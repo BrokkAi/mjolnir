@@ -6,6 +6,7 @@
 mod acp;
 mod app;
 mod event;
+mod registry;
 mod ui;
 
 use std::path::PathBuf;
@@ -18,9 +19,19 @@ use tokio::sync::mpsc;
 #[command(name = "mj", version, about = "Interactive ACP chat TUI")]
 struct Cli {
     /// Command to spawn the ACP agent. Parsed with shell-words so quoted
-    /// arguments are honored. Defaults to `anvil` on PATH.
+    /// arguments are honored. Defaults to `anvil` on PATH. Takes
+    /// precedence over `--agent`.
     #[arg(short, long, default_value = "anvil")]
-    command: String,
+    command: Option<String>,
+
+    /// Named agent preset from the registry (~/.config/mj/agents.toml).
+    /// Ignored when `--command` is also set.
+    #[arg(short, long)]
+    agent: Option<String>,
+
+    /// List available agent presets from the registry and exit.
+    #[arg(long)]
+    list_agents: bool,
 
     /// Working directory used when opening a new session. Defaults to
     /// the current directory.
@@ -44,7 +55,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.log_file.as_deref())?;
 
-    let (command, args) = parse_command(&cli.command)?;
+    let registry = registry::AgentRegistry::load()?;
+
+    if cli.list_agents {
+        println!("{}", registry::format_agent_list(&registry));
+        return Ok(());
+    }
+
+    let (command, args) =
+        registry::resolve_command(cli.command.as_deref(), cli.agent.as_deref(), &registry)?;
     let cwd = match cli.cwd {
         Some(p) => p,
         None => std::env::current_dir().context("current dir")?,
@@ -95,13 +114,6 @@ async fn main() -> Result<()> {
     }
 
     ui_result
-}
-
-fn parse_command(s: &str) -> Result<(PathBuf, Vec<String>)> {
-    let parts = shell_words::split(s).context("split command string")?;
-    let mut iter = parts.into_iter();
-    let program = iter.next().context("empty command string")?;
-    Ok((PathBuf::from(program), iter.collect()))
 }
 
 fn init_logging(path: Option<&std::path::Path>) -> Result<()> {

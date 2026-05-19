@@ -13,6 +13,7 @@ The binary is named `mj` and defaults to launching `anvil` from `PATH`.
 - Permission prompts with keyboard selection.
 - Slash-command autocomplete from commands advertised by the agent.
 - Optional file logging for the TUI and separate stderr capture for the agent.
+- Named agent presets from a local registry (`~/.config/mj/agents.toml`).
 
 ## Requirements
 
@@ -42,7 +43,11 @@ mj --cwd .
 
 ## CLI Options
 
-- `--command`, `-c`: ACP server command to spawn. Defaults to `anvil`.
+- `--command`, `-c`: ACP server command to spawn. Takes precedence over
+  `--agent`. Defaults to `anvil`.
+- `--agent`, `-a`: named agent preset from the registry. Ignored when
+  `--command` is also set.
+- `--list-agents`: list available agent presets from the registry and exit.
 - `--cwd`: workspace directory used for the ACP session. Defaults to the current
   directory.
 - `--log-file`: write TUI logs to a file. Equivalent env var:
@@ -53,6 +58,41 @@ mj --cwd .
 Logging is disabled by default because the TUI owns the terminal. Set
 `BROKK_TUI_LOG_LEVEL` to override the default `info` filter when `--log-file` is
 enabled.
+
+## Agent Registry
+
+`mj` can load named agent presets from `~/.config/mj/agents.toml` (or the XDG
+config directory on your platform). This lets you define short names for
+commonly-used agent commands instead of retyping the full command every time.
+
+Example `agents.toml`:
+
+```toml
+[agents.anvil]
+command = "anvil"
+
+[agents.local]
+command = "/path/to/custom-agent --flag"
+description = "My local dev agent"
+```
+
+Then run with a preset name:
+
+```bash
+mj --agent local
+```
+
+Command resolution precedence:
+
+1. `--command` (explicit, highest priority)
+2. `--agent` (named preset from the registry)
+3. Default: `anvil`
+
+List available presets:
+
+```bash
+mj --list-agents
+```
 
 ## Keyboard Controls
 

@@ -37,10 +37,14 @@ The current crate is already a usable MVP:
 - Keeps TUI logging out of stderr via `--log-file`.
 - Captures or discards agent stderr via `--agent-stderr`.
 - Has focused unit tests around ACP lifecycle and UI state transitions.
+- Reads named agent presets from `~/.config/mj/agents.toml` and resolves
+  `--agent` / `--command` / default precedence.
 
 Current command-line surface:
 
-- `mj --command "anvil"` to choose the ACP server command.
+- `mj --command "anvil"` to choose the ACP server command (highest priority).
+- `mj --agent local` to look up a named preset from the registry.
+- `mj --list-agents` to list available presets and exit.
 - `mj --cwd /path/to/repo` to choose the ACP session root.
 - `mj --log-file /path/to/mj.log` for TUI logs.
 - `mj --agent-stderr /path/to/agent.err` for child-process stderr.
@@ -167,7 +171,8 @@ Deliverables:
 - Search or filter over the transcript.
 - Copy-friendly transcript output mode or an export command.
 - Session title display and clearer session metadata.
-- Optional launch presets, for example named commands in a config file:
+- Named agent presets loaded from `~/.config/mj/agents.toml`, selectable via
+  `--agent <name>` and listable via `--list-agents`. The config format:
 
   ```toml
   [agents.anvil]
@@ -175,7 +180,10 @@ Deliverables:
 
   [agents.local]
   command = "/path/to/custom-agent --flag"
+  description = "My local dev agent"
   ```
+
+  Precedence: `--command` > `--agent` > default `anvil`.
 
 Exit criteria:
 
@@ -230,17 +238,20 @@ Near-term:
 
 Medium-term:
 
-- Named agent presets.
 - Persisted local settings.
 - Export transcript.
 - Rich diff rendering.
 - Config option picker.
 - Session list/load/fork support if agents expose it usefully.
 
+Done:
+
+- Named agent presets (registry module, `--agent`, `--list-agents`).
+
 Later:
 
 - Release packaging and installers.
-- ACP registry integration.
+- ACP registry integration (remote/network registry; local presets done).
 - Filesystem capability support.
 - Terminal capability support.
 - Multiple sessions.
@@ -250,7 +261,8 @@ Later:
 1. **How agent-agnostic should the UI stay?** Brokk-specific affordances can make
    Brokk better, but they should not turn the core into a Brokk-only client.
 2. **Do we want a config file?** Launch presets and history need persistence, but
-   a config format adds compatibility burden.
+   a config format adds compatibility burden. — _Partially answered: a local
+   agents.toml was added for named presets; a broader config file is still open._
 3. **Should `mj` implement filesystem capabilities?** Local-disk reads are easy;
    doing it safely and predictably with permissions is harder.
 4. **Should `mj` implement terminal capabilities?** It fits the app domain, but
@@ -266,7 +278,7 @@ Later:
 Before turning this into an implementation roadmap, decide:
 
 - Is `mjolnir` primarily a Brokk companion, or a general ACP terminal client?
-- Should v1 include named launch presets?
+- Should v1 include named launch presets? — _Done._
 - Should v1 include persisted prompt history?
 - Should v1 include session list/load, or only `session/new`?
 - Which agents must be in the compatibility matrix?
