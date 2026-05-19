@@ -15,13 +15,13 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::sync::mpsc;
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "mj", version, about = "Interactive ACP chat TUI")]
 struct Cli {
     /// Command to spawn the ACP agent. Parsed with shell-words so quoted
-    /// arguments are honored. Defaults to `anvil` on PATH. Takes
-    /// precedence over `--agent`.
-    #[arg(short, long, default_value = "anvil")]
+    /// arguments are honored. Takes precedence over `--agent`. When
+    /// neither `--command` nor `--agent` is set, defaults to `anvil`.
+    #[arg(short, long)]
     command: Option<String>,
 
     /// Named agent preset from the registry (~/.config/mj/agents.toml).
@@ -139,4 +139,50 @@ fn init_logging(path: Option<&std::path::Path>) -> Result<()> {
         .with_ansi(false)
         .init();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_command_is_none_when_not_provided() {
+        let cli = Cli::parse_from(["mj"]);
+        assert!(
+            cli.command.is_none(),
+            "command must be None when --command is not passed so --agent can take effect"
+        );
+        assert!(cli.agent.is_none());
+    }
+
+    #[test]
+    fn cli_command_is_some_when_explicitly_set() {
+        let cli = Cli::parse_from(["mj", "--command", "my-agent"]);
+        assert_eq!(cli.command.as_deref(), Some("my-agent"));
+    }
+
+    #[test]
+    fn cli_agent_is_some_when_provided_without_command() {
+        let cli = Cli::parse_from(["mj", "--agent", "local"]);
+        assert!(
+            cli.command.is_none(),
+            "command must be None so resolve_command falls through to the agent preset"
+        );
+        assert_eq!(cli.agent.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn cli_command_takes_precedence_over_agent() {
+        let cli = Cli::parse_from(["mj", "--command", "override", "--agent", "local"]);
+        assert_eq!(cli.command.as_deref(), Some("override"));
+        assert_eq!(cli.agent.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn cli_list_agents_flag_parses() {
+        let cli = Cli::parse_from(["mj", "--list-agents"]);
+        assert!(cli.list_agents);
+        assert!(cli.command.is_none());
+        assert!(cli.agent.is_none());
+    }
 }
