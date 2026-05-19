@@ -94,6 +94,44 @@ pub enum TurnState {
     Streaming,
 }
 
+/// Severity attached to transient status text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    Info,
+    Warning,
+    Fatal,
+}
+
+/// Transient status text shown in the footer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusMessage {
+    pub kind: StatusKind,
+    pub text: String,
+}
+
+impl StatusMessage {
+    pub fn info(text: impl Into<String>) -> Self {
+        Self {
+            kind: StatusKind::Info,
+            text: text.into(),
+        }
+    }
+
+    pub fn warning(text: impl Into<String>) -> Self {
+        Self {
+            kind: StatusKind::Warning,
+            text: text.into(),
+        }
+    }
+
+    pub fn fatal(text: impl Into<String>) -> Self {
+        Self {
+            kind: StatusKind::Fatal,
+            text: text.into(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub agent_label: String,
@@ -110,8 +148,10 @@ pub struct AppState {
     /// transcript. `0` keeps the view pinned to the newest line.
     pub scroll_offset: u16,
     pub should_quit: bool,
-    /// Transient status line (cleared on next event).
-    pub status_line: Option<String>,
+    /// True once the runtime has stopped accepting commands.
+    pub runtime_closed: bool,
+    /// Transient status line with severity.
+    pub status_line: Option<StatusMessage>,
     /// Slash-command autocomplete state, recomputed on every input edit.
     pub autocomplete: Autocomplete,
 }
@@ -149,8 +189,38 @@ impl AppState {
             pending_permission: None,
             scroll_offset: 0,
             should_quit: false,
+            runtime_closed: false,
             status_line: None,
             autocomplete: Autocomplete::default(),
+        }
+    }
+
+    fn set_status_line(&mut self, kind: StatusKind, text: impl Into<String>) {
+        self.status_line = Some(StatusMessage {
+            kind,
+            text: text.into(),
+        });
+    }
+
+    /// Mark the runtime as closed and switch the UI into read-only mode.
+    pub fn mark_runtime_closed(&mut self) {
+        self.runtime_closed = true;
+        self.turn = TurnState::Idle;
+        self.pending_permission = None;
+        self.autocomplete = Autocomplete::default();
+        self.connection_status = "disconnected".to_string();
+
+        let is_fatal = matches!(
+            self.status_line,
+            Some(StatusMessage {
+                kind: StatusKind::Fatal,
+                ..
+            })
+        );
+        if !is_fatal {
+            self.status_line = Some(StatusMessage::info(
+                "acp runtime closed; press Ctrl-C to quit",
+            ));
         }
     }
 
@@ -301,16 +371,18 @@ impl AppState {
             }
             UiEvent::PromptDone { stop_reason } => {
                 self.turn = TurnState::Idle;
-                self.status_line = Some(format!("turn done: {stop_reason:?}"));
+                self.set_status_line(StatusKind::Info, format!("turn done: {stop_reason:?}"));
                 self.update_autocomplete();
             }
             UiEvent::Warning(msg) => {
-                self.status_line = Some(msg);
+                self.set_status_line(StatusKind::Warning, msg);
             }
             UiEvent::Fatal(msg) => {
                 self.transcript.push(Entry::System(format!("fatal: {msg}")));
                 self.connection_status = "disconnected".to_string();
                 self.turn = TurnState::Idle;
+                self.status_line = Some(StatusMessage::fatal(msg));
+                self.mark_runtime_closed();
             }
         }
     }
@@ -519,6 +591,59 @@ mod tests {
             stop_reason: StopReason::EndTurn,
         });
         assert_eq!(s.turn, TurnState::Idle);
+    }
+
+    #[test]
+    fn fatal_event_sets_fatal_status_and_closes_runtime() {
+        let mut s = AppState::new();
+        s.autocomplete.visible = true;
+        s.pending_permission = Some(PendingPermission {
+            prompt: permission_prompt(),
+            selected: 0,
+        });
+
+        s.apply_event(UiEvent::Fatal("boom".to_string()));
+
+        assert!(s.runtime_closed);
+        assert_eq!(s.turn, TurnState::Idle);
+        assert_eq!(s.connection_status, "disconnected");
+        assert!(s.pending_permission.is_none());
+        assert!(!s.autocomplete.visible);
+        assert_eq!(s.transcript.len(), 1);
+        match &s.transcript[0] {
+            Entry::System(text) => assert_eq!(text, "fatal: boom"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+        let status = s.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Fatal);
+        assert_eq!(status.text, "boom");
+    }
+
+    #[test]
+    fn runtime_close_notice_preserves_fatal_status() {
+        let mut s = AppState::new();
+        s.status_line = Some(StatusMessage::fatal("boom"));
+
+        s.mark_runtime_closed();
+
+        assert!(s.runtime_closed);
+        assert_eq!(s.connection_status, "disconnected");
+        let status = s.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Fatal);
+        assert_eq!(status.text, "boom");
+    }
+
+    #[test]
+    fn runtime_close_notice_replaces_nonfatal_status() {
+        let mut s = AppState::new();
+        s.status_line = Some(StatusMessage::warning("prompt failed"));
+
+        s.mark_runtime_closed();
+
+        assert!(s.runtime_closed);
+        let status = s.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Info);
+        assert_eq!(status.text, "acp runtime closed; press Ctrl-C to quit");
     }
 
     #[test]
