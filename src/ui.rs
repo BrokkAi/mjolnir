@@ -28,9 +28,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::app::{
-    AppState, ConfigPickerPhase, ConfigValueChoice, Entry, PendingPermission, StatusKind,
-    StatusMessage, TurnState, config_option_choices, config_option_current_value_label,
-    config_option_summary, permission_kind_label, stop_reason_label,
+    AppState, ConfigValueChoice, Entry, PendingPermission, StatusKind, StatusMessage, TurnState,
+    config_option_choices, config_option_current_value_label, permission_kind_label,
+    stop_reason_label,
 };
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
 
@@ -161,29 +161,7 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         return;
     }
 
-    if matches!(
-        (key.modifiers, key.code),
-        (KeyModifiers::CONTROL, KeyCode::Char('o'))
-    ) {
-        if state.turn == TurnState::Streaming {
-            state.status_line = Some(StatusMessage::warning(
-                "finish or cancel the current turn before changing config",
-            ));
-            return;
-        }
-        if state.session_id.is_none() {
-            state.status_line = Some(StatusMessage::warning("waiting for session..."));
-            return;
-        }
-        if state.session_config_options.is_empty() {
-            state.status_line = Some(StatusMessage::warning(
-                "no session config options available",
-            ));
-            return;
-        }
-        if state.open_config_picker() {
-            state.status_line = Some(StatusMessage::info("config picker open"));
-        }
+    if open_config_value_picker_for_shortcut(state, key.modifiers, key.code) {
         return;
     }
 
@@ -319,12 +297,15 @@ fn handle_config_picker_key(
     modifiers: KeyModifiers,
     code: KeyCode,
 ) {
+    if open_config_value_picker_for_shortcut(state, modifiers, code) {
+        return;
+    }
+
     match (modifiers, code) {
-        (KeyModifiers::CONTROL, KeyCode::Char('o'))
-        | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             state.dismiss_config_picker();
         }
-        (_, KeyCode::Esc) if !state.config_picker_back() => {
+        (_, KeyCode::Esc) => {
             state.dismiss_config_picker();
         }
         (_, KeyCode::Tab) | (_, KeyCode::Enter) => {
@@ -340,6 +321,57 @@ fn handle_config_picker_key(
             state.config_picker_move(1);
         }
         _ => {}
+    }
+}
+
+fn open_config_value_picker_for_shortcut(
+    state: &mut AppState,
+    modifiers: KeyModifiers,
+    code: KeyCode,
+) -> bool {
+    let Some(shortcut) = config_shortcut_key(modifiers, code) else {
+        return false;
+    };
+
+    if state.turn == TurnState::Streaming {
+        state.status_line = Some(StatusMessage::warning(
+            "finish or cancel the current turn before changing config",
+        ));
+        return true;
+    }
+    if state.session_id.is_none() {
+        state.status_line = Some(StatusMessage::warning("waiting for session..."));
+        return true;
+    }
+
+    let Some((option_index, option_name)) = state
+        .selectable_config_options()
+        .into_iter()
+        .find(|(_, _, assigned_shortcut)| *assigned_shortcut == Some(shortcut))
+        .map(|(option_index, option, _)| (option_index, option.name.clone()))
+    else {
+        if state.selectable_config_options().is_empty() {
+            state.status_line = Some(StatusMessage::warning(
+                "no session config options available",
+            ));
+            return true;
+        }
+        return false;
+    };
+
+    if state.open_config_value_picker(option_index) {
+        state.status_line = Some(StatusMessage::info(format!("editing {}", option_name)));
+    }
+    true
+}
+
+fn config_shortcut_key(modifiers: KeyModifiers, code: KeyCode) -> Option<char> {
+    if modifiers != KeyModifiers::CONTROL {
+        return None;
+    }
+    match code {
+        KeyCode::Char(c @ '1'..='9') => Some(c),
+        _ => None,
     }
 }
 
@@ -368,12 +400,14 @@ fn draw(
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
 ) {
+    let has_config_options = !state.selectable_config_options().is_empty();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(3),
+            Constraint::Length(if has_config_options { 1 } else { 0 }),
             Constraint::Length(1),
         ])
         .split(f.area());
@@ -381,7 +415,8 @@ fn draw(
     draw_header(f, chunks[0], state);
     draw_transcript(f, chunks[1], state, transcript_scroll);
     draw_input(f, chunks[2], state);
-    draw_status(f, chunks[3], state);
+    draw_config_shortcuts_row(f, chunks[3], state);
+    draw_status(f, chunks[4], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -392,7 +427,7 @@ fn draw(
     }
 
     if state.config_picker.is_some() {
-        draw_config_picker_modal(f, f.area(), state);
+        draw_config_value_picker_modal(f, f.area(), state);
     }
 
     if let Some(pending) = state.pending_permission.as_ref() {
@@ -535,14 +570,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         " runtime closed (Ctrl-C to quit) ".to_string()
     } else {
         match state.turn {
-            TurnState::Idle => {
-                let mut title = String::from(" prompt (Enter to send");
-                if !state.session_config_options.is_empty() {
-                    title.push_str(" | Ctrl-O config");
-                }
-                title.push_str(" | Ctrl-C to quit) ");
-                title
-            }
+            TurnState::Idle => " prompt (Enter to send | Ctrl-C to quit) ".to_string(),
             TurnState::Streaming => " streaming... (Ctrl-C to cancel) ".to_string(),
         }
     };
@@ -568,6 +596,31 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         let cursor_y = area.y + 1;
         f.set_cursor_position((cursor_x, cursor_y));
     }
+}
+
+fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    if area.height == 0 {
+        return;
+    }
+
+    let options = state.selectable_config_options();
+    if options.is_empty() {
+        return;
+    }
+
+    let mut chips = Vec::with_capacity(options.len());
+    for (_, option, shortcut) in options {
+        let current = config_option_current_value_label(option);
+        let chip = match shortcut {
+            Some(shortcut) => format!("[^{shortcut} {}: {current}]", option.name),
+            None => format!("[{}: {current}]", option.name),
+        };
+        chips.push(chip);
+    }
+
+    let text = format!("config: {}", chips.join(" "));
+    let paragraph = Paragraph::new(text).style(Style::default().fg(Color::Cyan));
+    f.render_widget(paragraph, area);
 }
 
 fn draw_status(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -659,47 +712,25 @@ fn draw_permission_modal(f: &mut ratatui::Frame, area: Rect, pending: &PendingPe
     f.render_widget(footer, layout[2]);
 }
 
-fn draw_config_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let Some(picker) = state.config_picker.as_ref() else {
         return;
     };
 
-    let option = state.session_config_options.get(picker.selected_option);
-    let (title, detail, total, selected, rows) = match picker.phase {
-        ConfigPickerPhase::Option => {
-            let title = " session config ";
-            let detail = option
-                .map(|opt| {
-                    opt.description
-                        .clone()
-                        .unwrap_or_else(|| config_option_current_value_label(opt))
-                })
-                .unwrap_or_else(|| "choose a session option".to_string());
-            let rows = state.session_config_options.len();
-            (
-                title.to_string(),
-                detail,
-                rows,
-                picker.selected_option,
-                8u16,
-            )
-        }
-        ConfigPickerPhase::Value => {
-            let Some(option) = option else {
-                return;
-            };
-            let Some(choices) = config_option_choices(option) else {
-                return;
-            };
-            let title = format!(" {} values ", option.name);
-            let detail = option
-                .description
-                .clone()
-                .unwrap_or_else(|| config_option_current_value_label(option));
-            let rows = choices.len();
-            (title, detail, rows, picker.selected_value, 8u16)
-        }
+    let Some(option) = state.session_config_options.get(picker.selected_option) else {
+        return;
     };
+    let Some(choices) = config_option_choices(option) else {
+        return;
+    };
+    let title = format!(" {} values ", option.name);
+    let detail = option
+        .description
+        .clone()
+        .unwrap_or_else(|| config_option_current_value_label(option));
+    let total = choices.len();
+    let selected = picker.selected_value;
+    let rows = 8u16;
 
     if total == 0 {
         return;
@@ -734,80 +765,34 @@ fn draw_config_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState
 
     let header = Paragraph::new(vec![
         Line::from(detail),
-        Line::from(match picker.phase {
-            ConfigPickerPhase::Option => "Enter to edit | Esc/Ctrl-O close".to_string(),
-            ConfigPickerPhase::Value => "Enter to apply | Esc back | Ctrl-O close".to_string(),
-        }),
+        Line::from("Enter to apply | Esc cancel".to_string()),
     ])
     .wrap(Wrap { trim: false });
     f.render_widget(header, layout[0]);
 
-    let items = match picker.phase {
-        ConfigPickerPhase::Option => {
-            let start = if total <= layout[1].height as usize {
-                0
-            } else {
-                let view_size = layout[1].height as usize;
-                let half = view_size / 2;
-                selected.saturating_sub(half).min(total - view_size)
-            };
-            let end = (start + layout[1].height as usize).min(total);
-            state.session_config_options[start..end]
-                .iter()
-                .enumerate()
-                .map(|(offset, option)| {
-                    let absolute = start + offset;
-                    let marker = if absolute == selected { ">" } else { " " };
-                    let mut line = if config_option_choices(option).is_some() {
-                        config_option_summary(option)
-                    } else {
-                        format!("{} [unsupported]", option.name)
-                    };
-                    if let Some(description) = option.description.as_ref()
-                        && !description.trim().is_empty()
-                    {
-                        line.push_str("  -- ");
-                        line.push_str(description.trim());
-                    }
-                    truncate_line(line, layout[1].width, marker == ">")
-                })
-                .collect::<Vec<ListItem>>()
-        }
-        ConfigPickerPhase::Value => {
-            let Some(option) = option else {
-                return;
-            };
-            let Some(choices) = config_option_choices(option) else {
-                return;
-            };
-            let start = if total <= layout[1].height as usize {
-                0
-            } else {
-                let view_size = layout[1].height as usize;
-                let half = view_size / 2;
-                selected.saturating_sub(half).min(total - view_size)
-            };
-            let end = (start + layout[1].height as usize).min(total);
-            choices[start..end]
-                .iter()
-                .enumerate()
-                .map(|(offset, choice)| {
-                    let absolute = start + offset;
-                    let marker = if absolute == selected { ">" } else { " " };
-                    let line = config_value_row_text(choice);
-                    truncate_line(line, layout[1].width, marker == ">")
-                })
-                .collect::<Vec<ListItem>>()
-        }
+    let start = if total <= layout[1].height as usize {
+        0
+    } else {
+        let view_size = layout[1].height as usize;
+        let half = view_size / 2;
+        selected.saturating_sub(half).min(total - view_size)
     };
+    let end = (start + layout[1].height as usize).min(total);
+    let items = choices[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, choice)| {
+            let absolute = start + offset;
+            let marker = if absolute == selected { ">" } else { " " };
+            let line = config_value_row_text(choice);
+            truncate_line(line, layout[1].width, marker == ">")
+        })
+        .collect::<Vec<ListItem>>();
     let list = List::new(items);
     f.render_widget(list, layout[1]);
 
-    let footer = Paragraph::new(match picker.phase {
-        ConfigPickerPhase::Option => "Up/Down to choose | Enter to edit | Esc/Ctrl-O close",
-        ConfigPickerPhase::Value => "Up/Down to choose | Enter to apply | Esc back | Ctrl-O close",
-    })
-    .style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new("Up/Down to choose | Enter to apply | Esc cancel")
+        .style(Style::default().fg(Color::DarkGray));
     f.render_widget(footer, layout[2]);
 }
 
@@ -947,10 +932,15 @@ fn config_value_row_text(choice: &ConfigValueChoice) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::{SessionConfigOption, SessionConfigSelectOption};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> CtEvent {
-        CtEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+        key_with_modifiers(code, KeyModifiers::NONE)
+    }
+
+    fn key_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> CtEvent {
+        CtEvent::Key(KeyEvent::new(code, modifiers))
     }
 
     #[test]
@@ -1041,5 +1031,66 @@ mod tests {
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
         assert_eq!(state.scroll_offset, 0);
         assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn ctrl_digit_opens_matching_config_value_picker() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![
+                    SessionConfigSelectOption::new("model-1", "Model 1"),
+                    SessionConfigSelectOption::new("model-2", "Model 2"),
+                ],
+            ),
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "ask",
+                vec![
+                    SessionConfigSelectOption::new("ask", "Ask"),
+                    SessionConfigSelectOption::new("code", "Code"),
+                ],
+            ),
+        ];
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('2'), KeyModifiers::CONTROL),
+        );
+
+        let picker = state.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.selected_option, 1);
+        assert_eq!(picker.selected_value, 0);
+    }
+
+    #[test]
+    fn ctrl_o_no_longer_opens_config_picker() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        state.session_config_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "model-1",
+            vec![
+                SessionConfigSelectOption::new("model-1", "Model 1"),
+                SessionConfigSelectOption::new("model-2", "Model 2"),
+            ],
+        )];
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.config_picker.is_none());
     }
 }

@@ -178,15 +178,8 @@ pub struct PendingPermission {
 /// Config option picker overlay state.
 #[derive(Debug, Clone)]
 pub struct ConfigPicker {
-    pub phase: ConfigPickerPhase,
     pub selected_option: usize,
     pub selected_value: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigPickerPhase {
-    Option,
-    Value,
 }
 
 /// Autocomplete popover for slash-commands.
@@ -265,15 +258,31 @@ impl AppState {
         self.autocomplete = Autocomplete::default();
     }
 
-    /// Open the config picker overlay. Returns `true` if it became visible.
-    pub fn open_config_picker(&mut self) -> bool {
-        if self.runtime_closed || self.session_config_options.is_empty() {
+    /// Open the value picker for one config option. Returns `true` if it
+    /// became visible.
+    pub fn open_config_value_picker(&mut self, option_index: usize) -> bool {
+        if self.runtime_closed {
             return false;
         }
+        let Some(option) = self.session_config_options.get(option_index) else {
+            return false;
+        };
+        let Some(choices) = config_option_choices(option) else {
+            return false;
+        };
+        if choices.is_empty() {
+            self.set_status_line(
+                StatusKind::Warning,
+                format!("config option '{}' has no values", option.name),
+            );
+            return false;
+        }
+        let current = config_option_current_value_id(option)
+            .and_then(|value| choices.iter().position(|choice| &choice.value == value))
+            .unwrap_or(0);
         self.config_picker = Some(ConfigPicker {
-            phase: ConfigPickerPhase::Option,
-            selected_option: 0,
-            selected_value: 0,
+            selected_option: option_index,
+            selected_value: current,
         });
         self.autocomplete = Autocomplete::default();
         true
@@ -290,103 +299,41 @@ impl AppState {
     }
 
     /// Move the config picker cursor by `delta`, wrapping within the
-    /// current list.
+    /// current option's value list.
     pub fn config_picker_move(&mut self, delta: i32) {
         let Some(picker) = self.config_picker.as_mut() else {
             return;
         };
 
-        match picker.phase {
-            ConfigPickerPhase::Option => {
-                let len = self.session_config_options.len();
-                if len == 0 {
-                    return;
-                }
-                let cur = picker.selected_option as i32;
-                picker.selected_option = (cur + delta).rem_euclid(len as i32) as usize;
-            }
-            ConfigPickerPhase::Value => {
-                let Some(option) = self.session_config_options.get(picker.selected_option) else {
-                    return;
-                };
-                let Some(choices) = config_option_choices(option) else {
-                    return;
-                };
-                let len = choices.len();
-                if len == 0 {
-                    return;
-                }
-                let cur = picker.selected_value as i32;
-                picker.selected_value = (cur + delta).rem_euclid(len as i32) as usize;
-            }
+        let Some(option) = self.session_config_options.get(picker.selected_option) else {
+            return;
+        };
+        let Some(choices) = config_option_choices(option) else {
+            return;
+        };
+        let len = choices.len();
+        if len == 0 {
+            return;
         }
+        let cur = picker.selected_value as i32;
+        picker.selected_value = (cur + delta).rem_euclid(len as i32) as usize;
     }
 
-    /// Step the config picker forward. Returns a submit action when the
-    /// user confirms a value selection.
+    /// Submit the current config value selection.
     pub fn config_picker_accept(&mut self) -> Option<(SessionConfigId, SessionConfigValueId)> {
-        let (phase, selected_option, selected_value) = {
+        let (selected_option, selected_value) = {
             let picker = self.config_picker.as_ref()?;
-            (picker.phase, picker.selected_option, picker.selected_value)
+            (picker.selected_option, picker.selected_value)
         };
 
-        match phase {
-            ConfigPickerPhase::Option => {
-                let option = self.session_config_options.get(selected_option)?;
-                let Some(choices) = config_option_choices(option) else {
-                    self.set_status_line(
-                        StatusKind::Warning,
-                        format!("config option '{}' is not selectable", option.name),
-                    );
-                    return None;
-                };
-                if choices.is_empty() {
-                    self.set_status_line(
-                        StatusKind::Warning,
-                        format!("config option '{}' has no values", option.name),
-                    );
-                    return None;
-                }
-                let current = config_option_current_value_id(option)
-                    .and_then(|value| choices.iter().position(|choice| &choice.value == value))
-                    .unwrap_or(0);
-                if let Some(picker) = self.config_picker.as_mut() {
-                    picker.phase = ConfigPickerPhase::Value;
-                    picker.selected_value = current;
-                }
-                None
-            }
-            ConfigPickerPhase::Value => {
-                let (config_id, value) = {
-                    let option = self.session_config_options.get(selected_option)?;
-                    let choices = config_option_choices(option)?;
-                    let choice = choices.get(selected_value)?;
-                    (option.id.clone(), choice.value.clone())
-                };
-                self.dismiss_config_picker();
-                Some((config_id, value))
-            }
-        }
-    }
-
-    /// Move back within the config picker. Returns `true` when the picker
-    /// should stay open.
-    pub fn config_picker_back(&mut self) -> bool {
-        let Some(phase) = self.config_picker.as_ref().map(|picker| picker.phase) else {
-            return false;
+        let (config_id, value) = {
+            let option = self.session_config_options.get(selected_option)?;
+            let choices = config_option_choices(option)?;
+            let choice = choices.get(selected_value)?;
+            (option.id.clone(), choice.value.clone())
         };
-        match phase {
-            ConfigPickerPhase::Option => {
-                self.dismiss_config_picker();
-                false
-            }
-            ConfigPickerPhase::Value => {
-                if let Some(picker) = self.config_picker.as_mut() {
-                    picker.phase = ConfigPickerPhase::Option;
-                }
-                true
-            }
-        }
+        self.dismiss_config_picker();
+        Some((config_id, value))
     }
 
     /// Recompute the slash-command autocomplete popover from the current
@@ -652,32 +599,43 @@ impl AppState {
             self.config_picker = None;
             return;
         };
-        let Some(picker) = self.config_picker.as_mut() else {
+        let Some((selected_option, selected_value)) = self
+            .config_picker
+            .as_ref()
+            .map(|picker| (picker.selected_option, picker.selected_value))
+        else {
             return;
         };
 
-        picker.selected_option = picker
-            .selected_option
-            .min(self.session_config_options.len().saturating_sub(1));
-
-        if picker.phase == ConfigPickerPhase::Value {
-            let Some(option) = self.session_config_options.get(picker.selected_option) else {
-                picker.phase = ConfigPickerPhase::Option;
-                picker.selected_value = 0;
-                return;
-            };
-            let Some(choices) = config_option_choices(option) else {
-                picker.phase = ConfigPickerPhase::Option;
-                picker.selected_value = 0;
-                return;
-            };
-            if choices.is_empty() {
-                picker.phase = ConfigPickerPhase::Option;
-                picker.selected_value = 0;
-                return;
-            }
-            picker.selected_value = picker.selected_value.min(choices.len().saturating_sub(1));
+        let Some(option) = self.session_config_options.get(selected_option) else {
+            self.config_picker = None;
+            return;
+        };
+        let Some(choices) = config_option_choices(option) else {
+            self.config_picker = None;
+            return;
+        };
+        if choices.is_empty() {
+            self.config_picker = None;
+            return;
         }
+        if let Some(picker) = self.config_picker.as_mut() {
+            picker.selected_value = selected_value.min(choices.len().saturating_sub(1));
+        }
+    }
+
+    /// Return select-style config options in agent order, together with
+    /// their original index and optional `Ctrl-1..9` shortcut.
+    pub fn selectable_config_options(&self) -> Vec<(usize, &SessionConfigOption, Option<char>)> {
+        self.session_config_options
+            .iter()
+            .enumerate()
+            .filter(|(_, option)| matches!(&option.kind, SessionConfigKind::Select(_)))
+            .enumerate()
+            .map(|(select_index, (option_index, option))| {
+                (option_index, option, config_shortcut_char(select_index))
+            })
+            .collect()
     }
 }
 
@@ -768,6 +726,10 @@ pub fn config_option_summary(option: &SessionConfigOption) -> String {
         text.push_str(&format!(" [{category}]"));
     }
     text
+}
+
+fn config_shortcut_char(select_index: usize) -> Option<char> {
+    (select_index < 9).then_some((b'1' + select_index as u8) as char)
 }
 
 fn config_select_current_value_label(select: &SessionConfigSelect) -> String {
@@ -974,7 +936,46 @@ mod tests {
     }
 
     #[test]
-    fn config_picker_advances_from_option_to_value_and_submits() {
+    fn config_shortcuts_assign_in_select_order_and_cap_at_nine() {
+        let mut s = AppState::new();
+        s.session_config_options = (0..10)
+            .map(|idx| {
+                SessionConfigOption::select(
+                    format!("model-{idx}"),
+                    format!("Model {idx}"),
+                    format!("model-{idx}-a"),
+                    vec![
+                        SessionConfigSelectOption::new(format!("model-{idx}-a"), "A"),
+                        SessionConfigSelectOption::new(format!("model-{idx}-b"), "B"),
+                    ],
+                )
+            })
+            .collect();
+
+        let shortcuts = s.selectable_config_options();
+        assert_eq!(shortcuts.len(), 10);
+        assert_eq!(
+            shortcuts
+                .iter()
+                .map(|(option_index, _, shortcut)| (*option_index, *shortcut))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, Some('1')),
+                (1, Some('2')),
+                (2, Some('3')),
+                (3, Some('4')),
+                (4, Some('5')),
+                (5, Some('6')),
+                (6, Some('7')),
+                (7, Some('8')),
+                (8, Some('9')),
+                (9, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn open_config_value_picker_preselects_current_value_and_submits() {
         let mut s = AppState::new();
         s.session_config_options = vec![SessionConfigOption::select(
             "model",
@@ -986,23 +987,62 @@ mod tests {
             ],
         )];
 
-        assert!(s.open_config_picker());
-        assert_eq!(
-            s.config_picker.as_ref().expect("picker").phase,
-            ConfigPickerPhase::Option
-        );
-
-        assert!(s.config_picker_accept().is_none());
-        assert_eq!(
-            s.config_picker.as_ref().expect("picker").phase,
-            ConfigPickerPhase::Value
-        );
+        assert!(s.open_config_value_picker(0));
+        assert_eq!(s.config_picker.as_ref().expect("picker").selected_value, 0);
 
         s.config_picker_move(1);
         let submitted = s.config_picker_accept().expect("submitted");
         assert!(s.config_picker.is_none());
         assert_eq!(submitted.0.to_string(), "model");
         assert_eq!(submitted.1.to_string(), "model-2");
+    }
+
+    #[test]
+    fn config_option_update_reassigns_shortcuts_and_clamps_picker_selection() {
+        let mut s = AppState::new();
+        let initial = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![
+                    SessionConfigSelectOption::new("model-1", "Model 1"),
+                    SessionConfigSelectOption::new("model-2", "Model 2"),
+                ],
+            ),
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "ask",
+                vec![
+                    SessionConfigSelectOption::new("ask", "Ask"),
+                    SessionConfigSelectOption::new("code", "Code"),
+                ],
+            ),
+        ];
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::ConfigOptionUpdate(
+            ConfigOptionUpdate::new(initial),
+        )));
+
+        assert!(s.open_config_value_picker(0));
+        s.config_picker_move(1);
+        assert_eq!(s.config_picker.as_ref().expect("picker").selected_value, 1);
+
+        let updated = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "model-1",
+            vec![SessionConfigSelectOption::new("model-1", "Model 1")],
+        )];
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::ConfigOptionUpdate(
+            ConfigOptionUpdate::new(updated),
+        )));
+
+        let shortcuts = s.selectable_config_options();
+        assert_eq!(shortcuts.len(), 1);
+        assert_eq!(shortcuts[0].0, 0);
+        assert_eq!(shortcuts[0].2, Some('1'));
+        assert_eq!(s.config_picker.as_ref().expect("picker").selected_value, 0);
     }
 
     #[test]
