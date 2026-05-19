@@ -5,7 +5,8 @@
 //! network I/O. They communicate over two unbounded mpsc channels.
 
 use agent_client_protocol::schema::{
-    ContentBlock, PermissionOption, SessionUpdate, StopReason, ToolCallUpdate,
+    ContentBlock, PermissionOption, SessionConfigId, SessionConfigValueId, SessionUpdate,
+    StopReason, ToolCallUpdate,
 };
 use tokio::sync::oneshot;
 
@@ -60,6 +61,11 @@ pub enum PermissionDecision {
 pub enum UiCommand {
     /// Send a user prompt for the current session.
     SendPrompt { text: String },
+    /// Set a session configuration option to a new value.
+    SetSessionConfigOption {
+        config_id: SessionConfigId,
+        value: SessionConfigValueId,
+    },
     /// Cancel the in-flight prompt turn (Ctrl-C while streaming).
     CancelPrompt,
     /// Tear down: kill the agent child and exit.

@@ -4,10 +4,11 @@
 use std::path::PathBuf;
 
 use agent_client_protocol::schema::{
-    CancelNotification, ClientCapabilities, ContentBlock, FileSystemCapabilities,
-    InitializeRequest, NewSessionRequest, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
-    SessionNotification, TextContent,
+    CancelNotification, ClientCapabilities, ConfigOptionUpdate, ContentBlock,
+    FileSystemCapabilities, InitializeRequest, NewSessionRequest, PromptRequest, ProtocolVersion,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::{Context, Result};
@@ -160,12 +161,33 @@ async fn drive_session(
     let _ = ui_tx.send(UiEvent::SessionStarted {
         session_id: session_id.to_string(),
     });
+    if let Some(config_options) = session.config_options {
+        let _ = ui_tx.send(UiEvent::SessionUpdate(SessionUpdate::ConfigOptionUpdate(
+            ConfigOptionUpdate::new(config_options),
+        )));
+    }
 
     while let Some(cmd) = ui_rx.recv().await {
         match cmd {
             UiCommand::SendPrompt { text } => {
                 if !drive_prompt_turn(&conn, &session_id, text, ui_tx, ui_rx).await? {
                     break;
+                }
+            }
+            UiCommand::SetSessionConfigOption { config_id, value } => {
+                let req = SetSessionConfigOptionRequest::new(session_id.clone(), config_id, value);
+                match conn.send_request(req).block_task().await {
+                    Ok(resp) => {
+                        let _ =
+                            ui_tx.send(UiEvent::SessionUpdate(SessionUpdate::ConfigOptionUpdate(
+                                ConfigOptionUpdate::new(resp.config_options),
+                            )));
+                    }
+                    Err(e) => {
+                        let _ = ui_tx.send(UiEvent::Warning(format!(
+                            "session config update failed: {e}"
+                        )));
+                    }
                 }
             }
             UiCommand::CancelPrompt => {}
@@ -257,6 +279,11 @@ async fn drive_prompt_turn(
                     Some(UiCommand::SendPrompt { .. }) => {
                         let _ = ui_tx.send(UiEvent::Warning(
                             "prompt already in flight".to_string(),
+                        ));
+                    }
+                    Some(UiCommand::SetSessionConfigOption { .. }) => {
+                        let _ = ui_tx.send(UiEvent::Warning(
+                            "config updates are only supported while idle".to_string(),
                         ));
                     }
                 }

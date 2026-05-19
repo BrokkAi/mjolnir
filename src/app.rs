@@ -7,8 +7,10 @@
 use std::collections::HashMap;
 
 use agent_client_protocol::schema::{
-    AvailableCommand, Plan, PlanEntry, SessionUpdate, StopReason, ToolCall, ToolCallContent,
-    ToolCallStatus, ToolCallUpdate, ToolKind,
+    AvailableCommand, Plan, PlanEntry, SessionConfigId, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
+    ToolCallUpdate, ToolKind,
 };
 
 use crate::event::{PermissionPrompt, UiEvent, content_block_text};
@@ -29,6 +31,15 @@ pub enum Entry {
     Plan(Vec<PlanEntry>),
     /// System-level note (errors, warnings, mode changes).
     System(String),
+}
+
+/// One displayed value for a select-style session config option.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigValueChoice {
+    pub value: SessionConfigValueId,
+    pub name: String,
+    pub description: Option<String>,
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,11 +150,13 @@ pub struct AppState {
     pub connection_status: String,
     pub current_mode: Option<String>,
     pub available_commands: Vec<AvailableCommand>,
+    pub session_config_options: Vec<SessionConfigOption>,
     pub transcript: Vec<Entry>,
     pub tool_calls: HashMap<String, ToolCallView>,
     pub input: String,
     pub turn: TurnState,
     pub pending_permission: Option<PendingPermission>,
+    pub config_picker: Option<ConfigPicker>,
     /// Scroll offset measured in rendered lines from the bottom of the
     /// transcript. `0` keeps the view pinned to the newest line.
     pub scroll_offset: u16,
@@ -160,6 +173,20 @@ pub struct AppState {
 pub struct PendingPermission {
     pub prompt: PermissionPrompt,
     pub selected: usize,
+}
+
+/// Config option picker overlay state.
+#[derive(Debug, Clone)]
+pub struct ConfigPicker {
+    pub phase: ConfigPickerPhase,
+    pub selected_option: usize,
+    pub selected_value: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigPickerPhase {
+    Option,
+    Value,
 }
 
 /// Autocomplete popover for slash-commands.
@@ -182,11 +209,13 @@ impl AppState {
             connection_status: "connecting...".to_string(),
             current_mode: None,
             available_commands: Vec::new(),
+            session_config_options: Vec::new(),
             transcript: Vec::new(),
             tool_calls: HashMap::new(),
             input: String::new(),
             turn: TurnState::Idle,
             pending_permission: None,
+            config_picker: None,
             scroll_offset: 0,
             should_quit: false,
             runtime_closed: false,
@@ -207,6 +236,7 @@ impl AppState {
         self.runtime_closed = true;
         self.turn = TurnState::Idle;
         self.pending_permission = None;
+        self.config_picker = None;
         self.autocomplete = Autocomplete::default();
         self.connection_status = "disconnected".to_string();
 
@@ -235,6 +265,130 @@ impl AppState {
         self.autocomplete = Autocomplete::default();
     }
 
+    /// Open the config picker overlay. Returns `true` if it became visible.
+    pub fn open_config_picker(&mut self) -> bool {
+        if self.runtime_closed || self.session_config_options.is_empty() {
+            return false;
+        }
+        self.config_picker = Some(ConfigPicker {
+            phase: ConfigPickerPhase::Option,
+            selected_option: 0,
+            selected_value: 0,
+        });
+        self.autocomplete = Autocomplete::default();
+        true
+    }
+
+    /// Close the config picker overlay and restore autocomplete if needed.
+    pub fn dismiss_config_picker(&mut self) {
+        self.config_picker = None;
+        if self.runtime_closed {
+            self.autocomplete = Autocomplete::default();
+        } else {
+            self.update_autocomplete();
+        }
+    }
+
+    /// Move the config picker cursor by `delta`, wrapping within the
+    /// current list.
+    pub fn config_picker_move(&mut self, delta: i32) {
+        let Some(picker) = self.config_picker.as_mut() else {
+            return;
+        };
+
+        match picker.phase {
+            ConfigPickerPhase::Option => {
+                let len = self.session_config_options.len();
+                if len == 0 {
+                    return;
+                }
+                let cur = picker.selected_option as i32;
+                picker.selected_option = (cur + delta).rem_euclid(len as i32) as usize;
+            }
+            ConfigPickerPhase::Value => {
+                let Some(option) = self.session_config_options.get(picker.selected_option) else {
+                    return;
+                };
+                let Some(choices) = config_option_choices(option) else {
+                    return;
+                };
+                let len = choices.len();
+                if len == 0 {
+                    return;
+                }
+                let cur = picker.selected_value as i32;
+                picker.selected_value = (cur + delta).rem_euclid(len as i32) as usize;
+            }
+        }
+    }
+
+    /// Step the config picker forward. Returns a submit action when the
+    /// user confirms a value selection.
+    pub fn config_picker_accept(&mut self) -> Option<(SessionConfigId, SessionConfigValueId)> {
+        let (phase, selected_option, selected_value) = {
+            let picker = self.config_picker.as_ref()?;
+            (picker.phase, picker.selected_option, picker.selected_value)
+        };
+
+        match phase {
+            ConfigPickerPhase::Option => {
+                let option = self.session_config_options.get(selected_option)?;
+                let Some(choices) = config_option_choices(option) else {
+                    self.set_status_line(
+                        StatusKind::Warning,
+                        format!("config option '{}' is not selectable", option.name),
+                    );
+                    return None;
+                };
+                if choices.is_empty() {
+                    self.set_status_line(
+                        StatusKind::Warning,
+                        format!("config option '{}' has no values", option.name),
+                    );
+                    return None;
+                }
+                let current = config_option_current_value_id(option)
+                    .and_then(|value| choices.iter().position(|choice| &choice.value == value))
+                    .unwrap_or(0);
+                if let Some(picker) = self.config_picker.as_mut() {
+                    picker.phase = ConfigPickerPhase::Value;
+                    picker.selected_value = current;
+                }
+                None
+            }
+            ConfigPickerPhase::Value => {
+                let (config_id, value) = {
+                    let option = self.session_config_options.get(selected_option)?;
+                    let choices = config_option_choices(option)?;
+                    let choice = choices.get(selected_value)?;
+                    (option.id.clone(), choice.value.clone())
+                };
+                self.dismiss_config_picker();
+                Some((config_id, value))
+            }
+        }
+    }
+
+    /// Move back within the config picker. Returns `true` when the picker
+    /// should stay open.
+    pub fn config_picker_back(&mut self) -> bool {
+        let Some(phase) = self.config_picker.as_ref().map(|picker| picker.phase) else {
+            return false;
+        };
+        match phase {
+            ConfigPickerPhase::Option => {
+                self.dismiss_config_picker();
+                false
+            }
+            ConfigPickerPhase::Value => {
+                if let Some(picker) = self.config_picker.as_mut() {
+                    picker.phase = ConfigPickerPhase::Option;
+                }
+                true
+            }
+        }
+    }
+
     /// Recompute the slash-command autocomplete popover from the current
     /// `input` buffer. Call this every time the input is mutated.
     ///
@@ -251,6 +405,7 @@ impl AppState {
     pub fn update_autocomplete(&mut self) {
         let trigger_active = self.input.starts_with('/')
             && self.pending_permission.is_none()
+            && self.config_picker.is_none()
             && self.turn == TurnState::Idle;
         if !trigger_active {
             self.autocomplete = Autocomplete::default();
@@ -463,11 +618,21 @@ impl AppState {
                 self.current_mode = Some(mode.clone());
                 self.transcript.push(Entry::System(format!("mode: {mode}")));
             }
-            SessionUpdate::ConfigOptionUpdate(_) => {
-                // Config options are rendered through the available list;
-                // we surface the raw event as a system note for now.
-                self.transcript
-                    .push(Entry::System("config option updated".to_string()));
+            SessionUpdate::ConfigOptionUpdate(u) => {
+                self.session_config_options = u.config_options;
+                self.refresh_config_picker();
+
+                if let Some(mode_option) = self.session_config_options.iter().find(|option| {
+                    matches!(option.category, Some(SessionConfigOptionCategory::Mode))
+                }) && let Some(value) = config_option_current_value_id(mode_option)
+                {
+                    self.current_mode = Some(value.to_string());
+                }
+
+                self.set_status_line(
+                    StatusKind::Info,
+                    config_options_summary(&self.session_config_options),
+                );
             }
             SessionUpdate::SessionInfoUpdate(info) => {
                 if let Some(title) = info.title.value() {
@@ -479,6 +644,39 @@ impl AppState {
                 self.transcript
                     .push(Entry::System("unsupported session update".to_string()));
             }
+        }
+    }
+
+    fn refresh_config_picker(&mut self) {
+        if self.session_config_options.is_empty() {
+            self.config_picker = None;
+            return;
+        };
+        let Some(picker) = self.config_picker.as_mut() else {
+            return;
+        };
+
+        picker.selected_option = picker
+            .selected_option
+            .min(self.session_config_options.len().saturating_sub(1));
+
+        if picker.phase == ConfigPickerPhase::Value {
+            let Some(option) = self.session_config_options.get(picker.selected_option) else {
+                picker.phase = ConfigPickerPhase::Option;
+                picker.selected_value = 0;
+                return;
+            };
+            let Some(choices) = config_option_choices(option) else {
+                picker.phase = ConfigPickerPhase::Option;
+                picker.selected_value = 0;
+                return;
+            };
+            if choices.is_empty() {
+                picker.phase = ConfigPickerPhase::Option;
+                picker.selected_value = 0;
+                return;
+            }
+            picker.selected_value = picker.selected_value.min(choices.len().saturating_sub(1));
         }
     }
 }
@@ -509,6 +707,113 @@ fn append_or_start(transcript: &mut Vec<Entry>, kind: EntryKind, text: String) {
         EntryKind::Agent => Entry::AgentMessage(text),
         EntryKind::Thought => Entry::AgentThought(text),
     });
+}
+
+/// Return the current value identifier for a select-style session config option.
+pub fn config_option_current_value_id(
+    option: &SessionConfigOption,
+) -> Option<&SessionConfigValueId> {
+    match &option.kind {
+        SessionConfigKind::Select(select) => Some(&select.current_value),
+        _ => None,
+    }
+}
+
+/// Return the current value label for a session config option.
+pub fn config_option_current_value_label(option: &SessionConfigOption) -> String {
+    match &option.kind {
+        SessionConfigKind::Select(select) => config_select_current_value_label(select),
+        _ => "unsupported".to_string(),
+    }
+}
+
+/// Return the value choices for a select-style config option.
+pub fn config_option_choices(option: &SessionConfigOption) -> Option<Vec<ConfigValueChoice>> {
+    match &option.kind {
+        SessionConfigKind::Select(select) => Some(config_select_choices(select)),
+        _ => None,
+    }
+}
+
+/// Summarize the current config options for the status line.
+pub fn config_options_summary(options: &[SessionConfigOption]) -> String {
+    let mut supported: Vec<String> = options
+        .iter()
+        .filter_map(|option| match &option.kind {
+            SessionConfigKind::Select(_) => Some(config_option_summary(option)),
+            _ => None,
+        })
+        .collect();
+
+    if supported.is_empty() {
+        return "session config options updated".to_string();
+    }
+
+    let remaining = supported.len().saturating_sub(3);
+    supported.truncate(3);
+    let mut text = format!("config: {}", supported.join(", "));
+    if remaining > 0 {
+        text.push_str(&format!(" (+{remaining} more)"));
+    }
+    text
+}
+
+pub fn config_option_summary(option: &SessionConfigOption) -> String {
+    let mut text = format!(
+        "{}={}",
+        option.name,
+        config_option_current_value_label(option)
+    );
+    if let Some(category) = config_option_category_text(option.category.as_ref()) {
+        text.push_str(&format!(" [{category}]"));
+    }
+    text
+}
+
+fn config_select_current_value_label(select: &SessionConfigSelect) -> String {
+    let choices = config_select_choices(select);
+    choices
+        .iter()
+        .find(|choice| choice.value == select.current_value)
+        .map(|choice| choice.name.clone())
+        .unwrap_or_else(|| select.current_value.to_string())
+}
+
+fn config_select_choices(select: &SessionConfigSelect) -> Vec<ConfigValueChoice> {
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .map(|opt| ConfigValueChoice {
+                value: opt.value.clone(),
+                name: opt.name.clone(),
+                description: opt.description.clone(),
+                group: None,
+            })
+            .collect(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| {
+                group.options.iter().map(move |opt| ConfigValueChoice {
+                    value: opt.value.clone(),
+                    name: opt.name.clone(),
+                    description: opt.description.clone(),
+                    group: Some(group.name.clone()),
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn config_option_category_text(category: Option<&SessionConfigOptionCategory>) -> Option<String> {
+    let category = category?;
+    Some(match category {
+        SessionConfigOptionCategory::Mode => "mode".to_string(),
+        SessionConfigOptionCategory::Model => "model".to_string(),
+        SessionConfigOptionCategory::ThoughtLevel => "thought_level".to_string(),
+        SessionConfigOptionCategory::Other(value) => value.clone(),
+        _ => "other".to_string(),
+    })
 }
 
 /// Format a permission option label for the modal. Returned strings are
@@ -542,7 +847,8 @@ pub fn stop_reason_label(reason: StopReason) -> &'static str {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind, TextContent,
+        ConfigOptionUpdate, ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind,
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, TextContent,
     };
 
     fn text_chunk(s: &str) -> ContentChunk {
@@ -628,6 +934,75 @@ mod tests {
         let status = s.status_line.expect("status");
         assert_eq!(status.kind, StatusKind::Fatal);
         assert_eq!(status.text, "boom");
+    }
+
+    #[test]
+    fn config_option_update_refreshes_session_state() {
+        let mut s = AppState::new();
+        let options = vec![
+            SessionConfigOption::select(
+                "mode",
+                "Session Mode",
+                "ask",
+                vec![
+                    SessionConfigSelectOption::new("ask", "Ask"),
+                    SessionConfigSelectOption::new("code", "Code"),
+                ],
+            )
+            .category(Some(SessionConfigOptionCategory::Mode)),
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![
+                    SessionConfigSelectOption::new("model-1", "Model 1"),
+                    SessionConfigSelectOption::new("model-2", "Model 2"),
+                ],
+            )
+            .category(Some(SessionConfigOptionCategory::Model)),
+        ];
+
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::ConfigOptionUpdate(
+            ConfigOptionUpdate::new(options),
+        )));
+
+        assert_eq!(s.session_config_options.len(), 2);
+        assert_eq!(s.current_mode.as_deref(), Some("ask"));
+        let status = s.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Info);
+        assert!(status.text.contains("Session Mode=Ask"));
+    }
+
+    #[test]
+    fn config_picker_advances_from_option_to_value_and_submits() {
+        let mut s = AppState::new();
+        s.session_config_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "model-1",
+            vec![
+                SessionConfigSelectOption::new("model-1", "Model 1"),
+                SessionConfigSelectOption::new("model-2", "Model 2"),
+            ],
+        )];
+
+        assert!(s.open_config_picker());
+        assert_eq!(
+            s.config_picker.as_ref().expect("picker").phase,
+            ConfigPickerPhase::Option
+        );
+
+        assert!(s.config_picker_accept().is_none());
+        assert_eq!(
+            s.config_picker.as_ref().expect("picker").phase,
+            ConfigPickerPhase::Value
+        );
+
+        s.config_picker_move(1);
+        let submitted = s.config_picker_accept().expect("submitted");
+        assert!(s.config_picker.is_none());
+        assert_eq!(submitted.0.to_string(), "model");
+        assert_eq!(submitted.1.to_string(), "model-2");
     }
 
     #[test]

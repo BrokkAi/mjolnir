@@ -28,8 +28,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::app::{
-    AppState, Entry, PendingPermission, StatusKind, StatusMessage, TurnState,
-    permission_kind_label, stop_reason_label,
+    AppState, ConfigPickerPhase, ConfigValueChoice, Entry, PendingPermission, StatusKind,
+    StatusMessage, TurnState, config_option_choices, config_option_current_value_label,
+    config_option_summary, permission_kind_label, stop_reason_label,
 };
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
 
@@ -152,6 +153,37 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
     // Permission modal owns the keyboard while it's open.
     if state.pending_permission.is_some() {
         handle_permission_key(state, key.code);
+        return;
+    }
+
+    if state.config_picker.is_some() {
+        handle_config_picker_key(state, cmd_tx, key.modifiers, key.code);
+        return;
+    }
+
+    if matches!(
+        (key.modifiers, key.code),
+        (KeyModifiers::CONTROL, KeyCode::Char('o'))
+    ) {
+        if state.turn == TurnState::Streaming {
+            state.status_line = Some(StatusMessage::warning(
+                "finish or cancel the current turn before changing config",
+            ));
+            return;
+        }
+        if state.session_id.is_none() {
+            state.status_line = Some(StatusMessage::warning("waiting for session..."));
+            return;
+        }
+        if state.session_config_options.is_empty() {
+            state.status_line = Some(StatusMessage::warning(
+                "no session config options available",
+            ));
+            return;
+        }
+        if state.open_config_picker() {
+            state.status_line = Some(StatusMessage::info("config picker open"));
+        }
         return;
     }
 
@@ -281,6 +313,36 @@ fn handle_permission_key(state: &mut AppState, code: KeyCode) {
     }
 }
 
+fn handle_config_picker_key(
+    state: &mut AppState,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    modifiers: KeyModifiers,
+    code: KeyCode,
+) {
+    match (modifiers, code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('o'))
+        | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+            state.dismiss_config_picker();
+        }
+        (_, KeyCode::Esc) if !state.config_picker_back() => {
+            state.dismiss_config_picker();
+        }
+        (_, KeyCode::Tab) | (_, KeyCode::Enter) => {
+            if let Some((config_id, value)) = state.config_picker_accept() {
+                state.status_line = Some(StatusMessage::info("updating config..."));
+                let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { config_id, value });
+            }
+        }
+        (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+            state.config_picker_move(-1);
+        }
+        (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+            state.config_picker_move(1);
+        }
+        _ => {}
+    }
+}
+
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -327,6 +389,10 @@ fn draw(
     // and renders on top.
     if state.autocomplete.visible {
         draw_autocomplete_popover(f, chunks[2], state);
+    }
+
+    if state.config_picker.is_some() {
+        draw_config_picker_modal(f, f.area(), state);
     }
 
     if let Some(pending) = state.pending_permission.as_ref() {
@@ -466,11 +532,18 @@ fn push_block(out: &mut Vec<Line<'static>>, label: &str, color: Color, text: Str
 
 fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let title = if state.runtime_closed {
-        " runtime closed (Ctrl-C to quit) "
+        " runtime closed (Ctrl-C to quit) ".to_string()
     } else {
         match state.turn {
-            TurnState::Idle => " prompt (Enter to send | Ctrl-C to quit) ",
-            TurnState::Streaming => " streaming... (Ctrl-C to cancel) ",
+            TurnState::Idle => {
+                let mut title = String::from(" prompt (Enter to send");
+                if !state.session_config_options.is_empty() {
+                    title.push_str(" | Ctrl-O config");
+                }
+                title.push_str(" | Ctrl-C to quit) ");
+                title
+            }
+            TurnState::Streaming => " streaming... (Ctrl-C to cancel) ".to_string(),
         }
     };
     let style = if state.runtime_closed || state.turn == TurnState::Streaming {
@@ -488,6 +561,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if !state.runtime_closed
         && state.turn != TurnState::Streaming
         && state.pending_permission.is_none()
+        && state.config_picker.is_none()
     {
         // Place a fake cursor at end of input. Estimated, ASCII only.
         let cursor_x = area.x + 1 + (state.input.len().min((area.width - 2) as usize) as u16);
@@ -585,6 +659,164 @@ fn draw_permission_modal(f: &mut ratatui::Frame, area: Rect, pending: &PendingPe
     f.render_widget(footer, layout[2]);
 }
 
+fn draw_config_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let Some(picker) = state.config_picker.as_ref() else {
+        return;
+    };
+
+    let option = state.session_config_options.get(picker.selected_option);
+    let (title, detail, total, selected, rows) = match picker.phase {
+        ConfigPickerPhase::Option => {
+            let title = " session config ";
+            let detail = option
+                .map(|opt| {
+                    opt.description
+                        .clone()
+                        .unwrap_or_else(|| config_option_current_value_label(opt))
+                })
+                .unwrap_or_else(|| "choose a session option".to_string());
+            let rows = state.session_config_options.len();
+            (
+                title.to_string(),
+                detail,
+                rows,
+                picker.selected_option,
+                8u16,
+            )
+        }
+        ConfigPickerPhase::Value => {
+            let Some(option) = option else {
+                return;
+            };
+            let Some(choices) = config_option_choices(option) else {
+                return;
+            };
+            let title = format!(" {} values ", option.name);
+            let detail = option
+                .description
+                .clone()
+                .unwrap_or_else(|| config_option_current_value_label(option));
+            let rows = choices.len();
+            (title, detail, rows, picker.selected_value, 8u16)
+        }
+    };
+
+    if total == 0 {
+        return;
+    }
+
+    let desired_rows = (total as u16).min(rows);
+    let height = (desired_rows + 4).min(area.height.saturating_sub(4));
+    if height < 5 {
+        return;
+    }
+    let width = area.width.saturating_sub(8).min(90);
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let rect = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let header = Paragraph::new(vec![
+        Line::from(detail),
+        Line::from(match picker.phase {
+            ConfigPickerPhase::Option => "Enter to edit | Esc/Ctrl-O close".to_string(),
+            ConfigPickerPhase::Value => "Enter to apply | Esc back | Ctrl-O close".to_string(),
+        }),
+    ])
+    .wrap(Wrap { trim: false });
+    f.render_widget(header, layout[0]);
+
+    let items = match picker.phase {
+        ConfigPickerPhase::Option => {
+            let start = if total <= layout[1].height as usize {
+                0
+            } else {
+                let view_size = layout[1].height as usize;
+                let half = view_size / 2;
+                selected.saturating_sub(half).min(total - view_size)
+            };
+            let end = (start + layout[1].height as usize).min(total);
+            state.session_config_options[start..end]
+                .iter()
+                .enumerate()
+                .map(|(offset, option)| {
+                    let absolute = start + offset;
+                    let marker = if absolute == selected { ">" } else { " " };
+                    let mut line = if config_option_choices(option).is_some() {
+                        config_option_summary(option)
+                    } else {
+                        format!("{} [unsupported]", option.name)
+                    };
+                    if let Some(description) = option.description.as_ref()
+                        && !description.trim().is_empty()
+                    {
+                        line.push_str("  -- ");
+                        line.push_str(description.trim());
+                    }
+                    truncate_line(line, layout[1].width, marker == ">")
+                })
+                .collect::<Vec<ListItem>>()
+        }
+        ConfigPickerPhase::Value => {
+            let Some(option) = option else {
+                return;
+            };
+            let Some(choices) = config_option_choices(option) else {
+                return;
+            };
+            let start = if total <= layout[1].height as usize {
+                0
+            } else {
+                let view_size = layout[1].height as usize;
+                let half = view_size / 2;
+                selected.saturating_sub(half).min(total - view_size)
+            };
+            let end = (start + layout[1].height as usize).min(total);
+            choices[start..end]
+                .iter()
+                .enumerate()
+                .map(|(offset, choice)| {
+                    let absolute = start + offset;
+                    let marker = if absolute == selected { ">" } else { " " };
+                    let mut line = config_value_row_text(choice);
+                    if let Some(description) = choice.description.as_ref()
+                        && !description.trim().is_empty()
+                    {
+                        line.push_str("  -- ");
+                        line.push_str(description.trim());
+                    }
+                    truncate_line(line, layout[1].width, marker == ">")
+                })
+                .collect::<Vec<ListItem>>()
+        }
+    };
+    let list = List::new(items);
+    f.render_widget(list, layout[1]);
+
+    let footer = Paragraph::new(match picker.phase {
+        ConfigPickerPhase::Option => "Up/Down to choose | Enter to edit | Esc/Ctrl-O close",
+        ConfigPickerPhase::Value => "Up/Down to choose | Enter to apply | Esc back | Ctrl-O close",
+    })
+    .style(Style::default().fg(Color::DarkGray));
+    f.render_widget(footer, layout[2]);
+}
+
 /// Slash-command autocomplete popover. Anchored to the top edge of the
 /// input box and grows upward into the transcript pane so it never
 /// covers the user's cursor. Width matches the input box; height caps
@@ -676,6 +908,46 @@ fn draw_autocomplete_popover(f: &mut ratatui::Frame, input_area: Rect, state: &A
 
     let list = List::new(items);
     f.render_widget(list, inner);
+}
+
+fn truncate_line(line: String, width: u16, selected: bool) -> ListItem<'static> {
+    let cap = width as usize;
+    let mut line = if line.chars().count() > cap {
+        if cap > 3 {
+            line.chars().take(cap - 3).collect::<String>() + "..."
+        } else {
+            line.chars().take(cap).collect()
+        }
+    } else {
+        line
+    };
+    if line.is_empty() {
+        line.push(' ');
+    }
+    let style = if selected {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    ListItem::new(line).style(style)
+}
+
+fn config_value_row_text(choice: &ConfigValueChoice) -> String {
+    let mut line = if let Some(group) = choice.group.as_ref() {
+        format!("{group} / {}", choice.name)
+    } else {
+        choice.name.clone()
+    };
+    if let Some(description) = choice.description.as_ref()
+        && !description.trim().is_empty()
+    {
+        line.push_str("  -- ");
+        line.push_str(description.trim());
+    }
+    line
 }
 
 #[cfg(test)]
