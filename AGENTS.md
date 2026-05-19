@@ -19,7 +19,7 @@ There is no separate `tests/` directory today; tests are colocated in module-lev
 - `cargo clippy --all-targets -- -D warnings` runs lints with warnings treated as errors, matching CI.
 - `cargo test` runs unit tests.
 - `cargo build --release` builds the optimized `mj` binary.
-- `cargo run -- --command "brokk-acp" --cwd .` runs the TUI against an ACP server command.
+- `cargo run -- --command "anvil" --cwd .` runs the TUI against an ACP server command.
 
 ## Coding Style & Naming Conventions
 

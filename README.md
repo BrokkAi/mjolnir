@@ -4,7 +4,7 @@
 spawns an ACP-speaking agent process, talks JSON-RPC over the agent's stdio, and
 renders the session in a `ratatui` chat interface.
 
-The binary is named `mj` and defaults to launching `brokk-acp` from `PATH`.
+The binary is named `mj` and defaults to launching `anvil` from `PATH`.
 
 ## Features
 
@@ -17,7 +17,7 @@ The binary is named `mj` and defaults to launching `brokk-acp` from `PATH`.
 ## Requirements
 
 - Rust stable with Cargo.
-- An ACP server executable, such as `brokk-acp`, available on `PATH` or passed
+- An ACP server executable, such as `npx @zed-industries/codex-acp`, available on `PATH` or passed
   with `--command`.
 
 ## Build and Run
@@ -27,22 +27,22 @@ cargo build --release
 ./target/release/mj
 ```
 
-Run against a custom ACP server command:
+Run against an ACP server command explicitly:
 
 ```bash
-cargo run -- --command "brokk-acp --max-turns 25" --cwd /path/to/workspace
+cargo run -- --command "npx @zed-industries/codex-acp" --cwd /path/to/workspace
 ```
 
 Install locally from this checkout:
 
 ```bash
 cargo install --path .
-mj --command "brokk-acp" --cwd .
+mj --cwd .
 ```
 
 ## CLI Options
 
-- `--command`, `-c`: ACP server command to spawn. Defaults to `brokk-acp`.
+- `--command`, `-c`: ACP server command to spawn. Defaults to `anvil`.
 - `--cwd`: workspace directory used for the ACP session. Defaults to the current
   directory.
 - `--log-file`: write TUI logs to a file. Equivalent env var:

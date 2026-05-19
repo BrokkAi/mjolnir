@@ -18,13 +18,13 @@ Relevant Brokk history:
 
 The original intent was broader than "a Brokk TUI": build a native Rust terminal
 client that speaks the Agent Client Protocol (ACP) to any conformant agent. It
-defaults to `brokk-acp`, but the client should stay agent-agnostic.
+defaults to `anvil`, but the client should stay agent-agnostic.
 
 ## Current status
 
 The current crate is already a usable MVP:
 
-- Spawns an ACP agent process, defaulting to `brokk-acp` on `PATH`.
+- Spawns an ACP agent process, defaulting to `anvil` on `PATH`.
 - Talks ACP JSON-RPC over the child process stdio.
 - Opens a new ACP session for `--cwd` or the current directory.
 - Sends text prompts and receives prompt responses.
@@ -40,7 +40,7 @@ The current crate is already a usable MVP:
 
 Current command-line surface:
 
-- `mj --command "brokk-acp"` to choose the ACP server command.
+- `mj --command "anvil"` to choose the ACP server command.
 - `mj --cwd /path/to/repo` to choose the ACP session root.
 - `mj --log-file /path/to/mj.log` for TUI logs.
 - `mj --agent-stderr /path/to/agent.err` for child-process stderr.
@@ -128,13 +128,13 @@ Exit criteria:
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
   `cargo test`, and `cargo build --release` pass.
-- Manual smoke test against `brokk-acp` can launch, send a prompt, handle a tool
+- Manual smoke test against `anvil` can launch, send a prompt, handle a tool
   permission, cancel a prompt, and exit without a leftover child process.
 
 ### M2: Improve protocol coverage
 
 Goal: render and respond to common ACP features well enough that `mjolnir` is
-useful with multiple agents, not only `brokk-acp`.
+useful with multiple agents, not only the default one.
 
 Deliverables:
 
@@ -170,8 +170,8 @@ Deliverables:
 - Optional launch presets, for example named commands in a config file:
 
   ```toml
-  [agents.brokk]
-  command = "brokk-acp"
+  [agents.anvil]
+  command = "anvil"
 
   [agents.local]
   command = "/path/to/custom-agent --flag"
@@ -199,7 +199,7 @@ Deliverables:
 Exit criteria:
 
 - Fresh machine install path works for at least macOS aarch64 and Linux x86_64.
-- `mj --version` and `mj --command "brokk-acp" --cwd .` work after install.
+- `mj --version` and `mj --cwd .` work after install.
 
 ### M5: Optional client capabilities
 
@@ -259,7 +259,7 @@ Later:
    repo should not inherit the entire Java/Python migration unless that becomes
    an explicit product decision.
 6. **What are the first-class target agents?** We need a small compatibility
-   matrix to avoid designing only against `brokk-acp`.
+   matrix to avoid designing only against one agent.
 
 ## Discussion checklist
 
