@@ -794,13 +794,7 @@ fn draw_config_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState
                 .map(|(offset, choice)| {
                     let absolute = start + offset;
                     let marker = if absolute == selected { ">" } else { " " };
-                    let mut line = config_value_row_text(choice);
-                    if let Some(description) = choice.description.as_ref()
-                        && !description.trim().is_empty()
-                    {
-                        line.push_str("  -- ");
-                        line.push_str(description.trim());
-                    }
+                    let line = config_value_row_text(choice);
                     truncate_line(line, layout[1].width, marker == ">")
                 })
                 .collect::<Vec<ListItem>>()

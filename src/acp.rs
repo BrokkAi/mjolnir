@@ -175,19 +175,8 @@ async fn drive_session(
                 }
             }
             UiCommand::SetSessionConfigOption { config_id, value } => {
-                let req = SetSessionConfigOptionRequest::new(session_id.clone(), config_id, value);
-                match conn.send_request(req).block_task().await {
-                    Ok(resp) => {
-                        let _ =
-                            ui_tx.send(UiEvent::SessionUpdate(SessionUpdate::ConfigOptionUpdate(
-                                ConfigOptionUpdate::new(resp.config_options),
-                            )));
-                    }
-                    Err(e) => {
-                        let _ = ui_tx.send(UiEvent::Warning(format!(
-                            "session config update failed: {e}"
-                        )));
-                    }
+                if !drive_config_update(&conn, &session_id, config_id, value, ui_tx, ui_rx).await? {
+                    break;
                 }
             }
             UiCommand::CancelPrompt => {}
@@ -231,6 +220,52 @@ fn spawn_agent(
     let stdin = child.stdin.take().context("child stdin not piped")?;
     let stdout = child.stdout.take().context("child stdout not piped")?;
     Ok((child, stdin, stdout))
+}
+
+async fn drive_config_update(
+    conn: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    config_id: agent_client_protocol::schema::SessionConfigId,
+    value: agent_client_protocol::schema::SessionConfigValueId,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+    ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
+) -> Result<bool> {
+    let req = SetSessionConfigOptionRequest::new(session_id.clone(), config_id, value);
+    let update = conn.send_request(req).block_task();
+    tokio::pin!(update);
+
+    loop {
+        tokio::select! {
+            result = &mut update => {
+                match result {
+                    Ok(resp) => {
+                        let _ = ui_tx.send(UiEvent::SessionUpdate(SessionUpdate::ConfigOptionUpdate(
+                            ConfigOptionUpdate::new(resp.config_options),
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = ui_tx.send(UiEvent::Warning(format!(
+                            "session config update failed: {e}"
+                        )));
+                    }
+                }
+                return Ok(true);
+            }
+            maybe_cmd = ui_rx.recv() => {
+                match maybe_cmd {
+                    Some(UiCommand::Shutdown) | None => {
+                        return Ok(false);
+                    }
+                    Some(UiCommand::SendPrompt { .. }) | Some(UiCommand::SetSessionConfigOption { .. }) => {
+                        let _ = ui_tx.send(UiEvent::Warning(
+                            "config update already in flight".to_string(),
+                        ));
+                    }
+                    Some(UiCommand::CancelPrompt) => {}
+                }
+            }
+        }
+    }
 }
 
 async fn drive_prompt_turn(
@@ -298,7 +333,8 @@ mod tests {
     use agent_client_protocol::Agent as AgentRole;
     use agent_client_protocol::schema::{
         ContentBlock, ContentChunk, InitializeResponse, NewSessionResponse, PromptResponse,
-        SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
+        SessionConfigId, SessionConfigValueId, SessionId, SessionNotification, SessionUpdate,
+        SetSessionConfigOptionRequest, StopReason, TextContent,
     };
     use std::sync::{
         Arc,
@@ -352,6 +388,43 @@ mod tests {
             )
             .connect_with(transport, |_cx| async move {
                 // Keep the agent alive until the client side closes.
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_with_hanging_config(stream: tokio::io::DuplexStream) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(InitializeResponse::new(
+                        agent_client_protocol::schema::ProtocolVersion::V1,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: SetSessionConfigOptionRequest, _responder, _cx| {
+                    futures::future::pending::<()>().await;
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
                 futures::future::pending::<()>().await;
                 Ok(())
             })
@@ -546,6 +619,51 @@ mod tests {
         assert_eq!(cancel_hits.load(Ordering::SeqCst), 1);
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        let join = tokio::time::timeout(Duration::from_secs(2), client_task)
+            .await
+            .expect("drive_client did not return after shutdown");
+        join.expect("client task panicked")
+            .expect("drive_client returned error");
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_interrupts_hanging_config_update() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_with_hanging_config(agent_side));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            ui_tx,
+            cmd_rx,
+        ));
+
+        let mut saw_session = false;
+        while !saw_session {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("handshake timeout")
+                .expect("channel closed");
+            if matches!(ev, UiEvent::SessionStarted { .. }) {
+                saw_session = true;
+            }
+        }
+
+        cmd_tx
+            .send(UiCommand::SetSessionConfigOption {
+                config_id: SessionConfigId::new("model"),
+                value: SessionConfigValueId::new("model-2"),
+            })
+            .expect("send config update");
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+
         let join = tokio::time::timeout(Duration::from_secs(2), client_task)
             .await
             .expect("drive_client did not return after shutdown");
