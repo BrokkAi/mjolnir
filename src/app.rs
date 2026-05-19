@@ -388,7 +388,6 @@ impl AppState {
     }
 
     fn apply_session_update(&mut self, update: SessionUpdate) {
-        self.scroll_offset = 0;
         match update {
             SessionUpdate::UserMessageChunk(c) => {
                 // During an active prompt turn (`Streaming`), the user's
@@ -591,6 +590,18 @@ mod tests {
             stop_reason: StopReason::EndTurn,
         });
         assert_eq!(s.turn, TurnState::Idle);
+    }
+
+    #[test]
+    fn streaming_updates_preserve_manual_scroll_offset() {
+        let mut s = AppState::new();
+        s.scroll_offset = 12;
+
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("hello"),
+        )));
+
+        assert_eq!(s.scroll_offset, 12);
     }
 
     #[test]

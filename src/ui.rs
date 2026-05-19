@@ -33,6 +33,30 @@ use crate::app::{
 };
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
 
+#[derive(Debug, Default)]
+struct TranscriptScrollState {
+    last_rendered_lines: Option<(usize, u16)>,
+}
+
+impl TranscriptScrollState {
+    /// Preserve the visible transcript when new wrapped lines arrive
+    /// or the terminal is resized.
+    fn reconcile(&mut self, scroll_offset: &mut usize, rendered_lines: usize, visible_rows: u16) {
+        if let Some((previous_lines, previous_visible_rows)) = self.last_rendered_lines
+            && *scroll_offset > 0
+        {
+            let previous_top = previous_lines
+                .saturating_sub(previous_visible_rows as usize)
+                .saturating_sub(*scroll_offset);
+            let current_top = rendered_lines.saturating_sub(visible_rows as usize);
+            let preserved_top = previous_top.min(current_top);
+            let next_offset = current_top.saturating_sub(preserved_top);
+            *scroll_offset = next_offset;
+        }
+        self.last_rendered_lines = Some((rendered_lines, visible_rows));
+    }
+}
+
 /// Run the UI loop until the user quits or the runtime closes.
 pub async fn run(
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
@@ -52,10 +76,11 @@ async fn ui_loop(
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
 ) -> Result<()> {
     let mut state = AppState::new();
+    let mut transcript_scroll = TranscriptScrollState::default();
     let mut crossterm_events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
 
-    terminal.draw(|f| draw(f, &state))?;
+    terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
 
     loop {
         tokio::select! {
@@ -93,7 +118,7 @@ async fn ui_loop(
             let _ = cmd_tx.send(UiCommand::Shutdown);
             break;
         }
-        terminal.draw(|f| draw(f, &state))?;
+        terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
     }
     Ok(())
 }
@@ -276,7 +301,11 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     Ok(())
 }
 
-fn draw(f: &mut ratatui::Frame, state: &AppState) {
+fn draw(
+    f: &mut ratatui::Frame,
+    state: &mut AppState,
+    transcript_scroll: &mut TranscriptScrollState,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -288,7 +317,7 @@ fn draw(f: &mut ratatui::Frame, state: &AppState) {
         .split(f.area());
 
     draw_header(f, chunks[0], state);
-    draw_transcript(f, chunks[1], state);
+    draw_transcript(f, chunks[1], state, transcript_scroll);
     draw_input(f, chunks[2], state);
     draw_status(f, chunks[3], state);
 
@@ -327,39 +356,38 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     f.render_widget(p, area);
 }
 
-fn draw_transcript(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+fn draw_transcript(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    state: &mut AppState,
+    transcript_scroll: &mut TranscriptScrollState,
+) {
     let block = Block::default().borders(Borders::ALL).title(" transcript ");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let lines = render_transcript_lines(state, inner.width);
-    let total = lines.len();
-    let visible = usize::from(inner.height);
-    // Scroll so the bottom of the transcript is pinned at the bottom of
-    // the pane, unless the user has scrolled up.
-    let top = transcript_scroll_top(total, visible, state.scroll_offset);
-    // ratatui still accepts a u16 scroll position, so only clamp at the
-    // render boundary.
-    let scroll_row = top.min(u16::MAX as usize) as u16;
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll_row, 0));
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    // Count wrapped rows so scroll anchoring survives resize and long lines.
+    let total = paragraph.line_count(inner.width);
+    transcript_scroll.reconcile(&mut state.scroll_offset, total, inner.height);
+    let top = total
+        .saturating_sub(inner.height as usize)
+        .saturating_sub(state.scroll_offset)
+        .min(u16::MAX as usize) as u16;
+    let paragraph = paragraph.scroll((top, 0));
     f.render_widget(paragraph, inner);
 }
 
-fn transcript_scroll_top(total_lines: usize, visible_lines: usize, scroll_offset: usize) -> usize {
-    total_lines
-        .saturating_sub(visible_lines)
-        .saturating_sub(scroll_offset)
-}
-
-fn render_transcript_lines<'a>(state: &'a AppState, _width: u16) -> Vec<Line<'a>> {
-    let mut out: Vec<Line<'a>> = Vec::new();
+fn render_transcript_lines(state: &AppState, _width: u16) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
     for entry in &state.transcript {
         match entry {
-            Entry::UserPrompt(text) => push_block(&mut out, "you", Color::Cyan, text),
-            Entry::AgentMessage(text) => push_block(&mut out, "agent", Color::Green, text),
-            Entry::AgentThought(text) => push_block(&mut out, "thought", Color::DarkGray, text),
+            Entry::UserPrompt(text) => push_block(&mut out, "you", Color::Cyan, text.clone()),
+            Entry::AgentMessage(text) => push_block(&mut out, "agent", Color::Green, text.clone()),
+            Entry::AgentThought(text) => {
+                push_block(&mut out, "thought", Color::DarkGray, text.clone())
+            }
             Entry::Plan(entries) => {
                 out.push(Line::from(Span::styled(
                     "plan",
@@ -425,13 +453,13 @@ fn render_transcript_lines<'a>(state: &'a AppState, _width: u16) -> Vec<Line<'a>
     out
 }
 
-fn push_block<'a>(out: &mut Vec<Line<'a>>, label: &str, color: Color, text: &'a str) {
+fn push_block(out: &mut Vec<Line<'static>>, label: &str, color: Color, text: String) {
     out.push(Line::from(Span::styled(
         format!("{label}:"),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )));
     for raw in text.split('\n') {
-        out.push(Line::from(raw));
+        out.push(Line::from(raw.to_string()));
     }
     out.push(Line::from(""));
 }
@@ -660,31 +688,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_closed_keeps_transcript_scrolling_active() {
-        let mut state = AppState::new();
-        state.runtime_closed = true;
-        state.scroll_offset = 0;
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageUp));
-        assert_eq!(state.scroll_offset, 5);
-
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
-        assert_eq!(state.scroll_offset, 0);
-        assert!(!state.should_quit);
-    }
-
-    #[test]
-    fn transcript_scroll_top_handles_more_than_u16_max_offset() {
-        assert_eq!(transcript_scroll_top(80_000, 24, 0), 79_976);
-        assert_eq!(
-            transcript_scroll_top(80_000, 24, u16::MAX as usize + 5),
-            14_436
-        );
-        assert_eq!(transcript_scroll_top(80_000, 24, 79_976), 0);
-    }
-
-    #[test]
     fn runtime_closed_ignores_text_input() {
         let mut state = AppState::new();
         state.runtime_closed = true;
@@ -710,5 +713,67 @@ mod tests {
         );
 
         assert!(state.should_quit);
+    }
+
+    #[test]
+    fn transcript_scroll_stays_pinned_to_bottom_when_following() {
+        let mut tracker = TranscriptScrollState::default();
+        let mut offset = 0;
+
+        tracker.reconcile(&mut offset, 80, 20);
+        tracker.reconcile(&mut offset, 100, 20);
+
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn transcript_scroll_preserves_position_when_new_rows_arrive() {
+        let mut tracker = TranscriptScrollState::default();
+        let mut offset = 0;
+
+        tracker.reconcile(&mut offset, 100, 20);
+        offset = 12;
+        tracker.reconcile(&mut offset, 112, 20);
+
+        assert_eq!(offset, 24);
+    }
+
+    #[test]
+    fn transcript_scroll_adjusts_for_resize() {
+        let mut tracker = TranscriptScrollState::default();
+        let mut offset = 0;
+
+        tracker.reconcile(&mut offset, 100, 20);
+        offset = 12;
+        tracker.reconcile(&mut offset, 100, 28);
+
+        assert_eq!(offset, 4);
+    }
+
+    #[test]
+    fn transcript_scroll_reconciles_offsets_above_u16_max() {
+        let mut tracker = TranscriptScrollState::default();
+        let mut offset = 0;
+
+        tracker.reconcile(&mut offset, 80_000, 24);
+        offset = u16::MAX as usize + 5;
+        tracker.reconcile(&mut offset, 80_050, 24);
+
+        assert_eq!(offset, u16::MAX as usize + 55);
+    }
+
+    #[test]
+    fn runtime_closed_keeps_transcript_scrolling_active() {
+        let mut state = AppState::new();
+        state.runtime_closed = true;
+        state.scroll_offset = 0;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageUp));
+        assert_eq!(state.scroll_offset, 5);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
+        assert_eq!(state.scroll_offset, 0);
+        assert!(!state.should_quit);
     }
 }
