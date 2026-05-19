@@ -28,7 +28,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::app::{
-    AppState, Entry, PendingPermission, TurnState, permission_kind_label, stop_reason_label,
+    AppState, Entry, PendingPermission, StatusKind, StatusMessage, TurnState,
+    permission_kind_label, stop_reason_label,
 };
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
 
@@ -90,7 +91,9 @@ async fn ui_loop(
                         handle_crossterm(&mut state, cmd_tx, ev);
                     }
                     Some(Err(e)) => {
-                        state.status_line = Some(format!("input error: {e}"));
+                        state.status_line = Some(StatusMessage::warning(format!(
+                            "input error: {e}"
+                        )));
                     }
                     None => break,
                 }
@@ -100,14 +103,11 @@ async fn ui_loop(
             // arm and exits the loop. The conditional pattern disables
             // the branch when the channel closes, which would leave the
             // TUI spinning on tick + crossterm forever.
-            maybe_ev = event_rx.recv() => {
+            maybe_ev = event_rx.recv(), if !state.runtime_closed => {
                 match maybe_ev {
                     Some(ev) => state.apply_event(ev),
                     None => {
-                        state.status_line =
-                            Some("acp runtime closed; exiting".to_string());
-                        terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
-                        break;
+                        state.mark_runtime_closed();
                     }
                 }
             }
@@ -128,6 +128,24 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         return;
     };
     if key.kind != KeyEventKind::Press {
+        return;
+    }
+
+    if state.runtime_closed {
+        match (key.modifiers, key.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('c'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('d'))
+            | (_, KeyCode::Esc) => {
+                state.should_quit = true;
+            }
+            (_, KeyCode::PageUp) => {
+                state.scroll_offset = state.scroll_offset.saturating_add(5);
+            }
+            (_, KeyCode::PageDown) => {
+                state.scroll_offset = state.scroll_offset.saturating_sub(5);
+            }
+            _ => {}
+        }
         return;
     }
 
@@ -167,7 +185,7 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             if state.turn == TurnState::Streaming {
                 let _ = cmd_tx.send(UiCommand::CancelPrompt);
-                state.status_line = Some("cancelling...".to_string());
+                state.status_line = Some(StatusMessage::info("cancelling..."));
             } else if state.input.is_empty() {
                 state.should_quit = true;
             } else {
@@ -202,12 +220,18 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
 }
 
 fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
+    if state.runtime_closed {
+        state.status_line = Some(StatusMessage::info(
+            "acp runtime closed; press Ctrl-C to quit",
+        ));
+        return;
+    }
     if state.turn == TurnState::Streaming {
-        state.status_line = Some("a prompt is already in flight".to_string());
+        state.status_line = Some(StatusMessage::warning("a prompt is already in flight"));
         return;
     }
     if state.session_id.is_none() {
-        state.status_line = Some("waiting for session...".to_string());
+        state.status_line = Some(StatusMessage::warning("waiting for session..."));
         return;
     }
     let text = std::mem::take(&mut state.input);
@@ -441,11 +465,15 @@ fn push_block(out: &mut Vec<Line<'static>>, label: &str, color: Color, text: Str
 }
 
 fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let title = match state.turn {
-        TurnState::Idle => " prompt (Enter to send | Ctrl-C to quit) ",
-        TurnState::Streaming => " streaming... (Ctrl-C to cancel) ",
+    let title = if state.runtime_closed {
+        " runtime closed (Ctrl-C to quit) "
+    } else {
+        match state.turn {
+            TurnState::Idle => " prompt (Enter to send | Ctrl-C to quit) ",
+            TurnState::Streaming => " streaming... (Ctrl-C to cancel) ",
+        }
     };
-    let style = if state.turn == TurnState::Streaming {
+    let style = if state.runtime_closed || state.turn == TurnState::Streaming {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
@@ -457,7 +485,10 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
 
-    if state.turn != TurnState::Streaming && state.pending_permission.is_none() {
+    if !state.runtime_closed
+        && state.turn != TurnState::Streaming
+        && state.pending_permission.is_none()
+    {
         // Place a fake cursor at end of input. Estimated, ASCII only.
         let cursor_x = area.x + 1 + (state.input.len().min((area.width - 2) as usize) as u16);
         let cursor_y = area.y + 1;
@@ -466,18 +497,37 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
 }
 
 fn draw_status(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let msg = state.status_line.clone().unwrap_or_else(|| {
+    let (msg, style) = if let Some(status) = state.status_line.as_ref() {
+        let mut text = status.text.clone();
+        let style = match status.kind {
+            StatusKind::Info => Style::default().fg(Color::DarkGray),
+            StatusKind::Warning => Style::default()
+                .bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+            StatusKind::Fatal => {
+                if state.runtime_closed {
+                    text.push_str(" | press Ctrl-C to quit");
+                }
+                Style::default()
+                    .bg(Color::Red)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            }
+        };
+        (text, style)
+    } else {
         if let Some(reason) = state.transcript.iter().rev().find_map(|e| match e {
             Entry::System(s) if s.starts_with("turn done:") => Some(s.clone()),
             _ => None,
         }) {
-            reason
+            (reason, Style::default().fg(Color::DarkGray))
         } else {
-            "ready".to_string()
+            ("ready".to_string(), Style::default().fg(Color::DarkGray))
         }
-    });
+    };
     let _ = stop_reason_label; // referenced from app::stop_reason_label users
-    let p = Paragraph::new(msg).style(Style::default().fg(Color::DarkGray));
+    let p = Paragraph::new(msg).style(style);
     f.render_widget(p, area);
 }
 
@@ -631,6 +681,11 @@ fn draw_autocomplete_popover(f: &mut ratatui::Frame, input_area: Rect, state: &A
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> CtEvent {
+        CtEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
 
     #[test]
     fn transcript_scroll_stays_pinned_to_bottom_when_following() {
@@ -665,5 +720,48 @@ mod tests {
         tracker.reconcile(&mut offset, 100, 28);
 
         assert_eq!(offset, 4);
+    }
+
+    #[test]
+    fn runtime_closed_keeps_transcript_scrolling_active() {
+        let mut state = AppState::new();
+        state.runtime_closed = true;
+        state.scroll_offset = 0;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageUp));
+        assert_eq!(state.scroll_offset, 5);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
+        assert_eq!(state.scroll_offset, 0);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn runtime_closed_ignores_text_input() {
+        let mut state = AppState::new();
+        state.runtime_closed = true;
+        state.input = "keep".to_string();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('x')));
+
+        assert_eq!(state.input, "keep");
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn runtime_closed_quits_on_ctrl_c() {
+        let mut state = AppState::new();
+        state.runtime_closed = true;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            CtEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
+
+        assert!(state.should_quit);
     }
 }
