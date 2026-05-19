@@ -15,6 +15,14 @@ use agent_client_protocol::schema::{
 
 use crate::event::{PermissionPrompt, UiEvent, content_block_text};
 
+/// How the UI loop ends, so `main` can decide whether to quit entirely
+/// or restart the session with a different agent.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum UiExitReason {
+    Quit,
+    SwapAgent,
+}
+
 /// One entry in the scrolling transcript.
 #[derive(Debug, Clone)]
 pub enum Entry {
@@ -160,7 +168,7 @@ pub struct AppState {
     /// Scroll offset measured in rendered lines from the bottom of the
     /// transcript. `0` keeps the view pinned to the newest line.
     pub scroll_offset: usize,
-    pub should_quit: bool,
+    pub exit_reason: Option<UiExitReason>,
     /// True once the runtime has stopped accepting commands.
     pub runtime_closed: bool,
     /// Transient status line with severity.
@@ -210,7 +218,7 @@ impl AppState {
             pending_permission: None,
             config_picker: None,
             scroll_offset: 0,
-            should_quit: false,
+            exit_reason: None,
             runtime_closed: false,
             status_line: None,
             autocomplete: Autocomplete::default(),

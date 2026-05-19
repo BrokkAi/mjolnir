@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 
 use crate::app::{
     AppState, ConfigValueChoice, Entry, PendingPermission, StatusKind, StatusMessage, TurnState,
-    config_option_choices, config_option_current_value_label, permission_kind_label,
+    UiExitReason, config_option_choices, config_option_current_value_label, permission_kind_label,
     stop_reason_label,
 };
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
@@ -58,24 +58,24 @@ impl TranscriptScrollState {
     }
 }
 
-/// Run the UI loop until the user quits or the runtime closes.
+/// Run the UI loop until the user quits or asks to swap agents. The
+/// caller owns the terminal lifecycle (see `setup_terminal` /
+/// `restore_terminal`) so the picker can reuse the same alt-screen.
+/// Returns the reason the loop exited so `main` knows whether to
+/// terminate or run the picker again.
 pub async fn run(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     mut event_rx: mpsc::UnboundedReceiver<UiEvent>,
-) -> Result<()> {
-    let mut terminal = setup_terminal().context("setup terminal")?;
-    let result = ui_loop(&mut terminal, &cmd_tx, &mut event_rx).await;
-    if let Err(e) = restore_terminal(&mut terminal) {
-        tracing::warn!("restore terminal failed: {e}");
-    }
-    result
+) -> Result<UiExitReason> {
+    ui_loop(terminal, &cmd_tx, &mut event_rx).await
 }
 
 async fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
-) -> Result<()> {
+) -> Result<UiExitReason> {
     let mut state = AppState::new();
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut crossterm_events = EventStream::new();
@@ -115,13 +115,14 @@ async fn ui_loop(
             _ = tick.tick() => {}
         }
 
-        if state.should_quit {
+        if let Some(reason) = state.exit_reason {
             let _ = cmd_tx.send(UiCommand::Shutdown);
-            break;
+            terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
+            return Ok(reason);
         }
         terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
     }
-    Ok(())
+    Ok(UiExitReason::Quit)
 }
 
 fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>, ev: CtEvent) {
@@ -137,7 +138,7 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             (KeyModifiers::CONTROL, KeyCode::Char('c'))
             | (KeyModifiers::CONTROL, KeyCode::Char('d'))
             | (_, KeyCode::Esc) => {
-                state.should_quit = true;
+                state.exit_reason = Some(UiExitReason::Quit);
             }
             (_, KeyCode::PageUp) => {
                 state.scroll_offset = state.scroll_offset.saturating_add(5);
@@ -197,14 +198,14 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
                 let _ = cmd_tx.send(UiCommand::CancelPrompt);
                 state.status_line = Some(StatusMessage::info("cancelling..."));
             } else if state.input.is_empty() {
-                state.should_quit = true;
+                state.exit_reason = Some(UiExitReason::Quit);
             } else {
                 state.input.clear();
                 state.update_autocomplete();
             }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('d')) if state.input.is_empty() => {
-            state.should_quit = true;
+            state.exit_reason = Some(UiExitReason::Quit);
         }
         (_, KeyCode::Enter) => submit_prompt(state, cmd_tx),
         (_, KeyCode::Char(c)) => {
@@ -230,6 +231,29 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
 }
 
 fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
+    let text = std::mem::take(&mut state.input);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    // Client-side `/mj:` commands are handled here without forwarding
+    // anything to the agent. Right now only `/mj:agents` is supported.
+    if let Some(rest) = trimmed.strip_prefix("/mj:") {
+        match rest.trim() {
+            "agents" => {
+                state.exit_reason = Some(UiExitReason::SwapAgent);
+                return;
+            }
+            other => {
+                state.status_line = Some(StatusMessage::warning(format!(
+                    "unknown mj command: /mj:{other}"
+                )));
+                return;
+            }
+        }
+    }
+
     if state.runtime_closed {
         state.status_line = Some(StatusMessage::info(
             "acp runtime closed; press Ctrl-C to quit",
@@ -242,11 +266,6 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     }
     if state.session_id.is_none() {
         state.status_line = Some(StatusMessage::warning("waiting for session..."));
-        return;
-    }
-    let text = std::mem::take(&mut state.input);
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
         return;
     }
     state.record_user_prompt(trimmed.to_string());
@@ -375,16 +394,16 @@ fn config_shortcut_key(modifiers: KeyModifiers, code: KeyCode) -> Option<char> {
     }
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
-    enable_raw_mode()?;
+pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+    enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("enter alt screen")?;
     let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
+    let terminal = Terminal::new(backend).context("ratatui terminal")?;
     Ok(terminal)
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -953,7 +972,7 @@ mod tests {
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('x')));
 
         assert_eq!(state.input, "keep");
-        assert!(!state.should_quit);
+        assert!(state.exit_reason.is_none());
     }
 
     #[test]
@@ -968,7 +987,37 @@ mod tests {
             CtEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         );
 
-        assert!(state.should_quit);
+        assert_eq!(state.exit_reason, Some(UiExitReason::Quit));
+    }
+
+    #[test]
+    fn slash_mj_agents_triggers_swap_exit_reason() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "/mj:agents".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert_eq!(state.exit_reason, Some(UiExitReason::SwapAgent));
+        // Must not forward the command to the agent.
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn unknown_slash_mj_command_warns_without_exit() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "/mj:bogus".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.exit_reason.is_none());
+        assert!(cmd_rx.try_recv().is_err());
+        let warn = state.status_line.expect("warning");
+        assert_eq!(warn.kind, StatusKind::Warning);
+        assert!(warn.text.contains("/mj:bogus"), "msg: {}", warn.text);
     }
 
     #[test]
@@ -1030,7 +1079,7 @@ mod tests {
 
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
         assert_eq!(state.scroll_offset, 0);
-        assert!(!state.should_quit);
+        assert!(state.exit_reason.is_none());
     }
 
     #[test]
