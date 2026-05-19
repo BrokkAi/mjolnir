@@ -333,17 +333,24 @@ fn draw_transcript(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     f.render_widget(block, area);
 
     let lines = render_transcript_lines(state, inner.width);
-    let total = lines.len() as u16;
-    let visible = inner.height;
+    let total = lines.len();
+    let visible = usize::from(inner.height);
     // Scroll so the bottom of the transcript is pinned at the bottom of
     // the pane, unless the user has scrolled up.
-    let top = total
-        .saturating_sub(visible)
-        .saturating_sub(state.scroll_offset);
+    let top = transcript_scroll_top(total, visible, state.scroll_offset);
+    // ratatui still accepts a u16 scroll position, so only clamp at the
+    // render boundary.
+    let scroll_row = top.min(u16::MAX as usize) as u16;
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((top, 0));
+        .scroll((scroll_row, 0));
     f.render_widget(paragraph, inner);
+}
+
+fn transcript_scroll_top(total_lines: usize, visible_lines: usize, scroll_offset: usize) -> usize {
+    total_lines
+        .saturating_sub(visible_lines)
+        .saturating_sub(scroll_offset)
 }
 
 fn render_transcript_lines<'a>(state: &'a AppState, _width: u16) -> Vec<Line<'a>> {
@@ -665,6 +672,16 @@ mod tests {
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
         assert_eq!(state.scroll_offset, 0);
         assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn transcript_scroll_top_handles_more_than_u16_max_offset() {
+        assert_eq!(transcript_scroll_top(80_000, 24, 0), 79_976);
+        assert_eq!(
+            transcript_scroll_top(80_000, 24, u16::MAX as usize + 5),
+            14_436
+        );
+        assert_eq!(transcript_scroll_top(80_000, 24, 79_976), 0);
     }
 
     #[test]

@@ -146,7 +146,7 @@ pub struct AppState {
     pub pending_permission: Option<PendingPermission>,
     /// Scroll offset measured in rendered lines from the bottom of the
     /// transcript. `0` keeps the view pinned to the newest line.
-    pub scroll_offset: u16,
+    pub scroll_offset: usize,
     pub should_quit: bool,
     /// True once the runtime has stopped accepting commands.
     pub runtime_closed: bool,
