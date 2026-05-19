@@ -38,7 +38,13 @@ pub async fn run(
     ui_rx: mpsc::UnboundedReceiver<UiCommand>,
 ) -> Result<()> {
     let (mut child, child_stdin, child_stdout) =
-        spawn_agent(&cfg.command, &cfg.args, cfg.agent_stderr.as_deref())?;
+        match spawn_agent(&cfg.command, &cfg.args, cfg.agent_stderr.as_deref()) {
+            Ok(spawned) => spawned,
+            Err(e) => {
+                let _ = ui_tx.send(UiEvent::Fatal(format!("acp: {e}")));
+                return Err(e);
+            }
+        };
     let transport = ByteStreams::new(child_stdin.compat_write(), child_stdout.compat());
 
     let result = drive_client(transport, cfg.cwd.clone(), ui_tx.clone(), ui_rx).await;
@@ -70,7 +76,6 @@ where
     // returns immediately so the JSON-RPC dispatch loop stays unblocked.
     let perm_ui_tx = ui_tx.clone();
     let notif_ui_tx = ui_tx.clone();
-    let session_ui_tx = ui_tx.clone();
     let result = Client
         .builder()
         .on_receive_notification(
@@ -104,9 +109,8 @@ where
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport, |conn: ConnectionTo<Agent>| async move {
-            if let Err(e) = drive_session(conn, cwd, &session_ui_tx, &mut ui_rx).await {
+            if let Err(e) = drive_session(conn, cwd, &ui_tx, &mut ui_rx).await {
                 let msg = format!("{e:#}");
-                let _ = session_ui_tx.send(UiEvent::Fatal(msg.clone()));
                 return Err(agent_client_protocol::Error::internal_error()
                     .data(serde_json::Value::String(msg)));
             }
@@ -396,5 +400,35 @@ mod tests {
         join.expect("client task panicked")
             .expect("drive_client returned error");
         agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_reports_spawn_failure_as_fatal() {
+        let cfg = AcpRuntimeConfig {
+            command: PathBuf::from("definitely-not-a-real-mjolnir-command"),
+            args: Vec::new(),
+            cwd: std::env::temp_dir(),
+            agent_stderr: None,
+        };
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        let run_task = tokio::spawn(run(cfg, ui_tx, cmd_rx));
+
+        let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            .await
+            .expect("timeout waiting for fatal event")
+            .expect("channel closed");
+        match ev {
+            UiEvent::Fatal(msg) => {
+                assert!(msg.contains("spawning agent"), "unexpected fatal: {msg}");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let result = tokio::time::timeout(Duration::from_secs(5), run_task)
+            .await
+            .expect("run task did not finish");
+        assert!(result.expect("run task panicked").is_err());
     }
 }

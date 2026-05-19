@@ -113,6 +113,12 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             | (_, KeyCode::Esc) => {
                 state.should_quit = true;
             }
+            (_, KeyCode::PageUp) => {
+                state.scroll_offset = state.scroll_offset.saturating_add(5);
+            }
+            (_, KeyCode::PageDown) => {
+                state.scroll_offset = state.scroll_offset.saturating_sub(5);
+            }
             _ => {}
         }
         return;
@@ -635,4 +641,57 @@ fn draw_autocomplete_popover(f: &mut ratatui::Frame, input_area: Rect, state: &A
 
     let list = List::new(items);
     f.render_widget(list, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> CtEvent {
+        CtEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn runtime_closed_keeps_transcript_scrolling_active() {
+        let mut state = AppState::new();
+        state.runtime_closed = true;
+        state.scroll_offset = 0;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageUp));
+        assert_eq!(state.scroll_offset, 5);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
+        assert_eq!(state.scroll_offset, 0);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn runtime_closed_ignores_text_input() {
+        let mut state = AppState::new();
+        state.runtime_closed = true;
+        state.input = "keep".to_string();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('x')));
+
+        assert_eq!(state.input, "keep");
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn runtime_closed_quits_on_ctrl_c() {
+        let mut state = AppState::new();
+        state.runtime_closed = true;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            CtEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
+
+        assert!(state.should_quit);
+    }
 }
