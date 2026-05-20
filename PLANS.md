@@ -40,10 +40,17 @@ The current crate is already a usable MVP:
 
 Current command-line surface:
 
-- `mj --command "anvil"` to choose the ACP server command.
 - `mj --cwd /path/to/repo` to choose the ACP session root.
 - `mj --log-file /path/to/mj.log` for TUI logs.
 - `mj --agent-stderr /path/to/agent.err` for child-process stderr.
+
+There is no `--command` / `--agent` flag. The agent is chosen interactively in
+a picker on the first launch (or whenever `~/.config/mj/config.toml` is missing
+the `agent` block), and can be changed later with the in-TUI `/mj:agents`
+command. The picker is backed by the official
+[agentclientprotocol/registry](https://github.com/agentclientprotocol/registry)
+index (24h on-disk cache) with native binary install, plus the bundled `anvil`
+default and a `Custom command...` entry for arbitrary launch strings.
 
 ## Product goal
 
@@ -167,19 +174,13 @@ Deliverables:
 - Search or filter over the transcript.
 - Copy-friendly transcript output mode or an export command.
 - Session title display and clearer session metadata.
-- Optional launch presets, for example named commands in a config file:
-
-  ```toml
-  [agents.anvil]
-  command = "anvil"
-
-  [agents.local]
-  command = "/path/to/custom-agent --flag"
-  ```
+- ✅ Interactive agent picker backed by the ACP registry with native binary
+  install, plus a hardcoded `anvil` default and a `Custom command...` entry,
+  reachable on first launch and via `/mj:agents`.
 
 Exit criteria:
 
-- A user can start `mj`, pick or pass an agent command, carry out a few turns,
+- A user can start `mj`, pick an agent in the picker, carry out a few turns,
   recover recent prompts, and copy or export useful output without leaving the
   terminal.
 

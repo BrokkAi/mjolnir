@@ -1,6 +1,7 @@
 //! ACP client runtime: spawns the agent subprocess, wires JSON-RPC over
 //! stdio, and bridges UI commands/events through two mpsc channels.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +25,9 @@ pub struct AcpRuntimeConfig {
     pub command: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    /// Environment variables to inject into the spawned agent process.
+    /// Used for agents that require knobs like `AUGMENT_DISABLE_AUTO_UPDATE=1`.
+    pub env: HashMap<String, String>,
     /// Where the agent's stderr should go. `None` discards it (via
     /// `Stdio::null()`, which maps to /dev/null on Unix and NUL on
     /// Windows) so the agent's logs don't bleed into the TUI. Pass a
@@ -190,15 +194,19 @@ pub async fn run(
 ) -> Result<()> {
     let fatal_emitted = Arc::new(AtomicBool::new(false));
 
-    let (mut child, child_stdin, child_stdout) =
-        match spawn_agent(&cfg.command, &cfg.args, cfg.agent_stderr.as_deref()) {
-            Ok(spawned) => spawned,
-            Err(launch_err) => {
-                let text = launch_err.to_string();
-                emit_fatal(&ui_tx, &fatal_emitted, text.clone());
-                return Err(anyhow::anyhow!(text));
-            }
-        };
+    let (mut child, child_stdin, child_stdout) = match spawn_agent(
+        &cfg.command,
+        &cfg.args,
+        &cfg.env,
+        cfg.agent_stderr.as_deref(),
+    ) {
+        Ok(spawned) => spawned,
+        Err(launch_err) => {
+            let text = launch_err.to_string();
+            emit_fatal(&ui_tx, &fatal_emitted, text.clone());
+            return Err(anyhow::anyhow!(text));
+        }
+    };
     let transport = ByteStreams::new(child_stdin.compat_write(), child_stdout.compat());
 
     // Race the ACP client against `child.wait()`. If the agent process
@@ -410,6 +418,7 @@ async fn drive_session(
 fn spawn_agent(
     command: &PathBuf,
     args: &[String],
+    env: &HashMap<String, String>,
     stderr_path: Option<&std::path::Path>,
 ) -> std::result::Result<
     (
@@ -421,6 +430,9 @@ fn spawn_agent(
 > {
     let mut cmd = Command::new(command);
     cmd.args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     // If the runtime task is aborted, dropping the child should still terminate it.
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1000,6 +1012,7 @@ mod tests {
             command: PathBuf::from("definitely-not-a-real-mjolnir-command"),
             args: Vec::new(),
             cwd: std::env::temp_dir(),
+            env: HashMap::new(),
             agent_stderr: None,
         };
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
@@ -1041,6 +1054,7 @@ mod tests {
             command: PathBuf::from("/bin/true"),
             args: Vec::new(),
             cwd: std::env::temp_dir(),
+            env: HashMap::new(),
             // Parent dir doesn't exist, so create(true).append(true) on
             // the file fails with NotFound. The path is intentionally
             // bizarre so we don't collide with anything real.
@@ -1131,6 +1145,7 @@ mod tests {
             command: PathBuf::from("/bin/true"),
             args: Vec::new(),
             cwd: std::env::temp_dir(),
+            env: HashMap::new(),
             agent_stderr: None,
         };
         assert_run_reports_agent_exited(cfg).await;
@@ -1155,6 +1170,7 @@ mod tests {
                 "head -c 200 >/dev/null; sleep 0.3; exit 0".into(),
             ],
             cwd: std::env::temp_dir(),
+            env: HashMap::new(),
             agent_stderr: None,
         };
         assert_run_reports_agent_exited(cfg).await;
