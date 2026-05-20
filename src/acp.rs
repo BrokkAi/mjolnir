@@ -1141,9 +1141,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_reports_agent_exit_via_post_drive_snapshot() {
+        // `/bin/sh -c 'exit 0'` instead of `/bin/true` because `true`
+        // lives at `/usr/bin/true` on macOS, not `/bin/true`. `/bin/sh`
+        // is portable across Linux and macOS.
         let cfg = AcpRuntimeConfig {
-            command: PathBuf::from("/bin/true"),
-            args: Vec::new(),
+            command: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), "exit 0".into()],
             cwd: std::env::temp_dir(),
             env: HashMap::new(),
             agent_stderr: None,
