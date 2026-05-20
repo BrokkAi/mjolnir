@@ -261,6 +261,66 @@ Later:
 6. **What are the first-class target agents?** We need a small compatibility
    matrix to avoid designing only against one agent.
 
+## Compatibility
+
+Smoke-tested against non-Brokk ACP agents to validate the
+"agent-agnostic terminal client" goal (PLANS.md goal #1). Each entry
+records the date, agent version, and what worked at the protocol layer.
+Update this table when re-running against newer versions or new agents.
+
+### `@agentclientprotocol/claude-agent-acp` 0.36.1 — 2026-05-20
+
+Source: npm package in the official `@agentclientprotocol` scope, OIDC-
+published from GitHub Actions by Conrad Irwin et al. (Apache-2.0).
+Wraps the Claude Agent SDK; uses Claude Code's local credentials, so no
+`ANTHROPIC_API_KEY` in the env is needed if Claude Code is already
+authenticated on the machine.
+
+Launch:
+
+```text
+mj --command "npx -y -p @agentclientprotocol/claude-agent-acp@0.36.1 claude-agent-acp"
+```
+
+Verified at the protocol layer (driven by a hand-rolled JSON-RPC probe,
+not a full interactive prompt round-trip, to avoid burning model tokens
+in a smoke test):
+
+| Feature | Result |
+| --- | --- |
+| `initialize` handshake (ACP v1) | works; `protocolVersion: 1` returned, matches our advertised version |
+| `agentInfo` (name + version) | populated; our `Connected` event renders `Claude Agent 0.36.1` |
+| `authMethods` | `[]`; no auth-required path triggered for this configuration |
+| `session/new` with `cwd` | works; returns `sessionId`, `models`, `modes`, `configOptions` |
+| `configOptions` categories | `mode`, `model`, `thought_level` — all map to our existing `SessionConfigOptionCategory` variants and render via the inline shortcut row |
+| `available_commands_update` notification | streams immediately after `session/new`; populates the slash autocomplete |
+| `loadSession`, `sessionCapabilities` (resume/fork/list/close/delete) | advertised by the agent; mjolnir does not yet drive any of these (M5 territory) |
+| `promptCapabilities.image`, `embeddedContext` | accepted by the agent; mjolnir still renders these `ContentBlock` variants as `[image]` / `[resource]` placeholders pending M2 |
+| `mcpCapabilities.http`, `sse` | advertised; mjolnir does not currently let the user specify `mcpServers` at `session/new` (sends none) |
+
+Known gaps to file as follow-ups when the matrix expands:
+
+- We do not surface the agent's `sessionCapabilities` to the user, so
+  there's no UI hint that this agent supports resume/fork/list.
+- We send `session/new` without `mcpServers`. If users want to plug in
+  MCP servers via `mj`, that requires a CLI flag or config-file entry.
+- Effort levels (`low/medium/high/xhigh/max`) come through the
+  `thought_level` config category and render with the auto-titlecased
+  name (`Xhigh`). Cosmetic and agent-side, not blocking.
+
+Not yet exercised (would consume model tokens or require interactive
+testing): `session/prompt` round-trip, tool-call permission flow,
+prompt cancellation against a live agent, agent-initiated errors mid-
+turn.
+
+### Next targets
+
+- Gemini CLI (auth-required path test).
+- Goose (self-hosted, no auth dance).
+
+Each future entry should follow the same shape: source / launch
+command / verified table / known gaps / not-yet-exercised.
+
 ## Discussion checklist
 
 Before turning this into an implementation roadmap, decide:
