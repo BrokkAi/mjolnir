@@ -151,7 +151,7 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
     }
 
     // Permission modal owns the keyboard while it's open.
-    if state.pending_permission.is_some() {
+    if state.has_pending_permission() {
         handle_permission_key(state, key.code);
         return;
     }
@@ -257,7 +257,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
 }
 
 fn handle_permission_key(state: &mut AppState, code: KeyCode) {
-    let Some(pending) = state.pending_permission.as_mut() else {
+    let Some(pending) = state.pending_permission_mut() else {
         return;
     };
     let len = pending.prompt.options.len().max(1);
@@ -273,7 +273,7 @@ fn handle_permission_key(state: &mut AppState, code: KeyCode) {
             pending.selected = (pending.selected + 1) % len;
         }
         KeyCode::Enter => {
-            let pending = state.pending_permission.take().expect("checked above");
+            let pending = state.take_pending_permission().expect("checked above");
             let PendingPermission { prompt, selected } = pending;
             let decision = prompt
                 .options
@@ -284,7 +284,7 @@ fn handle_permission_key(state: &mut AppState, code: KeyCode) {
             state.update_autocomplete();
         }
         KeyCode::Esc => {
-            let pending = state.pending_permission.take().expect("checked above");
+            let pending = state.take_pending_permission().expect("checked above");
             let _ = pending.prompt.responder.send(PermissionDecision::Cancelled);
             state.update_autocomplete();
         }
@@ -431,8 +431,8 @@ fn draw(
         draw_config_value_picker_modal(f, f.area(), state);
     }
 
-    if let Some(pending) = state.pending_permission.as_ref() {
-        draw_permission_modal(f, f.area(), pending);
+    if let Some(pending) = state.pending_permission() {
+        draw_permission_modal(f, f.area(), pending, state.pending_permission_count());
     }
 }
 
@@ -613,7 +613,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
 
     if !state.runtime_closed
         && state.turn != TurnState::Streaming
-        && state.pending_permission.is_none()
+        && !state.has_pending_permission()
         && state.config_picker.is_none()
     {
         // Place a fake cursor at end of input. Estimated, ASCII only.
@@ -683,7 +683,12 @@ fn draw_status(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     f.render_widget(p, area);
 }
 
-fn draw_permission_modal(f: &mut ratatui::Frame, area: Rect, pending: &PendingPermission) {
+fn draw_permission_modal(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    pending: &PendingPermission,
+    queue_len: usize,
+) {
     let width = area.width.saturating_sub(8).min(80);
     let height = (pending.prompt.options.len() as u16 + 6).min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
@@ -691,9 +696,16 @@ fn draw_permission_modal(f: &mut ratatui::Frame, area: Rect, pending: &PendingPe
     let rect = Rect::new(x, y, width, height);
 
     f.render_widget(Clear, rect);
+    // Surface queue depth so the user knows another prompt is waiting
+    // behind this one rather than wondering why one just popped up.
+    let title = if queue_len > 1 {
+        format!(" permission request (1 of {queue_len}) ")
+    } else {
+        " permission request ".to_string()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" permission request ")
+        .title(title)
         .style(Style::default().fg(Color::Yellow));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
