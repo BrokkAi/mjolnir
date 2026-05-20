@@ -2,16 +2,18 @@
 //! stdio, and bridges UI commands/events through two mpsc channels.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::schema::{
-    CancelNotification, ClientCapabilities, ConfigOptionUpdate, ContentBlock,
+    CancelNotification, ClientCapabilities, ConfigOptionUpdate, ContentBlock, ErrorCode,
     FileSystemCapabilities, InitializeRequest, NewSessionRequest, PromptRequest, ProtocolVersion,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -29,6 +31,108 @@ pub struct AcpRuntimeConfig {
     pub agent_stderr: Option<PathBuf>,
 }
 
+/// User-facing classification of launch-phase failures. Each variant
+/// renders as a one-line headline plus an action hint on the next line;
+/// `UiEvent::Fatal` carries that text through to the transcript so users
+/// see a `command not found` differently from an `auth required`.
+#[derive(Debug)]
+pub enum LaunchError {
+    /// `spawn` returned ENOENT for the agent command.
+    CommandNotFound { command: String },
+    /// `spawn` failed for some other reason (permissions, OS limits, ...).
+    SpawnFailed {
+        command: String,
+        source: std::io::Error,
+    },
+    /// The ACP `initialize` handshake errored or the agent never replied
+    /// to it. Often a wrong protocol version or a crashed agent.
+    InitializeFailed {
+        source: agent_client_protocol::Error,
+    },
+    /// `session/new` returned `auth_required` (-32000). The agent is
+    /// healthy; the user just needs to authenticate first.
+    AuthRequired { detail: Option<String> },
+    /// `session/new` failed for some other reason (bad cwd, agent-side
+    /// crash, ...).
+    SessionCreateFailed {
+        source: agent_client_protocol::Error,
+    },
+}
+
+impl std::fmt::Display for LaunchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LaunchError::CommandNotFound { command } => write!(
+                f,
+                "agent command not found: {command}\n\
+                 hint: install the agent on PATH or pass --command </path/to/agent>"
+            ),
+            LaunchError::SpawnFailed { command, source } => write!(
+                f,
+                "could not spawn agent {command}: {source}\n\
+                 hint: check executable permissions and that --command is right"
+            ),
+            LaunchError::InitializeFailed { source } => write!(
+                f,
+                "agent did not complete the ACP initialize handshake: {source}\n\
+                 hint: confirm the agent speaks ACP v1; capture --agent-stderr for detail"
+            ),
+            LaunchError::AuthRequired { detail } => {
+                let detail = detail.as_deref().unwrap_or("no detail provided");
+                write!(
+                    f,
+                    "agent requires authentication before opening a session: {detail}\n\
+                     hint: see the agent's docs to authenticate, then relaunch mj"
+                )
+            }
+            LaunchError::SessionCreateFailed { source } => write!(
+                f,
+                "agent rejected session/new: {source}\n\
+                 hint: verify --cwd is accessible to the agent"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LaunchError {}
+
+/// Send `UiEvent::Fatal` and mark it as sent so the tail of `run` does
+/// not emit a generic follow-up Fatal for the same failure.
+fn emit_fatal(
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+    fatal_emitted: &Arc<AtomicBool>,
+    msg: String,
+) {
+    if !fatal_emitted.swap(true, Ordering::SeqCst) {
+        let _ = ui_tx.send(UiEvent::Fatal(msg));
+    }
+}
+
+/// Classify a spawn-time `io::Error`. `ErrorKind::NotFound` becomes
+/// `CommandNotFound`; everything else falls through to `SpawnFailed`.
+fn classify_spawn_error(command: &std::path::Path, source: std::io::Error) -> LaunchError {
+    let command = command.display().to_string();
+    if source.kind() == std::io::ErrorKind::NotFound {
+        LaunchError::CommandNotFound { command }
+    } else {
+        LaunchError::SpawnFailed { command, source }
+    }
+}
+
+/// Classify a `session/new` ACP error. Auth-required (`-32000`) is split
+/// out because it has a different remediation than a generic failure.
+fn classify_session_error(source: agent_client_protocol::Error) -> LaunchError {
+    if source.code == ErrorCode::AuthRequired {
+        let detail = source.data.as_ref().map(|d| match d {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+        LaunchError::AuthRequired { detail }
+    } else {
+        LaunchError::SessionCreateFailed { source }
+    }
+}
+
 /// Spawn the agent subprocess and run the ACP client to completion.
 /// Pumps `ui_rx` for `UiCommand`s and emits `UiEvent`s onto `ui_tx`.
 ///
@@ -38,24 +142,38 @@ pub async fn run(
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     ui_rx: mpsc::UnboundedReceiver<UiCommand>,
 ) -> Result<()> {
+    let fatal_emitted = Arc::new(AtomicBool::new(false));
+
     let (mut child, child_stdin, child_stdout) =
         match spawn_agent(&cfg.command, &cfg.args, cfg.agent_stderr.as_deref()) {
             Ok(spawned) => spawned,
-            Err(e) => {
-                let _ = ui_tx.send(UiEvent::Fatal(format!("acp: {e}")));
-                return Err(e);
+            Err(launch_err) => {
+                let text = launch_err.to_string();
+                emit_fatal(&ui_tx, &fatal_emitted, text.clone());
+                return Err(anyhow::anyhow!(text));
             }
         };
     let transport = ByteStreams::new(child_stdin.compat_write(), child_stdout.compat());
 
-    let result = drive_client(transport, cfg.cwd.clone(), ui_tx.clone(), ui_rx).await;
+    let result = drive_client(
+        transport,
+        cfg.cwd.clone(),
+        ui_tx.clone(),
+        ui_rx,
+        fatal_emitted.clone(),
+    )
+    .await;
 
     let kill = child.kill().await;
     if let Err(e) = kill {
         tracing::warn!("kill child: {e}");
     }
+    // Generic catch-all: anything that escaped the launch-phase classifier
+    // (e.g. a transport error after initialize succeeded) gets a plain
+    // fatal so the user sees *something*. Launch-phase failures will
+    // already have called `emit_fatal` with action text.
     if let Err(e) = &result {
-        let _ = ui_tx.send(UiEvent::Fatal(format!("acp: {e}")));
+        emit_fatal(&ui_tx, &fatal_emitted, format!("acp: {e}"));
     }
     result
 }
@@ -68,6 +186,7 @@ pub async fn drive_client<T>(
     cwd: PathBuf,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     mut ui_rx: mpsc::UnboundedReceiver<UiCommand>,
+    fatal_emitted: Arc<AtomicBool>,
 ) -> Result<()>
 where
     T: ConnectTo<Client>,
@@ -110,7 +229,7 @@ where
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport, |conn: ConnectionTo<Agent>| async move {
-            if let Err(e) = drive_session(conn, cwd, &ui_tx, &mut ui_rx).await {
+            if let Err(e) = drive_session(conn, cwd, &ui_tx, &mut ui_rx, fatal_emitted).await {
                 let msg = format!("{e:#}");
                 return Err(agent_client_protocol::Error::internal_error()
                     .data(serde_json::Value::String(msg)));
@@ -131,6 +250,7 @@ async fn drive_session(
     cwd: PathBuf,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
+    fatal_emitted: Arc<AtomicBool>,
 ) -> Result<()> {
     // Advertise our client capabilities. We do not yet implement
     // `fs/read_text_file` or `fs/write_text_file`, so we declare both as
@@ -142,21 +262,33 @@ async fn drive_session(
                 .write_text_file(false))
             .terminal(false),
     );
-    let init_resp = conn
-        .send_request(init_req)
-        .block_task()
-        .await
-        .context("initialize")?;
+    let init_resp = match conn.send_request(init_req).block_task().await {
+        Ok(r) => r,
+        Err(source) => {
+            let launch_err = LaunchError::InitializeFailed { source };
+            let text = launch_err.to_string();
+            emit_fatal(ui_tx, &fatal_emitted, text.clone());
+            return Err(anyhow::anyhow!(text));
+        }
+    };
     let _ = ui_tx.send(UiEvent::Connected {
         agent_name: init_resp.agent_info.as_ref().map(|i| i.name.clone()),
         agent_version: init_resp.agent_info.as_ref().map(|i| i.version.clone()),
     });
 
-    let session = conn
+    let session = match conn
         .send_request(NewSessionRequest::new(cwd))
         .block_task()
         .await
-        .context("new_session")?;
+    {
+        Ok(s) => s,
+        Err(source) => {
+            let launch_err = classify_session_error(source);
+            let text = launch_err.to_string();
+            emit_fatal(ui_tx, &fatal_emitted, text.clone());
+            return Err(anyhow::anyhow!(text));
+        }
+    };
     let session_id: SessionId = session.session_id;
     let _ = ui_tx.send(UiEvent::SessionStarted {
         session_id: session_id.to_string(),
@@ -190,11 +322,14 @@ fn spawn_agent(
     command: &PathBuf,
     args: &[String],
     stderr_path: Option<&std::path::Path>,
-) -> Result<(
-    Child,
-    tokio::process::ChildStdin,
-    tokio::process::ChildStdout,
-)> {
+) -> std::result::Result<
+    (
+        Child,
+        tokio::process::ChildStdin,
+        tokio::process::ChildStdout,
+    ),
+    LaunchError,
+> {
     let mut cmd = Command::new(command);
     cmd.args(args);
     // If the runtime task is aborted, dropping the child should still terminate it.
@@ -207,18 +342,30 @@ fn spawn_agent(
                 .create(true)
                 .append(true)
                 .open(path)
-                .with_context(|| format!("open agent stderr {path:?}"))?;
+                .map_err(|source| LaunchError::SpawnFailed {
+                    command: format!("(opening agent stderr {})", path.display()),
+                    source,
+                })?;
             cmd.stderr(std::process::Stdio::from(file));
         }
         None => {
             cmd.stderr(std::process::Stdio::null());
         }
     }
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("spawning agent {command:?}"))?;
-    let stdin = child.stdin.take().context("child stdin not piped")?;
-    let stdout = child.stdout.take().context("child stdout not piped")?;
+    let mut child = cmd.spawn().map_err(|e| classify_spawn_error(command, e))?;
+    // `stdin` / `stdout` are always Some here because we requested
+    // `piped()` above; the `?` is just defensive.
+    let stdin = child.stdin.take().ok_or_else(|| LaunchError::SpawnFailed {
+        command: command.display().to_string(),
+        source: std::io::Error::other("child stdin not piped"),
+    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| LaunchError::SpawnFailed {
+            command: command.display().to_string(),
+            source: std::io::Error::other("child stdout not piped"),
+        })?;
     Ok((child, stdin, stdout))
 }
 
@@ -491,6 +638,41 @@ mod tests {
             .await;
     }
 
+    /// Initialize succeeds, but session/new responds with auth_required
+    /// (-32000). Used to exercise the LaunchError::AuthRequired path.
+    async fn run_mock_agent_session_auth_required(stream: tokio::io::DuplexStream) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(InitializeResponse::new(
+                        agent_client_protocol::schema::ProtocolVersion::V1,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    responder.respond_with_error(
+                        agent_client_protocol::Error::auth_required()
+                            .data(serde_json::Value::String("login required".to_string())),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn full_prompt_turn_against_mock_agent() {
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
@@ -507,6 +689,7 @@ mod tests {
             std::env::temp_dir(),
             ui_tx,
             cmd_rx,
+            Arc::new(AtomicBool::new(false)),
         ));
 
         // Pull Connected + SessionStarted.
@@ -576,6 +759,7 @@ mod tests {
             std::env::temp_dir(),
             ui_tx,
             cmd_rx,
+            Arc::new(AtomicBool::new(false)),
         ));
 
         let mut saw_connected = false;
@@ -643,6 +827,7 @@ mod tests {
             std::env::temp_dir(),
             ui_tx,
             cmd_rx,
+            Arc::new(AtomicBool::new(false)),
         ));
 
         let mut saw_session = false;
@@ -692,6 +877,7 @@ mod tests {
             std::env::temp_dir(),
             ui_tx,
             cmd_rx,
+            Arc::new(AtomicBool::new(false)),
         ));
 
         // Wait for the handshake so we know the loop is actually inside
@@ -738,7 +924,14 @@ mod tests {
             .expect("channel closed");
         match ev {
             UiEvent::Fatal(msg) => {
-                assert!(msg.contains("spawning agent"), "unexpected fatal: {msg}");
+                assert!(
+                    msg.contains("agent command not found"),
+                    "unexpected fatal: {msg}"
+                );
+                assert!(
+                    msg.contains("hint:"),
+                    "expected action hint in fatal: {msg}"
+                );
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -747,5 +940,143 @@ mod tests {
             .await
             .expect("run task did not finish");
         assert!(result.expect("run task panicked").is_err());
+    }
+
+    #[test]
+    fn classify_spawn_error_distinguishes_not_found_from_other_io_errors() {
+        let cmd = std::path::Path::new("does-not-matter");
+        let not_found =
+            classify_spawn_error(cmd, std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(
+            matches!(not_found, LaunchError::CommandNotFound { .. }),
+            "expected CommandNotFound, got {not_found:?}"
+        );
+
+        let permission = classify_spawn_error(
+            cmd,
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+        assert!(
+            matches!(permission, LaunchError::SpawnFailed { .. }),
+            "expected SpawnFailed for permission denied, got {permission:?}"
+        );
+    }
+
+    #[test]
+    fn classify_session_error_routes_auth_required_separately() {
+        // -32000 is the JSON-RPC code for ACP's AuthRequired.
+        let auth = classify_session_error(
+            agent_client_protocol::Error::auth_required()
+                .data(serde_json::Value::String("login first".into())),
+        );
+        match auth {
+            LaunchError::AuthRequired { detail } => {
+                assert_eq!(detail.as_deref(), Some("login first"));
+            }
+            other => panic!("expected AuthRequired, got {other:?}"),
+        }
+
+        let other = classify_session_error(agent_client_protocol::Error::invalid_params());
+        assert!(
+            matches!(other, LaunchError::SessionCreateFailed { .. }),
+            "expected SessionCreateFailed, got {other:?}"
+        );
+    }
+
+    #[test]
+    fn launch_error_display_includes_action_hint() {
+        // Every launch error must carry an actionable next step so users
+        // do not just see "acp: ..." with no remediation.
+        let cases = [
+            LaunchError::CommandNotFound {
+                command: "anvil".into(),
+            },
+            LaunchError::SpawnFailed {
+                command: "anvil".into(),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            },
+            LaunchError::InitializeFailed {
+                source: agent_client_protocol::Error::internal_error(),
+            },
+            LaunchError::AuthRequired {
+                detail: Some("login".into()),
+            },
+            LaunchError::SessionCreateFailed {
+                source: agent_client_protocol::Error::invalid_params(),
+            },
+        ];
+        for case in cases {
+            let text = case.to_string();
+            assert!(text.contains("hint:"), "missing hint in: {text}");
+        }
+    }
+
+    #[test]
+    fn emit_fatal_is_only_sent_once_per_runtime() {
+        // Two distinct failure sites (e.g. drive_session classifies an
+        // InitializeFailed, then the run() tail observes the bubbled-up
+        // error) must NOT produce two Fatal events.
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let guard = Arc::new(AtomicBool::new(false));
+
+        emit_fatal(&ui_tx, &guard, "first".to_string());
+        emit_fatal(&ui_tx, &guard, "second".to_string());
+
+        match ui_rx.try_recv().expect("missing first fatal") {
+            UiEvent::Fatal(msg) => assert_eq!(msg, "first"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(
+            ui_rx.try_recv().is_err(),
+            "second emit_fatal should be suppressed by the guard"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_client_classifies_session_new_auth_required() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_session_auth_required(agent_side));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let fatal_emitted = Arc::new(AtomicBool::new(false));
+
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            ui_tx,
+            cmd_rx,
+            fatal_emitted.clone(),
+        ));
+
+        // Pull events until we see Fatal. We expect Connected first (init
+        // succeeds), then Fatal from session/new.
+        let mut got_fatal = None;
+        for _ in 0..6 {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for fatal")
+                .expect("channel closed");
+            if let UiEvent::Fatal(msg) = ev {
+                got_fatal = Some(msg);
+                break;
+            }
+        }
+        let msg = got_fatal.expect("did not receive Fatal");
+        assert!(
+            msg.contains("authentication"),
+            "expected auth-required wording in fatal: {msg}"
+        );
+        assert!(
+            msg.contains("login required"),
+            "expected agent detail surfaced in fatal: {msg}"
+        );
+        assert!(fatal_emitted.load(Ordering::SeqCst));
+
+        let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
     }
 }
