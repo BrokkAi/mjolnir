@@ -44,13 +44,21 @@ pub enum LaunchError {
         command: String,
         source: std::io::Error,
     },
+    /// Opening the `--agent-stderr` capture file failed. Distinct from
+    /// `SpawnFailed` because the remediation is "fix the --agent-stderr
+    /// flag", not "fix the --command flag".
+    StderrFileOpen {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
     /// The ACP `initialize` handshake errored or the agent never replied
     /// to it. Often a wrong protocol version or a crashed agent.
     InitializeFailed {
         source: agent_client_protocol::Error,
     },
-    /// `session/new` returned `auth_required` (-32000). The agent is
-    /// healthy; the user just needs to authenticate first.
+    /// The agent returned `auth_required` (-32000) at either `initialize`
+    /// or `session/new`. The agent is healthy; the user just needs to
+    /// authenticate first.
     AuthRequired { detail: Option<String> },
     /// `session/new` failed for some other reason (bad cwd, agent-side
     /// crash, ...).
@@ -71,6 +79,12 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "could not spawn agent {command}: {source}\n\
                  hint: check executable permissions and that --command is right"
+            ),
+            LaunchError::StderrFileOpen { path, source } => write!(
+                f,
+                "could not open agent stderr file {}: {source}\n\
+                 hint: check --agent-stderr <path> is writable and its parent directory exists",
+                path.display()
             ),
             LaunchError::InitializeFailed { source } => write!(
                 f,
@@ -119,17 +133,36 @@ fn classify_spawn_error(command: &std::path::Path, source: std::io::Error) -> La
     }
 }
 
-/// Classify a `session/new` ACP error. Auth-required (`-32000`) is split
-/// out because it has a different remediation than a generic failure.
+/// Extract an `AuthRequired` detail from an ACP error if the code matches.
+/// Returns `Some(detail)` for any auth-required error (regardless of the
+/// stage that produced it) and `None` otherwise.
+fn auth_required_detail(source: &agent_client_protocol::Error) -> Option<Option<String>> {
+    if source.code != ErrorCode::AuthRequired {
+        return None;
+    }
+    let detail = source.data.as_ref().map(|d| match d {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    });
+    Some(detail)
+}
+
+/// Classify an ACP error from the `initialize` handshake. Auth-required
+/// is split out so users get the same actionable text as on session/new;
+/// the spec permits an agent to demand auth before opening any session.
+fn classify_initialize_error(source: agent_client_protocol::Error) -> LaunchError {
+    match auth_required_detail(&source) {
+        Some(detail) => LaunchError::AuthRequired { detail },
+        None => LaunchError::InitializeFailed { source },
+    }
+}
+
+/// Classify a `session/new` ACP error. Auth-required is split out because
+/// it has a different remediation than a generic failure.
 fn classify_session_error(source: agent_client_protocol::Error) -> LaunchError {
-    if source.code == ErrorCode::AuthRequired {
-        let detail = source.data.as_ref().map(|d| match d {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        });
-        LaunchError::AuthRequired { detail }
-    } else {
-        LaunchError::SessionCreateFailed { source }
+    match auth_required_detail(&source) {
+        Some(detail) => LaunchError::AuthRequired { detail },
+        None => LaunchError::SessionCreateFailed { source },
     }
 }
 
@@ -160,6 +193,12 @@ pub async fn run(
     // transport closes silently and otherwise just looks like a series of
     // failed prompts. Catching the exit here surfaces a single, clear
     // Fatal instead of an unbounded stream of "prompt failed" warnings.
+    //
+    // `biased;` with `drive_result` first: when the user quits cleanly
+    // (drive_result = Ok) and the agent also happens to exit in the same
+    // poll (because it noticed EOF on stdin), we want the clean-shutdown
+    // outcome, not a spurious "agent exited unexpectedly" Fatal. The wait
+    // branch only wins when drive is still pending.
     let result: Result<()> = {
         let drive = drive_client(
             transport,
@@ -170,6 +209,7 @@ pub async fn run(
         );
         tokio::pin!(drive);
         tokio::select! {
+            biased;
             drive_result = &mut drive => drive_result,
             wait_result = child.wait() => {
                 let detail = match wait_result {
@@ -307,7 +347,7 @@ async fn drive_session(
     let init_resp = match conn.send_request(init_req).block_task().await {
         Ok(r) => r,
         Err(source) => {
-            let launch_err = LaunchError::InitializeFailed { source };
+            let launch_err = classify_initialize_error(source);
             let text = launch_err.to_string();
             emit_fatal(ui_tx, &fatal_emitted, text.clone());
             return Err(anyhow::anyhow!(text));
@@ -384,8 +424,8 @@ fn spawn_agent(
                 .create(true)
                 .append(true)
                 .open(path)
-                .map_err(|source| LaunchError::SpawnFailed {
-                    command: format!("(opening agent stderr {})", path.display()),
+                .map_err(|source| LaunchError::StderrFileOpen {
+                    path: path.to_path_buf(),
                     source,
                 })?;
             cmd.stderr(std::process::Stdio::from(file));
@@ -984,6 +1024,50 @@ mod tests {
         assert!(result.expect("run task panicked").is_err());
     }
 
+    /// End-to-end check that a bad `--agent-stderr` path emits the right
+    /// flag in the Fatal text (regression for the SpawnFailed
+    /// mis-attribution we used to ship).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_blames_agent_stderr_flag_when_stderr_file_open_fails() {
+        let cfg = AcpRuntimeConfig {
+            command: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            cwd: std::env::temp_dir(),
+            // Parent dir doesn't exist, so create(true).append(true) on
+            // the file fails with NotFound. The path is intentionally
+            // bizarre so we don't collide with anything real.
+            agent_stderr: Some(PathBuf::from("/no-such-dir-bridge-cse-stderr/agent.err")),
+        };
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        let run_task = tokio::spawn(run(cfg, ui_tx, cmd_rx));
+
+        let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            .await
+            .expect("timeout waiting for fatal")
+            .expect("channel closed");
+        match ev {
+            UiEvent::Fatal(msg) => {
+                assert!(
+                    msg.contains("--agent-stderr"),
+                    "expected --agent-stderr in fatal: {msg}"
+                );
+                assert!(
+                    !msg.contains("--command"),
+                    "must not blame --command: {msg}"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let result = tokio::time::timeout(Duration::from_secs(5), run_task)
+            .await
+            .expect("run task did not finish");
+        assert!(result.expect("run task panicked").is_err());
+    }
+
     /// Use a real subprocess that exits immediately to exercise the
     /// child-wait race in `run`. The agent quitting before responding to
     /// `initialize` should bubble up as a Fatal mentioning the unexpected
@@ -1090,6 +1174,10 @@ mod tests {
                 command: "anvil".into(),
                 source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             },
+            LaunchError::StderrFileOpen {
+                path: std::path::PathBuf::from("/var/log/agent.err"),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            },
             LaunchError::InitializeFailed {
                 source: agent_client_protocol::Error::internal_error(),
             },
@@ -1104,6 +1192,54 @@ mod tests {
             let text = case.to_string();
             assert!(text.contains("hint:"), "missing hint in: {text}");
         }
+    }
+
+    #[test]
+    fn stderr_file_open_error_blames_the_right_flag() {
+        // Regression: previously the agent-stderr file open failure was
+        // routed to LaunchError::SpawnFailed with a synthesized command
+        // string, so the hint told the user to check --command. It should
+        // tell them to check --agent-stderr.
+        let err = LaunchError::StderrFileOpen {
+            path: std::path::PathBuf::from("/var/log/agent.err"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("--agent-stderr"),
+            "expected --agent-stderr in hint, got: {text}"
+        );
+        assert!(
+            !text.contains("--command"),
+            "stderr-file failure must not blame --command, got: {text}"
+        );
+        assert!(
+            text.contains("/var/log/agent.err"),
+            "expected the offending path in the error text, got: {text}"
+        );
+    }
+
+    #[test]
+    fn classify_initialize_error_routes_auth_required_to_authrequired() {
+        // The ACP spec permits an agent to demand auth at initialize, not
+        // just at session/new. Both stages should route AuthRequired to
+        // the same actionable variant.
+        let auth = classify_initialize_error(
+            agent_client_protocol::Error::auth_required()
+                .data(serde_json::Value::String("login first".into())),
+        );
+        match auth {
+            LaunchError::AuthRequired { detail } => {
+                assert_eq!(detail.as_deref(), Some("login first"));
+            }
+            other => panic!("expected AuthRequired, got {other:?}"),
+        }
+
+        let other = classify_initialize_error(agent_client_protocol::Error::internal_error());
+        assert!(
+            matches!(other, LaunchError::InitializeFailed { .. }),
+            "non-auth errors must remain InitializeFailed, got {other:?}"
+        );
     }
 
     #[test]

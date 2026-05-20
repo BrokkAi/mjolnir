@@ -315,10 +315,15 @@ impl AppState {
         self.permission_queue.pop_front()
     }
 
-    /// Cancel every queued permission prompt by sending `Cancelled`
-    /// through each responder. Used during fatal shutdown / runtime close
-    /// so the agent observes a deterministic outcome instead of inferring
-    /// "cancelled" from a dropped sender.
+    /// Drain every queued permission prompt and send `Cancelled` through
+    /// each responder. Used during fatal shutdown / runtime close.
+    ///
+    /// Note: the agent doesn't observe a difference between this and
+    /// dropping the senders -- by the time we reach this method the ACP
+    /// transport has typically already closed, and the receiver side maps
+    /// both `Ok(Cancelled)` and `Err(RecvError)` to the same outcome. The
+    /// explicit send is for code-clarity at the call site (intentional
+    /// cancel vs. accidental drop), not for any wire-level guarantee.
     pub fn cancel_all_pending_permissions(&mut self) {
         while let Some(pending) = self.permission_queue.pop_front() {
             let _ = pending.prompt.responder.send(PermissionDecision::Cancelled);
