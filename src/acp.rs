@@ -1046,19 +1046,23 @@ mod tests {
 
     /// End-to-end check that a bad `--agent-stderr` path emits the right
     /// flag in the Fatal text (regression for the SpawnFailed
-    /// mis-attribution we used to ship).
-    #[cfg(unix)]
+    /// mis-attribution we used to ship). Portable: the stderr file open
+    /// fails *before* spawn touches the command, so the command path
+    /// doesn't have to exist on either platform.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_blames_agent_stderr_flag_when_stderr_file_open_fails() {
+        // Use a relative path whose parent doesn't exist; Rust's path
+        // APIs handle forward slashes on Windows too, so create(true)
+        // fails with NotFound on both Linux/macOS and Windows.
+        let bad_stderr = std::env::temp_dir()
+            .join("mj-bridge-cse-no-such-dir")
+            .join("agent.err");
         let cfg = AcpRuntimeConfig {
-            command: PathBuf::from("/bin/true"),
+            command: PathBuf::from("does-not-need-to-exist"),
             args: Vec::new(),
             cwd: std::env::temp_dir(),
             env: HashMap::new(),
-            // Parent dir doesn't exist, so create(true).append(true) on
-            // the file fails with NotFound. The path is intentionally
-            // bizarre so we don't collide with anything real.
-            agent_stderr: Some(PathBuf::from("/no-such-dir-bridge-cse-stderr/agent.err")),
+            agent_stderr: Some(bad_stderr),
         };
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
@@ -1095,7 +1099,6 @@ mod tests {
     /// the two tests below that target the two distinct internal paths
     /// (wait-branch vs post-drive snapshot) which both surface the same
     /// user-visible message.
-    #[cfg(unix)]
     async fn assert_run_reports_agent_exited(cfg: AcpRuntimeConfig) {
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
@@ -1132,21 +1135,59 @@ mod tests {
         assert!(result.expect("run task panicked").is_err());
     }
 
+    /// Build a subprocess command that starts and exits successfully
+    /// without ever speaking ACP. Portable across Linux / macOS /
+    /// Windows so the agent-exit tests can run everywhere.
+    fn quick_exit_command() -> (PathBuf, Vec<String>) {
+        if cfg!(windows) {
+            (PathBuf::from("cmd"), vec!["/C".into(), "exit 0".into()])
+        } else {
+            (PathBuf::from("/bin/sh"), vec!["-c".into(), "exit 0".into()])
+        }
+    }
+
+    /// Build a subprocess command that starts, waits long enough that
+    /// `drive_result` stays pending, and then exits. We need the child
+    /// to *still be alive* when the test asserts so that `child.wait()`
+    /// is the branch that resolves, not the transport read.
+    fn hang_then_exit_command() -> (PathBuf, Vec<String>) {
+        if cfg!(windows) {
+            // `ping -n 2 127.0.0.1` sleeps roughly one second on Windows
+            // (one ping immediately, one after a 1-second timeout) then
+            // exits. Slower than Unix's `sleep 0.3` but reliable without
+            // requiring the `timeout` builtin (which is missing on some
+            // SKUs and refuses to run when stdin is redirected).
+            (
+                PathBuf::from("cmd"),
+                vec!["/C".into(), "ping 127.0.0.1 -n 2 > nul".into()],
+            )
+        } else {
+            (
+                PathBuf::from("/bin/sh"),
+                // Read+discard the initialize bytes so the shell keeps
+                // its stdout open while it sleeps; otherwise the child
+                // could close stdout early and drive_result would race
+                // to win.
+                vec![
+                    "-c".into(),
+                    "head -c 200 >/dev/null; sleep 0.3; exit 0".into(),
+                ],
+            )
+        }
+    }
+
     /// Agent exits *immediately*, before mjolnir's `initialize` send can
     /// complete. With `biased; drive_result` first, the drive future is
     /// polled, gets a broken-pipe error, and returns Err quickly. The
     /// wait branch never fires; instead the post-drive `try_wait()`
     /// snapshot rescues the message wording. This nails down the
     /// "drive-Err + child-dead snapshot" path.
-    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_reports_agent_exit_via_post_drive_snapshot() {
-        // `/bin/sh -c 'exit 0'` instead of `/bin/true` because `true`
-        // lives at `/usr/bin/true` on macOS, not `/bin/true`. `/bin/sh`
-        // is portable across Linux and macOS.
+        let (command, args) = quick_exit_command();
         let cfg = AcpRuntimeConfig {
-            command: PathBuf::from("/bin/sh"),
-            args: vec!["-c".into(), "exit 0".into()],
+            command,
+            args,
             cwd: std::env::temp_dir(),
             env: HashMap::new(),
             agent_stderr: None,
@@ -1159,19 +1200,12 @@ mod tests {
     /// pipes remain open while the child sleeps). When the child exits,
     /// `child.wait()` resolves first. This nails down the "wait-branch
     /// wins the race" path that the post-drive snapshot wouldn't reach.
-    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_reports_agent_exit_via_wait_branch() {
+        let (command, args) = hang_then_exit_command();
         let cfg = AcpRuntimeConfig {
-            command: PathBuf::from("/bin/sh"),
-            // Read+discard one chunk of stdin then sleep then exit. `cat
-            // > /dev/null` would just consume initialize forever; we need
-            // it to actually exit. The sleep keeps drive_result pending
-            // long enough for wait() to win cleanly.
-            args: vec![
-                "-c".into(),
-                "head -c 200 >/dev/null; sleep 0.3; exit 0".into(),
-            ],
+            command,
+            args,
             cwd: std::env::temp_dir(),
             env: HashMap::new(),
             agent_stderr: None,
