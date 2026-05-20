@@ -166,6 +166,19 @@ fn classify_session_error(source: agent_client_protocol::Error) -> LaunchError {
     }
 }
 
+/// User-facing message for an agent process that exited without us
+/// asking. Shared between the `child.wait()` race in `run` (which
+/// catches the exit as it happens) and the post-drive `try_wait()`
+/// snapshot (which catches it after `drive_client` returned an Err).
+/// Both produce identical wording so users see one consistent
+/// explanation regardless of which path detected it.
+fn agent_exited_unexpectedly_msg(detail: impl std::fmt::Display) -> String {
+    format!(
+        "agent process exited unexpectedly: {detail}\n\
+         hint: capture --agent-stderr to see the agent's last output"
+    )
+}
+
 /// Spawn the agent subprocess and run the ACP client to completion.
 /// Pumps `ui_rx` for `UiCommand`s and emits `UiEvent`s onto `ui_tx`.
 ///
@@ -216,10 +229,7 @@ pub async fn run(
                     Ok(status) => format!("exit status {status}"),
                     Err(e) => format!("wait failed: {e}"),
                 };
-                let msg = format!(
-                    "agent process exited unexpectedly: {detail}\n\
-                     hint: capture --agent-stderr to see the agent's last output"
-                );
+                let msg = agent_exited_unexpectedly_msg(detail);
                 emit_fatal(&ui_tx, &fatal_emitted, msg.clone());
                 Err(anyhow::anyhow!(msg))
             }
@@ -248,10 +258,7 @@ pub async fn run(
         // user with no action text. If the child *had* already exited at
         // that point, swap in the friendly "agent exited" wording.
         let msg = if let Some(status) = pre_kill_exit {
-            format!(
-                "agent process exited unexpectedly: exit status {status}\n\
-                 hint: capture --agent-stderr to see the agent's last output"
-            )
+            agent_exited_unexpectedly_msg(format!("exit status {status}"))
         } else {
             format!("acp: {e}")
         };
@@ -1068,27 +1075,18 @@ mod tests {
         assert!(result.expect("run task panicked").is_err());
     }
 
-    /// Use a real subprocess that exits immediately to exercise the
-    /// child-wait race in `run`. The agent quitting before responding to
-    /// `initialize` should bubble up as a Fatal mentioning the unexpected
-    /// exit instead of a generic transport error.
+    /// Helper: drive `run` against a launch config, drain events until a
+    /// Fatal arrives or the channel closes, and assert the Fatal carries
+    /// the friendly "agent process exited" wording plus a hint. Used by
+    /// the two tests below that target the two distinct internal paths
+    /// (wait-branch vs post-drive snapshot) which both surface the same
+    /// user-visible message.
     #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_emits_fatal_when_agent_exits_immediately() {
-        let cfg = AcpRuntimeConfig {
-            command: PathBuf::from("/bin/true"),
-            args: Vec::new(),
-            cwd: std::env::temp_dir(),
-            agent_stderr: None,
-        };
+    async fn assert_run_reports_agent_exited(cfg: AcpRuntimeConfig) {
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
-
         let run_task = tokio::spawn(run(cfg, ui_tx, cmd_rx));
 
-        // Drain events until we see Fatal. We don't care whether init
-        // failure or the child-wait branch wins the race, only that the
-        // user gets a single Fatal explaining the situation.
         let mut got_fatal = None;
         for _ in 0..6 {
             let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
@@ -1110,7 +1108,6 @@ mod tests {
             "expected action hint in fatal: {msg}"
         );
 
-        // Channel must be closed (no second Fatal), and run must return Err.
         assert!(
             ui_rx.recv().await.is_none(),
             "expected the runtime to close the event channel after Fatal"
@@ -1119,6 +1116,48 @@ mod tests {
             .await
             .expect("run task did not finish");
         assert!(result.expect("run task panicked").is_err());
+    }
+
+    /// Agent exits *immediately*, before mjolnir's `initialize` send can
+    /// complete. With `biased; drive_result` first, the drive future is
+    /// polled, gets a broken-pipe error, and returns Err quickly. The
+    /// wait branch never fires; instead the post-drive `try_wait()`
+    /// snapshot rescues the message wording. This nails down the
+    /// "drive-Err + child-dead snapshot" path.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_reports_agent_exit_via_post_drive_snapshot() {
+        let cfg = AcpRuntimeConfig {
+            command: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            cwd: std::env::temp_dir(),
+            agent_stderr: None,
+        };
+        assert_run_reports_agent_exited(cfg).await;
+    }
+
+    /// Agent hangs at `initialize` (never responds) then exits after a
+    /// short sleep. Drive_result stays pending (no JSON-RPC response,
+    /// pipes remain open while the child sleeps). When the child exits,
+    /// `child.wait()` resolves first. This nails down the "wait-branch
+    /// wins the race" path that the post-drive snapshot wouldn't reach.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_reports_agent_exit_via_wait_branch() {
+        let cfg = AcpRuntimeConfig {
+            command: PathBuf::from("/bin/sh"),
+            // Read+discard one chunk of stdin then sleep then exit. `cat
+            // > /dev/null` would just consume initialize forever; we need
+            // it to actually exit. The sleep keeps drive_result pending
+            // long enough for wait() to win cleanly.
+            args: vec![
+                "-c".into(),
+                "head -c 200 >/dev/null; sleep 0.3; exit 0".into(),
+            ],
+            cwd: std::env::temp_dir(),
+            agent_stderr: None,
+        };
+        assert_run_reports_agent_exited(cfg).await;
     }
 
     #[test]
@@ -1217,6 +1256,21 @@ mod tests {
             text.contains("/var/log/agent.err"),
             "expected the offending path in the error text, got: {text}"
         );
+    }
+
+    #[test]
+    fn agent_exited_unexpectedly_msg_has_consistent_shape() {
+        // Both the wait-branch and the post-drive snapshot funnel through
+        // this formatter. Locking down the wording here prevents either
+        // call site from drifting from the user-visible contract.
+        let m1 = agent_exited_unexpectedly_msg("exit status 0");
+        assert!(m1.starts_with("agent process exited unexpectedly:"));
+        assert!(m1.contains("exit status 0"));
+        assert!(m1.contains("hint: capture --agent-stderr"));
+
+        let m2 = agent_exited_unexpectedly_msg("wait failed: broken pipe");
+        assert!(m2.contains("wait failed: broken pipe"));
+        assert!(m2.contains("hint: capture --agent-stderr"));
     }
 
     #[test]

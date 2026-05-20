@@ -182,7 +182,13 @@ pub struct AppState {
     /// FIFO queue of permission prompts. The front element is the one
     /// currently shown in the modal; new requests are pushed to the back
     /// so they aren't silently dropped when one is already on screen.
-    pub permission_queue: VecDeque<PendingPermission>,
+    ///
+    /// Private so callers can't accidentally bypass the queue invariants
+    /// (e.g. push without going through `apply_event`, or take without
+    /// answering the responder). External code goes through
+    /// `has_pending_permission` / `pending_permission` /
+    /// `take_pending_permission` / `cancel_all_pending_permissions`.
+    permission_queue: VecDeque<PendingPermission>,
     pub config_picker: Option<ConfigPicker>,
     /// Scroll offset measured in rendered lines from the bottom of the
     /// transcript. `0` keeps the view pinned to the newest line.
@@ -1092,10 +1098,11 @@ mod tests {
     fn fatal_event_sets_fatal_status_and_closes_runtime() {
         let mut s = AppState::new();
         s.autocomplete.visible = true;
-        s.permission_queue.push_back(PendingPermission {
-            prompt: permission_prompt(),
-            selected: 0,
-        });
+        // Queue a real permission prompt via the production event path
+        // rather than poking the field directly; same shape as what the
+        // runtime would send.
+        s.apply_event(UiEvent::PermissionRequest(permission_prompt()));
+        assert!(s.has_pending_permission());
 
         s.apply_event(UiEvent::Fatal("boom".to_string()));
 
