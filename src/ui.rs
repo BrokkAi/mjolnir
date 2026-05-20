@@ -1055,6 +1055,43 @@ mod tests {
         assert_eq!(offset, u16::MAX as usize + 55);
     }
 
+    /// Integration of the three scrolling concerns that fired together in
+    /// practice: the user scrolls up, more chunks arrive, then the
+    /// terminal resizes. The visible top-of-window must stay anchored to
+    /// whatever the user was reading. Individual concerns are covered by
+    /// the tests above; this exercises them in sequence.
+    #[test]
+    fn streaming_chunks_and_resize_preserve_user_scroll_anchor() {
+        let mut tracker = TranscriptScrollState::default();
+        let mut offset = 0;
+
+        // Initial frame: 100 wrapped rows visible in a 20-row window,
+        // pinned to bottom.
+        tracker.reconcile(&mut offset, 100, 20);
+
+        // User scrolls up by 12 rows.
+        offset = 12;
+
+        // Streaming chunks grow the transcript by 8 rows.
+        tracker.reconcile(&mut offset, 108, 20);
+        // Top-of-window should still be at the same content line, so the
+        // offset grows by exactly the number of new rows.
+        assert_eq!(offset, 20, "new rows must not shift the user's view");
+
+        // Terminal resizes taller (28 rows visible).
+        tracker.reconcile(&mut offset, 108, 28);
+        // Window grew by 8 rows so the same top-line is now 8 rows
+        // closer to bottom; offset drops by 8.
+        assert_eq!(offset, 12, "resize must not shift the user's view");
+
+        // More chunks arrive after the resize.
+        tracker.reconcile(&mut offset, 116, 28);
+        assert_eq!(
+            offset, 20,
+            "subsequent rows still grow the offset by their count"
+        );
+    }
+
     #[test]
     fn runtime_closed_keeps_transcript_scrolling_active() {
         let mut state = AppState::new();

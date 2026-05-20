@@ -901,8 +901,10 @@ pub fn stop_reason_label(reason: StopReason) -> &'static str {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        ConfigOptionUpdate, ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind,
-        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, TextContent,
+        AudioContent, ConfigOptionUpdate, Content, ContentBlock, ContentChunk, Diff,
+        EmbeddedResource, EmbeddedResourceResource, ImageContent, PermissionOption,
+        PermissionOptionKind, ResourceLink, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelectOption, Terminal, TextContent, TextResourceContents,
     };
 
     fn text_chunk(s: &str) -> ContentChunk {
@@ -962,6 +964,123 @@ mod tests {
         )));
 
         assert_eq!(s.scroll_offset, 12);
+    }
+
+    #[test]
+    fn content_block_variants_render_with_visible_placeholders() {
+        // PLANS.md M2 calls for ContentBlock variants beyond Text to
+        // degrade visibly instead of silently panicking. This pumps each
+        // known variant through `AgentMessageChunk` and asserts the
+        // transcript shows a labelled placeholder so the user knows
+        // something was sent even if we can't render it inline yet.
+        let blocks: Vec<(ContentBlock, &str)> = vec![
+            (ContentBlock::Text(TextContent::new("hi")), "hi"),
+            (
+                ContentBlock::Image(ImageContent::new("data", "image/png")),
+                "[image]",
+            ),
+            (
+                ContentBlock::Audio(AudioContent::new("data", "audio/wav")),
+                "[audio]",
+            ),
+            (
+                ContentBlock::ResourceLink(ResourceLink::new("readme", "file:///readme.md")),
+                "[link file:///readme.md]",
+            ),
+            (
+                ContentBlock::Resource(EmbeddedResource::new(
+                    EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+                        "snippet",
+                        "file:///snippet.txt",
+                    )),
+                )),
+                "[resource]",
+            ),
+        ];
+
+        for (block, expected_substring) in blocks {
+            let mut s = AppState::new();
+            s.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(block.clone()),
+            )));
+            assert_eq!(
+                s.transcript.len(),
+                1,
+                "block {block:?} produced an empty transcript"
+            );
+            match &s.transcript[0] {
+                Entry::AgentMessage(text) => assert!(
+                    text.contains(expected_substring),
+                    "block {block:?} rendered as {text:?}, expected substring {expected_substring:?}"
+                ),
+                other => panic!("block {block:?} produced unexpected entry: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn agent_chunks_keep_folding_while_permission_modal_is_open() {
+        // The permission modal owns the keyboard but must NOT block the
+        // ACP event pipeline -- chunks streamed concurrently with the
+        // prompt that triggered the modal still belong in the transcript.
+        // Otherwise scrolling back to read what led to the prompt would
+        // show a gap.
+        let mut s = AppState::new();
+        let (prompt, _rx) = permission_prompt_with_id("call-1");
+        s.apply_event(UiEvent::PermissionRequest(prompt));
+        assert!(s.has_pending_permission());
+
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("thinking..."),
+        )));
+
+        assert!(s.has_pending_permission(), "modal must remain queued");
+        assert_eq!(s.transcript.len(), 1);
+        match &s.transcript[0] {
+            Entry::AgentMessage(text) => assert_eq!(text, "thinking..."),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_call_content_diff_and_terminal_render_as_placeholders() {
+        // Diff and Terminal variants don't have inline rendering yet
+        // (M2 territory) but they must not panic and must show *some*
+        // labelled placeholder so the user knows the tool produced
+        // structured output.
+        let mut s = AppState::new();
+        let mut fields = agent_client_protocol::schema::ToolCallUpdateFields::default();
+        fields.content = Some(vec![
+            ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
+                "stdout: ok",
+            )))),
+            ToolCallContent::Diff(Diff::new("/tmp/file.rs", "new contents")),
+            ToolCallContent::Terminal(Terminal::new(
+                agent_client_protocol::schema::TerminalId::new("term-1"),
+            )),
+        ]);
+        let update = ToolCallUpdate::new("call-1", fields);
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            update,
+        )));
+
+        let view = s.tool_calls.get("call-1").expect("view");
+        assert_eq!(view.body.len(), 3);
+        assert!(
+            view.body[0].contains("stdout: ok"),
+            "expected text content, got {:?}",
+            view.body[0]
+        );
+        assert!(
+            view.body[1].contains("[diff"),
+            "expected diff placeholder, got {:?}",
+            view.body[1]
+        );
+        assert!(
+            view.body[2].contains("[terminal"),
+            "expected terminal placeholder, got {:?}",
+            view.body[2]
+        );
     }
 
     #[test]
