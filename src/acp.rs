@@ -155,25 +155,67 @@ pub async fn run(
         };
     let transport = ByteStreams::new(child_stdin.compat_write(), child_stdout.compat());
 
-    let result = drive_client(
-        transport,
-        cfg.cwd.clone(),
-        ui_tx.clone(),
-        ui_rx,
-        fatal_emitted.clone(),
-    )
-    .await;
+    // Race the ACP client against `child.wait()`. If the agent process
+    // dies on its own (crash, panic, exit-without-shutdown), the JSON-RPC
+    // transport closes silently and otherwise just looks like a series of
+    // failed prompts. Catching the exit here surfaces a single, clear
+    // Fatal instead of an unbounded stream of "prompt failed" warnings.
+    let result: Result<()> = {
+        let drive = drive_client(
+            transport,
+            cfg.cwd.clone(),
+            ui_tx.clone(),
+            ui_rx,
+            fatal_emitted.clone(),
+        );
+        tokio::pin!(drive);
+        tokio::select! {
+            drive_result = &mut drive => drive_result,
+            wait_result = child.wait() => {
+                let detail = match wait_result {
+                    Ok(status) => format!("exit status {status}"),
+                    Err(e) => format!("wait failed: {e}"),
+                };
+                let msg = format!(
+                    "agent process exited unexpectedly: {detail}\n\
+                     hint: capture --agent-stderr to see the agent's last output"
+                );
+                emit_fatal(&ui_tx, &fatal_emitted, msg.clone());
+                Err(anyhow::anyhow!(msg))
+            }
+        }
+    };
 
+    // Snapshot whether the child died on its own *before* we touch it,
+    // so the post-drive Fatal can distinguish "agent crashed" from
+    // "we killed it after a different error".
+    let pre_kill_exit = child.try_wait().ok().flatten();
+
+    // `kill` is a no-op (and returns ESRCH on Unix) when the child has
+    // already exited via the wait branch above. We tolerate both.
     let kill = child.kill().await;
     if let Err(e) = kill {
         tracing::warn!("kill child: {e}");
     }
     // Generic catch-all: anything that escaped the launch-phase classifier
     // (e.g. a transport error after initialize succeeded) gets a plain
-    // fatal so the user sees *something*. Launch-phase failures will
-    // already have called `emit_fatal` with action text.
+    // fatal so the user sees *something*. Launch-phase failures and the
+    // child-wait branch above will already have called `emit_fatal` with
+    // action text, and the guard suppresses a second emission.
     if let Err(e) = &result {
-        emit_fatal(&ui_tx, &fatal_emitted, format!("acp: {e}"));
+        // Race-condition handling: drive_client can return with a raw
+        // `Broken pipe` before the `child.wait()` arm fires, leaving the
+        // user with no action text. If the child *had* already exited at
+        // that point, swap in the friendly "agent exited" wording.
+        let msg = if let Some(status) = pre_kill_exit {
+            format!(
+                "agent process exited unexpectedly: exit status {status}\n\
+                 hint: capture --agent-stderr to see the agent's last output"
+            )
+        } else {
+            format!("acp: {e}")
+        };
+        emit_fatal(&ui_tx, &fatal_emitted, msg);
     }
     result
 }
@@ -936,6 +978,59 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
 
+        let result = tokio::time::timeout(Duration::from_secs(5), run_task)
+            .await
+            .expect("run task did not finish");
+        assert!(result.expect("run task panicked").is_err());
+    }
+
+    /// Use a real subprocess that exits immediately to exercise the
+    /// child-wait race in `run`. The agent quitting before responding to
+    /// `initialize` should bubble up as a Fatal mentioning the unexpected
+    /// exit instead of a generic transport error.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_emits_fatal_when_agent_exits_immediately() {
+        let cfg = AcpRuntimeConfig {
+            command: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            cwd: std::env::temp_dir(),
+            agent_stderr: None,
+        };
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        let run_task = tokio::spawn(run(cfg, ui_tx, cmd_rx));
+
+        // Drain events until we see Fatal. We don't care whether init
+        // failure or the child-wait branch wins the race, only that the
+        // user gets a single Fatal explaining the situation.
+        let mut got_fatal = None;
+        for _ in 0..6 {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for fatal")
+                .expect("channel closed");
+            if let UiEvent::Fatal(msg) = ev {
+                got_fatal = Some(msg);
+                break;
+            }
+        }
+        let msg = got_fatal.expect("did not receive Fatal");
+        assert!(
+            msg.contains("agent process exited"),
+            "unexpected fatal wording: {msg}"
+        );
+        assert!(
+            msg.contains("hint:"),
+            "expected action hint in fatal: {msg}"
+        );
+
+        // Channel must be closed (no second Fatal), and run must return Err.
+        assert!(
+            ui_rx.recv().await.is_none(),
+            "expected the runtime to close the event channel after Fatal"
+        );
         let result = tokio::time::timeout(Duration::from_secs(5), run_task)
             .await
             .expect("run task did not finish");

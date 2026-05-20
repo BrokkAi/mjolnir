@@ -72,13 +72,28 @@ async fn main() -> Result<()> {
 
     let ui_result = ui::run(cmd_tx, event_rx).await;
 
-    // UI exited. `cmd_tx` was moved into `ui::run` and is now dropped,
-    // which causes `drive_session` to see `None` on its `recv()` and
-    // return, after which `acp::run` calls `child.kill().await` and
-    // cleans up. Wait for that natural shutdown for a bounded window so
-    // the agent process is reaped, and only abort as a last resort if
-    // the runtime is wedged (e.g. blocked on a `block_task().await` for
-    // a never-arriving response).
+    // Shutdown paths reaching this point:
+    //
+    // 1. User quit while idle (Ctrl-C/Ctrl-D/Esc with empty input):
+    //    `ui::run` sends `UiCommand::Shutdown` and returns. `cmd_tx` is
+    //    then dropped; `drive_session` sees `None` on its `recv()` and
+    //    returns, then `acp::run` kills/reaps the child.
+    //
+    // 2. User cancelled mid-prompt and then quit: same as #1 once the
+    //    cancel resolves into a `PromptDone(Cancelled)`. A force-quit
+    //    via Ctrl-D before the cancel lands also works because
+    //    `drive_prompt_turn` selects on the command channel and exits
+    //    on `Shutdown` even while a prompt RPC is in flight.
+    //
+    // 3. Agent EOF / crash: `acp::run` races `drive_client` against
+    //    `child.wait()`. The wait branch (or the post-drive snapshot)
+    //    surfaces a single Fatal mentioning the unexpected exit, the
+    //    UI flips to read-only, and the event channel closes.
+    //
+    // 4. Runtime wedged (e.g. agent stops responding but stdio stays
+    //    open): the 2s `timeout` below trips and we `abort()` the
+    //    task. `kill_on_drop(true)` on the `Command` then signals the
+    //    child when the `Child` value is dropped during unwind.
     let abort_handle = acp_handle.abort_handle();
     match tokio::time::timeout(std::time::Duration::from_secs(2), acp_handle).await {
         Ok(join_res) => {
