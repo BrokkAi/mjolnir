@@ -52,6 +52,12 @@ command. The picker is backed by the official
 index (24h on-disk cache) with native binary install, plus the bundled `anvil`
 default and a `Custom command...` entry for arbitrary launch strings.
 
+M1 hardening landed (PR #34): an explicit `ConnectionState` lifecycle drives
+the header label, a `LaunchError` enum surfaces spawn / initialize /
+`session/new` failures with one-line action hints, permission prompts queue
+FIFO instead of silently overwriting, and an unexpected agent exit raises a
+single Fatal instead of an unbounded "prompt failed" stream.
+
 ## Product goal
 
 Make `mjolnir` the best small terminal client for ACP agents:
@@ -116,27 +122,42 @@ Status: done.
 
 ### M1: Make the MVP dependable
 
+Status: done (PR #34, 2026-05-20). Follow-up: issue #35 (unify
+`TurnState` with `ConnectionState::Streaming`).
+
 Goal: the current feature set should feel stable enough for daily local use.
 
 Deliverables:
 
-- Tighten error messages when agent launch, initialize, or `session/new` fails.
-- Add visible connection states for launching, initializing, ready, streaming,
-  cancelled, closed, and fatal.
-- Improve shutdown so child processes are reliably reaped on normal exit and
-  cancellation paths.
-- Make transcript scrolling predictable during active streaming and after
-  resize.
-- Keep permission modal behavior deterministic under streaming, resize, and
-  autocomplete interactions.
-- Add regression tests for the state transitions above.
+- ✅ Tighten error messages when agent launch, initialize, or `session/new`
+  fails — `LaunchError` enum classifies five distinct failures
+  (`CommandNotFound`, `SpawnFailed`, `StderrFileOpen`, `InitializeFailed`,
+  `AuthRequired`, `SessionCreateFailed`) and each renders a headline plus a
+  `hint:` line.
+- ✅ Add visible connection states for launching, initializing, ready,
+  streaming, cancelled, closed, and fatal — `ConnectionState` enum drives
+  the header label.
+- ✅ Improve shutdown so child processes are reliably reaped on normal exit
+  and cancellation paths — `run()` races `drive_client` against
+  `child.wait()` and surfaces an unexpected agent exit as a single Fatal.
+- ✅ Make transcript scrolling predictable during active streaming and after
+  resize — integration test `streaming_chunks_and_resize_preserve_user_scroll_anchor`
+  locks in the reconciler composition.
+- ✅ Keep permission modal behavior deterministic under streaming, resize,
+  and autocomplete interactions — permission prompts queue FIFO; the modal
+  header shows `(1 of N)` when more are queued; runtime close fans out
+  `Cancelled` to every queued responder.
+- ✅ Add regression tests for the state transitions above — test count went
+  from 40 → 88, including portable integration tests on Linux / macOS /
+  Windows for the agent-exit and stderr-blame paths.
 
 Exit criteria:
 
-- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
-  `cargo test`, and `cargo build --release` pass.
-- Manual smoke test against `anvil` can launch, send a prompt, handle a tool
-  permission, cancel a prompt, and exit without a leftover child process.
+- ✅ `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test`, and `cargo build --release` pass on all three CI targets.
+- ✅ Manual smoke test against `anvil` can launch, send a prompt, handle a
+  tool permission, cancel a prompt, and exit without a leftover child
+  process.
 
 ### M2: Improve protocol coverage
 
@@ -147,13 +168,19 @@ Deliverables:
 
 - Render more `ContentBlock` variants with clear fallbacks:
   `resource_link`, embedded `resource`, `image`, `audio`, and unknown variants.
+  Today they show labelled placeholders (`[image]`, `[resource]`, `[link …]`,
+  `[audio]`) — M2 should make them rich.
 - Improve tool-call rendering for diff, terminal, and structured content.
 - Render config option updates in a way that lets users understand model, mode,
   reasoning, and other agent-provided session settings.
 - Add command support for ACP session config changes if the protocol surface and
   advertised commands make that practical.
-- Handle ACP auth-required responses with actionable UI text.
-- Track compatibility quirks discovered with at least two non-Brokk ACP agents.
+- ✅ Handle ACP auth-required responses with actionable UI text — shipped
+  early in M1 as `LaunchError::AuthRequired`, classified at both
+  `initialize` and `session/new`.
+- Track compatibility quirks discovered with at least two non-Brokk ACP
+  agents — partial: `@agentclientprotocol/claude-agent-acp` 0.36.1 done
+  (see Compatibility section below), one more (Gemini or Goose) to go.
 
 Exit criteria:
 
@@ -221,13 +248,15 @@ Each should start with a separate design note before implementation.
 
 Near-term:
 
-- Better fatal/error rendering.
-- Better child-process cleanup.
-- Better transcript scrolling.
 - Multiline input.
 - Prompt history.
-- More complete `SessionUpdate` rendering.
-- Compatibility smoke tests against multiple ACP agents.
+- More complete `SessionUpdate` rendering (image/audio/resource go beyond
+  placeholders; structured tool-call output for diff/terminal).
+- Compatibility smoke tests against more non-Brokk ACP agents (one done in
+  M1; see the Compatibility section).
+
+(M1 closed: fatal/error rendering, child-process cleanup, transcript
+scrolling.)
 
 Medium-term:
 
