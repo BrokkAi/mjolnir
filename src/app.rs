@@ -105,6 +105,30 @@ pub enum TurnState {
     Streaming,
 }
 
+/// Lifecycle of the ACP connection from launch through shutdown.
+///
+/// Driven by `UiEvent`s from the ACP runtime plus a couple of UI-initiated
+/// transitions (`record_user_prompt`, `mark_cancelling`). The header label
+/// is derived from this state, so it doubles as the externally visible
+/// connection indicator described in PLANS.md M1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// Agent process is being spawned and `initialize` is in flight.
+    Launching,
+    /// `initialize` succeeded; `session/new` is in flight.
+    Initializing,
+    /// Session is open and accepting prompts.
+    Ready,
+    /// A prompt turn is streaming responses.
+    Streaming,
+    /// Cancellation was requested; awaiting the final `PromptDone`.
+    Cancelling,
+    /// Runtime shut down cleanly (UI quit or agent EOF).
+    Closed,
+    /// Runtime ended with a fatal error.
+    Fatal,
+}
+
 /// Severity attached to transient status text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
@@ -147,7 +171,7 @@ impl StatusMessage {
 pub struct AppState {
     pub agent_label: String,
     pub session_id: Option<String>,
-    pub connection_status: String,
+    pub connection_state: ConnectionState,
     pub current_mode: Option<String>,
     pub available_commands: Vec<AvailableCommand>,
     pub session_config_options: Vec<SessionConfigOption>,
@@ -199,7 +223,7 @@ impl AppState {
         Self {
             agent_label: String::new(),
             session_id: None,
-            connection_status: "connecting...".to_string(),
+            connection_state: ConnectionState::Launching,
             current_mode: None,
             available_commands: Vec::new(),
             session_config_options: Vec::new(),
@@ -231,7 +255,12 @@ impl AppState {
         self.pending_permission = None;
         self.config_picker = None;
         self.autocomplete = Autocomplete::default();
-        self.connection_status = "disconnected".to_string();
+        // Preserve Fatal: a fatal event always supersedes a clean close,
+        // since the channel-drop that triggers this method follows the
+        // Fatal event by design.
+        if self.connection_state != ConnectionState::Fatal {
+            self.connection_state = ConnectionState::Closed;
+        }
 
         let is_fatal = matches!(
             self.status_line,
@@ -247,11 +276,20 @@ impl AppState {
         }
     }
 
+    /// Note that the user has requested cancellation of the in-flight
+    /// prompt. Idempotent and only meaningful while `Streaming`.
+    pub fn mark_cancelling(&mut self) {
+        if self.connection_state == ConnectionState::Streaming {
+            self.connection_state = ConnectionState::Cancelling;
+        }
+    }
+
     /// Push a user prompt into the transcript immediately, before the
     /// command reaches the runtime. Keeps the UI responsive.
     pub fn record_user_prompt(&mut self, text: String) {
         self.transcript.push(Entry::UserPrompt(text));
         self.turn = TurnState::Streaming;
+        self.connection_state = ConnectionState::Streaming;
         self.scroll_offset = 0;
         // Sending the prompt clears the input; tear down any open
         // autocomplete popover so it doesn't linger over an empty buffer.
@@ -457,11 +495,11 @@ impl AppState {
                     (Some(n), None) => n,
                     _ => "agent".to_string(),
                 };
-                self.connection_status = format!("connected to {}", self.agent_label);
+                self.connection_state = ConnectionState::Initializing;
             }
             UiEvent::SessionStarted { session_id } => {
                 self.session_id = Some(session_id);
-                self.connection_status = format!("session ready ({})", self.agent_label);
+                self.connection_state = ConnectionState::Ready;
             }
             UiEvent::SessionUpdate(u) => self.apply_session_update(u),
             UiEvent::PermissionRequest(prompt) => {
@@ -473,6 +511,15 @@ impl AppState {
             }
             UiEvent::PromptDone { stop_reason } => {
                 self.turn = TurnState::Idle;
+                // Drop out of Streaming/Cancelling and back to Ready when
+                // the turn lands. Leave non-prompt states (Fatal, Closed,
+                // unexpected Ready) untouched.
+                if matches!(
+                    self.connection_state,
+                    ConnectionState::Streaming | ConnectionState::Cancelling
+                ) {
+                    self.connection_state = ConnectionState::Ready;
+                }
                 self.set_status_line(StatusKind::Info, format!("turn done: {stop_reason:?}"));
                 self.update_autocomplete();
             }
@@ -481,7 +528,7 @@ impl AppState {
             }
             UiEvent::Fatal(msg) => {
                 self.transcript.push(Entry::System(format!("fatal: {msg}")));
-                self.connection_status = "disconnected".to_string();
+                self.connection_state = ConnectionState::Fatal;
                 self.turn = TurnState::Idle;
                 self.status_line = Some(StatusMessage::fatal(msg));
                 self.mark_runtime_closed();
@@ -885,7 +932,7 @@ mod tests {
 
         assert!(s.runtime_closed);
         assert_eq!(s.turn, TurnState::Idle);
-        assert_eq!(s.connection_status, "disconnected");
+        assert_eq!(s.connection_state, ConnectionState::Fatal);
         assert!(s.pending_permission.is_none());
         assert!(!s.autocomplete.visible);
         assert_eq!(s.transcript.len(), 1);
@@ -1053,7 +1100,10 @@ mod tests {
         s.mark_runtime_closed();
 
         assert!(s.runtime_closed);
-        assert_eq!(s.connection_status, "disconnected");
+        // A pre-existing Fatal status must outlast the clean-close path:
+        // otherwise the user gets a generic "disconnected" instead of the
+        // real error.
+        assert_eq!(s.connection_state, ConnectionState::Closed);
         let status = s.status_line.expect("status");
         assert_eq!(status.kind, StatusKind::Fatal);
         assert_eq!(status.text, "boom");
@@ -1070,6 +1120,80 @@ mod tests {
         let status = s.status_line.expect("status");
         assert_eq!(status.kind, StatusKind::Info);
         assert_eq!(status.text, "acp runtime closed; press Ctrl-C to quit");
+    }
+
+    #[test]
+    fn connection_state_progresses_through_launch_to_streaming_to_ready() {
+        let mut s = AppState::new();
+        assert_eq!(s.connection_state, ConnectionState::Launching);
+
+        s.apply_event(UiEvent::Connected {
+            agent_name: Some("anvil".into()),
+            agent_version: Some("0.1".into()),
+        });
+        assert_eq!(s.connection_state, ConnectionState::Initializing);
+
+        s.apply_event(UiEvent::SessionStarted {
+            session_id: "sess-1".into(),
+        });
+        assert_eq!(s.connection_state, ConnectionState::Ready);
+
+        s.record_user_prompt("hi".to_string());
+        assert_eq!(s.connection_state, ConnectionState::Streaming);
+
+        s.mark_cancelling();
+        assert_eq!(s.connection_state, ConnectionState::Cancelling);
+
+        s.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::Cancelled,
+        });
+        assert_eq!(s.connection_state, ConnectionState::Ready);
+        assert_eq!(s.turn, TurnState::Idle);
+    }
+
+    #[test]
+    fn mark_cancelling_is_noop_outside_streaming() {
+        // Cancelling is only meaningful while a prompt is in flight; from
+        // Ready, a stray Ctrl-C must not lie about the connection state.
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::Connected {
+            agent_name: Some("anvil".into()),
+            agent_version: None,
+        });
+        s.apply_event(UiEvent::SessionStarted {
+            session_id: "sess-1".into(),
+        });
+        assert_eq!(s.connection_state, ConnectionState::Ready);
+
+        s.mark_cancelling();
+        assert_eq!(s.connection_state, ConnectionState::Ready);
+    }
+
+    #[test]
+    fn fatal_state_outlasts_runtime_close() {
+        // Fatal arrives via UiEvent::Fatal, which internally calls
+        // mark_runtime_closed. A subsequent mark_runtime_closed (the
+        // channel-drop path in ui_loop) must not downgrade Fatal to Closed.
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::Fatal("kaboom".to_string()));
+        assert_eq!(s.connection_state, ConnectionState::Fatal);
+
+        s.mark_runtime_closed();
+        assert_eq!(s.connection_state, ConnectionState::Fatal);
+    }
+
+    #[test]
+    fn prompt_done_after_fatal_does_not_resurrect_ready() {
+        // A stray PromptDone arriving after Fatal (e.g. queued before the
+        // fatal error propagated) must not flip the lifecycle back to
+        // Ready; Fatal sticks until the user quits.
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::Fatal("kaboom".to_string()));
+
+        s.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+        });
+        assert_eq!(s.connection_state, ConnectionState::Fatal);
     }
 
     #[test]

@@ -28,9 +28,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::app::{
-    AppState, ConfigValueChoice, Entry, PendingPermission, StatusKind, StatusMessage, TurnState,
-    config_option_choices, config_option_current_value_label, permission_kind_label,
-    stop_reason_label,
+    AppState, ConfigValueChoice, ConnectionState, Entry, PendingPermission, StatusKind,
+    StatusMessage, TurnState, config_option_choices, config_option_current_value_label,
+    permission_kind_label, stop_reason_label,
 };
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
 
@@ -195,6 +195,7 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             if state.turn == TurnState::Streaming {
                 let _ = cmd_tx.send(UiCommand::CancelPrompt);
+                state.mark_cancelling();
                 state.status_line = Some(StatusMessage::info("cancelling..."));
             } else if state.input.is_empty() {
                 state.should_quit = true;
@@ -451,10 +452,34 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let mode = state.current_mode.as_deref().unwrap_or("-");
     let header = format!(
         " mjolnir | {} | session {} | mode {} ",
-        state.connection_status, session, mode
+        connection_state_label(state),
+        session,
+        mode
     );
     let p = Paragraph::new(header).style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_widget(p, area);
+}
+
+/// Render the lifecycle state for the header. Once the agent has identified
+/// itself we suffix the label with the agent name so users with multiple
+/// running clients can tell them apart.
+pub(crate) fn connection_state_label(state: &AppState) -> String {
+    let agent_suffix = || {
+        if state.agent_label.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", state.agent_label)
+        }
+    };
+    match state.connection_state {
+        ConnectionState::Launching => "launching...".to_string(),
+        ConnectionState::Initializing => format!("initializing{}", agent_suffix()),
+        ConnectionState::Ready => format!("ready{}", agent_suffix()),
+        ConnectionState::Streaming => format!("streaming{}", agent_suffix()),
+        ConnectionState::Cancelling => format!("cancelling{}", agent_suffix()),
+        ConnectionState::Closed => "disconnected".to_string(),
+        ConnectionState::Fatal => "fatal".to_string(),
+    }
 }
 
 fn draw_transcript(
