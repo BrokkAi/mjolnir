@@ -5,12 +5,13 @@
 //! folded in through `apply_event`; ratatui then renders from this state.
 
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::{
-    AvailableCommand, Plan, PlanEntry, SessionConfigId, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
-    ToolCallUpdate, ToolKind,
+    AvailableCommand, Diff, Plan, PlanEntry, SessionConfigId, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate, StopReason, ToolCall,
+    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, Usage, UsageUpdate,
 };
 
 use crate::event::{PermissionDecision, PermissionPrompt, UiEvent, content_block_text};
@@ -55,7 +56,31 @@ pub struct ToolCallView {
     pub title: String,
     pub kind: ToolKind,
     pub status: ToolCallStatus,
-    pub body: Vec<String>,
+    pub body: Vec<ToolCallOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolCallOutput {
+    Text(String),
+    Diff {
+        path: String,
+        old_text: Option<String>,
+        new_text: String,
+    },
+    Terminal {
+        terminal_id: String,
+    },
+    Note(String),
+}
+
+impl ToolCallOutput {
+    fn from_diff(diff: &Diff) -> Self {
+        Self::Diff {
+            path: diff.path.display().to_string(),
+            old_text: diff.old_text.clone(),
+            new_text: diff.new_text.clone(),
+        }
+    }
 }
 
 impl ToolCallView {
@@ -90,15 +115,20 @@ impl ToolCallView {
         for c in content {
             match c {
                 ToolCallContent::Content(block) => {
-                    self.body.push(content_block_text(&block.content));
+                    self.body
+                        .push(ToolCallOutput::Text(content_block_text(&block.content)));
                 }
                 ToolCallContent::Diff(d) => {
-                    self.body.push(format!("[diff {}]", d.path.display()));
+                    self.body.push(ToolCallOutput::from_diff(d));
                 }
                 ToolCallContent::Terminal(t) => {
-                    self.body.push(format!("[terminal {}]", t.terminal_id));
+                    self.body.push(ToolCallOutput::Terminal {
+                        terminal_id: t.terminal_id.to_string(),
+                    });
                 }
-                _ => self.body.push("[unsupported tool content]".to_string()),
+                _ => self
+                    .body
+                    .push(ToolCallOutput::Note("unsupported tool content".to_string())),
             }
         }
     }
@@ -175,6 +205,35 @@ impl StatusMessage {
     }
 }
 
+/// Token and context usage surfaced by the agent, when available.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub total_tokens: Option<u64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub thought_tokens: Option<u64>,
+    pub context_used: Option<u64>,
+    pub context_size: Option<u64>,
+    pub cost: Option<String>,
+}
+
+impl TokenUsage {
+    fn apply_prompt_usage(&mut self, usage: Usage) {
+        self.total_tokens = Some(usage.total_tokens);
+        self.input_tokens = Some(usage.input_tokens);
+        self.output_tokens = Some(usage.output_tokens);
+        self.thought_tokens = usage.thought_tokens;
+    }
+
+    fn apply_usage_update(&mut self, update: UsageUpdate) {
+        self.context_used = Some(update.used);
+        self.context_size = Some(update.size);
+        self.cost = update
+            .cost
+            .map(|cost| format!("{:.4} {}", cost.amount, cost.currency));
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub agent_label: String,
@@ -185,6 +244,11 @@ pub struct AppState {
     pub session_config_options: Vec<SessionConfigOption>,
     pub transcript: Vec<Entry>,
     pub tool_calls: HashMap<String, ToolCallView>,
+    /// Bumped whenever `transcript` or `tool_calls` change in a way that
+    /// affects rendering. The UI layer uses this as a cache key so it can
+    /// skip rebuilding `Vec<Line>` and re-running word-wrap when nothing
+    /// visible changed.
+    transcript_revision: u64,
     pub input: String,
     pub turn: TurnState,
     /// FIFO queue of permission prompts. The front element is the one
@@ -206,6 +270,11 @@ pub struct AppState {
     pub runtime_closed: bool,
     /// Transient status line with severity.
     pub status_line: Option<StatusMessage>,
+    /// Timing for the active or most recently completed prompt turn.
+    turn_started_at: Option<Instant>,
+    last_turn_elapsed: Option<Duration>,
+    /// Last token/context usage reported by the agent.
+    pub token_usage: TokenUsage,
     /// Slash-command autocomplete state, recomputed on every input edit.
     pub autocomplete: Autocomplete,
     /// True while the keyboard help overlay is visible.
@@ -248,6 +317,7 @@ impl AppState {
             session_config_options: Vec::new(),
             transcript: Vec::new(),
             tool_calls: HashMap::new(),
+            transcript_revision: 0,
             input: String::new(),
             turn: TurnState::Idle,
             permission_queue: VecDeque::new(),
@@ -256,9 +326,35 @@ impl AppState {
             exit_reason: None,
             runtime_closed: false,
             status_line: None,
+            turn_started_at: None,
+            last_turn_elapsed: None,
+            token_usage: TokenUsage::default(),
             autocomplete: Autocomplete::default(),
             help_overlay: false,
         }
+    }
+
+    /// Monotonic counter that the UI uses as a cache key for the rendered
+    /// transcript. Increases each time `transcript` or `tool_calls` mutate
+    /// in a way that the renderer cares about.
+    pub fn transcript_revision(&self) -> u64 {
+        self.transcript_revision
+    }
+
+    fn bump_transcript_revision(&mut self) {
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
+    pub fn active_turn_elapsed(&self) -> Option<Duration> {
+        if self.turn == TurnState::Streaming {
+            self.turn_started_at.map(|started| started.elapsed())
+        } else {
+            None
+        }
+    }
+
+    pub fn last_turn_elapsed(&self) -> Option<Duration> {
+        self.last_turn_elapsed
     }
 
     fn set_status_line(&mut self, kind: StatusKind, text: impl Into<String>) {
@@ -272,6 +368,7 @@ impl AppState {
     pub fn mark_runtime_closed(&mut self) {
         self.runtime_closed = true;
         self.turn = TurnState::Idle;
+        self.finish_turn_timer();
         self.cancel_all_pending_permissions();
         self.config_picker = None;
         self.autocomplete = Autocomplete::default();
@@ -351,8 +448,11 @@ impl AppState {
     /// command reaches the runtime. Keeps the UI responsive.
     pub fn record_user_prompt(&mut self, text: String) {
         self.transcript.push(Entry::UserPrompt(text));
+        self.bump_transcript_revision();
         self.turn = TurnState::Streaming;
         self.connection_state = ConnectionState::Streaming;
+        self.turn_started_at = Some(Instant::now());
+        self.last_turn_elapsed = None;
         self.scroll_offset = 0;
         // Sending the prompt clears the input; tear down any open
         // autocomplete popover so it doesn't linger over an empty buffer.
@@ -576,18 +676,17 @@ impl AppState {
                 });
                 self.update_autocomplete();
             }
-            UiEvent::PromptDone { stop_reason } => {
-                self.turn = TurnState::Idle;
-                // Drop out of Streaming/Cancelling and back to Ready when
-                // the turn lands. Leave non-prompt states (Fatal, Closed,
-                // unexpected Ready) untouched.
-                if matches!(
-                    self.connection_state,
-                    ConnectionState::Streaming | ConnectionState::Cancelling
-                ) {
-                    self.connection_state = ConnectionState::Ready;
+            UiEvent::PromptDone { stop_reason, usage } => {
+                self.finish_prompt_turn();
+                if let Some(usage) = usage {
+                    self.token_usage.apply_prompt_usage(usage);
                 }
                 self.set_status_line(StatusKind::Info, format!("turn done: {stop_reason:?}"));
+                self.update_autocomplete();
+            }
+            UiEvent::PromptFailed { message } => {
+                self.finish_prompt_turn();
+                self.set_status_line(StatusKind::Warning, message);
                 self.update_autocomplete();
             }
             UiEvent::Warning(msg) => {
@@ -595,11 +694,32 @@ impl AppState {
             }
             UiEvent::Fatal(msg) => {
                 self.transcript.push(Entry::System(format!("fatal: {msg}")));
+                self.bump_transcript_revision();
                 self.connection_state = ConnectionState::Fatal;
                 self.turn = TurnState::Idle;
                 self.status_line = Some(StatusMessage::fatal(msg));
                 self.mark_runtime_closed();
             }
+        }
+    }
+
+    fn finish_prompt_turn(&mut self) {
+        self.turn = TurnState::Idle;
+        self.finish_turn_timer();
+        // Drop out of Streaming/Cancelling and back to Ready when the turn
+        // lands. Leave non-prompt states (Fatal, Closed, unexpected Ready)
+        // untouched.
+        if matches!(
+            self.connection_state,
+            ConnectionState::Streaming | ConnectionState::Cancelling
+        ) {
+            self.connection_state = ConnectionState::Ready;
+        }
+    }
+
+    fn finish_turn_timer(&mut self) {
+        if let Some(started_at) = self.turn_started_at.take() {
+            self.last_turn_elapsed = Some(started_at.elapsed());
         }
     }
 
@@ -620,20 +740,24 @@ impl AppState {
                 }
                 let text = content_block_text(&c.content);
                 append_or_start(&mut self.transcript, EntryKind::User, text);
+                self.bump_transcript_revision();
             }
             SessionUpdate::AgentMessageChunk(c) => {
                 let text = content_block_text(&c.content);
                 append_or_start(&mut self.transcript, EntryKind::Agent, text);
+                self.bump_transcript_revision();
             }
             SessionUpdate::AgentThoughtChunk(c) => {
                 let text = content_block_text(&c.content);
                 append_or_start(&mut self.transcript, EntryKind::Thought, text);
+                self.bump_transcript_revision();
             }
             SessionUpdate::ToolCall(tc) => {
                 let id = tc.tool_call_id.to_string();
                 self.tool_calls
                     .insert(id.clone(), ToolCallView::from_tool_call(&tc));
                 self.transcript.push(Entry::ToolCall(id));
+                self.bump_transcript_revision();
             }
             SessionUpdate::ToolCallUpdate(u) => {
                 let id = u.tool_call_id.to_string();
@@ -653,6 +777,7 @@ impl AppState {
                     self.tool_calls.insert(id.clone(), view);
                     self.transcript.push(Entry::ToolCall(id));
                 }
+                self.bump_transcript_revision();
             }
             SessionUpdate::Plan(Plan { entries, .. }) => {
                 // Replace the most recent Plan entry if present, else push.
@@ -666,6 +791,7 @@ impl AppState {
                 } else {
                     self.transcript.push(Entry::Plan(entries));
                 }
+                self.bump_transcript_revision();
             }
             SessionUpdate::AvailableCommandsUpdate(u) => {
                 self.available_commands = u.available_commands;
@@ -678,6 +804,7 @@ impl AppState {
                 let mode = u.current_mode_id.to_string();
                 self.current_mode = Some(mode.clone());
                 self.transcript.push(Entry::System(format!("mode: {mode}")));
+                self.bump_transcript_revision();
             }
             SessionUpdate::ConfigOptionUpdate(u) => {
                 self.session_config_options = u.config_options;
@@ -699,11 +826,16 @@ impl AppState {
                 if let Some(title) = info.title.value() {
                     self.transcript
                         .push(Entry::System(format!("session title: {title}")));
+                    self.bump_transcript_revision();
                 }
+            }
+            SessionUpdate::UsageUpdate(u) => {
+                self.token_usage.apply_usage_update(u);
             }
             _ => {
                 self.transcript
                     .push(Entry::System("unsupported session update".to_string()));
+                self.bump_transcript_revision();
             }
         }
     }
@@ -923,10 +1055,10 @@ pub fn stop_reason_label(reason: StopReason) -> &'static str {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        AudioContent, ConfigOptionUpdate, Content, ContentBlock, ContentChunk, Diff,
+        AudioContent, ConfigOptionUpdate, Content, ContentBlock, ContentChunk, Cost, Diff,
         EmbeddedResource, EmbeddedResourceResource, ImageContent, PermissionOption,
         PermissionOptionKind, ResourceLink, SessionConfigOption, SessionConfigOptionCategory,
-        SessionConfigSelectOption, Terminal, TextContent, TextResourceContents,
+        SessionConfigSelectOption, Terminal, TextContent, TextResourceContents, Usage, UsageUpdate,
     };
 
     fn text_chunk(s: &str) -> ContentChunk {
@@ -972,6 +1104,7 @@ mod tests {
         assert_eq!(s.turn, TurnState::Streaming);
         s.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
+            usage: None,
         });
         assert_eq!(s.turn, TurnState::Idle);
     }
@@ -1065,18 +1198,17 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_content_diff_and_terminal_render_as_placeholders() {
-        // Diff and Terminal variants don't have inline rendering yet
-        // (M2 territory) but they must not panic and must show *some*
-        // labelled placeholder so the user knows the tool produced
-        // structured output.
+    fn tool_call_content_diff_and_terminal_are_kept_structured() {
         let mut s = AppState::new();
         let mut fields = agent_client_protocol::schema::ToolCallUpdateFields::default();
         fields.content = Some(vec![
             ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
                 "stdout: ok",
             )))),
-            ToolCallContent::Diff(Diff::new("/tmp/file.rs", "new contents")),
+            ToolCallContent::Diff(
+                Diff::new("/tmp/file.rs", "new contents")
+                    .old_text(Some("old contents".to_string())),
+            ),
             ToolCallContent::Terminal(Terminal::new(
                 agent_client_protocol::schema::TerminalId::new("term-1"),
             )),
@@ -1088,20 +1220,20 @@ mod tests {
 
         let view = s.tool_calls.get("call-1").expect("view");
         assert_eq!(view.body.len(), 3);
-        assert!(
-            view.body[0].contains("stdout: ok"),
-            "expected text content, got {:?}",
-            view.body[0]
+        assert_eq!(view.body[0], ToolCallOutput::Text("stdout: ok".to_string()));
+        assert_eq!(
+            view.body[1],
+            ToolCallOutput::Diff {
+                path: "/tmp/file.rs".to_string(),
+                old_text: Some("old contents".to_string()),
+                new_text: "new contents".to_string(),
+            }
         );
-        assert!(
-            view.body[1].contains("[diff"),
-            "expected diff placeholder, got {:?}",
-            view.body[1]
-        );
-        assert!(
-            view.body[2].contains("[terminal"),
-            "expected terminal placeholder, got {:?}",
-            view.body[2]
+        assert_eq!(
+            view.body[2],
+            ToolCallOutput::Terminal {
+                terminal_id: "term-1".to_string(),
+            }
         );
     }
 
@@ -1333,9 +1465,71 @@ mod tests {
 
         s.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::Cancelled,
+            usage: None,
         });
         assert_eq!(s.connection_state, ConnectionState::Ready);
         assert_eq!(s.turn, TurnState::Idle);
+    }
+
+    #[test]
+    fn prompt_failed_returns_to_ready_with_warning_status() {
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::Connected {
+            agent_name: Some("anvil".into()),
+            agent_version: None,
+        });
+        s.apply_event(UiEvent::SessionStarted {
+            session_id: "sess-1".into(),
+        });
+        s.record_user_prompt("hi".to_string());
+
+        s.apply_event(UiEvent::PromptFailed {
+            message: "prompt failed: boom".to_string(),
+        });
+
+        assert_eq!(s.connection_state, ConnectionState::Ready);
+        assert_eq!(s.turn, TurnState::Idle);
+        let status = s.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Warning);
+        assert_eq!(status.text, "prompt failed: boom");
+    }
+
+    #[test]
+    fn prompt_done_records_elapsed_and_token_usage() {
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::Connected {
+            agent_name: Some("anvil".into()),
+            agent_version: None,
+        });
+        s.apply_event(UiEvent::SessionStarted {
+            session_id: "sess-1".into(),
+        });
+        s.record_user_prompt("hi".to_string());
+
+        s.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: Some(Usage::new(42, 30, 12).thought_tokens(Some(4))),
+        });
+
+        assert_eq!(s.turn, TurnState::Idle);
+        assert!(s.last_turn_elapsed().is_some());
+        assert_eq!(s.token_usage.total_tokens, Some(42));
+        assert_eq!(s.token_usage.input_tokens, Some(30));
+        assert_eq!(s.token_usage.output_tokens, Some(12));
+        assert_eq!(s.token_usage.thought_tokens, Some(4));
+    }
+
+    #[test]
+    fn usage_update_records_context_tokens_and_cost() {
+        let mut s = AppState::new();
+
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
+            UsageUpdate::new(12_000, 128_000).cost(Cost::new(0.125, "USD")),
+        )));
+
+        assert_eq!(s.token_usage.context_used, Some(12_000));
+        assert_eq!(s.token_usage.context_size, Some(128_000));
+        assert_eq!(s.token_usage.cost.as_deref(), Some("0.1250 USD"));
     }
 
     #[test]
@@ -1465,6 +1659,7 @@ mod tests {
 
         s.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
+            usage: None,
         });
         assert_eq!(s.connection_state, ConnectionState::Fatal);
     }
@@ -1677,6 +1872,7 @@ mod tests {
 
         s.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
+            usage: None,
         });
         assert!(s.autocomplete.visible);
     }

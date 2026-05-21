@@ -7,7 +7,7 @@
 
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::AvailableCommandInput;
 use anyhow::{Context, Result};
@@ -29,10 +29,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
+use tokio::time::MissedTickBehavior;
 
 use crate::app::{
     AppState, ConfigValueChoice, ConnectionState, Entry, PendingPermission, StatusKind,
-    StatusMessage, TurnState, UiExitReason, config_option_choices,
+    StatusMessage, ToolCallOutput, TurnState, UiExitReason, config_option_choices,
     config_option_current_value_label, permission_kind_label, stop_reason_label,
 };
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
@@ -42,6 +43,21 @@ static KEYBOARD_ENHANCEMENT_ENABLED: AtomicBool = AtomicBool::new(false);
 #[derive(Debug, Default)]
 struct TranscriptScrollState {
     last_rendered_lines: Option<(usize, u16)>,
+    /// Cached `Vec<Line>` + wrapped `line_count`, keyed by
+    /// `(transcript_revision, width)`. Rebuilding these requires
+    /// running `unicode_segmentation` / `unicode_width` over the entire
+    /// transcript, which dominates UI CPU on long sessions; caching cuts
+    /// it out when nothing visible changed (e.g. while the user is
+    /// typing in the input box or navigating modals).
+    cache: Option<TranscriptCache>,
+}
+
+#[derive(Debug)]
+struct TranscriptCache {
+    revision: u64,
+    width: u16,
+    lines: Vec<Line<'static>>,
+    line_count: usize,
 }
 
 impl TranscriptScrollState {
@@ -76,6 +92,13 @@ pub async fn run(
     ui_loop(terminal, &cmd_tx, &mut event_rx).await
 }
 
+/// Maximum redraw rate. Events/keystrokes flip a `dirty` flag, but the
+/// terminal is only repainted at most once per frame budget. This caps
+/// CPU usage during streaming bursts (where every chunk used to trigger
+/// a full `Paragraph` word-wrap of the entire transcript) while keeping
+/// input latency below human perception.
+const FRAME_BUDGET: Duration = Duration::from_millis(33);
+
 async fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
@@ -84,9 +107,15 @@ async fn ui_loop(
     let mut state = AppState::new();
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut crossterm_events = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    // Wake-up timer so we still get scheduled to draw when no events
+    // arrive (e.g. while waiting on the agent). `Delay` keeps it from
+    // burst-firing after a long busy period.
+    let mut frame_tick = tokio::time::interval(FRAME_BUDGET);
+    frame_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
+    let mut last_draw = Instant::now();
+    let mut dirty = false;
 
     loop {
         tokio::select! {
@@ -103,6 +132,7 @@ async fn ui_loop(
                     }
                     None => break,
                 }
+                dirty = true;
             }
             // Use the unconditional form (no `Some(ev) = ...`) so the
             // None case (runtime dropped the sender) reaches the match
@@ -116,8 +146,13 @@ async fn ui_loop(
                         state.mark_runtime_closed();
                     }
                 }
+                dirty = true;
             }
-            _ = tick.tick() => {}
+            _ = frame_tick.tick() => {
+                if needs_live_redraw(&state) {
+                    dirty = true;
+                }
+            }
         }
 
         if let Some(reason) = state.exit_reason {
@@ -125,9 +160,28 @@ async fn ui_loop(
             terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
             return Ok(reason);
         }
-        terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
+
+        // Throttle: redraw at most once per FRAME_BUDGET. Under a flood
+        // of events (`biased` select keeps picking the event arm before
+        // the timer), this elapsed-time check is what actually paces
+        // the redraws; the timer arm is the wake-up source when idle.
+        if dirty && last_draw.elapsed() >= FRAME_BUDGET {
+            terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
+            dirty = false;
+            last_draw = Instant::now();
+        }
     }
     Ok(UiExitReason::Quit)
+}
+
+fn needs_live_redraw(state: &AppState) -> bool {
+    matches!(
+        state.connection_state,
+        ConnectionState::Launching
+            | ConnectionState::Initializing
+            | ConnectionState::Streaming
+            | ConnectionState::Cancelling
+    ) || state.turn == TurnState::Streaming
 }
 
 fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>, ev: CtEvent) {
@@ -541,13 +595,31 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         })
         .unwrap_or_else(|| "no session".to_string());
     let mode = state.current_mode.as_deref().unwrap_or("-");
-    let header = format!(
-        " mjolnir | {} | session {} | mode {} ",
+    let base = Style::default().bg(Color::DarkGray).fg(Color::White);
+    let mut spans = vec![
+        Span::styled(" mjolnir ", base.add_modifier(Modifier::BOLD)),
+        Span::styled("| ", base.fg(Color::Gray)),
+    ];
+    if needs_live_redraw(state) {
+        spans.push(Span::styled(spinner_frame(), base.fg(Color::Cyan)));
+        spans.push(Span::styled(" ", base));
+    }
+    spans.push(Span::styled(
         connection_state_label(state),
-        session,
-        mode
-    );
-    let p = Paragraph::new(header).style(Style::default().add_modifier(Modifier::REVERSED));
+        base.fg(connection_state_color(state.connection_state)),
+    ));
+    spans.extend([
+        Span::styled(" | session ", base.fg(Color::Gray)),
+        Span::styled(session, base.fg(Color::LightYellow)),
+        Span::styled(" | mode ", base.fg(Color::Gray)),
+        Span::styled(mode.to_string(), base.fg(Color::Cyan)),
+        Span::styled(" | ", base.fg(Color::Gray)),
+        Span::styled(turn_elapsed_label(state), base.fg(Color::Green)),
+        Span::styled(" | ", base.fg(Color::Gray)),
+        Span::styled(token_usage_label(state), base.fg(Color::Magenta)),
+        Span::styled(" ", base),
+    ]);
+    let p = Paragraph::new(Line::from(spans)).style(base);
     f.render_widget(p, area);
 }
 
@@ -573,6 +645,84 @@ pub(crate) fn connection_state_label(state: &AppState) -> String {
     }
 }
 
+fn connection_state_color(state: ConnectionState) -> Color {
+    match state {
+        ConnectionState::Launching | ConnectionState::Initializing => Color::LightYellow,
+        ConnectionState::Ready => Color::Green,
+        ConnectionState::Streaming => Color::Cyan,
+        ConnectionState::Cancelling => Color::Yellow,
+        ConnectionState::Closed => Color::DarkGray,
+        ConnectionState::Fatal => Color::Red,
+    }
+}
+
+fn spinner_frame() -> &'static str {
+    const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+    let idx = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| (duration.as_millis() / 120) as usize)
+        .unwrap_or(0)
+        % FRAMES.len();
+    FRAMES[idx]
+}
+
+fn turn_elapsed_label(state: &AppState) -> String {
+    if let Some(elapsed) = state.active_turn_elapsed() {
+        format!("elapsed {}", format_duration(elapsed))
+    } else if let Some(elapsed) = state.last_turn_elapsed() {
+        format!("last {}", format_duration(elapsed))
+    } else {
+        "elapsed -".to_string()
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+    if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn token_usage_label(state: &AppState) -> String {
+    let usage = &state.token_usage;
+    if let Some(total) = usage.total_tokens {
+        let mut parts = vec![format!("tok {}", compact_count(total))];
+        if let Some(input) = usage.input_tokens {
+            parts.push(format!("in {}", compact_count(input)));
+        }
+        if let Some(output) = usage.output_tokens {
+            parts.push(format!("out {}", compact_count(output)));
+        }
+        if let Some(thought) = usage.thought_tokens {
+            parts.push(format!("think {}", compact_count(thought)));
+        }
+        return parts.join(" ");
+    }
+    if let (Some(used), Some(size)) = (usage.context_used, usage.context_size) {
+        let mut text = format!("ctx {}/{}", compact_count(used), compact_count(size));
+        if let Some(cost) = &usage.cost {
+            text.push(' ');
+            text.push_str(cost);
+        }
+        return text;
+    }
+    "tok -".to_string()
+}
+
+fn compact_count(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}m", value as f64 / 1_000_000.0)
+    } else if value >= 10_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
 fn draw_transcript(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -583,27 +733,59 @@ fn draw_transcript(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let lines = render_transcript_lines(state, inner.width);
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    // Count wrapped rows so scroll anchoring survives resize and long lines.
-    let total = paragraph.line_count(inner.width);
+    // Avoid rebuilding the lines and re-running `Paragraph::line_count`
+    // (both O(text) with unicode segmentation) when neither the
+    // transcript nor the terminal width has changed since the last
+    // frame. Caching is keyed by `(revision, width)`; any mutation to
+    // `transcript` / `tool_calls` bumps the revision.
+    let revision = state.transcript_revision();
+    let cache_hit = matches!(
+        transcript_scroll.cache.as_ref(),
+        Some(c) if c.revision == revision && c.width == inner.width
+    );
+    if !cache_hit {
+        let lines = render_transcript_lines(state, inner.width);
+        let line_count = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(inner.width);
+        transcript_scroll.cache = Some(TranscriptCache {
+            revision,
+            width: inner.width,
+            lines,
+            line_count,
+        });
+    }
+    let cache = transcript_scroll
+        .cache
+        .as_ref()
+        .expect("cache populated above");
+    let total = cache.line_count;
+    // Clone the cached lines because `Paragraph::new` consumes the
+    // `Vec<Line>`. This still avoids the dominant cost (word-wrap +
+    // unicode tables) which only runs inside `render_widget`.
+    let lines = cache.lines.clone();
+
     transcript_scroll.reconcile(&mut state.scroll_offset, total, inner.height);
     let top = total
         .saturating_sub(inner.height as usize)
         .saturating_sub(state.scroll_offset)
         .min(u16::MAX as usize) as u16;
-    let paragraph = paragraph.scroll((top, 0));
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((top, 0));
     f.render_widget(paragraph, inner);
 }
 
-fn render_transcript_lines(state: &AppState, _width: u16) -> Vec<Line<'static>> {
+fn render_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     for entry in &state.transcript {
         match entry {
-            Entry::UserPrompt(text) => push_block(&mut out, "you", Color::Cyan, text.clone()),
-            Entry::AgentMessage(text) => push_block(&mut out, "agent", Color::Green, text.clone()),
+            Entry::UserPrompt(text) => push_plain_block(&mut out, "you", Color::Cyan, text.clone()),
+            Entry::AgentMessage(text) => {
+                push_markdown_block(&mut out, "agent", Color::Green, text.clone())
+            }
             Entry::AgentThought(text) => {
-                push_block(&mut out, "thought", Color::DarkGray, text.clone())
+                push_markdown_block(&mut out, "thought", Color::DarkGray, text.clone())
             }
             Entry::Plan(entries) => {
                 out.push(Line::from(Span::styled(
@@ -631,30 +813,20 @@ fn render_transcript_lines(state: &AppState, _width: u16) -> Vec<Line<'static>> 
             }
             Entry::ToolCall(id) => {
                 if let Some(view) = state.tool_calls.get(id) {
-                    let status_label = match view.status {
-                        agent_client_protocol::schema::ToolCallStatus::Pending => "pending",
-                        agent_client_protocol::schema::ToolCallStatus::InProgress => "running",
-                        agent_client_protocol::schema::ToolCallStatus::Completed => "done",
-                        agent_client_protocol::schema::ToolCallStatus::Failed => "failed",
-                        _ => "?",
-                    };
-                    let color = match view.status {
-                        agent_client_protocol::schema::ToolCallStatus::Failed => Color::Red,
-                        agent_client_protocol::schema::ToolCallStatus::Completed => Color::Yellow,
-                        _ => Color::LightYellow,
-                    };
+                    let status_label = tool_status_label(view.status);
+                    let color = tool_status_color(view.status);
                     out.push(Line::from(vec![
                         Span::styled(
                             format!("tool [{}] ", status_label),
                             Style::default().fg(color).add_modifier(Modifier::BOLD),
                         ),
+                        Span::styled(
+                            format!("{} ", tool_kind_label(view.kind)),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                         Span::raw(view.title.clone()),
                     ]));
-                    for body in &view.body {
-                        for raw in body.split('\n') {
-                            out.push(Line::from(format!("  {raw}")));
-                        }
-                    }
+                    push_tool_outputs(&mut out, &view.body, width);
                     out.push(Line::from(""));
                 }
             }
@@ -670,15 +842,466 @@ fn render_transcript_lines(state: &AppState, _width: u16) -> Vec<Line<'static>> 
     out
 }
 
-fn push_block(out: &mut Vec<Line<'static>>, label: &str, color: Color, text: String) {
+fn push_markdown_block(out: &mut Vec<Line<'static>>, label: &str, color: Color, text: String) {
     out.push(Line::from(Span::styled(
         format!("{label}:"),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )));
-    for raw in text.split('\n') {
-        out.push(Line::from(raw.to_string()));
-    }
+    push_markdown_lines(out, text, 0);
     out.push(Line::from(""));
+}
+
+fn push_plain_block(out: &mut Vec<Line<'static>>, label: &str, color: Color, text: String) {
+    out.push(Line::from(Span::styled(
+        format!("{label}:"),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )));
+    push_plain_lines(out, text, 0);
+    out.push(Line::from(""));
+}
+
+fn push_plain_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize) {
+    let prefix = " ".repeat(indent);
+    for raw in text.split('\n') {
+        out.push(Line::from(format!("{prefix}{raw}")));
+    }
+}
+
+fn push_markdown_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize) {
+    let prefix = " ".repeat(indent);
+    let mut in_code_block = false;
+    let mut code_lang = String::new();
+    for raw in text.split('\n') {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            if in_code_block {
+                code_lang = trimmed.trim_start_matches('`').trim().to_string();
+                let title = if code_lang.is_empty() {
+                    "code".to_string()
+                } else {
+                    format!("code {code_lang}")
+                };
+                out.push(Line::from(Span::styled(
+                    format!("{prefix}{title}"),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            } else {
+                code_lang.clear();
+            }
+            continue;
+        }
+
+        if in_code_block {
+            out.push(Line::from(Span::styled(
+                format!("{prefix}  {raw}"),
+                Style::default().fg(Color::Gray),
+            )));
+            continue;
+        }
+
+        if raw.trim().is_empty() {
+            out.push(Line::from(""));
+            continue;
+        }
+
+        if let Some((level, heading)) = markdown_heading(raw) {
+            let marker = "#".repeat(level);
+            out.push(Line::from(vec![
+                Span::styled(
+                    format!("{prefix}{marker} "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    heading.to_string(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            continue;
+        }
+
+        if markdown_rule(raw) {
+            out.push(Line::from(Span::styled(
+                format!("{prefix}--------"),
+                Style::default().fg(Color::DarkGray),
+            )));
+            continue;
+        }
+
+        if let Some(quoted) = trimmed.strip_prefix("> ") {
+            out.push(Line::from(vec![
+                Span::styled(format!("{prefix}> "), Style::default().fg(Color::DarkGray)),
+                Span::styled(quoted.to_string(), Style::default().fg(Color::Gray)),
+            ]));
+            continue;
+        }
+
+        if let Some(item) = markdown_unordered_item(raw) {
+            let mut spans = vec![Span::styled(
+                format!("{prefix}- "),
+                Style::default().fg(Color::DarkGray),
+            )];
+            spans.extend(inline_markdown_spans(item));
+            out.push(Line::from(spans));
+            continue;
+        }
+
+        if let Some((number, item)) = markdown_ordered_item(raw) {
+            let mut spans = vec![Span::styled(
+                format!("{prefix}{number}. "),
+                Style::default().fg(Color::DarkGray),
+            )];
+            spans.extend(inline_markdown_spans(item));
+            out.push(Line::from(spans));
+            continue;
+        }
+
+        let mut spans = vec![Span::raw(prefix.clone())];
+        spans.extend(inline_markdown_spans(raw));
+        out.push(Line::from(spans));
+    }
+}
+
+fn markdown_heading(raw: &str) -> Option<(usize, &str)> {
+    let trimmed = raw.trim_start();
+    let level = trimmed.chars().take_while(|c| *c == '#').count();
+    if (1..=6).contains(&level) && trimmed.as_bytes().get(level) == Some(&b' ') {
+        Some((level, trimmed[level + 1..].trim()))
+    } else {
+        None
+    }
+}
+
+fn markdown_rule(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    trimmed.len() >= 3
+        && (trimmed.chars().all(|c| c == '-')
+            || trimmed.chars().all(|c| c == '*')
+            || trimmed.chars().all(|c| c == '_'))
+}
+
+fn markdown_unordered_item(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim_start();
+    trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+}
+
+fn markdown_ordered_item(raw: &str) -> Option<(&str, &str)> {
+    let trimmed = raw.trim_start();
+    let dot = trimmed.find(". ")?;
+    let number = &trimmed[..dot];
+    if number.chars().all(|c| c.is_ascii_digit()) {
+        Some((number, &trimmed[dot + 2..]))
+    } else {
+        None
+    }
+}
+
+fn inline_markdown_spans(raw: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = raw;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("`")
+            && let Some(end) = after.find('`')
+        {
+            let (code, tail) = after.split_at(end);
+            spans.push(Span::styled(
+                code.to_string(),
+                Style::default().fg(Color::Yellow),
+            ));
+            rest = &tail[1..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("**")
+            && let Some(end) = after.find("**")
+        {
+            let (strong, tail) = after.split_at(end);
+            spans.push(Span::styled(
+                strong.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            rest = &tail[2..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("*")
+            && let Some(end) = after.find('*')
+        {
+            let (em, tail) = after.split_at(end);
+            spans.push(Span::styled(
+                em.to_string(),
+                Style::default().add_modifier(Modifier::ITALIC),
+            ));
+            rest = &tail[1..];
+            continue;
+        }
+
+        let next = rest
+            .char_indices()
+            .skip(1)
+            .find_map(|(idx, ch)| (ch == '`' || ch == '*').then_some(idx))
+            .unwrap_or(rest.len());
+        let (plain, tail) = rest.split_at(next);
+        spans.push(Span::raw(plain.to_string()));
+        rest = tail;
+    }
+    spans
+}
+
+fn push_tool_outputs(out: &mut Vec<Line<'static>>, outputs: &[ToolCallOutput], width: u16) {
+    for output in outputs {
+        match output {
+            ToolCallOutput::Text(text) => push_tool_text_lines(out, text.clone(), 2),
+            ToolCallOutput::Diff {
+                path,
+                old_text,
+                new_text,
+            } => push_diff_output(out, path, old_text.as_deref(), new_text, width),
+            ToolCallOutput::Terminal { terminal_id } => {
+                out.push(Line::from(vec![
+                    Span::styled("  terminal ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(terminal_id.clone(), Style::default().fg(Color::LightYellow)),
+                ]));
+            }
+            ToolCallOutput::Note(note) => {
+                out.push(Line::from(Span::styled(
+                    format!("  [{note}]"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+    }
+}
+
+fn push_tool_text_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize) {
+    let prefix = " ".repeat(indent);
+    for raw in text.split('\n') {
+        let line = format!("{prefix}{raw}");
+        out.push(Line::from(Span::styled(line, tool_output_line_style(raw))));
+    }
+}
+
+fn tool_output_line_style(raw: &str) -> Style {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("panic")
+        || lower.contains("denied")
+    {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else if lower.contains("warning") || lower.contains("warn") {
+        Style::default().fg(Color::Yellow)
+    } else if lower.contains("success")
+        || lower.contains("passed")
+        || lower == "ok"
+        || lower.ends_with(" ok")
+    {
+        Style::default().fg(Color::Green)
+    } else if raw.trim_start().starts_with('$') {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
+fn push_diff_output(
+    out: &mut Vec<Line<'static>>,
+    path: &str,
+    old_text: Option<&str>,
+    new_text: &str,
+    width: u16,
+) {
+    out.push(Line::from(vec![
+        Span::styled("  diff ", Style::default().fg(Color::DarkGray)),
+        Span::styled(path.to_string(), Style::default().fg(Color::Cyan)),
+    ]));
+
+    let old_lines: Vec<&str> = old_text.unwrap_or("").lines().collect();
+    let new_lines: Vec<&str> = new_text.lines().collect();
+    for diff_line in compact_line_diff(&old_lines, &new_lines, 80) {
+        let (prefix, color) = match diff_line.kind {
+            DiffLineKind::Added => ("+ ", Color::Green),
+            DiffLineKind::Removed => ("- ", Color::Red),
+            DiffLineKind::Context => ("  ", Color::DarkGray),
+            DiffLineKind::Omitted => ("... ", Color::DarkGray),
+        };
+        let text = truncate_display_line(&diff_line.text, width.saturating_sub(6) as usize);
+        out.push(Line::from(Span::styled(
+            format!("    {prefix}{text}"),
+            Style::default().fg(color),
+        )));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffLineKind {
+    Added,
+    Removed,
+    Context,
+    Omitted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffLine {
+    kind: DiffLineKind,
+    text: String,
+}
+
+fn compact_line_diff(old_lines: &[&str], new_lines: &[&str], limit: usize) -> Vec<DiffLine> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = if old_lines.len().saturating_mul(new_lines.len()) <= 40_000 {
+        lcs_line_diff(old_lines, new_lines)
+    } else {
+        positional_line_diff(old_lines, new_lines)
+    };
+
+    if lines.len() > limit {
+        let omitted = lines.len() - limit;
+        lines.truncate(limit);
+        lines.push(DiffLine {
+            kind: DiffLineKind::Omitted,
+            text: format!("{omitted} diff lines omitted"),
+        });
+    }
+    lines
+}
+
+fn lcs_line_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
+    let old_len = old_lines.len();
+    let new_len = new_lines.len();
+    let mut dp = vec![vec![0usize; new_len + 1]; old_len + 1];
+
+    for old_idx in (0..old_len).rev() {
+        for new_idx in (0..new_len).rev() {
+            dp[old_idx][new_idx] = if old_lines[old_idx] == new_lines[new_idx] {
+                dp[old_idx + 1][new_idx + 1] + 1
+            } else {
+                dp[old_idx + 1][new_idx].max(dp[old_idx][new_idx + 1])
+            };
+        }
+    }
+
+    let mut lines = Vec::new();
+    let mut old_idx = 0;
+    let mut new_idx = 0;
+    while old_idx < old_len && new_idx < new_len {
+        if old_lines[old_idx] == new_lines[new_idx] {
+            lines.push(DiffLine {
+                kind: DiffLineKind::Context,
+                text: old_lines[old_idx].to_string(),
+            });
+            old_idx += 1;
+            new_idx += 1;
+        } else if dp[old_idx + 1][new_idx] >= dp[old_idx][new_idx + 1] {
+            lines.push(DiffLine {
+                kind: DiffLineKind::Removed,
+                text: old_lines[old_idx].to_string(),
+            });
+            old_idx += 1;
+        } else {
+            lines.push(DiffLine {
+                kind: DiffLineKind::Added,
+                text: new_lines[new_idx].to_string(),
+            });
+            new_idx += 1;
+        }
+    }
+
+    lines.extend(old_lines[old_idx..].iter().map(|line| DiffLine {
+        kind: DiffLineKind::Removed,
+        text: (*line).to_string(),
+    }));
+    lines.extend(new_lines[new_idx..].iter().map(|line| DiffLine {
+        kind: DiffLineKind::Added,
+        text: (*line).to_string(),
+    }));
+    lines
+}
+
+fn positional_line_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
+    let mut lines = Vec::new();
+    let max = old_lines.len().max(new_lines.len());
+    for idx in 0..max {
+        match (old_lines.get(idx), new_lines.get(idx)) {
+            (Some(old), Some(new)) if old == new => lines.push(DiffLine {
+                kind: DiffLineKind::Context,
+                text: (*old).to_string(),
+            }),
+            (Some(old), Some(new)) => {
+                lines.push(DiffLine {
+                    kind: DiffLineKind::Removed,
+                    text: (*old).to_string(),
+                });
+                lines.push(DiffLine {
+                    kind: DiffLineKind::Added,
+                    text: (*new).to_string(),
+                });
+            }
+            (Some(old), None) => lines.push(DiffLine {
+                kind: DiffLineKind::Removed,
+                text: (*old).to_string(),
+            }),
+            (None, Some(new)) => lines.push(DiffLine {
+                kind: DiffLineKind::Added,
+                text: (*new).to_string(),
+            }),
+            (None, None) => {}
+        }
+    }
+    lines
+}
+
+fn truncate_display_line(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_string();
+    }
+    if width <= 3 {
+        return text.chars().take(width).collect();
+    }
+    text.chars().take(width - 3).collect::<String>() + "..."
+}
+
+fn tool_kind_label(kind: agent_client_protocol::schema::ToolKind) -> &'static str {
+    match kind {
+        agent_client_protocol::schema::ToolKind::Read => "read",
+        agent_client_protocol::schema::ToolKind::Edit => "edit",
+        agent_client_protocol::schema::ToolKind::Delete => "delete",
+        agent_client_protocol::schema::ToolKind::Move => "move",
+        agent_client_protocol::schema::ToolKind::Search => "search",
+        agent_client_protocol::schema::ToolKind::Execute => "exec",
+        agent_client_protocol::schema::ToolKind::Think => "think",
+        agent_client_protocol::schema::ToolKind::Fetch => "fetch",
+        agent_client_protocol::schema::ToolKind::SwitchMode => "mode",
+        _ => "other",
+    }
+}
+
+fn tool_status_label(status: agent_client_protocol::schema::ToolCallStatus) -> &'static str {
+    match status {
+        agent_client_protocol::schema::ToolCallStatus::Pending => "pending",
+        agent_client_protocol::schema::ToolCallStatus::InProgress => "running",
+        agent_client_protocol::schema::ToolCallStatus::Completed => "done",
+        agent_client_protocol::schema::ToolCallStatus::Failed => "failed",
+        _ => "?",
+    }
+}
+
+fn tool_status_color(status: agent_client_protocol::schema::ToolCallStatus) -> Color {
+    match status {
+        agent_client_protocol::schema::ToolCallStatus::Failed => Color::Red,
+        agent_client_protocol::schema::ToolCallStatus::Completed => Color::Green,
+        agent_client_protocol::schema::ToolCallStatus::InProgress => Color::Cyan,
+        agent_client_protocol::schema::ToolCallStatus::Pending => Color::DarkGray,
+        _ => Color::LightYellow,
+    }
 }
 
 fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -1112,7 +1735,9 @@ fn config_value_row_text(choice: &ConfigValueChoice) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{SessionConfigOption, SessionConfigSelectOption};
+    use agent_client_protocol::schema::{
+        SessionConfigOption, SessionConfigSelectOption, ToolCallStatus, ToolKind,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> CtEvent {
@@ -1121,6 +1746,13 @@ mod tests {
 
     fn key_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> CtEvent {
         CtEvent::Key(KeyEvent::new(code, modifiers))
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     #[test]
@@ -1308,6 +1940,150 @@ mod tests {
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
         assert_eq!(state.scroll_offset, 0);
         assert!(state.exit_reason.is_none());
+    }
+
+    #[test]
+    fn transcript_renders_markdown_blocks() {
+        let mut state = AppState::new();
+        state.transcript.push(Entry::AgentMessage(
+            "# Result\n- **bold** item\n```rs\nlet x = 1;\n```".to_string(),
+        ));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert!(rendered.iter().any(|line| line == "agent:"));
+        assert!(rendered.iter().any(|line| line == "# Result"));
+        assert!(rendered.iter().any(|line| line == "- bold item"));
+        assert!(rendered.iter().any(|line| line == "code rs"));
+        assert!(rendered.iter().any(|line| line == "  let x = 1;"));
+    }
+
+    #[test]
+    fn transcript_renders_structured_tool_outputs() {
+        let mut state = AppState::new();
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "run checks".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: vec![
+                    ToolCallOutput::Text("## Output\n`ok`".to_string()),
+                    ToolCallOutput::Diff {
+                        path: "src/main.rs".to_string(),
+                        old_text: Some("old\nsame".to_string()),
+                        new_text: "new\nsame".to_string(),
+                    },
+                    ToolCallOutput::Terminal {
+                        terminal_id: "term-1".to_string(),
+                    },
+                ],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "tool [done] exec run checks")
+        );
+        assert!(rendered.iter().any(|line| line == "  ## Output"));
+        assert!(rendered.iter().any(|line| line == "  `ok`"));
+        assert!(rendered.iter().any(|line| line == "  diff src/main.rs"));
+        assert!(rendered.iter().any(|line| line == "    - old"));
+        assert!(rendered.iter().any(|line| line == "    + new"));
+        assert!(rendered.iter().any(|line| line == "  terminal term-1"));
+    }
+
+    #[test]
+    fn user_prompts_and_tool_text_render_as_plain_text() {
+        let mut state = AppState::new();
+        state.transcript.push(Entry::UserPrompt(
+            "# literal\n`code` and **bold**".to_string(),
+        ));
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "log".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Text(
+                    "# stdout\n`ok` and **bold**".to_string(),
+                )],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert!(rendered.iter().any(|line| line == "# literal"));
+        assert!(rendered.iter().any(|line| line == "`code` and **bold**"));
+        assert!(rendered.iter().any(|line| line == "  # stdout"));
+        assert!(rendered.iter().any(|line| line == "  `ok` and **bold**"));
+    }
+
+    #[test]
+    fn compact_line_diff_handles_insertions() {
+        let old = ["a", "b", "c"];
+        let new = ["a", "inserted", "b", "c"];
+
+        let diff = compact_line_diff(&old, &new, 20);
+
+        assert_eq!(
+            diff,
+            vec![
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    text: "a".to_string(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Added,
+                    text: "inserted".to_string(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    text: "b".to_string(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    text: "c".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_rendering_truncates_to_available_width() {
+        let old = ["short"];
+        let new = ["abcdefghijklmnopqrstuvwxyz"];
+        let diff = compact_line_diff(&old, &new, 20);
+        assert!(
+            diff.iter()
+                .any(|line| line.text == "abcdefghijklmnopqrstuvwxyz")
+        );
+
+        let mut out = Vec::new();
+        push_diff_output(
+            &mut out,
+            "file.txt",
+            Some("short"),
+            "abcdefghijklmnopqrstuvwxyz",
+            12,
+        );
+        let rendered: Vec<String> = out.iter().map(line_text).collect();
+
+        assert!(rendered.iter().any(|line| line == "    + abc..."));
     }
 
     #[test]

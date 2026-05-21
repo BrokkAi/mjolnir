@@ -6,7 +6,7 @@
 
 use agent_client_protocol::schema::{
     ContentBlock, PermissionOption, SessionConfigId, SessionConfigValueId, SessionUpdate,
-    StopReason, ToolCallUpdate,
+    StopReason, ToolCallUpdate, Usage,
 };
 use tokio::sync::oneshot;
 
@@ -30,7 +30,13 @@ pub enum UiEvent {
     PermissionRequest(PermissionPrompt),
     /// The prompt turn completed (PromptRequest returned). UI can re-enable
     /// the input prompt.
-    PromptDone { stop_reason: StopReason },
+    PromptDone {
+        stop_reason: StopReason,
+        usage: Option<Usage>,
+    },
+    /// The prompt request failed before returning a stop reason. UI can
+    /// re-enable the input prompt and surface the error.
+    PromptFailed { message: String },
     /// A non-fatal error from the runtime (e.g. transport hiccup we
     /// recovered from). Shown in the status line.
     Warning(String),
