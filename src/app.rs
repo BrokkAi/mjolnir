@@ -208,6 +208,8 @@ pub struct AppState {
     pub status_line: Option<StatusMessage>,
     /// Slash-command autocomplete state, recomputed on every input edit.
     pub autocomplete: Autocomplete,
+    /// True while the keyboard help overlay is visible.
+    pub help_overlay: bool,
 }
 
 #[derive(Debug)]
@@ -255,6 +257,7 @@ impl AppState {
             runtime_closed: false,
             status_line: None,
             autocomplete: Autocomplete::default(),
+            help_overlay: false,
         }
     }
 

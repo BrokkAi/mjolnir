@@ -6,17 +6,20 @@
 //! to the runtime when the user submits prompts or cancels.
 
 use std::io::{self, Stdout};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use agent_client_protocol::schema::AvailableCommandInput;
 use anyhow::{Context, Result};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode, KeyEventKind,
-    KeyModifiers,
+    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use futures::StreamExt;
 use ratatui::Terminal;
@@ -33,6 +36,8 @@ use crate::app::{
     config_option_current_value_label, permission_kind_label, stop_reason_label,
 };
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
+
+static KEYBOARD_ENHANCEMENT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Default)]
 struct TranscriptScrollState {
@@ -133,12 +138,22 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         return;
     }
 
+    if state.help_overlay {
+        if is_help_key(key.modifiers, key.code) || matches!(key.code, KeyCode::Esc) {
+            state.help_overlay = false;
+        }
+        return;
+    }
+
     if state.runtime_closed {
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c'))
             | (KeyModifiers::CONTROL, KeyCode::Char('d'))
             | (_, KeyCode::Esc) => {
                 state.exit_reason = Some(UiExitReason::Quit);
+            }
+            (_, code) if should_open_help(state, key.modifiers, code) => {
+                state.help_overlay = true;
             }
             (_, KeyCode::PageUp) => {
                 state.scroll_offset = state.scroll_offset.saturating_add(5);
@@ -148,6 +163,11 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             }
             _ => {}
         }
+        return;
+    }
+
+    if should_open_help(state, key.modifiers, key.code) {
+        state.help_overlay = true;
         return;
     }
 
@@ -229,6 +249,16 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         }
         _ => {}
     }
+}
+
+fn is_help_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
+    modifiers.is_empty() && matches!(code, KeyCode::Char('?') | KeyCode::F(10))
+}
+
+fn should_open_help(state: &AppState, modifiers: KeyModifiers, code: KeyCode) -> bool {
+    modifiers.is_empty()
+        && (matches!(code, KeyCode::F(10))
+            || (state.input.is_empty() && matches!(code, KeyCode::Char('?'))))
 }
 
 fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
@@ -386,11 +416,31 @@ fn open_config_value_picker_for_shortcut(
 }
 
 fn config_shortcut_key(modifiers: KeyModifiers, code: KeyCode) -> Option<char> {
-    if modifiers != KeyModifiers::CONTROL {
+    if modifiers.is_empty()
+        && let KeyCode::F(n @ 1..=9) = code
+    {
+        return char::from_digit(n.into(), 10);
+    }
+
+    if !modifiers.contains(KeyModifiers::CONTROL)
+        || modifiers.intersects(
+            KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
+        )
+    {
         return None;
     }
     match code {
         KeyCode::Char(c @ '1'..='9') => Some(c),
+        // French AZERTY number-row keys emit these characters without Shift.
+        KeyCode::Char('&') => Some('1'),
+        KeyCode::Char('\u{e9}') => Some('2'),
+        KeyCode::Char('"') => Some('3'),
+        KeyCode::Char('\'') => Some('4'),
+        KeyCode::Char('(') => Some('5'),
+        KeyCode::Char('-') => Some('6'),
+        KeyCode::Char('\u{e8}') => Some('7'),
+        KeyCode::Char('_') => Some('8'),
+        KeyCode::Char('\u{e7}') => Some('9'),
         _ => None,
     }
 }
@@ -398,6 +448,21 @@ fn config_shortcut_key(modifiers: KeyModifiers, code: KeyCode) -> Option<char> {
 pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
+
+    if matches!(supports_keyboard_enhancement(), Ok(true)) {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        )
+        .context("enable keyboard enhancement")?;
+        KEYBOARD_ENHANCEMENT_ENABLED.store(true, Ordering::SeqCst);
+    }
+
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("enter alt screen")?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend).context("ratatui terminal")?;
@@ -405,6 +470,9 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 }
 
 pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    if KEYBOARD_ENHANCEMENT_ENABLED.swap(false, Ordering::SeqCst) {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -452,6 +520,10 @@ fn draw(
 
     if let Some(pending) = state.pending_permission() {
         draw_permission_modal(f, f.area(), pending, state.pending_permission_count());
+    }
+
+    if state.help_overlay {
+        draw_help_modal(f, f.area());
     }
 }
 
@@ -634,6 +706,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         && state.turn != TurnState::Streaming
         && !state.has_pending_permission()
         && state.config_picker.is_none()
+        && !state.help_overlay
     {
         // Place a fake cursor at end of input. Estimated, ASCII only.
         let cursor_x = area.x + 1 + (state.input.len().min((area.width - 2) as usize) as u16);
@@ -656,7 +729,7 @@ fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppStat
     for (_, option, shortcut) in options {
         let current = config_option_current_value_label(option);
         let chip = match shortcut {
-            Some(shortcut) => format!("[^{shortcut} {}: {current}]", option.name),
+            Some(shortcut) => format!("[F{shortcut} {}: {current}]", option.name),
             None => format!("[{}: {current}]", option.name),
         };
         chips.push(chip);
@@ -766,6 +839,57 @@ fn draw_permission_modal(
     let footer = Paragraph::new("Up/Down to choose | Enter to confirm | Esc to cancel")
         .style(Style::default().fg(Color::DarkGray));
     f.render_widget(footer, layout[2]);
+}
+
+fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
+    let width = area.width.saturating_sub(8).min(82);
+    let height = 18.min(area.height.saturating_sub(4));
+    if width < 40 || height < 10 {
+        return;
+    }
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let rect = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" help ")
+        .style(Style::default().fg(Color::Green));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "General",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  Enter        send prompt / accept selected item"),
+        Line::from("  Ctrl-C       cancel streaming turn; quit when idle with empty input"),
+        Line::from("  Ctrl-D       quit when input is empty"),
+        Line::from("  PageUp/Down  scroll transcript"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Overlays",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  ? or F10     open / close this help"),
+        Line::from("  Esc          dismiss overlay, autocomplete, or clear input"),
+        Line::from("  Tab          accept selected slash command"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Config",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  F1..F9       edit the matching config option"),
+        Line::from("  Ctrl-1..9    hidden fallback for terminals where function keys are awkward"),
+        Line::from("  Up/Down      move inside config or permission choices"),
+        Line::from(""),
+        Line::from("Built-in command: /mj:agents switches agent"),
+    ];
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, inner);
 }
 
 fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -1028,6 +1152,36 @@ mod tests {
     }
 
     #[test]
+    fn help_overlay_opens_and_closes_from_keyboard() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(10)));
+        assert!(state.help_overlay);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+        assert!(!state.help_overlay);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('?')));
+        assert!(state.help_overlay);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('?')));
+        assert!(!state.help_overlay);
+    }
+
+    #[test]
+    fn question_mark_types_when_input_is_not_empty() {
+        let mut state = AppState::new();
+        state.input = "why".to_string();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('?')));
+
+        assert!(!state.help_overlay);
+        assert_eq!(state.input, "why?");
+    }
+
+    #[test]
     fn slash_mj_agents_triggers_swap_exit_reason() {
         let mut state = AppState::new();
         state.session_id = Some("s-1".to_string());
@@ -1187,6 +1341,116 @@ mod tests {
             &cmd_tx,
             key_with_modifiers(KeyCode::Char('2'), KeyModifiers::CONTROL),
         );
+
+        let picker = state.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.selected_option, 1);
+        assert_eq!(picker.selected_value, 0);
+    }
+
+    #[test]
+    fn ctrl_shift_digit_opens_matching_config_value_picker() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![
+                    SessionConfigSelectOption::new("model-1", "Model 1"),
+                    SessionConfigSelectOption::new("model-2", "Model 2"),
+                ],
+            ),
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "ask",
+                vec![
+                    SessionConfigSelectOption::new("ask", "Ask"),
+                    SessionConfigSelectOption::new("code", "Code"),
+                ],
+            ),
+        ];
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(
+                KeyCode::Char('2'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+
+        let picker = state.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.selected_option, 1);
+        assert_eq!(picker.selected_value, 0);
+    }
+
+    #[test]
+    fn ctrl_azerty_number_row_key_opens_matching_config_value_picker() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![
+                    SessionConfigSelectOption::new("model-1", "Model 1"),
+                    SessionConfigSelectOption::new("model-2", "Model 2"),
+                ],
+            ),
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "ask",
+                vec![
+                    SessionConfigSelectOption::new("ask", "Ask"),
+                    SessionConfigSelectOption::new("code", "Code"),
+                ],
+            ),
+        ];
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('\u{e9}'), KeyModifiers::CONTROL),
+        );
+
+        let picker = state.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.selected_option, 1);
+        assert_eq!(picker.selected_value, 0);
+    }
+
+    #[test]
+    fn function_key_opens_matching_config_value_picker() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![
+                    SessionConfigSelectOption::new("model-1", "Model 1"),
+                    SessionConfigSelectOption::new("model-2", "Model 2"),
+                ],
+            ),
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "ask",
+                vec![
+                    SessionConfigSelectOption::new("ask", "Ask"),
+                    SessionConfigSelectOption::new("code", "Code"),
+                ],
+            ),
+        ];
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
 
         let picker = state.config_picker.as_ref().expect("picker");
         assert_eq!(picker.selected_option, 1);
