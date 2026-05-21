@@ -542,14 +542,13 @@ fn draw(
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
 ) {
-    let has_config_options = !state.selectable_config_options().is_empty();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(3),
-            Constraint::Length(if has_config_options { 1 } else { 0 }),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(f.area());
@@ -557,7 +556,7 @@ fn draw(
     draw_header(f, chunks[0], state);
     draw_transcript(f, chunks[1], state, transcript_scroll);
     draw_input(f, chunks[2], state);
-    draw_config_shortcuts_row(f, chunks[3], state);
+    draw_activity_row(f, chunks[3], state);
     draw_status(f, chunks[4], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
@@ -596,29 +595,15 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         .unwrap_or_else(|| "no session".to_string());
     let mode = state.current_mode.as_deref().unwrap_or("-");
     let base = Style::default().bg(Color::DarkGray).fg(Color::White);
-    let mut spans = vec![
+    let spans = vec![
         Span::styled(" mjolnir ", base.add_modifier(Modifier::BOLD)),
         Span::styled("| ", base.fg(Color::Gray)),
-    ];
-    if needs_live_redraw(state) {
-        spans.push(Span::styled(spinner_frame(), base.fg(Color::Cyan)));
-        spans.push(Span::styled(" ", base));
-    }
-    spans.push(Span::styled(
-        connection_state_label(state),
-        base.fg(connection_state_color(state.connection_state)),
-    ));
-    spans.extend([
-        Span::styled(" | session ", base.fg(Color::Gray)),
+        Span::styled("session ", base.fg(Color::Gray)),
         Span::styled(session, base.fg(Color::LightYellow)),
         Span::styled(" | mode ", base.fg(Color::Gray)),
         Span::styled(mode.to_string(), base.fg(Color::Cyan)),
-        Span::styled(" | ", base.fg(Color::Gray)),
-        Span::styled(turn_elapsed_label(state), base.fg(Color::Green)),
-        Span::styled(" | ", base.fg(Color::Gray)),
-        Span::styled(token_usage_label(state), base.fg(Color::Magenta)),
         Span::styled(" ", base),
-    ]);
+    ];
     let p = Paragraph::new(Line::from(spans)).style(base);
     f.render_widget(p, area);
 }
@@ -1338,28 +1323,40 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     }
 }
 
-fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+fn draw_activity_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if area.height == 0 {
         return;
     }
 
-    let options = state.selectable_config_options();
-    if options.is_empty() {
-        return;
+    let base = Style::default().fg(Color::DarkGray);
+    let mut spans = vec![Span::styled("status ", base)];
+    if needs_live_redraw(state) {
+        spans.push(Span::styled(
+            spinner_frame(),
+            Style::default().fg(Color::Cyan),
+        ));
+        spans.push(Span::raw(" "));
     }
-
-    let mut chips = Vec::with_capacity(options.len());
-    for (_, option, shortcut) in options {
-        let current = config_option_current_value_label(option);
-        let chip = match shortcut {
-            Some(shortcut) => format!("[F{shortcut} {}: {current}]", option.name),
-            None => format!("[{}: {current}]", option.name),
-        };
-        chips.push(chip);
+    spans.extend([
+        Span::styled(
+            connection_state_label(state),
+            Style::default().fg(connection_state_color(state.connection_state)),
+        ),
+        Span::styled(" | ", base),
+        Span::styled(turn_elapsed_label(state), Style::default().fg(Color::Green)),
+        Span::styled(" | ", base),
+        Span::styled(
+            token_usage_label(state),
+            Style::default().fg(Color::Magenta),
+        ),
+    ]);
+    if !state.agent_label.is_empty() {
+        spans.extend([
+            Span::styled(" | agent ", base),
+            Span::styled(state.agent_label.clone(), Style::default().fg(Color::Cyan)),
+        ]);
     }
-
-    let text = format!("config: {}", chips.join(" "));
-    let paragraph = Paragraph::new(text).style(Style::default().fg(Color::Cyan));
+    let paragraph = Paragraph::new(Line::from(spans));
     f.render_widget(paragraph, area);
 }
 
