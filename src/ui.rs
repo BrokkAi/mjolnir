@@ -542,13 +542,14 @@ fn draw(
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
 ) {
+    let has_config_options = !state.selectable_config_options().is_empty();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(3),
             Constraint::Min(3),
             Constraint::Length(3),
-            Constraint::Length(1),
+            Constraint::Length(if has_config_options { 1 } else { 0 }),
             Constraint::Length(1),
         ])
         .split(f.area());
@@ -556,7 +557,7 @@ fn draw(
     draw_header(f, chunks[0], state);
     draw_transcript(f, chunks[1], state, transcript_scroll);
     draw_input(f, chunks[2], state);
-    draw_activity_row(f, chunks[3], state);
+    draw_config_shortcuts_row(f, chunks[3], state);
     draw_status(f, chunks[4], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
@@ -581,50 +582,50 @@ fn draw(
 }
 
 fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let block = Block::default().borders(Borders::ALL).title(" mjolnir ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
     let session = state
         .session_id
         .as_deref()
-        .map(|s| {
-            let mut t = s.to_string();
-            if t.len() > 12 {
-                t.truncate(12);
-                t.push_str("...");
-            }
-            t
-        })
+        .map(str::to_string)
         .unwrap_or_else(|| "no session".to_string());
-    let mode = state.current_mode.as_deref().unwrap_or("-");
-    let base = Style::default().bg(Color::DarkGray).fg(Color::White);
-    let spans = vec![
-        Span::styled(" mjolnir ", base.add_modifier(Modifier::BOLD)),
-        Span::styled("| ", base.fg(Color::Gray)),
-        Span::styled("session ", base.fg(Color::Gray)),
-        Span::styled(session, base.fg(Color::LightYellow)),
-        Span::styled(" | mode ", base.fg(Color::Gray)),
-        Span::styled(mode.to_string(), base.fg(Color::Cyan)),
-        Span::styled(" ", base),
+    let conn_color = connection_state_color(state.connection_state);
+    let mut spans = vec![
+        Span::styled("session ", Style::default().fg(Color::Gray)),
+        Span::styled(session, Style::default().fg(Color::LightYellow)),
+        Span::raw("    "),
     ];
-    let p = Paragraph::new(Line::from(spans)).style(base);
-    f.render_widget(p, area);
+    if needs_live_redraw(state) {
+        spans.push(Span::styled(spinner_frame(), Style::default().fg(conn_color)));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(
+        connection_state_label(state),
+        Style::default().fg(conn_color),
+    ));
+    spans.extend([
+        Span::raw("   "),
+        Span::styled(turn_elapsed_label(state), Style::default().fg(Color::Green)),
+        Span::raw("   "),
+        Span::styled(
+            token_usage_label(state),
+            Style::default().fg(Color::Magenta),
+        ),
+    ]);
+
+    let p = Paragraph::new(Line::from(spans));
+    f.render_widget(p, inner);
 }
 
-/// Render the lifecycle state for the header. Once the agent has identified
-/// itself we suffix the label with the agent name so users with multiple
-/// running clients can tell them apart.
 pub(crate) fn connection_state_label(state: &AppState) -> String {
-    let agent_suffix = || {
-        if state.agent_label.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", state.agent_label)
-        }
-    };
     match state.connection_state {
         ConnectionState::Launching => "launching...".to_string(),
-        ConnectionState::Initializing => format!("initializing{}", agent_suffix()),
-        ConnectionState::Ready => format!("ready{}", agent_suffix()),
-        ConnectionState::Streaming => format!("streaming{}", agent_suffix()),
-        ConnectionState::Cancelling => format!("cancelling{}", agent_suffix()),
+        ConnectionState::Initializing => "initializing".to_string(),
+        ConnectionState::Ready => "ready".to_string(),
+        ConnectionState::Streaming => "streaming".to_string(),
+        ConnectionState::Cancelling => "cancelling".to_string(),
         ConnectionState::Closed => "disconnected".to_string(),
         ConnectionState::Fatal => "fatal".to_string(),
     }
@@ -1322,40 +1323,27 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     }
 }
 
-fn draw_activity_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if area.height == 0 {
         return;
     }
 
-    let base = Style::default().fg(Color::DarkGray);
-    let mut spans = vec![Span::styled("status ", base)];
-    if needs_live_redraw(state) {
-        spans.push(Span::styled(
-            spinner_frame(),
-            Style::default().fg(Color::Cyan),
-        ));
-        spans.push(Span::raw(" "));
+    let options = state.selectable_config_options();
+    if options.is_empty() {
+        return;
     }
-    spans.extend([
-        Span::styled(
-            connection_state_label(state),
-            Style::default().fg(connection_state_color(state.connection_state)),
-        ),
-        Span::styled(" | ", base),
-        Span::styled(turn_elapsed_label(state), Style::default().fg(Color::Green)),
-        Span::styled(" | ", base),
-        Span::styled(
-            token_usage_label(state),
-            Style::default().fg(Color::Magenta),
-        ),
-    ]);
-    if !state.agent_label.is_empty() {
-        spans.extend([
-            Span::styled(" | agent ", base),
-            Span::styled(state.agent_label.clone(), Style::default().fg(Color::Cyan)),
-        ]);
+
+    let mut chips = Vec::with_capacity(options.len());
+    for (_, option, shortcut) in options {
+        let current = config_option_current_value_label(option);
+        let chip = match shortcut {
+            Some(shortcut) => format!("[F{shortcut} {}: {current}]", option.name),
+            None => format!("[{}: {current}]", option.name),
+        };
+        chips.push(chip);
     }
-    let paragraph = Paragraph::new(Line::from(spans));
+
+    let paragraph = Paragraph::new(chips.join(" ")).style(Style::default().fg(Color::Cyan));
     f.render_widget(paragraph, area);
 }
 

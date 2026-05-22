@@ -816,11 +816,6 @@ impl AppState {
                 {
                     self.current_mode = Some(value.to_string());
                 }
-
-                self.set_status_line(
-                    StatusKind::Info,
-                    config_options_summary(&self.session_config_options),
-                );
             }
             SessionUpdate::SessionInfoUpdate(info) => {
                 if let Some(title) = info.title.value() {
@@ -939,41 +934,6 @@ pub fn config_option_choices(option: &SessionConfigOption) -> Option<Vec<ConfigV
     }
 }
 
-/// Summarize the current config options for the status line.
-pub fn config_options_summary(options: &[SessionConfigOption]) -> String {
-    let mut supported: Vec<String> = options
-        .iter()
-        .filter_map(|option| match &option.kind {
-            SessionConfigKind::Select(_) => Some(config_option_summary(option)),
-            _ => None,
-        })
-        .collect();
-
-    if supported.is_empty() {
-        return "session config options updated".to_string();
-    }
-
-    let remaining = supported.len().saturating_sub(3);
-    supported.truncate(3);
-    let mut text = format!("config: {}", supported.join(", "));
-    if remaining > 0 {
-        text.push_str(&format!(" (+{remaining} more)"));
-    }
-    text
-}
-
-pub fn config_option_summary(option: &SessionConfigOption) -> String {
-    let mut text = format!(
-        "{}={}",
-        option.name,
-        config_option_current_value_label(option)
-    );
-    if let Some(category) = config_option_category_text(option.category.as_ref()) {
-        text.push_str(&format!(" [{category}]"));
-    }
-    text
-}
-
 fn config_shortcut_char(select_index: usize) -> Option<char> {
     (select_index < 9).then_some((b'1' + select_index as u8) as char)
 }
@@ -1011,17 +971,6 @@ fn config_select_choices(select: &SessionConfigSelect) -> Vec<ConfigValueChoice>
             .collect(),
         _ => Vec::new(),
     }
-}
-
-fn config_option_category_text(category: Option<&SessionConfigOptionCategory>) -> Option<String> {
-    let category = category?;
-    Some(match category {
-        SessionConfigOptionCategory::Mode => "mode".to_string(),
-        SessionConfigOptionCategory::Model => "model".to_string(),
-        SessionConfigOptionCategory::ThoughtLevel => "thought_level".to_string(),
-        SessionConfigOptionCategory::Other(value) => value.clone(),
-        _ => "other".to_string(),
-    })
 }
 
 /// Format a permission option label for the modal. Returned strings are
@@ -1296,9 +1245,7 @@ mod tests {
 
         assert_eq!(s.session_config_options.len(), 2);
         assert_eq!(s.current_mode.as_deref(), Some("ask"));
-        let status = s.status_line.expect("status");
-        assert_eq!(status.kind, StatusKind::Info);
-        assert!(status.text.contains("Session Mode=Ask"));
+        assert!(s.status_line.is_none());
     }
 
     #[test]
