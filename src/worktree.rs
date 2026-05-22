@@ -16,11 +16,34 @@ use anyhow::{Context, Result, anyhow, bail};
 
 const WORKTREE_IGNORE_ENTRY: &str = ".mjolnir/worktrees/";
 
+/// Adjectives for random worktree names (adjective-noun style, like
+/// Docker container names). Kept short so the header label stays
+/// compact.
+const ADJECTIVES: &[&str] = &[
+    "bold", "brave", "bright", "calm", "clear", "cozy", "crisp", "dark", "deep", "eager", "fair",
+    "fast", "fine", "fresh", "glad", "happy", "jolly", "keen", "kind", "lucky", "merry", "neat",
+    "noble", "odd", "pale", "proud", "quick", "quiet", "rare", "rich", "safe", "sharp", "silly",
+    "slim", "soft", "swift", "tall", "thin", "vivid", "warm", "wild", "wise", "witty", "zany",
+];
+
+/// Nouns for random worktree names.
+const NOUNS: &[&str] = &[
+    "badger", "bear", "bird", "bloom", "brook", "cedar", "cloud", "coral", "crane", "dawn", "deer",
+    "dove", "eagle", "ember", "falcon", "fern", "flame", "forge", "fox", "frost", "gem", "grove",
+    "harbor", "hawk", "heron", "ivy", "jade", "lake", "lark", "leaf", "maple", "marsh", "moss",
+    "oak", "orchid", "otter", "owl", "pine", "quartz", "raven", "reef", "ridge", "river", "robin",
+    "sage", "storm", "thorn", "tide", "trout", "willow",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatedWorktree {
     pub project_root: PathBuf,
     pub worktree_root: PathBuf,
     pub session_cwd: PathBuf,
+    /// True when the worktree was freshly created by this invocation
+    /// (as opposed to being reused via `--worktree <name>`). Used by
+    /// the exit prompt to decide whether to offer cleanup.
+    pub was_created: bool,
 }
 
 /// Resolve the current Git project, ensure the Mjolnir worktree directory is
@@ -42,7 +65,7 @@ fn create_for_project_cwd(project_root: &Path, cwd: &Path) -> Result<CreatedWork
     std::fs::create_dir_all(&worktrees_dir)
         .with_context(|| format!("create {}", worktrees_dir.display()))?;
 
-    let worktree_root = unique_worktree_path(project_root, &worktrees_dir)?;
+    let worktree_root = unique_worktree_path(&worktrees_dir)?;
     run_git(
         project_root,
         [
@@ -63,7 +86,150 @@ fn create_for_project_cwd(project_root: &Path, cwd: &Path) -> Result<CreatedWork
         project_root: project_root.to_path_buf(),
         worktree_root,
         session_cwd,
+        was_created: true,
     })
+}
+
+/// Open an existing worktree by name (short name under
+/// `.mjolnir/worktrees/`) or by path (absolute or relative to `cwd`).
+/// The target directory must already exist and be a registered Git
+/// worktree.
+pub fn open_existing_for_cwd_prompting(
+    cwd: &Path,
+    name_or_path: &str,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<CreatedWorktree> {
+    let project_root = git_toplevel(cwd)?;
+    prompt_to_ignore_worktrees(&project_root, input, output)?;
+
+    let wdir = worktrees_dir(&project_root);
+    // Try short name first (most common), then treat as a cwd-relative
+    // path, then as an absolute path.
+    let worktree_root =
+        if !name_or_path.contains(std::path::is_separator) && !name_or_path.starts_with('.') {
+            let candidate = wdir.join(name_or_path);
+            if candidate.is_dir() {
+                candidate
+            } else if Path::new(name_or_path).is_dir() {
+                std::fs::canonicalize(name_or_path)
+                    .with_context(|| format!("resolve path {}", name_or_path))?
+            } else {
+                bail!(
+                    "worktree '{}' not found under {} and not a valid path",
+                    name_or_path,
+                    wdir.display()
+                );
+            }
+        } else if Path::new(name_or_path).is_absolute() {
+            PathBuf::from(name_or_path)
+        } else {
+            let resolved = cwd.join(name_or_path);
+            if !resolved.is_dir() {
+                bail!("worktree path does not exist: {}", resolved.display());
+            }
+            std::fs::canonicalize(&resolved)
+                .with_context(|| format!("resolve path {}", resolved.display()))?
+        };
+
+    if !worktree_root.is_dir() {
+        bail!("worktree path does not exist: {}", worktree_root.display());
+    }
+
+    // Verify it is actually a Git-linked worktree (has a .git file
+    // pointing back to the parent repo).
+    let git_file = worktree_root.join(".git");
+    if !git_file.exists() {
+        bail!(
+            "directory {} does not look like a Git worktree (no .git file)",
+            worktree_root.display()
+        );
+    }
+
+    let relative_cwd = relative_cwd(&project_root, cwd)?;
+    let session_cwd = worktree_root.join(relative_cwd);
+    if !session_cwd.is_dir() {
+        std::fs::create_dir_all(&session_cwd)
+            .with_context(|| format!("create session cwd {}", session_cwd.display()))?;
+    }
+
+    Ok(CreatedWorktree {
+        project_root,
+        worktree_root,
+        session_cwd,
+        was_created: false,
+    })
+}
+
+/// Ask the user whether to remove the worktree after the session ends.
+/// Returns Ok(true) when the worktree was successfully removed.
+pub fn prompt_remove_on_exit(
+    worktree: &CreatedWorktree,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool> {
+    let label = worktree
+        .worktree_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| worktree.worktree_root.display().to_string());
+    write!(output, "Remove worktree '{label}'? [y/N] ")?;
+    output.flush()?;
+
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    if !is_yes(answer.trim()) {
+        writeln!(
+            output,
+            "Keeping worktree: {}",
+            worktree.worktree_root.display()
+        )?;
+        return Ok(false);
+    }
+
+    match remove_worktree(&worktree.project_root, &worktree.worktree_root) {
+        Ok(()) => {
+            writeln!(output, "Removed worktree '{label}'.")?;
+            Ok(true)
+        }
+        Err(e) => {
+            writeln!(
+                output,
+                "Failed to remove worktree '{label}': {e:#}\n\
+                 Worktree kept at: {}",
+                worktree.worktree_root.display()
+            )?;
+            Ok(false)
+        }
+    }
+}
+
+/// Remove a Git-linked worktree. Runs `git worktree remove` from the
+/// project root; also cleans up the directory on disk if Git left it
+/// behind (e.g. when the .git metadata is stale).
+fn remove_worktree(project_root: &Path, worktree_root: &Path) -> Result<()> {
+    run_git(
+        project_root,
+        [
+            OsStr::new("worktree"),
+            OsStr::new("remove"),
+            OsStr::new("--force"),
+            worktree_root.as_os_str(),
+        ],
+    )
+    .with_context(|| format!("git worktree remove {}", worktree_root.display()))?;
+
+    // Belt-and-suspenders: if `git worktree remove --force` left the
+    // directory behind (can happen with stale metadata), clean it up.
+    if worktree_root.is_dir() {
+        std::fs::remove_dir_all(worktree_root)
+            .with_context(|| format!("remove worktree dir {}", worktree_root.display()))?;
+    }
+
+    // Prune stale worktree entries from the parent repo's metadata.
+    let _ = run_git(project_root, [OsStr::new("worktree"), OsStr::new("prune")]);
+
+    Ok(())
 }
 
 fn prompt_to_ignore_worktrees(
@@ -199,67 +365,66 @@ fn relative_cwd(project_root: &Path, cwd: &Path) -> Result<PathBuf> {
     Ok(relative.to_path_buf())
 }
 
-fn unique_worktree_path(project_root: &Path, worktrees_dir: &Path) -> Result<PathBuf> {
-    let branch = current_branch_slug(project_root).unwrap_or_else(|| "detached".to_string());
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    let pid = std::process::id();
+/// Pick a random adjective-noun combination for the worktree directory
+/// name. Mixes timestamp and PID for extra entropy so rapid invocations
+/// don't collide. Retries with a suffix on collision.
+fn unique_worktree_path(worktrees_dir: &Path) -> Result<PathBuf> {
+    let seed = mix_seed(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        std::process::id(),
+    );
 
     for attempt in 0..100_u32 {
-        let suffix = if attempt == 0 {
-            format!("{millis}-{pid}")
+        let mixed = seed
+            .wrapping_add(attempt as u64)
+            .wrapping_mul(6364136223846793005);
+        let adj = ADJECTIVES[(mixed as usize) % ADJECTIVES.len()];
+        let noun = NOUNS[((mixed >> 16) as usize) % NOUNS.len()];
+        let name = if attempt == 0 {
+            format!("{adj}-{noun}")
         } else {
-            format!("{millis}-{pid}-{attempt}")
+            format!("{adj}-{noun}-{attempt}")
         };
-        let path = worktrees_dir.join(format!("{branch}-{suffix}"));
+        let path = worktrees_dir.join(&name);
         if !path.exists() {
             return Ok(path);
         }
     }
 
     Err(anyhow!(
-        "could not find an unused worktree path under {}",
+        "could not find an unused worktree name under {}",
         worktrees_dir.display()
     ))
 }
 
-fn current_branch_slug(project_root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(project_root)
-        .args(["branch", "--show-current"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8(output.stdout).ok()?;
-    let slug = sanitize_path_component(branch.trim());
-    (!slug.is_empty()).then_some(slug)
+/// Generate a random adjective-noun name (without collision checking).
+/// Used for tests and potential future display needs.
+#[cfg(test)]
+fn random_worktree_name() -> String {
+    let seed = mix_seed(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        std::process::id(),
+    );
+    let mixed = seed.wrapping_mul(6364136223846793005);
+    let adj = ADJECTIVES[(mixed as usize) % ADJECTIVES.len()];
+    let noun = NOUNS[((mixed >> 16) as usize) % NOUNS.len()];
+    format!("{adj}-{noun}")
 }
 
-fn sanitize_path_component(value: &str) -> String {
-    let mut out = String::new();
-    let mut previous_dash = false;
-    for ch in value.chars() {
-        let mapped = if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-            ch
-        } else {
-            '-'
-        };
-        if mapped == '-' {
-            if previous_dash {
-                continue;
-            }
-            previous_dash = true;
-        } else {
-            previous_dash = false;
-        }
-        out.push(mapped);
-    }
-    out.trim_matches('-').chars().take(64).collect()
+/// Mix timestamp and PID into a u64 seed for random name generation.
+/// Uses a simple hash mix to spread entropy across both values.
+fn mix_seed(nanos: u128, pid: u32) -> u64 {
+    let hi = (nanos >> 64) as u64;
+    let lo = nanos as u64;
+    lo.wrapping_add(hi)
+        .wrapping_mul(0x9E3779B97F4A7C15)
+        .wrapping_add(pid as u64)
 }
 
 fn worktrees_dir(project_root: &Path) -> PathBuf {
@@ -383,6 +548,7 @@ mod tests {
         );
         assert_eq!(created.session_cwd, created.worktree_root.join("nested"));
         assert!(created.session_cwd.join("file.txt").exists());
+        assert!(created.was_created);
     }
 
     #[test]
@@ -403,6 +569,132 @@ mod tests {
             created.worktree_root.join("scratch/empty")
         );
         assert!(created.session_cwd.is_dir());
+    }
+
+    #[test]
+    fn random_name_is_adjective_noun_format() {
+        let name = random_worktree_name();
+        let parts: Vec<&str> = name.split('-').collect();
+        assert_eq!(parts.len(), 2, "expected adjective-noun, got: {name}");
+        assert!(
+            ADJECTIVES.contains(&parts[0]),
+            "first part '{}' not in ADJECTIVES",
+            parts[0]
+        );
+        assert!(
+            NOUNS.contains(&parts[1]),
+            "second part '{}' not in NOUNS",
+            parts[1]
+        );
+    }
+
+    #[test]
+    fn unique_worktree_path_produces_nonexistent_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wt_dir = dir.path().join(".mjolnir").join("worktrees");
+        std::fs::create_dir_all(&wt_dir).expect("mkdir");
+
+        let path = unique_worktree_path(&wt_dir).expect("unique path");
+        assert!(path.starts_with(&wt_dir));
+        assert!(!path.exists());
+
+        // Create the first name so the next call is forced to retry.
+        std::fs::create_dir_all(&path).expect("mkdir");
+        let path2 = unique_worktree_path(&wt_dir).expect("unique path 2");
+        assert!(path != path2, "second call should pick a different name");
+    }
+
+    #[test]
+    fn open_existing_finds_worktree_by_short_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+        std::fs::write(dir.path().join("file.txt"), "hello").expect("write file");
+        run_git(dir.path(), [OsStr::new("add"), OsStr::new(".")]).expect("git add");
+        commit_all(dir.path());
+
+        let created = create_for_project_cwd(dir.path(), dir.path()).expect("create worktree");
+        let name = created
+            .worktree_root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let reopened = open_existing_for_cwd_prompting(
+            dir.path(),
+            &name,
+            &mut Cursor::new(b""),
+            &mut Vec::new(),
+        )
+        .expect("open existing");
+
+        assert_eq!(
+            std::fs::canonicalize(&reopened.worktree_root).expect("canon"),
+            std::fs::canonicalize(&created.worktree_root).expect("canon")
+        );
+        assert!(!reopened.was_created);
+    }
+
+    #[test]
+    fn open_existing_rejects_nonexistent_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+        std::fs::write(dir.path().join("file.txt"), "hello").expect("write file");
+        run_git(dir.path(), [OsStr::new("add"), OsStr::new(".")]).expect("git add");
+        commit_all(dir.path());
+
+        let result = open_existing_for_cwd_prompting(
+            dir.path(),
+            "no-such-worktree",
+            &mut Cursor::new(b""),
+            &mut Vec::new(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn prompt_remove_asks_and_removes_when_user_says_yes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+        std::fs::write(dir.path().join("file.txt"), "hello").expect("write file");
+        run_git(dir.path(), [OsStr::new("add"), OsStr::new(".")]).expect("git add");
+        commit_all(dir.path());
+
+        let created = create_for_project_cwd(dir.path(), dir.path()).expect("create worktree");
+        assert!(created.worktree_root.is_dir());
+
+        let mut input = Cursor::new(b"yes\n".to_vec());
+        let mut output = Vec::new();
+        let removed = prompt_remove_on_exit(&created, &mut input, &mut output).expect("prompt");
+
+        assert!(removed, "worktree should have been removed");
+        assert!(!created.worktree_root.is_dir(), "directory should be gone");
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("Removed worktree"));
+    }
+
+    #[test]
+    fn prompt_remove_keeps_worktree_when_user_says_no() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+        std::fs::write(dir.path().join("file.txt"), "hello").expect("write file");
+        run_git(dir.path(), [OsStr::new("add"), OsStr::new(".")]).expect("git add");
+        commit_all(dir.path());
+
+        let created = create_for_project_cwd(dir.path(), dir.path()).expect("create worktree");
+        assert!(created.worktree_root.is_dir());
+
+        let mut input = Cursor::new(b"no\n".to_vec());
+        let mut output = Vec::new();
+        let removed = prompt_remove_on_exit(&created, &mut input, &mut output).expect("prompt");
+
+        assert!(!removed, "worktree should have been kept");
+        assert!(
+            created.worktree_root.is_dir(),
+            "directory should still exist"
+        );
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("Keeping worktree"));
     }
 
     fn init_git_repo(path: &Path) {

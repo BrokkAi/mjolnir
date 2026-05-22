@@ -40,10 +40,14 @@ struct Cli {
     #[arg(long, env = "BROKK_TUI_LOG")]
     log_file: Option<PathBuf>,
 
-    /// Create a linked Git worktree under <project>/.mjolnir/worktrees
-    /// and run the ACP session there.
-    #[arg(long)]
-    worktree: bool,
+    /// Run the ACP session in a Git worktree.
+    ///
+    /// With no value, creates a new linked worktree under
+    /// <project>/.mjolnir/worktrees/ with a random adjective-noun name
+    /// (e.g. `bold-robin`). With a value, reuses an existing worktree
+    /// by name (short name under .mjolnir/worktrees/) or by path.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    worktree: Option<String>,
 
     /// Capture the agent subprocess's stderr to this file. When unset
     /// the agent's stderr is discarded via `Stdio::null()` (/dev/null on
@@ -61,11 +65,18 @@ async fn main() -> Result<()> {
         Some(p) => p,
         None => std::env::current_dir().context("current dir")?,
     };
-    let (cwd, worktree) = if cli.worktree {
-        let created = prepare_worktree_cwd(&cwd)?;
-        (created.session_cwd.clone(), Some(created))
-    } else {
-        (cwd, None)
+    let (cwd, worktree) = match cli.worktree.as_deref() {
+        None => (cwd, None),
+        Some("") => {
+            // `--worktree` with no value: create a new one.
+            let created = prepare_new_worktree(&cwd)?;
+            (created.session_cwd.clone(), Some(created))
+        }
+        Some(name_or_path) => {
+            // `--worktree <name>`: reuse an existing one.
+            let created = prepare_existing_worktree(&cwd, name_or_path)?;
+            (created.session_cwd.clone(), Some(created))
+        }
     };
     let worktree_label = worktree
         .as_ref()
@@ -87,12 +98,24 @@ async fn main() -> Result<()> {
     // to stdout now land in their normal scrollback.
     if let Some(w) = worktree.as_ref() {
         println!("Worktree: {}", w.worktree_root.display());
+        // Offer to clean up a freshly-created worktree. Skip the prompt
+        // for reused worktrees — the user explicitly asked to work in
+        // an existing one, so removing it would be surprising.
+        if w.was_created {
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            if let Err(e) = worktree::prompt_remove_on_exit(w, &mut input, &mut output) {
+                tracing::warn!("worktree cleanup prompt failed: {e:#}");
+            }
+        }
     }
 
     result
 }
 
-fn prepare_worktree_cwd(cwd: &std::path::Path) -> Result<CreatedWorktree> {
+fn prepare_new_worktree(cwd: &std::path::Path) -> Result<CreatedWorktree> {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let stdout = std::io::stdout();
@@ -106,8 +129,25 @@ fn prepare_worktree_cwd(cwd: &std::path::Path) -> Result<CreatedWorktree> {
     );
     // Print before the TUI takes over the terminal so the path lands in
     // the user's normal scrollback and is visible during the session.
-    println!("Created worktree at: {}", created.worktree_root.display());
+    println!("Created worktree: {}", created.worktree_root.display());
     Ok(created)
+}
+
+fn prepare_existing_worktree(cwd: &std::path::Path, name_or_path: &str) -> Result<CreatedWorktree> {
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    let opened =
+        worktree::open_existing_for_cwd_prompting(cwd, name_or_path, &mut input, &mut output)?;
+    tracing::info!(
+        project_root = %opened.project_root.display(),
+        worktree_root = %opened.worktree_root.display(),
+        session_cwd = %opened.session_cwd.display(),
+        "reusing existing git worktree"
+    );
+    println!("Using worktree: {}", opened.worktree_root.display());
+    Ok(opened)
 }
 
 async fn run_app(
