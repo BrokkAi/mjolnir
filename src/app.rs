@@ -272,6 +272,10 @@ pub struct AppState {
     pub autocomplete: Autocomplete,
     /// True while the keyboard help overlay is visible.
     pub help_overlay: bool,
+    /// Short label of the linked Git worktree backing this session, when
+    /// `--worktree` was used. Surfaced in the header so users can tell
+    /// concurrent Mjolnir instances apart.
+    pub worktree_label: Option<String>,
 }
 
 #[derive(Debug)]
@@ -323,6 +327,7 @@ impl AppState {
             token_usage: TokenUsage::default(),
             autocomplete: Autocomplete::default(),
             help_overlay: false,
+            worktree_label: None,
         }
     }
 
