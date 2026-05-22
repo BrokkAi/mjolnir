@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use crate::app::UiExitReason;
 use crate::config::{Config, SelectedAgent};
 use crate::picker::PickerOutcome;
+use crate::worktree::CreatedWorktree;
 
 #[derive(Parser)]
 #[command(name = "mj", version, about = "Interactive ACP chat TUI")]
@@ -60,25 +61,38 @@ async fn main() -> Result<()> {
         Some(p) => p,
         None => std::env::current_dir().context("current dir")?,
     };
-    let cwd = if cli.worktree {
-        prepare_worktree_cwd(&cwd)?
+    let (cwd, worktree) = if cli.worktree {
+        let created = prepare_worktree_cwd(&cwd)?;
+        (created.session_cwd.clone(), Some(created))
     } else {
-        cwd
+        (cwd, None)
     };
+    let worktree_label = worktree
+        .as_ref()
+        .and_then(|w| w.worktree_root.file_name())
+        .map(|n| n.to_string_lossy().into_owned());
 
     let mut terminal = ui::setup_terminal().context("setup terminal")?;
 
     // Run the application; ensure the terminal is restored even on
     // error so the user's shell isn't left in alt-screen / raw mode.
-    let result = run_app(&mut terminal, cwd, cli.agent_stderr).await;
+    let result = run_app(&mut terminal, cwd, cli.agent_stderr, worktree_label).await;
 
     if let Err(e) = ui::restore_terminal(&mut terminal) {
         tracing::warn!("restore terminal failed: {e}");
     }
+
+    // Remind the user where the worktree lives so they don't lose track
+    // of their work — the alt-screen has just been torn down, so writes
+    // to stdout now land in their normal scrollback.
+    if let Some(w) = worktree.as_ref() {
+        println!("Worktree: {}", w.worktree_root.display());
+    }
+
     result
 }
 
-fn prepare_worktree_cwd(cwd: &std::path::Path) -> Result<PathBuf> {
+fn prepare_worktree_cwd(cwd: &std::path::Path) -> Result<CreatedWorktree> {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let stdout = std::io::stdout();
@@ -90,13 +104,17 @@ fn prepare_worktree_cwd(cwd: &std::path::Path) -> Result<PathBuf> {
         session_cwd = %created.session_cwd.display(),
         "created git worktree"
     );
-    Ok(created.session_cwd)
+    // Print before the TUI takes over the terminal so the path lands in
+    // the user's normal scrollback and is visible during the session.
+    println!("Created worktree at: {}", created.worktree_root.display());
+    Ok(created)
 }
 
 async fn run_app(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     cwd: PathBuf,
     agent_stderr: Option<PathBuf>,
+    worktree_label: Option<String>,
 ) -> Result<()> {
     let config_path = config::default_config_path();
     let mut cfg = Config::load(&config_path)?;
@@ -125,7 +143,14 @@ async fn run_app(
             }
         };
 
-        let reason = run_session(terminal, &agent, cwd.clone(), agent_stderr.clone()).await?;
+        let reason = run_session(
+            terminal,
+            &agent,
+            cwd.clone(),
+            agent_stderr.clone(),
+            worktree_label.clone(),
+        )
+        .await?;
         match reason {
             UiExitReason::Quit => return Ok(()),
             UiExitReason::SwapAgent => {
@@ -180,6 +205,7 @@ async fn run_session(
     agent: &SelectedAgent,
     cwd: PathBuf,
     agent_stderr: Option<PathBuf>,
+    worktree_label: Option<String>,
 ) -> Result<UiExitReason> {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -202,7 +228,7 @@ async fn run_session(
         }
     });
 
-    let ui_result = ui::run(terminal, cmd_tx, event_rx).await;
+    let ui_result = ui::run(terminal, cmd_tx, event_rx, worktree_label).await;
 
     // Shutdown paths reaching this point:
     //

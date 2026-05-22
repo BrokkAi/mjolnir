@@ -88,8 +88,9 @@ pub async fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     mut event_rx: mpsc::UnboundedReceiver<UiEvent>,
+    worktree_label: Option<String>,
 ) -> Result<UiExitReason> {
-    ui_loop(terminal, &cmd_tx, &mut event_rx).await
+    ui_loop(terminal, &cmd_tx, &mut event_rx, worktree_label).await
 }
 
 /// Maximum redraw rate. Events/keystrokes flip a `dirty` flag, but the
@@ -103,8 +104,10 @@ async fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
+    worktree_label: Option<String>,
 ) -> Result<UiExitReason> {
     let mut state = AppState::new();
+    state.worktree_label = worktree_label;
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut crossterm_events = EventStream::new();
     // Wake-up timer so we still get scheduled to draw when no events
@@ -595,15 +598,19 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         .unwrap_or_else(|| "no session".to_string());
     let mode = state.current_mode.as_deref().unwrap_or("-");
     let base = Style::default().bg(Color::DarkGray).fg(Color::White);
-    let spans = vec![
+    let mut spans = vec![
         Span::styled(" mjolnir ", base.add_modifier(Modifier::BOLD)),
         Span::styled("| ", base.fg(Color::Gray)),
         Span::styled("session ", base.fg(Color::Gray)),
         Span::styled(session, base.fg(Color::LightYellow)),
         Span::styled(" | mode ", base.fg(Color::Gray)),
         Span::styled(mode.to_string(), base.fg(Color::Cyan)),
-        Span::styled(" ", base),
     ];
+    if let Some(label) = state.worktree_label.as_deref() {
+        spans.push(Span::styled(" | worktree ", base.fg(Color::Gray)));
+        spans.push(Span::styled(label.to_string(), base.fg(Color::LightMagenta)));
+    }
+    spans.push(Span::styled(" ", base));
     let p = Paragraph::new(Line::from(spans)).style(base);
     f.render_widget(p, area);
 }
