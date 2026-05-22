@@ -13,6 +13,7 @@ mod install;
 mod picker;
 mod registry;
 mod ui;
+mod worktree;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -38,6 +39,11 @@ struct Cli {
     #[arg(long, env = "BROKK_TUI_LOG")]
     log_file: Option<PathBuf>,
 
+    /// Create a linked Git worktree under <project>/.mjolnir/worktrees
+    /// and run the ACP session there.
+    #[arg(long)]
+    worktree: bool,
+
     /// Capture the agent subprocess's stderr to this file. When unset
     /// the agent's stderr is discarded via `Stdio::null()` (/dev/null on
     /// Unix, NUL on Windows) so it doesn't scribble over the TUI.
@@ -54,6 +60,11 @@ async fn main() -> Result<()> {
         Some(p) => p,
         None => std::env::current_dir().context("current dir")?,
     };
+    let cwd = if cli.worktree {
+        prepare_worktree_cwd(&cwd)?
+    } else {
+        cwd
+    };
 
     let mut terminal = ui::setup_terminal().context("setup terminal")?;
 
@@ -65,6 +76,21 @@ async fn main() -> Result<()> {
         tracing::warn!("restore terminal failed: {e}");
     }
     result
+}
+
+fn prepare_worktree_cwd(cwd: &std::path::Path) -> Result<PathBuf> {
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    let created = worktree::create_for_cwd_prompting(cwd, &mut input, &mut output)?;
+    tracing::info!(
+        project_root = %created.project_root.display(),
+        worktree_root = %created.worktree_root.display(),
+        session_cwd = %created.session_cwd.display(),
+        "created git worktree"
+    );
+    Ok(created.session_cwd)
 }
 
 async fn run_app(

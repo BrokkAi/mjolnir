@@ -20,6 +20,7 @@ inside the TUI to switch to a different agent later.
 - Slash-command autocomplete from commands advertised by the agent, plus a
   client-side `/mj:` namespace (`/mj:agents` to re-open the picker).
 - Optional file logging for the TUI and separate stderr capture for the agent.
+- Optional linked Git worktree sessions under `.mjolnir/worktrees/`.
 
 ## Requirements
 
@@ -66,6 +67,11 @@ and reused on subsequent launches.
   directory.
 - `--log-file`: write TUI logs to a file. Equivalent env var:
   `BROKK_TUI_LOG`.
+- `--worktree`: create a linked Git worktree under
+  `<project>/.mjolnir/worktrees/` and run the ACP session from the matching
+  directory inside that worktree. When the path is not already ignored, `mj`
+  prompts before startup and adds `.mjolnir/worktrees/` to the project
+  `.gitignore` if you answer yes.
 - `--agent-stderr`: capture the agent subprocess stderr to a file. Equivalent
   env var: `BROKK_TUI_AGENT_STDERR`.
 
@@ -99,6 +105,8 @@ enabled.
 - `~/.config/mj/config.toml` — the persisted choice (program + args + env).
 - `~/.cache/mj/registry.json` — cached registry index, refreshed every 24h.
 - `~/.cache/mj/agents/<id>/<version>/` — extracted binary distributions.
+- `<project>/.mjolnir/worktrees/` — linked Git worktrees created by
+  `mj --worktree`.
 
 ## Development
 
