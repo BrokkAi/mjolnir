@@ -600,7 +600,10 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         Span::styled(session, Style::default().fg(Color::LightYellow)),
     ];
     if let Some(label) = state.worktree_label.as_deref() {
-        spans.push(Span::styled("   worktree ", Style::default().fg(Color::Gray)));
+        spans.push(Span::styled(
+            "   worktree ",
+            Style::default().fg(Color::Gray),
+        ));
         spans.push(Span::styled(
             label.to_string(),
             Style::default().fg(Color::LightMagenta),
@@ -608,7 +611,10 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     }
     spans.push(Span::raw("    "));
     if needs_live_redraw(state) {
-        spans.push(Span::styled(spinner_frame(), Style::default().fg(conn_color)));
+        spans.push(Span::styled(
+            spinner_frame(),
+            Style::default().fg(conn_color),
+        ));
         spans.push(Span::raw(" "));
     }
     spans.push(Span::styled(
