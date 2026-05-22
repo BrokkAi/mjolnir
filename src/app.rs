@@ -1926,19 +1926,13 @@ mod tests {
         assert!(s.is_streaming(), "Streaming must count as streaming");
         s.input = "/cre".to_string();
         s.update_autocomplete();
-        assert!(
-            !s.autocomplete.visible,
-            "Streaming: popover must be hidden"
-        );
+        assert!(!s.autocomplete.visible, "Streaming: popover must be hidden");
 
         // Cancelling: still a turn in flight; popover stays hidden, the
         // prompt timer keeps running, duplicate user chunks stay suppressed.
         s.mark_cancelling();
         assert_eq!(s.connection_state, ConnectionState::Cancelling);
-        assert!(
-            s.is_streaming(),
-            "Cancelling must still count as streaming"
-        );
+        assert!(s.is_streaming(), "Cancelling must still count as streaming");
         s.update_autocomplete();
         assert!(
             !s.autocomplete.visible,
