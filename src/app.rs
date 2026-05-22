@@ -258,6 +258,10 @@ pub struct AppState {
     /// Scroll offset measured in rendered lines from the bottom of the
     /// transcript. `0` keeps the view pinned to the newest line.
     pub scroll_offset: usize,
+    /// When false, tool-call outputs are truncated to a small line budget
+    /// in the transcript so streaming bursts don't push the conversation
+    /// off-screen. Ctrl-T flips this for the whole session.
+    pub expand_tool_outputs: bool,
     pub exit_reason: Option<UiExitReason>,
     /// True once the runtime has stopped accepting commands.
     pub runtime_closed: bool,
@@ -315,6 +319,7 @@ impl AppState {
             permission_queue: VecDeque::new(),
             config_picker: None,
             scroll_offset: 0,
+            expand_tool_outputs: false,
             exit_reason: None,
             runtime_closed: false,
             status_line: None,
@@ -335,6 +340,14 @@ impl AppState {
 
     fn bump_transcript_revision(&mut self) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
+    /// Flip the global tool-output collapse setting. Bumps the transcript
+    /// revision so the renderer rebuilds its cached `Vec<Line>` with the
+    /// new line budget.
+    pub fn toggle_expand_tool_outputs(&mut self) {
+        self.expand_tool_outputs = !self.expand_tool_outputs;
+        self.bump_transcript_revision();
     }
 
     /// True while a prompt turn is in flight (i.e. we are waiting for or

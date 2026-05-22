@@ -13,8 +13,8 @@ use agent_client_protocol::schema::AvailableCommandInput;
 use anyhow::{Context, Result};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -98,6 +98,12 @@ pub async fn run(
 /// a full `Paragraph` word-wrap of the entire transcript) while keeping
 /// input latency below human perception.
 const FRAME_BUDGET: Duration = Duration::from_millis(33);
+
+/// Maximum number of lines we render from each tool-output entry when
+/// `expand_tool_outputs` is false. Picked to keep the head of long
+/// stdout / diff dumps visible without flushing the surrounding
+/// conversation out of the viewport while a turn is streaming.
+const TOOL_OUTPUT_COLLAPSED_LINES: usize = 6;
 
 async fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -184,9 +190,19 @@ fn needs_live_redraw(state: &AppState) -> bool {
     )
 }
 
+/// How many wrapped lines a single mouse-wheel notch scrolls the
+/// transcript. Three matches the common terminal default for line-mode
+/// scroll, so the feel is close to the surrounding shell.
+const MOUSE_SCROLL_STEP: usize = 3;
+
 fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>, ev: CtEvent) {
-    let CtEvent::Key(key) = ev else {
-        return;
+    let key = match ev {
+        CtEvent::Key(k) => k,
+        CtEvent::Mouse(m) => {
+            handle_mouse(state, m);
+            return;
+        }
+        _ => return,
     };
     if key.kind != KeyEventKind::Press {
         return;
@@ -209,12 +225,23 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             (_, code) if should_open_help(state, key.modifiers, code) => {
                 state.help_overlay = true;
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+                state.toggle_expand_tool_outputs();
+            }
             (_, KeyCode::PageUp) => {
                 state.scroll_offset = state.scroll_offset.saturating_add(5);
             }
             (_, KeyCode::PageDown) => {
                 state.scroll_offset = state.scroll_offset.saturating_sub(5);
             }
+            (_, KeyCode::Up) => {
+                state.scroll_offset = state.scroll_offset.saturating_add(1);
+            }
+            (_, KeyCode::Down) => {
+                state.scroll_offset = state.scroll_offset.saturating_sub(1);
+            }
+            (_, KeyCode::Home) => scroll_to_top(state),
+            (_, KeyCode::End) => scroll_to_bottom(state),
             _ => {}
         }
         return;
@@ -282,11 +309,10 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         (KeyModifiers::CONTROL, KeyCode::Char('d')) if state.input.is_empty() => {
             state.exit_reason = Some(UiExitReason::Quit);
         }
-        (_, KeyCode::Enter) => submit_prompt(state, cmd_tx),
-        (_, KeyCode::Char(c)) => {
-            state.input.push(c);
-            state.update_autocomplete();
+        (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+            state.toggle_expand_tool_outputs();
         }
+        (_, KeyCode::Enter) => submit_prompt(state, cmd_tx),
         (_, KeyCode::Backspace) => {
             state.input.pop();
             state.update_autocomplete();
@@ -297,12 +323,50 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         (_, KeyCode::PageDown) => {
             state.scroll_offset = state.scroll_offset.saturating_sub(5);
         }
+        (_, KeyCode::Up) => {
+            state.scroll_offset = state.scroll_offset.saturating_add(1);
+        }
+        (_, KeyCode::Down) => {
+            state.scroll_offset = state.scroll_offset.saturating_sub(1);
+        }
+        (_, KeyCode::Home) => scroll_to_top(state),
+        (_, KeyCode::End) => scroll_to_bottom(state),
+        (_, KeyCode::Char(c)) => {
+            state.input.push(c);
+            state.update_autocomplete();
+        }
         (_, KeyCode::Esc) => {
             state.input.clear();
             state.update_autocomplete();
         }
         _ => {}
     }
+}
+
+/// Translate mouse wheel events into transcript scroll. The terminal's
+/// native scrollback is suppressed by `EnableMouseCapture`, so without
+/// this the wheel does nothing at all.
+fn handle_mouse(state: &mut AppState, ev: MouseEvent) {
+    match ev.kind {
+        MouseEventKind::ScrollUp => {
+            state.scroll_offset = state.scroll_offset.saturating_add(MOUSE_SCROLL_STEP);
+        }
+        MouseEventKind::ScrollDown => {
+            state.scroll_offset = state.scroll_offset.saturating_sub(MOUSE_SCROLL_STEP);
+        }
+        _ => {}
+    }
+}
+
+/// `Home` jumps to the oldest line. `usize::MAX` is clamped by
+/// `TranscriptScrollState::reconcile` to the actual transcript height on
+/// the next draw, so we don't need to know the current line count here.
+fn scroll_to_top(state: &mut AppState) {
+    state.scroll_offset = usize::MAX;
+}
+
+fn scroll_to_bottom(state: &mut AppState) {
+    state.scroll_offset = 0;
 }
 
 fn is_help_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
@@ -714,7 +778,8 @@ fn draw_transcript(
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
 ) {
-    let block = Block::default().borders(Borders::ALL).title(" transcript ");
+    let title = transcript_block_title(state);
+    let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -761,8 +826,31 @@ fn draw_transcript(
     f.render_widget(paragraph, inner);
 }
 
+/// Block title for the transcript pane. Adds a scroll indicator when
+/// `scroll_offset > 0` so the user knows they're no longer following the
+/// stream and can press End / scroll down to re-attach. The expand
+/// state for tool outputs is appended so Ctrl-T's effect is visible.
+fn transcript_block_title(state: &AppState) -> String {
+    let mut title = String::from(" transcript ");
+    if state.scroll_offset > 0 {
+        title.push_str(&format!(
+            "[scrolled +{} | End to follow] ",
+            state.scroll_offset
+        ));
+    }
+    if state.expand_tool_outputs {
+        title.push_str("[tool output: expanded | Ctrl-T] ");
+    }
+    title
+}
+
 fn render_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
+    let collapse_limit = if state.expand_tool_outputs {
+        None
+    } else {
+        Some(TOOL_OUTPUT_COLLAPSED_LINES)
+    };
     for entry in &state.transcript {
         match entry {
             Entry::UserPrompt(text) => push_plain_block(&mut out, "you", Color::Cyan, text.clone()),
@@ -811,7 +899,7 @@ fn render_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
                         ),
                         Span::raw(view.title.clone()),
                     ]));
-                    push_tool_outputs(&mut out, &view.body, width);
+                    push_tool_outputs(&mut out, &view.body, width, collapse_limit);
                     out.push(Line::from(""));
                 }
             }
@@ -1037,15 +1125,29 @@ fn inline_markdown_spans(raw: &str) -> Vec<Span<'static>> {
     spans
 }
 
-fn push_tool_outputs(out: &mut Vec<Line<'static>>, outputs: &[ToolCallOutput], width: u16) {
+fn push_tool_outputs(
+    out: &mut Vec<Line<'static>>,
+    outputs: &[ToolCallOutput],
+    width: u16,
+    collapse_limit: Option<usize>,
+) {
     for output in outputs {
         match output {
-            ToolCallOutput::Text(text) => push_tool_text_lines(out, text.clone(), 2),
+            ToolCallOutput::Text(text) => {
+                push_tool_text_lines(out, text.clone(), 2, collapse_limit)
+            }
             ToolCallOutput::Diff {
                 path,
                 old_text,
                 new_text,
-            } => push_diff_output(out, path, old_text.as_deref(), new_text, width),
+            } => push_diff_output(
+                out,
+                path,
+                old_text.as_deref(),
+                new_text,
+                width,
+                collapse_limit,
+            ),
             ToolCallOutput::Terminal { terminal_id } => {
                 out.push(Line::from(vec![
                     Span::styled("  terminal ", Style::default().fg(Color::DarkGray)),
@@ -1062,12 +1164,38 @@ fn push_tool_outputs(out: &mut Vec<Line<'static>>, outputs: &[ToolCallOutput], w
     }
 }
 
-fn push_tool_text_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize) {
+fn push_tool_text_lines(
+    out: &mut Vec<Line<'static>>,
+    text: String,
+    indent: usize,
+    collapse_limit: Option<usize>,
+) {
     let prefix = " ".repeat(indent);
-    for raw in text.split('\n') {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let (visible_count, hidden) = match collapse_limit {
+        Some(limit) if lines.len() > limit => (limit, lines.len() - limit),
+        _ => (lines.len(), 0),
+    };
+    for raw in &lines[..visible_count] {
         let line = format!("{prefix}{raw}");
         out.push(Line::from(Span::styled(line, tool_output_line_style(raw))));
     }
+    if hidden > 0 {
+        push_collapse_hint(out, indent, hidden);
+    }
+}
+
+/// Trailing "K more lines hidden" hint shown under collapsed tool outputs
+/// so the user can tell something was elided rather than assuming the
+/// output just ended.
+fn push_collapse_hint(out: &mut Vec<Line<'static>>, indent: usize, hidden: usize) {
+    let prefix = " ".repeat(indent);
+    out.push(Line::from(Span::styled(
+        format!("{prefix}... {hidden} more lines hidden (Ctrl-T to expand)"),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )));
 }
 
 fn tool_output_line_style(raw: &str) -> Style {
@@ -1099,6 +1227,7 @@ fn push_diff_output(
     old_text: Option<&str>,
     new_text: &str,
     width: u16,
+    collapse_limit: Option<usize>,
 ) {
     out.push(Line::from(vec![
         Span::styled("  diff ", Style::default().fg(Color::DarkGray)),
@@ -1107,7 +1236,8 @@ fn push_diff_output(
 
     let old_lines: Vec<&str> = old_text.unwrap_or("").lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
-    for diff_line in compact_line_diff(&old_lines, &new_lines, 80) {
+    let diff_budget = collapse_limit.unwrap_or(80);
+    for diff_line in compact_line_diff(&old_lines, &new_lines, diff_budget) {
         let (prefix, color) = match diff_line.kind {
             DiffLineKind::Added => ("+ ", Color::Green),
             DiffLineKind::Removed => ("- ", Color::Red),
@@ -1462,7 +1592,7 @@ fn draw_permission_modal(
 
 fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
     let width = area.width.saturating_sub(8).min(82);
-    let height = 18.min(area.height.saturating_sub(4));
+    let height = 22.min(area.height.saturating_sub(4));
     if width < 40 || height < 10 {
         return;
     }
@@ -1486,7 +1616,16 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  Enter        send prompt / accept selected item"),
         Line::from("  Ctrl-C       cancel streaming turn; quit when idle with empty input"),
         Line::from("  Ctrl-D       quit when input is empty"),
-        Line::from("  PageUp/Down  scroll transcript"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Scroll transcript",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  Up/Down      scroll one line"),
+        Line::from("  PageUp/Down  scroll five lines"),
+        Line::from("  Home/End     jump to top / bottom (End re-attaches to live stream)"),
+        Line::from("  Mouse wheel  scroll three lines per notch"),
+        Line::from("  Ctrl-T       expand/collapse tool outputs"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Overlays",
@@ -1939,6 +2078,162 @@ mod tests {
     }
 
     #[test]
+    fn arrow_keys_scroll_transcript_one_line() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        assert_eq!(state.scroll_offset, 2);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        assert_eq!(state.scroll_offset, 1);
+    }
+
+    #[test]
+    fn home_jumps_to_top_and_end_re_attaches_to_stream() {
+        let mut state = AppState::new();
+        state.scroll_offset = 12;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Home));
+        // `usize::MAX` is the sentinel that `reconcile` clamps to the top
+        // of the actual transcript on the next draw.
+        assert_eq!(state.scroll_offset, usize::MAX);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::End));
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_transcript() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        let wheel = |kind| {
+            CtEvent::Mouse(MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        handle_crossterm(&mut state, &cmd_tx, wheel(MouseEventKind::ScrollUp));
+        assert_eq!(state.scroll_offset, MOUSE_SCROLL_STEP);
+
+        handle_crossterm(&mut state, &cmd_tx, wheel(MouseEventKind::ScrollUp));
+        assert_eq!(state.scroll_offset, MOUSE_SCROLL_STEP * 2);
+
+        handle_crossterm(&mut state, &cmd_tx, wheel(MouseEventKind::ScrollDown));
+        assert_eq!(state.scroll_offset, MOUSE_SCROLL_STEP);
+    }
+
+    #[test]
+    fn ctrl_t_toggles_tool_output_expansion() {
+        let mut state = AppState::new();
+        assert!(!state.expand_tool_outputs);
+        let starting_revision = state.transcript_revision();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.expand_tool_outputs);
+        assert_ne!(
+            state.transcript_revision(),
+            starting_revision,
+            "toggle must bump revision so the renderer cache is invalidated"
+        );
+        // 't' character must not leak into the input buffer.
+        assert!(state.input.is_empty());
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+        assert!(!state.expand_tool_outputs);
+    }
+
+    #[test]
+    fn tool_output_collapses_long_text_with_hint_by_default() {
+        let mut state = AppState::new();
+        let long = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "log".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Text(long)],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        // First TOOL_OUTPUT_COLLAPSED_LINES lines are visible.
+        assert!(rendered.iter().any(|line| line == "  line 1"));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == &format!("  line {}", TOOL_OUTPUT_COLLAPSED_LINES))
+        );
+        // Everything past the budget is hidden.
+        assert!(
+            !rendered
+                .iter()
+                .any(|line| line == &format!("  line {}", TOOL_OUTPUT_COLLAPSED_LINES + 1))
+        );
+        // And a hint tells the user the rest exists.
+        let hidden = 20 - TOOL_OUTPUT_COLLAPSED_LINES;
+        assert!(
+            rendered.iter().any(|line| line
+                == &format!(
+                    "  ... {hidden} more lines hidden (Ctrl-T to expand)"
+                )),
+            "missing collapse hint, got: {rendered:?}"
+        );
+
+        // After expanding, every line is rendered and the hint disappears.
+        state.expand_tool_outputs = true;
+        let expanded: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(expanded.iter().any(|line| line == "  line 20"));
+        assert!(
+            !expanded
+                .iter()
+                .any(|line| line.contains("more lines hidden"))
+        );
+    }
+
+    #[test]
+    fn transcript_block_title_surfaces_scroll_and_expand_state() {
+        let mut state = AppState::new();
+        assert_eq!(transcript_block_title(&state), " transcript ");
+
+        state.scroll_offset = 7;
+        assert!(transcript_block_title(&state).contains("[scrolled +7"));
+        assert!(transcript_block_title(&state).contains("End to follow"));
+
+        state.scroll_offset = 0;
+        state.expand_tool_outputs = true;
+        assert!(transcript_block_title(&state).contains("tool output: expanded"));
+    }
+
+    #[test]
     fn transcript_renders_markdown_blocks() {
         let mut state = AppState::new();
         state.transcript.push(Entry::AgentMessage(
@@ -2076,6 +2371,7 @@ mod tests {
             Some("short"),
             "abcdefghijklmnopqrstuvwxyz",
             12,
+            None,
         );
         let rendered: Vec<String> = out.iter().map(line_text).collect();
 
