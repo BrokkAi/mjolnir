@@ -134,21 +134,15 @@ impl ToolCallView {
     }
 }
 
-/// Status of the current prompt turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TurnState {
-    /// No prompt in flight; user can type and send.
-    Idle,
-    /// We sent a PromptRequest and are waiting for chunks.
-    Streaming,
-}
-
 /// Lifecycle of the ACP connection from launch through shutdown.
 ///
 /// Driven by `UiEvent`s from the ACP runtime plus a couple of UI-initiated
 /// transitions (`record_user_prompt`, `mark_cancelling`). The header label
 /// is derived from this state, so it doubles as the externally visible
 /// connection indicator described in PLANS.md M1.
+///
+/// "Turn in flight" is derived from this enum via `AppState::is_streaming`
+/// — `Streaming` and `Cancelling` both count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
     /// Agent process is being spawned and `initialize` is in flight.
@@ -250,7 +244,6 @@ pub struct AppState {
     /// visible changed.
     transcript_revision: u64,
     pub input: String,
-    pub turn: TurnState,
     /// FIFO queue of permission prompts. The front element is the one
     /// currently shown in the modal; new requests are pushed to the back
     /// so they aren't silently dropped when one is already on screen.
@@ -319,7 +312,6 @@ impl AppState {
             tool_calls: HashMap::new(),
             transcript_revision: 0,
             input: String::new(),
-            turn: TurnState::Idle,
             permission_queue: VecDeque::new(),
             config_picker: None,
             scroll_offset: 0,
@@ -345,8 +337,20 @@ impl AppState {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
     }
 
+    /// True while a prompt turn is in flight (i.e. we are waiting for or
+    /// finishing the agent's response). Single source of truth for input
+    /// gating, Ctrl-C handling, autocomplete visibility, and cursor
+    /// placement — derived from `connection_state` so the turn-in-flight
+    /// signal cannot drift from the lifecycle enum.
+    pub fn is_streaming(&self) -> bool {
+        matches!(
+            self.connection_state,
+            ConnectionState::Streaming | ConnectionState::Cancelling
+        )
+    }
+
     pub fn active_turn_elapsed(&self) -> Option<Duration> {
-        if self.turn == TurnState::Streaming {
+        if self.is_streaming() {
             self.turn_started_at.map(|started| started.elapsed())
         } else {
             None
@@ -367,7 +371,6 @@ impl AppState {
     /// Mark the runtime as closed and switch the UI into read-only mode.
     pub fn mark_runtime_closed(&mut self) {
         self.runtime_closed = true;
-        self.turn = TurnState::Idle;
         self.finish_turn_timer();
         self.cancel_all_pending_permissions();
         self.config_picker = None;
@@ -449,7 +452,6 @@ impl AppState {
     pub fn record_user_prompt(&mut self, text: String) {
         self.transcript.push(Entry::UserPrompt(text));
         self.bump_transcript_revision();
-        self.turn = TurnState::Streaming;
         self.connection_state = ConnectionState::Streaming;
         self.turn_started_at = Some(Instant::now());
         self.last_turn_elapsed = None;
@@ -554,7 +556,7 @@ impl AppState {
         let trigger_active = self.input.starts_with('/')
             && !self.has_pending_permission()
             && self.config_picker.is_none()
-            && self.turn == TurnState::Idle;
+            && !self.is_streaming();
         if !trigger_active {
             self.autocomplete = Autocomplete::default();
             return;
@@ -696,7 +698,6 @@ impl AppState {
                 self.transcript.push(Entry::System(format!("fatal: {msg}")));
                 self.bump_transcript_revision();
                 self.connection_state = ConnectionState::Fatal;
-                self.turn = TurnState::Idle;
                 self.status_line = Some(StatusMessage::fatal(msg));
                 self.mark_runtime_closed();
             }
@@ -704,7 +705,6 @@ impl AppState {
     }
 
     fn finish_prompt_turn(&mut self) {
-        self.turn = TurnState::Idle;
         self.finish_turn_timer();
         // Drop out of Streaming/Cancelling and back to Ready when the turn
         // lands. Leave non-prompt states (Fatal, Closed, unexpected Ready)
@@ -735,7 +735,7 @@ impl AppState {
                 // chunk is part of a session replay (e.g. from
                 // `session/load`) and the only source of that user
                 // message, so we render it.
-                if self.turn == TurnState::Streaming {
+                if self.is_streaming() {
                     return;
                 }
                 let text = content_block_text(&c.content);
@@ -1101,12 +1101,12 @@ mod tests {
     fn prompt_done_returns_to_idle() {
         let mut s = AppState::new();
         s.record_user_prompt("test".to_string());
-        assert_eq!(s.turn, TurnState::Streaming);
+        assert!(s.is_streaming());
         s.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
             usage: None,
         });
-        assert_eq!(s.turn, TurnState::Idle);
+        assert!(!s.is_streaming());
     }
 
     #[test]
@@ -1250,7 +1250,7 @@ mod tests {
         s.apply_event(UiEvent::Fatal("boom".to_string()));
 
         assert!(s.runtime_closed);
-        assert_eq!(s.turn, TurnState::Idle);
+        assert!(!s.is_streaming());
         assert_eq!(s.connection_state, ConnectionState::Fatal);
         assert!(!s.has_pending_permission());
         assert!(!s.autocomplete.visible);
@@ -1468,7 +1468,7 @@ mod tests {
             usage: None,
         });
         assert_eq!(s.connection_state, ConnectionState::Ready);
-        assert_eq!(s.turn, TurnState::Idle);
+        assert!(!s.is_streaming());
     }
 
     #[test]
@@ -1488,7 +1488,7 @@ mod tests {
         });
 
         assert_eq!(s.connection_state, ConnectionState::Ready);
-        assert_eq!(s.turn, TurnState::Idle);
+        assert!(!s.is_streaming());
         let status = s.status_line.expect("status");
         assert_eq!(status.kind, StatusKind::Warning);
         assert_eq!(status.text, "prompt failed: boom");
@@ -1511,7 +1511,7 @@ mod tests {
             usage: Some(Usage::new(42, 30, 12).thought_tokens(Some(4))),
         });
 
-        assert_eq!(s.turn, TurnState::Idle);
+        assert!(!s.is_streaming());
         assert!(s.last_turn_elapsed().is_some());
         assert_eq!(s.token_usage.total_tokens, Some(42));
         assert_eq!(s.token_usage.input_tokens, Some(30));
@@ -1686,7 +1686,7 @@ mod tests {
         // same chunk is the only source of truth for the user message
         // and must be rendered.
         let mut s = AppState::new();
-        assert_eq!(s.turn, TurnState::Idle);
+        assert!(!s.is_streaming());
         s.apply_event(UiEvent::SessionUpdate(SessionUpdate::UserMessageChunk(
             text_chunk("replayed"),
         )));
@@ -1853,7 +1853,8 @@ mod tests {
         let mut s = AppState::new();
         seed_commands(&mut s);
         s.input = "/cre".to_string();
-        s.turn = TurnState::Streaming;
+        s.record_user_prompt("placeholder".to_string());
+        s.input = "/cre".to_string();
         s.update_autocomplete();
         assert!(
             !s.autocomplete.visible,
@@ -1865,8 +1866,8 @@ mod tests {
     fn autocomplete_reappears_when_streaming_finishes() {
         let mut s = AppState::new();
         seed_commands(&mut s);
+        s.record_user_prompt("placeholder".to_string());
         s.input = "/cre".to_string();
-        s.turn = TurnState::Streaming;
         s.update_autocomplete();
         assert!(!s.autocomplete.visible);
 
@@ -1887,5 +1888,86 @@ mod tests {
 
         s.apply_event(UiEvent::PermissionRequest(permission_prompt()));
         assert!(!s.autocomplete.visible);
+    }
+
+    #[test]
+    fn is_streaming_tracks_connection_state_across_full_turn_lifecycle() {
+        // Pins the single-source-of-truth invariant: is_streaming must
+        // mirror `ConnectionState::Streaming | Cancelling` exactly across
+        // every transition the UI gates on (input enablement, Ctrl-C
+        // routing, autocomplete visibility). If a future change touches
+        // one without the other, this test catches the drift.
+        let mut s = AppState::new();
+        seed_commands(&mut s);
+
+        // Launching / Initializing / Ready: input is editable, popover
+        // shows, Ctrl-C quits rather than cancelling.
+        assert!(!s.is_streaming(), "Launching must not count as streaming");
+        s.apply_event(UiEvent::Connected {
+            agent_name: Some("anvil".into()),
+            agent_version: None,
+        });
+        assert!(
+            !s.is_streaming(),
+            "Initializing must not count as streaming"
+        );
+        s.apply_event(UiEvent::SessionStarted {
+            session_id: "sess-1".into(),
+        });
+        assert!(!s.is_streaming(), "Ready must not count as streaming");
+        s.input = "/cre".to_string();
+        s.update_autocomplete();
+        assert!(s.autocomplete.visible, "Ready: popover must be visible");
+
+        // Streaming: input is greyed out, popover hides, Ctrl-C cancels.
+        s.input.clear();
+        s.record_user_prompt("hi".to_string());
+        assert_eq!(s.connection_state, ConnectionState::Streaming);
+        assert!(s.is_streaming(), "Streaming must count as streaming");
+        s.input = "/cre".to_string();
+        s.update_autocomplete();
+        assert!(
+            !s.autocomplete.visible,
+            "Streaming: popover must be hidden"
+        );
+
+        // Cancelling: still a turn in flight; popover stays hidden, the
+        // prompt timer keeps running, duplicate user chunks stay suppressed.
+        s.mark_cancelling();
+        assert_eq!(s.connection_state, ConnectionState::Cancelling);
+        assert!(
+            s.is_streaming(),
+            "Cancelling must still count as streaming"
+        );
+        s.update_autocomplete();
+        assert!(
+            !s.autocomplete.visible,
+            "Cancelling: popover must remain hidden"
+        );
+        assert!(
+            s.active_turn_elapsed().is_some(),
+            "Cancelling: turn timer must still tick"
+        );
+
+        // PromptDone returns to Ready: popover reappears, input editable again.
+        s.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::Cancelled,
+            usage: None,
+        });
+        assert_eq!(s.connection_state, ConnectionState::Ready);
+        assert!(!s.is_streaming(), "Ready (after turn) must not stream");
+        assert!(
+            s.autocomplete.visible,
+            "Ready (after turn): popover must reappear"
+        );
+
+        // Fatal/Closed: input gating gives way to runtime_closed, but
+        // is_streaming itself must report false either way.
+        s.apply_event(UiEvent::Fatal("kaboom".into()));
+        assert!(!s.is_streaming(), "Fatal must not count as streaming");
+
+        let mut s = AppState::new();
+        s.mark_runtime_closed();
+        assert!(!s.is_streaming(), "Closed must not count as streaming");
     }
 }

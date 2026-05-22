@@ -122,8 +122,9 @@ Status: done.
 
 ### M1: Make the MVP dependable
 
-Status: done (PR #34, 2026-05-20). Follow-up: issue #35 (unify
-`TurnState` with `ConnectionState::Streaming`).
+Status: done (PR #34, 2026-05-20). Issue #35 follow-up retired
+`TurnState`; turn-in-flight is now derived from `ConnectionState` via
+`AppState::is_streaming`.
 
 Goal: the current feature set should feel stable enough for daily local use.
 

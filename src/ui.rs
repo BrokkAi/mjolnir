@@ -33,7 +33,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::app::{
     AppState, ConfigValueChoice, ConnectionState, Entry, PendingPermission, StatusKind,
-    StatusMessage, ToolCallOutput, TurnState, UiExitReason, config_option_choices,
+    StatusMessage, ToolCallOutput, UiExitReason, config_option_choices,
     config_option_current_value_label, permission_kind_label, stop_reason_label,
 };
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
@@ -181,7 +181,7 @@ fn needs_live_redraw(state: &AppState) -> bool {
             | ConnectionState::Initializing
             | ConnectionState::Streaming
             | ConnectionState::Cancelling
-    ) || state.turn == TurnState::Streaming
+    )
 }
 
 fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>, ev: CtEvent) {
@@ -268,7 +268,7 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
 
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-            if state.turn == TurnState::Streaming {
+            if state.is_streaming() {
                 let _ = cmd_tx.send(UiCommand::CancelPrompt);
                 state.mark_cancelling();
                 state.status_line = Some(StatusMessage::info("cancelling..."));
@@ -345,7 +345,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         ));
         return;
     }
-    if state.turn == TurnState::Streaming {
+    if state.is_streaming() {
         state.status_line = Some(StatusMessage::warning("a prompt is already in flight"));
         return;
     }
@@ -437,7 +437,7 @@ fn open_config_value_picker_for_shortcut(
         return false;
     };
 
-    if state.turn == TurnState::Streaming {
+    if state.is_streaming() {
         state.status_line = Some(StatusMessage::warning(
             "finish or cancel the current turn before changing config",
         ));
@@ -1292,13 +1292,12 @@ fn tool_status_color(status: agent_client_protocol::schema::ToolCallStatus) -> C
 fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let title = if state.runtime_closed {
         " runtime closed (Ctrl-C to quit) ".to_string()
+    } else if state.is_streaming() {
+        " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
-        match state.turn {
-            TurnState::Idle => " prompt (Enter to send | Ctrl-C to quit) ".to_string(),
-            TurnState::Streaming => " streaming... (Ctrl-C to cancel) ".to_string(),
-        }
+        " prompt (Enter to send | Ctrl-C to quit) ".to_string()
     };
-    let style = if state.runtime_closed || state.turn == TurnState::Streaming {
+    let style = if state.runtime_closed || state.is_streaming() {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
@@ -1311,7 +1310,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     f.render_widget(paragraph, area);
 
     if !state.runtime_closed
-        && state.turn != TurnState::Streaming
+        && !state.is_streaming()
         && !state.has_pending_permission()
         && state.config_picker.is_none()
         && !state.help_overlay
