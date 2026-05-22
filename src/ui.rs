@@ -608,7 +608,10 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     ];
     if let Some(label) = state.worktree_label.as_deref() {
         spans.push(Span::styled(" | worktree ", base.fg(Color::Gray)));
-        spans.push(Span::styled(label.to_string(), base.fg(Color::LightMagenta)));
+        spans.push(Span::styled(
+            label.to_string(),
+            base.fg(Color::LightMagenta),
+        ));
     }
     spans.push(Span::styled(" ", base));
     let p = Paragraph::new(Line::from(spans)).style(base);
