@@ -250,6 +250,16 @@ pub struct AppState {
     /// Scroll offset measured in rendered lines from the bottom of the
     /// prompt box. `0` keeps the view pinned to the newest line.
     pub input_scroll_offset: usize,
+    /// Previously submitted prompts, oldest first. Used for Up/Down
+    /// navigation in the input buffer.
+    prompt_history: Vec<String>,
+    /// Index into `prompt_history` when navigating history. `None` means
+    /// the user is not currently browsing history (they're editing a fresh
+    /// input or the navigation was reset).
+    history_cursor: Option<usize>,
+    /// Saved input when history navigation starts. Restored when the user
+    /// presses Down past the most recent history entry.
+    history_saved_input: String,
     /// Pasted attachments that exceeded the chip line threshold. Shown as
     /// compact badges in the input box; their contents are concatenated
     /// with `input` when the prompt is submitted.
@@ -351,6 +361,9 @@ impl AppState {
             input_scroll_offset: 0,
             attachments: Vec::new(),
             next_attachment_id: 0,
+            prompt_history: Vec::new(),
+            history_cursor: None,
+            history_saved_input: String::new(),
             permission_queue: VecDeque::new(),
             config_picker: None,
             scroll_offset: 0,
@@ -365,6 +378,83 @@ impl AppState {
             help_overlay: false,
             worktree_label: None,
         }
+    }
+
+    /// Return a copy of the prompt history for persistence.
+    pub fn prompt_history(&self) -> Vec<String> {
+        self.prompt_history.clone()
+    }
+
+    /// Replace the in-memory prompt history (e.g. with entries loaded
+    /// from disk at startup).
+    pub fn set_prompt_history(&mut self, entries: Vec<String>) {
+        self.prompt_history = entries;
+    }
+
+    /// Navigate to the previous (older) prompt in history. Returns `true`
+    /// if the navigation moved (i.e. there is an older entry available).
+    /// Saves the current input the first time in a navigation sequence.
+    pub fn prompt_history_previous(&mut self) -> bool {
+        if self.prompt_history.is_empty() {
+            return false;
+        }
+        let new_cursor = match self.history_cursor {
+            Some(i) => {
+                if i == 0 {
+                    return false; // already at the oldest
+                }
+                i - 1
+            }
+            None => self.prompt_history.len() - 1,
+        };
+        if self.history_cursor.is_none() {
+            self.history_saved_input = self.input.clone();
+        }
+        self.history_cursor = Some(new_cursor);
+        self.input = self.prompt_history[new_cursor].clone();
+        self.input_cursor = self.input.chars().count();
+        self.scroll_input_to_bottom();
+        self.update_autocomplete();
+        true
+    }
+
+    /// Navigate to the next (newer) prompt in history. Returns `true`
+    /// if the navigation moved. When past the most recent entry, the
+    /// saved input is restored and `history_cursor` is set to `None`.
+    pub fn prompt_history_next(&mut self) -> bool {
+        if self.prompt_history.is_empty() {
+            return false;
+        }
+        match self.history_cursor {
+            Some(i) => {
+                if i + 1 >= self.prompt_history.len() {
+                    // Past the end: restore saved input.
+                    let saved = std::mem::take(&mut self.history_saved_input);
+                    self.history_cursor = None;
+                    self.input = saved;
+                    self.input_cursor = self.input.chars().count();
+                    self.scroll_input_to_bottom();
+                    self.update_autocomplete();
+                    true
+                } else {
+                    let new_cursor = i + 1;
+                    self.history_cursor = Some(new_cursor);
+                    self.input = self.prompt_history[new_cursor].clone();
+                    self.input_cursor = self.input.chars().count();
+                    self.scroll_input_to_bottom();
+                    self.update_autocomplete();
+                    true
+                }
+            }
+            None => false, // not currently navigating
+        }
+    }
+
+    /// Reset any ongoing history navigation so the current text is
+    /// treated as a new input. Called whenever the user edits the buffer.
+    pub fn reset_history_navigation(&mut self) {
+        self.history_cursor = None;
+        self.history_saved_input.clear();
     }
 
     /// Monotonic counter that the UI uses as a cache key for the rendered
@@ -504,7 +594,13 @@ impl AppState {
     /// Push a user prompt into the transcript immediately, before the
     /// command reaches the runtime. Keeps the UI responsive.
     pub fn record_user_prompt(&mut self, text: String) {
-        self.transcript.push(Entry::UserPrompt(text));
+        self.transcript.push(Entry::UserPrompt(text.clone()));
+        // Record in prompt history for Up/Down navigation, deduplicating
+        // consecutive identical prompts.
+        if self.prompt_history.last().map(String::as_str) != Some(&text) {
+            self.prompt_history.push(text);
+        }
+        self.reset_history_navigation();
         self.bump_transcript_revision();
         self.connection_state = ConnectionState::Streaming;
         self.turn_started_at = Some(Instant::now());
@@ -1136,8 +1232,8 @@ pub fn stop_reason_label(reason: StopReason) -> &'static str {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        AudioContent, ConfigOptionUpdate, Content, ContentBlock, ContentChunk, Cost, Diff,
-        EmbeddedResource, EmbeddedResourceResource, ImageContent, PermissionOption,
+        AudioContent, AvailableCommand, ConfigOptionUpdate, Content, ContentBlock, ContentChunk,
+        Cost, Diff, EmbeddedResource, EmbeddedResourceResource, ImageContent, PermissionOption,
         PermissionOptionKind, ResourceLink, SessionConfigOption, SessionConfigOptionCategory,
         SessionConfigSelectOption, Terminal, TextContent, TextResourceContents, Usage, UsageUpdate,
     };
@@ -2148,5 +2244,141 @@ mod tests {
         let mut s = AppState::new();
         s.mark_runtime_closed();
         assert!(!s.is_streaming(), "Closed must not count as streaming");
+    }
+
+    // -- Prompt history tests -------------------------------------------------
+
+    #[test]
+    fn prompt_history_previous_next_navigates_and_restores() {
+        let mut s = AppState::new();
+        s.record_user_prompt("first".into());
+        s.record_user_prompt("second".into());
+        s.record_user_prompt("third".into());
+
+        // Start with empty input.
+        s.input = "".into();
+        s.input_cursor = 0;
+
+        // Up navigates to most recent (third).
+        assert!(s.prompt_history_previous());
+        assert_eq!(s.input, "third");
+        assert!(s.prompt_history_previous());
+        assert_eq!(s.input, "second");
+        assert!(s.prompt_history_previous());
+        assert_eq!(s.input, "first");
+        // Already at oldest — no-op.
+        assert!(!s.prompt_history_previous());
+        assert_eq!(s.input, "first");
+
+        // Down forward to newest.
+        assert!(s.prompt_history_next());
+        assert_eq!(s.input, "second");
+        assert!(s.prompt_history_next());
+        assert_eq!(s.input, "third");
+        // Past the end restores saved input (empty).
+        assert!(s.prompt_history_next());
+        assert_eq!(s.input, "");
+
+        // Further Down is a no-op.
+        assert!(!s.prompt_history_next());
+    }
+
+    #[test]
+    fn prompt_history_saves_and_restores_partial_input() {
+        let mut s = AppState::new();
+        s.record_user_prompt("hello".into());
+
+        s.input = "draft".into();
+        s.input_cursor = 5;
+
+        // Up → history.
+        assert!(s.prompt_history_previous());
+        assert_eq!(s.input, "hello");
+        // Down past most recent → saved input restored.
+        assert!(s.prompt_history_next());
+        assert_eq!(s.input, "draft");
+        // history_cursor is None, so no more forward.
+        assert!(!s.prompt_history_next());
+    }
+
+    #[test]
+    fn prompt_history_empty_history_does_nothing() {
+        let mut s = AppState::new();
+        s.input = "abc".into();
+        assert!(!s.prompt_history_previous());
+        assert!(!s.prompt_history_next());
+        assert_eq!(s.input, "abc");
+    }
+
+    #[test]
+    fn prompt_history_editing_resets_navigation() {
+        let mut s = AppState::new();
+        s.record_user_prompt("historical".into());
+        s.input.clear();
+        s.prompt_history_previous();
+        assert_eq!(s.input, "historical");
+
+        // Simulate typing a character (the UI calls reset_history_navigation
+        // inside insert_text_at_cursor).
+        s.reset_history_navigation();
+        // After reset, Down shouldn't navigate.
+        assert!(!s.prompt_history_next());
+        // And Up starts a fresh navigation from the last entry.
+        assert!(s.prompt_history_previous());
+        assert_eq!(s.input, "historical");
+    }
+
+    #[test]
+    fn prompt_history_deduplicates_consecutive_identical_prompts() {
+        let mut s = AppState::new();
+        s.record_user_prompt("dup".into());
+        s.record_user_prompt("dup".into());
+        s.record_user_prompt("unique".into());
+        s.record_user_prompt("dup".into());
+
+        assert_eq!(s.prompt_history.len(), 3);
+        assert_eq!(s.prompt_history[0], "dup");
+        assert_eq!(s.prompt_history[1], "unique");
+        assert_eq!(s.prompt_history[2], "dup");
+    }
+
+    #[test]
+    fn prompt_history_reset_on_autocomplete_accept() {
+        let mut s = AppState::new();
+        s.available_commands
+            .push(AvailableCommand::new("greet", "a friendly greeting"));
+        s.record_user_prompt("greetings".into());
+
+        // Navigate into history.
+        s.input.clear();
+        s.prompt_history_previous();
+        assert_eq!(s.input, "greetings");
+
+        // Simulate autocomplete accept: manual overwrite + reset.
+        s.input = "/greet ".into();
+        s.input_cursor = s.input.chars().count();
+        s.reset_history_navigation();
+
+        // After reset, history is no longer active.
+        assert!(!s.prompt_history_next());
+    }
+
+    #[test]
+    fn prompt_history_starts_new_navigation_after_submit() {
+        let mut s = AppState::new();
+        s.record_user_prompt("a".into());
+        s.input = "prev".into();
+        s.prompt_history_previous();
+        assert_eq!(s.input, "a");
+
+        // Submit a new prompt (record_user_prompt resets navigation).
+        s.input = "b".into();
+        s.record_user_prompt("b".into());
+        assert_eq!(s.prompt_history.len(), 2);
+
+        // New navigation starts from "b".
+        s.input.clear();
+        assert!(s.prompt_history_previous());
+        assert_eq!(s.input, "b");
     }
 }

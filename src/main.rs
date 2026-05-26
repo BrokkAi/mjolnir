@@ -24,7 +24,7 @@ use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 
 use crate::app::UiExitReason;
-use crate::config::{Config, SelectedAgent};
+use crate::config::{Config, SelectedAgent, history_path};
 use crate::picker::PickerOutcome;
 use crate::worktree::CreatedWorktree;
 
@@ -358,7 +358,8 @@ async fn run_session(
         }
     });
 
-    let ui_result = ui::run(terminal, cmd_tx, event_rx, worktree_label).await;
+    let hist_path = history_path();
+    let ui_result = ui::run(terminal, cmd_tx, event_rx, worktree_label, Some(&hist_path)).await;
 
     // Shutdown paths reaching this point:
     //

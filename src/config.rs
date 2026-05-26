@@ -66,9 +66,117 @@ pub fn default_config_path() -> PathBuf {
         .join("config.toml")
 }
 
+/// Path for the persisted prompt-history file (NUL-delimited format to
+/// support multiline prompts): `$XDG_CONFIG_HOME/mj/history.txt`.
+pub fn history_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from(".config"))
+        .join("mj")
+        .join("history.txt")
+}
+
+/// Maximum number of history entries kept on disk. Older entries are
+/// trimmed when the limit is exceeded.
+pub const HISTORY_MAX_ENTRIES: usize = 100;
+
+/// Load the prompt history from a NUL-delimited file (supports multiline
+/// prompts). Returns an empty `Vec` when the file does not exist or is
+/// unreadable.
+pub fn load_history(path: &Path) -> Vec<String> {
+    match std::fs::read_to_string(path).map_err(|e| tracing::warn!("load_history {path:?}: {e}")) {
+        Ok(body) => body
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Persist the prompt history to disk in NUL-delimited format, capped
+/// at `HISTORY_MAX_ENTRIES`.
+pub fn save_history(path: &Path, entries: &[String]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create history dir {}", parent.display()))?;
+    }
+    let tail = if entries.len() > HISTORY_MAX_ENTRIES {
+        &entries[entries.len() - HISTORY_MAX_ENTRIES..]
+    } else {
+        entries
+    };
+    let body = tail.join("\0");
+    std::fs::write(path, body).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_history_returns_empty_for_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history.txt");
+        let entries = load_history(&path);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn load_save_history_roundtrips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history.txt");
+        let entries: Vec<String> = (0..5).map(|i| format!("prompt {i}")).collect();
+        save_history(&path, &entries).expect("save");
+        let loaded = load_history(&path);
+        assert_eq!(loaded, entries);
+    }
+
+    #[test]
+    fn save_history_caps_at_max_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history.txt");
+        let entries: Vec<String> = (0..120).map(|i| format!("prompt {i}")).collect();
+        save_history(&path, &entries).expect("save");
+        let loaded = load_history(&path);
+        assert_eq!(loaded.len(), HISTORY_MAX_ENTRIES);
+        // Keeps the most recent entries (tail).
+        assert_eq!(loaded[0], format!("prompt {}", 120 - HISTORY_MAX_ENTRIES));
+        assert_eq!(loaded[loaded.len() - 1], "prompt 119");
+    }
+
+    #[test]
+    fn save_history_creates_parent_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("deep").join("history.txt");
+        save_history(&path, &["hi".to_string()]).expect("save");
+        assert_eq!(load_history(&path), vec!["hi".to_string()]);
+    }
+
+    #[test]
+    fn save_load_history_preserves_multiline_prompts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history.txt");
+        let entries = vec![
+            "single line".to_string(),
+            "line one\nline two\nline three".to_string(),
+            "another single".to_string(),
+        ];
+        save_history(&path, &entries).expect("save");
+        let loaded = load_history(&path);
+        assert_eq!(loaded, entries);
+    }
+
+    #[test]
+    fn save_empty_history_writes_empty_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history.txt");
+        save_history(&path, &[]).expect("save");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(body, "");
+        let loaded = load_history(&path);
+        assert!(loaded.is_empty());
+    }
 
     #[test]
     fn load_missing_file_returns_default() {

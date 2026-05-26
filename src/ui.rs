@@ -6,6 +6,7 @@
 //! to the runtime when the user submits prompts or cancels.
 
 use std::io::{self, Stdout};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -36,6 +37,7 @@ use crate::app::{
     StatusKind, StatusMessage, ToolCallOutput, UiExitReason, config_option_choices,
     config_option_current_value_label, permission_kind_label, stop_reason_label,
 };
+use crate::config;
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
 
 static KEYBOARD_ENHANCEMENT_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -86,13 +88,31 @@ impl TranscriptScrollState {
 /// `restore_terminal`) so the picker can reuse the same alt-screen.
 /// Returns the reason the loop exited so `main` knows whether to
 /// terminate or run the picker again.
+///
+/// Prompt history is loaded from `history_path` (if set) and persisted
+/// on exit.
 pub async fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     mut event_rx: mpsc::UnboundedReceiver<UiEvent>,
     worktree_label: Option<String>,
+    history_path: Option<&Path>,
 ) -> Result<UiExitReason> {
-    ui_loop(terminal, &cmd_tx, &mut event_rx, worktree_label).await
+    let initial_history = history_path.map(config::load_history).unwrap_or_default();
+    let (reason, history) = ui_loop(
+        terminal,
+        &cmd_tx,
+        &mut event_rx,
+        worktree_label,
+        initial_history,
+    )
+    .await?;
+    if let Some(path) = history_path
+        && let Err(e) = config::save_history(path, &history)
+    {
+        tracing::warn!("save_history {path:?}: {e:#}");
+    }
+    Ok(reason)
 }
 
 /// Maximum redraw rate. Events/keystrokes flip a `dirty` flag, but the
@@ -113,8 +133,10 @@ async fn ui_loop(
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
     worktree_label: Option<String>,
-) -> Result<UiExitReason> {
+    initial_history: Vec<String>,
+) -> Result<(UiExitReason, Vec<String>)> {
     let mut state = AppState::new();
+    state.set_prompt_history(initial_history);
     state.worktree_label = worktree_label;
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut crossterm_events = EventStream::new();
@@ -169,7 +191,7 @@ async fn ui_loop(
         if let Some(reason) = state.exit_reason {
             let _ = cmd_tx.send(UiCommand::Shutdown);
             terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
-            return Ok(reason);
+            return Ok((reason, state.prompt_history()));
         }
 
         // Throttle: redraw at most once per FRAME_BUDGET. Under a flood
@@ -182,7 +204,7 @@ async fn ui_loop(
             last_draw = Instant::now();
         }
     }
-    Ok(UiExitReason::Quit)
+    Ok((UiExitReason::Quit, state.prompt_history()))
 }
 
 fn needs_live_redraw(state: &AppState) -> bool {
@@ -357,10 +379,12 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             } else if !state.input.is_empty() {
                 state.input.clear();
                 state.input_cursor = 0;
+                state.reset_history_navigation();
                 state.scroll_input_to_bottom();
                 state.update_autocomplete();
             } else {
                 state.attachments.clear();
+                state.reset_history_navigation();
                 state.scroll_input_to_bottom();
                 state.update_autocomplete();
             }
@@ -444,8 +468,8 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         (_, KeyCode::Right) => {
             move_input_cursor_right(state);
         }
-        (_, KeyCode::Up) => move_input_cursor_up(state, 1),
-        (_, KeyCode::Down) => move_input_cursor_down(state, 1),
+        (_, KeyCode::Up) => move_input_cursor_up_or_history(state, 1),
+        (_, KeyCode::Down) => move_input_cursor_down_or_history(state, 1),
         (_, KeyCode::PageUp) => move_input_cursor_up(state, TRANSCRIPT_SCROLL_PAGE_STEP),
         (_, KeyCode::PageDown) => move_input_cursor_down(state, TRANSCRIPT_SCROLL_PAGE_STEP),
         (_, KeyCode::Home) => move_input_cursor_to_line_start(state),
@@ -458,6 +482,7 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             state.input.clear();
             state.input_cursor = 0;
             state.attachments.clear();
+            state.reset_history_navigation();
             state.scroll_input_to_bottom();
             state.update_autocomplete();
         }
@@ -480,6 +505,7 @@ fn input_byte_index_at_char(text: &str, char_index: usize) -> usize {
 }
 
 fn insert_text_at_cursor(state: &mut AppState, text: &str) {
+    state.reset_history_navigation();
     let cursor = state.input_cursor.min(input_char_count(&state.input));
     let byte_index = input_byte_index_at_char(&state.input, cursor);
     state.input.insert_str(byte_index, text);
@@ -487,6 +513,7 @@ fn insert_text_at_cursor(state: &mut AppState, text: &str) {
 }
 
 fn delete_input_range(state: &mut AppState, start: usize, end: usize, new_cursor: usize) -> bool {
+    state.reset_history_navigation();
     let len = input_char_count(&state.input);
     let start = start.min(len);
     let end = end.min(len);
@@ -714,6 +741,35 @@ fn move_input_cursor_vertical(state: &mut AppState, delta_rows: isize) {
     .min(max_line);
 
     state.input_cursor = input_cursor_index_for_line_position(&state.input, target_line, col);
+}
+
+/// Move the cursor up one line in the input buffer. When the cursor is
+/// already on the first line, navigate to the previous (older) prompt in
+/// history instead (Up-at-top = shell-style reverse history search).
+///
+/// This matches bash/zsh behavior: pressing Up on line 0 of a multiline
+/// prompt navigates history rather than being a no-op at the top.
+fn move_input_cursor_up_or_history(state: &mut AppState, lines: usize) {
+    let (line, _, _) = input_line_cursor_position(&state.input, state.input_cursor);
+    if line == 0 && state.prompt_history_previous() {
+        return;
+    }
+    move_input_cursor_up(state, lines);
+}
+
+/// Move the cursor down one line in the input buffer. When the cursor is
+/// already on the last line and the user is browsing history, navigate
+/// to the next (newer) prompt (Down-at-bottom = forward history).
+///
+/// This matches bash/zsh behavior: pressing Down on the last line of a
+/// multiline prompt navigates history forward rather than being a no-op
+/// at the bottom.
+fn move_input_cursor_down_or_history(state: &mut AppState, lines: usize) {
+    let (line, _, total_lines) = input_line_cursor_position(&state.input, state.input_cursor);
+    if line + 1 >= total_lines && state.prompt_history_next() {
+        return;
+    }
+    move_input_cursor_down(state, lines);
 }
 
 fn move_input_cursor_up(state: &mut AppState, lines: usize) {
@@ -2217,13 +2273,14 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  Enter           send prompt / accept selected item"),
         Line::from("  Shift/Alt+Enter  insert a newline in the prompt"),
         Line::from("  Left/Right       move the prompt cursor"),
-        Line::from("  Up/Down          move the cursor one line"),
+        Line::from("  Up/Down          cursor line or browse prompt history (top/bottom)"),
         Line::from("  PageUp/Down      move the cursor five lines"),
         Line::from("  Home/End         jump to the start / end of the current line"),
         Line::from("  Ctrl-A/E/B/F     line start/end and char left/right"),
         Line::from("  Ctrl-K/U/W       delete to end/start of line or previous word"),
         Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
         Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
+        Line::from("  Esc              clear input, chips, and browsing history"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Pasted chips (>3 lines)",
