@@ -1691,11 +1691,11 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     let selected = picker.selected_value;
     let rows = 8u16;
 
-    if total == 0 {
-        return;
-    }
-
-    let desired_rows = (total as u16).min(rows);
+    let desired_rows = if total == 0 {
+        1
+    } else {
+        (total as u16).min(rows)
+    };
     let height = (desired_rows + 5).min(area.height.saturating_sub(4));
     if height < 6 {
         return;
@@ -1744,6 +1744,16 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     };
     let search = Paragraph::new(search_text);
     f.render_widget(search, layout[1]);
+
+    if total == 0 {
+        let no_matches = Paragraph::new("No matches").style(Style::default().fg(Color::DarkGray));
+        f.render_widget(no_matches, layout[2]);
+
+        let footer = Paragraph::new("Backspace to clear | Esc cancel")
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(footer, layout[3]);
+        return;
+    }
 
     let start = if total <= layout[2].height as usize {
         0
@@ -1916,6 +1926,7 @@ mod tests {
         SessionConfigOption, SessionConfigSelectOption, ToolCallStatus, ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
 
     fn key(code: KeyCode) -> CtEvent {
         key_with_modifiers(code, KeyModifiers::NONE)
@@ -2589,5 +2600,49 @@ mod tests {
         );
 
         assert!(state.config_picker.is_none());
+    }
+
+    #[test]
+    fn config_picker_renders_no_matches_state() {
+        let mut state = AppState::new();
+        state.session_config_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "model-1",
+            vec![
+                SessionConfigSelectOption::new("model-1", "Model 1"),
+                SessionConfigSelectOption::new("model-2", "Model 2"),
+            ],
+        )];
+        assert!(state.open_config_value_picker(0));
+        state.config_picker_set_search("zzz");
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_config_value_picker_modal(frame, frame.area(), &state))
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let rendered_lines: Vec<String> = (0..buffer.area().height)
+            .map(|y| {
+                (0..buffer.area().width)
+                    .map(|x| buffer.cell((x, y)).expect("cell").symbol())
+                    .collect()
+            })
+            .collect();
+
+        assert!(
+            rendered_lines
+                .iter()
+                .any(|line| line.contains("No matches")),
+            "rendered lines: {rendered_lines:?}"
+        );
+        assert!(
+            rendered_lines
+                .iter()
+                .any(|line| line.contains("Backspace to clear")),
+            "rendered lines: {rendered_lines:?}"
+        );
     }
 }
