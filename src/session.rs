@@ -6,7 +6,7 @@
 //! collecting results before entering the TUI.
 
 use std::io::Stdout;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
@@ -79,9 +79,13 @@ pub enum ResumeOutcome {
 }
 
 /// List sessions from the configured agent without entering the TUI.
-pub async fn list_sessions(agent: &SelectedAgent, cwd: PathBuf) -> Result<Vec<SessionEntry>> {
+pub async fn list_sessions(
+    agent: &SelectedAgent,
+    cwd: PathBuf,
+    agent_stderr: Option<&Path>,
+) -> Result<Vec<SessionEntry>> {
     let (mut child, child_stdin, child_stdout) =
-        acp::spawn_agent(&agent.program, &agent.args, &agent.env, None)
+        acp::spawn_agent(&agent.program, &agent.args, &agent.env, agent_stderr)
             .map_err(|launch_err| anyhow::anyhow!("{launch_err}"))
             .context("spawn agent for session listing")?;
 
