@@ -7,6 +7,7 @@
 
 mod acp;
 mod app;
+mod clipboard;
 mod config;
 mod event;
 mod headless;

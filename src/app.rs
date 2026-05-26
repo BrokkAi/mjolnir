@@ -14,6 +14,8 @@ use agent_client_protocol::schema::{
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, Usage, UsageUpdate,
 };
 
+use crate::clipboard::ClipboardLease;
+
 use crate::event::{PermissionDecision, PermissionPrompt, UiEvent, content_block_text};
 
 /// How the UI loop ends, so `main` can decide whether to quit entirely
@@ -291,6 +293,10 @@ pub struct AppState {
     /// `--worktree` was used. Surfaced in the header so users can tell
     /// concurrent Mjolnir instances apart.
     pub worktree_label: Option<String>,
+    /// Holds the platform clipboard lease so copied text remains available
+    /// on Linux/X11 where the owning process must stay alive.
+    #[allow(dead_code)]
+    pub clipboard_lease: Option<ClipboardLease>,
 }
 
 #[derive(Debug)]
@@ -364,6 +370,7 @@ impl AppState {
             autocomplete: Autocomplete::default(),
             help_overlay: false,
             worktree_label: None,
+            clipboard_lease: None,
         }
     }
 
@@ -384,6 +391,15 @@ impl AppState {
     pub fn toggle_expand_tool_outputs(&mut self) {
         self.expand_tool_outputs = !self.expand_tool_outputs;
         self.bump_transcript_revision();
+    }
+
+    /// Extract the text of the most recent agent message from the transcript.
+    /// Returns None if no agent message exists yet.
+    pub fn last_agent_message(&self) -> Option<String> {
+        self.transcript.iter().rev().find_map(|entry| match entry {
+            Entry::AgentMessage(text) => Some(text.clone()),
+            _ => None,
+        })
     }
 
     /// Reset the prompt box to follow the newest line.

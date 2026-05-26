@@ -5,16 +5,18 @@
 //! into `AppState`, redraws on every tick, and emits `UiCommand`s back
 //! to the runtime when the user submits prompts or cancels.
 
+use std::fmt;
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::AvailableCommandInput;
 use anyhow::{Context, Result};
+use crossterm::Command;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    DisableBracketedPaste, EnableBracketedPaste,
     Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -36,11 +38,35 @@ use crate::app::{
     StatusKind, StatusMessage, ToolCallOutput, UiExitReason, config_option_choices,
     config_option_current_value_label, permission_kind_label, stop_reason_label,
 };
+use crate::clipboard::copy_to_clipboard;
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
 
 static KEYBOARD_ENHANCEMENT_ENABLED: AtomicBool = AtomicBool::new(false);
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
 const PROMPT_SIDE_PADDING: u16 = 4;
+
+/// Enable alternate-screen scroll mode so the terminal translates the
+/// mouse wheel into Up/Down arrow key events while the alt screen is
+/// active. Unlike `EnableMouseCapture`, this leaves button-mode capture
+/// off, so native text selection and OS copy still work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnableAlternateScroll;
+
+impl Command for EnableAlternateScroll {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str("\x1b[?1007h")
+    }
+}
+
+/// Disable alternate-screen scroll mode when leaving the alt screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisableAlternateScroll;
+
+impl Command for DisableAlternateScroll {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str("\x1b[?1007l")
+    }
+}
 
 #[derive(Debug, Default)]
 struct TranscriptScrollState {
@@ -195,18 +221,9 @@ fn needs_live_redraw(state: &AppState) -> bool {
     )
 }
 
-/// How many wrapped lines a single mouse-wheel notch scrolls the
-/// transcript. Three matches the common terminal default for line-mode
-/// scroll, so the feel is close to the surrounding shell.
-const MOUSE_SCROLL_STEP: usize = 3;
-
 fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>, ev: CtEvent) {
     let key = match ev {
         CtEvent::Key(k) => k,
-        CtEvent::Mouse(m) => {
-            handle_mouse(state, m);
-            return;
-        }
         CtEvent::Paste(text) => {
             // Skip paste when a modal is active or the runtime is closed;
             // the input buffer isn't focused and pasted text would land
@@ -246,6 +263,9 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             }
             (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
                 state.toggle_expand_tool_outputs();
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
+                copy_last_agent_message(state);
             }
             (_, KeyCode::PageUp) => {
                 state.scroll_offset = state.scroll_offset.saturating_add(5);
@@ -372,6 +392,9 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         }
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
             state.toggle_expand_tool_outputs();
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
+            copy_last_agent_message(state);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
             move_input_cursor_to_line_start(state);
@@ -771,18 +794,28 @@ fn normalize_paste(text: &str) -> String {
     normalized
 }
 
-/// Translate mouse wheel events into transcript scroll. The terminal's
-/// native scrollback is suppressed by `EnableMouseCapture`, so without
-/// this the wheel does nothing at all.
-fn handle_mouse(state: &mut AppState, ev: MouseEvent) {
-    match ev.kind {
-        MouseEventKind::ScrollUp => {
-            state.scroll_offset = state.scroll_offset.saturating_add(MOUSE_SCROLL_STEP);
+/// Copy the text of the most recent agent message to the system clipboard.
+/// Sets a transient status message so the user knows whether it worked.
+fn copy_last_agent_message(state: &mut AppState) {
+    let Some(text) = state.last_agent_message() else {
+        state.status_line = Some(StatusMessage::warning("no agent message to copy"));
+        return;
+    };
+
+    match copy_to_clipboard(&text) {
+        Ok(lease) => {
+            let preview_len = text.chars().count().min(60);
+            let preview: String = text.chars().take(preview_len).collect();
+            let suffix = if text.chars().count() > 60 { "…" } else { "" };
+            state.status_line = Some(StatusMessage::info(format!(
+                "copied to clipboard: \"{preview}{suffix}\""
+            )));
+            // Store the lease to keep the clipboard handle alive on Linux/X11
+            state.clipboard_lease = lease;
         }
-        MouseEventKind::ScrollDown => {
-            state.scroll_offset = state.scroll_offset.saturating_sub(MOUSE_SCROLL_STEP);
+        Err(e) => {
+            state.status_line = Some(StatusMessage::warning(format!("clipboard error: {e}")));
         }
-        _ => {}
     }
 }
 
@@ -1051,7 +1084,7 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     execute!(
         stdout,
         EnterAlternateScreen,
-        EnableMouseCapture,
+        EnableAlternateScroll,
         EnableBracketedPaste
     )
     .context("enter alt screen")?;
@@ -1068,7 +1101,7 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture,
+        DisableAlternateScroll,
         DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
@@ -2224,6 +2257,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  Ctrl-K/U/W       delete to end/start of line or previous word"),
         Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
         Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
+        Line::from("  Ctrl-Y           copy last agent message to clipboard"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Pasted chips (>3 lines)",
@@ -2762,30 +2796,6 @@ mod tests {
             key_with_modifiers(KeyCode::End, KeyModifiers::CONTROL),
         );
         assert_eq!(state.scroll_offset, 0);
-    }
-
-    #[test]
-    fn mouse_wheel_scrolls_transcript() {
-        let mut state = AppState::new();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        let wheel = |kind| {
-            CtEvent::Mouse(MouseEvent {
-                kind,
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            })
-        };
-
-        handle_crossterm(&mut state, &cmd_tx, wheel(MouseEventKind::ScrollUp));
-        assert_eq!(state.scroll_offset, MOUSE_SCROLL_STEP);
-
-        handle_crossterm(&mut state, &cmd_tx, wheel(MouseEventKind::ScrollUp));
-        assert_eq!(state.scroll_offset, MOUSE_SCROLL_STEP * 2);
-
-        handle_crossterm(&mut state, &cmd_tx, wheel(MouseEventKind::ScrollDown));
-        assert_eq!(state.scroll_offset, MOUSE_SCROLL_STEP);
     }
 
     #[test]
