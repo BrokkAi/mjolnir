@@ -2256,8 +2256,30 @@ fn draw_permission_modal(
     pending: &PendingPermission,
     queue_len: usize,
 ) {
+    // Calculate dimensions based on content
     let width = area.width.saturating_sub(8).min(80);
-    let height = (pending.prompt.options.len() as u16 + 6).min(area.height.saturating_sub(4));
+    
+    // Build the header paragraph to measure its wrapped height
+    let title = pending
+        .prompt
+        .tool_call
+        .fields
+        .title
+        .clone()
+        .unwrap_or_else(|| pending.prompt.tool_call.tool_call_id.to_string());
+    
+    let header_para = Paragraph::new(title.clone())
+        .style(Style::default().add_modifier(Modifier::BOLD))
+        .wrap(Wrap { trim: false });
+    
+    // Calculate wrapped header height (accounting for block borders and padding)
+    let inner_width = width.saturating_sub(2); // Block borders
+    let header_height = header_para.line_count(inner_width) as u16;
+    
+    // Height = header + options + footer + borders
+    let height = (header_height + pending.prompt.options.len() as u16 + 4)
+        .min(area.height.saturating_sub(4));
+    
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     let rect = Rect::new(x, y, width, height);
@@ -2277,25 +2299,16 @@ fn draw_permission_modal(
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let title = pending
-        .prompt
-        .tool_call
-        .fields
-        .title
-        .clone()
-        .unwrap_or_else(|| pending.prompt.tool_call.tool_call_id.to_string());
-
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Min(header_height),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
         .split(inner);
 
-    let header = Paragraph::new(title).style(Style::default().add_modifier(Modifier::BOLD));
-    f.render_widget(header, layout[0]);
+    f.render_widget(header_para, layout[0]);
 
     let items: Vec<ListItem> = pending
         .prompt
