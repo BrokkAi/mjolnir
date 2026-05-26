@@ -9,27 +9,49 @@ permissions:
   contents: write
 
 jobs:
-  build-cross:
-    name: Cross-build ${{ matrix.target }}
+  build-linux:
+    name: Build x86_64-unknown-linux-gnu
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            archive: tar.gz
-            bin: mj
-          - target: aarch64-unknown-linux-gnu
-            archive: tar.gz
-            bin: mj
-
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build release binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      - name: Package archive
+        shell: bash
+        run: |
+          name="brokk-mjolnir-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          mkdir "$name"
+          cp "target/x86_64-unknown-linux-gnu/release/mj" "$name/"
+          cp README.md LICENSE "$name/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: x86_64-unknown-linux-gnu
+          path: |
+            brokk-mjolnir-*.tar.gz
+            brokk-mjolnir-*.tar.gz.sha256
+          if-no-files-found: error
+
+  build-linux-arm64:
+    name: Build aarch64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
 
       - name: Install cross
         uses: taiki-e/install-action@v2
@@ -37,37 +59,30 @@ jobs:
           tool: cross
 
       - name: Build release binary
-        run: cross build --release --locked --target ${{ matrix.target }}
+        run: cross build --release --locked --target aarch64-unknown-linux-gnu
 
       - name: Package archive
         shell: bash
         run: |
-          name="brokk-mjolnir-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="brokk-mjolnir-${GITHUB_REF_NAME}-aarch64-unknown-linux-gnu"
           mkdir "$name"
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$name/"
+          cp "target/aarch64-unknown-linux-gnu/release/mj" "$name/"
           cp README.md LICENSE "$name/"
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            zip -r "$name.zip" "$name"
-            shasum -a 256 "$name.zip" > "$name.zip.sha256"
-          else
-            tar czf "$name.tar.gz" "$name"
-            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
-          fi
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.target }}
+          name: aarch64-unknown-linux-gnu
           path: |
             brokk-mjolnir-*.tar.gz
             brokk-mjolnir-*.tar.gz.sha256
-            brokk-mjolnir-*.zip
-            brokk-mjolnir-*.zip.sha256
           if-no-files-found: error
 
   build-windows:
     name: Build x86_64-pc-windows-msvc
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
 
@@ -76,23 +91,20 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Install cargo-xwin
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-xwin
-
       - name: Build release binary
-        run: cargo xwin build --release --locked --target x86_64-pc-windows-msvc
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
 
       - name: Package archive
-        shell: bash
+        shell: pwsh
         run: |
-          name="brokk-mjolnir-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc"
-          mkdir "$name"
-          cp "target/x86_64-pc-windows-msvc/release/mj.exe" "$name/"
-          cp README.md LICENSE "$name/"
-          zip -r "$name.zip" "$name"
-          shasum -a 256 "$name.zip" > "$name.zip.sha256"
+          $name = "brokk-mjolnir-${env:GITHUB_REF_NAME}-x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item "target\x86_64-pc-windows-msvc\release\mj.exe" -Destination $name
+          Copy-Item "README.md" -Destination $name
+          Copy-Item "LICENSE" -Destination $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "$name.zip").Hash.ToLower()
+          "$hash  $name.zip" | Set-Content -Path "$name.zip.sha256" -NoNewline
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -149,7 +161,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build-cross, build-windows, build-macos]
+    needs: [build-linux, build-linux-arm64, build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
