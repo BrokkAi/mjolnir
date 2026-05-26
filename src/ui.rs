@@ -12,9 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use agent_client_protocol::schema::AvailableCommandInput;
 use anyhow::{Context, Result};
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -32,13 +32,15 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 use crate::app::{
-    AppState, ConfigValueChoice, ConnectionState, Entry, PendingPermission, StatusKind,
-    StatusMessage, ToolCallOutput, UiExitReason, config_option_choices,
+    AppState, ConfigValueChoice, ConnectionState, Entry, PastedAttachment, PendingPermission,
+    StatusKind, StatusMessage, ToolCallOutput, UiExitReason, config_option_choices,
     config_option_current_value_label, permission_kind_label, stop_reason_label,
 };
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
 
 static KEYBOARD_ENHANCEMENT_ENABLED: AtomicBool = AtomicBool::new(false);
+const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
+const PROMPT_SIDE_PADDING: u16 = 4;
 
 #[derive(Debug, Default)]
 struct TranscriptScrollState {
@@ -205,6 +207,20 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             handle_mouse(state, m);
             return;
         }
+        CtEvent::Paste(text) => {
+            // Skip paste when a modal is active or the runtime is closed;
+            // the input buffer isn't focused and pasted text would land
+            // invisibly in the background.
+            if state.help_overlay
+                || state.has_pending_permission()
+                || state.config_picker.is_some()
+                || state.runtime_closed
+            {
+                return;
+            }
+            handle_paste(state, &text);
+            return;
+        }
         _ => return,
     };
     if key.kind != KeyEventKind::Press {
@@ -276,20 +292,54 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
     // filter.
     if state.autocomplete.visible {
         match (key.modifiers, key.code) {
-            (_, KeyCode::Tab) | (_, KeyCode::Enter) => {
+            (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::NONE, KeyCode::Enter) => {
                 state.autocomplete_accept();
                 return;
             }
-            (_, KeyCode::Up) => {
+            (KeyModifiers::NONE, KeyCode::Up) => {
                 state.autocomplete_move(-1);
                 return;
             }
-            (_, KeyCode::Down) => {
+            (KeyModifiers::NONE, KeyCode::Down) => {
                 state.autocomplete_move(1);
                 return;
             }
             (_, KeyCode::Esc) => {
                 state.autocomplete_dismiss();
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if key.modifiers == KeyModifiers::CONTROL {
+        match key.code {
+            KeyCode::PageUp => {
+                state.scroll_offset = state
+                    .scroll_offset
+                    .saturating_add(TRANSCRIPT_SCROLL_PAGE_STEP);
+                return;
+            }
+            KeyCode::PageDown => {
+                state.scroll_offset = state
+                    .scroll_offset
+                    .saturating_sub(TRANSCRIPT_SCROLL_PAGE_STEP);
+                return;
+            }
+            KeyCode::Up => {
+                state.scroll_offset = state.scroll_offset.saturating_add(1);
+                return;
+            }
+            KeyCode::Down => {
+                state.scroll_offset = state.scroll_offset.saturating_sub(1);
+                return;
+            }
+            KeyCode::Home => {
+                scroll_to_top(state);
+                return;
+            }
+            KeyCode::End => {
+                scroll_to_bottom(state);
                 return;
             }
             _ => {}
@@ -302,48 +352,423 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
                 let _ = cmd_tx.send(UiCommand::CancelPrompt);
                 state.mark_cancelling();
                 state.status_line = Some(StatusMessage::info("cancelling..."));
-            } else if state.input.is_empty() {
+            } else if state.input.is_empty() && state.attachments.is_empty() {
                 state.exit_reason = Some(UiExitReason::Quit);
-            } else {
+            } else if !state.input.is_empty() {
                 state.input.clear();
+                state.input_cursor = 0;
+                state.scroll_input_to_bottom();
+                state.update_autocomplete();
+            } else {
+                state.attachments.clear();
+                state.scroll_input_to_bottom();
                 state.update_autocomplete();
             }
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('d')) if state.input.is_empty() => {
+        (KeyModifiers::CONTROL, KeyCode::Char('d'))
+            if state.input.is_empty() && state.attachments.is_empty() =>
+        {
             state.exit_reason = Some(UiExitReason::Quit);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
             state.toggle_expand_tool_outputs();
         }
-        (_, KeyCode::Enter) => submit_prompt(state, cmd_tx),
-        (_, KeyCode::Backspace) => {
-            state.input.pop();
+        (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
+            move_input_cursor_to_line_start(state);
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
+            move_input_cursor_to_line_end(state);
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
+            move_input_cursor_left(state);
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
+            move_input_cursor_right(state);
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+            delete_to_line_end(state);
             state.update_autocomplete();
         }
-        (_, KeyCode::PageUp) => {
-            state.scroll_offset = state.scroll_offset.saturating_add(5);
+        (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+            delete_to_line_start(state);
+            state.update_autocomplete();
         }
-        (_, KeyCode::PageDown) => {
-            state.scroll_offset = state.scroll_offset.saturating_sub(5);
+        (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
+            delete_previous_word(state);
+            state.update_autocomplete();
         }
-        (_, KeyCode::Up) => {
-            state.scroll_offset = state.scroll_offset.saturating_add(1);
+        (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+            if !delete_at_cursor(state) && state.input.is_empty() {
+                if state.attachments.is_empty() {
+                    state.exit_reason = Some(UiExitReason::Quit);
+                    return;
+                }
+                state.attachments.pop();
+            }
+            state.update_autocomplete();
         }
-        (_, KeyCode::Down) => {
-            state.scroll_offset = state.scroll_offset.saturating_sub(1);
+        // Shift+Enter or Alt+Enter inserts a literal newline in the
+        // input buffer, so the user can draft multi-line prompts
+        // without submitting. Shift+Enter requires keyboard enhancement
+        // (the protocol-level extension); Alt+Enter works everywhere
+        // crossterm reports the Alt modifier.
+        (KeyModifiers::SHIFT, KeyCode::Enter) | (KeyModifiers::ALT, KeyCode::Enter) => {
+            insert_text_at_cursor(state, "\n");
+            state.update_autocomplete();
         }
-        (_, KeyCode::Home) => scroll_to_top(state),
-        (_, KeyCode::End) => scroll_to_bottom(state),
+        (_, KeyCode::Enter) => submit_prompt(state, cmd_tx),
+        (KeyModifiers::ALT, KeyCode::Backspace) => {
+            delete_previous_word(state);
+            state.update_autocomplete();
+        }
+        (KeyModifiers::ALT, KeyCode::Char('b')) => {
+            move_input_cursor_word_left(state);
+        }
+        (KeyModifiers::ALT, KeyCode::Char('f')) => {
+            move_input_cursor_word_right(state);
+        }
+        (_, KeyCode::Backspace) => {
+            if !delete_before_cursor(state) {
+                // Remove the last attachment chip when the input buffer is empty.
+                state.attachments.pop();
+            }
+            state.update_autocomplete();
+        }
+        (_, KeyCode::Delete) => {
+            delete_at_cursor(state);
+            state.update_autocomplete();
+        }
+        (_, KeyCode::Left) => {
+            move_input_cursor_left(state);
+        }
+        (_, KeyCode::Right) => {
+            move_input_cursor_right(state);
+        }
+        (_, KeyCode::Up) => move_input_cursor_up(state, 1),
+        (_, KeyCode::Down) => move_input_cursor_down(state, 1),
+        (_, KeyCode::PageUp) => move_input_cursor_up(state, TRANSCRIPT_SCROLL_PAGE_STEP),
+        (_, KeyCode::PageDown) => move_input_cursor_down(state, TRANSCRIPT_SCROLL_PAGE_STEP),
+        (_, KeyCode::Home) => move_input_cursor_to_line_start(state),
+        (_, KeyCode::End) => move_input_cursor_to_line_end(state),
         (_, KeyCode::Char(c)) => {
-            state.input.push(c);
+            insert_text_at_cursor(state, &c.to_string());
             state.update_autocomplete();
         }
         (_, KeyCode::Esc) => {
             state.input.clear();
+            state.input_cursor = 0;
+            state.attachments.clear();
+            state.scroll_input_to_bottom();
             state.update_autocomplete();
         }
         _ => {}
     }
+}
+
+fn input_char_count(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn input_byte_index_at_char(text: &str, char_index: usize) -> usize {
+    if char_index == 0 {
+        return 0;
+    }
+    text.char_indices()
+        .nth(char_index)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len())
+}
+
+fn insert_text_at_cursor(state: &mut AppState, text: &str) {
+    let cursor = state.input_cursor.min(input_char_count(&state.input));
+    let byte_index = input_byte_index_at_char(&state.input, cursor);
+    state.input.insert_str(byte_index, text);
+    state.input_cursor = cursor + input_char_count(text);
+}
+
+fn delete_input_range(state: &mut AppState, start: usize, end: usize, new_cursor: usize) -> bool {
+    let len = input_char_count(&state.input);
+    let start = start.min(len);
+    let end = end.min(len);
+    if start >= end {
+        return false;
+    }
+
+    let byte_start = input_byte_index_at_char(&state.input, start);
+    let byte_end = input_byte_index_at_char(&state.input, end);
+    state.input.drain(byte_start..byte_end);
+    state.input_cursor = new_cursor.min(input_char_count(&state.input));
+    true
+}
+
+fn delete_before_cursor(state: &mut AppState) -> bool {
+    let cursor = state.input_cursor.min(input_char_count(&state.input));
+    if cursor == 0 {
+        return false;
+    }
+    delete_input_range(state, cursor - 1, cursor, cursor - 1)
+}
+
+fn delete_at_cursor(state: &mut AppState) -> bool {
+    let cursor = state.input_cursor.min(input_char_count(&state.input));
+    delete_input_range(state, cursor, cursor + 1, cursor)
+}
+
+fn move_input_cursor_left(state: &mut AppState) {
+    let len = input_char_count(&state.input);
+    state.input_cursor = state.input_cursor.min(len).saturating_sub(1);
+}
+
+fn move_input_cursor_right(state: &mut AppState) {
+    let len = input_char_count(&state.input);
+    state.input_cursor = state.input_cursor.min(len);
+    if state.input_cursor < len {
+        state.input_cursor += 1;
+    }
+}
+
+fn input_char_at(text: &str, char_index: usize) -> Option<char> {
+    text.chars().nth(char_index)
+}
+
+fn input_prev_word_boundary(text: &str, cursor_char_index: usize) -> usize {
+    let len = input_char_count(text);
+    let mut index = cursor_char_index.min(len);
+
+    while index > 0
+        && input_char_at(text, index - 1)
+            .map(|c| c.is_whitespace())
+            .unwrap_or(false)
+    {
+        index -= 1;
+    }
+
+    while index > 0
+        && input_char_at(text, index - 1)
+            .map(|c| !c.is_whitespace())
+            .unwrap_or(false)
+    {
+        index -= 1;
+    }
+
+    index
+}
+
+fn input_next_word_boundary(text: &str, cursor_char_index: usize) -> usize {
+    let len = input_char_count(text);
+    let mut index = cursor_char_index.min(len);
+
+    while index < len
+        && input_char_at(text, index)
+            .map(|c| !c.is_whitespace())
+            .unwrap_or(false)
+    {
+        index += 1;
+    }
+
+    while index < len
+        && input_char_at(text, index)
+            .map(|c| c.is_whitespace())
+            .unwrap_or(false)
+    {
+        index += 1;
+    }
+
+    index
+}
+
+fn move_input_cursor_word_left(state: &mut AppState) {
+    state.input_cursor = input_prev_word_boundary(&state.input, state.input_cursor);
+}
+
+fn move_input_cursor_word_right(state: &mut AppState) {
+    state.input_cursor = input_next_word_boundary(&state.input, state.input_cursor);
+}
+
+fn input_line_cursor_position(text: &str, cursor_char_index: usize) -> (usize, usize, usize) {
+    let cursor = cursor_char_index.min(input_char_count(text));
+    let mut consumed = 0usize;
+    let total_lines = text.split('\n').count().max(1);
+
+    for (line_index, line) in text.split('\n').enumerate() {
+        let line_len = line.chars().count();
+        if cursor <= consumed + line_len {
+            return (line_index, cursor - consumed, total_lines);
+        }
+        consumed += line_len + 1;
+    }
+
+    (total_lines.saturating_sub(1), 0, total_lines)
+}
+
+fn input_cursor_index_for_line_position(
+    text: &str,
+    target_line: usize,
+    target_col: usize,
+) -> usize {
+    let mut chars_before = 0usize;
+
+    for (line_index, line) in text.split('\n').enumerate() {
+        let line_len = line.chars().count();
+        if line_index == target_line {
+            return chars_before + target_col.min(line_len);
+        }
+        chars_before += line_len + 1;
+    }
+
+    input_char_count(text)
+}
+
+fn move_input_cursor_to_line_start(state: &mut AppState) {
+    let (line, _, _) = input_line_cursor_position(&state.input, state.input_cursor);
+    state.input_cursor = input_cursor_index_for_line_position(&state.input, line, 0);
+}
+
+fn move_input_cursor_to_line_end(state: &mut AppState) {
+    state.input_cursor = input_current_line_end_index(&state.input, state.input_cursor);
+}
+
+fn input_current_line_start_index(text: &str, cursor_char_index: usize) -> usize {
+    let (line, _, _) = input_line_cursor_position(text, cursor_char_index);
+    input_cursor_index_for_line_position(text, line, 0)
+}
+
+fn input_current_line_end_index(text: &str, cursor_char_index: usize) -> usize {
+    let (line, _, _) = input_line_cursor_position(text, cursor_char_index);
+    let line_len = input_line_length(text, line);
+    input_cursor_index_for_line_position(text, line, line_len)
+}
+
+fn input_line_length(text: &str, line_index: usize) -> usize {
+    text.split('\n')
+        .nth(line_index)
+        .map(|line| line.chars().count())
+        .unwrap_or(0)
+}
+
+fn delete_to_line_start(state: &mut AppState) -> bool {
+    let start = input_current_line_start_index(&state.input, state.input_cursor);
+    delete_input_range(state, start, state.input_cursor, start)
+}
+
+fn delete_to_line_end(state: &mut AppState) -> bool {
+    let end = input_current_line_end_index(&state.input, state.input_cursor);
+    delete_input_range(state, state.input_cursor, end, state.input_cursor)
+}
+
+fn delete_previous_word(state: &mut AppState) -> bool {
+    let cursor = state.input_cursor.min(input_char_count(&state.input));
+    let start = input_prev_word_boundary(&state.input, cursor);
+    delete_input_range(state, start, cursor, start)
+}
+
+fn input_cursor_visual_position(
+    text: &str,
+    cursor_char_index: usize,
+    inner_w: usize,
+) -> (usize, usize, usize) {
+    let cursor = cursor_char_index.min(input_char_count(text));
+    let mut consumed = 0usize;
+    let mut visual_row = 0usize;
+    let mut cursor_col = 0usize;
+    let mut total_rows = 0usize;
+
+    for line in text.split('\n') {
+        let line_len = line.chars().count();
+        let line_rows = if inner_w == 0 || line_len == 0 {
+            1
+        } else {
+            line_len.div_ceil(inner_w)
+        };
+
+        if cursor <= consumed + line_len {
+            let within_line = cursor - consumed;
+            if inner_w > 0 {
+                visual_row += within_line.checked_div(inner_w).unwrap_or(0);
+                cursor_col = within_line % inner_w;
+            }
+            total_rows += line_rows;
+            return (visual_row, cursor_col, total_rows);
+        }
+
+        consumed += line_len + 1;
+        visual_row += line_rows;
+        total_rows += line_rows;
+    }
+
+    (total_rows.saturating_sub(1), 0, total_rows.max(1))
+}
+
+fn move_input_cursor_vertical(state: &mut AppState, delta_rows: isize) {
+    let (line, col, total_lines) = input_line_cursor_position(&state.input, state.input_cursor);
+    if total_lines == 0 {
+        return;
+    }
+
+    let max_line = total_lines.saturating_sub(1);
+    let target_line = if delta_rows.is_negative() {
+        line.saturating_sub(delta_rows.unsigned_abs())
+    } else {
+        line.saturating_add(delta_rows as usize)
+    }
+    .min(max_line);
+
+    state.input_cursor = input_cursor_index_for_line_position(&state.input, target_line, col);
+}
+
+fn move_input_cursor_up(state: &mut AppState, lines: usize) {
+    move_input_cursor_vertical(state, -(lines as isize));
+}
+
+fn move_input_cursor_down(state: &mut AppState, lines: usize) {
+    move_input_cursor_vertical(state, lines as isize);
+}
+
+/// Translate a bracketed paste event into input buffer edits or a chip.
+/// Normalizes CRLF to LF and strips control characters (except tab and
+/// newline) so pasted text from browsers or terminals renders predictably.
+/// When the pasted text exceeds the chip threshold (>3 lines), it is
+/// stored as a compact attachment instead of inline text.
+fn handle_paste(state: &mut AppState, text: &str) {
+    let cleaned = normalize_paste(text);
+
+    let line_count = cleaned.lines().count();
+
+    // If the paste is large (>3 lines), create a chip instead of inline text.
+    if line_count > 3 {
+        let id = state.next_attachment_id;
+        state.next_attachment_id += 1;
+        state.attachments.push(PastedAttachment {
+            id,
+            content: cleaned,
+        });
+    } else {
+        // Small paste: append inline.
+        insert_text_at_cursor(state, &cleaned);
+    }
+    state.scroll_input_to_bottom();
+    state.update_autocomplete();
+}
+
+fn normalize_paste(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                normalized.push('\n');
+            }
+            '\n' | '\t' => normalized.push(c),
+            c if !c.is_control() => normalized.push(c),
+            _ => {}
+        }
+    }
+
+    normalized
 }
 
 /// Translate mouse wheel events into transcript scroll. The terminal's
@@ -379,15 +804,35 @@ fn is_help_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
 fn should_open_help(state: &AppState, modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty()
         && (matches!(code, KeyCode::F(10))
-            || (state.input.is_empty() && matches!(code, KeyCode::Char('?'))))
+            || (state.input.is_empty()
+                && state.attachments.is_empty()
+                && matches!(code, KeyCode::Char('?'))))
 }
 
 fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
-    let text = std::mem::take(&mut state.input);
-    let trimmed = text.trim();
+    // Concatenate attachment contents (in order) with input text.
+    let mut combined = String::new();
+    for attachment in &state.attachments {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&attachment.content);
+    }
+    let input_text = std::mem::take(&mut state.input);
+    if !combined.is_empty() && !input_text.is_empty() {
+        combined.push('\n');
+    }
+    combined.push_str(&input_text);
+
+    let trimmed = combined.trim();
     if trimmed.is_empty() {
         return;
     }
+
+    // Clear attachments after taking their content.
+    state.attachments.clear();
+    state.input_cursor = 0;
+    state.scroll_input_to_bottom();
 
     // Client-side `/mj:` commands are handled here without forwarding
     // anything to the agent. Right now only `/mj:agents` is supported.
@@ -603,7 +1048,13 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
         KEYBOARD_ENHANCEMENT_ENABLED.store(true, Ordering::SeqCst);
     }
 
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("enter alt screen")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("enter alt screen")?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend).context("ratatui terminal")?;
     Ok(terminal)
@@ -617,11 +1068,18 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
     Ok(())
 }
+
+/// Minimum input box height: three text rows between top and bottom borders.
+const MIN_INPUT_HEIGHT: u16 = 5;
+/// Maximum input box height so the transcript stays usable even when
+/// the user pastes or drafts a long multi-line prompt.
+const MAX_INPUT_HEIGHT: u16 = 16;
 
 fn draw(
     f: &mut ratatui::Frame,
@@ -629,12 +1087,19 @@ fn draw(
     transcript_scroll: &mut TranscriptScrollState,
 ) {
     let has_config_options = !state.selectable_config_options().is_empty();
+
+    // Dynamic input height: borders (2) + chip rows + text lines, clamped.
+    let chip_rows = state.attachments.len();
+    let input_lines = 1 + state.input.chars().filter(|c| *c == '\n').count();
+    let input_height = (chip_rows + input_lines + 2) as u16;
+    let input_height = input_height.clamp(MIN_INPUT_HEIGHT, MAX_INPUT_HEIGHT);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
             Constraint::Length(if has_config_options { 1 } else { 0 }),
             Constraint::Length(1),
         ])
@@ -1453,13 +1918,55 @@ fn tool_status_color(status: agent_client_protocol::schema::ToolCallStatus) -> C
     }
 }
 
+/// Count how many visual rows a piece of text occupies when rendered
+/// inside a wrapping `Paragraph` at `inner_w` columns. Empty lines
+/// still consume one row.
+fn input_wrapped_row_count(text: &str, inner_w: usize) -> usize {
+    text.split('\n')
+        .map(|line| {
+            if inner_w == 0 {
+                return 1;
+            }
+            let cc = line.chars().count();
+            if cc == 0 { 1 } else { cc.div_ceil(inner_w) }
+        })
+        .sum()
+}
+
+/// Compute the cursor position for a multi-line input buffer. Accounts
+/// for explicit newlines _and_ line wrapping at the text area width, so
+/// the cursor lands on the correct visual row even when a single
+/// logical line spans multiple terminal columns. `chip_rows` is added
+/// as a prefix offset (paste-attachment badges rendered above the text).
+fn input_cursor_position(
+    area: Rect,
+    text: &str,
+    cursor_char_index: usize,
+    chip_rows: usize,
+    scroll_offset: u16,
+) -> (u16, u16) {
+    let inner_w = area.width as usize;
+    let inner_h = area.height as usize;
+
+    let (text_cursor_row, cursor_x_offset, _) =
+        input_cursor_visual_position(text, cursor_char_index, inner_w);
+
+    // Combined row in the full content (chips above + text below).
+    let total_cursor_row = chip_rows + text_cursor_row;
+    let visible_row = total_cursor_row.saturating_sub(scroll_offset as usize);
+    let cursor_x = area.x + cursor_x_offset.min(inner_w.saturating_sub(1)) as u16;
+    let cursor_y = area.y + visible_row.min(inner_h.saturating_sub(1)) as u16;
+
+    (cursor_x, cursor_y)
+}
+
 fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let title = if state.runtime_closed {
         " runtime closed (Ctrl-C to quit) ".to_string()
     } else if state.is_streaming() {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
-        " prompt (Enter to send | Ctrl-C to quit) ".to_string()
+        " prompt (Enter to send | Shift/Alt+Enter for newline | Ctrl-C to quit) ".to_string()
     };
     let style = if state.runtime_closed || state.is_streaming() {
         Style::default().fg(Color::DarkGray)
@@ -1467,11 +1974,80 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         Style::default()
     };
     let block = Block::default().borders(Borders::ALL).title(title);
-    let paragraph = Paragraph::new(state.input.as_str())
+
+    // Build lines: chip rows first, then input text rows.
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Render each attachment as a compact chip row.
+    for attachment in &state.attachments {
+        let line_count = attachment.content.lines().count();
+        let char_count = attachment.content.chars().count();
+        let label = format!(
+            "📎 {} line{} · {} char{}",
+            line_count,
+            if line_count == 1 { "" } else { "s" },
+            char_count,
+            if char_count == 1 { "" } else { "s" }
+        );
+        lines.push(Line::from(Span::styled(
+            label,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    // Add input text lines.
+    for line in state.input.split('\n') {
+        lines.push(Line::from(line.to_string()));
+    }
+
+    f.render_widget(block, area);
+
+    let inner = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let side_padding = PROMPT_SIDE_PADDING.min(inner.width / 4);
+    let content_width = inner.width.saturating_sub(side_padding * 2).max(1);
+    let inner_h = inner.height as usize;
+    let chip_rows = state.attachments.len();
+    let text_rows = input_wrapped_row_count(&state.input, content_width as usize);
+    let total_visual_rows = chip_rows + text_rows;
+    let visible_rows = total_visual_rows.max(1).min(inner_h);
+    let top_padding = if total_visual_rows < inner_h {
+        ((inner_h - total_visual_rows) / 2) as u16
+    } else {
+        0
+    };
+    let content_area = Rect::new(
+        inner.x + side_padding,
+        inner.y + top_padding,
+        content_width,
+        visible_rows as u16,
+    );
+    let scroll = if total_visual_rows > visible_rows {
+        let cursor_row =
+            input_cursor_visual_position(&state.input, state.input_cursor, content_width as usize)
+                .0
+                + chip_rows;
+        let desired = cursor_row.saturating_sub(visible_rows / 2);
+        desired.min(total_visual_rows - visible_rows) as u16
+    } else {
+        0
+    };
+
+    let paragraph = Paragraph::new(lines)
         .style(style)
-        .block(block)
-        .wrap(Wrap { trim: false });
-    f.render_widget(paragraph, area);
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+    f.render_widget(paragraph, content_area);
 
     if !state.runtime_closed
         && !state.is_streaming()
@@ -1479,9 +2055,13 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         && state.config_picker.is_none()
         && !state.help_overlay
     {
-        // Place a fake cursor at end of input. Estimated, ASCII only.
-        let cursor_x = area.x + 1 + (state.input.len().min((area.width - 2) as usize) as u16);
-        let cursor_y = area.y + 1;
+        let (cursor_x, cursor_y) = input_cursor_position(
+            content_area,
+            &state.input,
+            state.input_cursor,
+            chip_rows,
+            scroll,
+        );
         f.set_cursor_position((cursor_x, cursor_y));
     }
 }
@@ -1634,35 +2214,40 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
             "General",
             Style::default().add_modifier(Modifier::BOLD),
         )]),
-        Line::from("  Enter        send prompt / accept selected item"),
-        Line::from("  Ctrl-C       cancel streaming turn; quit when idle with empty input"),
-        Line::from("  Ctrl-D       quit when input is empty"),
+        Line::from("  Enter           send prompt / accept selected item"),
+        Line::from("  Shift/Alt+Enter  insert a newline in the prompt"),
+        Line::from("  Left/Right       move the prompt cursor"),
+        Line::from("  Up/Down          move the cursor one line"),
+        Line::from("  PageUp/Down      move the cursor five lines"),
+        Line::from("  Home/End         jump to the start / end of the current line"),
+        Line::from("  Ctrl-A/E/B/F     line start/end and char left/right"),
+        Line::from("  Ctrl-K/U/W       delete to end/start of line or previous word"),
+        Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
+        Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Pasted chips (>3 lines)",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  Backspace / Esc / Enter  remove chip / clear / send chips + input"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Scroll transcript",
             Style::default().add_modifier(Modifier::BOLD),
         )]),
-        Line::from("  Up/Down      scroll one line"),
-        Line::from("  PageUp/Down  scroll five lines"),
-        Line::from("  Home/End     jump to top / bottom (End re-attaches to live stream)"),
-        Line::from("  Mouse wheel  scroll three lines per notch"),
-        Line::from("  Ctrl-T       expand/collapse tool outputs"),
+        Line::from("  Ctrl+Up/Down / Ctrl+PageUp/Down / Ctrl+Home/End / wheel / Ctrl-T"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Overlays",
             Style::default().add_modifier(Modifier::BOLD),
         )]),
-        Line::from("  ? or F10     open / close this help"),
-        Line::from("  Esc          dismiss overlay, autocomplete, or clear input"),
-        Line::from("  Tab          accept selected slash command"),
+        Line::from("  ? or F10 / Tab  help toggle / accept selected slash command"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Config",
             Style::default().add_modifier(Modifier::BOLD),
         )]),
-        Line::from("  F1..F9       edit the matching config option"),
-        Line::from("  Ctrl-1..9    hidden fallback for terminals where function keys are awkward"),
-        Line::from("  Up/Down      move inside config or permission choices"),
+        Line::from("  F1..F9 / Ctrl-1..9 / Up/Down  edit or move inside choices"),
         Line::from(""),
         Line::from("Built-in command: /mj:agents switches agent"),
     ];
@@ -1993,6 +2578,7 @@ mod tests {
     fn question_mark_types_when_input_is_not_empty() {
         let mut state = AppState::new();
         state.input = "why".to_string();
+        state.input_cursor = state.input.chars().count();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('?')));
@@ -2131,30 +2717,50 @@ mod tests {
     }
 
     #[test]
-    fn arrow_keys_scroll_transcript_one_line() {
+    fn ctrl_arrow_keys_scroll_transcript_one_line() {
         let mut state = AppState::new();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Up, KeyModifiers::CONTROL),
+        );
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Up, KeyModifiers::CONTROL),
+        );
         assert_eq!(state.scroll_offset, 2);
 
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Down, KeyModifiers::CONTROL),
+        );
         assert_eq!(state.scroll_offset, 1);
     }
 
     #[test]
-    fn home_jumps_to_top_and_end_re_attaches_to_stream() {
+    fn ctrl_home_jumps_to_top_and_ctrl_end_re_attaches_to_stream() {
         let mut state = AppState::new();
         state.scroll_offset = 12;
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Home));
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Home, KeyModifiers::CONTROL),
+        );
         // `usize::MAX` is the sentinel that `reconcile` clamps to the top
         // of the actual transcript on the next draw.
         assert_eq!(state.scroll_offset, usize::MAX);
 
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::End));
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::End, KeyModifiers::CONTROL),
+        );
         assert_eq!(state.scroll_offset, 0);
     }
 
@@ -2643,6 +3249,454 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Backspace to clear")),
             "rendered lines: {rendered_lines:?}"
+    fn bracketed_paste_appends_cleaned_text_to_input() {
+        let mut state = AppState::new();
+        state.input = "prefix ".to_string();
+        state.input_cursor = state.input.chars().count();
+
+        handle_paste(&mut state, "hello\nworld\r\n!");
+
+        assert_eq!(state.input, "prefix hello\nworld\n!");
+        assert_eq!(state.input_cursor, state.input.chars().count());
+    }
+
+    #[test]
+    fn bracketed_paste_strips_control_characters_except_tab_and_newline() {
+        let mut state = AppState::new();
+
+        handle_paste(&mut state, "a\x00b\x07c\t\t\n");
+
+        assert_eq!(state.input, "abc\t\t\n");
+    }
+
+    #[test]
+    fn bracketed_paste_normalizes_carriage_returns_to_newlines() {
+        let mut state = AppState::new();
+
+        handle_paste(&mut state, "one\rtwo\rthree");
+
+        assert_eq!(state.input, "one\ntwo\nthree");
+        assert!(state.attachments.is_empty());
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline_without_submitting() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "line 1".to_string();
+        state.input_cursor = state.input.chars().count();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Enter, KeyModifiers::SHIFT),
+        );
+
+        assert_eq!(state.input, "line 1\n");
+        assert!(cmd_rx.try_recv().is_err(), "must not submit");
+    }
+
+    #[test]
+    fn alt_enter_inserts_newline_without_submitting() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "first".to_string();
+        state.input_cursor = state.input.chars().count();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Enter, KeyModifiers::ALT),
+        );
+
+        assert_eq!(state.input, "first\n");
+        assert!(cmd_rx.try_recv().is_err(), "must not submit");
+    }
+
+    #[test]
+    fn prompt_cursor_moves_and_edits_in_place() {
+        let mut state = AppState::new();
+        state.input = "ab".to_string();
+        state.input_cursor = 1;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('x')));
+        assert_eq!(state.input, "axb");
+        assert_eq!(state.input_cursor, 2);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Backspace));
+        assert_eq!(state.input, "ab");
+        assert_eq!(state.input_cursor, 1);
+    }
+
+    #[test]
+    fn prompt_cursor_arrows_move_through_lines() {
+        let mut state = AppState::new();
+        state.input = "abc\ndef".to_string();
+        state.input_cursor = state.input.chars().count();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        assert_eq!(state.input_cursor, 3);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        assert_eq!(state.input_cursor, 7);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Home));
+        assert_eq!(state.input_cursor, 4);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::End));
+        assert_eq!(state.input_cursor, 7);
+    }
+
+    #[test]
+    fn prompt_ctrl_a_and_ctrl_e_jump_to_line_edges() {
+        let mut state = AppState::new();
+        state.input = "abc\ndef".to_string();
+        state.input_cursor = state.input.chars().count();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.input_cursor, 4);
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('e'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.input_cursor, 7);
+    }
+
+    #[test]
+    fn prompt_ctrl_b_and_ctrl_f_move_one_character() {
+        let mut state = AppState::new();
+        state.input = "abc".to_string();
+        state.input_cursor = 1;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('b'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.input_cursor, 0);
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.input_cursor, 1);
+    }
+
+    #[test]
+    fn prompt_ctrl_k_and_ctrl_u_delete_to_line_edges() {
+        let mut state = AppState::new();
+        state.input = "hello world".to_string();
+        state.input_cursor = 5;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.input, "hello");
+        assert_eq!(state.input_cursor, 5);
+
+        state.input = "hello world".to_string();
+        state.input_cursor = 5;
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.input, " world");
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn prompt_word_shortcuts_move_and_delete_words() {
+        let mut state = AppState::new();
+        state.input = "hello world".to_string();
+        state.input_cursor = state.input.chars().count();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('b'), KeyModifiers::ALT),
+        );
+        assert_eq!(state.input_cursor, 6);
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('f'), KeyModifiers::ALT),
+        );
+        assert_eq!(state.input_cursor, 11);
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.input, "hello ");
+        assert_eq!(state.input_cursor, 6);
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Backspace, KeyModifiers::ALT),
+        );
+        assert_eq!(state.input, "");
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn prompt_ctrl_d_deletes_char_or_quits_when_empty() {
+        let mut state = AppState::new();
+        state.input = "ab".to_string();
+        state.input_cursor = 0;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.input, "b");
+        assert_eq!(state.input_cursor, 0);
+
+        let mut empty = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut empty,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(empty.exit_reason, Some(UiExitReason::Quit));
+    }
+
+    #[test]
+    fn input_cursor_tracks_last_line_in_multiline_buffer() {
+        let area = Rect::new(2, 3, 40, 10);
+
+        let (x, y) = input_cursor_position(area, "hello", 5, 0, 0);
+        assert_eq!((x, y), (7, 3));
+
+        let (x, y) = input_cursor_position(area, "line one\nsecond", 15, 0, 0);
+        assert_eq!((x, y), (8, 4));
+
+        let (x, y) = input_cursor_position(area, "a\nbb\nccc", 8, 0, 0);
+        assert_eq!((x, y), (5, 5));
+    }
+
+    #[test]
+    fn input_cursor_does_not_panic_on_narrow_terminal() {
+        // width=1, height=1: no room for content, but must not panic
+        let area = Rect::new(0, 0, 1, 1);
+        let (x, y) = input_cursor_position(area, "abc\ndef", 7, 0, 0);
+        assert_eq!((x, y), (0, 0));
+    }
+
+    #[test]
+    fn input_cursor_scrolls_with_offset() {
+        let area = Rect::new(0, 0, 40, 5); // inner height = 3 visible lines
+        // 5 lines, cursor on line 5 (index 4), scroll offset = 2
+        let (x, y) = input_cursor_position(area, "a\nb\nc\nd\ne", 9, 0, 2);
+        assert_eq!((x, y), (1, 2));
+    }
+
+    #[test]
+    fn input_cursor_accounts_for_chip_rows() {
+        let area = Rect::new(0, 0, 40, 10);
+        // Single line "hello" at text row 0, but 2 chip rows above.
+        let (x, y) = input_cursor_position(area, "hello", 5, 2, 0);
+        assert_eq!((x, y), (5, 2));
+    }
+
+    #[test]
+    fn multiline_submit_sends_trimmed_text() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "line one\nline two\nline three".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        let cmd = cmd_rx.try_recv().expect("prompt was sent");
+        match cmd {
+            UiCommand::SendPrompt { text } => {
+                assert_eq!(text, "line one\nline two\nline three");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn paste_over_three_lines_creates_attachment_chip() {
+        let mut state = AppState::new();
+        state.attachments = Vec::new();
+
+        handle_paste(&mut state, "a\nb\nc\nd");
+
+        assert!(
+            state.input.is_empty(),
+            "large paste must go to a chip, not inline"
+        );
+        assert_eq!(state.attachments.len(), 1);
+        assert_eq!(state.attachments[0].content, "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn paste_over_three_carriage_return_lines_creates_attachment_chip() {
+        let mut state = AppState::new();
+
+        handle_paste(&mut state, "a\rb\rc\rd\re");
+
+        assert!(
+            state.input.is_empty(),
+            "large CR-separated paste must go to a chip, not inline"
+        );
+        assert_eq!(state.attachments.len(), 1);
+        assert_eq!(state.attachments[0].content, "a\nb\nc\nd\ne");
+    }
+
+    #[test]
+    fn bracketed_paste_event_creates_attachment_chip() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            CtEvent::Paste("a\rb\rc\rd\re".to_string()),
+        );
+
+        assert!(state.input.is_empty());
+        assert_eq!(state.attachments.len(), 1);
+        assert_eq!(state.attachments[0].content, "a\nb\nc\nd\ne");
+    }
+
+    #[test]
+    fn paste_three_or_fewer_lines_stays_inline() {
+        let mut state = AppState::new();
+
+        handle_paste(&mut state, "hello\nworld\r\n!");
+
+        assert_eq!(state.input, "hello\nworld\n!");
+        assert!(state.attachments.is_empty());
+    }
+
+    #[test]
+    fn backspace_on_empty_input_removes_last_attachment() {
+        let mut state = AppState::new();
+        state.attachments.push(crate::app::PastedAttachment {
+            id: 1,
+            content: "first".to_string(),
+        });
+        state.attachments.push(crate::app::PastedAttachment {
+            id: 2,
+            content: "second".to_string(),
+        });
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Backspace));
+
+        assert_eq!(
+            state.attachments.len(),
+            1,
+            "only the last chip should be removed"
+        );
+        assert_eq!(state.attachments[0].id, 1);
+    }
+
+    #[test]
+    fn submit_combines_attachment_contents_and_input_text() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.attachments.push(crate::app::PastedAttachment {
+            id: 1,
+            content: "pasted-1".to_string(),
+        });
+        state.attachments.push(crate::app::PastedAttachment {
+            id: 2,
+            content: "pasted-2".to_string(),
+        });
+        state.input = "typed".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        let cmd = cmd_rx.try_recv().expect("prompt was sent");
+        match cmd {
+            UiCommand::SendPrompt { text } => {
+                assert_eq!(text, "pasted-1\npasted-2\ntyped");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(state.input.is_empty());
+        assert!(state.attachments.is_empty());
+    }
+
+    #[test]
+    fn esc_clears_input_and_attachments() {
+        let mut state = AppState::new();
+        state.input = "draft".to_string();
+        state.attachments.push(crate::app::PastedAttachment {
+            id: 1,
+            content: "x".to_string(),
+        });
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+
+        assert!(state.input.is_empty());
+        assert!(state.attachments.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_clears_attachments_when_input_is_empty() {
+        let mut state = AppState::new();
+        state.attachments.push(crate::app::PastedAttachment {
+            id: 1,
+            content: "x".to_string(),
+        });
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.input.is_empty());
+        assert!(state.attachments.is_empty());
+        assert!(
+            state.exit_reason.is_none(),
+            "first Ctrl-C clears attachments, not quits"
+        );
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(
+            state.exit_reason,
+            Some(UiExitReason::Quit),
+            "second Ctrl-C quits when everything is empty"
         );
     }
 }
