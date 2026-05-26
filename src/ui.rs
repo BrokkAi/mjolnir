@@ -12,9 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use agent_client_protocol::schema::AvailableCommandInput;
 use anyhow::{Context, Result};
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -205,6 +205,10 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             handle_mouse(state, m);
             return;
         }
+        CtEvent::Paste(text) => {
+            handle_paste(state, &text);
+            return;
+        }
         _ => return,
     };
     if key.kind != KeyEventKind::Press {
@@ -315,6 +319,15 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
             state.toggle_expand_tool_outputs();
         }
+        // Shift+Enter or Alt+Enter inserts a literal newline in the
+        // input buffer, so the user can draft multi-line prompts
+        // without submitting. Shift+Enter requires keyboard enhancement
+        // (the protocol-level extension); Alt+Enter works everywhere
+        // crossterm reports the Alt modifier.
+        (KeyModifiers::SHIFT, KeyCode::Enter) | (KeyModifiers::ALT, KeyCode::Enter) => {
+            state.input.push('\n');
+            state.update_autocomplete();
+        }
         (_, KeyCode::Enter) => submit_prompt(state, cmd_tx),
         (_, KeyCode::Backspace) => {
             state.input.pop();
@@ -344,6 +357,19 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         }
         _ => {}
     }
+}
+
+/// Translate a bracketed paste event into input buffer edits.
+/// Normalizes CRLF to LF and strips control characters (except tab and
+/// newline) so pasted text from browsers or terminals renders predictably.
+fn handle_paste(state: &mut AppState, text: &str) {
+    let cleaned: String = text
+        .replace("\r\n", "\n")
+        .chars()
+        .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
+        .collect();
+    state.input.push_str(&cleaned);
+    state.update_autocomplete();
 }
 
 /// Translate mouse wheel events into transcript scroll. The terminal's
@@ -584,7 +610,13 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
         KEYBOARD_ENHANCEMENT_ENABLED.store(true, Ordering::SeqCst);
     }
 
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("enter alt screen")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("enter alt screen")?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend).context("ratatui terminal")?;
     Ok(terminal)
@@ -598,11 +630,18 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
     Ok(())
 }
+
+/// Minimum input box height: one text row between top and bottom borders.
+const MIN_INPUT_HEIGHT: u16 = 3;
+/// Maximum input box height so the transcript stays usable even when
+/// the user pastes or drafts a long multi-line prompt.
+const MAX_INPUT_HEIGHT: u16 = 12;
 
 fn draw(
     f: &mut ratatui::Frame,
@@ -610,12 +649,17 @@ fn draw(
     transcript_scroll: &mut TranscriptScrollState,
 ) {
     let has_config_options = !state.selectable_config_options().is_empty();
+
+    // Dynamic input height: borders (2) + number of text lines, clamped.
+    let input_lines = 1 + state.input.chars().filter(|c| *c == '\n').count();
+    let input_height = (input_lines as u16 + 2).clamp(MIN_INPUT_HEIGHT, MAX_INPUT_HEIGHT);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
             Constraint::Length(if has_config_options { 1 } else { 0 }),
             Constraint::Length(1),
         ])
@@ -1434,13 +1478,25 @@ fn tool_status_color(status: agent_client_protocol::schema::ToolCallStatus) -> C
     }
 }
 
+/// Compute the cursor position for a multi-line input buffer. The cursor
+/// sits at the end of the last visible line, accounting for the border.
+fn input_cursor_position(area: Rect, text: &str) -> (u16, u16) {
+    let last_line = text.rsplit('\n').next().unwrap_or("");
+    let line_count = text.chars().filter(|c| *c == '\n').count() + 1;
+    // +1 for left border, min() to stay inside the text area
+    let cursor_x = area.x + 1 + (last_line.len().min((area.width - 2) as usize) as u16);
+    // +1 for top border, clamp to visible area height
+    let cursor_y = area.y + 1 + ((line_count - 1).min((area.height - 2) as usize) as u16);
+    (cursor_x, cursor_y)
+}
+
 fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let title = if state.runtime_closed {
         " runtime closed (Ctrl-C to quit) ".to_string()
     } else if state.is_streaming() {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
-        " prompt (Enter to send | Ctrl-C to quit) ".to_string()
+        " prompt (Enter to send | Shift+Enter for newline | Ctrl-C to quit) ".to_string()
     };
     let style = if state.runtime_closed || state.is_streaming() {
         Style::default().fg(Color::DarkGray)
@@ -1460,9 +1516,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         && state.config_picker.is_none()
         && !state.help_overlay
     {
-        // Place a fake cursor at end of input. Estimated, ASCII only.
-        let cursor_x = area.x + 1 + (state.input.len().min((area.width - 2) as usize) as u16);
-        let cursor_y = area.y + 1;
+        let (cursor_x, cursor_y) = input_cursor_position(area, &state.input);
         f.set_cursor_position((cursor_x, cursor_y));
     }
 }
@@ -1616,6 +1670,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from("  Enter        send prompt / accept selected item"),
+        Line::from("  Shift+Enter  insert a newline in the prompt (multiline input)"),
         Line::from("  Ctrl-C       cancel streaming turn; quit when idle with empty input"),
         Line::from("  Ctrl-D       quit when input is empty"),
         Line::from(""),
@@ -2549,5 +2604,91 @@ mod tests {
         );
 
         assert!(state.config_picker.is_none());
+    }
+
+    #[test]
+    fn bracketed_paste_appends_cleaned_text_to_input() {
+        let mut state = AppState::new();
+        state.input = "prefix ".to_string();
+
+        handle_paste(&mut state, "hello\nworld\r\n!");
+
+        assert_eq!(state.input, "prefix hello\nworld\n!");
+    }
+
+    #[test]
+    fn bracketed_paste_strips_control_characters_except_tab_and_newline() {
+        let mut state = AppState::new();
+
+        handle_paste(&mut state, "a\x00b\x07c\t\t\n");
+
+        assert_eq!(state.input, "abc\t\t\n");
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline_without_submitting() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "line 1".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Enter, KeyModifiers::SHIFT),
+        );
+
+        assert_eq!(state.input, "line 1\n");
+        assert!(cmd_rx.try_recv().is_err(), "must not submit");
+    }
+
+    #[test]
+    fn alt_enter_inserts_newline_without_submitting() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "first".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Enter, KeyModifiers::ALT),
+        );
+
+        assert_eq!(state.input, "first\n");
+        assert!(cmd_rx.try_recv().is_err(), "must not submit");
+    }
+
+    #[test]
+    fn input_cursor_tracks_last_line_in_multiline_buffer() {
+        let area = Rect::new(0, 0, 40, 10);
+
+        let (x, y) = input_cursor_position(area, "hello");
+        assert_eq!((x, y), (6, 1));
+
+        let (x, y) = input_cursor_position(area, "line one\nsecond");
+        assert_eq!((x, y), (7, 2));
+
+        let (x, y) = input_cursor_position(area, "a\nbb\nccc");
+        assert_eq!((x, y), (4, 3));
+    }
+
+    #[test]
+    fn multiline_submit_sends_trimmed_text() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "line one\nline two\nline three".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        let cmd = cmd_rx.try_recv().expect("prompt was sent");
+        match cmd {
+            UiCommand::SendPrompt { text } => {
+                assert_eq!(text, "line one\nline two\nline three");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(state.input.is_empty());
     }
 }
