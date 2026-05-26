@@ -58,6 +58,13 @@ impl Command for EnableAlternateScroll {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
         f.write_str("\x1b[?1007h")
     }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> std::io::Result<()> {
+        // No direct WinAPI equivalent; the ANSI sequence is handled by
+        // modern Windows terminals (ConPTY / VT100 support).
+        Ok(())
+    }
 }
 
 /// Disable alternate-screen scroll mode when leaving the alt screen.
@@ -67,6 +74,13 @@ struct DisableAlternateScroll;
 impl Command for DisableAlternateScroll {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
         f.write_str("\x1b[?1007l")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> std::io::Result<()> {
+        // No direct WinAPI equivalent; the ANSI sequence is handled by
+        // modern Windows terminals (ConPTY / VT100 support).
+        Ok(())
     }
 }
 
