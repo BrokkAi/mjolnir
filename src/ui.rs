@@ -130,12 +130,15 @@ impl TranscriptScrollState {
 /// terminate or run the picker again.
 ///
 /// Prompt history is loaded from `history_path` (if set) and persisted
-/// on exit.
+/// on exit. `initial_agent_label` pre-populates the agent section of
+/// the header so we show the configured agent name immediately instead
+/// of waiting for the agent to report its own name during handshake.
 pub async fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     mut event_rx: mpsc::UnboundedReceiver<UiEvent>,
     worktree_label: Option<String>,
+    initial_agent_label: Option<String>,
     history_path: Option<&Path>,
 ) -> Result<UiExitReason> {
     let initial_history = history_path.map(config::load_history).unwrap_or_default();
@@ -144,6 +147,7 @@ pub async fn run(
         &cmd_tx,
         &mut event_rx,
         worktree_label,
+        initial_agent_label,
         initial_history,
     )
     .await?;
@@ -173,11 +177,15 @@ async fn ui_loop(
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
     worktree_label: Option<String>,
+    initial_agent_label: Option<String>,
     initial_history: Vec<String>,
 ) -> Result<(UiExitReason, Vec<String>)> {
     let mut state = AppState::new();
     state.set_prompt_history(initial_history);
     state.worktree_label = worktree_label;
+    if let Some(label) = initial_agent_label {
+        state.agent_label = label;
+    }
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut crossterm_events = EventStream::new();
     // Wake-up timer so we still get scheduled to draw when no events

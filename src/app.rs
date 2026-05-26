@@ -875,15 +875,11 @@ impl AppState {
 
     pub fn apply_event(&mut self, event: UiEvent) {
         match event {
-            UiEvent::Connected {
-                agent_name,
-                agent_version,
-            } => {
-                self.agent_label = match (agent_name, agent_version) {
-                    (Some(n), Some(v)) => format!("{n} {v}"),
-                    (Some(n), None) => n,
-                    _ => "agent".to_string(),
-                };
+            UiEvent::Connected { .. } => {
+                // Keep the pre-filled agent_label (the configured
+                // executable name). The agent may report a different
+                // name over ACP, but the user wants to see which
+                // binary they wired up in config.
                 self.connection_state = ConnectionState::Initializing;
             }
             UiEvent::SessionStarted { session_id, .. } => {

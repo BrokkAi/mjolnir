@@ -360,7 +360,23 @@ async fn run_session(
     });
 
     let hist_path = history_path();
-    let ui_result = ui::run(terminal, cmd_tx, event_rx, worktree_label, Some(&hist_path)).await;
+    // Pre-fill the UI header with the configured agent's executable
+    // name so the user sees immediately which agent is wired up, without
+    // waiting for the ACP handshake to complete.
+    let agent_display_name = agent
+        .program
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned());
+
+    let ui_result = ui::run(
+        terminal,
+        cmd_tx,
+        event_rx,
+        worktree_label,
+        agent_display_name,
+        Some(&hist_path),
+    )
+    .await;
 
     // Shutdown paths reaching this point:
     //
