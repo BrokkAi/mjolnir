@@ -614,7 +614,7 @@ fn draw(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Length(3),
             Constraint::Length(if has_config_options { 1 } else { 0 }),
             Constraint::Length(1),
@@ -622,8 +622,8 @@ fn draw(
         .split(f.area());
 
     draw_transcript(f, chunks[0], state, transcript_scroll);
-    draw_input(f, chunks[1], state);
-    draw_header(f, chunks[2], state);
+    draw_header(f, chunks[1], state);
+    draw_input(f, chunks[2], state);
     draw_config_shortcuts_row(f, chunks[3], state);
     draw_status(f, chunks[4], state);
 
@@ -649,9 +649,7 @@ fn draw(
 }
 
 fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let block = Block::default().borders(Borders::ALL).title(" mjolnir ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = area;
 
     let session = state
         .session_id
