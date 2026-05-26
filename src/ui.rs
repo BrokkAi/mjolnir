@@ -15,9 +15,9 @@ use agent_client_protocol::schema::AvailableCommandInput;
 use anyhow::{Context, Result};
 use crossterm::Command;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste,
-    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, EnableBracketedPaste, Event as CtEvent, EventStream, KeyCode,
+    KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
