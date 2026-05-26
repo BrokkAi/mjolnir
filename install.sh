@@ -481,9 +481,12 @@ install_anvil() {
 }
 
 install_bifrost() {
-  local -a patterns=(
-    "^bifrost-.*-${RUST_TARGET}[.]tar[.]gz$"
-  )
+  local -a patterns=()
+
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    patterns+=("^bifrost-.*-universal-apple-darwin[.]tar[.]gz$")
+  fi
+  patterns+=("^bifrost-.*-${RUST_TARGET}[.]tar[.]gz$")
 
   install_from_archive "bifrost" "bifrost" "bifrost" "${BIFROST_VERSION:-}" "${patterns[@]}"
 }
