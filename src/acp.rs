@@ -439,7 +439,7 @@ async fn drive_session(
     Ok(())
 }
 
-fn spawn_agent(
+pub(crate) fn spawn_agent(
     command: &PathBuf,
     args: &[String],
     env: &HashMap<String, String>,

@@ -14,6 +14,7 @@ mod headless;
 mod install;
 mod picker;
 mod registry;
+mod session;
 mod ui;
 mod worktree;
 
@@ -27,11 +28,15 @@ use tokio::sync::mpsc;
 use crate::app::UiExitReason;
 use crate::config::{Config, SelectedAgent, history_path};
 use crate::picker::PickerOutcome;
+use crate::session::SessionEntryJson;
 use crate::worktree::CreatedWorktree;
 
 #[derive(Debug, Parser)]
 #[command(name = "mj", version, about = "Interactive ACP chat TUI")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Run one prompt non-interactively and print the result.
     ///
     /// Matches Claude Code's `--print`/`-p` shape where practical: provide
@@ -84,6 +89,43 @@ struct Cli {
     agent_stderr: Option<PathBuf>,
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum Commands {
+    /// Resume an existing ACP session.
+    ///
+    /// Without arguments, opens an interactive session picker that lists
+    /// available sessions from the configured agent. With a session ID,
+    /// resumes that session directly without prompting.
+    ///
+    /// Use `--list` to print sessions in headless mode (no TUI).
+    Resume(ResumeArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct ResumeArgs {
+    /// Session ID to resume directly. When omitted, opens an interactive
+    /// picker that fetches the session list from the configured agent.
+    session_id: Option<String>,
+
+    /// List available sessions and exit (headless, no TUI). Optionally
+    /// filtered by `--cwd`.
+    #[arg(short, long)]
+    list: bool,
+
+    /// Output format for `--list`.
+    #[arg(long, value_enum, default_value_t = HeadlessOutputFormat::Text)]
+    format: HeadlessOutputFormat,
+
+    /// Working directory filter for `--list` and the resumed session.
+    /// Defaults to the current directory.
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+
+    /// Capture the agent subprocess's stderr to this file.
+    #[arg(long, env = "BROKK_TUI_AGENT_STDERR")]
+    agent_stderr: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum HeadlessOutputFormat {
     Text,
@@ -125,6 +167,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.log_file.as_deref())?;
 
+    // Dispatch to subcommand if provided.
+    if let Some(Commands::Resume(args)) = cli.command {
+        return run_resume(args).await;
+    }
+
     let cwd = match cli.cwd {
         Some(p) => p,
         None => std::env::current_dir().context("current dir")?,
@@ -165,7 +212,7 @@ async fn main() -> Result<()> {
 
     // Run the application; ensure the terminal is restored even on
     // error so the user's shell isn't left in alt-screen / raw mode.
-    let result = run_app(&mut terminal, cwd, cli.agent_stderr, worktree_label).await;
+    let result = run_app(&mut terminal, cwd, cli.agent_stderr, worktree_label, None).await;
 
     if let Err(e) = ui::restore_terminal(&mut terminal) {
         tracing::warn!("restore terminal failed: {e}");
@@ -191,6 +238,110 @@ async fn main() -> Result<()> {
     }
 
     result
+}
+
+/// Handle the `mj resume` subcommand: list sessions, pick one interactively,
+/// or resume directly by ID.
+async fn run_resume(args: ResumeArgs) -> Result<()> {
+    let cwd = match args.cwd.clone() {
+        Some(p) => p,
+        None => std::env::current_dir().context("current dir")?,
+    };
+
+    // Load the configured agent (same as headless mode).
+    let config_path = config::default_config_path();
+    let cfg =
+        Config::load(&config_path).with_context(|| format!("load {}", config_path.display()))?;
+    let agent = cfg.agent.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no agent configured; run `mj` once to pick an agent before resuming sessions"
+        )
+    })?;
+
+    // `--list`: headless listing, print and exit.
+    if args.list {
+        let sessions = session::list_sessions(&agent, cwd).await?;
+        match args.format {
+            HeadlessOutputFormat::Json | HeadlessOutputFormat::StreamJson => {
+                let json: Vec<SessionEntryJson> =
+                    sessions.iter().map(SessionEntryJson::from).collect();
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            }
+            HeadlessOutputFormat::Text => {
+                if sessions.is_empty() {
+                    println!("no sessions found");
+                } else {
+                    for s in &sessions {
+                        let title = s.title.as_deref().unwrap_or("(untitled)");
+                        let cwd_str = s.cwd.display();
+                        let updated = s.updated_at.as_deref().unwrap_or("");
+                        println!("{}  {}  {}  {}", s.session_id, title, cwd_str, updated);
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // Direct ID: skip the picker and launch TUI with that session.
+    if let Some(session_id) = args.session_id {
+        let mut terminal = ui::setup_terminal().context("setup terminal")?;
+        let result = run_app(
+            &mut terminal,
+            cwd,
+            args.agent_stderr,
+            None,
+            Some(session_id),
+        )
+        .await;
+        if let Err(e) = ui::restore_terminal(&mut terminal) {
+            tracing::warn!("restore terminal failed: {e}");
+        }
+        return result;
+    }
+
+    // Interactive picker: fetch sessions first (agent is killed after listing),
+    // then set up the TUI to show the picker, then launch the chosen session
+    // with a fresh agent.
+    eprintln!("Fetching sessions from agent...");
+    let sessions = session::list_sessions(&agent, cwd.clone()).await?;
+    if sessions.is_empty() {
+        eprintln!("No sessions available.");
+        return Ok(());
+    }
+
+    let mut terminal = ui::setup_terminal().context("setup terminal")?;
+
+    let outcome = session::run_session_picker(&mut terminal, sessions).await;
+
+    if let Err(e) = ui::restore_terminal(&mut terminal) {
+        tracing::warn!("restore terminal (picker) failed: {e}");
+    }
+
+    let outcome = outcome?;
+    match outcome {
+        session::ResumeOutcome::Cancelled => {
+            eprintln!("Cancelled.");
+            Ok(())
+        }
+        session::ResumeOutcome::Selected(entry) => {
+            eprintln!("Resuming session: {}", entry.session_id);
+            // Set up a fresh TUI for the resumed session.
+            let mut terminal = ui::setup_terminal().context("setup terminal")?;
+            let result = run_app(
+                &mut terminal,
+                cwd,
+                args.agent_stderr,
+                None,
+                Some(entry.session_id),
+            )
+            .await;
+            if let Err(e) = ui::restore_terminal(&mut terminal) {
+                tracing::warn!("restore terminal failed: {e}");
+            }
+            result
+        }
+    }
 }
 
 fn read_headless_prompt(prompt_arg: String) -> Result<String> {
@@ -245,6 +396,7 @@ async fn run_app(
     cwd: PathBuf,
     agent_stderr: Option<PathBuf>,
     worktree_label: Option<String>,
+    resume_session: Option<String>,
 ) -> Result<()> {
     let config_path = config::default_config_path();
     let mut cfg = Config::load(&config_path)?;
@@ -253,6 +405,8 @@ async fn run_app(
     // agent; if the user invokes `/mj:agents`, the UI exits with
     // `SwapAgent`, we run the picker again, persist, and loop.
     let mut last_source_id: Option<String> = None;
+    // Consume resume_session on the first iteration only.
+    let mut initial_resume = resume_session;
     loop {
         let agent = match cfg.agent.clone() {
             Some(a) => {
@@ -273,12 +427,14 @@ async fn run_app(
             }
         };
 
+        let resume = initial_resume.take();
         let reason = run_session(
             terminal,
             &agent,
             cwd.clone(),
             agent_stderr.clone(),
             worktree_label.clone(),
+            resume,
         )
         .await?;
         match reason {
@@ -336,6 +492,7 @@ async fn run_session(
     cwd: PathBuf,
     agent_stderr: Option<PathBuf>,
     worktree_label: Option<String>,
+    resume_session: Option<String>,
 ) -> Result<UiExitReason> {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -344,7 +501,7 @@ async fn run_session(
         command: agent.program.clone(),
         args: agent.args.clone(),
         cwd,
-        resume_session: None,
+        resume_session,
         env: agent.env.clone(),
         agent_stderr,
     };
@@ -505,5 +662,103 @@ mod tests {
         assert!(help.contains("[possible values: default, acceptEdits, bypassPermissions]"));
         assert!(!help.contains("accept-edits"));
         assert!(!help.contains("bypass-permissions"));
+    }
+
+    #[test]
+    fn parse_resume_subcommand_without_args() {
+        let cli = Cli::try_parse_from(["mj", "resume"]).expect("parse");
+        assert!(matches!(cli.command, Some(Commands::Resume(_))));
+        if let Some(Commands::Resume(args)) = cli.command {
+            assert!(args.session_id.is_none());
+            assert!(!args.list);
+            assert!(matches!(args.format, HeadlessOutputFormat::Text));
+            assert!(args.cwd.is_none());
+            assert!(args.agent_stderr.is_none());
+        }
+    }
+
+    #[test]
+    fn parse_resume_subcommand_with_session_id() {
+        let cli = Cli::try_parse_from(["mj", "resume", "sess-123"]).expect("parse");
+        if let Some(Commands::Resume(args)) = cli.command {
+            assert_eq!(args.session_id, Some("sess-123".to_string()));
+            assert!(!args.list);
+        } else {
+            panic!("expected Resume subcommand");
+        }
+    }
+
+    #[test]
+    fn parse_resume_subcommand_with_list_flag() {
+        let cli = Cli::try_parse_from(["mj", "resume", "--list"]).expect("parse");
+        if let Some(Commands::Resume(args)) = cli.command {
+            assert!(args.list);
+            assert!(args.session_id.is_none());
+        } else {
+            panic!("expected Resume subcommand");
+        }
+    }
+
+    #[test]
+    fn parse_resume_subcommand_with_list_and_format() {
+        let cli =
+            Cli::try_parse_from(["mj", "resume", "--list", "--format", "json"]).expect("parse");
+        if let Some(Commands::Resume(args)) = cli.command {
+            assert!(args.list);
+            assert!(matches!(args.format, HeadlessOutputFormat::Json));
+        } else {
+            panic!("expected Resume subcommand");
+        }
+    }
+
+    #[test]
+    fn parse_resume_subcommand_with_cwd() {
+        let cli = Cli::try_parse_from(["mj", "resume", "--cwd", "/tmp/test"]).expect("parse");
+        if let Some(Commands::Resume(args)) = cli.command {
+            assert_eq!(args.cwd, Some(PathBuf::from("/tmp/test")));
+        } else {
+            panic!("expected Resume subcommand");
+        }
+    }
+
+    #[test]
+    fn parse_resume_subcommand_with_agent_stderr() {
+        let cli =
+            Cli::try_parse_from(["mj", "resume", "--agent-stderr", "agent.log"]).expect("parse");
+        if let Some(Commands::Resume(args)) = cli.command {
+            assert_eq!(args.agent_stderr, Some(PathBuf::from("agent.log")));
+        } else {
+            panic!("expected Resume subcommand");
+        }
+    }
+
+    #[test]
+    fn parse_resume_subcommand_combined_flags() {
+        let cli = Cli::try_parse_from([
+            "mj",
+            "resume",
+            "sess-456",
+            "--cwd",
+            "/home/user",
+            "--agent-stderr",
+            "err.log",
+        ])
+        .expect("parse");
+        if let Some(Commands::Resume(args)) = cli.command {
+            assert_eq!(args.session_id, Some("sess-456".to_string()));
+            assert_eq!(args.cwd, Some(PathBuf::from("/home/user")));
+            assert_eq!(args.agent_stderr, Some(PathBuf::from("err.log")));
+            assert!(!args.list);
+        } else {
+            panic!("expected Resume subcommand");
+        }
+    }
+
+    #[test]
+    fn resume_help_shows_subcommand_info() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_long_help().to_string();
+        assert!(help.contains("resume"));
+        assert!(help.contains("Resume an existing ACP session"));
     }
 }
