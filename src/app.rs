@@ -244,6 +244,12 @@ pub struct AppState {
     /// visible changed.
     transcript_revision: u64,
     pub input: String,
+    /// Cursor position in `input`, counted in Unicode scalar values from
+    /// the start of the buffer.
+    pub input_cursor: usize,
+    /// Scroll offset measured in rendered lines from the bottom of the
+    /// prompt box. `0` keeps the view pinned to the newest line.
+    pub input_scroll_offset: usize,
     /// Pasted attachments that exceeded the chip line threshold. Shown as
     /// compact badges in the input box; their contents are concatenated
     /// with `input` when the prompt is submitted.
@@ -335,6 +341,8 @@ impl AppState {
             tool_calls: HashMap::new(),
             transcript_revision: 0,
             input: String::new(),
+            input_cursor: 0,
+            input_scroll_offset: 0,
             attachments: Vec::new(),
             next_attachment_id: 0,
             permission_queue: VecDeque::new(),
@@ -370,6 +378,11 @@ impl AppState {
     pub fn toggle_expand_tool_outputs(&mut self) {
         self.expand_tool_outputs = !self.expand_tool_outputs;
         self.bump_transcript_revision();
+    }
+
+    /// Reset the prompt box to follow the newest line.
+    pub fn scroll_input_to_bottom(&mut self) {
+        self.input_scroll_offset = 0;
     }
 
     /// True while a prompt turn is in flight (i.e. we are waiting for or
@@ -490,6 +503,7 @@ impl AppState {
         self.connection_state = ConnectionState::Streaming;
         self.turn_started_at = Some(Instant::now());
         self.last_turn_elapsed = None;
+        self.input_cursor = 0;
         self.scroll_offset = 0;
         // Sending the prompt clears the input; tear down any open
         // autocomplete popover so it doesn't linger over an empty buffer.
@@ -675,6 +689,8 @@ impl AppState {
             return false;
         };
         self.input = format!("/{} ", cmd.name);
+        self.input_cursor = self.input.chars().count();
+        self.scroll_input_to_bottom();
         self.autocomplete = Autocomplete::default();
         true
     }
