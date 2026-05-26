@@ -234,6 +234,7 @@ impl TokenUsage {
 pub struct AppState {
     pub agent_label: String,
     pub session_id: Option<String>,
+    pub session_title: Option<String>,
     pub connection_state: ConnectionState,
     pub current_mode: Option<String>,
     pub available_commands: Vec<AvailableCommand>,
@@ -355,6 +356,7 @@ impl AppState {
         Self {
             agent_label: String::new(),
             session_id: None,
+            session_title: None,
             connection_state: ConnectionState::Launching,
             current_mode: None,
             available_commands: Vec::new(),
@@ -1041,6 +1043,7 @@ impl AppState {
             }
             SessionUpdate::SessionInfoUpdate(info) => {
                 if let Some(title) = info.title.value() {
+                    self.session_title = Some(title.clone());
                     self.transcript
                         .push(Entry::System(format!("session title: {title}")));
                     self.bump_transcript_revision();

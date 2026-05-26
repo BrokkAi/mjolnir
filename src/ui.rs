@@ -1238,27 +1238,25 @@ fn draw(
 fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let inner = area;
 
-    let session = state
-        .session_id
-        .as_deref()
-        .map(str::to_string)
-        .unwrap_or_else(|| "no session".to_string());
     let conn_color = connection_state_color(state.connection_state);
-    let mut spans = vec![
-        Span::styled("session ", Style::default().fg(Color::Gray)),
-        Span::styled(session, Style::default().fg(Color::LightYellow)),
-    ];
-    if let Some(label) = state.worktree_label.as_deref() {
+    let mut spans = Vec::new();
+    let agent_label = state.agent_label.trim();
+    if !agent_label.is_empty() {
+        spans.push(Span::styled("agent ", Style::default().fg(Color::Gray)));
         spans.push(Span::styled(
-            "   worktree ",
-            Style::default().fg(Color::Gray),
+            agent_label.to_string(),
+            Style::default().fg(Color::Cyan),
         ));
+        spans.push(Span::raw("   "));
+    }
+    if let Some(label) = state.worktree_label.as_deref() {
+        spans.push(Span::styled("worktree ", Style::default().fg(Color::Gray)));
         spans.push(Span::styled(
             label.to_string(),
             Style::default().fg(Color::LightMagenta),
         ));
+        spans.push(Span::raw("   "));
     }
-    spans.push(Span::raw("    "));
     if needs_live_redraw(state) {
         spans.push(Span::styled(
             spinner_frame(),
@@ -1279,6 +1277,26 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
             Style::default().fg(Color::Magenta),
         ),
     ]);
+    let session = state
+        .session_id
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| "no session".to_string());
+    spans.extend([
+        Span::raw("   "),
+        Span::styled("session ", Style::default().fg(Color::Gray)),
+        Span::styled(session, Style::default().fg(Color::LightYellow)),
+    ]);
+    if let Some(title) = state.session_title.as_deref() {
+        let title = title.trim();
+        if !title.is_empty() {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                title.to_string(),
+                Style::default().fg(Color::White),
+            ));
+        }
+    }
 
     let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, inner);
