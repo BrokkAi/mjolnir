@@ -140,9 +140,9 @@ pub async fn run(
     worktree_label: Option<String>,
     initial_agent_label: Option<String>,
     history_path: Option<&Path>,
-) -> Result<UiExitReason> {
+) -> Result<(UiExitReason, Option<String>)> {
     let initial_history = history_path.map(config::load_history).unwrap_or_default();
-    let (reason, history) = ui_loop(
+    let (reason, session_id, history) = ui_loop(
         terminal,
         &cmd_tx,
         &mut event_rx,
@@ -156,7 +156,7 @@ pub async fn run(
     {
         tracing::warn!("save_history {path:?}: {e:#}");
     }
-    Ok(reason)
+    Ok((reason, session_id))
 }
 
 /// Maximum redraw rate. Events/keystrokes flip a `dirty` flag, but the
@@ -179,7 +179,7 @@ async fn ui_loop(
     worktree_label: Option<String>,
     initial_agent_label: Option<String>,
     initial_history: Vec<String>,
-) -> Result<(UiExitReason, Vec<String>)> {
+) -> Result<(UiExitReason, Option<String>, Vec<String>)> {
     let mut state = AppState::new();
     state.set_prompt_history(initial_history);
     state.worktree_label = worktree_label;
@@ -239,7 +239,7 @@ async fn ui_loop(
         if let Some(reason) = state.exit_reason {
             let _ = cmd_tx.send(UiCommand::Shutdown);
             terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
-            return Ok((reason, state.prompt_history()));
+            return Ok((reason, state.session_id.clone(), state.prompt_history()));
         }
 
         // Throttle: redraw at most once per FRAME_BUDGET. Under a flood
@@ -252,7 +252,7 @@ async fn ui_loop(
             last_draw = Instant::now();
         }
     }
-    Ok((UiExitReason::Quit, state.prompt_history()))
+    Ok((UiExitReason::Quit, None, state.prompt_history()))
 }
 
 fn needs_live_redraw(state: &AppState) -> bool {
