@@ -613,17 +613,17 @@ fn draw(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
             Constraint::Min(3),
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(if has_config_options { 1 } else { 0 }),
             Constraint::Length(1),
         ])
         .split(f.area());
 
-    draw_header(f, chunks[0], state);
-    draw_transcript(f, chunks[1], state, transcript_scroll);
-    draw_input(f, chunks[2], state);
+    draw_transcript(f, chunks[0], state, transcript_scroll);
+    draw_input(f, chunks[1], state);
+    draw_header(f, chunks[2], state);
     draw_config_shortcuts_row(f, chunks[3], state);
     draw_status(f, chunks[4], state);
 
@@ -632,7 +632,7 @@ fn draw(
     // it overlays the transcript pane. The permission modal trumps it
     // and renders on top.
     if state.autocomplete.visible {
-        draw_autocomplete_popover(f, chunks[2], state);
+        draw_autocomplete_popover(f, chunks[1], state);
     }
 
     if state.config_picker.is_some() {
