@@ -45,7 +45,7 @@ use crate::event::{PermissionDecision, UiCommand, UiEvent};
 
 static KEYBOARD_ENHANCEMENT_ENABLED: AtomicBool = AtomicBool::new(false);
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
-const PROMPT_SIDE_PADDING: u16 = 4;
+const PROMPT_SIDE_PADDING: u16 = 1;
 
 /// Enable alternate-screen scroll mode so the terminal translates the
 /// mouse wheel into Up/Down arrow key events while the alt screen is
@@ -2118,7 +2118,12 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         return;
     }
     let side_padding = PROMPT_SIDE_PADDING.min(inner.width / 4);
-    let content_width = inner.width.saturating_sub(side_padding * 2).max(1);
+    // Reserve space for the "> " prompt prefix in the gutter.
+    const PROMPT_PREFIX_WIDTH: u16 = 2;
+    let content_width = inner
+        .width
+        .saturating_sub(side_padding * 2 + PROMPT_PREFIX_WIDTH)
+        .max(1);
     let inner_h = inner.height as usize;
     let chip_rows = state.attachments.len();
     let text_rows = input_wrapped_row_count(&state.input, content_width as usize);
@@ -2130,7 +2135,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         0
     };
     let content_area = Rect::new(
-        inner.x + side_padding,
+        inner.x + side_padding + PROMPT_PREFIX_WIDTH,
         inner.y + top_padding,
         content_width,
         visible_rows as u16,
@@ -2151,6 +2156,23 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     f.render_widget(paragraph, content_area);
+
+    // Draw the ">" prompt prefix in the gutter to the left of the input text.
+    let gutter_area = Rect::new(
+        inner.x + side_padding,
+        content_area.y,
+        PROMPT_PREFIX_WIDTH,
+        content_area.height,
+    );
+    let gutter_style = if state.runtime_closed || state.is_streaming() {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    };
+    let gutter = Paragraph::new(">").style(gutter_style);
+    f.render_widget(gutter, gutter_area);
 
     if !state.runtime_closed
         && !state.is_streaming()
