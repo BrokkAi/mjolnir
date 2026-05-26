@@ -293,6 +293,12 @@ pub struct PendingPermission {
 pub struct ConfigPicker {
     pub selected_option: usize,
     pub selected_value: usize,
+    /// Search query to filter choices. Empty means show all.
+    pub search_query: String,
+    /// Indices into the full `choices` vec that match `search_query`.
+    /// Always non-empty when `search_query` is non-empty (falls back to
+    /// full list if no match).
+    pub filtered_indices: Vec<usize>,
 }
 
 /// Autocomplete popover for slash-commands.
@@ -501,9 +507,12 @@ impl AppState {
         let current = config_option_current_value_id(option)
             .and_then(|value| choices.iter().position(|choice| &choice.value == value))
             .unwrap_or(0);
+        let all_indices: Vec<usize> = (0..choices.len()).collect();
         self.config_picker = Some(ConfigPicker {
             selected_option: option_index,
             selected_value: current,
+            search_query: String::new(),
+            filtered_indices: all_indices,
         });
         self.autocomplete = Autocomplete::default();
         true
@@ -520,24 +529,72 @@ impl AppState {
     }
 
     /// Move the config picker cursor by `delta`, wrapping within the
-    /// current option's value list.
+    /// current option's filtered value list.
     pub fn config_picker_move(&mut self, delta: i32) {
         let Some(picker) = self.config_picker.as_mut() else {
             return;
         };
-
-        let Some(option) = self.session_config_options.get(picker.selected_option) else {
-            return;
-        };
-        let Some(choices) = config_option_choices(option) else {
-            return;
-        };
-        let len = choices.len();
+        let len = picker.filtered_indices.len();
         if len == 0 {
             return;
         }
         let cur = picker.selected_value as i32;
         picker.selected_value = (cur + delta).rem_euclid(len as i32) as usize;
+    }
+
+    /// Update the config picker search query, recompute the filtered
+    /// indices, and reset the cursor to the first match (or to whichever
+    /// previously-selected item is still visible). The filter is a
+    /// case-insensitive substring match over each choice's `name` and
+    /// (if present) `description`.
+    pub fn config_picker_set_search(&mut self, query: impl Into<String>) {
+        let Some(picker) = self.config_picker.as_mut() else {
+            return;
+        };
+        let query = query.into();
+        let Some(option) = self.session_config_options.get(picker.selected_option) else {
+            picker.search_query = query;
+            picker.filtered_indices = Vec::new();
+            picker.selected_value = 0;
+            return;
+        };
+        let Some(choices) = config_option_choices(option) else {
+            picker.search_query = query;
+            picker.filtered_indices = Vec::new();
+            picker.selected_value = 0;
+            return;
+        };
+
+        // Remember the full-choice index that was selected before the
+        // filter changed so we can keep pointing at it if it survives.
+        let previously_selected_full = picker.filtered_indices.get(picker.selected_value).copied();
+
+        let haystack = query.to_lowercase();
+        let filtered: Vec<usize> = if haystack.is_empty() {
+            (0..choices.len()).collect()
+        } else {
+            choices
+                .iter()
+                .enumerate()
+                .filter(|(_, choice)| {
+                    choice.name.to_lowercase().contains(&haystack)
+                        || choice
+                            .description
+                            .as_deref()
+                            .map(|d| d.to_lowercase().contains(&haystack))
+                            .unwrap_or(false)
+                })
+                .map(|(i, _)| i)
+                .collect()
+        };
+
+        let new_selected = previously_selected_full
+            .and_then(|full_idx| filtered.iter().position(|&i| i == full_idx))
+            .unwrap_or(0);
+
+        picker.search_query = query;
+        picker.filtered_indices = filtered;
+        picker.selected_value = new_selected;
     }
 
     /// Submit the current config value selection.
@@ -550,7 +607,9 @@ impl AppState {
         let (config_id, value) = {
             let option = self.session_config_options.get(selected_option)?;
             let choices = config_option_choices(option)?;
-            let choice = choices.get(selected_value)?;
+            let picker = self.config_picker.as_ref()?;
+            let full_index = *picker.filtered_indices.get(selected_value)?;
+            let choice = choices.get(full_index)?;
             (option.id.clone(), choice.value.clone())
         };
         self.dismiss_config_picker();
@@ -879,7 +938,29 @@ impl AppState {
             return;
         }
         if let Some(picker) = self.config_picker.as_mut() {
-            picker.selected_value = selected_value.min(choices.len().saturating_sub(1));
+            let query = picker.search_query.clone();
+            // Recompute filtered indices against the new choices list.
+            let haystack = query.to_lowercase();
+            let filtered: Vec<usize> = if haystack.is_empty() {
+                (0..choices.len()).collect()
+            } else {
+                choices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, choice)| {
+                        choice.name.to_lowercase().contains(&haystack)
+                            || choice
+                                .description
+                                .as_deref()
+                                .map(|d| d.to_lowercase().contains(&haystack))
+                                .unwrap_or(false)
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            };
+            picker.filtered_indices = filtered;
+            picker.selected_value =
+                selected_value.min(picker.filtered_indices.len().saturating_sub(1));
         }
     }
 
@@ -1374,6 +1455,107 @@ mod tests {
         assert_eq!(shortcuts[0].0, 0);
         assert_eq!(shortcuts[0].2, Some('1'));
         assert_eq!(s.config_picker.as_ref().expect("picker").selected_value, 0);
+    }
+
+    #[test]
+    fn config_picker_search_filters_choices_case_insensitively() {
+        let mut s = AppState::new();
+        s.session_config_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "claude-3-5",
+            vec![
+                SessionConfigSelectOption::new("gpt-4o", "GPT-4o"),
+                SessionConfigSelectOption::new("gpt-4", "GPT-4"),
+                SessionConfigSelectOption::new("claude-3-5", "Claude 3.5 Sonnet"),
+                SessionConfigSelectOption::new("claude-3", "Claude 3"),
+            ],
+        )];
+
+        assert!(s.open_config_value_picker(0));
+        let picker = s.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.filtered_indices.len(), 4);
+
+        // Search for "Claude" (case-insensitive)
+        s.config_picker_set_search("claude");
+        let picker = s.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.filtered_indices, vec![2, 3]);
+        assert_eq!(picker.selected_value, 0);
+
+        // Refine to "sonnet"
+        s.config_picker_set_search("sonnet");
+        let picker = s.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.filtered_indices, vec![2]);
+
+        // Clear filter shows all again
+        s.config_picker_set_search("");
+        let picker = s.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.filtered_indices.len(), 4);
+    }
+
+    #[test]
+    fn config_picker_search_moves_navigates_filtered_list() {
+        let mut s = AppState::new();
+        s.session_config_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "gpt-4",
+            vec![
+                SessionConfigSelectOption::new("gpt-4o", "GPT-4o"),
+                SessionConfigSelectOption::new("gpt-4", "GPT-4"),
+                SessionConfigSelectOption::new("claude-3", "Claude 3"),
+            ],
+        )];
+
+        assert!(s.open_config_value_picker(0));
+        // Current value "gpt-4" is at index 1 → selected_value = 1
+        s.config_picker_set_search("gpt");
+
+        // Filtered to [0, 1]. Previously selected full index 1 still present
+        // at position 1 in the filtered list.
+        let picker = s.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.filtered_indices, vec![0, 1]);
+        assert_eq!(picker.selected_value, 1);
+
+        // Move up to first match
+        s.config_picker_move(-1);
+        let picker = s.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.selected_value, 0);
+
+        // Accept should submit gpt-4o (filtered_indices[0] = 0)
+        let submitted = s.config_picker_accept().expect("submitted");
+        assert_eq!(submitted.1.to_string(), "gpt-4o");
+    }
+
+    #[test]
+    fn config_picker_preserves_selection_when_filter_narrows() {
+        let mut s = AppState::new();
+        s.session_config_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "gpt-4",
+            vec![
+                SessionConfigSelectOption::new("gpt-4", "GPT-4"),
+                SessionConfigSelectOption::new("claude-3", "Claude 3"),
+                SessionConfigSelectOption::new("claude-3-5", "Claude 3.5"),
+            ],
+        )];
+
+        assert!(s.open_config_value_picker(0));
+        // Current value "gpt-4" is at index 0 → selected_value = 0
+        let picker = s.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.selected_value, 0);
+
+        // Move to Claude 3 (index 1)
+        s.config_picker_move(1);
+        let picker = s.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.selected_value, 1);
+
+        // Filter to "claude" - should still point at Claude 3 (full index 1)
+        s.config_picker_set_search("claude");
+        let picker = s.config_picker.as_ref().expect("picker");
+        assert_eq!(picker.filtered_indices, vec![1, 2]);
+        assert_eq!(picker.selected_value, 0); // Claude 3 at position 0 in filtered list
     }
 
     #[test]

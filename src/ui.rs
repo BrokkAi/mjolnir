@@ -491,6 +491,25 @@ fn handle_config_picker_key(
         (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
             state.config_picker_move(1);
         }
+        (_, KeyCode::Backspace) => {
+            if let Some(picker) = state.config_picker.as_mut()
+                && picker.search_query.pop().is_some()
+            {
+                let query = picker.search_query.clone();
+                state.config_picker_set_search(query);
+            }
+        }
+        (_, KeyCode::Char(c)) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+            state.config_picker_set_search({
+                let mut query = state
+                    .config_picker
+                    .as_ref()
+                    .map(|p| p.search_query.clone())
+                    .unwrap_or_default();
+                query.push(c);
+                query
+            });
+        }
         _ => {}
     }
 }
@@ -1668,7 +1687,7 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
         .description
         .clone()
         .unwrap_or_else(|| config_option_current_value_label(option));
-    let total = choices.len();
+    let total = picker.filtered_indices.len();
     let selected = picker.selected_value;
     let rows = 8u16;
 
@@ -1677,8 +1696,8 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     }
 
     let desired_rows = (total as u16).min(rows);
-    let height = (desired_rows + 4).min(area.height.saturating_sub(4));
-    if height < 5 {
+    let height = (desired_rows + 5).min(area.height.saturating_sub(4));
+    if height < 6 {
         return;
     }
     let width = area.width.saturating_sub(8).min(90);
@@ -1698,6 +1717,7 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
@@ -1710,30 +1730,50 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     .wrap(Wrap { trim: false });
     f.render_widget(header, layout[0]);
 
-    let start = if total <= layout[1].height as usize {
+    // Search input box
+    let search_text = if picker.search_query.is_empty() {
+        Line::from(Span::styled(
+            "🔍 type to filter...",
+            Style::default().fg(Color::DarkGray),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled("🔍 ", Style::default().fg(Color::DarkGray)),
+            Span::raw(picker.search_query.clone()),
+        ])
+    };
+    let search = Paragraph::new(search_text);
+    f.render_widget(search, layout[1]);
+
+    let start = if total <= layout[2].height as usize {
         0
     } else {
-        let view_size = layout[1].height as usize;
+        let view_size = layout[2].height as usize;
         let half = view_size / 2;
         selected.saturating_sub(half).min(total - view_size)
     };
-    let end = (start + layout[1].height as usize).min(total);
-    let items = choices[start..end]
+    let end = (start + layout[2].height as usize).min(total);
+    let items = picker.filtered_indices[start..end]
         .iter()
         .enumerate()
-        .map(|(offset, choice)| {
+        .map(|(offset, &full_idx)| {
             let absolute = start + offset;
             let marker = if absolute == selected { ">" } else { " " };
+            let choice = &choices[full_idx];
             let line = config_value_row_text(choice);
-            truncate_line(line, layout[1].width, marker == ">")
+            truncate_line(line, layout[2].width, marker == ">")
         })
         .collect::<Vec<ListItem>>();
     let list = List::new(items);
-    f.render_widget(list, layout[1]);
+    f.render_widget(list, layout[2]);
 
-    let footer = Paragraph::new("Up/Down to choose | Enter to apply | Esc cancel")
-        .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(footer, layout[2]);
+    let filter_hint = if picker.search_query.is_empty() {
+        "Up/Down to choose | type to filter | Enter to apply | Esc cancel"
+    } else {
+        "Up/Down to choose | Backspace to clear | Enter to apply | Esc cancel"
+    };
+    let footer = Paragraph::new(filter_hint).style(Style::default().fg(Color::DarkGray));
+    f.render_widget(footer, layout[3]);
 }
 
 /// Slash-command autocomplete popover. Anchored to the top edge of the
