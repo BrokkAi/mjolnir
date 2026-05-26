@@ -237,7 +237,29 @@ async fn main() -> Result<()> {
         }
     }
 
-    result
+    // Print resume hint so the user can come back to this session.
+    match &result {
+        Ok(Some(session_id)) => {
+            let worktree_flag = worktree
+                .as_ref()
+                .and_then(|w| w.worktree_root.file_name())
+                .map(|n| n.to_string_lossy().into_owned());
+            print_resume_hint(session_id, worktree_flag.as_deref());
+        }
+        Ok(None) => {}
+        Err(_) => {}
+    }
+
+    result.map(|_| ())
+}
+
+/// Print a hint showing how to resume the session.
+fn print_resume_hint(session_id: &str, worktree_label: Option<&str>) {
+    if let Some(label) = worktree_label {
+        println!("To resume: mj resume {session_id} --worktree {label}");
+    } else {
+        println!("To resume: mj resume {session_id}");
+    }
 }
 
 /// Handle the `mj resume` subcommand: list sessions, pick one interactively,
@@ -284,20 +306,24 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
     }
 
     // Direct ID: skip the picker and launch TUI with that session.
-    if let Some(session_id) = args.session_id {
+    if let Some(session_id) = args.session_id.clone() {
         let mut terminal = ui::setup_terminal().context("setup terminal")?;
         let result = run_app(
             &mut terminal,
             cwd,
-            args.agent_stderr,
+            args.agent_stderr.clone(),
             None,
-            Some(session_id),
+            Some(session_id.clone()),
         )
         .await;
         if let Err(e) = ui::restore_terminal(&mut terminal) {
             tracing::warn!("restore terminal failed: {e}");
         }
-        return result;
+        // Show resume hint for the session we just ran
+        if let Ok(Some(resumed_id)) = &result {
+            print_resume_hint(resumed_id, None);
+        }
+        return result.map(|_| ());
     }
 
     // Interactive picker: fetch sessions first (agent is killed after listing),
@@ -339,7 +365,11 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
             if let Err(e) = ui::restore_terminal(&mut terminal) {
                 tracing::warn!("restore terminal failed: {e}");
             }
-            result
+            // Show resume hint for the session we just ran
+            if let Ok(Some(resumed_id)) = &result {
+                print_resume_hint(resumed_id, None);
+            }
+            result.map(|_| ())
         }
     }
 }
@@ -397,7 +427,7 @@ async fn run_app(
     agent_stderr: Option<PathBuf>,
     worktree_label: Option<String>,
     resume_session: Option<String>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let config_path = config::default_config_path();
     let mut cfg = Config::load(&config_path)?;
 
@@ -416,7 +446,7 @@ async fn run_app(
             None => {
                 let outcome = run_picker_with_registry(terminal, last_source_id.clone()).await?;
                 let Some(outcome) = outcome else {
-                    return Ok(());
+                    return Ok(None);
                 };
                 let selected = picker_outcome_to_selected(outcome);
                 cfg.agent = Some(selected.clone());
@@ -428,7 +458,7 @@ async fn run_app(
         };
 
         let resume = initial_resume.take();
-        let reason = run_session(
+        let (reason, session_id) = run_session(
             terminal,
             &agent,
             cwd.clone(),
@@ -438,7 +468,7 @@ async fn run_app(
         )
         .await?;
         match reason {
-            UiExitReason::Quit => return Ok(()),
+            UiExitReason::Quit => return Ok(session_id),
             UiExitReason::SwapAgent => {
                 // Drop the current agent; the next loop iteration runs
                 // the picker so the user can pick a new one. We persist
@@ -493,7 +523,7 @@ async fn run_session(
     agent_stderr: Option<PathBuf>,
     worktree_label: Option<String>,
     resume_session: Option<String>,
-) -> Result<UiExitReason> {
+) -> Result<(UiExitReason, Option<String>)> {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
