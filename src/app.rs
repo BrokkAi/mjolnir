@@ -244,6 +244,11 @@ pub struct AppState {
     /// visible changed.
     transcript_revision: u64,
     pub input: String,
+    /// Pasted attachments that exceeded the chip line threshold. Shown as
+    /// compact badges in the input box; their contents are concatenated
+    /// with `input` when the prompt is submitted.
+    pub attachments: Vec<PastedAttachment>,
+    pub next_attachment_id: usize,
     /// FIFO queue of permission prompts. The front element is the one
     /// currently shown in the modal; new requests are pushed to the back
     /// so they aren't silently dropped when one is already on screen.
@@ -288,6 +293,16 @@ pub struct PendingPermission {
     pub selected: usize,
 }
 
+/// A pasted attachment that exceeded the chip threshold. Shown as a compact
+/// badge in the input box instead of inline text, so the user can keep
+/// scrolling the transcript and composing without being overwhelmed.
+#[derive(Debug, Clone)]
+pub struct PastedAttachment {
+    #[allow(dead_code)]
+    pub id: usize,
+    pub content: String,
+}
+
 /// Config option picker overlay state.
 #[derive(Debug, Clone)]
 pub struct ConfigPicker {
@@ -320,6 +335,8 @@ impl AppState {
             tool_calls: HashMap::new(),
             transcript_revision: 0,
             input: String::new(),
+            attachments: Vec::new(),
+            next_attachment_id: 0,
             permission_queue: VecDeque::new(),
             config_picker: None,
             scroll_offset: 0,

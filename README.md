@@ -98,6 +98,15 @@ is enabled.
 - `Ctrl-C`: cancel an in-flight prompt; when idle with an empty input, quit.
 - `Ctrl-D`: quit when the input is empty.
 
+## Multiline Input and Paste Chips
+
+Paste text with more than 3 lines into the prompt and it appears as a
+compact chip (e.g. "📎 45 lines · 1,234 chars") instead of raw text.
+Chips keep the input box small and the transcript readable. When you
+press `Enter`, chip contents are concatenated with your typed text before
+sending to the agent. Use `Backspace` on an empty input to remove the
+last chip, or `Esc` to clear everything.
+
 ### Built-in `/mj:` commands
 
 - `/mj:agents`: re-open the agent picker so you can switch the current session
