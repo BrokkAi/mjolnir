@@ -234,6 +234,10 @@ impl TokenUsage {
 pub struct AppState {
     pub agent_label: String,
     pub session_id: Option<String>,
+    /// Human-friendly session title reported by the agent via
+    /// `SessionInfoUpdate`. Surfaced in the status bar so users can tell
+    /// sessions apart at a glance.
+    pub session_name: Option<String>,
     pub connection_state: ConnectionState,
     pub current_mode: Option<String>,
     pub available_commands: Vec<AvailableCommand>,
@@ -355,6 +359,7 @@ impl AppState {
         Self {
             agent_label: String::new(),
             session_id: None,
+            session_name: None,
             connection_state: ConnectionState::Launching,
             current_mode: None,
             available_commands: Vec::new(),
@@ -1041,6 +1046,7 @@ impl AppState {
             }
             SessionUpdate::SessionInfoUpdate(info) => {
                 if let Some(title) = info.title.value() {
+                    self.session_name = Some(title.to_string());
                     self.transcript
                         .push(Entry::System(format!("session title: {title}")));
                     self.bump_transcript_revision();

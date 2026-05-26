@@ -27,6 +27,7 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Alignment;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -1238,27 +1239,16 @@ fn draw(
 fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let inner = area;
 
-    let session = state
-        .session_id
-        .as_deref()
-        .map(str::to_string)
-        .unwrap_or_else(|| "no session".to_string());
     let conn_color = connection_state_color(state.connection_state);
-    let mut spans = vec![
-        Span::styled("session ", Style::default().fg(Color::Gray)),
-        Span::styled(session, Style::default().fg(Color::LightYellow)),
-    ];
+    let mut spans = vec![];
     if let Some(label) = state.worktree_label.as_deref() {
-        spans.push(Span::styled(
-            "   worktree ",
-            Style::default().fg(Color::Gray),
-        ));
+        spans.push(Span::styled("worktree ", Style::default().fg(Color::Gray)));
         spans.push(Span::styled(
             label.to_string(),
             Style::default().fg(Color::LightMagenta),
         ));
+        spans.push(Span::raw("   "));
     }
-    spans.push(Span::raw("    "));
     if needs_live_redraw(state) {
         spans.push(Span::styled(
             spinner_frame(),
@@ -2246,8 +2236,29 @@ fn draw_status(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         }
     };
     let _ = stop_reason_label; // referenced from app::stop_reason_label users
+
+    // Build the session badge (name or id) so we can place it on the right.
+    let session_label = state
+        .session_name
+        .as_deref()
+        .map(|s| s.to_string())
+        .or_else(|| state.session_id.as_deref().map(|s| s.to_string()))
+        .unwrap_or_else(|| "no session".to_string());
+    let session_badge = format!("session {}", session_label);
+    let badge_width = (session_badge.len() as u16).min(area.width);
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(1), Constraint::Length(badge_width)])
+        .split(area);
+
     let p = Paragraph::new(msg).style(style);
-    f.render_widget(p, area);
+    f.render_widget(p, chunks[0]);
+
+    let badge = Paragraph::new(session_badge)
+        .style(Style::default().fg(Color::Gray))
+        .alignment(Alignment::Right);
+    f.render_widget(badge, chunks[1]);
 }
 
 fn draw_permission_modal(
