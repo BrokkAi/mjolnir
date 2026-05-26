@@ -32,6 +32,16 @@ inside the TUI to switch to a different agent later.
 
 ## Build and Run
 
+Install the latest `mj`, `anvil`, and `bifrost` release binaries:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash
+```
+
+By default, the installer writes to `~/.local/bin`. If that directory is not on
+`PATH`, it offers to add it to your shell profile. Set `INSTALL_DIR` or
+`MJOLNIR_INSTALL_DIR` to install somewhere else.
+
 ```bash
 cargo build --release
 ./target/release/mj
