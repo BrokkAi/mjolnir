@@ -995,11 +995,16 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     });
 }
 
+fn clamp_permission_selected(selected: usize, option_count: usize) -> usize {
+    selected.min(option_count.saturating_sub(1))
+}
+
 fn handle_permission_key(state: &mut AppState, code: KeyCode) {
     let Some(pending) = state.pending_permission_mut() else {
         return;
     };
     let len = pending.prompt.options.len().max(1);
+    pending.selected = clamp_permission_selected(pending.selected, pending.prompt.options.len());
     match code {
         KeyCode::Up | KeyCode::Char('k') => {
             if pending.selected == 0 {
@@ -2326,9 +2331,7 @@ fn draw_permission_modal(
     f.render_widget(header_para, layout[0]);
 
     let visible_options = usize::from(layout[1].height);
-    let selected = pending
-        .selected
-        .min(pending.prompt.options.len().saturating_sub(1));
+    let selected = clamp_permission_selected(pending.selected, pending.prompt.options.len());
     let first_visible = if visible_options == 0 || pending.prompt.options.len() <= visible_options {
         0
     } else {
@@ -2343,7 +2346,7 @@ fn draw_permission_modal(
         .skip(first_visible)
         .take(visible_options)
         .map(|(i, opt)| {
-            let marker = if i == pending.selected { ">" } else { " " };
+            let marker = if i == selected { ">" } else { " " };
             let kind = permission_kind_label(opt.kind);
             ListItem::new(format!("{marker} {} ({kind})", opt.name))
         })
@@ -3144,6 +3147,27 @@ mod tests {
                 "missing {expected:?}; rendered:\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn permission_modal_clamps_out_of_bounds_selected_option() {
+        let pending = permission_pending_with_options(
+            "run shell command",
+            &["Allow once", "Allow always", "Reject"],
+            99,
+        );
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_permission_modal(frame, frame.area(), &pending, 1))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("> Reject (allow once)"),
+            "clamped selection should be rendered; rendered:\n{rendered}"
+        );
     }
 
     #[test]
