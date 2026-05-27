@@ -5,7 +5,6 @@
 //! into `AppState`, redraws on every tick, and emits `UiCommand`s back
 //! to the runtime when the user submits prompts or cancels.
 
-use std::fmt;
 use std::io::{self, Stdout};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,11 +12,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::AvailableCommandInput;
 use anyhow::{Context, Result};
-use crossterm::Command;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event as CtEvent, EventStream, KeyCode,
-    KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -45,43 +43,13 @@ use crate::event::{PermissionDecision, UiCommand, UiEvent};
 
 static KEYBOARD_ENHANCEMENT_ENABLED: AtomicBool = AtomicBool::new(false);
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
+const TRANSCRIPT_SCROLL_WHEEL_STEP: usize = 3;
 const PROMPT_SIDE_PADDING: u16 = 1;
 
-/// Enable alternate-screen scroll mode so the terminal translates the
-/// mouse wheel into Up/Down arrow key events while the alt screen is
-/// active. Unlike `EnableMouseCapture`, this leaves button-mode capture
-/// off, so native text selection and OS copy still work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EnableAlternateScroll;
-
-impl Command for EnableAlternateScroll {
-    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        f.write_str("\x1b[?1007h")
-    }
-
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> std::io::Result<()> {
-        // No direct WinAPI equivalent; the ANSI sequence is handled by
-        // modern Windows terminals (ConPTY / VT100 support).
-        Ok(())
-    }
-}
-
-/// Disable alternate-screen scroll mode when leaving the alt screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DisableAlternateScroll;
-
-impl Command for DisableAlternateScroll {
-    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        f.write_str("\x1b[?1007l")
-    }
-
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> std::io::Result<()> {
-        // No direct WinAPI equivalent; the ANSI sequence is handled by
-        // modern Windows terminals (ConPTY / VT100 support).
-        Ok(())
-    }
+enum TerminalRequest {
+    None,
+    ToggleTextSelectionMode,
 }
 
 #[derive(Debug, Default)]
@@ -204,7 +172,8 @@ async fn ui_loop(
             maybe_ct = crossterm_events.next() => {
                 match maybe_ct {
                     Some(Ok(ev)) => {
-                        handle_crossterm(&mut state, cmd_tx, ev);
+                        let request = handle_crossterm(&mut state, cmd_tx, ev);
+                        apply_terminal_request(terminal, &mut state, request)?;
                     }
                     Some(Err(e)) => {
                         state.record_status_message(
@@ -266,7 +235,11 @@ fn needs_live_redraw(state: &AppState) -> bool {
     )
 }
 
-fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>, ev: CtEvent) {
+fn handle_crossterm(
+    state: &mut AppState,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    ev: CtEvent,
+) -> TerminalRequest {
     let key = match ev {
         CtEvent::Key(k) => k,
         CtEvent::Paste(text) => {
@@ -278,22 +251,30 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
                 || state.config_picker.is_some()
                 || state.runtime_closed
             {
-                return;
+                return TerminalRequest::None;
             }
             handle_paste(state, &text);
-            return;
+            return TerminalRequest::None;
         }
-        _ => return,
+        CtEvent::Mouse(mouse) => {
+            handle_mouse(state, mouse);
+            return TerminalRequest::None;
+        }
+        _ => return TerminalRequest::None,
     };
     if key.kind != KeyEventKind::Press {
-        return;
+        return TerminalRequest::None;
+    }
+
+    if is_text_selection_key(key.modifiers, key.code) {
+        return TerminalRequest::ToggleTextSelectionMode;
     }
 
     if state.help_overlay {
         if is_help_key(key.modifiers, key.code) || matches!(key.code, KeyCode::Esc) {
             state.help_overlay = false;
         }
-        return;
+        return TerminalRequest::None;
     }
 
     if state.runtime_closed {
@@ -331,27 +312,27 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             (_, KeyCode::End) => scroll_to_bottom(state),
             _ => {}
         }
-        return;
+        return TerminalRequest::None;
     }
 
     if should_open_help(state, key.modifiers, key.code) {
         state.help_overlay = true;
-        return;
+        return TerminalRequest::None;
     }
 
     // Permission modal owns the keyboard while it's open.
     if state.has_pending_permission() {
         handle_permission_key(state, key.code);
-        return;
+        return TerminalRequest::None;
     }
 
     if state.config_picker.is_some() {
         handle_config_picker_key(state, cmd_tx, key.modifiers, key.code);
-        return;
+        return TerminalRequest::None;
     }
 
     if open_config_value_picker_for_shortcut(state, key.modifiers, key.code) {
-        return;
+        return TerminalRequest::None;
     }
 
     // Slash-command autocomplete owns Tab and Up/Down while it's
@@ -362,19 +343,19 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::NONE, KeyCode::Enter) => {
                 state.autocomplete_accept();
-                return;
+                return TerminalRequest::None;
             }
             (KeyModifiers::NONE, KeyCode::Up) => {
                 state.autocomplete_move(-1);
-                return;
+                return TerminalRequest::None;
             }
             (KeyModifiers::NONE, KeyCode::Down) => {
                 state.autocomplete_move(1);
-                return;
+                return TerminalRequest::None;
             }
             (_, KeyCode::Esc) => {
                 state.autocomplete_dismiss();
-                return;
+                return TerminalRequest::None;
             }
             _ => {}
         }
@@ -386,29 +367,29 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
                 state.scroll_offset = state
                     .scroll_offset
                     .saturating_add(TRANSCRIPT_SCROLL_PAGE_STEP);
-                return;
+                return TerminalRequest::None;
             }
             KeyCode::PageDown => {
                 state.scroll_offset = state
                     .scroll_offset
                     .saturating_sub(TRANSCRIPT_SCROLL_PAGE_STEP);
-                return;
+                return TerminalRequest::None;
             }
             KeyCode::Up => {
                 state.scroll_offset = state.scroll_offset.saturating_add(1);
-                return;
+                return TerminalRequest::None;
             }
             KeyCode::Down => {
                 state.scroll_offset = state.scroll_offset.saturating_sub(1);
-                return;
+                return TerminalRequest::None;
             }
             KeyCode::Home => {
                 scroll_to_top(state);
-                return;
+                return TerminalRequest::None;
             }
             KeyCode::End => {
                 scroll_to_bottom(state);
-                return;
+                return TerminalRequest::None;
             }
             _ => {}
         }
@@ -480,7 +461,7 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             if !delete_at_cursor(state) && state.input.is_empty() {
                 if state.attachments.is_empty() {
                     state.exit_reason = Some(UiExitReason::Quit);
-                    return;
+                    return TerminalRequest::None;
                 }
                 state.attachments.pop();
             }
@@ -542,6 +523,63 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             state.update_autocomplete();
         }
         _ => {}
+    }
+    TerminalRequest::None
+}
+
+fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
+    if state.text_selection_mode
+        || state.help_overlay
+        || state.has_pending_permission()
+        || state.config_picker.is_some()
+    {
+        return;
+    }
+
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            state.scroll_offset = state
+                .scroll_offset
+                .saturating_add(TRANSCRIPT_SCROLL_WHEEL_STEP);
+        }
+        MouseEventKind::ScrollDown => {
+            state.scroll_offset = state
+                .scroll_offset
+                .saturating_sub(TRANSCRIPT_SCROLL_WHEEL_STEP);
+        }
+        _ => {}
+    }
+}
+
+fn apply_terminal_request(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &mut AppState,
+    request: TerminalRequest,
+) -> Result<()> {
+    match request {
+        TerminalRequest::None => Ok(()),
+        TerminalRequest::ToggleTextSelectionMode => {
+            let next = !state.text_selection_mode;
+            set_mouse_capture(terminal, !next)?;
+            state.text_selection_mode = next;
+            state.status_line = Some(StatusMessage::info(if next {
+                "text selection mode: mouse selection enabled; press F12 to resume wheel scrolling"
+            } else {
+                "wheel scrolling enabled; press F12 to select text with the mouse"
+            }));
+            Ok(())
+        }
+    }
+}
+
+fn set_mouse_capture(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    enabled: bool,
+) -> Result<()> {
+    if enabled {
+        execute!(terminal.backend_mut(), EnableMouseCapture).context("enable mouse capture")
+    } else {
+        execute!(terminal.backend_mut(), DisableMouseCapture).context("disable mouse capture")
     }
 }
 
@@ -923,6 +961,10 @@ fn is_help_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty() && matches!(code, KeyCode::Char('?') | KeyCode::F(10))
 }
 
+fn is_text_selection_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
+    modifiers.is_empty() && matches!(code, KeyCode::F(12))
+}
+
 fn should_open_help(state: &AppState, modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty()
         && (matches!(code, KeyCode::F(10))
@@ -1179,7 +1221,7 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     execute!(
         stdout,
         EnterAlternateScreen,
-        EnableAlternateScroll,
+        EnableMouseCapture,
         EnableBracketedPaste
     )
     .context("enter alt screen")?;
@@ -1195,8 +1237,8 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableMouseCapture,
         LeaveAlternateScreen,
-        DisableAlternateScroll,
         DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
@@ -2104,13 +2146,19 @@ fn input_cursor_position(
 }
 
 fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let text_selection_hint = if state.text_selection_mode {
+        "F12 resume wheel"
+    } else {
+        "F12 select text"
+    };
     let title = if state.runtime_closed {
         " runtime closed (Ctrl-C to quit) ".to_string()
     } else if state.is_streaming() {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
-        " prompt (Ctrl-N new session | Ctrl-O load session | Enter to send | Shift/Alt+Enter for newline | Ctrl-C to quit) "
-            .to_string()
+        format!(
+            " prompt (Ctrl-N new session | Ctrl-O load session | Enter to send | Shift/Alt+Enter for newline | Ctrl-C to quit | {text_selection_hint}) "
+        )
     };
     let style = if state.runtime_closed || state.is_streaming() {
         Style::default().fg(Color::DarkGray)
@@ -2220,6 +2268,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         && !state.has_pending_permission()
         && state.config_picker.is_none()
         && !state.help_overlay
+        && !state.text_selection_mode
     {
         let (cursor_x, cursor_y) = input_cursor_position(
             content_area,
@@ -2395,6 +2444,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
         Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
         Line::from("  Ctrl-Y           copy last agent message to clipboard"),
+        Line::from("  F12              toggle mouse text selection / wheel scrolling"),
         Line::from("  Esc              clear input, chips, and browsing history"),
         Line::from(""),
         Line::from(vec![Span::styled(
@@ -2407,7 +2457,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
             "Scroll transcript",
             Style::default().add_modifier(Modifier::BOLD),
         )]),
-        Line::from("  Ctrl+Up/Down / Ctrl+PageUp/Down / Ctrl+Home/End / wheel / Ctrl-T"),
+        Line::from("  Wheel / Ctrl+Up/Down / Ctrl+PageUp/Down / Ctrl+Home/End / Ctrl-T"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Overlays",
@@ -2685,7 +2735,7 @@ mod tests {
         PermissionOption, PermissionOptionKind, SessionConfigOption, SessionConfigSelectOption,
         ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::TestBackend;
 
     fn key(code: KeyCode) -> CtEvent {
@@ -2694,6 +2744,15 @@ mod tests {
 
     fn key_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> CtEvent {
         CtEvent::Key(KeyEvent::new(code, modifiers))
+    }
+
+    fn mouse(kind: MouseEventKind) -> CtEvent {
+        CtEvent::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -2970,6 +3029,39 @@ mod tests {
     }
 
     #[test]
+    fn mouse_wheel_scrolls_transcript() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollUp));
+        assert_eq!(state.scroll_offset, TRANSCRIPT_SCROLL_WHEEL_STEP);
+
+        handle_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollDown));
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn text_selection_mode_ignores_mouse_wheel() {
+        let mut state = AppState::new();
+        state.text_selection_mode = true;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollUp));
+
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn f12_requests_text_selection_mode_toggle() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        let request = handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(12)));
+
+        assert_eq!(request, TerminalRequest::ToggleTextSelectionMode);
+    }
+
+    #[test]
     fn ctrl_arrow_keys_scroll_transcript_one_line() {
         let mut state = AppState::new();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
@@ -3119,6 +3211,35 @@ mod tests {
         state.scroll_offset = 0;
         state.expand_tool_outputs = true;
         assert!(transcript_block_title(&state).contains("tool output: expanded"));
+    }
+
+    #[test]
+    fn input_title_includes_text_selection_shortcut() {
+        let mut state = AppState::new();
+        let backend = TestBackend::new(140, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_input(frame, frame.area(), &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("Ctrl-C to quit"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("F12 select text"),
+            "rendered:\n{rendered}"
+        );
+
+        state.text_selection_mode = true;
+        terminal
+            .draw(|frame| draw_input(frame, frame.area(), &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("F12 resume wheel"),
+            "rendered:\n{rendered}"
+        );
     }
 
     #[test]

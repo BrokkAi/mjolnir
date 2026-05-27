@@ -323,6 +323,8 @@ pub struct AppState {
     pub autocomplete: Autocomplete,
     /// True while the keyboard help overlay is visible.
     pub help_overlay: bool,
+    /// True while mouse capture is disabled so the terminal can select text.
+    pub text_selection_mode: bool,
     /// Short label of the linked Git worktree backing this session, when
     /// `--worktree` was used. Surfaced in the header so users can tell
     /// concurrent Mjolnir instances apart.
@@ -412,6 +414,7 @@ impl AppState {
             token_usage: TokenUsage::default(),
             autocomplete: Autocomplete::default(),
             help_overlay: false,
+            text_selection_mode: false,
             worktree_label: None,
             clipboard_lease: None,
         }
