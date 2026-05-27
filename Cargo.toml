@@ -12,7 +12,7 @@ name = "mj"
 path = "src/main.rs"
 
 [dependencies]
-agent-client-protocol = { version = "0.12", features = ["unstable_session_usage"] }
+agent-client-protocol = { version = "0.12", features = ["unstable_session_model", "unstable_session_usage"] }
 arboard = "3.4"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }

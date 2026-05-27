@@ -8,15 +8,17 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::{
-    AvailableCommand, Diff, Plan, PlanEntry, SessionConfigId, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
-    SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate, ToolCall, ToolCallContent,
-    ToolCallStatus, ToolCallUpdate, ToolKind, Usage, UsageUpdate,
+    AvailableCommand, Diff, Plan, PlanEntry, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionUpdate, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
+    ToolKind, Usage, UsageUpdate,
 };
 
 use crate::clipboard::ClipboardLease;
 
-use crate::event::{PermissionDecision, PermissionPrompt, UiEvent, content_block_text};
+use crate::event::{
+    PermissionDecision, PermissionPrompt, SessionConfigTarget, UiEvent, content_block_text,
+};
 
 const BUILTIN_NEW_COMMAND: &str = "new";
 const BUILTIN_LOAD_COMMAND: &str = "load";
@@ -259,6 +261,7 @@ pub struct AppState {
     pub current_mode: Option<String>,
     pub available_commands: Vec<AvailableCommand>,
     pub session_config_options: Vec<SessionConfigOption>,
+    pub session_config_targets: Vec<SessionConfigTarget>,
     pub transcript: Vec<Entry>,
     pub tool_calls: HashMap<String, ToolCallView>,
     /// Bumped whenever `transcript` or `tool_calls` change in a way that
@@ -385,6 +388,7 @@ impl AppState {
                 commands
             },
             session_config_options: Vec::new(),
+            session_config_targets: Vec::new(),
             transcript: Vec::new(),
             tool_calls: HashMap::new(),
             transcript_revision: 0,
@@ -786,22 +790,29 @@ impl AppState {
     }
 
     /// Submit the current config value selection.
-    pub fn config_picker_accept(&mut self) -> Option<(SessionConfigId, SessionConfigValueId)> {
+    pub fn config_picker_accept(&mut self) -> Option<(SessionConfigTarget, SessionConfigValueId)> {
         let (selected_option, selected_value) = {
             let picker = self.config_picker.as_ref()?;
             (picker.selected_option, picker.selected_value)
         };
 
-        let (config_id, value) = {
+        let (target, value) = {
             let option = self.session_config_options.get(selected_option)?;
             let choices = config_option_choices(option)?;
             let picker = self.config_picker.as_ref()?;
             let full_index = *picker.filtered_indices.get(selected_value)?;
             let choice = choices.get(full_index)?;
-            (option.id.clone(), choice.value.clone())
+            let target = self
+                .session_config_targets
+                .get(selected_option)
+                .cloned()
+                .unwrap_or_else(|| SessionConfigTarget::ConfigOption {
+                    config_id: option.id.clone(),
+                });
+            (target, choice.value.clone())
         };
         self.dismiss_config_picker();
-        Some((config_id, value))
+        Some((target, value))
     }
 
     /// Recompute the slash-command autocomplete popover from the current
@@ -930,6 +941,9 @@ impl AppState {
                 self.connection_state = ConnectionState::Ready;
             }
             UiEvent::SessionUpdate(u) => self.apply_session_update(u),
+            UiEvent::SessionConfigOptions { options, targets } => {
+                self.apply_session_config_options(options, targets);
+            }
             UiEvent::PermissionRequest(prompt) => {
                 // Append to the queue rather than replacing the current
                 // pending prompt: overwriting would drop the prior
@@ -1069,15 +1083,8 @@ impl AppState {
                 self.bump_transcript_revision();
             }
             SessionUpdate::ConfigOptionUpdate(u) => {
-                self.session_config_options = u.config_options;
-                self.refresh_config_picker();
-
-                if let Some(mode_option) = self.session_config_options.iter().find(|option| {
-                    matches!(option.category, Some(SessionConfigOptionCategory::Mode))
-                }) && let Some(value) = config_option_current_value_id(mode_option)
-                {
-                    self.current_mode = Some(value.to_string());
-                }
+                let targets = config_option_targets(&u.config_options);
+                self.apply_session_config_options(u.config_options, targets);
             }
             SessionUpdate::SessionInfoUpdate(info) => {
                 if let Some(title) = info.title.value() {
@@ -1150,6 +1157,29 @@ impl AppState {
         }
     }
 
+    fn apply_session_config_options(
+        &mut self,
+        options: Vec<SessionConfigOption>,
+        targets: Vec<SessionConfigTarget>,
+    ) {
+        self.session_config_targets = if targets.len() == options.len() {
+            targets
+        } else {
+            config_option_targets(&options)
+        };
+        self.session_config_options = options;
+        self.refresh_config_picker();
+
+        if let Some(mode_option) = self
+            .session_config_options
+            .iter()
+            .find(|option| matches!(option.category, Some(SessionConfigOptionCategory::Mode)))
+            && let Some(value) = config_option_current_value_id(mode_option)
+        {
+            self.current_mode = Some(value.to_string());
+        }
+    }
+
     /// Return select-style config options in agent order, together with
     /// their original index and optional `Ctrl-1..9` shortcut.
     pub fn selectable_config_options(&self) -> Vec<(usize, &SessionConfigOption, Option<char>)> {
@@ -1163,6 +1193,15 @@ impl AppState {
             })
             .collect()
     }
+}
+
+fn config_option_targets(options: &[SessionConfigOption]) -> Vec<SessionConfigTarget> {
+    options
+        .iter()
+        .map(|option| SessionConfigTarget::ConfigOption {
+            config_id: option.id.clone(),
+        })
+        .collect()
 }
 
 #[derive(PartialEq, Eq)]
@@ -1588,7 +1627,12 @@ mod tests {
         s.config_picker_move(1);
         let submitted = s.config_picker_accept().expect("submitted");
         assert!(s.config_picker.is_none());
-        assert_eq!(submitted.0.to_string(), "model");
+        assert_eq!(
+            submitted.0,
+            SessionConfigTarget::ConfigOption {
+                config_id: "model".into()
+            }
+        );
         assert_eq!(submitted.1.to_string(), "model-2");
     }
 

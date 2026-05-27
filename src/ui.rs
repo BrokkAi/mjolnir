@@ -1054,9 +1054,9 @@ fn handle_config_picker_key(
             state.dismiss_config_picker();
         }
         (_, KeyCode::Tab) | (_, KeyCode::Enter) => {
-            if let Some((config_id, value)) = state.config_picker_accept() {
+            if let Some((target, value)) = state.config_picker_accept() {
                 state.status_line = Some(StatusMessage::info("updating config..."));
-                let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { config_id, value });
+                let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { target, value });
             }
         }
         (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {

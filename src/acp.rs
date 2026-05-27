@@ -7,11 +7,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::schema::{
-    CancelNotification, ClientCapabilities, ConfigOptionUpdate, ContentBlock, ErrorCode,
-    FileSystemCapabilities, InitializeRequest, LoadSessionRequest, NewSessionRequest,
-    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionId, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, TextContent,
+    CancelNotification, ClientCapabilities, ContentBlock, ErrorCode, FileSystemCapabilities,
+    InitializeRequest, LoadSessionRequest, ModelInfo, NewSessionRequest, PromptRequest,
+    ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionModeState,
+    SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    SetSessionModelRequest, TextContent,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
@@ -19,7 +21,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::event::{PermissionDecision, PermissionPrompt, UiCommand, UiEvent};
+use crate::event::{PermissionDecision, PermissionPrompt, SessionConfigTarget, UiCommand, UiEvent};
 
 pub struct AcpRuntimeConfig {
     pub command: PathBuf,
@@ -379,7 +381,7 @@ async fn drive_session(
         agent_version: init_resp.agent_info.as_ref().map(|i| i.version.clone()),
     });
 
-    let (session_id, config_options, resumed) = match resume_session {
+    let (session_id, initial_config, resumed) = match resume_session {
         Some(existing_session_id) => {
             let session_id = SessionId::from(existing_session_id.clone());
             match conn
@@ -387,7 +389,11 @@ async fn drive_session(
                 .block_task()
                 .await
             {
-                Ok(s) => (session_id, s.config_options, true),
+                Ok(s) => (
+                    session_id,
+                    session_config_from_parts(s.config_options, s.models, s.modes),
+                    true,
+                ),
                 Err(source) => {
                     let launch_err = classify_session_error(source);
                     let text = launch_err.to_string();
@@ -401,7 +407,10 @@ async fn drive_session(
             .block_task()
             .await
         {
-            Ok(s) => (s.session_id, s.config_options, false),
+            Ok(s) => {
+                let config = session_config_from_parts(s.config_options, s.models, s.modes);
+                (s.session_id, config, false)
+            }
             Err(source) => {
                 let launch_err = classify_session_error(source);
                 let text = launch_err.to_string();
@@ -410,14 +419,20 @@ async fn drive_session(
             }
         },
     };
+    let (session_config_options, session_config_targets) = initial_config.unwrap_or_default();
+    let mut session_config = SessionConfigCache {
+        options: session_config_options,
+        targets: session_config_targets,
+    };
     let _ = ui_tx.send(UiEvent::SessionStarted {
         session_id: session_id.to_string(),
         resumed,
     });
-    if let Some(config_options) = config_options {
-        let _ = ui_tx.send(UiEvent::SessionUpdate(SessionUpdate::ConfigOptionUpdate(
-            ConfigOptionUpdate::new(config_options),
-        )));
+    if !session_config.options.is_empty() {
+        let _ = ui_tx.send(UiEvent::SessionConfigOptions {
+            options: session_config.options.clone(),
+            targets: session_config.targets.clone(),
+        });
     }
 
     while let Some(cmd) = ui_rx.recv().await {
@@ -427,8 +442,18 @@ async fn drive_session(
                     break;
                 }
             }
-            UiCommand::SetSessionConfigOption { config_id, value } => {
-                if !drive_config_update(&conn, &session_id, config_id, value, ui_tx, ui_rx).await? {
+            UiCommand::SetSessionConfigOption { target, value } => {
+                if !drive_config_update(
+                    &conn,
+                    &session_id,
+                    target,
+                    value,
+                    &mut session_config,
+                    ui_tx,
+                    ui_rx,
+                )
+                .await?
+                {
                     break;
                 }
             }
@@ -494,26 +519,170 @@ pub(crate) fn spawn_agent(
     Ok((child, stdin, stdout))
 }
 
+fn session_config_from_parts(
+    config_options: Option<Vec<SessionConfigOption>>,
+    models: Option<agent_client_protocol::schema::SessionModelState>,
+    modes: Option<SessionModeState>,
+) -> Option<(Vec<SessionConfigOption>, Vec<SessionConfigTarget>)> {
+    if let Some(options) = config_options
+        && !options.is_empty()
+    {
+        let targets = config_option_targets(&options);
+        return Some((options, targets));
+    }
+
+    let mut options = Vec::new();
+    let mut targets = Vec::new();
+
+    if let Some(models) = models
+        && let Some(option) = legacy_model_config_option(models)
+    {
+        options.push(option);
+        targets.push(SessionConfigTarget::LegacyModel);
+    }
+
+    if let Some(modes) = modes
+        && let Some(option) = legacy_mode_config_option(modes)
+    {
+        options.push(option);
+        targets.push(SessionConfigTarget::LegacyMode);
+    }
+
+    (!options.is_empty()).then_some((options, targets))
+}
+
+fn config_option_targets(options: &[SessionConfigOption]) -> Vec<SessionConfigTarget> {
+    options
+        .iter()
+        .map(|option| SessionConfigTarget::ConfigOption {
+            config_id: option.id.clone(),
+        })
+        .collect()
+}
+
+fn legacy_model_config_option(
+    models: agent_client_protocol::schema::SessionModelState,
+) -> Option<SessionConfigOption> {
+    if models.available_models.is_empty() {
+        return None;
+    }
+
+    let options = models
+        .available_models
+        .into_iter()
+        .map(|model| model_to_select_option(&model))
+        .collect::<Vec<_>>();
+
+    Some(
+        SessionConfigOption::select(
+            "model",
+            "Model",
+            models.current_model_id.to_string(),
+            options,
+        )
+        .category(SessionConfigOptionCategory::Model),
+    )
+}
+
+fn model_to_select_option(model: &ModelInfo) -> SessionConfigSelectOption {
+    SessionConfigSelectOption::new(model.model_id.to_string(), model.name.clone())
+        .description(model.description.clone())
+}
+
+fn legacy_mode_config_option(modes: SessionModeState) -> Option<SessionConfigOption> {
+    if modes.available_modes.is_empty() {
+        return None;
+    }
+
+    let is_thinking = modes
+        .available_modes
+        .iter()
+        .all(|mode| mode.name.starts_with("Thinking:"));
+    let name = if is_thinking { "Thinking" } else { "Mode" };
+    let category = if is_thinking {
+        SessionConfigOptionCategory::ThoughtLevel
+    } else {
+        SessionConfigOptionCategory::Mode
+    };
+    let options = modes
+        .available_modes
+        .into_iter()
+        .map(|mode| {
+            SessionConfigSelectOption::new(mode.id.to_string(), mode.name)
+                .description(mode.description)
+        })
+        .collect::<Vec<_>>();
+
+    Some(
+        SessionConfigOption::select(
+            name.to_ascii_lowercase(),
+            name,
+            modes.current_mode_id.to_string(),
+            options,
+        )
+        .category(category),
+    )
+}
+
+fn set_current_config_value(
+    options: &mut [SessionConfigOption],
+    targets: &[SessionConfigTarget],
+    target: &SessionConfigTarget,
+    value: &SessionConfigValueId,
+) {
+    let Some(option) = targets
+        .iter()
+        .position(|candidate| candidate == target)
+        .and_then(|index| options.get_mut(index))
+    else {
+        return;
+    };
+
+    if let SessionConfigKind::Select(select) = &mut option.kind {
+        select.current_value = value.clone();
+    }
+}
+
+struct SessionConfigCache {
+    options: Vec<SessionConfigOption>,
+    targets: Vec<SessionConfigTarget>,
+}
+
 async fn drive_config_update(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
-    config_id: agent_client_protocol::schema::SessionConfigId,
+    target: SessionConfigTarget,
     value: agent_client_protocol::schema::SessionConfigValueId,
+    session_config: &mut SessionConfigCache,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
 ) -> Result<bool> {
-    let req = SetSessionConfigOptionRequest::new(session_id.clone(), config_id, value);
-    let update = conn.send_request(req).block_task();
+    let update = send_config_update(conn, session_id, target.clone(), value.clone());
     tokio::pin!(update);
 
     loop {
         tokio::select! {
             result = &mut update => {
                 match result {
-                    Ok(resp) => {
-                        let _ = ui_tx.send(UiEvent::SessionUpdate(SessionUpdate::ConfigOptionUpdate(
-                            ConfigOptionUpdate::new(resp.config_options),
-                        )));
+                    Ok(Some(options)) => {
+                        session_config.targets = config_option_targets(&options);
+                        session_config.options = options;
+                        let _ = ui_tx.send(UiEvent::SessionConfigOptions {
+                            options: session_config.options.clone(),
+                            targets: session_config.targets.clone(),
+                        });
+                    }
+                    Ok(None) => {
+                        set_current_config_value(
+                            &mut session_config.options,
+                            &session_config.targets,
+                            &target,
+                            &value,
+                        );
+                        let _ = ui_tx.send(UiEvent::SessionConfigOptions {
+                            options: session_config.options.clone(),
+                            targets: session_config.targets.clone(),
+                        });
                     }
                     Err(e) => {
                         let _ = ui_tx.send(UiEvent::Warning(format!(
@@ -541,6 +710,31 @@ async fn drive_config_update(
                     Some(UiCommand::CancelPrompt) => {}
                 }
             }
+        }
+    }
+}
+
+async fn send_config_update(
+    conn: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    target: SessionConfigTarget,
+    value: SessionConfigValueId,
+) -> std::result::Result<Option<Vec<SessionConfigOption>>, agent_client_protocol::Error> {
+    match target {
+        SessionConfigTarget::ConfigOption { config_id } => {
+            let req = SetSessionConfigOptionRequest::new(session_id.clone(), config_id, value);
+            conn.send_request(req)
+                .block_task()
+                .await
+                .map(|resp| Some(resp.config_options))
+        }
+        SessionConfigTarget::LegacyModel => {
+            let req = SetSessionModelRequest::new(session_id.clone(), value.to_string());
+            conn.send_request(req).block_task().await.map(|_| None)
+        }
+        SessionConfigTarget::LegacyMode => {
+            let req = SetSessionModeRequest::new(session_id.clone(), value.to_string());
+            conn.send_request(req).block_task().await.map(|_| None)
         }
     }
 }
@@ -622,6 +816,111 @@ mod tests {
     };
     use std::time::Duration;
     use tokio::io::split;
+
+    #[test]
+    fn legacy_session_models_and_modes_become_config_picker_options() {
+        let model_state = agent_client_protocol::schema::SessionModelState::new(
+            "openai/gpt-4.1",
+            vec![
+                ModelInfo::new("openai/gpt-4.1", "OpenAI GPT-4.1"),
+                ModelInfo::new("anthropic/claude-sonnet-4", "Anthropic Claude Sonnet 4"),
+            ],
+        );
+        let mode_state = SessionModeState::new(
+            "medium",
+            vec![
+                agent_client_protocol::schema::SessionMode::new("low", "Thinking: low"),
+                agent_client_protocol::schema::SessionMode::new("medium", "Thinking: medium"),
+            ],
+        );
+
+        let (options, targets) =
+            session_config_from_parts(None, Some(model_state), Some(mode_state)).expect("config");
+
+        assert_eq!(options.len(), 2);
+        assert_eq!(
+            targets,
+            vec![
+                SessionConfigTarget::LegacyModel,
+                SessionConfigTarget::LegacyMode
+            ]
+        );
+        assert_eq!(options[0].name, "Model");
+        assert_eq!(
+            options[0].category,
+            Some(SessionConfigOptionCategory::Model)
+        );
+        assert_eq!(
+            options[1].category,
+            Some(SessionConfigOptionCategory::ThoughtLevel)
+        );
+        assert_eq!(
+            current_select_value(&options[0]).as_deref(),
+            Some("openai/gpt-4.1")
+        );
+        assert_eq!(current_select_value(&options[1]).as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn explicit_config_options_take_precedence_over_legacy_models() {
+        let config_option = SessionConfigOption::select(
+            "model",
+            "Configured Model",
+            "model-a",
+            vec![
+                agent_client_protocol::schema::SessionConfigSelectOption::new("model-a", "Model A"),
+            ],
+        );
+        let legacy_model_state = agent_client_protocol::schema::SessionModelState::new(
+            "legacy/model",
+            vec![ModelInfo::new("legacy/model", "Legacy Model")],
+        );
+
+        let (options, targets) =
+            session_config_from_parts(Some(vec![config_option]), Some(legacy_model_state), None)
+                .expect("config");
+
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].name, "Configured Model");
+        assert_eq!(
+            targets,
+            vec![SessionConfigTarget::ConfigOption {
+                config_id: "model".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn legacy_config_updates_current_value_locally_after_success() {
+        let model_state = agent_client_protocol::schema::SessionModelState::new(
+            "openai/gpt-4.1",
+            vec![
+                ModelInfo::new("openai/gpt-4.1", "OpenAI GPT-4.1"),
+                ModelInfo::new("openai/gpt-5", "OpenAI GPT-5"),
+            ],
+        );
+        let (mut options, targets) =
+            session_config_from_parts(None, Some(model_state), None).expect("config");
+
+        set_current_config_value(
+            &mut options,
+            &targets,
+            &SessionConfigTarget::LegacyModel,
+            &"openai/gpt-5".into(),
+        );
+
+        assert_eq!(
+            current_select_value(&options[0]).as_deref(),
+            Some("openai/gpt-5")
+        );
+    }
+
+    fn current_select_value(option: &SessionConfigOption) -> Option<String> {
+        match &option.kind {
+            SessionConfigKind::Select(select) => Some(select.current_value.to_string()),
+            _ => None,
+        }
+    }
 
     /// Spawn a minimal in-process ACP agent over a duplex stream. The
     /// agent answers Initialize/NewSession/Prompt, streams one chunk back
@@ -1154,7 +1453,9 @@ mod tests {
 
         cmd_tx
             .send(UiCommand::SetSessionConfigOption {
-                config_id: SessionConfigId::new("model"),
+                target: SessionConfigTarget::ConfigOption {
+                    config_id: SessionConfigId::new("model"),
+                },
                 value: SessionConfigValueId::new("model-2"),
             })
             .expect("send config update");
@@ -1201,7 +1502,9 @@ mod tests {
 
         cmd_tx
             .send(UiCommand::SetSessionConfigOption {
-                config_id: SessionConfigId::new("model"),
+                target: SessionConfigTarget::ConfigOption {
+                    config_id: SessionConfigId::new("model"),
+                },
                 value: SessionConfigValueId::new("model-2"),
             })
             .expect("send config update");

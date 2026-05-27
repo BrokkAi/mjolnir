@@ -5,8 +5,8 @@
 //! network I/O. They communicate over two unbounded mpsc channels.
 
 use agent_client_protocol::schema::{
-    ContentBlock, PermissionOption, SessionConfigId, SessionConfigValueId, SessionUpdate,
-    StopReason, ToolCallUpdate, Usage,
+    ContentBlock, PermissionOption, SessionConfigId, SessionConfigOption, SessionConfigValueId,
+    SessionUpdate, StopReason, ToolCallUpdate, Usage,
 };
 use tokio::sync::oneshot;
 
@@ -25,6 +25,13 @@ pub enum UiEvent {
     /// `SessionUpdate` enum and let the UI state machine decide how to
     /// fold each variant into the transcript.
     SessionUpdate(SessionUpdate),
+    /// Session configuration options with the ACP method each option should
+    /// use when changed. Real `configOptions` use `session/set_config_option`;
+    /// legacy synthesized options use older model/mode methods.
+    SessionConfigOptions {
+        options: Vec<SessionConfigOption>,
+        targets: Vec<SessionConfigTarget>,
+    },
     /// `session/request_permission` from the agent. The UI is expected to
     /// render a modal and answer through `responder` exactly once.
     PermissionRequest(PermissionPrompt),
@@ -62,6 +69,15 @@ pub enum PermissionDecision {
     Cancelled,
 }
 
+/// The ACP request to send when the user changes a displayed session config
+/// option.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionConfigTarget {
+    ConfigOption { config_id: SessionConfigId },
+    LegacyModel,
+    LegacyMode,
+}
+
 /// Commands flowing from the UI task into the ACP runtime.
 #[derive(Debug)]
 pub enum UiCommand {
@@ -69,7 +85,7 @@ pub enum UiCommand {
     SendPrompt { text: String },
     /// Set a session configuration option to a new value.
     SetSessionConfigOption {
-        config_id: SessionConfigId,
+        target: SessionConfigTarget,
         value: SessionConfigValueId,
     },
     /// Cancel the in-flight prompt turn (Ctrl-C while streaming).
