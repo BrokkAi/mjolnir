@@ -209,6 +209,9 @@ async fn ui_loop(
         if let Some(reason) = state.exit_reason {
             let _ = cmd_tx.send(UiCommand::Shutdown);
             terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
+            reset_text_selection_mode_for_exit(&mut state, |enabled| {
+                set_mouse_capture(terminal, enabled)
+            })?;
             return Ok((reason, state.session_id.clone(), state.prompt_history()));
         }
 
@@ -222,6 +225,7 @@ async fn ui_loop(
             last_draw = Instant::now();
         }
     }
+    reset_text_selection_mode_for_exit(&mut state, |enabled| set_mouse_capture(terminal, enabled))?;
     Ok((UiExitReason::Quit, None, state.prompt_history()))
 }
 
@@ -578,6 +582,17 @@ fn set_mouse_capture(
     } else {
         execute!(terminal.backend_mut(), DisableMouseCapture).context("disable mouse capture")
     }
+}
+
+fn reset_text_selection_mode_for_exit<F>(state: &mut AppState, mut set_capture: F) -> Result<()>
+where
+    F: FnMut(bool) -> Result<()>,
+{
+    if state.text_selection_mode {
+        set_capture(true)?;
+        state.text_selection_mode = false;
+    }
+    Ok(())
 }
 
 fn input_char_count(text: &str) -> usize {
@@ -3085,6 +3100,37 @@ mod tests {
         let request = handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(12)));
 
         assert_eq!(request, TerminalRequest::ToggleTextSelectionMode);
+    }
+
+    #[test]
+    fn exit_reset_reenables_mouse_capture_after_text_selection_mode() {
+        let mut state = AppState::new();
+        state.text_selection_mode = true;
+        let mut calls = Vec::new();
+
+        reset_text_selection_mode_for_exit(&mut state, |enabled| {
+            calls.push(enabled);
+            Ok(())
+        })
+        .expect("reset text selection mode");
+
+        assert_eq!(calls, vec![true]);
+        assert!(!state.text_selection_mode);
+    }
+
+    #[test]
+    fn exit_reset_leaves_mouse_capture_unchanged_when_not_selecting_text() {
+        let mut state = AppState::new();
+        let mut calls = Vec::new();
+
+        reset_text_selection_mode_for_exit(&mut state, |enabled| {
+            calls.push(enabled);
+            Ok(())
+        })
+        .expect("reset text selection mode");
+
+        assert!(calls.is_empty());
+        assert!(!state.text_selection_mode);
     }
 
     #[test]
