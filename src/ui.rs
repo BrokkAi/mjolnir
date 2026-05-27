@@ -207,9 +207,10 @@ async fn ui_loop(
                         handle_crossterm(&mut state, cmd_tx, ev);
                     }
                     Some(Err(e)) => {
-                        state.status_line = Some(StatusMessage::warning(format!(
-                            "input error: {e}"
-                        )));
+                        state.record_status_message(
+                            StatusKind::Warning,
+                            format!("input error: {e}"),
+                        );
                     }
                     None => break,
                 }
@@ -873,10 +874,10 @@ fn normalize_paste(text: &str) -> String {
 }
 
 /// Copy the text of the most recent agent message to the system clipboard.
-/// Sets a transient status message so the user knows whether it worked.
+/// Records a system message so the user knows whether it worked.
 fn copy_last_agent_message(state: &mut AppState) {
     let Some(text) = state.last_agent_message() else {
-        state.status_line = Some(StatusMessage::warning("no agent message to copy"));
+        state.record_status_message(StatusKind::Warning, "no agent message to copy");
         return;
     };
 
@@ -885,14 +886,15 @@ fn copy_last_agent_message(state: &mut AppState) {
             let preview_len = text.chars().count().min(60);
             let preview: String = text.chars().take(preview_len).collect();
             let suffix = if text.chars().count() > 60 { "…" } else { "" };
-            state.status_line = Some(StatusMessage::info(format!(
-                "copied to clipboard: \"{preview}{suffix}\""
-            )));
+            state.record_status_message(
+                StatusKind::Info,
+                format!("copied to clipboard: \"{preview}{suffix}\""),
+            );
             // Store the lease to keep the clipboard handle alive on Linux/X11
             state.clipboard_lease = lease;
         }
         Err(e) => {
-            state.status_line = Some(StatusMessage::warning(format!("clipboard error: {e}")));
+            state.record_status_message(StatusKind::Warning, format!("clipboard error: {e}"));
         }
     }
 }
@@ -954,24 +956,23 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
 
     if let Some(rest) = trimmed.strip_prefix("/mj:") {
         let other = rest.trim();
-        state.status_line = Some(StatusMessage::warning(format!(
-            "unknown mj command: /mj:{other}"
-        )));
+        state.record_status_message(
+            StatusKind::Warning,
+            format!("unknown mj command: /mj:{other}"),
+        );
         return;
     }
 
     if state.runtime_closed {
-        state.status_line = Some(StatusMessage::info(
-            "acp runtime closed; press Ctrl-C to quit",
-        ));
+        state.record_status_message(StatusKind::Info, "acp runtime closed; press Ctrl-C to quit");
         return;
     }
     if state.is_streaming() {
-        state.status_line = Some(StatusMessage::warning("a prompt is already in flight"));
+        state.record_status_message(StatusKind::Warning, "a prompt is already in flight");
         return;
     }
     if state.session_id.is_none() {
-        state.status_line = Some(StatusMessage::warning("waiting for session..."));
+        state.record_status_message(StatusKind::Warning, "waiting for session...");
         return;
     }
     state.record_user_prompt(trimmed.to_string());
@@ -1078,13 +1079,14 @@ fn open_config_value_picker_for_shortcut(
     };
 
     if state.is_streaming() {
-        state.status_line = Some(StatusMessage::warning(
+        state.record_status_message(
+            StatusKind::Warning,
             "finish or cancel the current turn before changing config",
-        ));
+        );
         return true;
     }
     if state.session_id.is_none() {
-        state.status_line = Some(StatusMessage::warning("waiting for session..."));
+        state.record_status_message(StatusKind::Warning, "waiting for session...");
         return true;
     }
 
@@ -1095,9 +1097,7 @@ fn open_config_value_picker_for_shortcut(
         .map(|(option_index, option, _)| (option_index, option.name.clone()))
     else {
         if state.selectable_config_options().is_empty() {
-            state.status_line = Some(StatusMessage::warning(
-                "no session config options available",
-            ));
+            state.record_status_message(StatusKind::Warning, "no session config options available");
             return true;
         }
         return false;
@@ -1301,31 +1301,8 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
             ));
         }
     }
-    if let Some((text, style)) = header_status_line(state) {
-        spans.push(Span::raw("   "));
-        spans.push(Span::styled(text, style));
-    }
-
     let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, inner);
-}
-
-fn header_status_line(state: &AppState) -> Option<(String, Style)> {
-    let status = state.status_line.as_ref()?;
-    let mut text = status.text.clone();
-    let style = match status.kind {
-        StatusKind::Info => Style::default().fg(Color::DarkGray),
-        StatusKind::Warning => Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-        StatusKind::Fatal => {
-            if state.runtime_closed {
-                text.push_str(" | press Ctrl-C to quit");
-            }
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        }
-    };
-    Some((text, style))
 }
 
 pub(crate) fn connection_state_label(state: &AppState) -> String {
@@ -2655,6 +2632,8 @@ fn config_value_row_text(choice: &ConfigValueChoice) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::app::StatusKind;
+
     use super::*;
     use agent_client_protocol::schema::{
         SessionConfigOption, SessionConfigSelectOption, ToolCallStatus, ToolKind,
@@ -2764,6 +2743,11 @@ mod tests {
         let warn = state.status_line.expect("warning");
         assert_eq!(warn.kind, StatusKind::Warning);
         assert!(warn.text.contains("/mj:bogus"), "msg: {}", warn.text);
+        assert_eq!(state.transcript.len(), 1);
+        match &state.transcript[0] {
+            Entry::System(text) => assert_eq!(text, "warning: unknown mj command: /mj:bogus"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
     }
 
     #[test]

@@ -182,7 +182,7 @@ pub enum StatusKind {
     Fatal,
 }
 
-/// Transient status text shown in the footer.
+/// Transient status text kept for input handling and tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusMessage {
     pub kind: StatusKind,
@@ -539,10 +539,23 @@ impl AppState {
     }
 
     fn set_status_line(&mut self, kind: StatusKind, text: impl Into<String>) {
-        self.status_line = Some(StatusMessage {
-            kind,
-            text: text.into(),
+        let text = text.into();
+        self.status_line = Some(match kind {
+            StatusKind::Info => StatusMessage::info(text),
+            StatusKind::Warning => StatusMessage::warning(text),
+            StatusKind::Fatal => StatusMessage::fatal(text),
         });
+    }
+
+    pub fn push_system_message(&mut self, text: impl Into<String>) {
+        self.transcript.push(Entry::System(text.into()));
+        self.bump_transcript_revision();
+    }
+
+    pub fn record_status_message(&mut self, kind: StatusKind, text: impl Into<String>) {
+        let text = text.into();
+        self.set_status_line(kind, text.clone());
+        self.push_system_message(status_transcript_text(kind, &text));
     }
 
     /// Mark the runtime as closed and switch the UI into read-only mode.
@@ -567,9 +580,10 @@ impl AppState {
             })
         );
         if !is_fatal {
-            self.status_line = Some(StatusMessage::info(
+            self.record_status_message(
+                StatusKind::Info,
                 "acp runtime closed; press Ctrl-C to quit",
-            ));
+            );
         }
     }
 
@@ -658,7 +672,7 @@ impl AppState {
             return false;
         };
         if choices.is_empty() {
-            self.set_status_line(
+            self.record_status_message(
                 StatusKind::Warning,
                 format!("config option '{}' has no values", option.name),
             );
@@ -923,17 +937,15 @@ impl AppState {
             }
             UiEvent::PromptFailed { message } => {
                 self.finish_prompt_turn();
-                self.set_status_line(StatusKind::Warning, message);
+                self.record_status_message(StatusKind::Warning, message);
                 self.update_autocomplete();
             }
             UiEvent::Warning(msg) => {
-                self.set_status_line(StatusKind::Warning, msg);
+                self.record_status_message(StatusKind::Warning, msg);
             }
             UiEvent::Fatal(msg) => {
-                self.transcript.push(Entry::System(format!("fatal: {msg}")));
-                self.bump_transcript_revision();
                 self.connection_state = ConnectionState::Fatal;
-                self.status_line = Some(StatusMessage::fatal(msg));
+                self.record_status_message(StatusKind::Fatal, msg);
                 self.mark_runtime_closed();
             }
         }
@@ -1229,6 +1241,14 @@ fn config_select_choices(select: &SessionConfigSelect) -> Vec<ConfigValueChoice>
             })
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+fn status_transcript_text(kind: StatusKind, text: &str) -> String {
+    match kind {
+        StatusKind::Info => text.to_string(),
+        StatusKind::Warning => format!("warning: {text}"),
+        StatusKind::Fatal => format!("fatal: {text}"),
     }
 }
 
@@ -1735,6 +1755,11 @@ mod tests {
         let status = s.status_line.expect("status");
         assert_eq!(status.kind, StatusKind::Info);
         assert_eq!(status.text, "acp runtime closed; press Ctrl-C to quit");
+        assert_eq!(s.transcript.len(), 1);
+        match &s.transcript[0] {
+            Entry::System(text) => assert_eq!(text, "acp runtime closed; press Ctrl-C to quit"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
     }
 
     #[test]
@@ -1790,6 +1815,11 @@ mod tests {
         let status = s.status_line.expect("status");
         assert_eq!(status.kind, StatusKind::Warning);
         assert_eq!(status.text, "prompt failed: boom");
+        assert_eq!(s.transcript.len(), 2);
+        match &s.transcript[1] {
+            Entry::System(text) => assert_eq!(text, "warning: prompt failed: boom"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
     }
 
     #[test]
