@@ -1170,11 +1170,12 @@ impl AppState {
         self.session_config_options = options;
         self.refresh_config_picker();
 
-        if let Some(mode_option) = self
-            .session_config_options
-            .iter()
-            .find(|option| matches!(option.category, Some(SessionConfigOptionCategory::Mode)))
-            && let Some(value) = config_option_current_value_id(mode_option)
+        if let Some(mode_option) = self.session_config_options.iter().find(|option| {
+            matches!(
+                option.category,
+                Some(SessionConfigOptionCategory::Mode | SessionConfigOptionCategory::ThoughtLevel)
+            )
+        }) && let Some(value) = config_option_current_value_id(mode_option)
         {
             self.current_mode = Some(value.to_string());
         }
@@ -1567,6 +1568,29 @@ mod tests {
         assert_eq!(s.session_config_options.len(), 2);
         assert_eq!(s.current_mode.as_deref(), Some("ask"));
         assert!(s.status_line.is_none());
+    }
+
+    #[test]
+    fn config_option_update_uses_thought_level_as_current_mode() {
+        let mut s = AppState::new();
+        let options = vec![
+            SessionConfigOption::select(
+                "thinking",
+                "Thinking",
+                "medium",
+                vec![
+                    SessionConfigSelectOption::new("low", "Thinking: low"),
+                    SessionConfigSelectOption::new("medium", "Thinking: medium"),
+                ],
+            )
+            .category(Some(SessionConfigOptionCategory::ThoughtLevel)),
+        ];
+
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::ConfigOptionUpdate(
+            ConfigOptionUpdate::new(options),
+        )));
+
+        assert_eq!(s.current_mode.as_deref(), Some("medium"));
     }
 
     #[test]
