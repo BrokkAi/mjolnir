@@ -467,12 +467,9 @@ fn handle_crossterm(
             }
             state.update_autocomplete();
         }
-        // Shift+Enter or Alt+Enter inserts a literal newline in the
-        // input buffer, so the user can draft multi-line prompts
-        // without submitting. Shift+Enter requires keyboard enhancement
-        // (the protocol-level extension); Alt+Enter works everywhere
-        // crossterm reports the Alt modifier.
-        (KeyModifiers::SHIFT, KeyCode::Enter) | (KeyModifiers::ALT, KeyCode::Enter) => {
+        // Insert a literal newline in the input buffer, so the user can
+        // draft multi-line prompts without submitting.
+        (modifiers, code) if is_prompt_newline_key(modifiers, code) => {
             insert_text_at_cursor(state, "\n");
             state.update_autocomplete();
         }
@@ -963,6 +960,33 @@ fn is_help_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
 
 fn is_text_selection_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty() && matches!(code, KeyCode::F(12))
+}
+
+#[cfg(target_os = "macos")]
+const PROMPT_NEWLINE_HINT: &str = "Ctrl-J";
+
+#[cfg(not(target_os = "macos"))]
+const PROMPT_NEWLINE_HINT: &str = "Shift/Alt+Enter";
+
+fn is_prompt_newline_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
+    // Shift+Enter requires keyboard enhancement support; Alt+Enter is
+    // reported only when the terminal treats Alt/Option as a modifier.
+    if matches!(
+        (modifiers, code),
+        (KeyModifiers::SHIFT, KeyCode::Enter) | (KeyModifiers::ALT, KeyCode::Enter)
+    ) {
+        return true;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Char('j'))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 fn should_open_help(state: &AppState, modifiers: KeyModifiers, code: KeyCode) -> bool {
@@ -2157,7 +2181,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
         format!(
-            " prompt (Ctrl-N new session | Ctrl-O load session | Enter to send | Shift/Alt+Enter for newline | Ctrl-C to quit | {text_selection_hint}) "
+            " prompt (Ctrl-N new session | Ctrl-O load session | Enter to send | {PROMPT_NEWLINE_HINT} for newline | Ctrl-C to quit | {text_selection_hint}) "
         )
     };
     let style = if state.runtime_closed || state.is_streaming() {
@@ -2434,7 +2458,9 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  Ctrl-N          new session"),
         Line::from("  Ctrl-O          load session"),
         Line::from("  Enter           send prompt / accept selected item"),
-        Line::from("  Shift/Alt+Enter  insert a newline in the prompt"),
+        Line::from(format!(
+            "  {PROMPT_NEWLINE_HINT:<15} insert a newline in the prompt"
+        )),
         Line::from("  Left/Right       move the prompt cursor"),
         Line::from("  Up/Down          cursor line or browse prompt history (top/bottom)"),
         Line::from("  PageUp/Down      move the cursor five lines"),
@@ -3740,6 +3766,25 @@ mod tests {
             &mut state,
             &cmd_tx,
             key_with_modifiers(KeyCode::Enter, KeyModifiers::ALT),
+        );
+
+        assert_eq!(state.input, "first\n");
+        assert!(cmd_rx.try_recv().is_err(), "must not submit");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ctrl_j_inserts_newline_without_submitting_on_macos() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "first".to_string();
+        state.input_cursor = state.input.chars().count();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('j'), KeyModifiers::CONTROL),
         );
 
         assert_eq!(state.input, "first\n");
