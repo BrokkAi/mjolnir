@@ -306,6 +306,9 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             (_, code) if should_open_help(state, key.modifiers, code) => {
                 state.help_overlay = true;
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+                state.exit_reason = Some(UiExitReason::NewSession);
+            }
             (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
                 state.toggle_expand_tool_outputs();
             }
@@ -436,6 +439,9 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
             if state.input.is_empty() && state.attachments.is_empty() =>
         {
             state.exit_reason = Some(UiExitReason::Quit);
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+            state.exit_reason = Some(UiExitReason::NewSession);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
             state.toggle_expand_tool_outputs();
@@ -2098,7 +2104,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     } else if state.is_streaming() {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
-        " prompt (Ctrl-O load session | Enter to send | Shift/Alt+Enter for newline | Ctrl-C to quit) "
+        " prompt (Ctrl-N new session | Ctrl-O load session | Enter to send | Shift/Alt+Enter for newline | Ctrl-C to quit) "
             .to_string()
     };
     let style = if state.runtime_closed || state.is_streaming() {
@@ -2347,6 +2353,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
             "General",
             Style::default().add_modifier(Modifier::BOLD),
         )]),
+        Line::from("  Ctrl-N          new session"),
         Line::from("  Ctrl-O          load session"),
         Line::from("  Enter           send prompt / accept selected item"),
         Line::from("  Shift/Alt+Enter  insert a newline in the prompt"),
@@ -3334,6 +3341,32 @@ mod tests {
         let picker = state.config_picker.as_ref().expect("picker");
         assert_eq!(picker.selected_option, 1);
         assert_eq!(picker.selected_value, 0);
+    }
+
+    #[test]
+    fn ctrl_n_triggers_new_session_exit_reason() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        state.session_config_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "model-1",
+            vec![
+                SessionConfigSelectOption::new("model-1", "Model 1"),
+                SessionConfigSelectOption::new("model-2", "Model 2"),
+            ],
+        )];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('n'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.config_picker.is_none());
+        assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
+        assert!(cmd_rx.try_recv().is_err());
     }
 
     #[test]
