@@ -486,7 +486,7 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
                     return start_item_action(state, &item, ItemAction::Select).await;
                 }
             }
-            (_, KeyCode::Backspace) => {
+            (_, KeyCode::Backspace) if state.search_focused => {
                 state.filter.pop();
                 state.recompute_filter();
             }
@@ -1168,6 +1168,52 @@ mod tests {
         let err = parse_custom_command("   ").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("empty"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn backspace_does_not_mutate_filter_when_search_unfocused() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        state.filter.push_str("hidden");
+        state.recompute_filter();
+        assert!(!state.search_focused);
+
+        let filtered_before = state.filtered.clone();
+        let key = crossterm::event::KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        let _ = handle_event(&mut state, CtEvent::Key(key)).await.unwrap();
+
+        assert_eq!(
+            state.filter, "hidden",
+            "backspace must not mutate filter while unfocused"
+        );
+        assert_eq!(state.filtered, filtered_before);
+    }
+
+    #[tokio::test]
+    async fn backspace_mutates_filter_when_search_focused() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        state.filter.push_str("hi");
+        state.search_focused = true;
+        state.recompute_filter();
+
+        let key = crossterm::event::KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        let _ = handle_event(&mut state, CtEvent::Key(key)).await.unwrap();
+
+        assert_eq!(
+            state.filter, "h",
+            "backspace must pop one char while search is focused"
+        );
     }
 
     #[test]
