@@ -251,6 +251,10 @@ install_dir_on_path() {
   esac
 }
 
+can_prompt_on_tty() {
+  [[ -r /dev/tty && -w /dev/tty ]] && { : >/dev/tty; } 2>/dev/null
+}
+
 shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
@@ -345,7 +349,7 @@ ensure_install_dir_on_path() {
     return 0
   fi
 
-  if [[ ! -r /dev/tty || ! -w /dev/tty ]]; then
+  if ! can_prompt_on_tty; then
     warn "${INSTALL_DIR} is not on PATH"
     log "add this to ${profile}: ${line}"
     return 0
@@ -399,7 +403,7 @@ find_extracted_binary() {
   printf '%s\n' "$found"
 }
 
-install_from_archive() {
+install_from_asset() {
   local label="$1"
   local repo="$2"
   local bin_name="$3"
@@ -426,58 +430,39 @@ install_from_archive() {
   verify_checksum_if_present "$release_file" "$asset_name" "$asset_file"
 
   extract_dir="${TMP_DIR}/${repo}-extract"
-  mkdir -p "$extract_dir"
 
   case "$asset_name" in
     *.tar.gz | *.tgz)
+      mkdir -p "$extract_dir"
       tar -xzf "$asset_file" -C "$extract_dir"
+      strip_quarantine "$extract_dir"
+      src="$(find_extracted_binary "$extract_dir" "$bin_name")"
+      install_binary "$src" "$bin_name"
       ;;
     *.zip)
       require_command unzip
+      mkdir -p "$extract_dir"
       unzip -q "$asset_file" -d "$extract_dir"
+      strip_quarantine "$extract_dir"
+      src="$(find_extracted_binary "$extract_dir" "$bin_name")"
+      install_binary "$src" "$bin_name"
       ;;
     *)
-      die "unsupported archive format for ${asset_name}"
+      install_binary "$asset_file" "$bin_name"
       ;;
   esac
-
-  strip_quarantine "$extract_dir"
-  src="$(find_extracted_binary "$extract_dir" "$bin_name")"
-  install_binary "$src" "$bin_name"
-}
-
-install_from_direct_asset() {
-  local label="$1"
-  local repo="$2"
-  local bin_name="$3"
-  local version="$4"
-  shift 4
-  local release_file="${TMP_DIR}/${repo}-release.json"
-  local tag
-  local asset_url
-  local asset_name
-  local asset_file
-
-  fetch_release "$repo" "$version" "$release_file"
-  tag="$(release_tag "$release_file")"
-  [[ -n "$tag" ]] || die "could not read latest ${label} release metadata"
-
-  asset_url="$(select_asset "$release_file" "$label" "$tag" "$@")"
-  asset_name="${asset_url##*/}"
-  asset_file="${TMP_DIR}/${asset_name}"
-
-  log "downloading ${label} ${tag} (${asset_name})"
-  download_file "$asset_url" "$asset_file"
-  verify_checksum_if_present "$release_file" "$asset_name" "$asset_file"
-  install_binary "$asset_file" "$bin_name"
 }
 
 install_anvil() {
-  local -a patterns=(
-    "^anvil-${ANVIL_OS}-${ARCH}$"
-  )
+  local -a patterns=()
 
-  install_from_direct_asset "anvil" "anvil" "anvil" "${ANVIL_VERSION:-}" "${patterns[@]}"
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    patterns+=("^brokk-anvil-.*-universal-apple-darwin[.]zip$")
+  fi
+  patterns+=("^brokk-anvil-.*-${RUST_TARGET}[.]zip$")
+  patterns+=("^anvil-${ANVIL_OS}-${ARCH}$")
+
+  install_from_asset "anvil" "anvil" "anvil" "${ANVIL_VERSION:-}" "${patterns[@]}"
 }
 
 install_bifrost() {
@@ -488,7 +473,7 @@ install_bifrost() {
   fi
   patterns+=("^bifrost-.*-${RUST_TARGET}[.]tar[.]gz$")
 
-  install_from_archive "bifrost" "bifrost" "bifrost" "${BIFROST_VERSION:-}" "${patterns[@]}"
+  install_from_asset "bifrost" "bifrost" "bifrost" "${BIFROST_VERSION:-}" "${patterns[@]}"
 }
 
 install_mjolnir() {
@@ -499,7 +484,7 @@ install_mjolnir() {
   fi
   patterns+=("^brokk-mjolnir-.*-${RUST_TARGET}[.]tar[.]gz$")
 
-  install_from_archive "mjolnir" "mjolnir" "mj" "${MJOLNIR_VERSION:-}" "${patterns[@]}"
+  install_from_asset "mjolnir" "mjolnir" "mj" "${MJOLNIR_VERSION:-}" "${patterns[@]}"
 }
 
 main() {
