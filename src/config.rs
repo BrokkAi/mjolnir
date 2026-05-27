@@ -1,7 +1,6 @@
 //! Persistent user config for `mj`.
 //!
-//! Stores the launch command of the agent selected in the picker so
-//! subsequent startups skip the prompt. Lives at
+//! Stores the default launch command and global picker preferences. Lives at
 //! `~/.config/mj/config.toml`.
 
 use std::collections::HashMap;
@@ -10,16 +9,19 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SelectedAgent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favorite_agents: Vec<String>,
 }
 
 /// Launch command resolved by the picker. `source_id` identifies where
-/// the choice came from so the picker can highlight the current row.
+/// the choice came from so the picker can highlight the default row.
 /// `"anvil"` and `"custom"` are reserved; everything else is a registry
 /// agent id.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SelectedAgent {
     pub source_id: String,
     pub program: PathBuf,
@@ -197,9 +199,11 @@ mod tests {
                 args: vec!["--quiet".to_string()],
                 env: HashMap::from([("FOO".to_string(), "bar".to_string())]),
             }),
+            favorite_agents: vec!["claude-acp".to_string(), "anvil".to_string()],
         };
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
+        assert_eq!(loaded.favorite_agents, vec!["claude-acp", "anvil"]);
         let agent = loaded.agent.expect("agent");
         assert_eq!(agent.source_id, "claude-acp");
         assert_eq!(agent.program, PathBuf::from("/usr/local/bin/claude-acp"));
@@ -218,6 +222,7 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
             }),
+            favorite_agents: Vec::new(),
         };
         cfg.save(&path).expect("save");
         assert!(path.exists());

@@ -18,12 +18,23 @@ use crate::clipboard::ClipboardLease;
 
 use crate::event::{PermissionDecision, PermissionPrompt, UiEvent, content_block_text};
 
+const BUILTIN_NEW_COMMAND: &str = "new";
+
+fn builtin_new_command() -> AvailableCommand {
+    AvailableCommand::new(BUILTIN_NEW_COMMAND, "start a new session")
+}
+
+fn install_builtin_commands(commands: &mut Vec<AvailableCommand>) {
+    commands.retain(|command| command.name != BUILTIN_NEW_COMMAND);
+    commands.insert(0, builtin_new_command());
+}
+
 /// How the UI loop ends, so `main` can decide whether to quit entirely
-/// or restart the session with a different agent.
+/// or start a fresh session through the agent picker.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum UiExitReason {
     Quit,
-    SwapAgent,
+    NewSession,
 }
 
 /// One entry in the scrolling transcript.
@@ -359,7 +370,11 @@ impl AppState {
             session_title: None,
             connection_state: ConnectionState::Launching,
             current_mode: None,
-            available_commands: Vec::new(),
+            available_commands: {
+                let mut commands = Vec::new();
+                install_builtin_commands(&mut commands);
+                commands
+            },
             session_config_options: Vec::new(),
             transcript: Vec::new(),
             tool_calls: HashMap::new(),
@@ -1015,6 +1030,7 @@ impl AppState {
             }
             SessionUpdate::AvailableCommandsUpdate(u) => {
                 self.available_commands = u.available_commands;
+                install_builtin_commands(&mut self.available_commands);
                 // The catalog changed mid-typing; rebuild the popover so
                 // a `/` already in the buffer reflects the new commands
                 // (and so a previously-empty filter can become non-empty).
@@ -1235,11 +1251,11 @@ pub fn permission_kind_label(
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        AudioContent, AvailableCommand, ConfigOptionUpdate, Content, ContentBlock, ContentChunk,
-        Cost, Diff, EmbeddedResource, EmbeddedResourceResource, ImageContent, PermissionOption,
-        PermissionOptionKind, ResourceLink, SessionConfigOption, SessionConfigOptionCategory,
-        SessionConfigSelectOption, StopReason, Terminal, TextContent, TextResourceContents, Usage,
-        UsageUpdate,
+        AudioContent, AvailableCommand, AvailableCommandsUpdate, ConfigOptionUpdate, Content,
+        ContentBlock, ContentChunk, Cost, Diff, EmbeddedResource, EmbeddedResourceResource,
+        ImageContent, PermissionOption, PermissionOptionKind, ResourceLink, SessionConfigOption,
+        SessionConfigOptionCategory, SessionConfigSelectOption, StopReason, Terminal, TextContent,
+        TextResourceContents, Usage, UsageUpdate,
     };
 
     fn text_chunk(s: &str) -> ContentChunk {
@@ -2034,6 +2050,41 @@ mod tests {
         s.update_autocomplete();
         assert!(!s.autocomplete.visible);
         assert!(s.autocomplete.matches.is_empty());
+    }
+
+    #[test]
+    fn autocomplete_advertises_builtin_new_by_default() {
+        let mut s = AppState::new();
+        s.input = "/n".to_string();
+        s.update_autocomplete();
+
+        assert!(s.autocomplete.visible);
+        let names: Vec<&str> = s
+            .autocomplete
+            .matches
+            .iter()
+            .map(|&i| s.available_commands[i].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["new"]);
+    }
+
+    #[test]
+    fn available_command_updates_keep_builtin_new_first() {
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::SessionUpdate(
+            SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
+                cmd("review_pr"),
+                AvailableCommand::new("new", "agent-provided command"),
+            ])),
+        ));
+
+        let names: Vec<&str> = s
+            .available_commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["new", "review_pr"]);
+        assert_eq!(s.available_commands[0].description, "start a new session");
     }
 
     #[test]

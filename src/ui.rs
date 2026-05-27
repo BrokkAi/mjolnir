@@ -123,7 +123,7 @@ impl TranscriptScrollState {
     }
 }
 
-/// Run the UI loop until the user quits or asks to swap agents. The
+/// Run the UI loop until the user quits or asks for a new session. The
 /// caller owns the terminal lifecycle (see `setup_terminal` /
 /// `restore_terminal`) so the picker can reuse the same alt-screen.
 /// Returns the reason the loop exited so `main` knows whether to
@@ -945,21 +945,19 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     state.input_cursor = 0;
     state.scroll_input_to_bottom();
 
-    // Client-side `/mj:` commands are handled here without forwarding
-    // anything to the agent. Right now only `/mj:agents` is supported.
+    // Client-side commands are handled here without forwarding anything
+    // to the agent.
+    if trimmed == "/new" {
+        state.exit_reason = Some(UiExitReason::NewSession);
+        return;
+    }
+
     if let Some(rest) = trimmed.strip_prefix("/mj:") {
-        match rest.trim() {
-            "agents" => {
-                state.exit_reason = Some(UiExitReason::SwapAgent);
-                return;
-            }
-            other => {
-                state.status_line = Some(StatusMessage::warning(format!(
-                    "unknown mj command: /mj:{other}"
-                )));
-                return;
-            }
-        }
+        let other = rest.trim();
+        state.status_line = Some(StatusMessage::warning(format!(
+            "unknown mj command: /mj:{other}"
+        )));
+        return;
     }
 
     if state.runtime_closed {
@@ -2400,7 +2398,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
         )]),
         Line::from("  F1..F9 / Ctrl-1..9 / Up/Down  edit or move inside choices"),
         Line::from(""),
-        Line::from("Built-in command: /mj:agents switches agent"),
+        Line::from("Built-in command: /new starts a new session"),
     ];
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -2739,15 +2737,15 @@ mod tests {
     }
 
     #[test]
-    fn slash_mj_agents_triggers_swap_exit_reason() {
+    fn slash_new_triggers_new_session_exit_reason() {
         let mut state = AppState::new();
         state.session_id = Some("s-1".to_string());
-        state.input = "/mj:agents".to_string();
+        state.input = "/new".to_string();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
 
         submit_prompt(&mut state, &cmd_tx);
 
-        assert_eq!(state.exit_reason, Some(UiExitReason::SwapAgent));
+        assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
         // Must not forward the command to the agent.
         assert!(cmd_rx.try_recv().is_err());
     }

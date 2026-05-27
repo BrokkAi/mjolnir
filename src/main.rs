@@ -1,9 +1,9 @@
 //! mjolnir: an interactive terminal client for any ACP-speaking agent.
 //!
 //! Picks an agent (from the ACP registry, the bundled `anvil` default, or
-//! a Custom command) the first time it runs, persists the choice to
-//! `~/.config/mj/config.toml`, then spawns the agent as a child process
-//! and renders the session in a ratatui chat UI.
+//! a Custom command) for each new session, persists global picker
+//! preferences to `~/.config/mj/config.toml`, then spawns the agent as a
+//! child process and renders the session in a ratatui chat UI.
 
 mod acp;
 mod app;
@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::app::UiExitReason;
 use crate::config::{Config, SelectedAgent, history_path};
-use crate::picker::PickerOutcome;
+use crate::picker::{PickerOutcome, PickerPreferences, PickerResult};
 use crate::session::SessionEntryJson;
 use crate::worktree::CreatedWorktree;
 
@@ -259,7 +259,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
         Config::load(&config_path).with_context(|| format!("load {}", config_path.display()))?;
     let agent = cfg.agent.ok_or_else(|| {
         anyhow::anyhow!(
-            "no agent configured; run `mj` once to pick an agent before resuming sessions"
+            "no default agent configured; run `mj` once to pick an agent before resuming sessions"
         )
     })?;
 
@@ -478,33 +478,36 @@ async fn run_app(
     let config_path = config::default_config_path();
     let mut cfg = Config::load(&config_path)?;
 
-    // Supervisor loop. We start a session for the currently-configured
-    // agent; if the user invokes `/mj:agents`, the UI exits with
-    // `SwapAgent`, we run the picker again, persist, and loop.
-    let mut last_source_id: Option<String> = None;
+    // Supervisor loop. New sessions always pass through the agent picker.
+    // Resumed sessions keep using the configured default agent because
+    // the session id belongs to that agent.
     // Consume resume_session on the first iteration only.
     let mut initial_resume = resume_session;
     loop {
-        let agent = match cfg.agent.clone() {
-            Some(a) => {
-                last_source_id = Some(a.source_id.clone());
-                a
-            }
-            None => {
-                let outcome = run_picker_with_registry(terminal, last_source_id.clone()).await?;
-                let Some(outcome) = outcome else {
-                    return Ok(None);
-                };
-                let selected = picker_outcome_to_selected(outcome);
-                cfg.agent = Some(selected.clone());
+        let resume = initial_resume.take();
+        let agent = if resume.is_some() {
+            cfg.agent.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no default agent configured; run `mj` once to pick an agent before resuming sessions"
+                )
+            })?
+        } else {
+            let picker_result = run_picker_with_registry(terminal, &cfg).await?;
+            apply_picker_preferences(&mut cfg, picker_result.preferences);
+            let Some(outcome) = picker_result.outcome else {
                 cfg.save(&config_path)
                     .with_context(|| format!("save {}", config_path.display()))?;
-                last_source_id = Some(selected.source_id.clone());
-                selected
+                return Ok(None);
+            };
+            let selected = picker_outcome_to_selected(outcome);
+            if cfg.agent.is_none() {
+                cfg.agent = Some(selected.clone());
             }
+            cfg.save(&config_path)
+                .with_context(|| format!("save {}", config_path.display()))?;
+            selected
         };
 
-        let resume = initial_resume.take();
         let (reason, session_id) = run_session(
             terminal,
             &agent,
@@ -516,11 +519,7 @@ async fn run_app(
         .await?;
         match reason {
             UiExitReason::Quit => return Ok(session_id),
-            UiExitReason::SwapAgent => {
-                // Drop the current agent; the next loop iteration runs
-                // the picker so the user can pick a new one. We persist
-                // only when they actually commit a choice.
-                cfg.agent = None;
+            UiExitReason::NewSession => {
                 continue;
             }
         }
@@ -529,8 +528,8 @@ async fn run_app(
 
 async fn run_picker_with_registry(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
-    current_source_id: Option<String>,
-) -> Result<Option<PickerOutcome>> {
+    cfg: &Config,
+) -> Result<PickerResult> {
     let cache_path = registry::default_cache_path();
     let registry =
         match registry::load_with_cache(&cache_path, registry::CACHE_TTL, registry::REGISTRY_URL)
@@ -549,9 +548,21 @@ async fn run_picker_with_registry(
         &registry,
         &install::default_install_root(),
         &registry::current_platform(),
-        current_source_id,
+        picker_preferences_from_config(cfg),
     )
     .await
+}
+
+fn picker_preferences_from_config(cfg: &Config) -> PickerPreferences {
+    PickerPreferences {
+        default_agent: cfg.agent.as_ref().map(selected_to_picker_outcome),
+        favorite_source_ids: cfg.favorite_agents.clone(),
+    }
+}
+
+fn apply_picker_preferences(cfg: &mut Config, preferences: PickerPreferences) {
+    cfg.agent = preferences.default_agent.map(picker_outcome_to_selected);
+    cfg.favorite_agents = preferences.favorite_source_ids;
 }
 
 fn picker_outcome_to_selected(o: PickerOutcome) -> SelectedAgent {
@@ -560,6 +571,15 @@ fn picker_outcome_to_selected(o: PickerOutcome) -> SelectedAgent {
         program: o.program,
         args: o.args,
         env: o.env,
+    }
+}
+
+fn selected_to_picker_outcome(agent: &SelectedAgent) -> PickerOutcome {
+    PickerOutcome {
+        source_id: agent.source_id.clone(),
+        program: agent.program.clone(),
+        args: agent.args.clone(),
+        env: agent.env.clone(),
     }
 }
 

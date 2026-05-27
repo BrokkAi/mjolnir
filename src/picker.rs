@@ -3,8 +3,7 @@
 //! Renders a ratatui screen that lists `anvil` + registry agents +
 //! `Custom`, lets the user filter and select one, then resolves the
 //! selection into a launch command (downloading a binary archive when
-//! needed, with a progress spinner). Used both at first launch and from
-//! the `/mj:agents` slash command.
+//! needed, with a progress spinner). Used whenever a new session starts.
 
 use std::collections::HashMap;
 use std::io::Stdout;
@@ -26,12 +25,26 @@ use crate::install::{self, Progress};
 use crate::registry::{DistributionKind, Registry};
 
 /// Resolved launch command for the chosen agent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickerOutcome {
     pub source_id: String,
     pub program: PathBuf,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+}
+
+/// Persistent picker preferences owned by the caller's global config.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PickerPreferences {
+    pub default_agent: Option<PickerOutcome>,
+    pub favorite_source_ids: Vec<String>,
+}
+
+/// Picker completion state. `outcome` is `None` only when the user cancels.
+#[derive(Debug, Clone)]
+pub struct PickerResult {
+    pub outcome: Option<PickerOutcome>,
+    pub preferences: PickerPreferences,
 }
 
 /// One row in the picker. `Anvil` and `Custom` are synthetic entries;
@@ -43,16 +56,24 @@ enum Item {
     Custom,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ItemAction {
+    Select,
+    SetDefault,
+}
+
 enum Mode {
     Browse,
     CustomInput {
         input: String,
+        action: ItemAction,
     },
     Installing {
         label: String,
         total_bytes: Option<u64>,
         downloaded_bytes: u64,
         extracting: bool,
+        action: ItemAction,
         rx: mpsc::UnboundedReceiver<Progress>,
         task: tokio::task::JoinHandle<Result<PickerOutcome>>,
     },
@@ -69,7 +90,9 @@ struct PickerState<'a> {
     filtered: Vec<usize>,
     selected: usize,
     mode: Mode,
-    current_source_id: Option<String>,
+    search_focused: bool,
+    notice: Option<String>,
+    preferences: PickerPreferences,
 }
 
 impl<'a> PickerState<'a> {
@@ -77,35 +100,55 @@ impl<'a> PickerState<'a> {
         registry: &'a Registry,
         platform: String,
         install_root: PathBuf,
-        current_source_id: Option<String>,
+        preferences: PickerPreferences,
     ) -> Self {
+        let mut state = Self {
+            registry,
+            platform,
+            install_root,
+            items: Vec::new(),
+            filter: String::new(),
+            filtered: Vec::new(),
+            selected: 0,
+            mode: Mode::Browse,
+            search_focused: false,
+            notice: None,
+            preferences,
+        };
+        let default_source_id = state.default_source_id().map(ToOwned::to_owned);
+        state.rebuild_items(default_source_id.as_deref());
+        state
+    }
+
+    fn rebuild_items(&mut self, preferred_source_id: Option<&str>) {
         let mut items = vec![Item::Anvil];
-        // Sort registry agents by display name for a predictable picker.
-        let mut indices: Vec<usize> = (0..registry.agents.len()).collect();
+        let mut indices: Vec<usize> = (0..self.registry.agents.len()).collect();
         indices.sort_by(|&a, &b| {
-            registry.agents[a]
+            self.registry.agents[a]
                 .name
                 .to_lowercase()
-                .cmp(&registry.agents[b].name.to_lowercase())
+                .cmp(&self.registry.agents[b].name.to_lowercase())
         });
         for i in indices {
             items.push(Item::Agent(i));
         }
         items.push(Item::Custom);
 
-        let mut state = Self {
-            registry,
-            platform,
-            install_root,
-            items,
-            filter: String::new(),
-            filtered: Vec::new(),
-            selected: 0,
-            mode: Mode::Browse,
-            current_source_id,
-        };
-        state.recompute_filter();
-        state
+        items.sort_by(|a, b| {
+            let a_fav = self.item_is_favorite(a);
+            let b_fav = self.item_is_favorite(b);
+            b_fav.cmp(&a_fav).then_with(|| {
+                self.item_label(a)
+                    .to_lowercase()
+                    .cmp(&self.item_label(b).to_lowercase())
+            })
+        });
+
+        self.items = items;
+        self.recompute_filter();
+        if let Some(source_id) = preferred_source_id {
+            self.select_source_id(source_id);
+        }
     }
 
     fn item_label(&self, item: &Item) -> String {
@@ -127,6 +170,14 @@ impl<'a> PickerState<'a> {
         }
     }
 
+    fn item_source_id(&self, item: &Item) -> String {
+        match item {
+            Item::Anvil => "anvil".to_string(),
+            Item::Custom => "custom".to_string(),
+            Item::Agent(idx) => self.registry.agents[*idx].id.clone(),
+        }
+    }
+
     fn item_hint(&self, item: &Item) -> String {
         match item {
             Item::Anvil => "default mj agent".to_string(),
@@ -141,23 +192,34 @@ impl<'a> PickerState<'a> {
         }
     }
 
-    fn item_is_current(&self, item: &Item) -> bool {
-        let Some(cur) = &self.current_source_id else {
+    fn default_source_id(&self) -> Option<&str> {
+        self.preferences
+            .default_agent
+            .as_ref()
+            .map(|agent| agent.source_id.as_str())
+    }
+
+    fn item_is_default(&self, item: &Item) -> bool {
+        let Some(cur) = self.default_source_id() else {
             return false;
         };
-        match item {
-            Item::Anvil => cur == "anvil",
-            Item::Custom => cur == "custom",
-            Item::Agent(idx) => self.registry.agents[*idx].id == *cur,
-        }
+        self.item_source_id(item) == cur
+    }
+
+    fn item_is_favorite(&self, item: &Item) -> bool {
+        let source_id = self.item_source_id(item);
+        self.preferences
+            .favorite_source_ids
+            .iter()
+            .any(|id| id == &source_id)
     }
 
     fn recompute_filter(&mut self) {
         let q = self.filter.to_lowercase();
-        let prev_selected_label = self
+        let prev_selected_source_id = self
             .filtered
             .get(self.selected)
-            .map(|&i| self.item_label(&self.items[i]));
+            .map(|&i| self.item_source_id(&self.items[i]));
 
         if q.is_empty() {
             self.filtered = (0..self.items.len()).collect();
@@ -172,11 +234,11 @@ impl<'a> PickerState<'a> {
         }
 
         // Preserve selection on the same row when possible; otherwise top.
-        self.selected = prev_selected_label
-            .and_then(|label| {
+        self.selected = prev_selected_source_id
+            .and_then(|source_id| {
                 self.filtered
                     .iter()
-                    .position(|&i| self.item_label(&self.items[i]) == label)
+                    .position(|&i| self.item_source_id(&self.items[i]) == source_id)
             })
             .unwrap_or(0);
     }
@@ -194,22 +256,57 @@ impl<'a> PickerState<'a> {
     fn focused_item(&self) -> Option<&Item> {
         self.filtered.get(self.selected).map(|&i| &self.items[i])
     }
+
+    fn select_source_id(&mut self, source_id: &str) {
+        if let Some(pos) = self
+            .filtered
+            .iter()
+            .position(|&i| self.item_source_id(&self.items[i]) == source_id)
+        {
+            self.selected = pos;
+        }
+    }
+
+    fn toggle_favorite(&mut self, item: &Item) {
+        let source_id = self.item_source_id(item);
+        let label = self.item_label(item);
+        if let Some(pos) = self
+            .preferences
+            .favorite_source_ids
+            .iter()
+            .position(|id| id == &source_id)
+        {
+            self.preferences.favorite_source_ids.remove(pos);
+            self.notice = Some(format!("removed favorite: {label}"));
+        } else {
+            self.preferences.favorite_source_ids.push(source_id.clone());
+            self.notice = Some(format!("added favorite: {label}"));
+        }
+        self.rebuild_items(Some(&source_id));
+    }
+
+    fn set_default_outcome(&mut self, outcome: PickerOutcome, label: String) {
+        let source_id = outcome.source_id.clone();
+        self.preferences.default_agent = Some(outcome);
+        self.notice = Some(format!("default set to {label}"));
+        self.rebuild_items(Some(&source_id));
+    }
 }
 
 /// Run the picker until the user selects an agent or cancels with Esc.
-/// Returns `Ok(None)` when the user cancels.
+/// Returns a result with `outcome: None` when the user cancels.
 pub async fn run_picker(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     registry: &Registry,
     install_root: &Path,
     platform: &str,
-    current_source_id: Option<String>,
-) -> Result<Option<PickerOutcome>> {
+    preferences: PickerPreferences,
+) -> Result<PickerResult> {
     let mut state = PickerState::new(
         registry,
         platform.to_string(),
         install_root.to_path_buf(),
-        current_source_id,
+        preferences,
     );
 
     let mut events = EventStream::new();
@@ -222,22 +319,34 @@ pub async fn run_picker(
             biased;
             maybe_ev = events.next() => {
                 let Some(ev) = maybe_ev else {
-                    return Ok(None);
+                    return Ok(PickerResult {
+                        outcome: None,
+                        preferences: state.preferences,
+                    });
                 };
                 let ev = ev.context("crossterm event stream")?;
                 if let Some(outcome) = handle_event(&mut state, ev).await? {
-                    return Ok(Some(outcome));
+                    return Ok(PickerResult {
+                        outcome: Some(outcome),
+                        preferences: state.preferences,
+                    });
                 }
             }
             _ = tick.tick() => {
                 if let Some(outcome) = pump_install(&mut state).await {
-                    return Ok(Some(outcome));
+                    return Ok(PickerResult {
+                        outcome: Some(outcome),
+                        preferences: state.preferences,
+                    });
                 }
             }
         }
         terminal.draw(|f| draw(f, &state))?;
         if matches!(state.mode, Mode::Cancelled) {
-            return Ok(None);
+            return Ok(PickerResult {
+                outcome: None,
+                preferences: state.preferences,
+            });
         }
     }
 }
@@ -277,9 +386,18 @@ async fn pump_install(state: &mut PickerState<'_>) -> Option<PickerOutcome> {
     if task.is_finished() {
         // Move the task out so we can await it.
         let prev = std::mem::replace(&mut state.mode, Mode::Browse);
-        if let Mode::Installing { task, .. } = prev {
+        if let Mode::Installing {
+            task,
+            action,
+            label,
+            ..
+        } = prev
+        {
             match task.await {
-                Ok(Ok(outcome)) => return Some(outcome),
+                Ok(Ok(outcome)) => match action {
+                    ItemAction::Select => return Some(outcome),
+                    ItemAction::SetDefault => state.set_default_outcome(outcome, label),
+                },
                 Ok(Err(e)) => {
                     state.mode = Mode::Error(format!("install failed: {e:#}"));
                 }
@@ -321,7 +439,7 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
                 state.mode = Mode::Browse;
             }
         }
-        Mode::CustomInput { input } => match (key.modifiers, key.code) {
+        Mode::CustomInput { input, action } => match (key.modifiers, key.code) {
             (_, KeyCode::Esc) => {
                 state.mode = Mode::Browse;
             }
@@ -331,7 +449,12 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
                     state.mode = Mode::Error("custom command cannot be empty".to_string());
                 } else {
                     match parse_custom_command(&raw) {
-                        Ok(outcome) => return Ok(Some(outcome)),
+                        Ok(outcome) => match *action {
+                            ItemAction::Select => return Ok(Some(outcome)),
+                            ItemAction::SetDefault => {
+                                state.set_default_outcome(outcome, "custom command".to_string());
+                            }
+                        },
                         Err(e) => state.mode = Mode::Error(format!("{e:#}")),
                     }
                 }
@@ -346,21 +469,42 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
         },
         Mode::Cancelled => {}
         Mode::Browse => match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                 state.mode = Mode::Cancelled;
+            }
+            (_, KeyCode::Esc) => {
+                if state.search_focused {
+                    state.search_focused = false;
+                } else {
+                    state.mode = Mode::Cancelled;
+                }
             }
             (_, KeyCode::Up) => state.move_selection(-1),
             (_, KeyCode::Down) => state.move_selection(1),
             (_, KeyCode::Enter) => {
                 if let Some(item) = state.focused_item().cloned() {
-                    return start_selection(state, &item).await;
+                    return start_item_action(state, &item, ItemAction::Select).await;
                 }
             }
             (_, KeyCode::Backspace) => {
                 state.filter.pop();
                 state.recompute_filter();
             }
-            (_, KeyCode::Char(c)) => {
+            (KeyModifiers::NONE, KeyCode::Char('/')) if !state.search_focused => {
+                state.search_focused = true;
+                state.notice = None;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('f')) if !state.search_focused => {
+                if let Some(item) = state.focused_item().cloned() {
+                    state.toggle_favorite(&item);
+                }
+            }
+            (KeyModifiers::NONE, KeyCode::Char('d')) if !state.search_focused => {
+                if let Some(item) = state.focused_item().cloned() {
+                    return start_item_action(state, &item, ItemAction::SetDefault).await;
+                }
+            }
+            (_, KeyCode::Char(c)) if state.search_focused => {
                 state.filter.push(c);
                 state.recompute_filter();
             }
@@ -370,20 +514,37 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
     Ok(None)
 }
 
-async fn start_selection(
+async fn start_item_action(
     state: &mut PickerState<'_>,
     item: &Item,
+    action: ItemAction,
 ) -> Result<Option<PickerOutcome>> {
     match item {
-        Item::Anvil => Ok(Some(PickerOutcome {
-            source_id: "anvil".to_string(),
-            program: PathBuf::from("anvil"),
-            args: Vec::new(),
-            env: HashMap::new(),
-        })),
+        Item::Anvil => {
+            let outcome = PickerOutcome {
+                source_id: "anvil".to_string(),
+                program: PathBuf::from("anvil"),
+                args: Vec::new(),
+                env: HashMap::new(),
+            };
+            match action {
+                ItemAction::Select => Ok(Some(outcome)),
+                ItemAction::SetDefault => {
+                    state.set_default_outcome(outcome, "anvil".to_string());
+                    Ok(None)
+                }
+            }
+        }
         Item::Custom => {
+            if matches!(action, ItemAction::Select)
+                && let Some(default_agent) = state.preferences.default_agent.as_ref()
+                && default_agent.source_id == "custom"
+            {
+                return Ok(Some(default_agent.clone()));
+            }
             state.mode = Mode::CustomInput {
                 input: String::new(),
+                action,
             };
             Ok(None)
         }
@@ -441,6 +602,7 @@ async fn start_selection(
                         total_bytes: None,
                         downloaded_bytes: 0,
                         extracting: false,
+                        action,
                         rx,
                         task,
                     };
@@ -450,23 +612,37 @@ async fn start_selection(
                     let pkg = agent.distribution.npx.as_ref().expect("npx checked");
                     let mut args = vec!["-y".to_string(), pkg.package.clone()];
                     args.extend(pkg.args.iter().cloned());
-                    Ok(Some(PickerOutcome {
+                    let outcome = PickerOutcome {
                         source_id: agent.id.clone(),
                         program: PathBuf::from("npx"),
                         args,
                         env: pkg.env.clone(),
-                    }))
+                    };
+                    match action {
+                        ItemAction::Select => Ok(Some(outcome)),
+                        ItemAction::SetDefault => {
+                            state.set_default_outcome(outcome, agent.name);
+                            Ok(None)
+                        }
+                    }
                 }
                 DistributionKind::Uvx => {
                     let pkg = agent.distribution.uvx.as_ref().expect("uvx checked");
                     let mut args = vec![pkg.package.clone()];
                     args.extend(pkg.args.iter().cloned());
-                    Ok(Some(PickerOutcome {
+                    let outcome = PickerOutcome {
                         source_id: agent.id.clone(),
                         program: PathBuf::from("uvx"),
                         args,
                         env: pkg.env.clone(),
-                    }))
+                    };
+                    match action {
+                        ItemAction::Select => Ok(Some(outcome)),
+                        ItemAction::SetDefault => {
+                            state.set_default_outcome(outcome, agent.name);
+                            Ok(None)
+                        }
+                    }
                 }
             }
         }
@@ -499,10 +675,10 @@ fn draw(f: &mut ratatui::Frame, state: &PickerState<'_>) {
     draw_header(f, chunks[0]);
     draw_list(f, chunks[1], state);
     draw_filter(f, chunks[2], state);
-    draw_footer(f, chunks[3]);
+    draw_footer(f, chunks[3], state);
 
     match &state.mode {
-        Mode::CustomInput { input } => draw_custom_input_modal(f, f.area(), input),
+        Mode::CustomInput { input, .. } => draw_custom_input_modal(f, f.area(), input),
         Mode::Installing {
             label,
             total_bytes,
@@ -556,10 +732,17 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
             let absolute = start + offset;
             let item = &state.items[i];
             let marker = if absolute == state.selected { ">" } else { " " };
-            let badge = if state.item_is_current(item) {
-                " [current]"
+            let mut badges = Vec::new();
+            if state.item_is_default(item) {
+                badges.push("default");
+            }
+            if state.item_is_favorite(item) {
+                badges.push("favorite");
+            }
+            let badge = if badges.is_empty() {
+                String::new()
             } else {
-                ""
+                format!(" [{}]", badges.join(", "))
             };
             let label = state.item_label(item);
             let hint = state.item_hint(item);
@@ -581,17 +764,33 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
 }
 
 fn draw_filter(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
-    let title = " filter (start typing) ";
+    let title = if state.search_focused {
+        " search (typing) "
+    } else {
+        " search (press /) "
+    };
     let block = Block::default().borders(Borders::ALL).title(title);
-    let p = Paragraph::new(state.filter.as_str())
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let text = if state.filter.is_empty() && !state.search_focused {
+        Line::from(vec![Span::styled(
+            "press / to filter agents",
+            Style::default().fg(Color::DarkGray),
+        )])
+    } else {
+        Line::from(state.filter.clone())
+    };
+    let p = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
     f.render_widget(p, area);
 }
 
-fn draw_footer(f: &mut ratatui::Frame, area: Rect) {
-    let p = Paragraph::new("Up/Down navigate | Enter select | Esc cancel")
-        .style(Style::default().fg(Color::DarkGray));
+fn draw_footer(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
+    let text = if let Some(notice) = state.notice.as_ref() {
+        notice.as_str()
+    } else if state.search_focused {
+        "typing filters | Up/Down navigate | Enter select | Esc stop search"
+    } else {
+        "Up/Down navigate | Enter select | / search | f favorite | d default | Esc cancel"
+    };
+    let p = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
     f.render_widget(p, area);
 }
 
@@ -772,7 +971,7 @@ mod tests {
             &reg,
             "darwin-aarch64".to_string(),
             PathBuf::from("/tmp"),
-            None,
+            PickerPreferences::default(),
         );
         // 1 anvil + 2 registry + 1 custom = 4 items
         assert_eq!(state.items.len(), 4);
@@ -787,7 +986,7 @@ mod tests {
             &reg,
             "darwin-aarch64".to_string(),
             PathBuf::from("/tmp"),
-            None,
+            PickerPreferences::default(),
         );
         let registry_labels: Vec<String> = state.items[1..state.items.len() - 1]
             .iter()
@@ -805,7 +1004,7 @@ mod tests {
             &reg,
             "darwin-aarch64".to_string(),
             PathBuf::from("/tmp"),
-            None,
+            PickerPreferences::default(),
         );
         state.filter = "binary".to_string();
         state.recompute_filter();
@@ -818,16 +1017,91 @@ mod tests {
     }
 
     #[test]
-    fn picker_marks_current_selection() {
+    fn picker_marks_default_selection() {
         let reg = fixture_registry();
         let state = PickerState::new(
             &reg,
             "darwin-aarch64".to_string(),
             PathBuf::from("/tmp"),
-            Some("anvil".to_string()),
+            PickerPreferences {
+                default_agent: Some(PickerOutcome {
+                    source_id: "anvil".to_string(),
+                    program: PathBuf::from("anvil"),
+                    args: Vec::new(),
+                    env: HashMap::new(),
+                }),
+                favorite_source_ids: Vec::new(),
+            },
         );
-        assert!(state.item_is_current(&Item::Anvil));
-        assert!(!state.item_is_current(&Item::Custom));
+        assert!(state.item_is_default(&Item::Anvil));
+        assert!(!state.item_is_default(&Item::Custom));
+    }
+
+    #[test]
+    fn picker_initial_selection_uses_default_agent() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                default_agent: Some(PickerOutcome {
+                    source_id: "claude-acp".to_string(),
+                    program: PathBuf::from("npx"),
+                    args: vec!["-y".to_string(), "@x/claude@0.36.1".to_string()],
+                    env: HashMap::new(),
+                }),
+                favorite_source_ids: Vec::new(),
+            },
+        );
+
+        let focused = state.focused_item().expect("focused");
+        assert_eq!(state.item_source_id(focused), "claude-acp");
+    }
+
+    #[test]
+    fn picker_pins_favorites_first() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                default_agent: None,
+                favorite_source_ids: vec!["claude-acp".to_string()],
+            },
+        );
+
+        assert_eq!(state.item_source_id(&state.items[0]), "claude-acp");
+        assert!(state.item_is_favorite(&state.items[0]));
+    }
+
+    #[test]
+    fn picker_toggle_favorite_updates_preferences_and_order() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        let claude = state
+            .items
+            .iter()
+            .find(|item| state.item_source_id(item) == "claude-acp")
+            .expect("claude")
+            .clone();
+
+        state.toggle_favorite(&claude);
+        assert_eq!(
+            state.preferences.favorite_source_ids,
+            vec!["claude-acp".to_string()]
+        );
+        assert_eq!(state.item_source_id(&state.items[0]), "claude-acp");
+
+        state.toggle_favorite(&claude);
+        assert!(state.preferences.favorite_source_ids.is_empty());
+        assert_eq!(state.item_source_id(&state.items[0]), "anvil");
     }
 
     #[test]
@@ -837,7 +1111,7 @@ mod tests {
             &reg,
             "darwin-aarch64".to_string(),
             PathBuf::from("/tmp"),
-            None,
+            PickerPreferences::default(),
         );
         // Find Claude (npx-only) and BinaryOnly entries.
         let labels_and_hints: Vec<(String, String)> = state
@@ -864,7 +1138,7 @@ mod tests {
             &reg,
             "windows-x86_64".to_string(),
             PathBuf::from("/tmp"),
-            None,
+            PickerPreferences::default(),
         );
         let bin_hint = state
             .items
@@ -903,7 +1177,7 @@ mod tests {
             &reg,
             "darwin-aarch64".to_string(),
             PathBuf::from("/tmp"),
-            None,
+            PickerPreferences::default(),
         );
         assert_eq!(state.selected, 0);
         state.move_selection(-1);
