@@ -554,8 +554,13 @@ impl AppState {
 
     pub fn record_status_message(&mut self, kind: StatusKind, text: impl Into<String>) {
         let text = text.into();
+        let transcript_text = status_transcript_text(kind, &text);
         self.set_status_line(kind, text.clone());
-        self.push_system_message(status_transcript_text(kind, &text));
+        if matches!(self.transcript.last(), Some(Entry::System(existing)) if existing == &transcript_text)
+        {
+            return;
+        }
+        self.push_system_message(transcript_text);
     }
 
     /// Mark the runtime as closed and switch the UI into read-only mode.

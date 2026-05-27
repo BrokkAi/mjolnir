@@ -2685,6 +2685,25 @@ mod tests {
     }
 
     #[test]
+    fn runtime_closed_submit_notice_deduplicates_in_transcript() {
+        let mut state = AppState::new();
+        state.runtime_closed = true;
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        state.input = "first".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        state.input = "second".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert_eq!(state.transcript.len(), 1);
+        match &state.transcript[0] {
+            Entry::System(text) => assert_eq!(text, "acp runtime closed; press Ctrl-C to quit"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
     fn help_overlay_opens_and_closes_from_keyboard() {
         let mut state = AppState::new();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
