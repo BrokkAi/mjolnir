@@ -270,7 +270,7 @@ fn handle_crossterm(
         return TerminalRequest::None;
     }
 
-    if is_text_selection_key(key.modifiers, key.code) {
+    if is_text_selection_key(key.modifiers, key.code) && can_toggle_text_selection_mode(state) {
         return TerminalRequest::ToggleTextSelectionMode;
     }
 
@@ -975,6 +975,10 @@ fn is_help_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
 
 fn is_text_selection_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty() && matches!(code, KeyCode::F(12))
+}
+
+fn can_toggle_text_selection_mode(state: &AppState) -> bool {
+    !state.help_overlay && !state.has_pending_permission() && state.config_picker.is_none()
 }
 
 #[cfg(target_os = "macos")]
@@ -3100,6 +3104,45 @@ mod tests {
         let request = handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(12)));
 
         assert_eq!(request, TerminalRequest::ToggleTextSelectionMode);
+    }
+
+    #[test]
+    fn f12_ignores_text_selection_toggle_while_overlay_owns_input() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        let mut help_state = AppState::new();
+        help_state.help_overlay = true;
+        assert_eq!(
+            handle_crossterm(&mut help_state, &cmd_tx, key(KeyCode::F(12))),
+            TerminalRequest::None
+        );
+        assert!(help_state.help_overlay);
+
+        let mut permission_state = AppState::new();
+        let pending = permission_pending_with_options("run shell command", &["Allow", "Reject"], 0);
+        permission_state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+        assert_eq!(
+            handle_crossterm(&mut permission_state, &cmd_tx, key(KeyCode::F(12))),
+            TerminalRequest::None
+        );
+        assert!(permission_state.has_pending_permission());
+
+        let mut config_state = AppState::new();
+        config_state.session_config_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "model-1",
+            vec![
+                SessionConfigSelectOption::new("model-1", "Model 1"),
+                SessionConfigSelectOption::new("model-2", "Model 2"),
+            ],
+        )];
+        assert!(config_state.open_config_value_picker(0));
+        assert_eq!(
+            handle_crossterm(&mut config_state, &cmd_tx, key(KeyCode::F(12))),
+            TerminalRequest::None
+        );
+        assert!(config_state.config_picker.is_some());
     }
 
     #[test]
