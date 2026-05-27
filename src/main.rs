@@ -567,16 +567,38 @@ async fn run_app(
                 let sessions =
                     session::list_sessions(&agent, cwd.clone(), agent_stderr.as_deref()).await?;
 
-                match session::run_session_picker(terminal, sessions).await? {
-                    session::ResumeOutcome::Cancelled => return Ok(session_id),
-                    session::ResumeOutcome::Selected(entry) => {
-                        initial_resume = Some(entry.session_id);
+                match session_picker_action(
+                    session::run_session_picker(terminal, sessions).await?,
+                    session_id,
+                ) {
+                    SessionPickerAction::Resume(session_id) => {
+                        initial_resume = Some(session_id);
                         initial_agent = Some(agent);
                         continue;
                     }
+                    SessionPickerAction::Exit(session_id) => return Ok(session_id),
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionPickerAction {
+    Resume(String),
+    Exit(Option<String>),
+}
+
+fn session_picker_action(
+    outcome: session::ResumeOutcome,
+    current_session_id: Option<String>,
+) -> SessionPickerAction {
+    match outcome {
+        session::ResumeOutcome::Selected(entry) => SessionPickerAction::Resume(entry.session_id),
+        session::ResumeOutcome::Cancelled => match current_session_id {
+            Some(session_id) => SessionPickerAction::Resume(session_id),
+            None => SessionPickerAction::Exit(None),
+        },
     }
 }
 
@@ -951,6 +973,44 @@ mod tests {
         } else {
             panic!("expected Resume subcommand");
         }
+    }
+
+    #[test]
+    fn cancelling_session_picker_resumes_current_session() {
+        let action = session_picker_action(
+            session::ResumeOutcome::Cancelled,
+            Some("current-session".to_string()),
+        );
+
+        assert_eq!(
+            action,
+            SessionPickerAction::Resume("current-session".to_string())
+        );
+    }
+
+    #[test]
+    fn cancelling_session_picker_without_current_session_exits() {
+        let action = session_picker_action(session::ResumeOutcome::Cancelled, None);
+
+        assert_eq!(action, SessionPickerAction::Exit(None));
+    }
+
+    #[test]
+    fn selecting_session_picker_entry_resumes_selected_session() {
+        let action = session_picker_action(
+            session::ResumeOutcome::Selected(session::SessionEntry {
+                session_id: "selected-session".into(),
+                cwd: PathBuf::from("/tmp/project"),
+                title: None,
+                updated_at: None,
+            }),
+            Some("current-session".to_string()),
+        );
+
+        assert_eq!(
+            action,
+            SessionPickerAction::Resume("selected-session".to_string())
+        );
     }
 
     #[test]
