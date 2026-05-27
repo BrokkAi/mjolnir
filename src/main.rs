@@ -563,6 +563,19 @@ async fn run_app(
             UiExitReason::NewSession => {
                 continue;
             }
+            UiExitReason::LoadSession => {
+                let sessions =
+                    session::list_sessions(&agent, cwd.clone(), agent_stderr.as_deref()).await?;
+
+                match session::run_session_picker(terminal, sessions).await? {
+                    session::ResumeOutcome::Cancelled => return Ok(session_id),
+                    session::ResumeOutcome::Selected(entry) => {
+                        initial_resume = Some(entry.session_id);
+                        initial_agent = Some(agent);
+                        continue;
+                    }
+                }
+            }
         }
     }
 }

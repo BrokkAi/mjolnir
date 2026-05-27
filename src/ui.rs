@@ -442,6 +442,9 @@ fn handle_crossterm(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiComma
         (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
             copy_last_agent_message(state);
         }
+        (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
+            state.exit_reason = Some(UiExitReason::LoadSession);
+        }
         (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
             move_input_cursor_to_line_start(state);
         }
@@ -949,6 +952,11 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     // to the agent.
     if trimmed == "/new" {
         state.exit_reason = Some(UiExitReason::NewSession);
+        return;
+    }
+
+    if trimmed == "/load" {
+        state.exit_reason = Some(UiExitReason::LoadSession);
         return;
     }
 
@@ -2113,7 +2121,8 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     } else if state.is_streaming() {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
-        " prompt (Enter to send | Shift/Alt+Enter for newline | Ctrl-C to quit) ".to_string()
+        " prompt (Ctrl-O load session | Enter to send | Shift/Alt+Enter for newline | Ctrl-C to quit) "
+            .to_string()
     };
     let style = if state.runtime_closed || state.is_streaming() {
         Style::default().fg(Color::DarkGray)
@@ -2361,6 +2370,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
             "General",
             Style::default().add_modifier(Modifier::BOLD),
         )]),
+        Line::from("  Ctrl-O          load session"),
         Line::from("  Enter           send prompt / accept selected item"),
         Line::from("  Shift/Alt+Enter  insert a newline in the prompt"),
         Line::from("  Left/Right       move the prompt cursor"),
@@ -2398,7 +2408,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
         )]),
         Line::from("  F1..F9 / Ctrl-1..9 / Up/Down  edit or move inside choices"),
         Line::from(""),
-        Line::from("Built-in command: /new starts a new session"),
+        Line::from("Built-in commands: /new starts a session; /load opens session picker"),
     ];
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -2746,6 +2756,20 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
 
         assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
+        // Must not forward the command to the agent.
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn slash_load_triggers_load_session_exit_reason() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "/load".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert_eq!(state.exit_reason, Some(UiExitReason::LoadSession));
         // Must not forward the command to the agent.
         assert!(cmd_rx.try_recv().is_err());
     }
@@ -3310,7 +3334,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_o_no_longer_opens_config_picker() {
+    fn ctrl_o_triggers_load_session_exit_reason() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![SessionConfigOption::select(
@@ -3322,7 +3346,7 @@ mod tests {
                 SessionConfigSelectOption::new("model-2", "Model 2"),
             ],
         )];
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
 
         handle_crossterm(
             &mut state,
@@ -3331,6 +3355,8 @@ mod tests {
         );
 
         assert!(state.config_picker.is_none());
+        assert_eq!(state.exit_reason, Some(UiExitReason::LoadSession));
+        assert!(cmd_rx.try_recv().is_err());
     }
 
     #[test]

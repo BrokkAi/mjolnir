@@ -19,13 +19,21 @@ use crate::clipboard::ClipboardLease;
 use crate::event::{PermissionDecision, PermissionPrompt, UiEvent, content_block_text};
 
 const BUILTIN_NEW_COMMAND: &str = "new";
+const BUILTIN_LOAD_COMMAND: &str = "load";
 
 fn builtin_new_command() -> AvailableCommand {
     AvailableCommand::new(BUILTIN_NEW_COMMAND, "start a new session")
 }
 
+fn builtin_load_command() -> AvailableCommand {
+    AvailableCommand::new(BUILTIN_LOAD_COMMAND, "load a previous session")
+}
+
 fn install_builtin_commands(commands: &mut Vec<AvailableCommand>) {
-    commands.retain(|command| command.name != BUILTIN_NEW_COMMAND);
+    commands.retain(|command| {
+        command.name != BUILTIN_NEW_COMMAND && command.name != BUILTIN_LOAD_COMMAND
+    });
+    commands.insert(0, builtin_load_command());
     commands.insert(0, builtin_new_command());
 }
 
@@ -35,6 +43,7 @@ fn install_builtin_commands(commands: &mut Vec<AvailableCommand>) {
 pub enum UiExitReason {
     Quit,
     NewSession,
+    LoadSession,
 }
 
 /// One entry in the scrolling transcript.
@@ -2053,9 +2062,9 @@ mod tests {
     }
 
     #[test]
-    fn autocomplete_advertises_builtin_new_by_default() {
+    fn autocomplete_advertises_builtin_commands_by_default() {
         let mut s = AppState::new();
-        s.input = "/n".to_string();
+        s.input = "/".to_string();
         s.update_autocomplete();
 
         assert!(s.autocomplete.visible);
@@ -2065,16 +2074,17 @@ mod tests {
             .iter()
             .map(|&i| s.available_commands[i].name.as_str())
             .collect();
-        assert_eq!(names, vec!["new"]);
+        assert_eq!(names, vec!["new", "load"]);
     }
 
     #[test]
-    fn available_command_updates_keep_builtin_new_first() {
+    fn available_command_updates_keep_builtin_commands_first() {
         let mut s = AppState::new();
         s.apply_event(UiEvent::SessionUpdate(
             SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
                 cmd("review_pr"),
                 AvailableCommand::new("new", "agent-provided command"),
+                AvailableCommand::new("load", "agent-provided command"),
             ])),
         ));
 
@@ -2083,8 +2093,12 @@ mod tests {
             .iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "review_pr"]);
+        assert_eq!(names, vec!["new", "load", "review_pr"]);
         assert_eq!(s.available_commands[0].description, "start a new session");
+        assert_eq!(
+            s.available_commands[1].description,
+            "load a previous session"
+        );
     }
 
     #[test]
