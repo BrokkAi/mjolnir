@@ -37,7 +37,7 @@ use tokio::time::MissedTickBehavior;
 use crate::app::{
     AppState, ConfigValueChoice, ConnectionState, Entry, PastedAttachment, PendingPermission,
     StatusKind, StatusMessage, ToolCallOutput, UiExitReason, config_option_choices,
-    config_option_current_value_label, permission_kind_label, stop_reason_label,
+    config_option_current_value_label, permission_kind_label,
 };
 use crate::clipboard::copy_to_clipboard;
 use crate::config;
@@ -1212,7 +1212,6 @@ fn draw(
             Constraint::Length(1),
             Constraint::Length(input_height),
             Constraint::Length(if has_config_options { 1 } else { 0 }),
-            Constraint::Length(1),
         ])
         .split(f.area());
 
@@ -1220,7 +1219,6 @@ fn draw(
     draw_header(f, chunks[1], state);
     draw_input(f, chunks[2], state);
     draw_config_shortcuts_row(f, chunks[3], state);
-    draw_status(f, chunks[4], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -1305,9 +1303,31 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
             ));
         }
     }
+    if let Some((text, style)) = header_status_line(state) {
+        spans.push(Span::raw("   "));
+        spans.push(Span::styled(text, style));
+    }
 
     let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, inner);
+}
+
+fn header_status_line(state: &AppState) -> Option<(String, Style)> {
+    let status = state.status_line.as_ref()?;
+    let mut text = status.text.clone();
+    let style = match status.kind {
+        StatusKind::Info => Style::default().fg(Color::DarkGray),
+        StatusKind::Warning => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        StatusKind::Fatal => {
+            if state.runtime_closed {
+                text.push_str(" | press Ctrl-C to quit");
+            }
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        }
+    };
+    Some((text, style))
 }
 
 pub(crate) fn connection_state_label(state: &AppState) -> String {
@@ -2239,41 +2259,6 @@ fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppStat
 
     let paragraph = Paragraph::new(chips.join(" ")).style(Style::default().fg(Color::Cyan));
     f.render_widget(paragraph, area);
-}
-
-fn draw_status(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let (msg, style) = if let Some(status) = state.status_line.as_ref() {
-        let mut text = status.text.clone();
-        let style = match status.kind {
-            StatusKind::Info => Style::default().fg(Color::DarkGray),
-            StatusKind::Warning => Style::default()
-                .bg(Color::Yellow)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-            StatusKind::Fatal => {
-                if state.runtime_closed {
-                    text.push_str(" | press Ctrl-C to quit");
-                }
-                Style::default()
-                    .bg(Color::Red)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            }
-        };
-        (text, style)
-    } else {
-        if let Some(reason) = state.transcript.iter().rev().find_map(|e| match e {
-            Entry::System(s) if s.starts_with("turn done:") => Some(s.clone()),
-            _ => None,
-        }) {
-            (reason, Style::default().fg(Color::DarkGray))
-        } else {
-            ("ready".to_string(), Style::default().fg(Color::DarkGray))
-        }
-    };
-    let _ = stop_reason_label; // referenced from app::stop_reason_label users
-    let p = Paragraph::new(msg).style(style);
-    f.render_widget(p, area);
 }
 
 fn draw_permission_modal(

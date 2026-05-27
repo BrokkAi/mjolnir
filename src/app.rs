@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use agent_client_protocol::schema::{
     AvailableCommand, Diff, Plan, PlanEntry, SessionConfigId, SessionConfigKind,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
-    SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate, StopReason, ToolCall,
-    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, Usage, UsageUpdate,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate, ToolCall, ToolCallContent,
+    ToolCallStatus, ToolCallUpdate, ToolKind, Usage, UsageUpdate,
 };
 
 use crate::clipboard::ClipboardLease;
@@ -1231,18 +1231,6 @@ pub fn permission_kind_label(
     }
 }
 
-/// Pretty-print a `StopReason` for the status bar.
-pub fn stop_reason_label(reason: StopReason) -> &'static str {
-    match reason {
-        StopReason::EndTurn => "end_turn",
-        StopReason::MaxTokens => "max_tokens",
-        StopReason::MaxTurnRequests => "max_turn_requests",
-        StopReason::Refusal => "refusal",
-        StopReason::Cancelled => "cancelled",
-        _ => "other",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1250,7 +1238,8 @@ mod tests {
         AudioContent, AvailableCommand, ConfigOptionUpdate, Content, ContentBlock, ContentChunk,
         Cost, Diff, EmbeddedResource, EmbeddedResourceResource, ImageContent, PermissionOption,
         PermissionOptionKind, ResourceLink, SessionConfigOption, SessionConfigOptionCategory,
-        SessionConfigSelectOption, Terminal, TextContent, TextResourceContents, Usage, UsageUpdate,
+        SessionConfigSelectOption, StopReason, Terminal, TextContent, TextResourceContents, Usage,
+        UsageUpdate,
     };
 
     fn text_chunk(s: &str) -> ContentChunk {
