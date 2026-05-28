@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -353,8 +353,10 @@ dependencies = [
  "libc",
  "ratatui",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "shell-words",
  "tar",
  "tempfile",

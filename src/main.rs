@@ -14,6 +14,7 @@ mod headless;
 mod install;
 mod picker;
 mod registry;
+mod self_update;
 mod session;
 mod ui;
 mod worktree;
@@ -92,6 +93,10 @@ struct Cli {
     /// Unix, NUL on Windows) so it doesn't scribble over the TUI.
     #[arg(long, env = "BROKK_TUI_AGENT_STDERR")]
     agent_stderr: Option<PathBuf>,
+
+    /// Skip the startup check for a newer mj release.
+    #[arg(long, global = true, env = "MJOLNIR_NO_UPDATE_CHECK")]
+    no_update_check: bool,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -188,11 +193,24 @@ fn ui_mode(fullscreen_tui: bool) -> UiMode {
     }
 }
 
+fn should_run_startup_update_check(cli: &Cli) -> bool {
+    if cli.no_update_check || cli.print.is_some() {
+        return false;
+    }
+    !matches!(&cli.command, Some(Commands::Resume(args)) if args.list)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.log_file.as_deref())?;
     let fullscreen_tui = cli.fullscreen_tui;
+
+    if should_run_startup_update_check(&cli)
+        && let Err(e) = self_update::check_prompt_and_restart_if_accepted().await
+    {
+        tracing::warn!("startup update check failed: {e:#}");
+    }
 
     // Dispatch to subcommand if provided.
     if let Some(Commands::Resume(mut args)) = cli.command {
@@ -844,6 +862,24 @@ mod tests {
         let cli = Cli::try_parse_from(["mj", "--fullscreen-tui", "resume", "sess-123"])
             .expect("parse top-level resume");
         assert!(cli.fullscreen_tui);
+    }
+
+    #[test]
+    fn startup_update_check_runs_only_for_interactive_modes() {
+        let cli = Cli::try_parse_from(["mj"]).expect("parse");
+        assert!(should_run_startup_update_check(&cli));
+
+        let cli = Cli::try_parse_from(["mj", "--no-update-check"]).expect("parse");
+        assert!(!should_run_startup_update_check(&cli));
+
+        let cli = Cli::try_parse_from(["mj", "--print", "hi"]).expect("parse");
+        assert!(!should_run_startup_update_check(&cli));
+
+        let cli = Cli::try_parse_from(["mj", "resume", "--list"]).expect("parse");
+        assert!(!should_run_startup_update_check(&cli));
+
+        let cli = Cli::try_parse_from(["mj", "resume", "sess-123"]).expect("parse");
+        assert!(should_run_startup_update_check(&cli));
     }
 
     #[test]
