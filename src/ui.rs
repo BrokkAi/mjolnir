@@ -5,6 +5,7 @@
 //! into `AppState`, redraws on every tick, and emits `UiCommand`s back
 //! to the runtime when the user submits prompts or cancels.
 
+use std::error::Error;
 use std::io::{self, Stdout, Write};
 use std::ops::Range;
 use std::path::Path;
@@ -1575,6 +1576,21 @@ pub fn restore_inline_chat_terminal(
 }
 
 fn is_cursor_position_timeout_io(error: &io::Error) -> bool {
+    is_cursor_position_timeout_error(error)
+}
+
+fn is_cursor_position_timeout_error(error: &(dyn Error + 'static)) -> bool {
+    let mut cause = Some(error);
+    while let Some(current) = cause {
+        if let Some(io_error) = current.downcast_ref::<io::Error>()
+            && io_error.kind() == io::ErrorKind::Other
+            && io_error.to_string() == CURSOR_POSITION_TIMEOUT_MESSAGE
+        {
+            return true;
+        }
+        cause = current.source();
+    }
+
     error.to_string().contains(CURSOR_POSITION_TIMEOUT_MESSAGE)
 }
 
@@ -3755,10 +3771,32 @@ mod tests {
         assert!(fullscreen.contains(&TerminalFeature::MouseCapture));
     }
 
+    #[derive(Debug)]
+    struct WrappedError {
+        source: std::io::Error,
+    }
+
+    impl std::fmt::Display for WrappedError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "wrapped terminal error")
+        }
+    }
+
+    impl std::error::Error for WrappedError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.source)
+        }
+    }
+
     #[test]
-    fn cursor_position_timeout_detection_matches_crossterm_message() {
+    fn cursor_position_timeout_detection_matches_crossterm_error_shape() {
         let err = std::io::Error::other(CURSOR_POSITION_TIMEOUT_MESSAGE);
         assert!(is_cursor_position_timeout_io(&err));
+
+        let wrapped = WrappedError {
+            source: std::io::Error::other(CURSOR_POSITION_TIMEOUT_MESSAGE),
+        };
+        assert!(is_cursor_position_timeout_error(&wrapped));
 
         let other = std::io::Error::other("terminal unavailable");
         assert!(!is_cursor_position_timeout_io(&other));
