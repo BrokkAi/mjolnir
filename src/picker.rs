@@ -161,7 +161,7 @@ impl<'a> PickerState<'a> {
 
     fn item_search_key(&self, item: &Item) -> String {
         match item {
-            Item::Anvil => "anvil".to_string(),
+            Item::Anvil => "anvil brokk acp uvx".to_string(),
             Item::Custom => "custom command".to_string(),
             Item::Agent(idx) => {
                 let a = &self.registry.agents[*idx];
@@ -180,7 +180,7 @@ impl<'a> PickerState<'a> {
 
     fn item_hint(&self, item: &Item) -> String {
         match item {
-            Item::Anvil => "default mj agent".to_string(),
+            Item::Anvil => "uvx brokk acp".to_string(),
             Item::Custom => "type your own command".to_string(),
             Item::Agent(idx) => {
                 let a = &self.registry.agents[*idx];
@@ -523,8 +523,8 @@ async fn start_item_action(
         Item::Anvil => {
             let outcome = PickerOutcome {
                 source_id: "anvil".to_string(),
-                program: PathBuf::from("anvil"),
-                args: Vec::new(),
+                program: PathBuf::from("uvx"),
+                args: vec!["brokk".to_string(), "acp".to_string()],
                 env: HashMap::new(),
             };
             match action {
@@ -992,6 +992,23 @@ mod tests {
                             }
                         }
                     }
+                },
+                {
+                    "id": "uvx-binary",
+                    "name": "UvxBinary",
+                    "version": "2.0.0",
+                    "description": "uvx and binary distributions",
+                    "distribution": {
+                        "uvx": {
+                            "package": "uvx-binary==2.0.0"
+                        },
+                        "binary": {
+                            "darwin-aarch64": {
+                                "archive": "https://example.com/uvx-bin.tar.gz",
+                                "cmd": "./uvx-bin"
+                            }
+                        }
+                    }
                 }
             ]
         }"#;
@@ -1007,10 +1024,10 @@ mod tests {
             PathBuf::from("/tmp"),
             PickerPreferences::default(),
         );
-        // 1 anvil + 2 registry + 1 custom = 4 items
-        assert_eq!(state.items.len(), 4);
+        // 1 anvil + 3 registry + 1 custom = 5 items
+        assert_eq!(state.items.len(), 5);
         assert!(matches!(state.items[0], Item::Anvil));
-        assert!(matches!(state.items.last(), Some(Item::Custom)));
+        assert!(state.items.iter().any(|item| matches!(item, Item::Custom)));
     }
 
     #[test]
@@ -1040,7 +1057,7 @@ mod tests {
             PathBuf::from("/tmp"),
             PickerPreferences::default(),
         );
-        state.filter = "binary".to_string();
+        state.filter = "binary-only".to_string();
         state.recompute_filter();
         let visible: Vec<String> = state
             .filtered
@@ -1060,8 +1077,8 @@ mod tests {
             PickerPreferences {
                 default_agent: Some(PickerOutcome {
                     source_id: "anvil".to_string(),
-                    program: PathBuf::from("anvil"),
-                    args: Vec::new(),
+                    program: PathBuf::from("uvx"),
+                    args: vec!["brokk".to_string(), "acp".to_string()],
                     env: HashMap::new(),
                 }),
                 favorite_source_ids: Vec::new(),
@@ -1069,6 +1086,65 @@ mod tests {
         );
         assert!(state.item_is_default(&Item::Anvil));
         assert!(!state.item_is_default(&Item::Custom));
+    }
+
+    #[test]
+    fn picker_anvil_entry_uses_brokk_uvx_command() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+
+        assert_eq!(state.item_hint(&Item::Anvil), "uvx brokk acp");
+    }
+
+    #[tokio::test]
+    async fn selecting_anvil_returns_brokk_uvx_command() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+
+        let outcome = start_item_action(&mut state, &Item::Anvil, ItemAction::Select)
+            .await
+            .expect("select")
+            .expect("outcome");
+
+        assert_eq!(outcome.source_id, "anvil");
+        assert_eq!(outcome.program, PathBuf::from("uvx"));
+        assert_eq!(outcome.args, vec!["brokk", "acp"]);
+    }
+
+    #[tokio::test]
+    async fn selecting_uvx_agent_prefers_uvx_over_binary() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        let item = state
+            .items
+            .iter()
+            .find(|item| state.item_source_id(item) == "uvx-binary")
+            .expect("uvx-binary")
+            .clone();
+
+        let outcome = start_item_action(&mut state, &item, ItemAction::Select)
+            .await
+            .expect("select")
+            .expect("outcome");
+
+        assert_eq!(outcome.source_id, "uvx-binary");
+        assert_eq!(outcome.program, PathBuf::from("uvx"));
+        assert_eq!(outcome.args, vec!["uvx-binary==2.0.0"]);
     }
 
     #[test]
@@ -1147,7 +1223,7 @@ mod tests {
             PathBuf::from("/tmp"),
             PickerPreferences::default(),
         );
-        // Find Claude (npx-only) and BinaryOnly entries.
+        // Find Claude (npx-only), UvxBinary, and BinaryOnly entries.
         let labels_and_hints: Vec<(String, String)> = state
             .items
             .iter()
@@ -1163,6 +1239,11 @@ mod tests {
             .find(|(l, _)| l == "BinaryOnly")
             .expect("binonly");
         assert!(bin.1.starts_with("binary"), "hint: {}", bin.1);
+        let uvx = labels_and_hints
+            .iter()
+            .find(|(l, _)| l == "UvxBinary")
+            .expect("uvx");
+        assert!(uvx.1.starts_with("uvx"), "hint: {}", uvx.1);
     }
 
     #[test]

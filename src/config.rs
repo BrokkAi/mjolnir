@@ -40,7 +40,10 @@ impl Config {
         }
         let s =
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        toml::from_str(&s).with_context(|| format!("parse {}", path.display()))
+        let mut cfg: Self =
+            toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?;
+        cfg.normalize();
+        Ok(cfg)
     }
 
     /// Atomic-ish save: write to a tmp sibling then rename. Creates the
@@ -56,6 +59,15 @@ impl Config {
         std::fs::rename(&tmp, path)
             .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
         Ok(())
+    }
+
+    fn normalize(&mut self) {
+        if let Some(agent) = self.agent.as_mut()
+            && agent.source_id == "anvil"
+        {
+            agent.program = PathBuf::from("uvx");
+            agent.args = vec!["brokk".to_string(), "acp".to_string()];
+        }
     }
 }
 
@@ -218,14 +230,35 @@ mod tests {
         let cfg = Config {
             agent: Some(SelectedAgent {
                 source_id: "anvil".to_string(),
-                program: PathBuf::from("anvil"),
-                args: vec![],
+                program: PathBuf::from("uvx"),
+                args: vec!["brokk".to_string(), "acp".to_string()],
                 env: HashMap::new(),
             }),
             favorite_agents: Vec::new(),
         };
         cfg.save(&path).expect("save");
         assert!(path.exists());
+    }
+
+    #[test]
+    fn load_normalizes_legacy_anvil_agent_to_uvx_brokk_acp() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+source_id = "anvil"
+program = "anvil"
+"#,
+        )
+        .expect("write");
+
+        let cfg = Config::load(&path).expect("load");
+        let agent = cfg.agent.expect("agent");
+        assert_eq!(agent.source_id, "anvil");
+        assert_eq!(agent.program, PathBuf::from("uvx"));
+        assert_eq!(agent.args, vec!["brokk", "acp"]);
     }
 
     #[test]

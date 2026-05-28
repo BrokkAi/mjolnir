@@ -18,9 +18,9 @@ It is native and small-footprint: no Electron shell, no browser runtime, no
 agent-specific frontend.
 
 Each session chooses its own harness from the official
-[ACP registry](https://github.com/agentclientprotocol/registry), the bundled
-`anvil` default, or a custom command. The agent changes. The working rhythm does
-not.
+[ACP registry](https://github.com/agentclientprotocol/registry), the `anvil`
+default (`uvx brokk acp`), or a custom command. The agent changes. The working
+rhythm does not.
 
 ![Mjolnir inline chat showing streaming agent output and tool activity](docs/readme-images/default-ui.png)
 
@@ -44,29 +44,29 @@ mj
 ```
 
 Network access is needed the first time `mj` fetches the ACP registry unless you
-only use `anvil`, a custom command, or an already-cached registry copy. Registry
-agents distributed through `npx` or `uvx` require the matching runtime on
-`PATH`.
+only use a custom command or an already-cached registry copy. The default
+`anvil` entry runs `uvx brokk acp`, and registry agents distributed through
+`npx` or `uvx` require the matching runtime on `PATH`.
 
 ## Quick Start
 
 Every new interactive session opens the agent picker. Choose an agent from the
-ACP registry, the bundled `anvil` default, or a custom ACP command.
+ACP registry, the `anvil` default, or a custom ACP command.
 
 ```
  mj | choose an agent
 +--- agents -------------------------------------------------+
-| > anvil [current]    -- default mj agent                   |
+| > anvil [current]    -- uvx brokk acp                      |
 |   Claude              -- npx v0.36.1                       |
-|   Codex               -- binary v0.14.0                    |
+|   Codex               -- npx v0.14.0                       |
 |   ...                                                      |
 |   Custom command...   -- type your own command             |
 +------------------------------------------------------------+
 ```
 
-Registry binary distributions are downloaded to
-`~/.cache/mj/agents/<id>/<version>/` and reused. Picker preferences are stored in
-`~/.config/mj/config.toml`.
+Registry agents selected through a binary-only distribution are downloaded to
+`~/.cache/mj/agents/<id>/<version>/` and reused. Picker preferences are stored
+in `~/.config/mj/config.toml`.
 
 Use `/new` inside the TUI to end the current chat and pick a harness again. Use
 `/load` to open the session picker for the current agent.

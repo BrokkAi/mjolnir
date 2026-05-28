@@ -94,20 +94,20 @@ impl DistributionKind {
 
 impl Agent {
     /// Return the distribution kinds available for the current platform,
-    /// ordered by preference: native binary first (no external runtime),
-    /// then npx, then uvx. Empty when none of them works here.
+    /// ordered by preference: package-manager launchers first, then native
+    /// binaries. Empty when none of them works here.
     pub fn supported_kinds(&self, platform: &str) -> Vec<DistributionKind> {
         let mut out = Vec::new();
-        if let Some(map) = &self.distribution.binary
-            && map.contains_key(platform)
-        {
-            out.push(DistributionKind::Binary);
-        }
         if self.distribution.npx.is_some() {
             out.push(DistributionKind::Npx);
         }
         if self.distribution.uvx.is_some() {
             out.push(DistributionKind::Uvx);
+        }
+        if let Some(map) = &self.distribution.binary
+            && map.contains_key(platform)
+        {
+            out.push(DistributionKind::Binary);
         }
         out
     }
@@ -325,14 +325,42 @@ mod tests {
     }
 
     #[test]
-    fn supported_kinds_prefers_binary_when_platform_matches() {
+    fn supported_kinds_prefers_npx_when_platform_binary_also_matches() {
         let reg = Registry::from_json(FIXTURE).expect("parse");
         let codex = reg.get("codex-acp").expect("codex");
         let kinds = codex.supported_kinds("darwin-aarch64");
-        assert_eq!(kinds, vec![DistributionKind::Binary, DistributionKind::Npx]);
+        assert_eq!(kinds, vec![DistributionKind::Npx, DistributionKind::Binary]);
         assert_eq!(
             codex.preferred_kind("darwin-aarch64"),
-            Some(DistributionKind::Binary)
+            Some(DistributionKind::Npx)
+        );
+    }
+
+    #[test]
+    fn supported_kinds_prefers_uvx_when_platform_binary_also_matches() {
+        let json = r#"{
+            "agents": [{
+                "id": "uvx-binary",
+                "name": "uvx binary",
+                "version": "1.0.0",
+                "distribution": {
+                    "binary": {
+                        "darwin-aarch64": {
+                            "archive": "https://example.com/bin.tar.gz",
+                            "cmd": "./bin"
+                        }
+                    },
+                    "uvx": { "package": "uvx-binary==1.0.0" }
+                }
+            }]
+        }"#;
+        let reg = Registry::from_json(json).expect("parse");
+        let agent = reg.get("uvx-binary").expect("uvx-binary");
+        let kinds = agent.supported_kinds("darwin-aarch64");
+        assert_eq!(kinds, vec![DistributionKind::Uvx, DistributionKind::Binary]);
+        assert_eq!(
+            agent.preferred_kind("darwin-aarch64"),
+            Some(DistributionKind::Uvx)
         );
     }
 
