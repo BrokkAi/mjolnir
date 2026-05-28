@@ -2680,7 +2680,11 @@ fn input_wrapped_layout(
 
 fn input_wrap_char_width(ch: char, width: usize) -> usize {
     let ch_width = ch.width().unwrap_or(0);
-    if ch_width > width { 0 } else { ch_width }
+    if ch_width > width {
+        width.max(1)
+    } else {
+        ch_width
+    }
 }
 
 fn input_push_wrapped_row(rows: &mut Vec<String>, row: &mut String, row_width: &mut usize) {
@@ -2710,10 +2714,6 @@ fn input_append_wrapped_char(
         *cursor_row = rows.len();
         *cursor_col = *row_width;
         *cursor_set = true;
-    }
-
-    if ch_width == 0 && ch.width().unwrap_or(0) > width {
-        return;
     }
 
     row.push(ch);
@@ -5494,6 +5494,14 @@ mod tests {
         let area = Rect::new(0, 0, 4, 3);
         let (x, y) = input_cursor_position(area, "ab界c", 4, 0, 0);
         assert_eq!((x, y), (1, 1));
+    }
+
+    #[test]
+    fn input_wrapping_keeps_glyph_wider_than_row() {
+        let layout = input_wrapped_layout("界", 1, 1);
+        assert_eq!(layout.rows, vec!["界".to_string()]);
+        assert_eq!(layout.cursor_row, 0);
+        assert_eq!(layout.cursor_col, 1);
     }
 
     #[test]
