@@ -5,23 +5,20 @@
 //! into `AppState`, redraws on every tick, and emits `UiCommand`s back
 //! to the runtime when the user submits prompts or cancels.
 
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::{AvailableCommandInput, ToolCallStatus};
 use anyhow::{Context, Result};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    supports_keyboard_enhancement,
 };
 use futures::StreamExt;
 use ratatui::backend::{Backend, ClearType, CrosstermBackend};
@@ -43,7 +40,6 @@ use crate::clipboard::copy_to_clipboard;
 use crate::config;
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
 
-static KEYBOARD_ENHANCEMENT_ENABLED: AtomicBool = AtomicBool::new(false);
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
 const TRANSCRIPT_SCROLL_WHEEL_STEP: usize = 3;
 const PROMPT_SIDE_PADDING: u16 = 1;
@@ -63,23 +59,18 @@ enum TerminalRequest {
     ToggleTextSelectionMode,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalFeature {
     RawMode,
-    KeyboardEnhancement,
     AlternateScreen,
     MouseCapture,
     BracketedPaste,
 }
 
-fn terminal_setup_features(
-    mode: UiMode,
-    keyboard_enhancement_supported: bool,
-) -> Vec<TerminalFeature> {
+#[cfg(test)]
+fn terminal_setup_features(mode: UiMode) -> Vec<TerminalFeature> {
     let mut features = vec![TerminalFeature::RawMode];
-    if keyboard_enhancement_supported {
-        features.push(TerminalFeature::KeyboardEnhancement);
-    }
     match mode {
         UiMode::InlineChat => {
             features.push(TerminalFeature::BracketedPaste);
@@ -392,21 +383,37 @@ fn sync_inline_terminal_height(
     }
 
     let area = terminal.get_frame().area();
-    terminal
+    if let Err(e) = terminal
         .backend_mut()
-        .set_cursor_position(area.as_position())?;
-    terminal
-        .backend_mut()
-        .clear_region(ClearType::AfterCursor)?;
+        .set_cursor_position(area.as_position())
+    {
+        tracing::warn!("skip inline viewport resize: set cursor position failed: {e}");
+        return Ok(());
+    }
+    if let Err(e) = terminal.backend_mut().clear_region(ClearType::AfterCursor) {
+        tracing::warn!("skip inline viewport resize: clear region failed: {e}");
+        return Ok(());
+    }
+    if let Err(e) = Write::flush(terminal.backend_mut()) {
+        tracing::warn!("skip inline viewport resize: flush failed: {e}");
+        return Ok(());
+    }
 
     let backend = CrosstermBackend::new(io::stdout());
-    let next = Terminal::with_options(
+    let next = match Terminal::with_options(
         backend,
         TerminalOptions {
             viewport: Viewport::Inline(desired),
         },
     )
-    .context("resize inline terminal")?;
+    .context("resize inline terminal")
+    {
+        Ok(next) => next,
+        Err(e) => {
+            tracing::warn!("skip inline viewport resize: {e:#}");
+            return Ok(());
+        }
+    };
     *terminal = next;
     *current_height = desired;
     Ok(())
@@ -1459,23 +1466,6 @@ pub fn setup_fullscreen_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>>
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
 
-    let keyboard_supported = matches!(supports_keyboard_enhancement(), Ok(true));
-    if terminal_setup_features(UiMode::FullscreenTui, keyboard_supported)
-        .contains(&TerminalFeature::KeyboardEnhancement)
-    {
-        execute!(
-            stdout,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-            )
-        )
-        .context("enable keyboard enhancement")?;
-        KEYBOARD_ENHANCEMENT_ENABLED.store(true, Ordering::SeqCst);
-    }
-
     execute!(
         stdout,
         EnterAlternateScreen,
@@ -1491,9 +1481,6 @@ pub fn setup_fullscreen_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>>
 pub fn restore_fullscreen_terminal(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> Result<()> {
-    if KEYBOARD_ENHANCEMENT_ENABLED.swap(false, Ordering::SeqCst) {
-        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
-    }
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -1508,44 +1495,55 @@ pub fn restore_fullscreen_terminal(
 pub fn setup_inline_chat_terminal(
     initial_height: u16,
 ) -> Result<Terminal<CrosstermBackend<Stdout>>> {
-    enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
+    stdout.flush().context("flush stdout before inline setup")?;
+    let mut stderr = io::stderr();
+    let _ = stderr.flush();
 
-    let keyboard_supported = matches!(supports_keyboard_enhancement(), Ok(true));
-    if terminal_setup_features(UiMode::InlineChat, keyboard_supported)
-        .contains(&TerminalFeature::KeyboardEnhancement)
-    {
-        execute!(
-            stdout,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-            )
-        )
-        .context("enable keyboard enhancement")?;
-        KEYBOARD_ENHANCEMENT_ENABLED.store(true, Ordering::SeqCst);
+    enable_raw_mode().context("enable raw mode")?;
+
+    let mut last_inline_error = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(75));
+        }
+
+        let mut stdout = io::stdout();
+        if let Err(err) = execute!(stdout, EnableBracketedPaste) {
+            let _ = disable_raw_mode();
+            return Err(err).context("enable bracketed paste");
+        }
+        if let Err(err) = stdout.flush() {
+            let mut stdout = io::stdout();
+            let _ = execute!(stdout, DisableBracketedPaste);
+            let _ = disable_raw_mode();
+            return Err(err).context("ratatui inline terminal");
+        }
+
+        let backend = CrosstermBackend::new(stdout);
+        match Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(initial_height),
+            },
+        ) {
+            Ok(terminal) => return Ok(terminal),
+            Err(err) => {
+                let mut stdout = io::stdout();
+                let _ = execute!(stdout, DisableBracketedPaste);
+                last_inline_error = Some(err);
+            }
+        }
     }
 
-    execute!(stdout, EnableBracketedPaste).context("enable bracketed paste")?;
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(initial_height),
-        },
-    )
-    .context("ratatui inline terminal")?;
-    Ok(terminal)
+    let _ = disable_raw_mode();
+    Err(last_inline_error.expect("inline terminal setup attempted"))
+        .context("ratatui inline terminal")
 }
 
 pub fn restore_inline_chat_terminal(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> Result<()> {
-    if KEYBOARD_ENHANCEMENT_ENABLED.swap(false, Ordering::SeqCst) {
-        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
-    }
     execute!(terminal.backend_mut(), DisableBracketedPaste)?;
     disable_raw_mode()?;
     terminal.show_cursor()?;
@@ -3718,14 +3716,13 @@ mod tests {
 
     #[test]
     fn terminal_setup_features_keep_inline_out_of_alt_screen_and_mouse_capture() {
-        let inline = terminal_setup_features(UiMode::InlineChat, true);
+        let inline = terminal_setup_features(UiMode::InlineChat);
         assert!(inline.contains(&TerminalFeature::RawMode));
-        assert!(inline.contains(&TerminalFeature::KeyboardEnhancement));
         assert!(inline.contains(&TerminalFeature::BracketedPaste));
         assert!(!inline.contains(&TerminalFeature::AlternateScreen));
         assert!(!inline.contains(&TerminalFeature::MouseCapture));
 
-        let fullscreen = terminal_setup_features(UiMode::FullscreenTui, true);
+        let fullscreen = terminal_setup_features(UiMode::FullscreenTui);
         assert!(fullscreen.contains(&TerminalFeature::AlternateScreen));
         assert!(fullscreen.contains(&TerminalFeature::MouseCapture));
     }

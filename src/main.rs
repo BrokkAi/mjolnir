@@ -594,6 +594,7 @@ async fn run_agent_picker_once(cfg: &Config) -> Result<PickerResult> {
     if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
         tracing::warn!("restore terminal (agent picker) failed: {e}");
     }
+    settle_after_fullscreen_picker_restore().await;
     result
 }
 
@@ -605,7 +606,16 @@ async fn run_session_picker_once(
     if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
         tracing::warn!("restore terminal (session picker) failed: {e}");
     }
+    settle_after_fullscreen_picker_restore().await;
     outcome
+}
+
+async fn settle_after_fullscreen_picker_restore() {
+    // Let the terminal finish leaving the alternate screen before the inline
+    // viewport asks for a cursor position. Without this, some terminals answer
+    // the CPR query late enough that crossterm times out and leaks the response
+    // back to the shell prompt.
+    tokio::time::sleep(Duration::from_millis(75)).await;
 }
 
 async fn run_picker_with_registry(
