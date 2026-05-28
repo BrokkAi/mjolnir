@@ -46,6 +46,10 @@ const PROMPT_SIDE_PADDING: u16 = 1;
 pub const INLINE_CHAT_HEIGHT: u16 = 8;
 const INLINE_EXPANDED_MAX_HEIGHT: u16 = 20;
 const INLINE_HELP_HEIGHT: u16 = 18;
+const CURSOR_POSITION_TIMEOUT_MESSAGE: &str =
+    "The cursor position could not be read within a normal duration";
+const INLINE_SETUP_RETRY_DELAY: Duration = Duration::from_millis(75);
+const INLINE_NON_CURSOR_SETUP_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {
@@ -249,9 +253,8 @@ async fn ui_loop(
     if mode == UiMode::InlineChat {
         sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
     }
-    terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll, mode))?;
+    let mut dirty = !draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
     let mut last_draw = Instant::now();
-    let mut dirty = false;
 
     loop {
         tokio::select! {
@@ -303,7 +306,7 @@ async fn ui_loop(
                 flush_transcript_to_scrollback(terminal, &mut transcript_sink, &state)?;
                 sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
             }
-            terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll, mode))?;
+            let _ = draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
             if mode == UiMode::FullscreenTui {
                 reset_text_selection_mode_for_exit(&mut state, |enabled| {
                     set_mouse_capture(terminal, enabled)
@@ -320,8 +323,7 @@ async fn ui_loop(
             if mode == UiMode::InlineChat {
                 sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
             }
-            terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll, mode))?;
-            dirty = false;
+            dirty = !draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
             last_draw = Instant::now();
         }
     }
@@ -331,6 +333,22 @@ async fn ui_loop(
         })?;
     }
     Ok((UiExitReason::Quit, None, state.prompt_history()))
+}
+
+fn draw_terminal_frame(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &mut AppState,
+    transcript_scroll: &mut TranscriptScrollState,
+    mode: UiMode,
+) -> Result<bool> {
+    match terminal.draw(|f| draw(f, state, transcript_scroll, mode)) {
+        Ok(_) => Ok(true),
+        Err(e) if mode == UiMode::InlineChat && is_cursor_position_timeout_io(&e) => {
+            tracing::warn!("skip inline redraw while waiting for cursor position response: {e}");
+            Ok(false)
+        }
+        Err(e) => Err(e).context("draw terminal"),
+    }
 }
 
 fn needs_live_redraw(state: &AppState) -> bool {
@@ -1500,10 +1518,10 @@ pub fn setup_inline_chat_terminal(
     let mut stderr = io::stderr();
     let _ = stderr.flush();
 
-    let mut last_inline_error = None;
-    for attempt in 0..3 {
+    let mut attempt = 0;
+    let final_error = loop {
         if attempt > 0 {
-            std::thread::sleep(Duration::from_millis(75));
+            std::thread::sleep(INLINE_SETUP_RETRY_DELAY);
         }
 
         enable_raw_mode().context("enable raw mode")?;
@@ -1528,16 +1546,23 @@ pub fn setup_inline_chat_terminal(
         ) {
             Ok(terminal) => return Ok(terminal),
             Err(err) => {
+                let cursor_position_timeout = is_cursor_position_timeout_io(&err);
                 let mut stdout = io::stdout();
                 let _ = execute!(stdout, DisableBracketedPaste);
                 let _ = disable_raw_mode();
-                last_inline_error = Some(err);
+                if cursor_position_timeout {
+                    tracing::warn!(
+                        "inline terminal setup is waiting for cursor position response; retrying"
+                    );
+                } else if attempt + 1 >= INLINE_NON_CURSOR_SETUP_ATTEMPTS {
+                    break err;
+                }
             }
         }
-    }
+        attempt += 1;
+    };
 
-    Err(last_inline_error.expect("inline terminal setup attempted"))
-        .context("ratatui inline terminal")
+    Err(final_error).context("ratatui inline terminal")
 }
 
 pub fn restore_inline_chat_terminal(
@@ -1547,6 +1572,10 @@ pub fn restore_inline_chat_terminal(
     disable_raw_mode()?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+fn is_cursor_position_timeout_io(error: &io::Error) -> bool {
+    error.to_string().contains(CURSOR_POSITION_TIMEOUT_MESSAGE)
 }
 
 /// Minimum input box height: three text rows between top and bottom borders.
@@ -3724,6 +3753,15 @@ mod tests {
         let fullscreen = terminal_setup_features(UiMode::FullscreenTui);
         assert!(fullscreen.contains(&TerminalFeature::AlternateScreen));
         assert!(fullscreen.contains(&TerminalFeature::MouseCapture));
+    }
+
+    #[test]
+    fn cursor_position_timeout_detection_matches_crossterm_message() {
+        let err = std::io::Error::other(CURSOR_POSITION_TIMEOUT_MESSAGE);
+        assert!(is_cursor_position_timeout_io(&err));
+
+        let other = std::io::Error::other("terminal unavailable");
+        assert!(!is_cursor_position_timeout_io(&other));
     }
 
     #[test]

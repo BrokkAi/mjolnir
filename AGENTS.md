@@ -37,6 +37,8 @@ Add focused unit tests near the code under test using `#[cfg(test)] mod tests`. 
 
 Permission dialogs must never truncate requested permission content. Long commands, titles, descriptions, and option labels must remain fully readable through wrapping, scrolling, paging, resizing, or an equivalent explicit expansion path. This applies to both inline and fullscreen UI modes.
 
+Do not recover from inline UI failures by falling back to the fullscreen TUI. That is a jarring mode switch and a poor user experience; inline terminal problems should be retried, degraded, or surfaced within inline mode instead.
+
 ## Commit & Pull Request Guidelines
 
 Recent commits use concise, imperative summaries such as `rename crate to mjolnir, binary to mj`; some include PR numbers after merge. Keep commit subjects specific and lowercase where natural. Pull requests should describe the behavior change, list validation commands run, link related issues, and include screenshots or terminal recordings when UI rendering changes.
