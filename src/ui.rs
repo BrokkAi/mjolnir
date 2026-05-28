@@ -1004,36 +1004,12 @@ fn input_cursor_visual_position(
     cursor_char_index: usize,
     inner_w: usize,
 ) -> (usize, usize, usize) {
-    let cursor = cursor_char_index.min(input_char_count(text));
-    let mut consumed = 0usize;
-    let mut visual_row = 0usize;
-    let mut cursor_col = 0usize;
-    let mut total_rows = 0usize;
-
-    for line in text.split('\n') {
-        let line_len = line.chars().count();
-        let line_rows = if inner_w == 0 || line_len == 0 {
-            1
-        } else {
-            line_len.div_ceil(inner_w)
-        };
-
-        if cursor <= consumed + line_len {
-            let within_line = cursor - consumed;
-            if inner_w > 0 {
-                visual_row += within_line.checked_div(inner_w).unwrap_or(0);
-                cursor_col = within_line % inner_w;
-            }
-            total_rows += line_rows;
-            return (visual_row, cursor_col, total_rows);
-        }
-
-        consumed += line_len + 1;
-        visual_row += line_rows;
-        total_rows += line_rows;
-    }
-
-    (total_rows.saturating_sub(1), 0, total_rows.max(1))
+    let layout = input_wrapped_layout(text, cursor_char_index, inner_w);
+    (
+        layout.cursor_row,
+        layout.cursor_col,
+        layout.rows.len().max(1),
+    )
 }
 
 fn move_input_cursor_vertical(state: &mut AppState, delta_rows: isize) {
@@ -2612,19 +2588,146 @@ fn tool_status_color(status: agent_client_protocol::schema::ToolCallStatus) -> C
     }
 }
 
-/// Count how many visual rows a piece of text occupies when rendered
-/// inside a wrapping `Paragraph` at `inner_w` columns. Empty lines
-/// still consume one row.
-fn input_wrapped_row_count(text: &str, inner_w: usize) -> usize {
-    text.split('\n')
-        .map(|line| {
-            if inner_w == 0 {
-                return 1;
+struct InputWrappedLayout {
+    rows: Vec<String>,
+    cursor_row: usize,
+    cursor_col: usize,
+}
+
+/// Split prompt text into the exact visual rows we render in the input
+/// editor and compute the cursor position in those rows. Empty logical
+/// lines still consume one row.
+fn input_wrapped_layout(
+    text: &str,
+    cursor_char_index: usize,
+    inner_w: usize,
+) -> InputWrappedLayout {
+    let width = inner_w.max(1);
+    let cursor = cursor_char_index.min(input_char_count(text));
+    let mut rows = Vec::new();
+    let mut global_char_index = 0usize;
+    let mut cursor_row = 0usize;
+    let mut cursor_col = 0usize;
+    let mut cursor_set = false;
+    let logical_lines: Vec<&str> = text.split('\n').collect();
+
+    for (line_index, logical_line) in logical_lines.iter().enumerate() {
+        let mut row = String::new();
+        let mut row_width = 0usize;
+
+        if cursor == global_char_index && !cursor_set {
+            cursor_row = rows.len();
+            cursor_col = 0;
+            cursor_set = true;
+        }
+
+        let chars: Vec<char> = logical_line.chars().collect();
+        let mut token_start = 0usize;
+
+        while token_start < chars.len() {
+            let token_is_whitespace = chars[token_start].is_whitespace();
+            let mut token_end = token_start;
+            let mut token_width = 0usize;
+
+            while token_end < chars.len() && chars[token_end].is_whitespace() == token_is_whitespace
+            {
+                token_width += input_wrap_char_width(chars[token_end], width);
+                token_end += 1;
             }
-            let cc = line.chars().count();
-            if cc == 0 { 1 } else { cc.div_ceil(inner_w) }
-        })
-        .sum()
+
+            if !token_is_whitespace && row_width > 0 && row_width + token_width > width {
+                input_push_wrapped_row(&mut rows, &mut row, &mut row_width);
+            }
+
+            for ch in &chars[token_start..token_end] {
+                input_append_wrapped_char(
+                    *ch,
+                    width,
+                    cursor,
+                    global_char_index,
+                    &mut rows,
+                    &mut row,
+                    &mut row_width,
+                    &mut cursor_row,
+                    &mut cursor_col,
+                    &mut cursor_set,
+                );
+                global_char_index += 1;
+            }
+
+            token_start = token_end;
+        }
+
+        if cursor == global_char_index && !cursor_set {
+            cursor_row = rows.len();
+            cursor_col = row_width;
+            cursor_set = true;
+        }
+
+        rows.push(row);
+
+        if line_index + 1 < logical_lines.len() {
+            global_char_index += 1;
+        }
+    }
+
+    InputWrappedLayout {
+        rows,
+        cursor_row,
+        cursor_col,
+    }
+}
+
+fn input_wrap_char_width(ch: char, width: usize) -> usize {
+    let ch_width = ch.width().unwrap_or(0);
+    if ch_width > width { 0 } else { ch_width }
+}
+
+fn input_push_wrapped_row(rows: &mut Vec<String>, row: &mut String, row_width: &mut usize) {
+    rows.push(std::mem::take(row));
+    *row_width = 0;
+}
+
+#[expect(clippy::too_many_arguments)]
+fn input_append_wrapped_char(
+    ch: char,
+    width: usize,
+    cursor: usize,
+    char_index: usize,
+    rows: &mut Vec<String>,
+    row: &mut String,
+    row_width: &mut usize,
+    cursor_row: &mut usize,
+    cursor_col: &mut usize,
+    cursor_set: &mut bool,
+) {
+    let ch_width = input_wrap_char_width(ch, width);
+    if ch_width > 0 && *row_width + ch_width > width {
+        input_push_wrapped_row(rows, row, row_width);
+    }
+
+    if cursor == char_index && !*cursor_set {
+        *cursor_row = rows.len();
+        *cursor_col = *row_width;
+        *cursor_set = true;
+    }
+
+    if ch_width == 0 && ch.width().unwrap_or(0) > width {
+        return;
+    }
+
+    row.push(ch);
+    *row_width += ch_width;
+}
+
+fn input_wrapped_lines(text: &str, inner_w: usize) -> Vec<String> {
+    input_wrapped_layout(text, 0, inner_w).rows
+}
+
+/// Count how many visual rows a piece of prompt text occupies at
+/// `inner_w` columns. Must stay in sync with `input_wrapped_lines`.
+fn input_wrapped_row_count(text: &str, inner_w: usize) -> usize {
+    input_wrapped_lines(text, inner_w).len()
 }
 
 /// Compute the cursor position for a multi-line input buffer. Accounts
@@ -2704,11 +2807,6 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         )));
     }
 
-    // Add input text lines.
-    for line in state.input.split('\n') {
-        lines.push(Line::from(line.to_string()));
-    }
-
     f.render_widget(block, area);
 
     let inner = Rect::new(
@@ -2743,6 +2841,13 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         content_width,
         visible_rows as u16,
     );
+
+    // Add input text rows after the content width is known so cursor
+    // placement and rendering use the same wrap boundaries.
+    for line in input_wrapped_lines(&state.input, content_width as usize) {
+        lines.push(Line::from(line));
+    }
+
     let scroll = if total_visual_rows > visible_rows {
         let cursor_row =
             input_cursor_visual_position(&state.input, state.input_cursor, content_width as usize)
@@ -2754,10 +2859,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         0
     };
 
-    let paragraph = Paragraph::new(lines)
-        .style(style)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+    let paragraph = Paragraph::new(lines).style(style).scroll((scroll, 0));
     f.render_widget(paragraph, content_area);
 
     // Draw the ">" prompt prefix in the gutter to the left of the input text.
@@ -5385,6 +5487,40 @@ mod tests {
         // Single line "hello" at text row 0, but 2 chip rows above.
         let (x, y) = input_cursor_position(area, "hello", 5, 2, 0);
         assert_eq!((x, y), (5, 2));
+    }
+
+    #[test]
+    fn input_cursor_uses_display_width_for_wrapped_prompt() {
+        let area = Rect::new(0, 0, 4, 3);
+        let (x, y) = input_cursor_position(area, "ab界c", 4, 0, 0);
+        assert_eq!((x, y), (1, 1));
+    }
+
+    #[test]
+    fn prompt_word_wraps_input_so_cursor_tracks_insert_position() {
+        let mut state = AppState::new();
+        state.input = "hello abcdef".to_string();
+        state.input_cursor = state.input.chars().count();
+
+        let mut terminal = Terminal::new(TestBackend::new(16, 6)).expect("terminal");
+        terminal
+            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::FullscreenTui))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer());
+        assert!(
+            rendered.iter().any(|line| line.contains("hello ")),
+            "first wrapped row missing; rendered:\n{}",
+            rendered.join("\n")
+        );
+        assert!(
+            rendered.iter().any(|line| line.contains("abcdef")),
+            "second wrapped row missing; rendered:\n{}",
+            rendered.join("\n")
+        );
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(10, 3));
     }
 
     #[test]
