@@ -1500,14 +1500,13 @@ pub fn setup_inline_chat_terminal(
     let mut stderr = io::stderr();
     let _ = stderr.flush();
 
-    enable_raw_mode().context("enable raw mode")?;
-
     let mut last_inline_error = None;
     for attempt in 0..3 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(75));
         }
 
+        enable_raw_mode().context("enable raw mode")?;
         let mut stdout = io::stdout();
         if let Err(err) = execute!(stdout, EnableBracketedPaste) {
             let _ = disable_raw_mode();
@@ -1531,12 +1530,12 @@ pub fn setup_inline_chat_terminal(
             Err(err) => {
                 let mut stdout = io::stdout();
                 let _ = execute!(stdout, DisableBracketedPaste);
+                let _ = disable_raw_mode();
                 last_inline_error = Some(err);
             }
         }
     }
 
-    let _ = disable_raw_mode();
     Err(last_inline_error.expect("inline terminal setup attempted"))
         .context("ratatui inline terminal")
 }
@@ -4375,7 +4374,7 @@ mod tests {
     #[test]
     fn input_title_includes_text_selection_shortcut() {
         let mut state = AppState::new();
-        let backend = TestBackend::new(140, 5);
+        let backend = TestBackend::new(180, 5);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
