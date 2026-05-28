@@ -40,6 +40,7 @@ use crate::app::{
 use crate::clipboard::copy_to_clipboard;
 use crate::config;
 use crate::event::{PermissionDecision, UiCommand, UiEvent};
+use crate::version::mjolnir_version_label;
 
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
 const TRANSCRIPT_SCROLL_WHEEL_STEP: usize = 3;
@@ -1826,7 +1827,14 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let inner = area;
 
     let conn_color = connection_state_color(state.connection_state);
-    let mut spans = Vec::new();
+    let width = area.width as usize;
+    let mut spans = vec![
+        Span::styled(
+            mjolnir_version_label(),
+            Style::default().fg(Color::LightBlue),
+        ),
+        Span::raw("   "),
+    ];
     let agent_label = state.agent_label.trim();
     if !agent_label.is_empty() {
         spans.push(Span::styled("agent ", Style::default().fg(Color::Gray)));
@@ -1838,9 +1846,15 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     }
     let cwd_label = state.cwd_label.trim();
     if !cwd_label.is_empty() {
+        let max_width = match width {
+            0..=89 => 18,
+            90..=139 => 28,
+            140..=179 => 40,
+            _ => 56,
+        };
         spans.push(Span::styled("cwd ", Style::default().fg(Color::Gray)));
         spans.push(Span::styled(
-            cwd_label.to_string(),
+            compact_middle_display(cwd_label, max_width),
             Style::default().fg(Color::LightMagenta),
         ));
         spans.push(Span::raw("   "));
@@ -1861,32 +1875,82 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         Span::styled(turn_elapsed_label(state), Style::default().fg(Color::Green)),
         Span::raw("   "),
         Span::styled(
-            token_usage_label(state),
+            header_token_usage_label(state, width),
             Style::default().fg(Color::Magenta),
         ),
     ]);
     let session = state
         .session_id
         .as_deref()
-        .map(str::to_string)
+        .map(|session_id| short_session_label(session_id, width))
         .unwrap_or_else(|| "no session".to_string());
     spans.extend([
         Span::raw("   "),
         Span::styled("session ", Style::default().fg(Color::Gray)),
         Span::styled(session, Style::default().fg(Color::LightYellow)),
     ]);
-    if let Some(title) = state.session_title.as_deref() {
+    if width >= 180
+        && let Some(title) = state.session_title.as_deref()
+    {
         let title = title.trim();
         if !title.is_empty() {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                title.to_string(),
+                compact_middle_display(title, 42),
                 Style::default().fg(Color::White),
             ));
         }
     }
     let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, inner);
+}
+
+fn compact_middle_display(text: &str, max_width: usize) -> String {
+    if text.width() <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 3 {
+        return text.chars().take(max_width).collect();
+    }
+
+    let prefix_width = (max_width - 3) / 3;
+    let suffix_width = max_width - 3 - prefix_width;
+    let prefix = take_display_prefix(text, prefix_width);
+    let suffix = take_display_suffix(text, suffix_width);
+    format!("{prefix}...{suffix}")
+}
+
+fn take_display_prefix(text: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
+}
+
+fn take_display_suffix(text: &str, max_width: usize) -> String {
+    let mut chars = Vec::new();
+    let mut width = 0;
+    for ch in text.chars().rev() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        chars.push(ch);
+        width += ch_width;
+    }
+    chars.into_iter().rev().collect()
+}
+
+fn short_session_label(session_id: &str, width: usize) -> String {
+    let max_width = if width < 130 { 10 } else { 12 };
+    compact_middle_display(session_id, max_width)
 }
 
 pub(crate) fn connection_state_label(state: &AppState) -> String {
@@ -1967,6 +2031,21 @@ fn token_usage_label(state: &AppState) -> String {
         return text;
     }
     "tok -".to_string()
+}
+
+fn header_token_usage_label(state: &AppState, width: usize) -> String {
+    if width >= 160 {
+        return token_usage_label(state);
+    }
+
+    let usage = &state.token_usage;
+    if let Some(total) = usage.total_tokens {
+        return format!("tok {}", compact_count(total));
+    }
+    if let (Some(used), Some(size)) = (usage.context_used, usage.context_size) {
+        return format!("ctx {}/{}", compact_count(used), compact_count(size));
+    }
+    token_usage_label(state)
 }
 
 fn compact_count(value: u64) -> String {
@@ -2820,7 +2899,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
         format!(
-            " prompt (Ctrl-N new session | Ctrl-O load session | Enter to send | {PROMPT_NEWLINE_HINT} for newline | F10 help | Ctrl-C to quit{text_selection_hint}) "
+            " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     };
     let style = if state.runtime_closed || state.is_streaming() {
@@ -3830,12 +3909,47 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains(&mjolnir_version_label()),
+            "rendered:\n{rendered}"
+        );
         assert!(rendered.contains("agent anvil"), "rendered:\n{rendered}");
         assert!(
             rendered.contains("cwd /home/user/project-a"),
             "rendered:\n{rendered}"
         );
         assert!(!rendered.contains("worktree"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn header_compacts_long_workspace_and_session_labels() {
+        let mut state = AppState::new();
+        state.agent_label = "uvx".to_string();
+        state.cwd_label = "/Users/ryan/code/mjolnir/.mjolnir/worktrees/bold-willow".to_string();
+        state.session_id = Some("48c95a78-cdbf-416a-807a-b0c5124fcc72".to_string());
+        state.session_title =
+            Some("the agent says agent uvx when using anvil, for custom commands".to_string());
+        let backend = TestBackend::new(120, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("mjolnir v"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("cwd /Users/r...trees/bold-willow"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("session 48...fcc72"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("the agent says"),
+            "rendered:\n{rendered}"
+        );
     }
 
     fn permission_pending_with_options(
@@ -4634,7 +4748,7 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("Ctrl-C to quit"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
         assert!(
             rendered.contains("F12 select text"),
             "rendered:\n{rendered}"
@@ -4663,7 +4777,7 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("Ctrl-C to quit"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
         assert!(rendered.contains("F10 help"), "rendered:\n{rendered}");
         assert!(!rendered.contains("F12"), "rendered:\n{rendered}");
     }

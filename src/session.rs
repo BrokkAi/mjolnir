@@ -26,6 +26,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::acp;
 use crate::config::SelectedAgent;
+use crate::version::mjolnir_version_label;
 
 /// One row in the session picker.
 #[derive(Debug, Clone)]
@@ -296,7 +297,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState) {
         .split(f.area());
 
     // Header
-    let header = Paragraph::new(" mj | resume a session ")
+    let header = Paragraph::new(format!(" {} | resume a session ", mjolnir_version_label()))
         .style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_widget(header, chunks[0]);
 

@@ -17,6 +17,7 @@ mod registry;
 mod self_update;
 mod session;
 mod ui;
+mod version;
 mod worktree;
 
 use std::path::PathBuf;

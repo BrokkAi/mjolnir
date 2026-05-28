@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 
 use crate::install::{self, Progress};
 use crate::registry::{DistributionKind, Registry};
+use crate::version::mjolnir_version_label;
 
 /// Resolved launch command for the chosen agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -699,7 +700,7 @@ fn draw(f: &mut ratatui::Frame, state: &PickerState<'_>) {
 }
 
 fn draw_header(f: &mut ratatui::Frame, area: Rect) {
-    let p = Paragraph::new(" mj | choose an agent ")
+    let p = Paragraph::new(format!(" {} | choose an agent ", mjolnir_version_label()))
         .style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_widget(p, area);
 }
