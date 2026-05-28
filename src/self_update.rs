@@ -1,0 +1,497 @@
+//! Startup self-update for the `mj` binary.
+//!
+//! This intentionally updates only mjolnir itself. Agent binaries such as
+//! anvil and bifrost are installed or upgraded through the agent picker.
+
+use std::ffi::OsString;
+use std::io::{self, IsTerminal, Read, Write};
+use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use flate2::read::GzDecoder;
+use semver::Version;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/BrokkAi/mjolnir/releases/latest";
+const BIN_NAME: &str = "mj";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupUpdateResult {
+    Skipped,
+    UpToDate,
+    Declined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UpdateInfo {
+    version: Version,
+    tag: String,
+    asset: ReleaseAsset,
+    checksum_asset: Option<ReleaseAsset>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct GitHubRelease {
+    tag_name: String,
+    #[serde(default)]
+    assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Platform {
+    os_family: &'static str,
+    arch: &'static str,
+    rust_target: String,
+}
+
+pub async fn check_prompt_and_restart_if_accepted() -> Result<StartupUpdateResult> {
+    if cfg!(debug_assertions) || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Ok(StartupUpdateResult::Skipped);
+    }
+
+    let Some(update) = latest_update().await? else {
+        return Ok(StartupUpdateResult::UpToDate);
+    };
+
+    if !prompt_for_update(&update)? {
+        return Ok(StartupUpdateResult::Declined);
+    }
+
+    match download_apply_and_restart(&update).await {
+        Ok(()) => unreachable!("restart replaces the current process on success"),
+        Err(e) => {
+            eprintln!("mj: upgrade failed: {e:#}");
+            eprintln!("mj: continuing with {}", env!("CARGO_PKG_VERSION"));
+            Ok(StartupUpdateResult::Skipped)
+        }
+    }
+}
+
+async fn latest_update() -> Result<Option<UpdateInfo>> {
+    let current = parse_version(env!("CARGO_PKG_VERSION"))
+        .with_context(|| format!("parse current version {}", env!("CARGO_PKG_VERSION")))?;
+    let release = fetch_latest_release()
+        .await
+        .context("fetch latest mj release")?;
+    update_info_from_release(&release, &current, &current_platform()?)
+}
+
+async fn fetch_latest_release() -> Result<GitHubRelease> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("build http client")?;
+    let resp = client
+        .get(LATEST_RELEASE_URL)
+        .send()
+        .await
+        .with_context(|| format!("GET {LATEST_RELEASE_URL}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("GET {LATEST_RELEASE_URL}: HTTP {status}");
+    }
+    let body = resp.text().await.context("read release body")?;
+    serde_json::from_str(&body).context("parse release body")
+}
+
+fn update_info_from_release(
+    release: &GitHubRelease,
+    current: &Version,
+    platform: &Platform,
+) -> Result<Option<UpdateInfo>> {
+    let latest = parse_version(&release.tag_name)
+        .with_context(|| format!("parse release tag {}", release.tag_name))?;
+    if latest <= *current {
+        return Ok(None);
+    }
+
+    let asset = select_mj_asset(&release.assets, platform)
+        .with_context(|| format!("find mj asset for {}/{}", platform.os_family, platform.arch))?;
+    let checksum_name = format!("{}.sha256", asset.name);
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|candidate| candidate.name == checksum_name)
+        .cloned();
+
+    Ok(Some(UpdateInfo {
+        version: latest,
+        tag: release.tag_name.clone(),
+        asset,
+        checksum_asset,
+    }))
+}
+
+fn prompt_for_update(update: &UpdateInfo) -> Result<bool> {
+    print!(
+        "mj {} is available; current version is {}. Upgrade now? [Y/n] ",
+        update.tag,
+        env!("CARGO_PKG_VERSION")
+    );
+    io::stdout().flush().context("flush update prompt")?;
+
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("read update prompt answer")?;
+    let answer = answer.trim();
+    Ok(answer.is_empty() || matches!(answer, "y" | "Y" | "yes" | "YES"))
+}
+
+async fn download_apply_and_restart(update: &UpdateInfo) -> Result<()> {
+    println!("mj: downloading {} ({})", update.tag, update.asset.name);
+    let archive = download_bytes(&update.asset.browser_download_url)
+        .await
+        .with_context(|| format!("download {}", update.asset.name))?;
+    verify_checksum_if_present(update, &archive).await?;
+
+    let new_binary = extract_mj_binary(&archive).context("extract mj binary")?;
+    let current_exe = std::env::current_exe().context("resolve current executable")?;
+    replace_current_exe(&current_exe, &new_binary).context("replace current executable")?;
+
+    println!("mj: upgraded to {}; restarting", update.tag);
+    restart_current_process(&current_exe)
+}
+
+async fn download_bytes(url: &str) -> Result<Vec<u8>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("build http client")?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("GET {url}: HTTP {status}");
+    }
+    resp.bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .context("read response body")
+}
+
+async fn verify_checksum_if_present(update: &UpdateInfo, archive: &[u8]) -> Result<()> {
+    let Some(checksum_asset) = update.checksum_asset.as_ref() else {
+        tracing::warn!("no checksum published for {}; skipping", update.asset.name);
+        return Ok(());
+    };
+
+    let body = download_bytes(&checksum_asset.browser_download_url)
+        .await
+        .with_context(|| format!("download {}", checksum_asset.name))?;
+    let body = String::from_utf8(body).context("checksum file is not utf-8")?;
+    let expected = body
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty checksum file {}", checksum_asset.name))?;
+    let actual = sha256_hex(archive);
+    if expected != actual {
+        anyhow::bail!(
+            "checksum mismatch for {}: expected {}, got {}",
+            update.asset.name,
+            expected,
+            actual
+        );
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn extract_mj_binary(archive_bytes: &[u8]) -> Result<Vec<u8>> {
+    let gz = GzDecoder::new(archive_bytes);
+    let mut archive = tar::Archive::new(gz);
+    for entry in archive.entries().context("read tar entries")? {
+        let mut entry = entry.context("read tar entry")?;
+        let path = entry.path().context("read tar entry path")?;
+        if path.file_name().and_then(|name| name.to_str()) != Some(BIN_NAME) {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .context("read mj binary from archive")?;
+        if bytes.is_empty() {
+            anyhow::bail!("archive contained an empty mj binary");
+        }
+        return Ok(bytes);
+    }
+    anyhow::bail!("archive did not contain expected binary: {BIN_NAME}");
+}
+
+fn replace_current_exe(current_exe: &Path, new_binary: &[u8]) -> Result<()> {
+    let parent = current_exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("executable has no parent: {}", current_exe.display()))?;
+    let tmp_path = parent.join(format!(
+        ".{}.self-update.{}.tmp",
+        BIN_NAME,
+        std::process::id()
+    ));
+
+    std::fs::write(&tmp_path, new_binary)
+        .with_context(|| format!("write {}", tmp_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("chmod {}", tmp_path.display()))?;
+    }
+
+    strip_quarantine(&tmp_path);
+    std::fs::rename(&tmp_path, current_exe)
+        .with_context(|| format!("rename {} -> {}", tmp_path.display(), current_exe.display()))?;
+    strip_quarantine(current_exe);
+    Ok(())
+}
+
+fn strip_quarantine(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("xattr")
+            .arg("-dr")
+            .arg("com.apple.quarantine")
+            .arg(path)
+            .status();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+    }
+}
+
+fn restart_current_process(current_exe: &Path) -> Result<()> {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = Command::new(current_exe).args(args).exec();
+        Err(err).with_context(|| format!("exec {}", current_exe.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        Command::new(current_exe)
+            .args(args)
+            .spawn()
+            .with_context(|| format!("restart {}", current_exe.display()))?;
+        std::process::exit(0);
+    }
+}
+
+fn select_mj_asset(assets: &[ReleaseAsset], platform: &Platform) -> Result<ReleaseAsset> {
+    let target_suffix = format!("-{}.tar.gz", platform.rust_target);
+    if platform.os_family == "macos"
+        && let Some(asset) = assets.iter().find(|asset| {
+            is_mj_archive(&asset.name) && asset.name.ends_with("-universal-apple-darwin.tar.gz")
+        })
+    {
+        return Ok(asset.clone());
+    }
+    assets
+        .iter()
+        .find(|asset| is_mj_archive(&asset.name) && asset.name.ends_with(&target_suffix))
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no mj archive found for target {}; available assets: {}",
+                platform.rust_target,
+                assets
+                    .iter()
+                    .filter(|asset| !asset.name.ends_with(".sha256"))
+                    .map(|asset| asset.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+}
+
+fn is_mj_archive(name: &str) -> bool {
+    name.starts_with("brokk-mjolnir-") && name.ends_with(".tar.gz")
+}
+
+fn current_platform() -> Result<Platform> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        other => anyhow::bail!("unsupported CPU architecture: {other}"),
+    };
+    let (os_family, rust_os) = match std::env::consts::OS {
+        "macos" => ("macos", "apple-darwin"),
+        "linux" => ("linux", "unknown-linux-gnu"),
+        other => anyhow::bail!("unsupported OS: {other}"),
+    };
+
+    Ok(Platform {
+        os_family,
+        arch,
+        rust_target: format!("{arch}-{rust_os}"),
+    })
+}
+
+fn parse_version(raw: &str) -> Result<Version> {
+    Version::parse(raw.trim_start_matches('v')).with_context(|| format!("parse version {raw}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn asset(name: &str) -> ReleaseAsset {
+        ReleaseAsset {
+            name: name.to_string(),
+            browser_download_url: format!("https://example.com/{name}"),
+        }
+    }
+
+    fn linux_x64() -> Platform {
+        Platform {
+            os_family: "linux",
+            arch: "x86_64",
+            rust_target: "x86_64-unknown-linux-gnu".to_string(),
+        }
+    }
+
+    fn mac_arm() -> Platform {
+        Platform {
+            os_family: "macos",
+            arch: "aarch64",
+            rust_target: "aarch64-apple-darwin".to_string(),
+        }
+    }
+
+    fn make_tar_gz(file_name: &str, content: &[u8]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+
+        let mut header = tar::Header::new_gnu();
+        header.set_path(file_name).expect("path");
+        header.set_size(content.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+
+        let mut tar_bytes: Vec<u8> = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            builder.append(&header, content).expect("append");
+            builder.finish().expect("finish");
+        }
+
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(&tar_bytes).expect("gz write");
+        gz.finish().expect("gz finish")
+    }
+
+    #[test]
+    fn release_newer_than_current_returns_update_info() {
+        let release = GitHubRelease {
+            tag_name: "v0.5.0".to_string(),
+            assets: vec![
+                asset("brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz"),
+                asset("brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256"),
+            ],
+        };
+
+        let update = update_info_from_release(
+            &release,
+            &Version::parse("0.4.2").expect("version"),
+            &linux_x64(),
+        )
+        .expect("update info")
+        .expect("update");
+
+        assert_eq!(update.version, Version::parse("0.5.0").expect("version"));
+        assert_eq!(
+            update.asset.name,
+            "brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        assert_eq!(
+            update.checksum_asset.expect("checksum").name,
+            "brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256"
+        );
+    }
+
+    #[test]
+    fn release_not_newer_returns_none() {
+        let release = GitHubRelease {
+            tag_name: "v0.4.2".to_string(),
+            assets: vec![asset(
+                "brokk-mjolnir-v0.4.2-x86_64-unknown-linux-gnu.tar.gz",
+            )],
+        };
+
+        let update = update_info_from_release(
+            &release,
+            &Version::parse("0.4.2").expect("version"),
+            &linux_x64(),
+        )
+        .expect("update info");
+
+        assert!(update.is_none());
+    }
+
+    #[test]
+    fn macos_prefers_universal_asset() {
+        let assets = vec![
+            asset("brokk-mjolnir-v0.5.0-aarch64-apple-darwin.tar.gz"),
+            asset("brokk-mjolnir-v0.5.0-universal-apple-darwin.tar.gz"),
+        ];
+
+        let selected = select_mj_asset(&assets, &mac_arm()).expect("select");
+
+        assert_eq!(
+            selected.name,
+            "brokk-mjolnir-v0.5.0-universal-apple-darwin.tar.gz"
+        );
+    }
+
+    #[test]
+    fn linux_selects_target_asset() {
+        let assets = vec![
+            asset("brokk-mjolnir-v0.5.0-aarch64-unknown-linux-gnu.tar.gz"),
+            asset("brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz"),
+        ];
+
+        let selected = select_mj_asset(&assets, &linux_x64()).expect("select");
+
+        assert_eq!(
+            selected.name,
+            "brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz"
+        );
+    }
+
+    #[test]
+    fn extract_mj_binary_finds_nested_binary() {
+        let archive = make_tar_gz("brokk-mjolnir/bin/mj", b"binary bytes");
+
+        let binary = extract_mj_binary(&archive).expect("extract");
+
+        assert_eq!(binary, b"binary bytes");
+    }
+
+    #[test]
+    fn checksum_hex_matches_known_value() {
+        assert_eq!(
+            sha256_hex(b"mj"),
+            "a3f9e2bcd804ec65d1ea4fc63a74e7f02a08e63ffd0b803a8f250236f5602405"
+        );
+    }
+}
