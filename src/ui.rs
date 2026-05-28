@@ -31,6 +31,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
     AppState, ConfigValueChoice, ConnectionState, Entry, PastedAttachment, PendingPermission,
@@ -2354,14 +2355,9 @@ fn draw_permission_modal(
     pending: &PendingPermission,
     queue_len: usize,
 ) {
-    // Keep the permission prompt roomy: clipped choices are worse than
-    // covering more of the transcript while the modal owns the keyboard.
-    let width = area.width.saturating_sub(4).min(100);
-    if width == 0 || area.height == 0 {
-        return;
-    }
+    const HORIZONTAL_PADDING: u16 = 2;
+    const VERTICAL_PADDING: u16 = 1;
 
-    // Build the header paragraph to measure its wrapped height
     let title = pending
         .prompt
         .tool_call
@@ -2369,24 +2365,55 @@ fn draw_permission_modal(
         .title
         .clone()
         .unwrap_or_else(|| pending.prompt.tool_call.tool_call_id.to_string());
+    let footer_text = "Up/Down to choose | Enter to confirm | Esc to cancel";
+    let selected = clamp_permission_selected(pending.selected, pending.prompt.options.len());
+    let longest_option_width = pending
+        .prompt
+        .options
+        .iter()
+        .map(|opt| {
+            let kind = permission_kind_label(opt.kind);
+            format!("> {} ({kind})", opt.name).width()
+        })
+        .max()
+        .unwrap_or(0);
 
-    let header_para = Paragraph::new(title.clone())
-        .style(Style::default().add_modifier(Modifier::BOLD))
-        .wrap(Wrap { trim: false });
+    let max_width = area.width.saturating_sub(4);
+    if max_width < 16 || area.height == 0 {
+        return;
+    }
+    let max_content_width = max_width.saturating_sub(2 + HORIZONTAL_PADDING * 2);
+    if max_content_width == 0 {
+        return;
+    }
 
-    // Calculate wrapped header height (accounting for block borders and padding)
-    let inner_width = width.saturating_sub(2); // Block borders
-    let header_height = header_para.line_count(inner_width) as u16;
-    let option_rows = pending.prompt.options.len().min(u16::MAX as usize) as u16;
+    let desired_content_width = longest_option_width
+        .max(title.width())
+        .max(footer_text.width())
+        .max(60)
+        .min(max_content_width as usize) as u16;
+    let width = desired_content_width
+        .saturating_add(2)
+        .saturating_add(HORIZONTAL_PADDING * 2)
+        .min(max_width);
 
-    // Height = header + options + footer + borders, plus slack for a
-    // larger default modal. Extra rows naturally go to the options list.
-    let content_height = header_height.saturating_add(option_rows).saturating_add(3);
-    let height = content_height
-        .saturating_add(6)
-        .max(18)
-        .min(area.height.saturating_sub(2));
-    if height == 0 {
+    let header_lines = wrap_text_to_width(&title, desired_content_width);
+    let option_lines = permission_option_lines(pending, selected, desired_content_width);
+
+    let header_height = header_lines.len().min(u16::MAX as usize) as u16;
+    let option_rows = option_lines
+        .iter()
+        .map(|(_, lines)| lines.len())
+        .sum::<usize>()
+        .min(u16::MAX as usize) as u16;
+
+    let max_height = area.height.saturating_sub(2);
+    let height = header_height
+        .saturating_add(option_rows)
+        .saturating_add(4)
+        .saturating_add(VERTICAL_PADDING * 2)
+        .min(max_height);
+    if height < 7 {
         return;
     }
 
@@ -2409,8 +2436,18 @@ fn draw_permission_modal(
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
+    let content = Rect::new(
+        inner.x.saturating_add(HORIZONTAL_PADDING),
+        inner.y.saturating_add(VERTICAL_PADDING),
+        inner.width.saturating_sub(HORIZONTAL_PADDING * 2),
+        inner.height.saturating_sub(VERTICAL_PADDING * 2),
+    );
+    if content.width == 0 || content.height < 3 {
+        return;
+    }
+
     let footer_height = 1.min(inner.height);
-    let measured_header_height = header_height.min(inner.height.saturating_sub(footer_height));
+    let measured_header_height = header_height.min(content.height.saturating_sub(footer_height));
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -2418,37 +2455,204 @@ fn draw_permission_modal(
             Constraint::Min(1),
             Constraint::Length(footer_height),
         ])
-        .split(inner);
+        .split(content);
 
-    f.render_widget(header_para, layout[0]);
+    let header = Paragraph::new(
+        header_lines
+            .into_iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line,
+                    Style::default().add_modifier(Modifier::BOLD),
+                ))
+            })
+            .collect::<Vec<_>>(),
+    );
+    f.render_widget(header, layout[0]);
 
     let visible_options = usize::from(layout[1].height);
-    let selected = clamp_permission_selected(pending.selected, pending.prompt.options.len());
-    let first_visible = if visible_options == 0 || pending.prompt.options.len() <= visible_options {
-        0
-    } else {
-        selected.saturating_add(1).saturating_sub(visible_options)
-    };
+    let visible_lines = visible_permission_option_lines(&option_lines, selected, visible_options);
+    f.render_widget(Paragraph::new(visible_lines), layout[1]);
 
-    let items: Vec<ListItem> = pending
+    let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
+    f.render_widget(footer, layout[2]);
+}
+
+fn permission_option_lines(
+    pending: &PendingPermission,
+    selected: usize,
+    width: u16,
+) -> Vec<(usize, Vec<Line<'static>>)> {
+    pending
         .prompt
         .options
         .iter()
         .enumerate()
-        .skip(first_visible)
-        .take(visible_options)
         .map(|(i, opt)| {
-            let marker = if i == selected { ">" } else { " " };
             let kind = permission_kind_label(opt.kind);
-            ListItem::new(format!("{marker} {} ({kind})", opt.name))
+            let label = format!("{} ({kind})", opt.name);
+            let marker = if i == selected { "> " } else { "  " };
+            let style = if i == selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let lines = wrap_prefixed_text_to_width(&label, width, marker, "  ")
+                .into_iter()
+                .map(|line| {
+                    let line = if i == selected {
+                        pad_text_to_width(line, width)
+                    } else {
+                        line
+                    };
+                    Line::from(Span::styled(line, style))
+                })
+                .collect();
+            (i, lines)
         })
-        .collect();
-    let list = List::new(items);
-    f.render_widget(list, layout[1]);
+        .collect()
+}
 
-    let footer = Paragraph::new("Up/Down to choose | Enter to confirm | Esc to cancel")
-        .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(footer, layout[2]);
+fn visible_permission_option_lines(
+    option_lines: &[(usize, Vec<Line<'static>>)],
+    selected: usize,
+    visible_rows: usize,
+) -> Vec<Line<'static>> {
+    if visible_rows == 0 {
+        return Vec::new();
+    }
+
+    let total_rows = option_lines
+        .iter()
+        .map(|(_, lines)| lines.len())
+        .sum::<usize>();
+    let selected_start = option_lines
+        .iter()
+        .take_while(|(i, _)| *i != selected)
+        .map(|(_, lines)| lines.len())
+        .sum::<usize>();
+    let selected_rows = option_lines
+        .iter()
+        .find(|(i, _)| *i == selected)
+        .map(|(_, lines)| lines.len())
+        .unwrap_or(1);
+    let selected_end = selected_start.saturating_add(selected_rows);
+
+    let first_visible_row = if total_rows <= visible_rows {
+        0
+    } else if selected_rows > visible_rows {
+        selected_start
+    } else {
+        selected_end
+            .saturating_sub(visible_rows)
+            .min(total_rows.saturating_sub(visible_rows))
+    };
+
+    option_lines
+        .iter()
+        .flat_map(|(_, lines)| lines.iter())
+        .skip(first_visible_row)
+        .take(visible_rows)
+        .cloned()
+        .collect()
+}
+
+fn wrap_prefixed_text_to_width(
+    text: &str,
+    width: u16,
+    first_prefix: &str,
+    continuation_prefix: &str,
+) -> Vec<String> {
+    let prefix_width = first_prefix.width().max(continuation_prefix.width());
+    let body_width = usize::from(width).saturating_sub(prefix_width).max(1) as u16;
+    wrap_text_to_width(text, body_width)
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let prefix = if i == 0 {
+                first_prefix
+            } else {
+                continuation_prefix
+            };
+            format!("{prefix}{line}")
+        })
+        .collect()
+}
+
+fn wrap_text_to_width(text: &str, width: u16) -> Vec<String> {
+    let width = usize::from(width).max(1);
+    let mut out = Vec::new();
+    for raw_line in text.lines() {
+        if raw_line.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+
+        let mut line = String::new();
+        for word in raw_line.split_whitespace() {
+            let word_len = word.width();
+            if line.is_empty() {
+                if word_len <= width {
+                    line.push_str(word);
+                } else {
+                    out.extend(split_word_to_width(word, width));
+                }
+                continue;
+            }
+
+            let next_len = line.width() + 1 + word_len;
+            if next_len <= width {
+                line.push(' ');
+                line.push_str(word);
+            } else {
+                out.push(line);
+                line = String::new();
+                if word_len <= width {
+                    line.push_str(word);
+                } else {
+                    out.extend(split_word_to_width(word, width));
+                }
+            }
+        }
+
+        if !line.is_empty() {
+            out.push(line);
+        }
+    }
+
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+fn split_word_to_width(word: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for ch in word.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if row.width() + ch_width > width {
+            rows.push(row);
+            row = String::new();
+        }
+        row.push(ch);
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+fn pad_text_to_width(mut line: String, width: u16) -> String {
+    let width = usize::from(width);
+    let len = line.width();
+    if len < width {
+        line.push_str(&" ".repeat(width - len));
+    }
+    line
 }
 
 fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
@@ -2732,16 +2936,7 @@ fn draw_autocomplete_popover(f: &mut ratatui::Frame, input_area: Rect, state: &A
 }
 
 fn truncate_line(line: String, width: u16, selected: bool) -> ListItem<'static> {
-    let cap = width as usize;
-    let mut line = if line.chars().count() > cap {
-        if cap > 3 {
-            line.chars().take(cap - 3).collect::<String>() + "..."
-        } else {
-            line.chars().take(cap).collect()
-        }
-    } else {
-        line
-    };
+    let mut line = truncate_text_to_width(line, width);
     if line.is_empty() {
         line.push(' ');
     }
@@ -2754,6 +2949,41 @@ fn truncate_line(line: String, width: u16, selected: bool) -> ListItem<'static> 
         Style::default()
     };
     ListItem::new(line).style(style)
+}
+
+fn truncate_text_to_width(line: String, width: u16) -> String {
+    let cap = width as usize;
+    if line.width() <= cap {
+        return line;
+    }
+    if cap > 3 {
+        let mut out = String::new();
+        let mut current_width = 0;
+        let ellipsis_width = 3; // ASCII "..."
+        let target = cap.saturating_sub(ellipsis_width);
+        for ch in line.chars() {
+            let w = ch.width().unwrap_or(0);
+            if current_width + w > target {
+                break;
+            }
+            out.push(ch);
+            current_width += w;
+        }
+        out.push_str("...");
+        out
+    } else {
+        let mut out = String::new();
+        let mut current_width = 0;
+        for ch in line.chars() {
+            let w = ch.width().unwrap_or(0);
+            if current_width + w > cap {
+                break;
+            }
+            out.push(ch);
+            current_width += w;
+        }
+        out
+    }
 }
 
 fn config_value_row_text(choice: &ConfigValueChoice) -> String {
@@ -3383,6 +3613,38 @@ mod tests {
                 "missing {expected:?}; rendered:\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn permission_modal_wraps_long_options_without_truncating() {
+        let pending = permission_pending_with_options(
+            "run shell command",
+            &[
+                "Allow reading the complete destination path before running the deployment command with production credentials",
+                "Reject",
+            ],
+            0,
+        );
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_permission_modal(frame, frame.area(), &pending, 1))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            !rendered.contains("..."),
+            "permission text must wrap, not truncate; rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("complete destination path"),
+            "missing first wrapped segment; rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("production credentials"),
+            "missing final wrapped segment; rendered:\n{rendered}"
+        );
     }
 
     #[test]
