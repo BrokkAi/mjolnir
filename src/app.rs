@@ -325,10 +325,9 @@ pub struct AppState {
     pub help_overlay: bool,
     /// True while mouse capture is disabled so the terminal can select text.
     pub text_selection_mode: bool,
-    /// Short label of the linked Git worktree backing this session, when
-    /// `--worktree` was used. Surfaced in the header so users can tell
-    /// concurrent Mjolnir instances apart.
-    pub worktree_label: Option<String>,
+    /// Current working directory shown in the header so users can tell
+    /// which project this session is operating in.
+    pub cwd_label: String,
     /// Holds the platform clipboard lease so copied text remains available
     /// on Linux/X11 where the owning process must stay alive.
     #[allow(dead_code)]
@@ -416,7 +415,7 @@ impl AppState {
             autocomplete: Autocomplete::default(),
             help_overlay: false,
             text_selection_mode: false,
-            worktree_label: None,
+            cwd_label: String::new(),
             clipboard_lease: None,
         }
     }

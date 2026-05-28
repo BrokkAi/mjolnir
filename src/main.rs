@@ -220,11 +220,12 @@ async fn main() -> Result<()> {
 
     let (cwd, worktree) = prepare_worktree_for_arg(cwd, cli.worktree.as_deref())?;
     let worktree_label = worktree_label(worktree.as_ref());
+    let cwd_label = cwd_label(&cwd);
 
     let result = run_app(
         cwd,
         cli.agent_stderr,
-        worktree_label.clone(),
+        cwd_label,
         None,
         None,
         ui_mode(fullscreen_tui),
@@ -266,6 +267,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
     };
     let (cwd, worktree) = prepare_worktree_for_arg(cwd, args.worktree.as_deref())?;
     let worktree_label = worktree_label(worktree.as_ref());
+    let cwd_label = cwd_label(&cwd);
 
     // `--list`: headless listing, print and exit.
     if args.list {
@@ -316,7 +318,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
         let result = run_app(
             cwd,
             args.agent_stderr.clone(),
-            worktree_label.clone(),
+            cwd_label,
             Some(session_id.clone()),
             Some(agent),
             mode,
@@ -356,7 +358,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
             let result = run_app(
                 cwd,
                 args.agent_stderr,
-                worktree_label.clone(),
+                cwd_label,
                 Some(entry.session_id),
                 Some(agent),
                 mode,
@@ -429,6 +431,10 @@ fn worktree_label(worktree: Option<&CreatedWorktree>) -> Option<String> {
         .map(|n| n.to_string_lossy().into_owned())
 }
 
+fn cwd_label(cwd: &std::path::Path) -> String {
+    cwd.display().to_string()
+}
+
 fn handle_worktree_after_tui(worktree: Option<&CreatedWorktree>) -> bool {
     let Some(w) = worktree else {
         return true;
@@ -496,7 +502,7 @@ fn prepare_existing_worktree(cwd: &std::path::Path, name_or_path: &str) -> Resul
 async fn run_app(
     cwd: PathBuf,
     agent_stderr: Option<PathBuf>,
-    worktree_label: Option<String>,
+    cwd_label: String,
     resume_session: Option<String>,
     initial_agent: Option<SelectedAgent>,
     mode: UiMode,
@@ -542,7 +548,7 @@ async fn run_app(
             &agent,
             cwd.clone(),
             agent_stderr.clone(),
-            worktree_label.clone(),
+            cwd_label.clone(),
             resume,
             mode,
         )
@@ -679,7 +685,7 @@ async fn run_session(
     agent: &SelectedAgent,
     cwd: PathBuf,
     agent_stderr: Option<PathBuf>,
-    worktree_label: Option<String>,
+    cwd_label: String,
     resume_session: Option<String>,
     mode: UiMode,
 ) -> Result<(UiExitReason, Option<String>)> {
@@ -725,7 +731,7 @@ async fn run_session(
         &mut terminal,
         cmd_tx,
         event_rx,
-        worktree_label,
+        cwd_label,
         agent_display_name,
         Some(&hist_path),
         mode,

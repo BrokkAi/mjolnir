@@ -189,7 +189,7 @@ pub async fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     mut event_rx: mpsc::UnboundedReceiver<UiEvent>,
-    worktree_label: Option<String>,
+    cwd_label: String,
     initial_agent_label: Option<String>,
     history_path: Option<&Path>,
     mode: UiMode,
@@ -199,7 +199,7 @@ pub async fn run(
         terminal,
         &cmd_tx,
         &mut event_rx,
-        worktree_label,
+        cwd_label,
         initial_agent_label,
         initial_history,
         mode,
@@ -230,14 +230,14 @@ async fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
-    worktree_label: Option<String>,
+    cwd_label: String,
     initial_agent_label: Option<String>,
     initial_history: Vec<String>,
     mode: UiMode,
 ) -> Result<(UiExitReason, Option<String>, Vec<String>)> {
     let mut state = AppState::new();
     state.set_prompt_history(initial_history);
-    state.worktree_label = worktree_label;
+    state.cwd_label = cwd_label;
     if let Some(label) = initial_agent_label {
         state.agent_label = label;
     }
@@ -1836,10 +1836,11 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ));
         spans.push(Span::raw("   "));
     }
-    if let Some(label) = state.worktree_label.as_deref() {
-        spans.push(Span::styled("worktree ", Style::default().fg(Color::Gray)));
+    let cwd_label = state.cwd_label.trim();
+    if !cwd_label.is_empty() {
+        spans.push(Span::styled("cwd ", Style::default().fg(Color::Gray)));
         spans.push(Span::styled(
-            label.to_string(),
+            cwd_label.to_string(),
             Style::default().fg(Color::LightMagenta),
         ));
         spans.push(Span::raw("   "));
@@ -3814,6 +3815,27 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn header_surfaces_current_working_directory() {
+        let mut state = AppState::new();
+        state.agent_label = "anvil".to_string();
+        state.cwd_label = "/home/user/project-a".to_string();
+        let backend = TestBackend::new(140, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("agent anvil"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("cwd /home/user/project-a"),
+            "rendered:\n{rendered}"
+        );
+        assert!(!rendered.contains("worktree"), "rendered:\n{rendered}");
     }
 
     fn permission_pending_with_options(
