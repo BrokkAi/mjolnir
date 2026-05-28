@@ -4,8 +4,8 @@
 //! anvil and bifrost are installed or upgraded through the agent picker.
 
 use std::ffi::OsString;
-use std::io::{self, IsTerminal, Read, Write};
-use std::path::Path;
+use std::io::{self, Cursor, IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/BrokkAi/mjolnir/releases/latest";
 const BIN_NAME: &str = "mj";
+const WINDOWS_BIN_NAME: &str = "mj.exe";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupUpdateResult {
@@ -30,7 +31,7 @@ struct UpdateInfo {
     version: Version,
     tag: String,
     asset: ReleaseAsset,
-    checksum_asset: Option<ReleaseAsset>,
+    checksum_asset: ReleaseAsset,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -122,7 +123,14 @@ fn update_info_from_release(
         .assets
         .iter()
         .find(|candidate| candidate.name == checksum_name)
-        .cloned();
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "release {} is missing required checksum asset {}",
+                release.tag_name,
+                checksum_name
+            )
+        })?;
 
     Ok(Some(UpdateInfo {
         version: latest,
@@ -153,14 +161,19 @@ async fn download_apply_and_restart(update: &UpdateInfo) -> Result<()> {
     let archive = download_bytes(&update.asset.browser_download_url)
         .await
         .with_context(|| format!("download {}", update.asset.name))?;
-    verify_checksum_if_present(update, &archive).await?;
+    verify_checksum(update, &archive).await?;
 
-    let new_binary = extract_mj_binary(&archive).context("extract mj binary")?;
+    let new_binary =
+        extract_mj_binary(&update.asset.name, &archive).context("extract mj binary")?;
     let current_exe = std::env::current_exe().context("resolve current executable")?;
-    replace_current_exe(&current_exe, &new_binary).context("replace current executable")?;
+    let replacement =
+        replace_current_exe(&current_exe, &new_binary).context("replace current executable")?;
 
     println!("mj: upgraded to {}; restarting", update.tag);
-    restart_current_process(&current_exe)
+    match replacement {
+        Replacement::RestartNow(restart_exe) => restart_current_process(&restart_exe),
+        Replacement::DeferredRestart => std::process::exit(0),
+    }
 }
 
 async fn download_bytes(url: &str) -> Result<Vec<u8>> {
@@ -184,20 +197,15 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>> {
         .context("read response body")
 }
 
-async fn verify_checksum_if_present(update: &UpdateInfo, archive: &[u8]) -> Result<()> {
-    let Some(checksum_asset) = update.checksum_asset.as_ref() else {
-        tracing::warn!("no checksum published for {}; skipping", update.asset.name);
-        return Ok(());
-    };
-
-    let body = download_bytes(&checksum_asset.browser_download_url)
+async fn verify_checksum(update: &UpdateInfo, archive: &[u8]) -> Result<()> {
+    let body = download_bytes(&update.checksum_asset.browser_download_url)
         .await
-        .with_context(|| format!("download {}", checksum_asset.name))?;
+        .with_context(|| format!("download {}", update.checksum_asset.name))?;
     let body = String::from_utf8(body).context("checksum file is not utf-8")?;
     let expected = body
         .split_whitespace()
         .next()
-        .ok_or_else(|| anyhow::anyhow!("empty checksum file {}", checksum_asset.name))?;
+        .ok_or_else(|| anyhow::anyhow!("empty checksum file {}", update.checksum_asset.name))?;
     let actual = sha256_hex(archive);
     if expected != actual {
         anyhow::bail!(
@@ -216,7 +224,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn extract_mj_binary(archive_bytes: &[u8]) -> Result<Vec<u8>> {
+fn extract_mj_binary(archive_name: &str, archive_bytes: &[u8]) -> Result<Vec<u8>> {
+    if archive_name.ends_with(".zip") {
+        return extract_mj_binary_from_zip(archive_bytes);
+    }
+    extract_mj_binary_from_tar_gz(archive_bytes)
+}
+
+fn extract_mj_binary_from_tar_gz(archive_bytes: &[u8]) -> Result<Vec<u8>> {
     let gz = GzDecoder::new(archive_bytes);
     let mut archive = tar::Archive::new(gz);
     for entry in archive.entries().context("read tar entries")? {
@@ -237,10 +252,45 @@ fn extract_mj_binary(archive_bytes: &[u8]) -> Result<Vec<u8>> {
     anyhow::bail!("archive did not contain expected binary: {BIN_NAME}");
 }
 
-fn replace_current_exe(current_exe: &Path, new_binary: &[u8]) -> Result<()> {
-    let parent = current_exe
+fn extract_mj_binary_from_zip(archive_bytes: &[u8]) -> Result<Vec<u8>> {
+    let cursor = Cursor::new(archive_bytes);
+    let mut archive = zip::ZipArchive::new(cursor).context("open zip archive")?;
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .with_context(|| format!("read zip entry {index}"))?;
+        let path = file
+            .enclosed_name()
+            .ok_or_else(|| anyhow::anyhow!("zip entry escapes destination: {}", file.name()))?;
+        if path.file_name().and_then(|name| name.to_str()) != Some(WINDOWS_BIN_NAME) {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .context("read mj.exe binary from archive")?;
+        if bytes.is_empty() {
+            anyhow::bail!("archive contained an empty mj.exe binary");
+        }
+        return Ok(bytes);
+    }
+    anyhow::bail!("archive did not contain expected binary: {WINDOWS_BIN_NAME}");
+}
+
+enum Replacement {
+    #[cfg_attr(windows, allow(dead_code))]
+    RestartNow(PathBuf),
+    #[cfg_attr(not(windows), allow(dead_code))]
+    DeferredRestart,
+}
+
+#[cfg(unix)]
+fn replace_current_exe(current_exe: &Path, new_binary: &[u8]) -> Result<Replacement> {
+    let target_exe = current_exe
+        .canonicalize()
+        .with_context(|| format!("resolve executable target {}", current_exe.display()))?;
+    let parent = target_exe
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("executable has no parent: {}", current_exe.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("executable has no parent: {}", target_exe.display()))?;
     let tmp_path = parent.join(format!(
         ".{}.self-update.{}.tmp",
         BIN_NAME,
@@ -249,20 +299,111 @@ fn replace_current_exe(current_exe: &Path, new_binary: &[u8]) -> Result<()> {
 
     std::fs::write(&tmp_path, new_binary)
         .with_context(|| format!("write {}", tmp_path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("chmod {}", tmp_path.display()))?;
-    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("chmod {}", tmp_path.display()))?;
 
     strip_quarantine(&tmp_path);
-    std::fs::rename(&tmp_path, current_exe)
-        .with_context(|| format!("rename {} -> {}", tmp_path.display(), current_exe.display()))?;
-    strip_quarantine(current_exe);
+    std::fs::rename(&tmp_path, &target_exe)
+        .with_context(|| format!("rename {} -> {}", tmp_path.display(), target_exe.display()))?;
+    strip_quarantine(&target_exe);
+    Ok(Replacement::RestartNow(target_exe))
+}
+
+#[cfg(windows)]
+fn replace_current_exe(current_exe: &Path, new_binary: &[u8]) -> Result<Replacement> {
+    let target_exe = current_exe
+        .canonicalize()
+        .with_context(|| format!("resolve executable target {}", current_exe.display()))?;
+    let parent = target_exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("executable has no parent: {}", target_exe.display()))?;
+    let tmp_path = parent.join(format!(
+        ".{}.self-update.{}.tmp.exe",
+        BIN_NAME,
+        std::process::id()
+    ));
+
+    std::fs::write(&tmp_path, new_binary)
+        .with_context(|| format!("write {}", tmp_path.display()))?;
+
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let script = windows_replacement_script(std::process::id(), &tmp_path, &target_exe, &args);
+    spawn_powershell_replacement(&script).context("spawn Windows self-update helper")?;
+    Ok(Replacement::DeferredRestart)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn replace_current_exe(_current_exe: &Path, _new_binary: &[u8]) -> Result<Replacement> {
+    anyhow::bail!("self-update replacement is only supported on Unix and Windows platforms")
+}
+
+#[cfg(any(windows, test))]
+fn windows_replacement_script(
+    parent_id: u32,
+    source: &Path,
+    target: &Path,
+    restart_args: &[OsString],
+) -> String {
+    let restart_args = restart_args
+        .iter()
+        .map(|arg| powershell_single_quoted(&arg.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r#"$ErrorActionPreference = 'Stop'
+$parentId = {parent_id}
+$source = {source}
+$target = {target}
+$restartArgs = @({restart_args})
+for ($i = 0; $i -lt 600; $i++) {{
+    try {{
+        Wait-Process -Id $parentId -Timeout 1 -ErrorAction SilentlyContinue
+    }} catch {{}}
+    try {{
+        Move-Item -LiteralPath $source -Destination $target -Force
+        Start-Process -FilePath $target -ArgumentList $restartArgs
+        exit 0
+    }} catch {{
+        Start-Sleep -Milliseconds 250
+    }}
+}}
+exit 1
+"#,
+        source = powershell_single_quoted(&source.display().to_string()),
+        target = powershell_single_quoted(&target.display().to_string()),
+    )
+}
+
+#[cfg(any(windows, test))]
+fn powershell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn spawn_powershell_replacement(script: &str) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .context("start powershell.exe")?;
     Ok(())
 }
 
+#[cfg(unix)]
 fn strip_quarantine(path: &Path) {
     #[cfg(target_os = "macos")]
     {
@@ -297,7 +438,11 @@ fn restart_current_process(current_exe: &Path) -> Result<()> {
 }
 
 fn select_mj_asset(assets: &[ReleaseAsset], platform: &Platform) -> Result<ReleaseAsset> {
-    let target_suffix = format!("-{}.tar.gz", platform.rust_target);
+    let target_suffix = format!(
+        "-{}{}",
+        platform.rust_target,
+        platform_archive_ext(platform)
+    );
     if platform.os_family == "macos"
         && let Some(asset) = assets.iter().find(|asset| {
             is_mj_archive(&asset.name) && asset.name.ends_with("-universal-apple-darwin.tar.gz")
@@ -324,7 +469,15 @@ fn select_mj_asset(assets: &[ReleaseAsset], platform: &Platform) -> Result<Relea
 }
 
 fn is_mj_archive(name: &str) -> bool {
-    name.starts_with("brokk-mjolnir-") && name.ends_with(".tar.gz")
+    name.starts_with("brokk-mjolnir-") && (name.ends_with(".tar.gz") || name.ends_with(".zip"))
+}
+
+fn platform_archive_ext(platform: &Platform) -> &'static str {
+    if platform.os_family == "windows" {
+        ".zip"
+    } else {
+        ".tar.gz"
+    }
 }
 
 fn current_platform() -> Result<Platform> {
@@ -336,6 +489,7 @@ fn current_platform() -> Result<Platform> {
     let (os_family, rust_os) = match std::env::consts::OS {
         "macos" => ("macos", "apple-darwin"),
         "linux" => ("linux", "unknown-linux-gnu"),
+        "windows" => ("windows", "pc-windows-msvc"),
         other => anyhow::bail!("unsupported OS: {other}"),
     };
 
@@ -378,6 +532,14 @@ mod tests {
         }
     }
 
+    fn windows_x64() -> Platform {
+        Platform {
+            os_family: "windows",
+            arch: "x86_64",
+            rust_target: "x86_64-pc-windows-msvc".to_string(),
+        }
+    }
+
     fn make_tar_gz(file_name: &str, content: &[u8]) -> Vec<u8> {
         use flate2::Compression;
         use flate2::write::GzEncoder;
@@ -398,6 +560,16 @@ mod tests {
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         gz.write_all(&tar_bytes).expect("gz write");
         gz.finish().expect("gz finish")
+    }
+
+    fn make_zip(file_name: &str, content: &[u8]) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file(file_name, zip::write::SimpleFileOptions::default())
+            .expect("start file");
+        writer.write_all(content).expect("zip write");
+        writer.finish().expect("finish").into_inner()
     }
 
     #[test]
@@ -424,8 +596,30 @@ mod tests {
             "brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz"
         );
         assert_eq!(
-            update.checksum_asset.expect("checksum").name,
+            update.checksum_asset.name,
             "brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256"
+        );
+    }
+
+    #[test]
+    fn release_newer_than_current_requires_checksum_asset() {
+        let release = GitHubRelease {
+            tag_name: "v0.5.0".to_string(),
+            assets: vec![asset(
+                "brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
+            )],
+        };
+
+        let err = update_info_from_release(
+            &release,
+            &Version::parse("0.4.2").expect("version"),
+            &linux_x64(),
+        )
+        .expect_err("missing checksum should fail");
+
+        assert!(
+            err.to_string()
+                .contains("missing required checksum asset brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256")
         );
     }
 
@@ -479,12 +673,41 @@ mod tests {
     }
 
     #[test]
+    fn windows_selects_zip_asset() {
+        let assets = vec![
+            asset("brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz"),
+            asset("brokk-mjolnir-v0.5.0-x86_64-pc-windows-msvc.zip"),
+        ];
+
+        let selected = select_mj_asset(&assets, &windows_x64()).expect("select");
+
+        assert_eq!(
+            selected.name,
+            "brokk-mjolnir-v0.5.0-x86_64-pc-windows-msvc.zip"
+        );
+    }
+
+    #[test]
     fn extract_mj_binary_finds_nested_binary() {
         let archive = make_tar_gz("brokk-mjolnir/bin/mj", b"binary bytes");
 
-        let binary = extract_mj_binary(&archive).expect("extract");
+        let binary = extract_mj_binary(
+            "brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
+            &archive,
+        )
+        .expect("extract");
 
         assert_eq!(binary, b"binary bytes");
+    }
+
+    #[test]
+    fn extract_mj_binary_finds_windows_zip_binary() {
+        let archive = make_zip("brokk-mjolnir/mj.exe", b"windows binary bytes");
+
+        let binary = extract_mj_binary("brokk-mjolnir-v0.5.0-x86_64-pc-windows-msvc.zip", &archive)
+            .expect("extract");
+
+        assert_eq!(binary, b"windows binary bytes");
     }
 
     #[test]
@@ -493,5 +716,70 @@ mod tests {
             sha256_hex(b"mj"),
             "a3f9e2bcd804ec65d1ea4fc63a74e7f02a08e63ffd0b803a8f250236f5602405"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_current_exe_writes_next_to_resolved_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("mj");
+        std::fs::write(&target, b"old").expect("write target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod target");
+
+        let Replacement::RestartNow(replaced) =
+            replace_current_exe(&target, b"new").expect("replace")
+        else {
+            panic!("expected immediate restart");
+        };
+
+        assert_eq!(replaced, target.canonicalize().expect("canonical target"));
+        assert_eq!(std::fs::read(&target).expect("read target"), b"new");
+        assert_eq!(
+            std::fs::metadata(&target)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_current_exe_resolves_symlink_before_replacing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("mj-real");
+        let link = dir.path().join("mj");
+        std::fs::write(&target, b"old").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let Replacement::RestartNow(replaced) =
+            replace_current_exe(&link, b"new").expect("replace")
+        else {
+            panic!("expected immediate restart");
+        };
+
+        assert_eq!(replaced, target.canonicalize().expect("canonical target"));
+        assert_eq!(std::fs::read(&target).expect("read target"), b"new");
+        assert_eq!(std::fs::read_link(&link).expect("read link"), target);
+    }
+
+    #[test]
+    fn windows_replacement_script_waits_moves_and_restarts() {
+        let script = windows_replacement_script(
+            42,
+            Path::new(r"C:\Program Files\mj\.mj.self-update.tmp.exe"),
+            Path::new(r"C:\Program Files\mj\mj.exe"),
+            &[OsString::from("say hi"), OsString::from("it'll work")],
+        );
+
+        assert!(script.contains("Wait-Process -Id $parentId -Timeout 1"));
+        assert!(script.contains("Move-Item -LiteralPath $source -Destination $target -Force"));
+        assert!(script.contains("Start-Process -FilePath $target -ArgumentList $restartArgs"));
+        assert!(script.contains("'say hi'"));
+        assert!(script.contains("'it''ll work'"));
     }
 }
