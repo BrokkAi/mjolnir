@@ -2592,30 +2592,34 @@ fn wrap_text_to_width(text: &str, width: u16) -> Vec<String> {
         }
 
         let mut line = String::new();
-        for word in raw_line.split_whitespace() {
-            let word_len = word.width();
-            if line.is_empty() {
-                if word_len <= width {
-                    line.push_str(word);
-                } else {
-                    out.extend(split_word_to_width(word, width));
+        let mut token_start = 0;
+        let mut token_whitespace = None;
+        for (idx, ch) in raw_line.char_indices() {
+            let is_whitespace = ch.is_whitespace();
+            match token_whitespace {
+                None => token_whitespace = Some(is_whitespace),
+                Some(current) if current != is_whitespace => {
+                    append_wrapped_token(
+                        &raw_line[token_start..idx],
+                        current,
+                        width,
+                        &mut line,
+                        &mut out,
+                    );
+                    token_start = idx;
+                    token_whitespace = Some(is_whitespace);
                 }
-                continue;
+                Some(_) => {}
             }
-
-            let next_len = line.width() + 1 + word_len;
-            if next_len <= width {
-                line.push(' ');
-                line.push_str(word);
-            } else {
-                out.push(line);
-                line = String::new();
-                if word_len <= width {
-                    line.push_str(word);
-                } else {
-                    out.extend(split_word_to_width(word, width));
-                }
-            }
+        }
+        if let Some(is_whitespace) = token_whitespace {
+            append_wrapped_token(
+                &raw_line[token_start..],
+                is_whitespace,
+                width,
+                &mut line,
+                &mut out,
+            );
         }
 
         if !line.is_empty() {
@@ -2629,14 +2633,57 @@ fn wrap_text_to_width(text: &str, width: u16) -> Vec<String> {
     out
 }
 
+fn append_wrapped_token(
+    token: &str,
+    is_whitespace: bool,
+    width: usize,
+    line: &mut String,
+    out: &mut Vec<String>,
+) {
+    if token.is_empty() {
+        return;
+    }
+    let token_width = token.width();
+    if token_width == 0 {
+        line.push_str(token);
+        return;
+    }
+
+    let line_width = line.width();
+    if !is_whitespace && line_width > 0 && line_width + token_width > width {
+        out.push(std::mem::take(line));
+    }
+    append_segment_to_width(token, width, line, out);
+}
+
+fn append_segment_to_width(segment: &str, width: usize, line: &mut String, out: &mut Vec<String>) {
+    if line.is_empty() {
+        let mut rows = split_word_to_width(segment, width);
+        if let Some(last) = rows.pop() {
+            out.extend(rows);
+            *line = last;
+        }
+        return;
+    }
+
+    for ch in segment.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        let line_width = line.width();
+        if line_width + ch_width > width && line_width > 0 {
+            out.push(std::mem::take(line));
+        }
+        line.push(ch);
+    }
+}
+
 fn split_word_to_width(word: &str, width: usize) -> Vec<String> {
     let mut rows = Vec::new();
     let mut row = String::new();
     for ch in word.chars() {
         let ch_width = ch.width().unwrap_or(0);
-        if row.width() + ch_width > width {
-            rows.push(row);
-            row = String::new();
+        let row_width = row.width();
+        if row_width + ch_width > width && row_width > 0 {
+            rows.push(std::mem::take(&mut row));
         }
         row.push(ch);
     }
@@ -3613,6 +3660,27 @@ mod tests {
                 "missing {expected:?}; rendered:\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn wrap_text_to_width_preserves_existing_spacing() {
+        assert_eq!(
+            wrap_text_to_width("  run   command", 80),
+            vec!["  run   command"]
+        );
+        assert_eq!(
+            wrap_text_to_width("cmd   --flag", 6),
+            vec!["cmd   ", "--flag"]
+        );
+    }
+
+    #[test]
+    fn split_word_to_width_does_not_emit_visual_blank_before_wide_char() {
+        assert_eq!(split_word_to_width("界", 1), vec!["界"]);
+        assert_eq!(
+            split_word_to_width("\u{0301}界x", 1),
+            vec!["\u{0301}界", "x"]
+        );
     }
 
     #[test]
