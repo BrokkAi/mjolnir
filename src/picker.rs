@@ -715,29 +715,24 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
         return;
     }
 
-    // Count favorites in the filtered list and build slots with optional separator.
-    let favorite_count = state
+    // Partition filtered items into favorites and others.
+    let (favorite_slots, other_slots): (Vec<Option<usize>>, Vec<Option<usize>>) = state
         .filtered
         .iter()
-        .filter(|&&i| state.item_is_favorite(&state.items[i]))
-        .count();
-    let has_separator = favorite_count > 0 && favorite_count < state.filtered.len();
+        .map(|&i| Some(i))
+        .partition(|slot| state.item_is_favorite(&state.items[slot.unwrap()]));
+    let has_separator = !favorite_slots.is_empty() && !other_slots.is_empty();
 
-    // Build slots: Some(index) for items, None for separator.
-    let mut slots: Vec<Option<usize>> = Vec::new();
-    for (pos, &i) in state.filtered.iter().enumerate() {
-        if pos == favorite_count && has_separator {
-            slots.push(None); // separator slot
-        }
-        slots.push(Some(i));
+    // Build slots: favorites, optional separator, then others.
+    let mut slots = favorite_slots;
+    if has_separator {
+        slots.push(None);
     }
+    slots.extend(other_slots);
 
-    // Translate selected index to slot index for proper centering.
-    let selected_slot = if has_separator && state.selected >= favorite_count {
-        state.selected + 1
-    } else {
-        state.selected
-    };
+    // Map the selected filtered index to its slot position for centering.
+    let selected_item = state.filtered.get(state.selected).copied();
+    let selected_slot = slots.iter().position(|&s| s == selected_item).unwrap_or(0);
 
     let visible = inner.height as usize;
     let total = slots.len();
@@ -751,17 +746,15 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
 
     let items: Vec<ListItem> = slots[start..end]
         .iter()
-        .enumerate()
-        .map(|(offset, slot)| {
-            let slot_absolute = start + offset;
-
-            // Render separator.
+        .map(|slot| {
             if slot.is_none() {
                 let label = " other ";
                 let width = inner.width as usize;
-                let sep_line = if width > label.len() + 2 {
-                    let pad = (width - label.len() - 2) / 2;
-                    format!("{}{}{}", "─".repeat(pad), label, "─".repeat(pad))
+                let sep_line = if width >= label.len() {
+                    let extra = width - label.len();
+                    let left = extra / 2;
+                    let right = extra - left;
+                    format!("{}{}{}", "─".repeat(left), label, "─".repeat(right))
                 } else {
                     "─ other ─".to_string()
                 };
@@ -770,14 +763,7 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
 
             let i = slot.unwrap();
             let item = &state.items[i];
-
-            // Translate slot index back to filtered index for selection highlighting.
-            let filtered_index = if slot_absolute > favorite_count && has_separator {
-                slot_absolute - 1
-            } else {
-                slot_absolute
-            };
-            let is_selected = filtered_index == state.selected;
+            let is_selected = Some(i) == selected_item;
 
             let marker = if is_selected { ">" } else { " " };
             let mut badges = Vec::new();
