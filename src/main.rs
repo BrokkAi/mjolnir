@@ -700,6 +700,17 @@ fn selected_to_picker_outcome(agent: &SelectedAgent) -> PickerOutcome {
     }
 }
 
+fn agent_header_label(agent: &SelectedAgent) -> String {
+    if agent.source_id == "custom" {
+        let mut words = Vec::with_capacity(agent.args.len() + 1);
+        words.push(agent.program.to_string_lossy().into_owned());
+        words.extend(agent.args.iter().cloned());
+        shell_words::join(words)
+    } else {
+        agent.source_id.clone()
+    }
+}
+
 async fn run_session(
     agent: &SelectedAgent,
     cwd: PathBuf,
@@ -738,13 +749,10 @@ async fn run_session(
     });
 
     let hist_path = history_path();
-    // Pre-fill the UI header with the configured agent's executable
-    // name so the user sees immediately which agent is wired up, without
-    // waiting for the ACP handshake to complete.
-    let agent_display_name = agent
-        .program
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned());
+    // Pre-fill the UI header with the configured agent identity. Registry
+    // agents use their source id so the header matches the picker/config,
+    // while custom agents show the exact command line being launched.
+    let agent_display_name = Some(agent_header_label(agent));
 
     let ui_result = ui::run(
         &mut terminal,
@@ -834,6 +842,33 @@ fn init_logging(path: Option<&std::path::Path>) -> Result<()> {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn agent_header_label_uses_registry_source_id() {
+        let agent = SelectedAgent {
+            source_id: "claude-acp".to_string(),
+            program: PathBuf::from("npx"),
+            args: vec!["-y".to_string(), "@x/claude@0.36.1".to_string()],
+            env: Default::default(),
+        };
+
+        assert_eq!(agent_header_label(&agent), "claude-acp");
+    }
+
+    #[test]
+    fn agent_header_label_uses_full_custom_command() {
+        let agent = SelectedAgent {
+            source_id: "custom".to_string(),
+            program: PathBuf::from("/usr/local/bin/my agent"),
+            args: vec!["--flag".to_string(), "value with space".to_string()],
+            env: Default::default(),
+        };
+
+        assert_eq!(
+            agent_header_label(&agent),
+            "'/usr/local/bin/my agent' --flag 'value with space'"
+        );
+    }
 
     #[test]
     fn parse_accepts_debug_file_aliases() {
