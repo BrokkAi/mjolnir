@@ -4059,6 +4059,58 @@ mod tests {
     }
 
     #[test]
+    fn transcript_sink_does_not_block_after_cancelled_tool_call() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        state.record_user_prompt("run tests".to_string());
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "cargo test".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::InProgress,
+                body: vec![ToolCallOutput::Text("running".to_string())],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let first_prompt: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(first_prompt, vec!["you:", "run tests", ""]);
+
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::Cancelled,
+            usage: None,
+        });
+        let cancelled_tool: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(
+            cancelled_tool,
+            vec![
+                "tool [failed] exec cargo test",
+                "  running",
+                "  [tool call ended before completion]",
+                ""
+            ]
+        );
+
+        state.record_user_prompt("next prompt".to_string());
+        let next_prompt: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(next_prompt, vec!["you:", "next prompt", ""]);
+    }
+
+    #[test]
     fn runtime_closed_keeps_transcript_scrolling_active() {
         let mut state = AppState::new();
         state.runtime_closed = true;

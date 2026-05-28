@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use agent_client_protocol::schema::{
     AvailableCommand, Diff, Plan, PlanEntry, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionUpdate, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-    ToolKind, Usage, UsageUpdate,
+    SessionConfigValueId, SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
+    ToolCallUpdate, ToolKind, Usage, UsageUpdate,
 };
 
 use crate::clipboard::ClipboardLease;
@@ -961,7 +961,7 @@ impl AppState {
                 self.update_autocomplete();
             }
             UiEvent::PromptDone { stop_reason, usage } => {
-                self.finish_prompt_turn();
+                self.finish_prompt_turn(matches!(stop_reason, StopReason::Cancelled));
                 if let Some(usage) = usage {
                     self.token_usage.apply_prompt_usage(usage);
                 }
@@ -969,7 +969,7 @@ impl AppState {
                 self.update_autocomplete();
             }
             UiEvent::PromptFailed { message } => {
-                self.finish_prompt_turn();
+                self.finish_prompt_turn(true);
                 self.record_status_message(StatusKind::Warning, message);
                 self.update_autocomplete();
             }
@@ -984,8 +984,11 @@ impl AppState {
         }
     }
 
-    fn finish_prompt_turn(&mut self) {
+    fn finish_prompt_turn(&mut self, fail_unfinished_tools: bool) {
         self.finish_turn_timer();
+        if fail_unfinished_tools {
+            self.fail_unfinished_tool_calls();
+        }
         // Drop out of Streaming/Cancelling and back to Ready when the turn
         // lands. Leave non-prompt states (Fatal, Closed, unexpected Ready)
         // untouched.
@@ -994,6 +997,27 @@ impl AppState {
             ConnectionState::Streaming | ConnectionState::Cancelling
         ) {
             self.connection_state = ConnectionState::Ready;
+        }
+    }
+
+    fn fail_unfinished_tool_calls(&mut self) {
+        let mut changed = false;
+        for view in self.tool_calls.values_mut() {
+            if matches!(
+                view.status,
+                ToolCallStatus::Pending | ToolCallStatus::InProgress
+            ) {
+                view.status = ToolCallStatus::Failed;
+                let note = "tool call ended before completion".to_string();
+                if !matches!(view.body.last(), Some(ToolCallOutput::Note(existing)) if existing == &note)
+                {
+                    view.body.push(ToolCallOutput::Note(note));
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            self.bump_transcript_revision();
         }
     }
 
@@ -1383,6 +1407,35 @@ mod tests {
             usage: None,
         });
         assert!(!s.is_streaming());
+    }
+
+    #[test]
+    fn cancelled_prompt_marks_unfinished_tool_calls_failed() {
+        let mut s = AppState::new();
+        s.record_user_prompt("run command".to_string());
+        s.tool_calls.insert(
+            "call-1".to_string(),
+            ToolCallView {
+                title: "cargo test".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::InProgress,
+                body: vec![ToolCallOutput::Text("running".to_string())],
+            },
+        );
+        s.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        s.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::Cancelled,
+            usage: None,
+        });
+
+        let view = s.tool_calls.get("call-1").expect("tool call");
+        assert_eq!(view.status, ToolCallStatus::Failed);
+        assert!(
+            view.body
+                .iter()
+                .any(|output| matches!(output, ToolCallOutput::Note(note) if note == "tool call ended before completion"))
+        );
     }
 
     #[test]
