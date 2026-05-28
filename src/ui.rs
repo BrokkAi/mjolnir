@@ -490,9 +490,7 @@ async fn run_inline_permission_modal(
         Ok(())
     })();
 
-    modal_result?;
-    restore_result?;
-    Ok(())
+    modal_result.and(restore_result)
 }
 
 fn handle_permission_modal_event(state: &mut AppState, ev: CtEvent) {
