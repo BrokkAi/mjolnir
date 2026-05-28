@@ -1,16 +1,17 @@
 //! Ratatui-based terminal UI.
 //!
-//! Owns the terminal alternate screen and the crossterm event stream.
+//! Owns the Ratatui viewport and the crossterm event stream.
 //! Pulls `UiEvent`s from the ACP runtime through `event_rx`, folds them
 //! into `AppState`, redraws on every tick, and emits `UiCommand`s back
 //! to the runtime when the user submits prompts or cancels.
 
 use std::io::{self, Stdout};
+use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agent_client_protocol::schema::AvailableCommandInput;
+use agent_client_protocol::schema::{AvailableCommandInput, ToolCallStatus};
 use anyhow::{Context, Result};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -23,12 +24,12 @@ use crossterm::terminal::{
     supports_keyboard_enhancement,
 };
 use futures::StreamExt;
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
+use ratatui::{Terminal, TerminalOptions, Viewport};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
@@ -45,11 +46,51 @@ static KEYBOARD_ENHANCEMENT_ENABLED: AtomicBool = AtomicBool::new(false);
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
 const TRANSCRIPT_SCROLL_WHEEL_STEP: usize = 3;
 const PROMPT_SIDE_PADDING: u16 = 1;
+pub const INLINE_CHAT_HEIGHT: u16 = 8;
+const INLINE_PERMISSION_MODAL_COOLDOWN: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiMode {
+    InlineChat,
+    FullscreenTui,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalRequest {
     None,
     ToggleTextSelectionMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalFeature {
+    RawMode,
+    KeyboardEnhancement,
+    AlternateScreen,
+    MouseCapture,
+    BracketedPaste,
+}
+
+fn terminal_setup_features(
+    mode: UiMode,
+    keyboard_enhancement_supported: bool,
+) -> Vec<TerminalFeature> {
+    let mut features = vec![TerminalFeature::RawMode];
+    if keyboard_enhancement_supported {
+        features.push(TerminalFeature::KeyboardEnhancement);
+    }
+    match mode {
+        UiMode::InlineChat => {
+            features.push(TerminalFeature::BracketedPaste);
+        }
+        UiMode::FullscreenTui => {
+            features.extend([
+                TerminalFeature::AlternateScreen,
+                TerminalFeature::MouseCapture,
+                TerminalFeature::BracketedPaste,
+            ]);
+        }
+    }
+    features
 }
 
 #[derive(Debug, Default)]
@@ -72,6 +113,96 @@ struct TranscriptCache {
     line_count: usize,
 }
 
+#[derive(Debug, Default)]
+struct TranscriptSink {
+    emitted_entries: usize,
+}
+
+#[derive(Debug, Default)]
+struct PermissionModalCooldown {
+    pending_key: Option<String>,
+    show_at: Option<Instant>,
+}
+
+impl PermissionModalCooldown {
+    fn reset(&mut self) {
+        self.pending_key = None;
+        self.show_at = None;
+    }
+
+    fn sync(&mut self, state: &AppState, now: Instant) {
+        let pending_key = pending_permission_key(state);
+        match pending_key {
+            Some(key) if self.pending_key.as_deref() == Some(key.as_str()) => {}
+            Some(key) => {
+                self.pending_key = Some(key);
+                self.show_at = Some(now + INLINE_PERMISSION_MODAL_COOLDOWN);
+            }
+            None => self.reset(),
+        }
+    }
+
+    fn is_waiting(&mut self, state: &AppState, now: Instant) -> bool {
+        self.sync(state, now);
+        state.has_pending_permission() && !self.deadline_elapsed(now)
+    }
+
+    fn is_ready(&mut self, state: &AppState, now: Instant) -> bool {
+        self.sync(state, now);
+        self.deadline_elapsed(now)
+    }
+
+    fn deadline_elapsed(&self, now: Instant) -> bool {
+        self.show_at.is_some_and(|show_at| now >= show_at)
+    }
+}
+
+fn pending_permission_key(state: &AppState) -> Option<String> {
+    state
+        .pending_permission()
+        .map(|pending| pending.prompt.tool_call.tool_call_id.to_string())
+}
+
+impl TranscriptSink {
+    fn pending_lines(&mut self, state: &AppState, width: u16) -> Vec<Line<'static>> {
+        let stable_entries = stable_transcript_entry_count(state);
+        if stable_entries <= self.emitted_entries {
+            return Vec::new();
+        }
+        let lines =
+            render_transcript_entry_range(state, width, self.emitted_entries..stable_entries);
+        self.emitted_entries = stable_entries;
+        lines
+    }
+}
+
+fn stable_transcript_entry_count(state: &AppState) -> usize {
+    let mut stable = 0;
+    for (idx, entry) in state.transcript.iter().enumerate() {
+        if transcript_entry_is_stable(state, idx, entry) {
+            stable = idx + 1;
+        } else {
+            break;
+        }
+    }
+    stable
+}
+
+fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bool {
+    match entry {
+        Entry::UserPrompt(_) | Entry::System(_) | Entry::Plan(_) => true,
+        Entry::AgentMessage(_) | Entry::AgentThought(_) => {
+            !(state.is_streaming() && idx + 1 == state.transcript.len())
+        }
+        Entry::ToolCall(id) => state.tool_calls.get(id).is_some_and(|view| {
+            matches!(
+                view.status,
+                ToolCallStatus::Completed | ToolCallStatus::Failed
+            )
+        }),
+    }
+}
+
 impl TranscriptScrollState {
     /// Preserve the visible transcript when new wrapped lines arrive
     /// or the terminal is resized.
@@ -92,8 +223,8 @@ impl TranscriptScrollState {
 }
 
 /// Run the UI loop until the user quits or asks for a new session. The
-/// caller owns the terminal lifecycle (see `setup_terminal` /
-/// `restore_terminal`) so the picker can reuse the same alt-screen.
+/// caller owns the terminal lifecycle (`setup_fullscreen_terminal` or
+/// `setup_inline_chat_terminal`, with the matching restore function).
 /// Returns the reason the loop exited so `main` knows whether to
 /// terminate or run the picker again.
 ///
@@ -108,6 +239,7 @@ pub async fn run(
     worktree_label: Option<String>,
     initial_agent_label: Option<String>,
     history_path: Option<&Path>,
+    mode: UiMode,
 ) -> Result<(UiExitReason, Option<String>)> {
     let initial_history = history_path.map(config::load_history).unwrap_or_default();
     let (reason, session_id, history) = ui_loop(
@@ -117,6 +249,7 @@ pub async fn run(
         worktree_label,
         initial_agent_label,
         initial_history,
+        mode,
     )
     .await?;
     if let Some(path) = history_path
@@ -147,6 +280,7 @@ async fn ui_loop(
     worktree_label: Option<String>,
     initial_agent_label: Option<String>,
     initial_history: Vec<String>,
+    mode: UiMode,
 ) -> Result<(UiExitReason, Option<String>, Vec<String>)> {
     let mut state = AppState::new();
     state.set_prompt_history(initial_history);
@@ -155,6 +289,8 @@ async fn ui_loop(
         state.agent_label = label;
     }
     let mut transcript_scroll = TranscriptScrollState::default();
+    let mut transcript_sink = TranscriptSink::default();
+    let mut permission_modal_cooldown = PermissionModalCooldown::default();
     let mut crossterm_events = EventStream::new();
     // Wake-up timer so we still get scheduled to draw when no events
     // arrive (e.g. while waiting on the agent). `Delay` keeps it from
@@ -162,7 +298,7 @@ async fn ui_loop(
     let mut frame_tick = tokio::time::interval(FRAME_BUDGET);
     frame_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
+    terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll, mode))?;
     let mut last_draw = Instant::now();
     let mut dirty = false;
 
@@ -172,8 +308,12 @@ async fn ui_loop(
             maybe_ct = crossterm_events.next() => {
                 match maybe_ct {
                     Some(Ok(ev)) => {
-                        let request = handle_crossterm(&mut state, cmd_tx, ev);
-                        apply_terminal_request(terminal, &mut state, request)?;
+                        let waiting_for_inline_permission_modal = mode == UiMode::InlineChat
+                            && permission_modal_cooldown.is_waiting(&state, Instant::now());
+                        if !waiting_for_inline_permission_modal {
+                            let request = handle_crossterm(&mut state, cmd_tx, ev, mode);
+                            apply_terminal_request(terminal, &mut state, request)?;
+                        }
                     }
                     Some(Err(e)) => {
                         state.record_status_message(
@@ -206,12 +346,29 @@ async fn ui_loop(
             }
         }
 
+        if mode == UiMode::InlineChat {
+            flush_transcript_to_scrollback(terminal, &mut transcript_sink, &state)?;
+            if permission_modal_cooldown.is_ready(&state, Instant::now()) {
+                run_inline_permission_modal(terminal, event_rx, &mut crossterm_events, &mut state)
+                    .await?;
+                permission_modal_cooldown.reset();
+                flush_transcript_to_scrollback(terminal, &mut transcript_sink, &state)?;
+                dirty = false;
+                last_draw = Instant::now();
+            }
+        }
+
         if let Some(reason) = state.exit_reason {
             let _ = cmd_tx.send(UiCommand::Shutdown);
-            terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
-            reset_text_selection_mode_for_exit(&mut state, |enabled| {
-                set_mouse_capture(terminal, enabled)
-            })?;
+            if mode == UiMode::InlineChat {
+                flush_transcript_to_scrollback(terminal, &mut transcript_sink, &state)?;
+            }
+            terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll, mode))?;
+            if mode == UiMode::FullscreenTui {
+                reset_text_selection_mode_for_exit(&mut state, |enabled| {
+                    set_mouse_capture(terminal, enabled)
+                })?;
+            }
             return Ok((reason, state.session_id.clone(), state.prompt_history()));
         }
 
@@ -220,12 +377,16 @@ async fn ui_loop(
         // the timer), this elapsed-time check is what actually paces
         // the redraws; the timer arm is the wake-up source when idle.
         if dirty && last_draw.elapsed() >= FRAME_BUDGET {
-            terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll))?;
+            terminal.draw(|f| draw(f, &mut state, &mut transcript_scroll, mode))?;
             dirty = false;
             last_draw = Instant::now();
         }
     }
-    reset_text_selection_mode_for_exit(&mut state, |enabled| set_mouse_capture(terminal, enabled))?;
+    if mode == UiMode::FullscreenTui {
+        reset_text_selection_mode_for_exit(&mut state, |enabled| {
+            set_mouse_capture(terminal, enabled)
+        })?;
+    }
     Ok((UiExitReason::Quit, None, state.prompt_history()))
 }
 
@@ -239,10 +400,124 @@ fn needs_live_redraw(state: &AppState) -> bool {
     )
 }
 
+fn flush_transcript_to_scrollback(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    sink: &mut TranscriptSink,
+    state: &AppState,
+) -> Result<()> {
+    let width = terminal.size()?.width;
+    if width == 0 {
+        return Ok(());
+    }
+    let lines = sink.pending_lines(state, width);
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let height = Paragraph::new(lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .min(u16::MAX as usize) as u16;
+    if height == 0 {
+        return Ok(());
+    }
+    terminal.insert_before(height, |buf| {
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(buf.area, buf);
+    })?;
+    Ok(())
+}
+
+async fn run_inline_permission_modal(
+    inline_terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
+    crossterm_events: &mut EventStream,
+    state: &mut AppState,
+) -> Result<()> {
+    let Some(active_permission_key) = pending_permission_key(state) else {
+        return Ok(());
+    };
+
+    execute!(inline_terminal.backend_mut(), EnterAlternateScreen)
+        .context("enter permission modal screen")?;
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut modal_terminal = Terminal::new(backend).context("permission modal terminal")?;
+    modal_terminal.clear().context("clear permission modal")?;
+
+    let modal_result: Result<()> = async {
+        modal_terminal.draw(|f| draw_permission_modal_screen(f, state))?;
+        while pending_permission_key(state).as_deref() == Some(active_permission_key.as_str())
+            && state.exit_reason.is_none()
+        {
+            tokio::select! {
+                biased;
+                maybe_ct = crossterm_events.next() => {
+                    match maybe_ct {
+                        Some(Ok(ev)) => {
+                            handle_permission_modal_event(state, ev);
+                        }
+                        Some(Err(e)) => {
+                            state.record_status_message(
+                                StatusKind::Warning,
+                                format!("input error: {e}"),
+                            );
+                        }
+                        None => break,
+                    }
+                }
+                maybe_ev = event_rx.recv(), if !state.runtime_closed => {
+                    match maybe_ev {
+                        Some(ev) => state.apply_event(ev),
+                        None => state.mark_runtime_closed(),
+                    }
+                }
+            }
+            if pending_permission_key(state).as_deref() == Some(active_permission_key.as_str()) {
+                modal_terminal.draw(|f| draw_permission_modal_screen(f, state))?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    let restore_result: Result<()> = (|| {
+        modal_terminal.show_cursor()?;
+        execute!(modal_terminal.backend_mut(), LeaveAlternateScreen)
+            .context("leave permission modal screen")?;
+        inline_terminal.clear().context("clear inline terminal")?;
+        let mut inline_scroll = TranscriptScrollState::default();
+        inline_terminal.draw(|f| draw(f, state, &mut inline_scroll, UiMode::InlineChat))?;
+        Ok(())
+    })();
+
+    modal_result?;
+    restore_result?;
+    Ok(())
+}
+
+fn handle_permission_modal_event(state: &mut AppState, ev: CtEvent) {
+    let CtEvent::Key(key) = ev else {
+        return;
+    };
+    if key.kind != KeyEventKind::Press {
+        return;
+    }
+    handle_permission_key(state, key.code);
+}
+
+fn draw_permission_modal_screen(f: &mut ratatui::Frame, state: &AppState) {
+    let area = f.area();
+    f.render_widget(Clear, area);
+    if let Some(pending) = state.pending_permission() {
+        draw_permission_modal(f, area, pending, state.pending_permission_count());
+    }
+}
+
 fn handle_crossterm(
     state: &mut AppState,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     ev: CtEvent,
+    mode: UiMode,
 ) -> TerminalRequest {
     let key = match ev {
         CtEvent::Key(k) => k,
@@ -261,7 +536,9 @@ fn handle_crossterm(
             return TerminalRequest::None;
         }
         CtEvent::Mouse(mouse) => {
-            handle_mouse(state, mouse);
+            if mode == UiMode::FullscreenTui {
+                handle_mouse(state, mouse);
+            }
             return TerminalRequest::None;
         }
         _ => return TerminalRequest::None,
@@ -270,7 +547,10 @@ fn handle_crossterm(
         return TerminalRequest::None;
     }
 
-    if is_text_selection_key(key.modifiers, key.code) && can_toggle_text_selection_mode(state) {
+    if mode == UiMode::FullscreenTui
+        && is_text_selection_key(key.modifiers, key.code)
+        && can_toggle_text_selection_mode(state)
+    {
         return TerminalRequest::ToggleTextSelectionMode;
     }
 
@@ -300,20 +580,20 @@ fn handle_crossterm(
             (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
                 copy_last_agent_message(state);
             }
-            (_, KeyCode::PageUp) => {
+            (_, KeyCode::PageUp) if mode == UiMode::FullscreenTui => {
                 state.scroll_offset = state.scroll_offset.saturating_add(5);
             }
-            (_, KeyCode::PageDown) => {
+            (_, KeyCode::PageDown) if mode == UiMode::FullscreenTui => {
                 state.scroll_offset = state.scroll_offset.saturating_sub(5);
             }
-            (_, KeyCode::Up) => {
+            (_, KeyCode::Up) if mode == UiMode::FullscreenTui => {
                 state.scroll_offset = state.scroll_offset.saturating_add(1);
             }
-            (_, KeyCode::Down) => {
+            (_, KeyCode::Down) if mode == UiMode::FullscreenTui => {
                 state.scroll_offset = state.scroll_offset.saturating_sub(1);
             }
-            (_, KeyCode::Home) => scroll_to_top(state),
-            (_, KeyCode::End) => scroll_to_bottom(state),
+            (_, KeyCode::Home) if mode == UiMode::FullscreenTui => scroll_to_top(state),
+            (_, KeyCode::End) if mode == UiMode::FullscreenTui => scroll_to_bottom(state),
             _ => {}
         }
         return TerminalRequest::None;
@@ -365,7 +645,7 @@ fn handle_crossterm(
         }
     }
 
-    if key.modifiers == KeyModifiers::CONTROL {
+    if mode == UiMode::FullscreenTui && key.modifiers == KeyModifiers::CONTROL {
         match key.code {
             KeyCode::PageUp => {
                 state.scroll_offset = state
@@ -1243,11 +1523,14 @@ fn config_shortcut_key(modifiers: KeyModifiers, code: KeyCode) -> Option<char> {
     }
 }
 
-pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+pub fn setup_fullscreen_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
 
-    if matches!(supports_keyboard_enhancement(), Ok(true)) {
+    let keyboard_supported = matches!(supports_keyboard_enhancement(), Ok(true));
+    if terminal_setup_features(UiMode::FullscreenTui, keyboard_supported)
+        .contains(&TerminalFeature::KeyboardEnhancement)
+    {
         execute!(
             stdout,
             PushKeyboardEnhancementFlags(
@@ -1273,7 +1556,9 @@ pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     Ok(terminal)
 }
 
-pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+pub fn restore_fullscreen_terminal(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> Result<()> {
     if KEYBOARD_ENHANCEMENT_ENABLED.swap(false, Ordering::SeqCst) {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
     }
@@ -1288,6 +1573,53 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
     Ok(())
 }
 
+pub fn setup_inline_chat_terminal(
+    initial_height: u16,
+) -> Result<Terminal<CrosstermBackend<Stdout>>> {
+    enable_raw_mode().context("enable raw mode")?;
+    let mut stdout = io::stdout();
+
+    let keyboard_supported = matches!(supports_keyboard_enhancement(), Ok(true));
+    if terminal_setup_features(UiMode::InlineChat, keyboard_supported)
+        .contains(&TerminalFeature::KeyboardEnhancement)
+    {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        )
+        .context("enable keyboard enhancement")?;
+        KEYBOARD_ENHANCEMENT_ENABLED.store(true, Ordering::SeqCst);
+    }
+
+    execute!(stdout, EnableBracketedPaste).context("enable bracketed paste")?;
+    let backend = CrosstermBackend::new(stdout);
+    let terminal = Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Inline(initial_height),
+        },
+    )
+    .context("ratatui inline terminal")?;
+    Ok(terminal)
+}
+
+pub fn restore_inline_chat_terminal(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> Result<()> {
+    if KEYBOARD_ENHANCEMENT_ENABLED.swap(false, Ordering::SeqCst) {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
+    execute!(terminal.backend_mut(), DisableBracketedPaste)?;
+    disable_raw_mode()?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
 /// Minimum input box height: three text rows between top and bottom borders.
 const MIN_INPUT_HEIGHT: u16 = 5;
 /// Maximum input box height so the transcript stays usable even when
@@ -1298,7 +1630,13 @@ fn draw(
     f: &mut ratatui::Frame,
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
+    mode: UiMode,
 ) {
+    if mode == UiMode::InlineChat {
+        draw_inline_chat(f, state);
+        return;
+    }
+
     let has_config_options = !state.selectable_config_options().is_empty();
 
     // Dynamic input height: borders (2) + chip rows + text lines, clamped.
@@ -1319,7 +1657,7 @@ fn draw(
 
     draw_transcript(f, chunks[0], state, transcript_scroll);
     draw_header(f, chunks[1], state);
-    draw_input(f, chunks[2], state);
+    draw_input(f, chunks[2], state, mode);
     draw_config_shortcuts_row(f, chunks[3], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
@@ -1339,7 +1677,36 @@ fn draw(
     }
 
     if state.help_overlay {
-        draw_help_modal(f, f.area());
+        draw_help_modal(f, f.area(), mode);
+    }
+}
+
+fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
+    let has_config_options = !state.selectable_config_options().is_empty();
+    let config_height = if has_config_options { 1 } else { 0 };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(MIN_INPUT_HEIGHT),
+            Constraint::Length(config_height),
+        ])
+        .split(f.area());
+
+    draw_header(f, chunks[0], state);
+    draw_input(f, chunks[1], state, UiMode::InlineChat);
+    draw_config_shortcuts_row(f, chunks[2], state);
+
+    if state.autocomplete.visible && !state.has_pending_permission() {
+        draw_inline_autocomplete_popover(f, f.area(), state);
+    }
+
+    if state.config_picker.is_some() {
+        draw_config_value_picker_modal(f, f.area(), state);
+    }
+
+    if state.help_overlay {
+        draw_help_modal(f, f.area(), UiMode::InlineChat);
     }
 }
 
@@ -1572,13 +1939,21 @@ fn transcript_block_title(state: &AppState) -> String {
 }
 
 fn render_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
+    render_transcript_entry_range(state, width, 0..state.transcript.len())
+}
+
+fn render_transcript_entry_range(
+    state: &AppState,
+    width: u16,
+    entry_range: Range<usize>,
+) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     let collapse_limit = if state.expand_tool_outputs {
         None
     } else {
         Some(TOOL_OUTPUT_COLLAPSED_LINES)
     };
-    for entry in &state.transcript {
+    for entry in state.transcript[entry_range].iter() {
         match entry {
             Entry::UserPrompt(text) => push_plain_block(&mut out, "you", Color::Cyan, text.clone()),
             Entry::AgentMessage(text) => {
@@ -2188,11 +2563,16 @@ fn input_cursor_position(
     (cursor_x, cursor_y)
 }
 
-fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let text_selection_hint = if state.text_selection_mode {
-        "F12 resume wheel"
-    } else {
-        "F12 select text"
+fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode) {
+    let text_selection_hint = match mode {
+        UiMode::InlineChat => String::new(),
+        UiMode::FullscreenTui => {
+            if state.text_selection_mode {
+                " | F12 resume wheel".to_string()
+            } else {
+                " | F12 select text".to_string()
+            }
+        }
     };
     let title = if state.runtime_closed {
         " runtime closed (Ctrl-C to quit) ".to_string()
@@ -2200,7 +2580,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
         format!(
-            " prompt (Ctrl-N new session | Ctrl-O load session | Enter to send | {PROMPT_NEWLINE_HINT} for newline | Ctrl-C to quit | {text_selection_hint}) "
+            " prompt (Ctrl-N new session | Ctrl-O load session | Enter to send | {PROMPT_NEWLINE_HINT} for newline | Ctrl-C to quit{text_selection_hint}) "
         )
     };
     let style = if state.runtime_closed || state.is_streaming() {
@@ -2311,7 +2691,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         && !state.has_pending_permission()
         && state.config_picker.is_none()
         && !state.help_overlay
-        && !state.text_selection_mode
+        && (mode == UiMode::InlineChat || !state.text_selection_mode)
     {
         let (cursor_x, cursor_y) = input_cursor_position(
             content_area,
@@ -2392,7 +2772,7 @@ fn draw_permission_modal(
 
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
-    let rect = Rect::new(x, y, width, height);
+    let rect = Rect::new(area.x + x, area.y + y, width, height);
 
     f.render_widget(Clear, rect);
     // Surface queue depth so the user knows another prompt is waiting
@@ -2451,7 +2831,7 @@ fn draw_permission_modal(
     f.render_widget(footer, layout[2]);
 }
 
-fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
+fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
     let width = area.width.saturating_sub(8).min(82);
     let height = 22.min(area.height.saturating_sub(4));
     if width < 40 || height < 10 {
@@ -2459,7 +2839,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
     }
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
-    let rect = Rect::new(x, y, width, height);
+    let rect = Rect::new(area.x + x, area.y + y, width, height);
 
     f.render_widget(Clear, rect);
     let block = Block::default()
@@ -2469,7 +2849,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![Span::styled(
             "General",
             Style::default().add_modifier(Modifier::BOLD),
@@ -2489,7 +2869,6 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
         Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
         Line::from("  Ctrl-Y           copy last agent message to clipboard"),
-        Line::from("  F12              toggle mouse text selection / wheel scrolling"),
         Line::from("  Esc              clear input, chips, and browsing history"),
         Line::from(""),
         Line::from(vec![Span::styled(
@@ -2498,12 +2877,20 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
         )]),
         Line::from("  Backspace / Esc / Enter  remove chip / clear / send chips + input"),
         Line::from(""),
-        Line::from(vec![Span::styled(
-            "Scroll transcript",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  Wheel / Ctrl+Up/Down / Ctrl+PageUp/Down / Ctrl+Home/End / Ctrl-T"),
-        Line::from(""),
+    ];
+    if mode == UiMode::FullscreenTui {
+        lines.extend([
+            Line::from("  F12              toggle mouse text selection / wheel scrolling"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Scroll transcript",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("  Wheel / Ctrl+Up/Down / Ctrl+PageUp/Down / Ctrl+Home/End / Ctrl-T"),
+            Line::from(""),
+        ]);
+    }
+    lines.extend([
         Line::from(vec![Span::styled(
             "Overlays",
             Style::default().add_modifier(Modifier::BOLD),
@@ -2517,7 +2904,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  F1..F9 / Ctrl-1..9 / Up/Down  edit or move inside choices"),
         Line::from(""),
         Line::from("Built-in commands: /new starts a session; /load opens session picker"),
-    ];
+    ]);
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(paragraph, inner);
@@ -2555,7 +2942,7 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     let width = area.width.saturating_sub(8).min(90);
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
-    let rect = Rect::new(x, y, width, height);
+    let rect = Rect::new(area.x + x, area.y + y, width, height);
 
     f.render_widget(Clear, rect);
     let block = Block::default()
@@ -2731,6 +3118,64 @@ fn draw_autocomplete_popover(f: &mut ratatui::Frame, input_area: Rect, state: &A
     f.render_widget(list, inner);
 }
 
+fn draw_inline_autocomplete_popover(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let max_visible_rows = 8u16;
+    let desired_rows = (state.autocomplete.matches.len() as u16).min(max_visible_rows);
+    if desired_rows == 0 || area.height < 4 {
+        return;
+    }
+    let height = (desired_rows + 2).min(area.height.saturating_sub(1));
+    if height < 3 {
+        return;
+    }
+    let rect = Rect::new(area.x, area.y, area.width, height);
+
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" commands (Tab/Enter accept, Esc cancel) ")
+        .style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let visible_rows = usize::from(inner.height);
+    let total = state.autocomplete.matches.len();
+    let selected = state.autocomplete.selected;
+    let start = if total <= visible_rows {
+        0
+    } else {
+        let half = visible_rows / 2;
+        selected.saturating_sub(half).min(total - visible_rows)
+    };
+    let end = (start + visible_rows).min(total);
+
+    let items: Vec<ListItem> = state.autocomplete.matches[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, &cmd_idx)| {
+            let absolute = start + offset;
+            let cmd = &state.available_commands[cmd_idx];
+            let marker = if absolute == selected { ">" } else { " " };
+            let hint = cmd
+                .input
+                .as_ref()
+                .map(|i| match i {
+                    AvailableCommandInput::Unstructured(u) => format!(" <{}>", u.hint),
+                    _ => String::new(),
+                })
+                .unwrap_or_default();
+            let mut line = format!("{marker} /{}{hint}", cmd.name);
+            let description = cmd.description.trim();
+            if !description.is_empty() {
+                line.push_str("  -- ");
+                line.push_str(description);
+            }
+            truncate_line(line, inner.width, marker == ">")
+        })
+        .collect();
+    f.render_widget(List::new(items), inner);
+}
+
 fn truncate_line(line: String, width: u16, selected: bool) -> ListItem<'static> {
     let cap = width as usize;
     let mut line = if line.chars().count() > cap {
@@ -2777,11 +3222,13 @@ mod tests {
 
     use super::*;
     use agent_client_protocol::schema::{
-        PermissionOption, PermissionOptionKind, SessionConfigOption, SessionConfigSelectOption,
-        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind, SessionConfigOption,
+        SessionConfigSelectOption, SessionUpdate, StopReason, TextContent, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::layout::Position;
 
     fn key(code: KeyCode) -> CtEvent {
         key_with_modifiers(code, KeyModifiers::NONE)
@@ -2798,6 +3245,18 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    fn text_chunk(s: &str) -> ContentChunk {
+        ContentChunk::new(ContentBlock::Text(TextContent::new(s)))
+    }
+
+    fn handle_crossterm(
+        state: &mut AppState,
+        cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+        ev: CtEvent,
+    ) -> TerminalRequest {
+        super::handle_crossterm(state, cmd_tx, ev, UiMode::FullscreenTui)
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -2858,6 +3317,63 @@ mod tests {
 
         assert_eq!(state.input, "keep");
         assert!(state.exit_reason.is_none());
+    }
+
+    #[test]
+    fn terminal_setup_features_keep_inline_out_of_alt_screen_and_mouse_capture() {
+        let inline = terminal_setup_features(UiMode::InlineChat, true);
+        assert!(inline.contains(&TerminalFeature::RawMode));
+        assert!(inline.contains(&TerminalFeature::KeyboardEnhancement));
+        assert!(inline.contains(&TerminalFeature::BracketedPaste));
+        assert!(!inline.contains(&TerminalFeature::AlternateScreen));
+        assert!(!inline.contains(&TerminalFeature::MouseCapture));
+
+        let fullscreen = terminal_setup_features(UiMode::FullscreenTui, true);
+        assert!(fullscreen.contains(&TerminalFeature::AlternateScreen));
+        assert!(fullscreen.contains(&TerminalFeature::MouseCapture));
+    }
+
+    #[test]
+    fn inline_chat_draw_survives_nonzero_viewport_origin_after_insert_before() {
+        let mut backend = TestBackend::new(80, 24);
+        backend
+            .set_cursor_position(Position::new(0, 20))
+            .expect("cursor position");
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(INLINE_CHAT_HEIGHT),
+            },
+        )
+        .expect("terminal");
+        let mut state = AppState::new();
+        let mut transcript_scroll = TranscriptScrollState::default();
+
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &mut transcript_scroll,
+                    UiMode::InlineChat,
+                )
+            })
+            .expect("initial draw");
+        terminal
+            .insert_before(2, |buf| {
+                Paragraph::new(vec![Line::from("one"), Line::from("two")]).render(buf.area, buf);
+            })
+            .expect("insert before");
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &mut transcript_scroll,
+                    UiMode::InlineChat,
+                )
+            })
+            .expect("draw after insert");
     }
 
     #[test]
@@ -3059,6 +3575,121 @@ mod tests {
     }
 
     #[test]
+    fn transcript_sink_emits_each_stable_entry_once() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        state.push_system_message("first");
+        let first: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(first, vec!["first", ""]);
+
+        assert!(sink.pending_lines(&state, 80).is_empty());
+
+        state.push_system_message("second");
+        let second: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(second, vec!["second", ""]);
+    }
+
+    #[test]
+    fn permission_modal_cooldown_waits_two_seconds_per_prompt() {
+        let mut state = AppState::new();
+        let mut cooldown = PermissionModalCooldown::default();
+        let now = Instant::now();
+
+        assert!(!cooldown.is_waiting(&state, now));
+        assert!(!cooldown.is_ready(&state, now));
+
+        let pending =
+            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
+        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+
+        assert!(cooldown.is_waiting(&state, now));
+        assert!(!cooldown.is_ready(&state, now + INLINE_PERMISSION_MODAL_COOLDOWN / 2));
+        assert!(cooldown.is_ready(&state, now + INLINE_PERMISSION_MODAL_COOLDOWN));
+
+        cooldown.reset();
+        assert!(cooldown.is_waiting(&state, now + INLINE_PERMISSION_MODAL_COOLDOWN));
+        assert!(cooldown.is_ready(&state, now + INLINE_PERMISSION_MODAL_COOLDOWN * 2));
+    }
+
+    #[test]
+    fn transcript_sink_emits_stable_prefix_during_streaming_turn() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        state.record_user_prompt("hello".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("world"),
+        )));
+
+        let prompt: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(prompt, vec!["you:", "hello", ""]);
+        assert!(sink.pending_lines(&state, 80).is_empty());
+
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        let rendered: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(rendered, vec!["agent:", "world", ""]);
+        assert!(sink.pending_lines(&state, 80).is_empty());
+    }
+
+    #[test]
+    fn transcript_sink_emits_completed_tool_call_during_streaming_turn() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        state.record_user_prompt("run tests".to_string());
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "cargo test".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::InProgress,
+                body: vec![ToolCallOutput::Text("running".to_string())],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let prompt: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(prompt, vec!["you:", "run tests", ""]);
+        assert!(sink.pending_lines(&state, 80).is_empty());
+
+        let view = state.tool_calls.get_mut("call-1").expect("tool call");
+        view.status = ToolCallStatus::Completed;
+        view.body = vec![ToolCallOutput::Text("ok".to_string())];
+
+        let rendered: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(rendered, vec!["tool [done] exec cargo test", "  ok", ""]);
+        assert!(sink.pending_lines(&state, 80).is_empty());
+    }
+
+    #[test]
     fn runtime_closed_keeps_transcript_scrolling_active() {
         let mut state = AppState::new();
         state.runtime_closed = true;
@@ -3104,6 +3735,49 @@ mod tests {
         let request = handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(12)));
 
         assert_eq!(request, TerminalRequest::ToggleTextSelectionMode);
+    }
+
+    #[test]
+    fn inline_mode_ignores_mouse_wheel_and_f12_selection_toggle() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        super::handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            mouse(MouseEventKind::ScrollUp),
+            UiMode::InlineChat,
+        );
+        assert_eq!(state.scroll_offset, 0);
+
+        let request =
+            super::handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(12)), UiMode::InlineChat);
+        assert_eq!(request, TerminalRequest::None);
+        assert!(!state.text_selection_mode);
+    }
+
+    #[test]
+    fn inline_mode_does_not_scroll_transcript_with_keyboard_shortcuts() {
+        let mut state = AppState::new();
+        state.runtime_closed = true;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        super::handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key(KeyCode::PageUp),
+            UiMode::InlineChat,
+        );
+        assert_eq!(state.scroll_offset, 0);
+
+        state.runtime_closed = false;
+        super::handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Up, KeyModifiers::CONTROL),
+            UiMode::InlineChat,
+        );
+        assert_eq!(state.scroll_offset, 0);
     }
 
     #[test]
@@ -3335,7 +4009,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw_input(frame, frame.area(), &state))
+            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::FullscreenTui))
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -3347,13 +4021,95 @@ mod tests {
 
         state.text_selection_mode = true;
         terminal
-            .draw(|frame| draw_input(frame, frame.area(), &state))
+            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::FullscreenTui))
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
             rendered.contains("F12 resume wheel"),
             "rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn inline_input_title_omits_text_selection_shortcut() {
+        let state = AppState::new();
+        let backend = TestBackend::new(140, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::InlineChat))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("Ctrl-C to quit"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("F12"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn inline_chat_does_not_render_permission_modal() {
+        let pending =
+            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+        let backend = TestBackend::new(100, INLINE_CHAT_HEIGHT);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            !rendered.contains("permission request"),
+            "inline renderer must not draw permission UI; rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("run shell command"),
+            "inline renderer must not draw permission UI; rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Allow once"),
+            "inline renderer must not draw permission UI; rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn inline_permission_modal_screen_is_blank_except_modal() {
+        let pending =
+            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
+        let mut state = AppState::new();
+        state.agent_label = "anvil".to_string();
+        state.record_user_prompt("hello".to_string());
+        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_permission_modal_screen(frame, &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("permission request"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("run shell command"),
+            "rendered:\n{rendered}"
+        );
+        assert!(rendered.contains("Allow once"), "rendered:\n{rendered}");
+        assert!(
+            !rendered.contains("agent anvil"),
+            "modal screen must not render the chat header; rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("prompt ("),
+            "modal screen must not render the prompt editor; rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("you:"),
+            "modal screen must not render the transcript pane; rendered:\n{rendered}"
         );
     }
 

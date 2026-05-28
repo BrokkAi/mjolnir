@@ -29,6 +29,7 @@ use crate::app::UiExitReason;
 use crate::config::{Config, SelectedAgent, history_path};
 use crate::picker::{PickerOutcome, PickerPreferences, PickerResult};
 use crate::session::SessionEntryJson;
+use crate::ui::UiMode;
 use crate::worktree::CreatedWorktree;
 
 #[derive(Debug, Parser)]
@@ -62,6 +63,10 @@ struct Cli {
     /// the current directory.
     #[arg(long)]
     cwd: Option<PathBuf>,
+
+    /// Use the legacy alternate-screen full-screen chat TUI.
+    #[arg(long)]
+    fullscreen_tui: bool,
 
     /// Resume an existing ACP session in headless mode instead of
     /// opening a new one.
@@ -133,6 +138,10 @@ struct ResumeArgs {
     /// Capture the agent subprocess's stderr to this file.
     #[arg(long, env = "BROKK_TUI_AGENT_STDERR")]
     agent_stderr: Option<PathBuf>,
+
+    /// Use the legacy alternate-screen full-screen chat TUI.
+    #[arg(long)]
+    fullscreen_tui: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -171,13 +180,23 @@ impl From<HeadlessPermissionMode> for headless::PermissionMode {
     }
 }
 
+fn ui_mode(fullscreen_tui: bool) -> UiMode {
+    if fullscreen_tui {
+        UiMode::FullscreenTui
+    } else {
+        UiMode::InlineChat
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.log_file.as_deref())?;
+    let fullscreen_tui = cli.fullscreen_tui;
 
     // Dispatch to subcommand if provided.
-    if let Some(Commands::Resume(args)) = cli.command {
+    if let Some(Commands::Resume(mut args)) = cli.command {
+        args.fullscreen_tui |= fullscreen_tui;
         return run_resume(args).await;
     }
 
@@ -202,23 +221,15 @@ async fn main() -> Result<()> {
     let (cwd, worktree) = prepare_worktree_for_arg(cwd, cli.worktree.as_deref())?;
     let worktree_label = worktree_label(worktree.as_ref());
 
-    let mut terminal = ui::setup_terminal().context("setup terminal")?;
-
-    // Run the application; ensure the terminal is restored even on
-    // error so the user's shell isn't left in alt-screen / raw mode.
     let result = run_app(
-        &mut terminal,
         cwd,
         cli.agent_stderr,
         worktree_label.clone(),
         None,
         None,
+        ui_mode(fullscreen_tui),
     )
     .await;
-
-    if let Err(e) = ui::restore_terminal(&mut terminal) {
-        tracing::warn!("restore terminal failed: {e}");
-    }
 
     let worktree_kept = handle_worktree_after_tui(worktree.as_ref());
 
@@ -248,6 +259,7 @@ fn print_resume_hint(session_id: &str, worktree_label: Option<&str>) {
 /// Handle the `mj resume` subcommand: pick the agent to resume from, list
 /// sessions, pick one interactively, or resume directly by ID.
 async fn run_resume(args: ResumeArgs) -> Result<()> {
+    let mode = ui_mode(args.fullscreen_tui);
     let cwd = match args.cwd.clone() {
         Some(p) => p,
         None => std::env::current_dir().context("current dir")?,
@@ -292,11 +304,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut terminal = ui::setup_terminal().context("setup terminal")?;
-    let agent = pick_agent_for_resume(&mut terminal).await;
-    if let Err(e) = ui::restore_terminal(&mut terminal) {
-        tracing::warn!("restore terminal (agent picker) failed: {e}");
-    }
+    let agent = pick_agent_for_resume().await;
     let Some(agent) = agent? else {
         eprintln!("Cancelled.");
         let _ = handle_worktree_after_tui(worktree.as_ref());
@@ -305,19 +313,15 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
 
     // Direct ID: launch the TUI with the chosen agent and session.
     if let Some(session_id) = args.session_id.clone() {
-        let mut terminal = ui::setup_terminal().context("setup terminal")?;
         let result = run_app(
-            &mut terminal,
             cwd,
             args.agent_stderr.clone(),
             worktree_label.clone(),
             Some(session_id.clone()),
             Some(agent),
+            mode,
         )
         .await;
-        if let Err(e) = ui::restore_terminal(&mut terminal) {
-            tracing::warn!("restore terminal failed: {e}");
-        }
         let worktree_kept = handle_worktree_after_tui(worktree.as_ref());
         // Show resume hint for the session we just ran
         if let Ok(Some(resumed_id)) = &result
@@ -340,15 +344,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut terminal = ui::setup_terminal().context("setup terminal")?;
-
-    let outcome = session::run_session_picker(&mut terminal, sessions).await;
-
-    if let Err(e) = ui::restore_terminal(&mut terminal) {
-        tracing::warn!("restore terminal (picker) failed: {e}");
-    }
-
-    let outcome = outcome?;
+    let outcome = run_session_picker_once(sessions).await?;
     match outcome {
         session::ResumeOutcome::Cancelled => {
             eprintln!("Cancelled.");
@@ -357,20 +353,15 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
         }
         session::ResumeOutcome::Selected(entry) => {
             eprintln!("Resuming session: {}", entry.session_id);
-            // Set up a fresh TUI for the resumed session.
-            let mut terminal = ui::setup_terminal().context("setup terminal")?;
             let result = run_app(
-                &mut terminal,
                 cwd,
                 args.agent_stderr,
                 worktree_label.clone(),
                 Some(entry.session_id),
                 Some(agent),
+                mode,
             )
             .await;
-            if let Err(e) = ui::restore_terminal(&mut terminal) {
-                tracing::warn!("restore terminal failed: {e}");
-            }
             let worktree_kept = handle_worktree_after_tui(worktree.as_ref());
             // Show resume hint for the session we just ran
             if let Ok(Some(resumed_id)) = &result
@@ -383,14 +374,12 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
     }
 }
 
-async fn pick_agent_for_resume(
-    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
-) -> Result<Option<SelectedAgent>> {
+async fn pick_agent_for_resume() -> Result<Option<SelectedAgent>> {
     let config_path = config::default_config_path();
     let mut cfg =
         Config::load(&config_path).with_context(|| format!("load {}", config_path.display()))?;
 
-    let picker_result = run_picker_with_registry(terminal, &cfg).await?;
+    let picker_result = run_agent_picker_once(&cfg).await?;
     apply_picker_preferences(&mut cfg, picker_result.preferences);
     let selected = picker_result.outcome.map(picker_outcome_to_selected);
     if cfg.agent.is_none()
@@ -505,12 +494,12 @@ fn prepare_existing_worktree(cwd: &std::path::Path, name_or_path: &str) -> Resul
 }
 
 async fn run_app(
-    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     cwd: PathBuf,
     agent_stderr: Option<PathBuf>,
     worktree_label: Option<String>,
     resume_session: Option<String>,
     initial_agent: Option<SelectedAgent>,
+    mode: UiMode,
 ) -> Result<Option<String>> {
     let config_path = config::default_config_path();
     let mut cfg = Config::load(&config_path)?;
@@ -533,7 +522,7 @@ async fn run_app(
                 )
             })?
         } else {
-            let picker_result = run_picker_with_registry(terminal, &cfg).await?;
+            let picker_result = run_agent_picker_once(&cfg).await?;
             apply_picker_preferences(&mut cfg, picker_result.preferences);
             let Some(outcome) = picker_result.outcome else {
                 cfg.save(&config_path)
@@ -550,12 +539,12 @@ async fn run_app(
         };
 
         let (reason, session_id) = run_session(
-            terminal,
             &agent,
             cwd.clone(),
             agent_stderr.clone(),
             worktree_label.clone(),
             resume,
+            mode,
         )
         .await?;
         match reason {
@@ -567,10 +556,7 @@ async fn run_app(
                 let sessions =
                     session::list_sessions(&agent, cwd.clone(), agent_stderr.as_deref()).await?;
 
-                match session_picker_action(
-                    session::run_session_picker(terminal, sessions).await?,
-                    session_id,
-                ) {
+                match session_picker_action(run_session_picker_once(sessions).await?, session_id) {
                     SessionPickerAction::Resume(session_id) => {
                         initial_resume = Some(session_id);
                         initial_agent = Some(agent);
@@ -600,6 +586,26 @@ fn session_picker_action(
             None => SessionPickerAction::Exit(None),
         },
     }
+}
+
+async fn run_agent_picker_once(cfg: &Config) -> Result<PickerResult> {
+    let mut terminal = ui::setup_fullscreen_terminal().context("setup terminal")?;
+    let result = run_picker_with_registry(&mut terminal, cfg).await;
+    if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
+        tracing::warn!("restore terminal (agent picker) failed: {e}");
+    }
+    result
+}
+
+async fn run_session_picker_once(
+    sessions: Vec<session::SessionEntry>,
+) -> Result<session::ResumeOutcome> {
+    let mut terminal = ui::setup_fullscreen_terminal().context("setup terminal")?;
+    let outcome = session::run_session_picker(&mut terminal, sessions).await;
+    if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
+        tracing::warn!("restore terminal (session picker) failed: {e}");
+    }
+    outcome
 }
 
 async fn run_picker_with_registry(
@@ -660,13 +666,20 @@ fn selected_to_picker_outcome(agent: &SelectedAgent) -> PickerOutcome {
 }
 
 async fn run_session(
-    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     agent: &SelectedAgent,
     cwd: PathBuf,
     agent_stderr: Option<PathBuf>,
     worktree_label: Option<String>,
     resume_session: Option<String>,
+    mode: UiMode,
 ) -> Result<(UiExitReason, Option<String>)> {
+    let mut terminal = match mode {
+        UiMode::InlineChat => {
+            ui::setup_inline_chat_terminal(ui::INLINE_CHAT_HEIGHT).context("setup terminal")?
+        }
+        UiMode::FullscreenTui => ui::setup_fullscreen_terminal().context("setup terminal")?,
+    };
+
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
@@ -699,14 +712,23 @@ async fn run_session(
         .map(|s| s.to_string_lossy().into_owned());
 
     let ui_result = ui::run(
-        terminal,
+        &mut terminal,
         cmd_tx,
         event_rx,
         worktree_label,
         agent_display_name,
         Some(&hist_path),
+        mode,
     )
     .await;
+
+    let restore_result = match mode {
+        UiMode::InlineChat => ui::restore_inline_chat_terminal(&mut terminal),
+        UiMode::FullscreenTui => ui::restore_fullscreen_terminal(&mut terminal),
+    };
+    if let Err(e) = restore_result {
+        tracing::warn!("restore terminal failed: {e}");
+    }
 
     // Shutdown paths reaching this point:
     //
@@ -797,6 +819,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_accepts_fullscreen_tui_flags() {
+        let cli = Cli::try_parse_from(["mj", "--fullscreen-tui"]).expect("parse");
+        assert!(cli.fullscreen_tui);
+
+        let cli = Cli::try_parse_from(["mj", "resume", "sess-123", "--fullscreen-tui"])
+            .expect("parse resume");
+        if let Some(Commands::Resume(args)) = cli.command {
+            assert!(args.fullscreen_tui);
+        } else {
+            panic!("expected Resume subcommand");
+        }
+
+        let cli = Cli::try_parse_from(["mj", "--fullscreen-tui", "resume", "sess-123"])
+            .expect("parse top-level resume");
+        assert!(cli.fullscreen_tui);
+    }
+
+    #[test]
     fn parse_accepts_permission_mode_canonical_and_legacy_values() {
         let canonical = Cli::try_parse_from(["mj", "--permission-mode", "acceptEdits"])
             .expect("parse canonical");
@@ -848,6 +888,7 @@ mod tests {
         assert!(help.contains("--debug-file <LOG_FILE>"));
         assert!(help.contains("[aliases: --log-file]"));
         assert!(help.contains("-w, --worktree [<WORKTREE>]"));
+        assert!(help.contains("--fullscreen-tui"));
         assert!(help.contains("[possible values: default, acceptEdits, bypassPermissions]"));
         assert!(!help.contains("accept-edits"));
         assert!(!help.contains("bypass-permissions"));
