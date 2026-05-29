@@ -227,6 +227,12 @@ pub async fn run(
 /// input latency below human perception.
 const FRAME_BUDGET: Duration = Duration::from_millis(33);
 
+/// Slow inline repair cadence. Regular draws are diffed against ratatui's
+/// previous buffer, so they cannot repair terminal emulator damage that
+/// happens while the tab is backgrounded. This heartbeat clears only the
+/// inline viewport and forces a full redraw at a human-scale interval.
+const INLINE_REPAIR_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Maximum number of lines we render from each tool-output entry when
 /// `expand_tool_outputs` is false. Picked to keep the head of long
 /// stdout / diff dumps visible without flushing the surrounding
@@ -264,6 +270,7 @@ async fn ui_loop(
     }
     let mut dirty = !draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
     let mut last_draw = Instant::now();
+    let mut last_inline_repair = Instant::now();
 
     loop {
         tokio::select! {
@@ -324,6 +331,21 @@ async fn ui_loop(
             return Ok((reason, state.session_id.clone(), state.prompt_history()));
         }
 
+        if should_repair_inline_view(mode, &state)
+            && last_inline_repair.elapsed() >= INLINE_REPAIR_INTERVAL
+        {
+            sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
+            let repaired = repair_inline_viewport(terminal, &mut state, &mut transcript_scroll);
+            let now = Instant::now();
+            last_inline_repair = now;
+            if repaired {
+                last_draw = now;
+                dirty = false;
+            } else {
+                dirty = true;
+            }
+        }
+
         // Throttle: redraw at most once per FRAME_BUDGET. Under a flood
         // of events (`biased` select keeps picking the event arm before
         // the timer), this elapsed-time check is what actually paces
@@ -357,6 +379,48 @@ fn draw_terminal_frame(
             Ok(false)
         }
         Err(e) => Err(e).context("draw terminal"),
+    }
+}
+
+fn should_repair_inline_view(mode: UiMode, state: &AppState) -> bool {
+    mode == UiMode::InlineChat && needs_live_redraw(state)
+}
+
+fn repair_inline_viewport(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &mut AppState,
+    transcript_scroll: &mut TranscriptScrollState,
+) -> bool {
+    match terminal.autoresize() {
+        Ok(()) => {}
+        Err(e) if is_cursor_position_timeout_io(&e) => {
+            tracing::warn!("skip inline repair while waiting for cursor position response: {e}");
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!("skip inline repair autoresize: {e}");
+            return false;
+        }
+    }
+
+    match terminal.clear() {
+        Ok(()) => {}
+        Err(e) if is_cursor_position_timeout_io(&e) => {
+            tracing::warn!("skip inline repair while waiting for cursor position response: {e}");
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!("skip inline repair: {e}");
+            return false;
+        }
+    }
+
+    match draw_terminal_frame(terminal, state, transcript_scroll, UiMode::InlineChat) {
+        Ok(rendered) => rendered,
+        Err(e) => {
+            tracing::warn!("skip inline repair redraw: {e:#}");
+            false
+        }
     }
 }
 
@@ -4017,6 +4081,21 @@ mod tests {
 
         assert_eq!(state.input, "keep");
         assert!(state.exit_reason.is_none());
+    }
+
+    #[test]
+    fn inline_repair_is_limited_to_live_inline_states() {
+        let mut state = AppState::new();
+
+        state.connection_state = ConnectionState::Streaming;
+        assert!(should_repair_inline_view(UiMode::InlineChat, &state));
+        assert!(!should_repair_inline_view(UiMode::FullscreenTui, &state));
+
+        state.connection_state = ConnectionState::Ready;
+        assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
+
+        state.connection_state = ConnectionState::Cancelling;
+        assert!(should_repair_inline_view(UiMode::InlineChat, &state));
     }
 
     #[test]
