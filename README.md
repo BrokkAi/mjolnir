@@ -161,6 +161,66 @@ Use `--output-format json` or `--output-format stream-json` when another tool
 needs structured output. `--permission-mode` controls how headless runs respond
 to permission prompts; the default rejects prompts so automation does not hang.
 
+## Remote Control
+
+`mj remote` provides a lightweight control plane for managing a fleet of mj
+clients. The server keeps in-memory client and job state; clients connect
+outbound over self-signed mutual TLS, heartbeat, poll for work, and run remote
+prompts through their local configured agent.
+
+Start a server:
+
+```bash
+mj remote server --bind 0.0.0.0:7337
+```
+
+The server prints a short join code, a manual fallback token, and a
+`mj+remote://join?...` pairing URI. That URI is the QR payload. By default it
+contains only the join code, while the client discovers the server URL and token
+over local UDP discovery. The server also generates and persists a local CA,
+server certificate, and fleet state in `~/.config/mj/remote-server.toml` unless
+`--state-file` points somewhere else, so restarts keep the same join code,
+token, clients, TLS material, and queued job metadata.
+
+Join from a client on the same LAN:
+
+```bash
+mj remote join --code ABC123
+```
+
+Or pass the scanned pairing URI:
+
+```bash
+mj remote join 'mj+remote://join?code=ABC123'
+```
+
+After the first successful join, the server issues a client certificate signed
+by its local CA. The client persists its server, token, CA certificate, client
+certificate, private key, and client id to `~/.config/mj/remote.toml` for 30
+days. Starting the client again only needs:
+
+```bash
+mj remote join
+```
+
+If discovery is unavailable, pass the pieces explicitly:
+
+```bash
+mj remote join --server https://host.example:7337 --token "$MJ_REMOTE_TOKEN" --name laptop
+```
+
+Manage the fleet from any authenticated machine:
+
+```bash
+mj remote list --server https://host.example:7337 --token "$MJ_REMOTE_TOKEN"
+mj remote prompt --server https://host.example:7337 --token "$MJ_REMOTE_TOKEN" --client client-abc123 "summarize this repo"
+```
+
+Remote prompt jobs reuse `mj --print --output-format json` on the managed
+client, so the client must already have a default agent configured. The join
+token is still used for bootstrap and admin commands; node identity after
+pairing is bound to the issued client certificate.
+
 ## Reference
 
 Common options:
