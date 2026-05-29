@@ -155,6 +155,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             UiEvent::Connected {
                 agent_name,
                 agent_version,
+                ..
             } => {
                 if matches!(cfg.output_format, OutputFormat::StreamJson) {
                     emit_json(&StreamRecord::Connected {
@@ -181,6 +182,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     cmd_tx
                         .send(UiCommand::SendPrompt {
                             text: cfg.prompt.clone(),
+                            images: Vec::new(),
                         })
                         .context("send prompt to ACP runtime")?;
                 }

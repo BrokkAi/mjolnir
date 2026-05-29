@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::schema::{
     CancelNotification, ClientCapabilities, ContentBlock, ErrorCode, FileSystemCapabilities,
-    InitializeRequest, LoadSessionRequest, ModelInfo, NewSessionRequest, PromptRequest,
-    ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionModeState,
-    SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    ImageContent, InitializeRequest, LoadSessionRequest, ModelInfo, NewSessionRequest,
+    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId, SessionId,
+    SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
     SetSessionModelRequest, TextContent,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
@@ -21,7 +21,9 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::event::{PermissionDecision, PermissionPrompt, SessionConfigTarget, UiCommand, UiEvent};
+use crate::event::{
+    PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, UiCommand, UiEvent,
+};
 
 pub struct AcpRuntimeConfig {
     pub command: PathBuf,
@@ -379,6 +381,7 @@ async fn drive_session(
     let _ = ui_tx.send(UiEvent::Connected {
         agent_name: init_resp.agent_info.as_ref().map(|i| i.name.clone()),
         agent_version: init_resp.agent_info.as_ref().map(|i| i.version.clone()),
+        prompt_images_supported: init_resp.agent_capabilities.prompt_capabilities.image,
     });
 
     let (session_id, initial_config, resumed) = match resume_session {
@@ -437,8 +440,8 @@ async fn drive_session(
 
     while let Some(cmd) = ui_rx.recv().await {
         match cmd {
-            UiCommand::SendPrompt { text } => {
-                if !drive_prompt_turn(&conn, &session_id, text, ui_tx, ui_rx).await? {
+            UiCommand::SendPrompt { text, images } => {
+                if !drive_prompt_turn(&conn, &session_id, text, images, ui_tx, ui_rx).await? {
                     break;
                 }
             }
@@ -743,13 +746,11 @@ async fn drive_prompt_turn(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
     text: String,
+    images: Vec<PromptImage>,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
 ) -> Result<bool> {
-    let req = PromptRequest::new(
-        session_id.clone(),
-        vec![ContentBlock::Text(TextContent::new(text))],
-    );
+    let req = PromptRequest::new(session_id.clone(), prompt_content_blocks(text, images));
     let prompt = conn.send_request(req).block_task();
     tokio::pin!(prompt);
 
@@ -801,6 +802,19 @@ async fn drive_prompt_turn(
     }
 }
 
+fn prompt_content_blocks(text: String, images: Vec<PromptImage>) -> Vec<ContentBlock> {
+    let mut content = Vec::new();
+    if !text.is_empty() {
+        content.push(ContentBlock::Text(TextContent::new(text)));
+    }
+    content.extend(
+        images.into_iter().map(|image| {
+            ContentBlock::Image(ImageContent::new(image.data_base64, image.mime_type))
+        }),
+    );
+    content
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,6 +830,32 @@ mod tests {
     };
     use std::time::Duration;
     use tokio::io::split;
+
+    #[test]
+    fn prompt_content_blocks_include_text_and_images() {
+        let blocks = prompt_content_blocks(
+            "look".to_string(),
+            vec![PromptImage {
+                data_base64: "aW1hZ2U=".to_string(),
+                mime_type: "image/png".to_string(),
+                width: 640,
+                height: 480,
+            }],
+        );
+
+        assert_eq!(blocks.len(), 2);
+        match &blocks[0] {
+            ContentBlock::Text(text) => assert_eq!(text.text, "look"),
+            other => panic!("unexpected text block: {other:?}"),
+        }
+        match &blocks[1] {
+            ContentBlock::Image(image) => {
+                assert_eq!(image.data, "aW1hZ2U=");
+                assert_eq!(image.mime_type, "image/png");
+            }
+            other => panic!("unexpected image block: {other:?}"),
+        }
+    }
 
     #[test]
     fn legacy_session_models_and_modes_become_config_picker_options() {
@@ -1186,6 +1226,7 @@ mod tests {
         cmd_tx
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
+                images: Vec::new(),
             })
             .expect("send prompt");
 
@@ -1260,6 +1301,7 @@ mod tests {
         cmd_tx
             .send(UiCommand::SendPrompt {
                 text: "resume".to_string(),
+                images: Vec::new(),
             })
             .expect("send prompt");
 
@@ -1324,6 +1366,7 @@ mod tests {
         cmd_tx
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
+                images: Vec::new(),
             })
             .expect("send prompt");
 
@@ -1389,6 +1432,7 @@ mod tests {
         cmd_tx
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
+                images: Vec::new(),
             })
             .expect("send prompt");
         cmd_tx.send(UiCommand::CancelPrompt).expect("send cancel");
@@ -1511,6 +1555,7 @@ mod tests {
         cmd_tx
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
+                images: Vec::new(),
             })
             .expect("send prompt");
 

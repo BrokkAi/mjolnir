@@ -8,7 +8,7 @@
 use std::error::Error;
 use std::io::{self, Stdout, Write};
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::{AvailableCommandInput, ToolCallStatus};
@@ -33,13 +33,15 @@ use tokio::time::MissedTickBehavior;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    AppState, ConfigValueChoice, ConnectionState, Entry, PastedAttachment, PendingPermission,
-    StatusKind, StatusMessage, ToolCallOutput, UiExitReason, config_option_choices,
-    config_option_current_value_label, permission_kind_label,
+    AppState, ConfigValueChoice, ConnectionState, Entry, PastedAttachment, PastedImageAttachment,
+    PendingPermission, StatusKind, StatusMessage, ToolCallOutput, UiExitReason,
+    config_option_choices, config_option_current_value_label, permission_kind_label,
 };
-use crate::clipboard::copy_to_clipboard;
+use crate::clipboard::{
+    ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
+};
 use crate::config;
-use crate::event::{PermissionDecision, UiCommand, UiEvent};
+use crate::event::{PermissionDecision, PromptImage, UiCommand, UiEvent};
 use crate::version::mjolnir_version_label;
 
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
@@ -52,6 +54,9 @@ const CURSOR_POSITION_TIMEOUT_MESSAGE: &str =
     "The cursor position could not be read within a normal duration";
 const INLINE_SETUP_RETRY_DELAY: Duration = Duration::from_millis(75);
 const INLINE_NON_CURSOR_SETUP_ATTEMPTS: usize = 3;
+const PASTE_BURST_CHAR_INTERVAL: Duration = Duration::from_millis(8);
+const PASTE_BURST_IDLE_TIMEOUT: Duration = Duration::from_millis(16);
+const PASTE_BURST_MIN_CHARS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {
@@ -299,6 +304,9 @@ async fn ui_loop(
                 dirty = true;
             }
             _ = frame_tick.tick() => {
+                if flush_input_paste_burst_if_due(&mut state, Instant::now(), false) {
+                    dirty = true;
+                }
                 if needs_live_redraw(&state) {
                     dirty = true;
                 }
@@ -484,6 +492,7 @@ fn handle_crossterm(
             {
                 return TerminalRequest::None;
             }
+            state.input_paste_burst.clear();
             handle_paste(state, &text);
             return TerminalRequest::None;
         }
@@ -571,6 +580,10 @@ fn handle_crossterm(
         return TerminalRequest::None;
     }
 
+    if !is_plain_character_input(key.modifiers, key.code) {
+        flush_input_paste_burst_if_due(state, Instant::now(), true);
+    }
+
     // Slash-command autocomplete owns Tab and Up/Down while it's
     // visible, and intercepts Enter/Esc before the normal handlers see
     // them. Plain typing still falls through so the user can refine the
@@ -637,7 +650,7 @@ fn handle_crossterm(
                 let _ = cmd_tx.send(UiCommand::CancelPrompt);
                 state.mark_cancelling();
                 state.status_line = Some(StatusMessage::info("cancelling..."));
-            } else if state.input.is_empty() && state.attachments.is_empty() {
+            } else if state.input.is_empty() && attachment_count(state) == 0 {
                 state.exit_reason = Some(UiExitReason::Quit);
             } else if !state.input.is_empty() {
                 state.input.clear();
@@ -646,14 +659,14 @@ fn handle_crossterm(
                 state.scroll_input_to_bottom();
                 state.update_autocomplete();
             } else {
-                state.attachments.clear();
+                clear_attachments(state);
                 state.reset_history_navigation();
                 state.scroll_input_to_bottom();
                 state.update_autocomplete();
             }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('d'))
-            if state.input.is_empty() && state.attachments.is_empty() =>
+            if state.input.is_empty() && attachment_count(state) == 0 =>
         {
             state.exit_reason = Some(UiExitReason::Quit);
         }
@@ -665,6 +678,11 @@ fn handle_crossterm(
         }
         (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
             copy_last_agent_message(state);
+        }
+        (modifiers, KeyCode::Char('v'))
+            if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            paste_clipboard_image(state);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
             state.exit_reason = Some(UiExitReason::LoadSession);
@@ -694,12 +712,9 @@ fn handle_crossterm(
             state.update_autocomplete();
         }
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
-            if !delete_at_cursor(state) && state.input.is_empty() {
-                if state.attachments.is_empty() {
-                    state.exit_reason = Some(UiExitReason::Quit);
-                    return TerminalRequest::None;
-                }
-                state.attachments.pop();
+            if !delete_at_cursor(state) && state.input.is_empty() && !pop_last_attachment(state) {
+                state.exit_reason = Some(UiExitReason::Quit);
+                return TerminalRequest::None;
             }
             state.update_autocomplete();
         }
@@ -723,7 +738,7 @@ fn handle_crossterm(
         (_, KeyCode::Backspace) => {
             if !delete_before_cursor(state) {
                 // Remove the last attachment chip when the input buffer is empty.
-                state.attachments.pop();
+                pop_last_attachment(state);
             }
             state.update_autocomplete();
         }
@@ -744,13 +759,15 @@ fn handle_crossterm(
         (_, KeyCode::Home) => move_input_cursor_to_line_start(state),
         (_, KeyCode::End) => move_input_cursor_to_line_end(state),
         (_, KeyCode::Char(c)) => {
+            let cursor_before_insert = state.input_cursor;
             insert_text_at_cursor(state, &c.to_string());
+            note_plain_input_char(state, cursor_before_insert, c, Instant::now());
             state.update_autocomplete();
         }
         (_, KeyCode::Esc) => {
             state.input.clear();
             state.input_cursor = 0;
-            state.attachments.clear();
+            clear_attachments(state);
             state.reset_history_navigation();
             state.scroll_input_to_bottom();
             state.update_autocomplete();
@@ -1093,6 +1110,93 @@ fn move_input_cursor_down(state: &mut AppState, lines: usize) {
     move_input_cursor_vertical(state, lines as isize);
 }
 
+fn attachment_count(state: &AppState) -> usize {
+    state.attachments.len() + state.image_attachments.len()
+}
+
+fn clear_attachments(state: &mut AppState) {
+    state.attachments.clear();
+    state.image_attachments.clear();
+}
+
+fn pop_last_attachment(state: &mut AppState) -> bool {
+    let text_id = state.attachments.last().map(|attachment| attachment.id);
+    let image_id = state
+        .image_attachments
+        .last()
+        .map(|attachment| attachment.id);
+
+    match (text_id, image_id) {
+        (Some(t), Some(i)) if t > i => state.attachments.pop().is_some(),
+        (Some(_), Some(_)) => state.image_attachments.pop().is_some(),
+        (Some(_), None) => state.attachments.pop().is_some(),
+        (None, Some(_)) => state.image_attachments.pop().is_some(),
+        (None, None) => false,
+    }
+}
+
+fn is_plain_character_input(modifiers: KeyModifiers, code: KeyCode) -> bool {
+    matches!(code, KeyCode::Char(_))
+        && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+fn note_plain_input_char(state: &mut AppState, start_cursor: usize, ch: char, now: Instant) {
+    let burst = &mut state.input_paste_burst;
+    let continues_burst = burst
+        .last_char_at
+        .is_some_and(|last| now.duration_since(last) <= PASTE_BURST_CHAR_INTERVAL);
+
+    if continues_burst && !burst.text.is_empty() {
+        burst.text.push(ch);
+    } else {
+        burst.start_cursor = start_cursor;
+        burst.text.clear();
+        burst.text.push(ch);
+    }
+    burst.last_char_at = Some(now);
+}
+
+fn flush_input_paste_burst_if_due(state: &mut AppState, now: Instant, force: bool) -> bool {
+    let Some(last_char_at) = state.input_paste_burst.last_char_at else {
+        return false;
+    };
+    if !force && now.duration_since(last_char_at) <= PASTE_BURST_IDLE_TIMEOUT {
+        return false;
+    }
+
+    let start = state.input_paste_burst.start_cursor;
+    let text = state.input_paste_burst.text.clone();
+    state.input_paste_burst.clear();
+
+    if text.chars().count() < PASTE_BURST_MIN_CHARS || !state.prompt_images_supported {
+        return false;
+    }
+
+    let end = start + input_char_count(&text);
+    let input_len = input_char_count(&state.input);
+    if end > input_len {
+        return false;
+    }
+    let byte_start = input_byte_index_at_char(&state.input, start);
+    let byte_end = input_byte_index_at_char(&state.input, end);
+    if state.input.get(byte_start..byte_end) != Some(text.as_str()) {
+        return false;
+    }
+
+    let Some((path, image)) = pasted_image_from_path_text(&text) else {
+        return false;
+    };
+
+    delete_input_range(state, start, end, start);
+    attach_clipboard_image(state, image);
+    state.record_status_message(
+        StatusKind::Info,
+        format!("attached image from {}", display_pasted_path(&path)),
+    );
+    state.update_autocomplete();
+    true
+}
+
 /// Translate a bracketed paste event into input buffer edits or a chip.
 /// Normalizes CRLF to LF and strips control characters (except tab and
 /// newline) so pasted text from browsers or terminals renders predictably.
@@ -1100,6 +1204,13 @@ fn move_input_cursor_down(state: &mut AppState, lines: usize) {
 /// stored as a compact attachment instead of inline text.
 fn handle_paste(state: &mut AppState, text: &str) {
     let cleaned = normalize_paste(text);
+
+    if cleaned.chars().count() > 1
+        && state.prompt_images_supported
+        && attach_pasted_image_path(state, &cleaned)
+    {
+        return;
+    }
 
     let line_count = cleaned.lines().count();
 
@@ -1117,6 +1228,159 @@ fn handle_paste(state: &mut AppState, text: &str) {
     }
     state.scroll_input_to_bottom();
     state.update_autocomplete();
+}
+
+fn attach_pasted_image_path(state: &mut AppState, pasted: &str) -> bool {
+    let Some((path, image)) = pasted_image_from_path_text(pasted) else {
+        return false;
+    };
+
+    attach_clipboard_image(state, image);
+    state.record_status_message(
+        StatusKind::Info,
+        format!("attached image from {}", display_pasted_path(&path)),
+    );
+    true
+}
+
+fn pasted_image_from_path_text(pasted: &str) -> Option<(PathBuf, ClipboardImage)> {
+    let path = normalize_pasted_image_path(pasted)?;
+    let image = load_image_path_as_png(&path).ok()?;
+    Some((path, image))
+}
+
+fn display_pasted_path(path: &Path) -> String {
+    path.display().to_string()
+}
+
+fn normalize_pasted_image_path(pasted: &str) -> Option<PathBuf> {
+    let pasted = pasted.trim();
+    if pasted.is_empty() || pasted.contains('\n') {
+        return None;
+    }
+
+    let unquoted = pasted
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| pasted.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(pasted);
+
+    if let Ok(url) = url::Url::parse(unquoted)
+        && url.scheme() == "file"
+    {
+        return url.to_file_path().ok();
+    }
+
+    if let Some(path) = normalize_windows_path(unquoted) {
+        return Some(path);
+    }
+
+    let parts = shell_words::split(pasted).ok()?;
+    if parts.len() != 1 {
+        return None;
+    }
+    let part = parts.into_iter().next()?;
+    normalize_windows_path(&part).or_else(|| Some(PathBuf::from(part)))
+}
+
+#[cfg(target_os = "linux")]
+fn is_probably_wsl() -> bool {
+    if let Ok(version) = std::fs::read_to_string("/proc/version") {
+        let version_lower = version.to_lowercase();
+        if version_lower.contains("microsoft") || version_lower.contains("wsl") {
+            return true;
+        }
+    }
+
+    std::env::var_os("WSL_DISTRO_NAME").is_some() || std::env::var_os("WSL_INTEROP").is_some()
+}
+
+#[cfg(target_os = "linux")]
+fn convert_windows_path_to_wsl(input: &str) -> Option<PathBuf> {
+    if input.starts_with("\\\\") {
+        return None;
+    }
+
+    let drive_letter = input.chars().next()?.to_ascii_lowercase();
+    if !drive_letter.is_ascii_lowercase() || input.get(1..2) != Some(":") {
+        return None;
+    }
+
+    let mut result = PathBuf::from(format!("/mnt/{drive_letter}"));
+    for component in input
+        .get(2..)?
+        .trim_start_matches(['\\', '/'])
+        .split(['\\', '/'])
+        .filter(|component| !component.is_empty())
+    {
+        result.push(component);
+    }
+    Some(result)
+}
+
+fn normalize_windows_path(input: &str) -> Option<PathBuf> {
+    let drive = input
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+        && input.get(1..2) == Some(":")
+        && input.get(2..3).is_some_and(|s| s == "\\" || s == "/");
+    let unc = input.starts_with("\\\\");
+    if !drive && !unc {
+        return None;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if is_probably_wsl()
+            && let Some(converted) = convert_windows_path_to_wsl(input)
+        {
+            return Some(converted);
+        }
+    }
+
+    Some(PathBuf::from(input))
+}
+
+fn attach_clipboard_image(state: &mut AppState, image: ClipboardImage) {
+    let id = state.next_attachment_id;
+    state.next_attachment_id += 1;
+    state.image_attachments.push(PastedImageAttachment {
+        id,
+        data_base64: image.data_base64,
+        mime_type: image.mime_type,
+        width: image.width,
+        height: image.height,
+        byte_len: image.byte_len,
+    });
+    state.scroll_input_to_bottom();
+    state.update_autocomplete();
+}
+
+fn paste_clipboard_image(state: &mut AppState) {
+    if !state.prompt_images_supported {
+        state.record_status_message(
+            StatusKind::Warning,
+            "this agent does not advertise image prompt support",
+        );
+        return;
+    }
+
+    match read_clipboard_image_as_png() {
+        Ok(image) => {
+            let width = image.width;
+            let height = image.height;
+            let byte_len = image.byte_len;
+            attach_clipboard_image(state, image);
+            state.record_status_message(
+                StatusKind::Info,
+                format!("attached image {width}x{height} ({byte_len} bytes)"),
+            );
+        }
+        Err(e) => {
+            state.record_status_message(StatusKind::Warning, format!("image paste failed: {e}"));
+        }
+    }
 }
 
 fn normalize_paste(text: &str) -> String {
@@ -1235,29 +1499,42 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     }
     combined.push_str(&input_text);
 
-    let trimmed = combined.trim();
-    if trimmed.is_empty() {
+    let images: Vec<PromptImage> = state
+        .image_attachments
+        .iter()
+        .map(|attachment| PromptImage {
+            data_base64: attachment.data_base64.clone(),
+            mime_type: attachment.mime_type.clone(),
+            width: attachment.width,
+            height: attachment.height,
+        })
+        .collect();
+
+    let text = combined.trim().to_string();
+    if text.is_empty() && images.is_empty() {
         return;
     }
 
     // Clear attachments after taking their content.
-    state.attachments.clear();
+    clear_attachments(state);
     state.input_cursor = 0;
     state.scroll_input_to_bottom();
 
     // Client-side commands are handled here without forwarding anything
     // to the agent.
-    if trimmed == "/new" {
+    if images.is_empty() && text == "/new" {
         state.exit_reason = Some(UiExitReason::NewSession);
         return;
     }
 
-    if trimmed == "/load" {
+    if images.is_empty() && text == "/load" {
         state.exit_reason = Some(UiExitReason::LoadSession);
         return;
     }
 
-    if let Some(rest) = trimmed.strip_prefix("/mj:") {
+    if images.is_empty()
+        && let Some(rest) = text.strip_prefix("/mj:")
+    {
         let other = rest.trim();
         state.record_status_message(
             StatusKind::Warning,
@@ -1278,10 +1555,20 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         state.record_status_message(StatusKind::Warning, "waiting for session...");
         return;
     }
-    state.record_user_prompt(trimmed.to_string());
-    let _ = cmd_tx.send(UiCommand::SendPrompt {
-        text: trimmed.to_string(),
-    });
+    let display_text = prompt_display_text(&text, images.len());
+    state.record_user_prompt(display_text);
+    let _ = cmd_tx.send(UiCommand::SendPrompt { text, images });
+}
+
+fn prompt_display_text(text: &str, image_count: usize) -> String {
+    let mut display = text.to_string();
+    for _ in 0..image_count {
+        if !display.is_empty() {
+            display.push('\n');
+        }
+        display.push_str("[image]");
+    }
+    display
 }
 
 fn clamp_permission_selected(selected: usize, option_count: usize) -> usize {
@@ -1598,7 +1885,7 @@ fn draw(
     let has_config_options = !state.selectable_config_options().is_empty();
 
     // Dynamic input height: borders (2) + chip rows + text lines, clamped.
-    let chip_rows = state.attachments.len();
+    let chip_rows = attachment_count(state);
     let input_lines = 1 + state.input.chars().filter(|c| *c == '\n').count();
     let input_height = (chip_rows + input_lines + 2) as u16;
     let input_height = input_height.clamp(MIN_INPUT_HEIGHT, MAX_INPUT_HEIGHT);
@@ -2898,6 +3185,51 @@ fn input_cursor_position(
     (cursor_x, cursor_y)
 }
 
+fn input_attachment_chips(state: &AppState) -> Vec<String> {
+    let mut chips: Vec<(usize, String)> =
+        Vec::with_capacity(state.attachments.len() + state.image_attachments.len());
+
+    for attachment in &state.attachments {
+        let line_count = attachment.content.lines().count();
+        let char_count = attachment.content.chars().count();
+        chips.push((
+            attachment.id,
+            format!(
+                "📎 {} line{} · {} char{}",
+                line_count,
+                if line_count == 1 { "" } else { "s" },
+                char_count,
+                if char_count == 1 { "" } else { "s" }
+            ),
+        ));
+    }
+
+    for attachment in &state.image_attachments {
+        chips.push((
+            attachment.id,
+            format!(
+                "🖼 image {}x{} · {}",
+                attachment.width,
+                attachment.height,
+                format_bytes(attachment.byte_len)
+            ),
+        ));
+    }
+
+    chips.sort_by_key(|(id, _)| *id);
+    chips.into_iter().map(|(_, label)| label).collect()
+}
+
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else if bytes >= 1_000 {
+        format!("{:.1} KB", bytes as f64 / 1_000.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode) {
     let text_selection_hint = match mode {
         UiMode::InlineChat => String::new(),
@@ -2929,18 +3261,9 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     let mut lines: Vec<Line> = Vec::new();
 
     // Render each attachment as a compact chip row.
-    for attachment in &state.attachments {
-        let line_count = attachment.content.lines().count();
-        let char_count = attachment.content.chars().count();
-        let label = format!(
-            "📎 {} line{} · {} char{}",
-            line_count,
-            if line_count == 1 { "" } else { "s" },
-            char_count,
-            if char_count == 1 { "" } else { "s" }
-        );
+    for chip in input_attachment_chips(state) {
         lines.push(Line::from(Span::styled(
-            label,
+            chip,
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -2967,7 +3290,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         .saturating_sub(side_padding * 2 + PROMPT_PREFIX_WIDTH)
         .max(1);
     let inner_h = inner.height as usize;
-    let chip_rows = state.attachments.len();
+    let chip_rows = attachment_count(state);
     let text_rows = input_wrapped_row_count(&state.input, content_width as usize);
     let total_visual_rows = chip_rows + text_rows;
     let visible_rows = total_visual_rows.max(1).min(inner_h);
@@ -3430,7 +3753,7 @@ fn pad_text_to_width(mut line: String, width: u16) -> String {
 
 fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
     let width = area.width.saturating_sub(8).min(82);
-    let height = 22.min(area.height.saturating_sub(4));
+    let height = 23.min(area.height.saturating_sub(4));
     if width < 40 || height < 10 {
         return;
     }
@@ -3465,6 +3788,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
         Line::from("  Ctrl-K/U/W       delete to end/start of line or previous word"),
         Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
         Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
+        Line::from("  Ctrl-V/Ctrl-Alt-V paste image from clipboard"),
         Line::from("  Ctrl-Y           copy last agent message to clipboard"),
         Line::from("  Esc              clear input, chips, and browsing history"),
         Line::from(""),
@@ -3873,6 +4197,33 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    fn test_clipboard_image() -> ClipboardImage {
+        ClipboardImage {
+            data_base64: "aW1hZ2U=".to_string(),
+            mime_type: "image/png".to_string(),
+            width: 640,
+            height: 480,
+            byte_len: 12_345,
+        }
+    }
+
+    fn test_image_attachment_with_id(id: usize) -> PastedImageAttachment {
+        let image = test_clipboard_image();
+        PastedImageAttachment {
+            id,
+            data_base64: image.data_base64,
+            mime_type: image.mime_type,
+            width: image.width,
+            height: image.height,
+            byte_len: image.byte_len,
+        }
+    }
+
+    fn write_test_png(path: &Path) {
+        let image = image::RgbaImage::from_pixel(2, 3, image::Rgba([255, 0, 0, 255]));
+        image.save(path).expect("write test image");
     }
 
     fn text_chunk(s: &str) -> ContentChunk {
@@ -5829,8 +6180,9 @@ mod tests {
 
         let cmd = cmd_rx.try_recv().expect("prompt was sent");
         match cmd {
-            UiCommand::SendPrompt { text } => {
+            UiCommand::SendPrompt { text, images } => {
                 assert_eq!(text, "line one\nline two\nline three");
+                assert!(images.is_empty());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -5883,6 +6235,178 @@ mod tests {
     }
 
     #[test]
+    fn pasting_image_path_creates_image_chip_when_supported() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("pasted image.png");
+        write_test_png(&path);
+        let mut state = AppState::new();
+        state.prompt_images_supported = true;
+
+        handle_paste(&mut state, &format!("'{}'", path.display()));
+
+        assert!(state.input.is_empty());
+        assert!(state.attachments.is_empty());
+        assert_eq!(state.image_attachments.len(), 1);
+        assert_eq!(state.image_attachments[0].width, 2);
+        assert_eq!(state.image_attachments[0].height, 3);
+    }
+
+    #[test]
+    fn pasting_file_url_image_path_creates_image_chip_when_supported() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("pasted-url.png");
+        write_test_png(&path);
+        let url = url::Url::from_file_path(&path).expect("file url");
+        let mut state = AppState::new();
+        state.prompt_images_supported = true;
+
+        handle_paste(&mut state, url.as_str());
+
+        assert!(state.input.is_empty());
+        assert_eq!(state.image_attachments.len(), 1);
+    }
+
+    #[test]
+    fn pasting_image_path_stays_text_when_agent_does_not_support_images() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("unsupported.png");
+        write_test_png(&path);
+        let mut state = AppState::new();
+
+        handle_paste(&mut state, &path.to_string_lossy());
+
+        assert_eq!(state.input, path.to_string_lossy());
+        assert!(state.image_attachments.is_empty());
+    }
+
+    #[test]
+    fn fast_typed_image_path_burst_becomes_image_chip() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("dragged.png");
+        write_test_png(&path);
+        let path_text = path.to_string_lossy();
+        let mut state = AppState::new();
+        state.prompt_images_supported = true;
+        let start = Instant::now();
+
+        for (i, ch) in path_text.chars().enumerate() {
+            let cursor_before_insert = state.input_cursor;
+            insert_text_at_cursor(&mut state, &ch.to_string());
+            note_plain_input_char(
+                &mut state,
+                cursor_before_insert,
+                ch,
+                start + Duration::from_millis(i as u64),
+            );
+        }
+
+        assert_eq!(state.input, path_text);
+        assert!(flush_input_paste_burst_if_due(
+            &mut state,
+            start + Duration::from_millis(100),
+            false,
+        ));
+        assert!(state.input.is_empty());
+        assert_eq!(state.image_attachments.len(), 1);
+        assert_eq!(state.image_attachments[0].width, 2);
+        assert_eq!(state.image_attachments[0].height, 3);
+    }
+
+    #[test]
+    fn slow_typed_image_path_does_not_become_image_chip() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("typed.png");
+        write_test_png(&path);
+        let path_text = path.to_string_lossy();
+        let mut state = AppState::new();
+        state.prompt_images_supported = true;
+        let start = Instant::now();
+
+        for (i, ch) in path_text.chars().enumerate() {
+            let cursor_before_insert = state.input_cursor;
+            insert_text_at_cursor(&mut state, &ch.to_string());
+            note_plain_input_char(
+                &mut state,
+                cursor_before_insert,
+                ch,
+                start + Duration::from_millis((i as u64) * 20),
+            );
+        }
+
+        assert!(!flush_input_paste_burst_if_due(
+            &mut state,
+            start + Duration::from_secs(5),
+            false,
+        ));
+        assert_eq!(state.input, path_text);
+        assert!(state.image_attachments.is_empty());
+    }
+
+    #[test]
+    fn forced_fast_typed_image_path_flushes_before_enter() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("enter.png");
+        write_test_png(&path);
+        let path_text = path.to_string_lossy();
+        let mut state = AppState::new();
+        state.prompt_images_supported = true;
+        let start = Instant::now();
+
+        for (i, ch) in path_text.chars().enumerate() {
+            let cursor_before_insert = state.input_cursor;
+            insert_text_at_cursor(&mut state, &ch.to_string());
+            note_plain_input_char(
+                &mut state,
+                cursor_before_insert,
+                ch,
+                start + Duration::from_millis(i as u64),
+            );
+        }
+
+        assert!(flush_input_paste_burst_if_due(
+            &mut state,
+            start + Duration::from_millis(1),
+            true,
+        ));
+        assert!(state.input.is_empty());
+        assert_eq!(state.image_attachments.len(), 1);
+    }
+
+    #[test]
+    fn attach_clipboard_image_creates_image_chip() {
+        let mut state = AppState::new();
+
+        attach_clipboard_image(&mut state, test_clipboard_image());
+
+        assert_eq!(state.image_attachments.len(), 1);
+        assert_eq!(state.image_attachments[0].mime_type, "image/png");
+        assert_eq!(state.image_attachments[0].width, 640);
+        assert_eq!(state.image_attachments[0].height, 480);
+        assert_eq!(state.image_attachments[0].byte_len, 12_345);
+    }
+
+    #[test]
+    fn ctrl_v_warns_when_agent_does_not_support_images() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('v'), KeyModifiers::CONTROL),
+        );
+
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Warning);
+        assert_eq!(
+            status.text,
+            "this agent does not advertise image prompt support"
+        );
+        assert!(state.input.is_empty());
+        assert!(state.image_attachments.is_empty());
+    }
+
+    #[test]
     fn paste_three_or_fewer_lines_stays_inline() {
         let mut state = AppState::new();
 
@@ -5916,6 +6440,24 @@ mod tests {
     }
 
     #[test]
+    fn backspace_on_empty_input_removes_last_image_attachment() {
+        let mut state = AppState::new();
+        state.attachments.push(crate::app::PastedAttachment {
+            id: 1,
+            content: "first".to_string(),
+        });
+        state
+            .image_attachments
+            .push(test_image_attachment_with_id(2));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Backspace));
+
+        assert_eq!(state.attachments.len(), 1);
+        assert!(state.image_attachments.is_empty());
+    }
+
+    #[test]
     fn submit_combines_attachment_contents_and_input_text() {
         let mut state = AppState::new();
         state.session_id = Some("s-1".to_string());
@@ -5934,13 +6476,46 @@ mod tests {
 
         let cmd = cmd_rx.try_recv().expect("prompt was sent");
         match cmd {
-            UiCommand::SendPrompt { text } => {
+            UiCommand::SendPrompt { text, images } => {
                 assert_eq!(text, "pasted-1\npasted-2\ntyped");
+                assert!(images.is_empty());
             }
             other => panic!("unexpected command: {other:?}"),
         }
         assert!(state.input.is_empty());
         assert!(state.attachments.is_empty());
+    }
+
+    #[test]
+    fn submit_sends_text_and_image_blocks() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state
+            .image_attachments
+            .push(test_image_attachment_with_id(1));
+        state.input = "describe this".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        let cmd = cmd_rx.try_recv().expect("prompt was sent");
+        match cmd {
+            UiCommand::SendPrompt { text, images } => {
+                assert_eq!(text, "describe this");
+                assert_eq!(images.len(), 1);
+                assert_eq!(images[0].data_base64, "aW1hZ2U=");
+                assert_eq!(images[0].mime_type, "image/png");
+                assert_eq!(images[0].width, 640);
+                assert_eq!(images[0].height, 480);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(state.input.is_empty());
+        assert!(state.image_attachments.is_empty());
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::UserPrompt(text)) if text == "describe this\n[image]"
+        ));
     }
 
     #[test]

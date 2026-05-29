@@ -10,6 +10,15 @@ use agent_client_protocol::schema::{
 };
 use tokio::sync::oneshot;
 
+/// Image block submitted by the UI with a prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptImage {
+    pub data_base64: String,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Events flowing from the ACP runtime into the UI task.
 #[derive(Debug)]
 pub enum UiEvent {
@@ -18,6 +27,7 @@ pub enum UiEvent {
     Connected {
         agent_name: Option<String>,
         agent_version: Option<String>,
+        prompt_images_supported: bool,
     },
     /// A session has been opened or loaded; future updates carry this session id.
     SessionStarted { session_id: String, resumed: bool },
@@ -82,7 +92,10 @@ pub enum SessionConfigTarget {
 #[derive(Debug)]
 pub enum UiCommand {
     /// Send a user prompt for the current session.
-    SendPrompt { text: String },
+    SendPrompt {
+        text: String,
+        images: Vec<PromptImage>,
+    },
     /// Set a session configuration option to a new value.
     SetSessionConfigOption {
         target: SessionConfigTarget,

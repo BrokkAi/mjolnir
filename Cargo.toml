@@ -15,11 +15,13 @@ path = "src/main.rs"
 agent-client-protocol = { version = "0.12", features = ["unstable_session_model", "unstable_session_usage"] }
 arboard = "3.4"
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 dirs = "6"
 flate2 = "1"
 futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = "0.2"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
@@ -34,6 +36,7 @@ tokio-util = { version = "0.7", features = ["compat", "rt"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 unicode-width = "0.2.2"
 

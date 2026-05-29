@@ -19,10 +19,80 @@
 //! no reusable clipboard abstraction.
 
 use std::io::Write;
+use std::path::Path;
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
 /// Maximum raw bytes we will base64-encode into an OSC 52 sequence.
 /// Large payloads are rejected before encoding to avoid overwhelming the terminal.
 const OSC52_MAX_RAW_BYTES: usize = 100_000;
+
+/// PNG image data read from the system clipboard and prepared for ACP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardImage {
+    pub data_base64: String,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub byte_len: usize,
+}
+
+/// Read image content from the system clipboard and encode it as PNG.
+pub fn read_clipboard_image_as_png() -> Result<ClipboardImage, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
+
+    if let Ok(files) = clipboard.get().file_list()
+        && let Some(image) = files
+            .into_iter()
+            .find_map(|path| load_image_path_as_png(&path).ok())
+    {
+        return Ok(image);
+    }
+
+    let image = clipboard
+        .get_image()
+        .map_err(|e| format!("no image on clipboard: {e}"))?;
+    let width = image.width as u32;
+    let height = image.height as u32;
+    let rgba = image::RgbaImage::from_raw(width, height, image.bytes.into_owned())
+        .ok_or_else(|| "could not encode image: invalid RGBA buffer".to_string())?;
+
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| format!("could not encode image: {e}"))?;
+
+    Ok(ClipboardImage {
+        data_base64: BASE64_STANDARD.encode(&png),
+        mime_type: "image/png".to_string(),
+        width,
+        height,
+        byte_len: png.len(),
+    })
+}
+
+/// Read an image file and encode it as PNG for ACP prompt submission.
+pub fn load_image_path_as_png(path: &Path) -> Result<ClipboardImage, String> {
+    let image =
+        image::open(path).map_err(|e| format!("could not open image {}: {e}", path.display()))?;
+    let width = image.width();
+    let height = image.height();
+
+    let mut png = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| format!("could not encode image {}: {e}", path.display()))?;
+
+    Ok(ClipboardImage {
+        data_base64: BASE64_STANDARD.encode(&png),
+        mime_type: "image/png".to_string(),
+        width,
+        height,
+        byte_len: png.len(),
+    })
+}
 
 /// Copy text to the system clipboard.
 ///

@@ -262,6 +262,7 @@ pub struct AppState {
     pub available_commands: Vec<AvailableCommand>,
     pub session_config_options: Vec<SessionConfigOption>,
     pub session_config_targets: Vec<SessionConfigTarget>,
+    pub prompt_images_supported: bool,
     pub transcript: Vec<Entry>,
     pub tool_calls: HashMap<String, ToolCallView>,
     /// Bumped whenever `transcript` or `tool_calls` change in a way that
@@ -290,6 +291,12 @@ pub struct AppState {
     /// compact badges in the input box; their contents are concatenated
     /// with `input` when the prompt is submitted.
     pub attachments: Vec<PastedAttachment>,
+    /// Pasted image attachments shown as compact badges and submitted as
+    /// ACP image content blocks.
+    pub image_attachments: Vec<PastedImageAttachment>,
+    /// Fast plain-character stream candidate. Terminals can deliver
+    /// drag/drop and paste data as key events instead of bracketed paste.
+    pub input_paste_burst: InputPasteBurst,
     pub next_attachment_id: usize,
     /// FIFO queue of permission prompts. The front element is the one
     /// currently shown in the modal; new requests are pushed to the back
@@ -354,6 +361,34 @@ pub struct PastedAttachment {
     pub content: String,
 }
 
+/// Image content captured from the clipboard and held until submission.
+#[derive(Debug, Clone)]
+pub struct PastedImageAttachment {
+    #[allow(dead_code)]
+    pub id: usize,
+    pub data_base64: String,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub byte_len: usize,
+}
+
+/// Candidate text inserted by a rapid stream of plain character events.
+#[derive(Debug, Clone, Default)]
+pub struct InputPasteBurst {
+    pub start_cursor: usize,
+    pub text: String,
+    pub last_char_at: Option<Instant>,
+}
+
+impl InputPasteBurst {
+    pub fn clear(&mut self) {
+        self.start_cursor = 0;
+        self.text.clear();
+        self.last_char_at = None;
+    }
+}
+
 /// Config option picker overlay state.
 #[derive(Debug, Clone)]
 pub struct ConfigPicker {
@@ -394,6 +429,7 @@ impl AppState {
             },
             session_config_options: Vec::new(),
             session_config_targets: Vec::new(),
+            prompt_images_supported: false,
             transcript: Vec::new(),
             tool_calls: HashMap::new(),
             transcript_revision: 0,
@@ -401,6 +437,8 @@ impl AppState {
             input_cursor: 0,
             input_scroll_offset: 0,
             attachments: Vec::new(),
+            image_attachments: Vec::new(),
+            input_paste_burst: InputPasteBurst::default(),
             next_attachment_id: 0,
             prompt_history: Vec::new(),
             history_cursor: None,
@@ -936,11 +974,15 @@ impl AppState {
 
     pub fn apply_event(&mut self, event: UiEvent) {
         match event {
-            UiEvent::Connected { .. } => {
+            UiEvent::Connected {
+                prompt_images_supported,
+                ..
+            } => {
                 // Keep the pre-filled agent_label (the configured
                 // executable name). The agent may report a different
                 // name over ACP, but the user wants to see which
                 // binary they wired up in config.
+                self.prompt_images_supported = prompt_images_supported;
                 self.connection_state = ConnectionState::Initializing;
             }
             UiEvent::SessionStarted { session_id, .. } => {
@@ -1913,6 +1955,7 @@ mod tests {
         s.apply_event(UiEvent::Connected {
             agent_name: Some("anvil".into()),
             agent_version: Some("0.1".into()),
+            prompt_images_supported: false,
         });
         assert_eq!(s.connection_state, ConnectionState::Initializing);
 
@@ -1942,6 +1985,7 @@ mod tests {
         s.apply_event(UiEvent::Connected {
             agent_name: Some("anvil".into()),
             agent_version: None,
+            prompt_images_supported: false,
         });
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -1971,6 +2015,7 @@ mod tests {
         s.apply_event(UiEvent::Connected {
             agent_name: Some("anvil".into()),
             agent_version: None,
+            prompt_images_supported: false,
         });
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -2012,6 +2057,7 @@ mod tests {
         s.apply_event(UiEvent::Connected {
             agent_name: Some("anvil".into()),
             agent_version: None,
+            prompt_images_supported: false,
         });
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -2419,6 +2465,7 @@ mod tests {
         s.apply_event(UiEvent::Connected {
             agent_name: Some("anvil".into()),
             agent_version: None,
+            prompt_images_supported: false,
         });
         assert!(
             !s.is_streaming(),
