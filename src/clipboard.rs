@@ -27,6 +27,12 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 /// Maximum raw bytes we will base64-encode into an OSC 52 sequence.
 /// Large payloads are rejected before encoding to avoid overwhelming the terminal.
 const OSC52_MAX_RAW_BYTES: usize = 100_000;
+/// Maximum image file size accepted for prompt attachments.
+const PROMPT_IMAGE_MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
+/// Maximum decoded image pixel count accepted for prompt attachments.
+const PROMPT_IMAGE_MAX_PIXELS: u64 = 16_000_000;
+/// Maximum encoded PNG size accepted before base64 conversion.
+const PROMPT_IMAGE_MAX_PNG_BYTES: usize = 25 * 1024 * 1024;
 
 /// PNG image data read from the system clipboard and prepared for ACP.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +62,7 @@ pub fn read_clipboard_image_as_png() -> Result<ClipboardImage, String> {
         .map_err(|e| format!("no image on clipboard: {e}"))?;
     let width = image.width as u32;
     let height = image.height as u32;
+    validate_prompt_image_dimensions(width, height, "clipboard image")?;
     let rgba = image::RgbaImage::from_raw(width, height, image.bytes.into_owned())
         .ok_or_else(|| "could not encode image: invalid RGBA buffer".to_string())?;
 
@@ -64,26 +71,69 @@ pub fn read_clipboard_image_as_png() -> Result<ClipboardImage, String> {
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .map_err(|e| format!("could not encode image: {e}"))?;
 
-    Ok(ClipboardImage {
-        data_base64: BASE64_STANDARD.encode(&png),
-        mime_type: "image/png".to_string(),
-        width,
-        height,
-        byte_len: png.len(),
-    })
+    clipboard_image_from_png(png, width, height, "clipboard image")
 }
 
 /// Read an image file and encode it as PNG for ACP prompt submission.
 pub fn load_image_path_as_png(path: &Path) -> Result<ClipboardImage, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("could not read image metadata {}: {e}", path.display()))?;
+    if metadata.len() > PROMPT_IMAGE_MAX_FILE_BYTES {
+        return Err(format!(
+            "image file {} is too large ({} bytes; max {PROMPT_IMAGE_MAX_FILE_BYTES})",
+            path.display(),
+            metadata.len()
+        ));
+    }
+
+    let reader = image::ImageReader::open(path)
+        .map_err(|e| format!("could not open image {}: {e}", path.display()))?
+        .with_guessed_format()
+        .map_err(|e| format!("could not identify image {}: {e}", path.display()))?;
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|e| format!("could not inspect image {}: {e}", path.display()))?;
+    validate_prompt_image_dimensions(width, height, &path.display().to_string())?;
+
     let image =
         image::open(path).map_err(|e| format!("could not open image {}: {e}", path.display()))?;
-    let width = image.width();
-    let height = image.height();
 
     let mut png = Vec::new();
     image
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .map_err(|e| format!("could not encode image {}: {e}", path.display()))?;
+
+    clipboard_image_from_png(png, width, height, &path.display().to_string())
+}
+
+fn validate_prompt_image_dimensions(width: u32, height: u32, source: &str) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "image {source} has invalid dimensions {width}x{height}"
+        ));
+    }
+
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > PROMPT_IMAGE_MAX_PIXELS {
+        return Err(format!(
+            "image {source} is too large ({width}x{height}; max {PROMPT_IMAGE_MAX_PIXELS} pixels)"
+        ));
+    }
+    Ok(())
+}
+
+fn clipboard_image_from_png(
+    png: Vec<u8>,
+    width: u32,
+    height: u32,
+    source: &str,
+) -> Result<ClipboardImage, String> {
+    if png.len() > PROMPT_IMAGE_MAX_PNG_BYTES {
+        return Err(format!(
+            "encoded image {source} is too large ({} bytes; max {PROMPT_IMAGE_MAX_PNG_BYTES})",
+            png.len()
+        ));
+    }
 
     Ok(ClipboardImage {
         data_base64: BASE64_STANDARD.encode(&png),
@@ -699,6 +749,30 @@ mod tests {
                 OSC52_MAX_RAW_BYTES + 1
             ))
         );
+    }
+
+    #[test]
+    fn prompt_image_dimensions_reject_oversized_images() {
+        let too_many_pixels = PROMPT_IMAGE_MAX_PIXELS + 1;
+        assert_eq!(
+            validate_prompt_image_dimensions(too_many_pixels as u32, 1, "test image"),
+            Err(format!(
+                "image test image is too large ({too_many_pixels}x1; max {PROMPT_IMAGE_MAX_PIXELS} pixels)"
+            ))
+        );
+    }
+
+    #[test]
+    fn load_image_path_rejects_large_file_before_decode() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("too-large.png");
+        let file = std::fs::File::create(&path).expect("create file");
+        file.set_len(PROMPT_IMAGE_MAX_FILE_BYTES + 1)
+            .expect("set sparse file length");
+
+        let err = load_image_path_as_png(&path).expect_err("large file should be rejected");
+
+        assert!(err.contains("is too large"), "unexpected error: {err}");
     }
 
     #[test]

@@ -1493,11 +1493,10 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         }
         combined.push_str(&attachment.content);
     }
-    let input_text = std::mem::take(&mut state.input);
-    if !combined.is_empty() && !input_text.is_empty() {
+    if !combined.is_empty() && !state.input.is_empty() {
         combined.push('\n');
     }
-    combined.push_str(&input_text);
+    combined.push_str(&state.input);
 
     let images: Vec<PromptImage> = state
         .image_attachments
@@ -1515,19 +1514,22 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
-    // Clear attachments after taking their content.
-    clear_attachments(state);
-    state.input_cursor = 0;
-    state.scroll_input_to_bottom();
-
     // Client-side commands are handled here without forwarding anything
     // to the agent.
     if images.is_empty() && text == "/new" {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
         state.exit_reason = Some(UiExitReason::NewSession);
         return;
     }
 
     if images.is_empty() && text == "/load" {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
         state.exit_reason = Some(UiExitReason::LoadSession);
         return;
     }
@@ -1555,6 +1557,11 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         state.record_status_message(StatusKind::Warning, "waiting for session...");
         return;
     }
+    state.input.clear();
+    clear_attachments(state);
+    state.input_cursor = 0;
+    state.scroll_input_to_bottom();
+
     let display_text = prompt_display_text(&text, images.len());
     state.record_user_prompt(display_text);
     let _ = cmd_tx.send(UiCommand::SendPrompt { text, images });
@@ -6516,6 +6523,25 @@ mod tests {
             state.transcript.last(),
             Some(Entry::UserPrompt(text)) if text == "describe this\n[image]"
         ));
+    }
+
+    #[test]
+    fn submit_preserves_text_and_images_when_session_is_not_ready() {
+        let mut state = AppState::new();
+        state
+            .image_attachments
+            .push(test_image_attachment_with_id(1));
+        state.input = "describe this".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert_eq!(state.input, "describe this");
+        assert_eq!(state.image_attachments.len(), 1);
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Warning);
+        assert_eq!(status.text, "waiting for session...");
     }
 
     #[test]
