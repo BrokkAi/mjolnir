@@ -1,9 +1,10 @@
 //! mjolnir: an interactive terminal client for any ACP-speaking agent.
 //!
-//! Picks an agent (from the ACP registry, the bundled `anvil` default, or
-//! a Custom command) for each new session, persists global picker
-//! preferences to `~/.config/mj/config.toml`, then spawns the agent as a
-//! child process and renders the session in a ratatui chat UI.
+//! Starts sessions with the configured default ACP agent, falling back to the
+//! picker only when no default exists or when the user explicitly requests a
+//! new agent with `/new`. It persists global picker preferences to
+//! `~/.config/mj/config.toml`, then spawns the agent as a child process and
+//! renders the session in a ratatui chat UI.
 
 mod acp;
 mod app;
@@ -541,6 +542,10 @@ fn prepare_existing_worktree(cwd: &std::path::Path, name_or_path: &str) -> Resul
     Ok(opened)
 }
 
+fn should_open_initial_agent_picker(cfg: &Config, initial_agent: Option<&SelectedAgent>) -> bool {
+    cfg.agent.is_none() && initial_agent.is_none()
+}
+
 async fn run_app(
     cwd: PathBuf,
     agent_stderr: Option<PathBuf>,
@@ -553,24 +558,20 @@ async fn run_app(
     let config_path = config::default_config_path();
     let mut cfg = Config::load(&config_path)?;
 
-    // Supervisor loop. New sessions always pass through the agent picker.
-    // Resumed sessions may provide the agent chosen by `mj resume`; otherwise
-    // they fall back to the configured default agent for compatibility with
-    // non-interactive resume paths.
+    // Supervisor loop. Initial sessions use the configured default agent when
+    // available. The picker is reserved for first-run setup and explicit
+    // new-session requests (`/new` / Ctrl-N), while resumed sessions may provide
+    // the agent chosen by `mj resume` or fall back to the configured default.
     // Consume resume_session and initial_agent on the first iteration only.
     let mut initial_resume = resume_session;
     let mut initial_agent = initial_agent;
+    let mut pick_agent = should_open_initial_agent_picker(&cfg, initial_agent.as_ref());
     loop {
         let resume = initial_resume.take();
         let agent = if let Some(agent) = initial_agent.take() {
             agent
-        } else if resume.is_some() {
-            cfg.agent.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no default agent configured; run `mj` once to pick an agent before resuming sessions"
-                )
-            })?
-        } else {
+        } else if pick_agent {
+            pick_agent = false;
             let picker_result = run_agent_picker_once(&cfg).await?;
             apply_picker_preferences(&mut cfg, picker_result.preferences);
             let Some(outcome) = picker_result.outcome else {
@@ -585,6 +586,12 @@ async fn run_app(
             cfg.save(&config_path)
                 .with_context(|| format!("save {}", config_path.display()))?;
             selected
+        } else {
+            cfg.agent.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no default agent configured; run `mj` once to pick an agent before resuming sessions"
+                )
+            })?
         };
 
         let (reason, session_id) = run_session(
@@ -600,6 +607,7 @@ async fn run_app(
         match reason {
             UiExitReason::Quit => return Ok(session_id),
             UiExitReason::NewSession => {
+                pick_agent = true;
                 continue;
             }
             UiExitReason::LoadSession => {
@@ -933,6 +941,35 @@ mod tests {
             project_label(std::path::Path::new("/Users/ryan/code/mjolnir/src"), None),
             "src"
         );
+    }
+
+    #[test]
+    fn initial_agent_picker_opens_only_without_default_or_initial_agent() {
+        let configured = SelectedAgent {
+            source_id: "claude-acp".to_string(),
+            program: PathBuf::from("npx"),
+            args: vec!["-y".to_string(), "@x/claude".to_string()],
+            env: Default::default(),
+        };
+        let initial = SelectedAgent {
+            source_id: "anvil".to_string(),
+            program: PathBuf::from("uvx"),
+            args: vec!["brokk".to_string(), "acp".to_string()],
+            env: Default::default(),
+        };
+
+        assert!(should_open_initial_agent_picker(&Config::default(), None));
+        assert!(!should_open_initial_agent_picker(
+            &Config {
+                agent: Some(configured),
+                favorite_agents: Vec::new(),
+            },
+            None
+        ));
+        assert!(!should_open_initial_agent_picker(
+            &Config::default(),
+            Some(&initial)
+        ));
     }
 
     #[test]

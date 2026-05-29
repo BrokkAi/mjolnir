@@ -3,7 +3,8 @@
 //! Renders a ratatui screen that lists `anvil` + registry agents +
 //! `Custom`, lets the user filter and select one, then resolves the
 //! selection into a launch command (downloading a binary archive when
-//! needed, with a progress spinner). Used whenever a new session starts.
+//! needed, with a progress spinner). Used for first-run setup, explicit
+//! new-session requests, and agent selection before interactive resume flows.
 
 use std::collections::HashMap;
 use std::io::Stdout;

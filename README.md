@@ -50,8 +50,9 @@ only use a custom command or an already-cached registry copy. The default
 
 ## Quick Start
 
-Every new interactive session opens the agent picker. Choose an agent from the
-ACP registry, the `anvil` default, or a custom ACP command.
+By default, `mj` starts an interactive session with the configured default agent.
+If no usable agent is configured yet, it opens the agent picker so you can choose
+an agent from the ACP registry, the `anvil` default, or a custom ACP command.
 
 ```
  mj | choose an agent
@@ -65,11 +66,13 @@ ACP registry, the `anvil` default, or a custom ACP command.
 ```
 
 Registry agents selected through a binary-only distribution are downloaded to
-`~/.cache/mj/agents/<id>/<version>/` and reused. Picker preferences are stored
-in `~/.config/mj/config.toml`.
+`~/.cache/mj/agents/<id>/<version>/` and reused. Picker preferences and the
+configured default agent are stored in `~/.config/mj/config.toml`.
 
-Use `/new` inside the TUI to end the current chat and pick a harness again. Use
-`/load` to open the session picker for the current agent.
+Use `/new` inside the TUI when you want to end the current chat and choose a
+harness again. The agent picker stays open for that explicit new-session flow
+until you select an agent or cancel it. Use `/load` to open the session picker
+for the current agent.
 
 ## Why Multiple Harnesses
 
