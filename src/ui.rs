@@ -546,13 +546,12 @@ fn handle_crossterm(
     let key = match ev {
         CtEvent::Key(k) => k,
         CtEvent::Paste(text) => {
-            // Skip paste when a modal is active or the runtime is closed;
+            // Skip paste when a modal is active;
             // the input buffer isn't focused and pasted text would land
             // invisibly in the background.
             if state.help_overlay
                 || state.has_pending_permission()
                 || state.config_picker.is_some()
-                || state.runtime_closed
             {
                 return TerminalRequest::None;
             }
@@ -586,47 +585,61 @@ fn handle_crossterm(
         return TerminalRequest::None;
     }
 
+    if should_open_help(key.modifiers, key.code) {
+        state.help_overlay = true;
+        return TerminalRequest::None;
+    }
+
     if state.runtime_closed {
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c'))
             | (KeyModifiers::CONTROL, KeyCode::Char('d'))
             | (_, KeyCode::Esc) => {
                 state.exit_reason = Some(UiExitReason::Quit);
+                return TerminalRequest::None;
             }
             (_, code) if should_open_help(key.modifiers, code) => {
                 state.help_overlay = true;
+                return TerminalRequest::None;
             }
             (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
                 state.exit_reason = Some(UiExitReason::NewSession);
+                return TerminalRequest::None;
             }
             (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
                 state.toggle_expand_tool_outputs();
+                return TerminalRequest::None;
             }
             (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
                 copy_last_agent_message(state);
+                return TerminalRequest::None;
             }
             (_, KeyCode::PageUp) if mode == UiMode::FullscreenTui => {
                 state.scroll_offset = state.scroll_offset.saturating_add(5);
+                return TerminalRequest::None;
             }
             (_, KeyCode::PageDown) if mode == UiMode::FullscreenTui => {
                 state.scroll_offset = state.scroll_offset.saturating_sub(5);
+                return TerminalRequest::None;
             }
             (_, KeyCode::Up) if mode == UiMode::FullscreenTui => {
                 state.scroll_offset = state.scroll_offset.saturating_add(1);
+                return TerminalRequest::None;
             }
             (_, KeyCode::Down) if mode == UiMode::FullscreenTui => {
                 state.scroll_offset = state.scroll_offset.saturating_sub(1);
+                return TerminalRequest::None;
             }
-            (_, KeyCode::Home) if mode == UiMode::FullscreenTui => scroll_to_top(state),
-            (_, KeyCode::End) if mode == UiMode::FullscreenTui => scroll_to_bottom(state),
+            (_, KeyCode::Home) if mode == UiMode::FullscreenTui => {
+                scroll_to_top(state);
+                return TerminalRequest::None;
+            }
+            (_, KeyCode::End) if mode == UiMode::FullscreenTui => {
+                scroll_to_bottom(state);
+                return TerminalRequest::None;
+            }
             _ => {}
         }
-        return TerminalRequest::None;
-    }
-
-    if should_open_help(key.modifiers, key.code) {
-        state.help_overlay = true;
-        return TerminalRequest::None;
     }
 
     // Permission modal owns the keyboard while it's open.
@@ -652,7 +665,7 @@ fn handle_crossterm(
     // visible, and intercepts Enter/Esc before the normal handlers see
     // them. Plain typing still falls through so the user can refine the
     // filter.
-    if state.autocomplete.visible {
+    if state.autocomplete.visible && !state.runtime_closed {
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::NONE, KeyCode::Enter) => {
                 state.autocomplete_accept();
@@ -1610,7 +1623,10 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     }
 
     if state.runtime_closed {
-        state.record_status_message(StatusKind::Info, "acp runtime closed; press Ctrl-C to quit");
+        state.record_status_message(
+            StatusKind::Info,
+            "acp runtime closed; type /new or press Ctrl-N for a new session, or Ctrl-C to quit",
+        );
         return;
     }
     if state.is_streaming() {
@@ -3313,7 +3329,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         }
     };
     let title = if state.runtime_closed {
-        " runtime closed (Ctrl-C to quit) ".to_string()
+        " runtime closed (/new or Ctrl-N for a new session | Ctrl-C to quit) ".to_string()
     } else if state.is_streaming() {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
@@ -4429,16 +4445,18 @@ mod tests {
     }
 
     #[test]
-    fn runtime_closed_ignores_text_input() {
+    fn runtime_closed_allows_new_session_command() {
         let mut state = AppState::new();
         state.runtime_closed = true;
-        state.input = "keep".to_string();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('x')));
+        for ch in ['/', 'n', 'e', 'w'] {
+            handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char(ch)));
+        }
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
-        assert_eq!(state.input, "keep");
-        assert!(state.exit_reason.is_none());
+        assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
+        assert!(state.input.is_empty());
     }
 
     #[test]
@@ -4572,7 +4590,10 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err());
         assert_eq!(state.transcript.len(), 1);
         match &state.transcript[0] {
-            Entry::System(text) => assert_eq!(text, "acp runtime closed; press Ctrl-C to quit"),
+            Entry::System(text) => assert_eq!(
+                text,
+                "acp runtime closed; type /new or press Ctrl-N for a new session, or Ctrl-C to quit"
+            ),
             other => panic!("unexpected entry: {other:?}"),
         }
     }
@@ -4891,10 +4912,18 @@ mod tests {
         state.scroll_offset = 0;
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageUp));
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::PageUp, KeyModifiers::CONTROL),
+        );
         assert_eq!(state.scroll_offset, 5);
 
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::PageDown, KeyModifiers::CONTROL),
+        );
         assert_eq!(state.scroll_offset, 0);
         assert!(state.exit_reason.is_none());
     }
