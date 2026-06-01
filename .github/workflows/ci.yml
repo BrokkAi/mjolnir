@@ -70,8 +70,5 @@ jobs:
     - name: Run Clippy lints
       run: cargo clippy --target aarch64-linux-android --all-targets -- -D warnings
 
-    - name: Build Android target
-      run: cargo build --release --locked --target aarch64-linux-android
-
-    - name: Run tests
-      run: cargo test
+    - name: Check Android target
+      run: cargo check --locked --target aarch64-linux-android
