@@ -13,7 +13,6 @@ path = "src/main.rs"
 
 [dependencies]
 agent-client-protocol = { version = "0.12", features = ["unstable_session_model", "unstable_session_usage"] }
-arboard = "3.4"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
@@ -47,3 +46,6 @@ unicode-width = "0.2.2"
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = "3.4"

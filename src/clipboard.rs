@@ -45,6 +45,7 @@ pub struct ClipboardImage {
 }
 
 /// Read image content from the system clipboard and encode it as PNG.
+#[cfg(not(target_os = "android"))]
 pub fn read_clipboard_image_as_png() -> Result<ClipboardImage, String> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
@@ -72,6 +73,12 @@ pub fn read_clipboard_image_as_png() -> Result<ClipboardImage, String> {
         .map_err(|e| format!("could not encode image: {e}"))?;
 
     clipboard_image_from_png(png, width, height, "clipboard image")
+}
+
+/// Android does not currently ship a native clipboard backend in this crate.
+#[cfg(target_os = "android")]
+pub fn read_clipboard_image_as_png() -> Result<ClipboardImage, String> {
+    Err("clipboard image access is unavailable on Android".to_string())
 }
 
 /// Read an image file and encode it as PNG for ACP prompt submission.
@@ -376,7 +383,7 @@ fn arboard_copy(text: &str) -> Result<Option<ClipboardLease>, String> {
 }
 
 /// arboard on Windows/other platforms.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
 fn arboard_copy(text: &str) -> Result<Option<ClipboardLease>, String> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
@@ -384,6 +391,12 @@ fn arboard_copy(text: &str) -> Result<Option<ClipboardLease>, String> {
         .set_text(text)
         .map_err(|e| format!("failed to set clipboard text: {e}"))?;
     Ok(None)
+}
+
+/// Android currently has no native clipboard backend wired into this crate.
+#[cfg(target_os = "android")]
+fn arboard_copy(_text: &str) -> Result<Option<ClipboardLease>, String> {
+    Err("native clipboard unavailable on Android".to_string())
 }
 
 /// Copy text into the Windows clipboard from a WSL process.
