@@ -43,3 +43,35 @@ jobs:
 
     - name: Run tests
       run: cargo test
+
+  android:
+    name: Android aarch64-unknown-linux-android
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: aarch64-linux-android-clang
+      CC_aarch64_linux_android: aarch64-linux-android-clang
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-linux-android
+        components: rustfmt, clippy
+
+    - name: Setup Android NDK
+      uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r27d
+
+    - name: Check Rust formatting
+      run: cargo fmt --check
+
+    - name: Run Clippy lints
+      run: cargo clippy --target aarch64-linux-android --all-targets -- -D warnings
+
+    - name: Build Android target
+      run: cargo build --release --locked --target aarch64-linux-android
+
+    - name: Run tests
+      run: cargo test
