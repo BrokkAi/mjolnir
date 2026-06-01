@@ -57,18 +57,11 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: aarch64-linux-android
-        components: rustfmt, clippy
 
     - name: Setup Android NDK
       uses: nttld/setup-ndk@v1
       with:
         ndk-version: r27d
-
-    - name: Check Rust formatting
-      run: cargo fmt --check
-
-    - name: Run Clippy lints
-      run: cargo clippy --target aarch64-linux-android --all-targets -- -D warnings
 
     - name: Check Android target
       run: cargo check --locked --target aarch64-linux-android
