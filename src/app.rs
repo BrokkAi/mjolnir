@@ -866,6 +866,7 @@ impl AppState {
     /// The popover is shown when:
     /// - the input starts with `/`,
     /// - no permission modal is open (it owns the keyboard),
+    /// - the runtime is still accepting commands,
     /// - we're not mid-stream (the input is greyed-out anyway).
     ///
     /// Filtering: case-insensitive prefix match on the slug after `/`,
@@ -877,6 +878,7 @@ impl AppState {
         let trigger_active = self.input.starts_with('/')
             && !self.has_pending_permission()
             && self.config_picker.is_none()
+            && !self.runtime_closed
             && !self.is_streaming();
         if !trigger_active {
             self.autocomplete = Autocomplete::default();
@@ -2447,6 +2449,19 @@ mod tests {
 
         s.apply_event(UiEvent::PermissionRequest(permission_prompt()));
         assert!(!s.autocomplete.visible);
+    }
+
+    #[test]
+    fn autocomplete_hidden_after_runtime_closes() {
+        let mut s = AppState::new();
+        seed_commands(&mut s);
+        s.mark_runtime_closed();
+        s.input = "/".to_string();
+
+        s.update_autocomplete();
+
+        assert!(!s.autocomplete.visible);
+        assert!(s.autocomplete.matches.is_empty());
     }
 
     #[test]
