@@ -74,9 +74,13 @@ download_file() {
 detect_platform() {
   local uname_s
   local uname_m
+  local uname_o=""
 
   uname_s="$(uname -s)"
   uname_m="$(uname -m)"
+  if uname -o >/dev/null 2>&1; then
+    uname_o="$(uname -o)"
+  fi
 
   case "$uname_m" in
     x86_64 | amd64)
@@ -96,8 +100,13 @@ detect_platform() {
       RUST_TARGET="${ARCH}-apple-darwin"
       ;;
     Linux)
-      OS_FAMILY="linux"
-      RUST_TARGET="${ARCH}-unknown-linux-gnu"
+      if [[ "$uname_o" == "Android" || "${PREFIX:-}" == *com.termux* ]]; then
+        OS_FAMILY="android"
+        RUST_TARGET="${ARCH}-linux-android"
+      else
+        OS_FAMILY="linux"
+        RUST_TARGET="${ARCH}-unknown-linux-gnu"
+      fi
       ;;
     *)
       die "unsupported OS: ${uname_s}"

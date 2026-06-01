@@ -487,6 +487,7 @@ fn current_platform() -> Result<Platform> {
         other => anyhow::bail!("unsupported CPU architecture: {other}"),
     };
     let (os_family, rust_os) = match std::env::consts::OS {
+        "android" => ("android", "linux-android"),
         "macos" => ("macos", "apple-darwin"),
         "linux" => ("linux", "unknown-linux-gnu"),
         "windows" => ("windows", "pc-windows-msvc"),
@@ -537,6 +538,14 @@ mod tests {
             os_family: "windows",
             arch: "x86_64",
             rust_target: "x86_64-pc-windows-msvc".to_string(),
+        }
+    }
+
+    fn android_arm() -> Platform {
+        Platform {
+            os_family: "android",
+            arch: "aarch64",
+            rust_target: "aarch64-linux-android".to_string(),
         }
     }
 
@@ -684,6 +693,21 @@ mod tests {
         assert_eq!(
             selected.name,
             "brokk-mjolnir-v0.5.0-x86_64-pc-windows-msvc.zip"
+        );
+    }
+
+    #[test]
+    fn android_selects_android_asset() {
+        let assets = vec![
+            asset("brokk-mjolnir-v0.5.0-aarch64-unknown-linux-gnu.tar.gz"),
+            asset("brokk-mjolnir-v0.5.0-aarch64-linux-android.tar.gz"),
+        ];
+
+        let selected = select_mj_asset(&assets, &android_arm()).expect("select");
+
+        assert_eq!(
+            selected.name,
+            "brokk-mjolnir-v0.5.0-aarch64-linux-android.tar.gz"
         );
     }
 
