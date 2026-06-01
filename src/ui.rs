@@ -549,9 +549,7 @@ fn handle_crossterm(
             // Skip paste when a modal is active;
             // the input buffer isn't focused and pasted text would land
             // invisibly in the background.
-            if state.help_overlay
-                || state.has_pending_permission()
-                || state.config_picker.is_some()
+            if state.help_overlay || state.has_pending_permission() || state.config_picker.is_some()
             {
                 return TerminalRequest::None;
             }
