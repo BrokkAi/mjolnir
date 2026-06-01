@@ -7,7 +7,6 @@
 //! service.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Read;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -30,12 +29,15 @@ use crate::version::MJOLNIR_VERSION;
 
 const MAX_HTTP_BODY: usize = 1024 * 1024;
 const REMOTE_PAIRING_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+const HTTP_REQUEST_TIMEOUT_SECS: u64 = 15;
 
 pub struct ClientConfig {
     pub pairing_uri: Option<String>,
     pub join_code: Option<String>,
+    pub ca_sha256: Option<String>,
     pub server: Option<String>,
     pub token: Option<String>,
+    pub ca_cert: Option<PathBuf>,
     pub name: Option<String>,
     pub cwd: PathBuf,
     pub poll_interval: Duration,
@@ -46,6 +48,7 @@ pub struct ClientConfig {
 pub struct SubmitPromptConfig {
     pub server: String,
     pub token: String,
+    pub ca_cert: Option<PathBuf>,
     pub client_id: String,
     pub prompt: String,
     pub permission_mode: PermissionMode,
@@ -64,6 +67,18 @@ struct PairingSeed {
     server: Option<String>,
     token: Option<String>,
     join_code: Option<String>,
+    ca_sha256: Option<String>,
+}
+
+struct ResolvePairingInput<'a> {
+    pairing_uri: Option<&'a str>,
+    join_code: Option<String>,
+    ca_sha256: Option<String>,
+    server: Option<String>,
+    token: Option<String>,
+    ca_cert: Option<&'a std::path::Path>,
+    discovery_addr: SocketAddr,
+    discovery_timeout: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,9 +234,10 @@ struct DiscoveryRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct DiscoveryResponse {
     protocol: String,
+    join_code: String,
     server: String,
-    token: String,
     ca_cert_pem: String,
+    ca_sha256: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -454,7 +470,7 @@ pub async fn run_server(
         .await
         .with_context(|| format!("bind remote server on {bind}"))?;
     let local_addr = listener.local_addr().context("remote server local addr")?;
-    let pairing_uri = pairing_uri_for_code(&join_code);
+    let pairing_uri = pairing_uri_for_code(&join_code, &token, &ca_cert_pem)?;
     let state = Arc::new(Mutex::new(store));
 
     println!("mj remote server listening on https://{local_addr}");
@@ -464,11 +480,11 @@ pub async fn run_server(
     println!("pairing uri: {pairing_uri}");
     println!("QR payload: {pairing_uri}");
     println!("manual fallback token: {token}");
+    println!("CA SHA-256: {}", ca_sha256_from_pem(&ca_cert_pem)?);
 
     tokio::spawn(run_discovery_responder(
         discovery_bind,
         local_addr,
-        token.clone(),
         join_code,
         ca_cert_pem,
     ));
@@ -507,14 +523,16 @@ pub async fn run_client(cfg: ClientConfig) -> Result<()> {
             ca_cert_pem: Some(saved.ca_cert_pem.clone()),
         }
     } else {
-        resolve_pairing(
-            cfg.pairing_uri.as_deref(),
-            cfg.join_code,
-            cfg.server,
-            cfg.token,
-            cfg.discovery_addr,
-            cfg.discovery_timeout,
-        )
+        resolve_pairing(ResolvePairingInput {
+            pairing_uri: cfg.pairing_uri.as_deref(),
+            join_code: cfg.join_code,
+            ca_sha256: cfg.ca_sha256,
+            server: cfg.server,
+            token: cfg.token,
+            ca_cert: cfg.ca_cert.as_deref(),
+            discovery_addr: cfg.discovery_addr,
+            discovery_timeout: cfg.discovery_timeout,
+        })
         .await?
     };
     let http = reqwest_client(
@@ -623,11 +641,15 @@ pub async fn run_client(cfg: ClientConfig) -> Result<()> {
     }
 }
 
-pub async fn list_clients(server: &str, token: &str) -> Result<()> {
+pub async fn list_clients(
+    server: &str,
+    token: &str,
+    ca_cert: Option<&std::path::Path>,
+) -> Result<()> {
     let pairing = PairingConfig {
         server: normalize_server_url(server),
         token: token.to_string(),
-        ca_cert_pem: load_saved_ca_for_server(server)?,
+        ca_cert_pem: load_ca_for_server(server, ca_cert)?,
     };
     let http = reqwest_client(&pairing, None)?;
     let response: ClientsResponse = get_json(&http, &pairing, "/api/clients").await?;
@@ -652,7 +674,7 @@ pub async fn submit_prompt(cfg: SubmitPromptConfig) -> Result<()> {
     let pairing = PairingConfig {
         server: normalize_server_url(&cfg.server),
         token: cfg.token,
-        ca_cert_pem: load_saved_ca_for_server(&cfg.server)?,
+        ca_cert_pem: load_ca_for_server(&cfg.server, cfg.ca_cert.as_deref())?,
     };
     let http = reqwest_client(&pairing, None)?;
     let created: CreateJobResponse = post_json(
@@ -701,13 +723,10 @@ pub async fn submit_prompt(cfg: SubmitPromptConfig) -> Result<()> {
 async fn run_discovery_responder(
     bind: SocketAddr,
     http_addr: SocketAddr,
-    token: String,
     join_code: String,
     ca_cert_pem: String,
 ) {
-    if let Err(e) =
-        run_discovery_responder_inner(bind, http_addr, token, join_code, ca_cert_pem).await
-    {
+    if let Err(e) = run_discovery_responder_inner(bind, http_addr, join_code, ca_cert_pem).await {
         tracing::warn!("remote discovery responder failed: {e:#}");
     }
 }
@@ -715,7 +734,6 @@ async fn run_discovery_responder(
 async fn run_discovery_responder_inner(
     bind: SocketAddr,
     http_addr: SocketAddr,
-    token: String,
     join_code: String,
     ca_cert_pem: String,
 ) -> Result<()> {
@@ -736,9 +754,10 @@ async fn run_discovery_responder_inner(
         let server = server_base_url_for_peer(http_addr, peer);
         let response = serde_json::to_vec(&DiscoveryResponse {
             protocol: "mj-remote-discovery-v1".to_string(),
+            join_code: join_code.clone(),
             server,
-            token: token.clone(),
             ca_cert_pem: ca_cert_pem.clone(),
+            ca_sha256: ca_sha256_from_pem(&ca_cert_pem).context("hash remote CA certificate")?,
         })
         .context("serialize discovery response")?;
         socket
@@ -766,7 +785,12 @@ async fn handle_connection_stream<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let request = read_http_request(&mut stream, client_cert_sha256).await?;
+    let request = tokio::time::timeout(
+        Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS),
+        read_http_request(&mut stream, client_cert_sha256),
+    )
+    .await
+    .context("timed out reading remote request")??;
     let response = match route_request(request, state) {
         Ok(response) => response,
         Err(e) => json_response(
@@ -1241,32 +1265,43 @@ fn authorized(request: &HttpRequest, token: &str) -> bool {
         .is_some_and(|value| value == token)
 }
 
-async fn resolve_pairing(
-    pairing_uri: Option<&str>,
-    join_code: Option<String>,
-    server: Option<String>,
-    token: Option<String>,
-    discovery_addr: SocketAddr,
-    discovery_timeout: Duration,
-) -> Result<PairingConfig> {
+async fn resolve_pairing(input: ResolvePairingInput<'_>) -> Result<PairingConfig> {
+    let ResolvePairingInput {
+        pairing_uri,
+        join_code,
+        ca_sha256,
+        server,
+        token,
+        ca_cert,
+        discovery_addr,
+        discovery_timeout,
+    } = input;
     let from_uri = pairing_uri.map(parse_pairing_uri).transpose()?;
     let server = server.or_else(|| from_uri.as_ref().and_then(|cfg| cfg.server.clone()));
     let token = token.or_else(|| from_uri.as_ref().and_then(|cfg| cfg.token.clone()));
+    let ca_sha256 = ca_sha256.or_else(|| from_uri.as_ref().and_then(|cfg| cfg.ca_sha256.clone()));
     let join_code = join_code.or_else(|| from_uri.and_then(|cfg| cfg.join_code));
     if let (Some(server), Some(token)) = (server.clone(), token.clone()) {
         return Ok(PairingConfig {
             server: normalize_server_url(&server),
             token,
-            ca_cert_pem: load_saved_ca_for_server(&server)?,
+            ca_cert_pem: load_ca_for_server(&server, ca_cert)?,
         });
     }
     let Some(join_code) = join_code else {
         bail!("missing remote pairing; pass --code or --server and --token");
     };
-    let discovered = discover_pairing(&join_code, discovery_addr, discovery_timeout).await?;
+    let Some(ca_sha256) = ca_sha256 else {
+        bail!("automatic discovery requires a pairing URI from `mj remote server` or --ca-sha256");
+    };
+    let Some(token) = token else {
+        bail!("automatic discovery requires a pairing URI from `mj remote server` or --token");
+    };
+    let discovered =
+        discover_pairing(&join_code, &ca_sha256, discovery_addr, discovery_timeout).await?;
     Ok(PairingConfig {
         server: normalize_server_url(&discovered.server),
-        token: discovered.token,
+        token,
         ca_cert_pem: discovered.ca_cert_pem,
     })
 }
@@ -1282,11 +1317,16 @@ fn parse_pairing_uri(value: &str) -> Result<PairingSeed> {
             .map(|server| normalize_server_url(server)),
         token: query.get("token").cloned(),
         join_code: query.get("code").cloned(),
+        ca_sha256: query
+            .get("ca_sha256")
+            .or_else(|| query.get("fingerprint"))
+            .map(|value| normalize_fingerprint(value)),
     })
 }
 
 async fn discover_pairing(
     join_code: &str,
+    expected_ca_sha256: &str,
     discovery_addr: SocketAddr,
     timeout: Duration,
 ) -> Result<PairingConfig> {
@@ -1316,15 +1356,30 @@ async fn discover_pairing(
     if response.protocol != "mj-remote-discovery-v1" {
         bail!("invalid discovery response");
     }
+    if response.join_code != join_code {
+        bail!("discovery response did not match requested join code");
+    }
+    let actual_ca_sha256 = ca_sha256_from_pem(&response.ca_cert_pem)?;
+    if normalize_fingerprint(expected_ca_sha256) != actual_ca_sha256 {
+        bail!("discovery response CA fingerprint did not match pairing URI");
+    }
+    if normalize_fingerprint(&response.ca_sha256) != actual_ca_sha256 {
+        bail!("discovery response CA fingerprint did not match certificate");
+    }
     Ok(PairingConfig {
         server: response.server,
-        token: response.token,
+        token: String::new(),
         ca_cert_pem: Some(response.ca_cert_pem),
     })
 }
 
-fn pairing_uri_for_code(join_code: &str) -> String {
-    format!("mj+remote://join?code={}", percent_encode(join_code))
+fn pairing_uri_for_code(join_code: &str, token: &str, ca_cert_pem: &str) -> Result<String> {
+    Ok(format!(
+        "mj+remote://join?code={}&token={}&ca_sha256={}",
+        percent_encode(join_code),
+        percent_encode(token),
+        ca_sha256_from_pem(ca_cert_pem)?
+    ))
 }
 
 fn server_base_url(bind: SocketAddr) -> String {
@@ -1370,6 +1425,15 @@ fn reqwest_client(
         builder = builder.identity(identity);
     }
     builder.build().context("build remote HTTP client")
+}
+
+fn load_ca_for_server(server: &str, ca_cert: Option<&std::path::Path>) -> Result<Option<String>> {
+    if let Some(path) = ca_cert {
+        return std::fs::read_to_string(path)
+            .with_context(|| format!("read CA certificate {}", path.display()))
+            .map(Some);
+    }
+    load_saved_ca_for_server(server)
 }
 
 fn load_saved_ca_for_server(server: &str) -> Result<Option<String>> {
@@ -1518,6 +1582,10 @@ fn cert_sha256_from_pem(pem: &str) -> Result<String> {
     )))
 }
 
+fn ca_sha256_from_pem(pem: &str) -> Result<String> {
+    cert_sha256_from_pem(pem)
+}
+
 fn certificates_from_pem(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
     Ok(pem_blocks(pem, "CERTIFICATE")?
         .into_iter()
@@ -1649,6 +1717,14 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+fn normalize_fingerprint(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_hexdigit())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -1694,15 +1770,7 @@ fn random_join_code() -> String {
 
 fn random_token(bytes: usize) -> String {
     let mut buf = vec![0_u8; bytes];
-    if std::fs::File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut buf))
-        .is_err()
-    {
-        let fallback = format!("{}:{}", now_epoch_nanos(), std::process::id());
-        let digest = Sha256::digest(fallback.as_bytes());
-        buf.clear();
-        buf.extend_from_slice(&digest[..bytes.min(digest.len())]);
-    }
+    getrandom::fill(&mut buf).expect("secure OS random source");
     hex_encode(&buf)
 }
 
@@ -1757,28 +1825,80 @@ mod tests {
 
     #[test]
     fn pairing_uri_roundtrips() {
-        let uri = pairing_uri_for_code("ABC123");
+        let tls = test_tls();
+        let expected_ca_sha256 = ca_sha256_from_pem(&tls.ca_cert_pem).expect("hash");
+        let uri = pairing_uri_for_code("ABC123", "secret-token", &tls.ca_cert_pem).expect("uri");
         let parsed = parse_pairing_uri(&uri).expect("parse");
         assert_eq!(parsed.join_code.as_deref(), Some("ABC123"));
+        assert_eq!(parsed.token.as_deref(), Some("secret-token"));
+        assert_eq!(
+            parsed.ca_sha256.as_deref(),
+            Some(expected_ca_sha256.as_str())
+        );
         assert!(parsed.server.is_none());
-        assert!(parsed.token.is_none());
     }
 
     #[tokio::test]
     async fn resolve_pairing_allows_cli_overrides() {
         let uri = "mj+remote://join?server=http%3A%2F%2Fold%3A1&token=old-token";
-        let parsed = resolve_pairing(
-            Some(uri),
-            None,
-            Some("http://new:2".to_string()),
-            Some("new-token".to_string()),
-            "255.255.255.255:7338".parse().expect("addr"),
-            Duration::from_millis(1),
-        )
+        let parsed = resolve_pairing(ResolvePairingInput {
+            pairing_uri: Some(uri),
+            join_code: None,
+            ca_sha256: None,
+            server: Some("http://new:2".to_string()),
+            token: Some("new-token".to_string()),
+            ca_cert: None,
+            discovery_addr: "255.255.255.255:7338".parse().expect("addr"),
+            discovery_timeout: Duration::from_millis(1),
+        })
         .await
         .expect("resolve");
         assert_eq!(parsed.server, "http://new:2");
         assert_eq!(parsed.token, "new-token");
+    }
+
+    #[tokio::test]
+    async fn resolve_pairing_rejects_discovery_without_ca_fingerprint() {
+        let err = resolve_pairing(ResolvePairingInput {
+            pairing_uri: None,
+            join_code: Some("ABC123".to_string()),
+            ca_sha256: None,
+            server: None,
+            token: None,
+            ca_cert: None,
+            discovery_addr: "255.255.255.255:7338".parse().expect("addr"),
+            discovery_timeout: Duration::from_millis(1),
+        })
+        .await
+        .expect_err("missing CA fingerprint should fail before discovery");
+        assert!(err.to_string().contains("requires a pairing URI"));
+    }
+
+    #[tokio::test]
+    async fn resolve_pairing_rejects_discovery_without_token() {
+        let err = resolve_pairing(ResolvePairingInput {
+            pairing_uri: None,
+            join_code: Some("ABC123".to_string()),
+            ca_sha256: Some("abc123".to_string()),
+            server: None,
+            token: None,
+            ca_cert: None,
+            discovery_addr: "255.255.255.255:7338".parse().expect("addr"),
+            discovery_timeout: Duration::from_millis(1),
+        })
+        .await
+        .expect_err("missing token should fail before discovery");
+        assert!(err.to_string().contains("requires a pairing URI"));
+    }
+
+    #[test]
+    fn load_ca_for_server_prefers_explicit_ca_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ca.pem");
+        std::fs::write(&path, "test-ca").expect("write ca");
+
+        let ca = load_ca_for_server("https://example.test", Some(&path)).expect("load ca");
+        assert_eq!(ca.as_deref(), Some("test-ca"));
     }
 
     #[test]

@@ -175,23 +175,26 @@ mj remote server --bind 0.0.0.0:7337
 ```
 
 The server prints a short join code, a manual fallback token, and a
-`mj+remote://join?...` pairing URI. That URI is the QR payload. By default it
-contains only the join code, while the client discovers the server URL and token
-over local UDP discovery. The server also generates and persists a local CA,
-server certificate, and fleet state in `~/.config/mj/remote-server.toml` unless
-`--state-file` points somewhere else, so restarts keep the same join code,
-token, clients, TLS material, and queued job metadata.
+`mj+remote://join?...` pairing URI. That URI is the QR payload. It contains the
+join code, bootstrap token, and SHA-256 fingerprint of the server's local CA, so
+the client can authenticate the UDP discovery response before trusting the
+discovered server URL and CA certificate. The server also generates and persists
+a local CA, server certificate, and fleet state in
+`~/.config/mj/remote-server.toml` unless `--state-file` points somewhere else,
+so restarts keep the same join code, token, clients, TLS material, and queued
+job metadata.
 
-Join from a client on the same LAN:
+Join from a client on the same LAN with the pairing URI:
 
 ```bash
-mj remote join --code ABC123
+mj remote join 'mj+remote://join?code=ABC123&token=...&ca_sha256=...'
 ```
 
-Or pass the scanned pairing URI:
+If you type the code manually, also pass the CA fingerprint printed in the
+pairing URI:
 
 ```bash
-mj remote join 'mj+remote://join?code=ABC123'
+mj remote join --code ABC123 --token "$MJ_REMOTE_TOKEN" --ca-sha256 ...
 ```
 
 After the first successful join, the server issues a client certificate signed
@@ -206,14 +209,14 @@ mj remote join
 If discovery is unavailable, pass the pieces explicitly:
 
 ```bash
-mj remote join --server https://host.example:7337 --token "$MJ_REMOTE_TOKEN" --name laptop
+mj remote join --server https://host.example:7337 --token "$MJ_REMOTE_TOKEN" --ca-cert ./remote-ca.pem --name laptop
 ```
 
 Manage the fleet from any authenticated machine:
 
 ```bash
-mj remote list --server https://host.example:7337 --token "$MJ_REMOTE_TOKEN"
-mj remote prompt --server https://host.example:7337 --token "$MJ_REMOTE_TOKEN" --client client-abc123 "summarize this repo"
+mj remote list --server https://host.example:7337 --token "$MJ_REMOTE_TOKEN" --ca-cert ./remote-ca.pem
+mj remote prompt --server https://host.example:7337 --token "$MJ_REMOTE_TOKEN" --ca-cert ./remote-ca.pem --client client-abc123 "summarize this repo"
 ```
 
 Remote prompt jobs reuse `mj --print --output-format json` on the managed

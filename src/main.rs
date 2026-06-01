@@ -156,6 +156,10 @@ enum RemoteCommand {
         #[arg(long)]
         code: Option<String>,
 
+        /// Expected SHA-256 fingerprint of the server CA for discovery pairing.
+        #[arg(long = "ca-sha256")]
+        ca_sha256: Option<String>,
+
         /// Server base URL, for example http://127.0.0.1:7337.
         #[arg(long, env = "MJ_REMOTE_SERVER")]
         server: Option<String>,
@@ -163,6 +167,10 @@ enum RemoteCommand {
         /// Pairing/auth token.
         #[arg(long, env = "MJ_REMOTE_TOKEN")]
         token: Option<String>,
+
+        /// PEM file containing the remote server CA certificate for manual pairing.
+        #[arg(long)]
+        ca_cert: Option<PathBuf>,
 
         /// Human-readable client name shown in fleet listings.
         #[arg(long)]
@@ -189,6 +197,10 @@ enum RemoteCommand {
         /// Pairing/auth token.
         #[arg(long, env = "MJ_REMOTE_TOKEN")]
         token: String,
+
+        /// PEM file containing the remote server CA certificate.
+        #[arg(long)]
+        ca_cert: Option<PathBuf>,
     },
     /// Run one prompt on a registered client.
     Prompt {
@@ -199,6 +211,10 @@ enum RemoteCommand {
         /// Pairing/auth token.
         #[arg(long, env = "MJ_REMOTE_TOKEN")]
         token: String,
+
+        /// PEM file containing the remote server CA certificate.
+        #[arg(long)]
+        ca_cert: Option<PathBuf>,
 
         /// Target client id from `mj remote list`.
         #[arg(long)]
@@ -541,8 +557,10 @@ async fn run_remote(args: RemoteArgs) -> Result<()> {
         RemoteCommand::Join {
             pairing_uri,
             code,
+            ca_sha256,
             server,
             token,
+            ca_cert,
             name,
             cwd,
             poll_secs,
@@ -555,8 +573,10 @@ async fn run_remote(args: RemoteArgs) -> Result<()> {
             remote::run_client(remote::ClientConfig {
                 pairing_uri,
                 join_code: code,
+                ca_sha256,
                 server,
                 token,
+                ca_cert,
                 name,
                 cwd,
                 poll_interval: Duration::from_secs(poll_secs),
@@ -565,10 +585,15 @@ async fn run_remote(args: RemoteArgs) -> Result<()> {
             })
             .await
         }
-        RemoteCommand::List { server, token } => remote::list_clients(&server, &token).await,
+        RemoteCommand::List {
+            server,
+            token,
+            ca_cert,
+        } => remote::list_clients(&server, &token, ca_cert.as_deref()).await,
         RemoteCommand::Prompt {
             server,
             token,
+            ca_cert,
             client,
             prompt,
             permission_mode,
@@ -578,6 +603,7 @@ async fn run_remote(args: RemoteArgs) -> Result<()> {
             remote::submit_prompt(remote::SubmitPromptConfig {
                 server,
                 token,
+                ca_cert,
                 client_id: client,
                 prompt,
                 permission_mode: permission_mode.into(),
