@@ -182,7 +182,8 @@ discovered server URL and CA certificate. The server also generates and persists
 a local CA, server certificate, and fleet state in
 `~/.config/mj/remote-server.toml` unless `--state-file` points somewhere else,
 so restarts keep the same join code, token, clients, TLS material, and queued
-job metadata.
+job metadata. The default server bind is loopback-only; use
+`--bind 0.0.0.0:7337` when pairing clients from other machines on the LAN.
 
 Join from a client on the same LAN with the pairing URI:
 

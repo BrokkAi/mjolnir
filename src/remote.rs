@@ -30,6 +30,7 @@ use crate::version::MJOLNIR_VERSION;
 const MAX_HTTP_BODY: usize = 1024 * 1024;
 const REMOTE_PAIRING_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 15;
+const REMOTE_JOB_TIMEOUT_SECS: u64 = 30 * 60;
 
 pub struct ClientConfig {
     pub pairing_uri: Option<String>,
@@ -438,7 +439,10 @@ impl RemoteServerStore {
         self.save()
     }
 
-    fn job_status(&self, job_id: &str) -> Result<JobStatusResponse> {
+    fn job_status(&mut self, job_id: &str) -> Result<JobStatusResponse> {
+        if self.state.expire_stale_running_jobs(now_epoch()) {
+            self.save()?;
+        }
         self.state.job_status(job_id)
     }
 }
@@ -1036,7 +1040,31 @@ impl RemoteServerState {
         Ok(())
     }
 
-    fn job_status(&self, job_id: &str) -> Result<JobStatusResponse> {
+    fn expire_stale_running_jobs(&mut self, now: u64) -> bool {
+        let mut changed = false;
+        for job in self.jobs.values_mut() {
+            if matches!(job.status, JobStatus::Running)
+                && now.saturating_sub(job.updated_epoch) >= REMOTE_JOB_TIMEOUT_SECS
+            {
+                job.status = JobStatus::Failed;
+                job.updated_epoch = now;
+                job.result = Some(JobResult {
+                    ok: false,
+                    output: None,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    error: Some(format!(
+                        "remote job timed out after {REMOTE_JOB_TIMEOUT_SECS} seconds"
+                    )),
+                });
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn job_status(&mut self, job_id: &str) -> Result<JobStatusResponse> {
+        self.expire_stale_running_jobs(now_epoch());
         let job = self
             .jobs
             .get(job_id)
@@ -1642,7 +1670,28 @@ fn set_private_file_permissions(path: &std::path::Path) -> Result<()> {
         .with_context(|| format!("set permissions on {}", path.display()))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn set_private_file_permissions(path: &std::path::Path) -> Result<()> {
+    let username = std::env::var("USERNAME").context("resolve current Windows user")?;
+    let user = match std::env::var("USERDOMAIN") {
+        Ok(domain) if !domain.trim().is_empty() => format!("{domain}\\{username}"),
+        _ => username,
+    };
+    let grant = format!("{user}:F");
+    let status = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(grant)
+        .status()
+        .with_context(|| format!("run icacls for {}", path.display()))?;
+    if !status.success() {
+        bail!("icacls failed for {} with {status}", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn set_private_file_permissions(_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
@@ -2053,6 +2102,44 @@ mod tests {
                 .and_then(|result| result.output)
                 .and_then(|output| output.get("result").cloned()),
             Some(serde_json::json!("done"))
+        );
+    }
+
+    #[test]
+    fn running_job_times_out_when_status_is_read() {
+        let mut state = RemoteServerState::default();
+        let tls = test_tls();
+        let registered = state
+            .register(
+                RegisterRequest {
+                    client_id: None,
+                    name: "desktop".to_string(),
+                    cwd: "/tmp/project".to_string(),
+                    version: "0.0.0".to_string(),
+                },
+                None,
+                &tls,
+            )
+            .expect("register");
+        let created = state
+            .create_job(CreateJobRequest {
+                client_id: registered.client_id.clone(),
+                prompt: "summarize".to_string(),
+                permission_mode: "default".to_string(),
+            })
+            .expect("create");
+        state.poll_job(&registered.client_id).expect("poll");
+        let job = state.jobs.get_mut(&created.job_id).expect("job");
+        job.updated_epoch = now_epoch().saturating_sub(REMOTE_JOB_TIMEOUT_SECS);
+
+        let status = state.job_status(&created.job_id).expect("status");
+
+        assert!(matches!(status.status, JobStatus::Failed));
+        assert_eq!(
+            status.result.and_then(|result| result.error),
+            Some(format!(
+                "remote job timed out after {REMOTE_JOB_TIMEOUT_SECS} seconds"
+            ))
         );
     }
 }

@@ -160,7 +160,7 @@ enum RemoteCommand {
         #[arg(long = "ca-sha256")]
         ca_sha256: Option<String>,
 
-        /// Server base URL, for example http://127.0.0.1:7337.
+        /// Server base URL, for example https://127.0.0.1:7337.
         #[arg(long, env = "MJ_REMOTE_SERVER")]
         server: Option<String>,
 
@@ -190,7 +190,7 @@ enum RemoteCommand {
     },
     /// List registered clients.
     List {
-        /// Server base URL, for example http://127.0.0.1:7337.
+        /// Server base URL, for example https://127.0.0.1:7337.
         #[arg(long, env = "MJ_REMOTE_SERVER")]
         server: String,
 
@@ -204,7 +204,7 @@ enum RemoteCommand {
     },
     /// Run one prompt on a registered client.
     Prompt {
-        /// Server base URL, for example http://127.0.0.1:7337.
+        /// Server base URL, for example https://127.0.0.1:7337.
         #[arg(long, env = "MJ_REMOTE_SERVER")]
         server: String,
 
