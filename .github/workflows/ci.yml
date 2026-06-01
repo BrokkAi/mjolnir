@@ -47,9 +47,6 @@ jobs:
   android:
     name: Android aarch64-unknown-linux-android
     runs-on: ubuntu-latest
-    env:
-      CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: aarch64-linux-android-clang
-      CC_aarch64_linux_android: aarch64-linux-android-clang
     steps:
     - uses: actions/checkout@v6
 
@@ -59,9 +56,19 @@ jobs:
         targets: aarch64-linux-android
 
     - name: Setup Android NDK
+      id: setup-ndk
       uses: nttld/setup-ndk@v1
       with:
         ndk-version: r27d
+
+    - name: Export Android NDK toolchain
+      shell: bash
+      run: |
+        ndk_path='${{ steps.setup-ndk.outputs.ndk-path }}'
+        echo "ANDROID_NDK_HOME=$ndk_path" >> "$GITHUB_ENV"
+        echo "ANDROID_NDK_ROOT=$ndk_path" >> "$GITHUB_ENV"
+        echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$ndk_path/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang" >> "$GITHUB_ENV"
+        echo "CC_aarch64_linux_android=$ndk_path/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang" >> "$GITHUB_ENV"
 
     - name: Check Android target
       run: cargo check --locked --target aarch64-linux-android
