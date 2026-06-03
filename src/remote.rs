@@ -145,7 +145,7 @@ pub async fn ensure_client_enrolled() -> Result<Option<String>> {
             ));
         }
         return Ok(Some(format!(
-            "Remote control enrollment is {}. Approve this machine in the web UI to connect clients.",
+            "Remote control enrollment is {}. Open https://localhost:11399, log in with the admin token from `mj server`, then approve this pending machine. Do not paste the machine id into the login box.",
             status.status
         )));
     }
@@ -185,10 +185,9 @@ pub async fn ensure_client_enrolled() -> Result<Option<String>> {
 
     std::fs::write(client_enrollment_id_path(), &enrollment.machine_id)
         .context("write remote enrollment id")?;
-    Ok(Some(format!(
-        "Remote control enrollment requested for this machine. Approve it in the web UI. Machine id: {}",
-        enrollment.machine_id
-    )))
+    Ok(Some(
+        "Remote control enrollment requested. Open https://localhost:11399, log in with the admin token from `mj server`, then approve the pending machine. No machine id needs to be pasted anywhere.".to_string(),
+    ))
 }
 
 pub async fn register_client_session(
@@ -311,11 +310,18 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
         println!("Remote control server initialized.");
         println!("Admin URL: https://{local_addr}");
         println!();
-        println!("Initial admin login token:");
+        println!("Initial admin login token (use this to log in to the web UI):");
         println!("  {token}");
+        println!();
+        println!(
+            "Client machine IDs are not login tokens; approve pending machines after logging in."
+        );
         println!();
     } else {
         println!("Remote control server listening at https://{local_addr}");
+        println!(
+            "Open the admin UI in a browser. If you need a new login token, run `mj server --reset-login-token`."
+        );
     }
 
     let state = AppState { store, certs };
@@ -799,7 +805,9 @@ async fn api_login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
         },
         Ok(false) => (
             StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse::new("invalid token")),
+            Json(ErrorResponse::new(
+                "invalid admin login token; use the mj_... token printed by `mj server`, not a client machine id",
+            )),
         )
             .into_response(),
         Err(e) => server_error(e),
@@ -1461,14 +1469,15 @@ section { border-right:1px solid #2a2e3a; padding:14px; overflow:auto; }
 <body>
 <div id="login">
   <h1>mj remote login</h1>
-  <p class="muted">Paste the admin login token printed by <code>mj server</code>.</p>
+  <p class="muted">Paste the <b>admin login token</b> printed by <code>mj server</code>. It starts with <code>mj_</code>.</p>
+  <p class="muted"><b>Do not paste a client machine id here.</b> Pending machines appear automatically after you log in. If you lost the admin token, stop the server and run <code>mj server --reset-login-token</code>.</p>
   <div class="row"><input id="token" type="password" placeholder="mj_..." style="flex:1"><button onclick="login()">Login</button></div>
   <p id="login-error" class="muted"></p>
 </div>
 <div id="app">
 <header><h1>mj remote</h1><button class="secondary" onclick="logout()">Logout</button></header>
 <main>
-<section><h2>Machines</h2><div id="machines"></div></section>
+<section><h2>Machines</h2><p class="muted">Pending client machines appear here automatically. Use Approve/Reject; there is nothing to paste.</p><div id="machines"></div></section>
 <section><h2>Sessions</h2><div id="sessions"></div></section>
 <section><h2>Thread</h2><div id="thread" class="muted">Select a session.</div><h3>Send prompt</h3><textarea id="prompt" placeholder="Prompt for selected session"></textarea><p><button onclick="sendPrompt()">Send prompt</button></p></section>
 </main>
