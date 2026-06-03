@@ -1925,8 +1925,11 @@ pub fn setup_inline_chat_terminal(
 pub fn restore_inline_chat_terminal(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> Result<()> {
-    clear_inline_viewport_for_exit(terminal)?;
-    Write::flush(terminal.backend_mut())?;
+    if let Err(e) = clear_inline_viewport_for_exit(terminal) {
+        tracing::warn!("skip inline exit cleanup: {e}");
+    } else if let Err(e) = Write::flush(terminal.backend_mut()) {
+        tracing::warn!("skip inline exit cleanup flush: {e}");
+    }
     execute!(terminal.backend_mut(), DisableBracketedPaste)?;
     disable_raw_mode()?;
     terminal.show_cursor()?;
