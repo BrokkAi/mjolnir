@@ -1925,9 +1925,24 @@ pub fn setup_inline_chat_terminal(
 pub fn restore_inline_chat_terminal(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> Result<()> {
+    clear_inline_viewport_for_exit(terminal)?;
+    Write::flush(terminal.backend_mut())?;
     execute!(terminal.backend_mut(), DisableBracketedPaste)?;
     disable_raw_mode()?;
     terminal.show_cursor()?;
+    Ok(())
+}
+
+fn clear_inline_viewport_for_exit<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+    let origin = terminal.get_frame().area().as_position();
+    terminal.backend_mut().set_cursor_position(origin)?;
+    terminal
+        .backend_mut()
+        .clear_region(ClearType::CurrentLine)?;
+    terminal
+        .backend_mut()
+        .clear_region(ClearType::AfterCursor)?;
+    terminal.backend_mut().set_cursor_position(origin)?;
     Ok(())
 }
 
@@ -4557,6 +4572,69 @@ mod tests {
                 )
             })
             .expect("draw after insert");
+    }
+
+    #[test]
+    fn inline_exit_clears_viewport_and_resets_cursor_to_prompt_origin() {
+        let mut backend = TestBackend::new(60, 16);
+        backend
+            .set_cursor_position(Position::new(0, 12))
+            .expect("cursor position");
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(INLINE_CHAT_HEIGHT),
+            },
+        )
+        .expect("terminal");
+
+        terminal
+            .insert_before(2, |buf| {
+                Paragraph::new(vec![
+                    Line::from("transcript one"),
+                    Line::from("transcript two"),
+                ])
+                .render(buf.area, buf);
+            })
+            .expect("insert before");
+
+        let mut state = AppState::new();
+        state.input = "hello world".to_string();
+        state.input_cursor = state.input.chars().count();
+        let mut transcript_scroll = TranscriptScrollState::default();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &mut transcript_scroll,
+                    UiMode::InlineChat,
+                )
+            })
+            .expect("draw");
+
+        let origin = terminal.get_frame().area().as_position();
+        clear_inline_viewport_for_exit(&mut terminal).expect("clear inline viewport");
+
+        terminal.backend_mut().assert_cursor_position(origin);
+
+        let rendered = buffer_lines(terminal.backend().buffer());
+        assert!(
+            rendered
+                .iter()
+                .take(origin.y as usize)
+                .any(|line| line.contains("transcript one")),
+            "transcript above inline viewport should remain visible:\n{}",
+            rendered.join("\n")
+        );
+        assert!(
+            rendered
+                .iter()
+                .skip(origin.y as usize)
+                .all(|line| line.trim().is_empty()),
+            "inline viewport should be blank after exit cleanup:\n{}",
+            rendered.join("\n")
+        );
     }
 
     #[test]
