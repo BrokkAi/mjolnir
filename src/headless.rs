@@ -123,7 +123,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         )
     })?;
 
-    let project_label = remote::project_label_from_cwd(&cfg.cwd);
+    let project_label = crate::paths::project_label_from_cwd(&cfg.cwd);
     let agent_label = remote::agent_display_label(&agent);
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();

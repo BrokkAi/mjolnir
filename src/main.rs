@@ -13,6 +13,7 @@ mod config;
 mod event;
 mod headless;
 mod install;
+mod paths;
 mod picker;
 mod registry;
 mod remote;
@@ -460,33 +461,14 @@ fn prepare_worktree_for_arg(
 }
 
 fn worktree_label(worktree: Option<&CreatedWorktree>) -> Option<String> {
-    worktree
-        .and_then(|w| w.worktree_root.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
+    worktree.map(|w| paths::folder_label(&w.worktree_root))
 }
 
 fn project_label(cwd: &std::path::Path, worktree: Option<&CreatedWorktree>) -> String {
     if let Some(worktree) = worktree {
-        return folder_label(&worktree.project_root);
+        return paths::folder_label(&worktree.project_root);
     }
-    if let Some(parent) = parent_above_mjolnir(cwd) {
-        return folder_label(&parent);
-    }
-    folder_label(cwd)
-}
-
-fn folder_label(path: &std::path::Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-fn parent_above_mjolnir(path: &std::path::Path) -> Option<PathBuf> {
-    path.ancestors()
-        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".mjolnir"))
-        .and_then(|mjolnir_dir| mjolnir_dir.parent())
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(std::path::Path::to_path_buf)
+    paths::project_label_from_cwd(cwd)
 }
 
 fn handle_worktree_after_tui(worktree: Option<&CreatedWorktree>) -> bool {
@@ -885,13 +867,13 @@ async fn run_session(
 
 async fn wait_for_task(label: &str, handle: tokio::task::JoinHandle<()>) {
     let abort_handle = handle.abort_handle();
-    match tokio::time::timeout(Duration::from_secs(1), handle).await {
+    match tokio::time::timeout(Duration::from_secs(2), handle).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::warn!("{label} join failed: {error}");
         }
         Err(_) => {
-            tracing::warn!("{label} did not exit within 1s; aborting");
+            tracing::warn!("{label} did not exit within 2s; aborting");
             abort_handle.abort();
         }
     }
