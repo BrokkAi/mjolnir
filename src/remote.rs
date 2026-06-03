@@ -84,6 +84,7 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
     });
     ensure_ca(&certs)?;
     ensure_server_cert(&certs)?;
+    install_rustls_crypto_provider();
 
     let tls_config = Arc::new(load_tls_config(&certs)?);
     let addr = SocketAddr::new(config.bind, config.port);
@@ -954,6 +955,10 @@ fn ensure_server_cert(paths: &CertPaths) -> Result<()> {
     std::fs::write(&paths.server_key, server_key.serialize_pem())
         .with_context(|| format!("write {}", paths.server_key.display()))?;
     Ok(())
+}
+
+fn install_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 fn load_tls_config(paths: &CertPaths) -> Result<RustlsServerConfig> {
