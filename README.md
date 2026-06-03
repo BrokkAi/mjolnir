@@ -163,17 +163,14 @@ to permission prompts; the default rejects prompts so automation does not hang.
 
 ## Voice Input
 
-Set `OPENAI_API_KEY` to enable microphone dictation, then press `Ctrl-R` inside
-the TUI to start recording. Press `Ctrl-R` again to stop; `mj` records a
-temporary `.wav`, sends it to the audio transcription API, merges the returned
-text into your prompt, and submits it automatically.
+Press `Ctrl-R` inside the TUI to start recording from the default microphone.
+Press `Ctrl-R` again to stop; `mj` records a temporary `.wav`, attaches it to
+the current prompt as ACP audio content, and submits it automatically.
 
-Optional environment variables:
-
-- `MJ_VOICE_MODEL`: transcription model name. Defaults to
-  `gpt-4o-mini-transcribe`.
-- `MJ_VOICE_API_BASE`: base URL for the transcription API. Defaults to
-  `https://api.openai.com/v1`.
+This path uses the active harness directly. No separate transcription API key
+or side-channel model configuration is required. The selected agent must
+advertise ACP audio prompt support; when it does not, `mj` keeps the shortcut
+disabled with an in-app warning instead of falling back to an unrelated API.
 
 ## Reference
 
@@ -204,7 +201,7 @@ Keyboard basics:
 - `PageUp` / `PageDown`: scroll the transcript.
 - `F10`: show or hide the help overlay.
 - `F1`..`F9`: edit visible session config options.
-- `Ctrl-R`: start or stop voice dictation; stopping submits the transcribed
+- `Ctrl-R`: start or stop voice dictation; stopping submits the recorded audio
   prompt automatically.
 - `Esc`: dismiss autocomplete, clear input, or cancel a permission prompt.
 - `Ctrl-C`: cancel an in-flight prompt; when idle with an empty input, quit.

@@ -41,7 +41,7 @@ use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
 };
 use crate::config;
-use crate::event::{PermissionDecision, PromptImage, UiCommand, UiEvent};
+use crate::event::{PermissionDecision, PromptAudio, PromptImage, UiCommand, UiEvent};
 use crate::version::mjolnir_version_label;
 use crate::voice::VoiceCommand;
 
@@ -404,10 +404,11 @@ fn draw_terminal_frame(
 
 fn apply_ui_event(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>, event: UiEvent) {
     match event {
-        UiEvent::VoiceTranscriptionReady { text } => {
-            state.apply_event(UiEvent::VoiceTranscriptionReady { text: text.clone() });
-            append_voice_transcript_to_input(state, &text);
-            submit_prompt(state, cmd_tx);
+        UiEvent::VoicePromptReady { audio } => {
+            state.apply_event(UiEvent::VoicePromptReady {
+                audio: audio.clone(),
+            });
+            submit_prompt_with_audio(state, cmd_tx, vec![audio]);
         }
         other => state.apply_event(other),
     }
@@ -895,6 +896,17 @@ fn toggle_voice_recording(
         );
         return;
     }
+    if !state.prompt_audio_supported {
+        state.record_status_message(
+            StatusKind::Warning,
+            "this agent does not advertise audio prompt support",
+        );
+        return;
+    }
+    if state.session_id.is_none() && !state.has_voice_input_activity() {
+        state.record_status_message(StatusKind::Warning, "waiting for session...");
+        return;
+    }
     if state.is_streaming() {
         state.record_status_message(
             StatusKind::Warning,
@@ -906,13 +918,6 @@ fn toggle_voice_recording(
         state.record_status_message(
             StatusKind::Warning,
             "close the active overlay before using voice input",
-        );
-        return;
-    }
-    if matches!(state.voice_input_state, VoiceInputState::Transcribing) {
-        state.record_status_message(
-            StatusKind::Info,
-            "voice transcription is already in progress",
         );
         return;
     }
@@ -1634,10 +1639,17 @@ fn should_open_help(modifiers: KeyModifiers, code: KeyCode) -> bool {
 }
 
 fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
+    submit_prompt_with_audio(state, cmd_tx, Vec::new());
+}
+
+fn submit_prompt_with_audio(
+    state: &mut AppState,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    audio: Vec<PromptAudio>,
+) {
     if state.has_voice_input_activity() {
         let message = match state.voice_input_state {
             VoiceInputState::Recording => "finish the active voice recording first (Ctrl-R)",
-            VoiceInputState::Transcribing => "wait for voice transcription to finish",
             VoiceInputState::Idle => unreachable!("voice activity should exclude idle state"),
         };
         state.record_status_message(StatusKind::Warning, message);
@@ -1669,13 +1681,13 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         .collect();
 
     let text = combined.trim().to_string();
-    if text.is_empty() && images.is_empty() {
+    if text.is_empty() && images.is_empty() && audio.is_empty() {
         return;
     }
 
     // Client-side commands are handled here without forwarding anything
     // to the agent.
-    if images.is_empty() && text == "/new" {
+    if images.is_empty() && audio.is_empty() && text == "/new" {
         state.input.clear();
         clear_attachments(state);
         state.input_cursor = 0;
@@ -1684,7 +1696,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
-    if images.is_empty() && text == "/load" {
+    if images.is_empty() && audio.is_empty() && text == "/load" {
         state.input.clear();
         clear_attachments(state);
         state.input_cursor = 0;
@@ -1694,6 +1706,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     }
 
     if images.is_empty()
+        && audio.is_empty()
         && let Some(rest) = text.strip_prefix("/mj:")
     {
         let other = rest.trim();
@@ -1724,34 +1737,28 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     state.input_cursor = 0;
     state.scroll_input_to_bottom();
 
-    let display_text = prompt_display_text(&text, images.len());
+    let display_text = prompt_display_text(&text, images.len(), audio.len());
     state.record_user_prompt(display_text);
-    let _ = cmd_tx.send(UiCommand::SendPrompt { text, images });
+    let _ = cmd_tx.send(UiCommand::SendPrompt {
+        text,
+        images,
+        audio,
+    });
 }
 
-fn append_voice_transcript_to_input(state: &mut AppState, text: &str) {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        state.record_status_message(StatusKind::Warning, "voice transcription returned no text");
-        return;
-    }
-    if !state.input.is_empty() && !state.input.ends_with(char::is_whitespace) {
-        state.input.push(' ');
-    }
-    state.input.push_str(trimmed);
-    state.input_cursor = state.input.chars().count();
-    state.scroll_input_to_bottom();
-    state.reset_history_navigation();
-    state.update_autocomplete();
-}
-
-fn prompt_display_text(text: &str, image_count: usize) -> String {
+fn prompt_display_text(text: &str, image_count: usize, audio_count: usize) -> String {
     let mut display = text.to_string();
     for _ in 0..image_count {
         if !display.is_empty() {
             display.push('\n');
         }
         display.push_str("[image]");
+    }
+    for _ in 0..audio_count {
+        if !display.is_empty() {
+            display.push('\n');
+        }
+        display.push_str("[audio]");
     }
     display
 }
@@ -3448,8 +3455,6 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         " runtime closed (/new or Ctrl-N for a new session | Ctrl-C to quit) ".to_string()
     } else if matches!(state.voice_input_state, VoiceInputState::Recording) {
         " recording voice... (Ctrl-R to stop and send) ".to_string()
-    } else if matches!(state.voice_input_state, VoiceInputState::Transcribing) {
-        " transcribing voice... ".to_string()
     } else if state.is_streaming() {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
@@ -3996,7 +4001,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
         Line::from("  Ctrl-K/U/W       delete to end/start of line or previous word"),
         Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
         Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
-        Line::from("  Ctrl-R           start/stop voice transcription and auto-send"),
+        Line::from("  Ctrl-R           start/stop voice recording and auto-send"),
         Line::from("  Ctrl-V/Ctrl-Alt-V paste image from clipboard"),
         Line::from("  Ctrl-Y           copy last agent message to clipboard"),
         Line::from("  Esc              clear input, chips, and browsing history"),
@@ -6143,6 +6148,7 @@ mod tests {
     fn ctrl_r_sends_toggle_to_voice_runtime() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
+        state.prompt_audio_supported = true;
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
         let (voice_tx, mut voice_rx) = mpsc::unbounded_channel::<VoiceCommand>();
 
@@ -6551,9 +6557,14 @@ mod tests {
 
         let cmd = cmd_rx.try_recv().expect("prompt was sent");
         match cmd {
-            UiCommand::SendPrompt { text, images } => {
+            UiCommand::SendPrompt {
+                text,
+                images,
+                audio,
+            } => {
                 assert_eq!(text, "line one\nline two\nline three");
                 assert!(images.is_empty());
+                assert!(audio.is_empty());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6847,9 +6858,14 @@ mod tests {
 
         let cmd = cmd_rx.try_recv().expect("prompt was sent");
         match cmd {
-            UiCommand::SendPrompt { text, images } => {
+            UiCommand::SendPrompt {
+                text,
+                images,
+                audio,
+            } => {
                 assert_eq!(text, "pasted-1\npasted-2\ntyped");
                 assert!(images.is_empty());
+                assert!(audio.is_empty());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6858,27 +6874,36 @@ mod tests {
     }
 
     #[test]
-    fn voice_transcription_ready_appends_text_and_auto_submits() {
+    fn voice_prompt_ready_auto_submits_recorded_audio() {
         let mut state = AppState::new();
         state.session_id = Some("s-1".to_string());
         state.input = "summarize".to_string();
         state.input_cursor = state.input.chars().count();
-        state.voice_input_state = VoiceInputState::Transcribing;
+        state.voice_input_state = VoiceInputState::Recording;
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
 
         apply_ui_event(
             &mut state,
             &cmd_tx,
-            UiEvent::VoiceTranscriptionReady {
-                text: "the latest changes".to_string(),
+            UiEvent::VoicePromptReady {
+                audio: PromptAudio {
+                    data_base64: "c291bmQ=".to_string(),
+                    mime_type: "audio/wav".to_string(),
+                },
             },
         );
 
         let cmd = cmd_rx.try_recv().expect("prompt was sent");
         match cmd {
-            UiCommand::SendPrompt { text, images } => {
-                assert_eq!(text, "summarize the latest changes");
+            UiCommand::SendPrompt {
+                text,
+                images,
+                audio,
+            } => {
+                assert_eq!(text, "summarize");
                 assert!(images.is_empty());
+                assert_eq!(audio.len(), 1);
+                assert_eq!(audio[0].data_base64, "c291bmQ=");
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6900,9 +6925,14 @@ mod tests {
 
         let cmd = cmd_rx.try_recv().expect("prompt was sent");
         match cmd {
-            UiCommand::SendPrompt { text, images } => {
+            UiCommand::SendPrompt {
+                text,
+                images,
+                audio,
+            } => {
                 assert_eq!(text, "describe this");
                 assert_eq!(images.len(), 1);
+                assert!(audio.is_empty());
                 assert_eq!(images[0].data_base64, "aW1hZ2U=");
                 assert_eq!(images[0].mime_type, "image/png");
                 assert_eq!(images[0].width, 640);

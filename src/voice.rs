@@ -1,53 +1,28 @@
-//! Microphone capture and speech-to-text integration for prompt dictation.
+//! Microphone capture for prompt dictation.
 //!
-//! Runs on a background task so audio capture and HTTP transcription never
-//! block the ratatui event loop.
+//! Records a temporary WAV file on a background thread so microphone I/O never
+//! blocks the ratatui event loop. When recording stops, the captured audio is
+//! base64-encoded and handed back to the UI as an ACP audio prompt block.
 
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use reqwest::multipart::{Form, Part};
-use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
-use crate::event::UiEvent;
+use crate::event::{PromptAudio, UiEvent};
 
-const DEFAULT_VOICE_API_BASE: &str = "https://api.openai.com/v1";
-const DEFAULT_VOICE_MODEL: &str = "gpt-4o-mini-transcribe";
+const RECORDED_AUDIO_MIME_TYPE: &str = "audio/wav";
 
 #[derive(Debug)]
 pub enum VoiceCommand {
     ToggleRecording,
     Shutdown,
-}
-
-#[derive(Debug)]
-struct VoiceConfig {
-    api_key: String,
-    api_base: String,
-    model: String,
-}
-
-impl VoiceConfig {
-    fn from_env() -> Result<Self> {
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .context("set OPENAI_API_KEY to enable voice transcription")?;
-        let api_base = std::env::var("MJ_VOICE_API_BASE")
-            .or_else(|_| std::env::var("OPENAI_BASE_URL"))
-            .unwrap_or_else(|_| DEFAULT_VOICE_API_BASE.to_string());
-        let model =
-            std::env::var("MJ_VOICE_MODEL").unwrap_or_else(|_| DEFAULT_VOICE_MODEL.to_string());
-        Ok(Self {
-            api_key,
-            api_base: normalize_api_base(&api_base),
-            model,
-        })
-    }
 }
 
 struct ActiveRecording {
@@ -60,55 +35,42 @@ type SharedWriter = Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>;
 
 struct VoiceRuntime {
     ui_tx: mpsc::UnboundedSender<UiEvent>,
-    runtime_handle: Handle,
     recording: Option<ActiveRecording>,
-    transcribing: bool,
 }
 
 impl VoiceRuntime {
-    fn new(ui_tx: mpsc::UnboundedSender<UiEvent>, runtime_handle: Handle) -> Self {
+    fn new(ui_tx: mpsc::UnboundedSender<UiEvent>) -> Self {
         Self {
             ui_tx,
-            runtime_handle,
             recording: None,
-            transcribing: false,
         }
     }
 
     fn handle_toggle(&mut self) {
-        if self.transcribing {
-            let _ = self.ui_tx.send(UiEvent::Warning(
-                "voice transcription already in progress".to_string(),
-            ));
-            return;
-        }
-
         if self.recording.is_some() {
-            if let Err(err) = self.stop_and_transcribe() {
-                let _ = self.ui_tx.send(UiEvent::VoiceTranscriptionFailed {
-                    message: format!("voice transcription failed: {err:#}"),
+            if let Err(err) = self.stop_and_prepare_prompt() {
+                let _ = self.ui_tx.send(UiEvent::VoicePromptFailed {
+                    message: format!("voice recording failed: {err:#}"),
                 });
             }
             return;
         }
 
         if let Err(err) = self.start_recording() {
-            let _ = self.ui_tx.send(UiEvent::VoiceTranscriptionFailed {
+            let _ = self.ui_tx.send(UiEvent::VoicePromptFailed {
                 message: format!("voice recording failed: {err:#}"),
             });
         }
     }
 
     fn start_recording(&mut self) -> Result<()> {
-        let _ = VoiceConfig::from_env()?;
         let recording = start_recording(self.ui_tx.clone())?;
         self.recording = Some(recording);
         let _ = self.ui_tx.send(UiEvent::VoiceRecordingStarted);
         Ok(())
     }
 
-    fn stop_and_transcribe(&mut self) -> Result<()> {
-        let cfg = VoiceConfig::from_env()?;
+    fn stop_and_prepare_prompt(&mut self) -> Result<()> {
         let Some(recording) = self.recording.take() else {
             return Ok(());
         };
@@ -117,24 +79,13 @@ impl VoiceRuntime {
         drop(recording.stream);
         finalize_writer(recording.writer)?;
 
-        self.transcribing = true;
-        let _ = self.ui_tx.send(UiEvent::VoiceTranscribing);
-
-        let result = self.runtime_handle.block_on(transcribe_file(&cfg, &path));
-        self.transcribing = false;
+        let audio = read_recorded_audio(&path)?;
         let _ = std::fs::remove_file(&path);
-
-        let text = result?.trim().to_string();
-        if text.is_empty() {
-            anyhow::bail!("transcription returned no text");
-        }
-
-        let _ = self.ui_tx.send(UiEvent::VoiceTranscriptionReady { text });
+        let _ = self.ui_tx.send(UiEvent::VoicePromptReady { audio });
         Ok(())
     }
 
     fn cleanup(&mut self) {
-        self.transcribing = false;
         if let Some(recording) = self.recording.take() {
             drop(recording.stream);
             let _ = finalize_writer(recording.writer);
@@ -145,9 +96,8 @@ impl VoiceRuntime {
 
 pub fn spawn(ui_tx: mpsc::UnboundedSender<UiEvent>) -> mpsc::UnboundedSender<VoiceCommand> {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-    let runtime_handle = Handle::current();
     std::thread::spawn(move || {
-        let mut runtime = VoiceRuntime::new(ui_tx, runtime_handle);
+        let mut runtime = VoiceRuntime::new(ui_tx);
         while let Some(cmd) = cmd_rx.blocking_recv() {
             match cmd {
                 VoiceCommand::ToggleRecording => runtime.handle_toggle(),
@@ -157,14 +107,6 @@ pub fn spawn(ui_tx: mpsc::UnboundedSender<UiEvent>) -> mpsc::UnboundedSender<Voi
         runtime.cleanup();
     });
     cmd_tx
-}
-
-fn normalize_api_base(raw: &str) -> String {
-    let trimmed = raw.trim_end_matches('/').to_string();
-    match url::Url::parse(&trimmed) {
-        Ok(url) if url.path().is_empty() || url.path() == "/" => format!("{trimmed}/v1"),
-        _ => trimmed,
-    }
 }
 
 fn start_recording(ui_tx: mpsc::UnboundedSender<UiEvent>) -> Result<ActiveRecording> {
@@ -186,7 +128,7 @@ fn start_recording(ui_tx: mpsc::UnboundedSender<UiEvent>) -> Result<ActiveRecord
                 &config,
                 move |data: &[f32], _| write_f32_samples(&writer, data),
                 move |err| {
-                    let _ = err_tx.send(UiEvent::VoiceTranscriptionFailed {
+                    let _ = err_tx.send(UiEvent::VoicePromptFailed {
                         message: format!("voice recording failed: microphone stream error: {err}"),
                     });
                 },
@@ -199,7 +141,7 @@ fn start_recording(ui_tx: mpsc::UnboundedSender<UiEvent>) -> Result<ActiveRecord
                 &config,
                 move |data: &[i16], _| write_i16_samples(&writer, data),
                 move |err| {
-                    let _ = ui_tx.send(UiEvent::VoiceTranscriptionFailed {
+                    let _ = ui_tx.send(UiEvent::VoicePromptFailed {
                         message: format!("voice recording failed: microphone stream error: {err}"),
                     });
                 },
@@ -212,7 +154,7 @@ fn start_recording(ui_tx: mpsc::UnboundedSender<UiEvent>) -> Result<ActiveRecord
                 &config,
                 move |data: &[u16], _| write_u16_samples(&writer, data),
                 move |err| {
-                    let _ = ui_tx.send(UiEvent::VoiceTranscriptionFailed {
+                    let _ = ui_tx.send(UiEvent::VoicePromptFailed {
                         message: format!("voice recording failed: microphone stream error: {err}"),
                     });
                 },
@@ -252,6 +194,14 @@ fn finalize_writer(writer: SharedWriter) -> Result<()> {
         writer.finalize().context("finalize recorded audio")?;
     }
     Ok(())
+}
+
+fn read_recorded_audio(path: &Path) -> Result<PromptAudio> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(PromptAudio {
+        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        mime_type: RECORDED_AUDIO_MIME_TYPE.to_string(),
+    })
 }
 
 fn write_f32_samples(writer: &SharedWriter, data: &[f32]) {
@@ -295,45 +245,6 @@ where
     }
 }
 
-async fn transcribe_file(cfg: &VoiceConfig, path: &Path) -> Result<String> {
-    let bytes = tokio::fs::read(path)
-        .await
-        .with_context(|| format!("read {}", path.display()))?;
-    let file_part = Part::bytes(bytes)
-        .file_name("voice.wav")
-        .mime_str("audio/wav")
-        .context("set voice upload mime type")?;
-    let form = Form::new()
-        .part("file", file_part)
-        .text("model", cfg.model.clone())
-        .text("response_format", "text");
-    let endpoint = format!(
-        "{}/audio/transcriptions",
-        cfg.api_base.trim_end_matches('/')
-    );
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(90))
-        .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("build voice transcription client")?;
-    let response = client
-        .post(&endpoint)
-        .bearer_auth(&cfg.api_key)
-        .multipart(form)
-        .send()
-        .await
-        .with_context(|| format!("POST {endpoint}"))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("read transcription response body")?;
-    if !status.is_success() {
-        anyhow::bail!("transcription API returned HTTP {status}: {body}");
-    }
-    Ok(body)
-}
-
 fn temp_voice_path() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -344,29 +255,17 @@ fn temp_voice_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_api_base;
+    use super::*;
 
     #[test]
-    fn normalize_api_base_adds_v1_for_bare_hosts() {
-        assert_eq!(
-            normalize_api_base("https://api.openai.com"),
-            "https://api.openai.com/v1"
-        );
-        assert_eq!(
-            normalize_api_base("https://api.openai.com/"),
-            "https://api.openai.com/v1"
-        );
-    }
+    fn read_recorded_audio_encodes_wav_payload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("voice.wav");
+        std::fs::write(&path, b"wav-data").expect("write wav");
 
-    #[test]
-    fn normalize_api_base_preserves_versioned_paths() {
-        assert_eq!(
-            normalize_api_base("https://api.openai.com/v1"),
-            "https://api.openai.com/v1"
-        );
-        assert_eq!(
-            normalize_api_base("https://example.com/custom/api"),
-            "https://example.com/custom/api"
-        );
+        let audio = read_recorded_audio(&path).expect("read audio");
+
+        assert_eq!(audio.mime_type, RECORDED_AUDIO_MIME_TYPE);
+        assert_eq!(audio.data_base64, "d2F2LWRhdGE=");
     }
 }

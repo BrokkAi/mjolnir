@@ -191,7 +191,6 @@ pub enum VoiceInputState {
     #[default]
     Idle,
     Recording,
-    Transcribing,
 }
 
 /// Severity attached to transient status text.
@@ -272,6 +271,7 @@ pub struct AppState {
     pub session_config_options: Vec<SessionConfigOption>,
     pub session_config_targets: Vec<SessionConfigTarget>,
     pub prompt_images_supported: bool,
+    pub prompt_audio_supported: bool,
     pub transcript: Vec<Entry>,
     pub tool_calls: HashMap<String, ToolCallView>,
     /// Bumped whenever `transcript` or `tool_calls` change in a way that
@@ -441,6 +441,7 @@ impl AppState {
             session_config_options: Vec::new(),
             session_config_targets: Vec::new(),
             prompt_images_supported: false,
+            prompt_audio_supported: false,
             transcript: Vec::new(),
             tool_calls: HashMap::new(),
             transcript_revision: 0,
@@ -995,6 +996,7 @@ impl AppState {
         match event {
             UiEvent::Connected {
                 prompt_images_supported,
+                prompt_audio_supported,
                 ..
             } => {
                 // Keep the pre-filled agent_label (the configured
@@ -1002,6 +1004,7 @@ impl AppState {
                 // name over ACP, but the user wants to see which
                 // binary they wired up in config.
                 self.prompt_images_supported = prompt_images_supported;
+                self.prompt_audio_supported = prompt_audio_supported;
                 self.connection_state = ConnectionState::Initializing;
             }
             UiEvent::SessionStarted { session_id, .. } => {
@@ -1041,18 +1044,14 @@ impl AppState {
                 self.voice_input_state = VoiceInputState::Recording;
                 self.set_status_line(
                     StatusKind::Info,
-                    "recording voice prompt... press Ctrl-R to stop and send",
+                    "recording voice prompt... press Ctrl-R to send",
                 );
             }
-            UiEvent::VoiceTranscribing => {
-                self.voice_input_state = VoiceInputState::Transcribing;
-                self.set_status_line(StatusKind::Info, "transcribing voice prompt...");
-            }
-            UiEvent::VoiceTranscriptionReady { .. } => {
+            UiEvent::VoicePromptReady { .. } => {
                 self.voice_input_state = VoiceInputState::Idle;
                 self.set_status_line(StatusKind::Info, "voice prompt captured; sending...");
             }
-            UiEvent::VoiceTranscriptionFailed { message } => {
+            UiEvent::VoicePromptFailed { message } => {
                 self.voice_input_state = VoiceInputState::Idle;
                 self.record_status_message(StatusKind::Warning, message);
             }
@@ -1994,6 +1993,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: Some("0.1".into()),
             prompt_images_supported: false,
+            prompt_audio_supported: false,
         });
         assert_eq!(s.connection_state, ConnectionState::Initializing);
 
@@ -2024,6 +2024,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: None,
             prompt_images_supported: false,
+            prompt_audio_supported: false,
         });
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -2054,6 +2055,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: None,
             prompt_images_supported: false,
+            prompt_audio_supported: false,
         });
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -2096,6 +2098,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: None,
             prompt_images_supported: false,
+            prompt_audio_supported: false,
         });
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -2517,6 +2520,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: None,
             prompt_images_supported: false,
+            prompt_audio_supported: false,
         });
         assert!(
             !s.is_streaming(),

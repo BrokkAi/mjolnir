@@ -7,13 +7,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::schema::{
-    CancelNotification, ClientCapabilities, ContentBlock, ErrorCode, FileSystemCapabilities,
-    ImageContent, InitializeRequest, LoadSessionRequest, ModelInfo, NewSessionRequest,
-    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId, SessionId,
-    SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    SetSessionModelRequest, TextContent,
+    AudioContent, CancelNotification, ClientCapabilities, ContentBlock, ErrorCode,
+    FileSystemCapabilities, ImageContent, InitializeRequest, LoadSessionRequest, ModelInfo,
+    NewSessionRequest, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    SessionConfigValueId, SessionId, SessionModeState, SessionNotification,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, TextContent,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
@@ -22,7 +22,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, UiCommand, UiEvent,
+    PermissionDecision, PermissionPrompt, PromptAudio, PromptImage, SessionConfigTarget, UiCommand,
+    UiEvent,
 };
 
 pub struct AcpRuntimeConfig {
@@ -382,6 +383,7 @@ async fn drive_session(
         agent_name: init_resp.agent_info.as_ref().map(|i| i.name.clone()),
         agent_version: init_resp.agent_info.as_ref().map(|i| i.version.clone()),
         prompt_images_supported: init_resp.agent_capabilities.prompt_capabilities.image,
+        prompt_audio_supported: init_resp.agent_capabilities.prompt_capabilities.audio,
     });
 
     let (session_id, initial_config, resumed) = match resume_session {
@@ -440,8 +442,13 @@ async fn drive_session(
 
     while let Some(cmd) = ui_rx.recv().await {
         match cmd {
-            UiCommand::SendPrompt { text, images } => {
-                if !drive_prompt_turn(&conn, &session_id, text, images, ui_tx, ui_rx).await? {
+            UiCommand::SendPrompt {
+                text,
+                images,
+                audio,
+            } => {
+                if !drive_prompt_turn(&conn, &session_id, text, images, audio, ui_tx, ui_rx).await?
+                {
                     break;
                 }
             }
@@ -747,10 +754,14 @@ async fn drive_prompt_turn(
     session_id: &SessionId,
     text: String,
     images: Vec<PromptImage>,
+    audio: Vec<PromptAudio>,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
 ) -> Result<bool> {
-    let req = PromptRequest::new(session_id.clone(), prompt_content_blocks(text, images));
+    let req = PromptRequest::new(
+        session_id.clone(),
+        prompt_content_blocks(text, images, audio),
+    );
     let prompt = conn.send_request(req).block_task();
     tokio::pin!(prompt);
 
@@ -802,7 +813,11 @@ async fn drive_prompt_turn(
     }
 }
 
-fn prompt_content_blocks(text: String, images: Vec<PromptImage>) -> Vec<ContentBlock> {
+fn prompt_content_blocks(
+    text: String,
+    images: Vec<PromptImage>,
+    audio: Vec<PromptAudio>,
+) -> Vec<ContentBlock> {
     let mut content = Vec::new();
     if !text.is_empty() {
         content.push(ContentBlock::Text(TextContent::new(text)));
@@ -810,6 +825,11 @@ fn prompt_content_blocks(text: String, images: Vec<PromptImage>) -> Vec<ContentB
     content.extend(
         images.into_iter().map(|image| {
             ContentBlock::Image(ImageContent::new(image.data_base64, image.mime_type))
+        }),
+    );
+    content.extend(
+        audio.into_iter().map(|audio| {
+            ContentBlock::Audio(AudioContent::new(audio.data_base64, audio.mime_type))
         }),
     );
     content
@@ -841,6 +861,7 @@ mod tests {
                 width: 640,
                 height: 480,
             }],
+            Vec::new(),
         );
 
         assert_eq!(blocks.len(), 2);
@@ -1227,6 +1248,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                audio: Vec::new(),
             })
             .expect("send prompt");
 
@@ -1302,6 +1324,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "resume".to_string(),
                 images: Vec::new(),
+                audio: Vec::new(),
             })
             .expect("send prompt");
 
@@ -1367,6 +1390,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                audio: Vec::new(),
             })
             .expect("send prompt");
 
@@ -1433,6 +1457,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                audio: Vec::new(),
             })
             .expect("send prompt");
         cmd_tx.send(UiCommand::CancelPrompt).expect("send cancel");
@@ -1556,6 +1581,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                audio: Vec::new(),
             })
             .expect("send prompt");
 

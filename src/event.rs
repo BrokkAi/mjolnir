@@ -19,6 +19,13 @@ pub struct PromptImage {
     pub height: u32,
 }
 
+/// Audio block submitted by the UI with a prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAudio {
+    pub data_base64: String,
+    pub mime_type: String,
+}
+
 /// Events flowing from the ACP runtime into the UI task.
 #[derive(Debug)]
 pub enum UiEvent {
@@ -28,6 +35,7 @@ pub enum UiEvent {
         agent_name: Option<String>,
         agent_version: Option<String>,
         prompt_images_supported: bool,
+        prompt_audio_supported: bool,
     },
     /// A session has been opened or loaded; future updates carry this session id.
     SessionStarted { session_id: String, resumed: bool },
@@ -56,13 +64,11 @@ pub enum UiEvent {
     PromptFailed { message: String },
     /// Voice input has started recording from the default microphone.
     VoiceRecordingStarted,
-    /// Voice recording ended and transcription is now in flight.
-    VoiceTranscribing,
-    /// Voice transcription finished successfully. The UI should merge
-    /// the text into the input and send it as a prompt.
-    VoiceTranscriptionReady { text: String },
-    /// Voice capture or transcription failed.
-    VoiceTranscriptionFailed { message: String },
+    /// Voice recording finished successfully. The UI should attach the
+    /// captured audio to the current prompt and send it immediately.
+    VoicePromptReady { audio: PromptAudio },
+    /// Voice capture failed.
+    VoicePromptFailed { message: String },
     /// A non-fatal error from the runtime (e.g. transport hiccup we
     /// recovered from). Shown in the status line.
     Warning(String),
@@ -104,6 +110,7 @@ pub enum UiCommand {
     SendPrompt {
         text: String,
         images: Vec<PromptImage>,
+        audio: Vec<PromptAudio>,
     },
     /// Set a session configuration option to a new value.
     SetSessionConfigOption {

@@ -183,6 +183,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         .send(UiCommand::SendPrompt {
                             text: cfg.prompt.clone(),
                             images: Vec::new(),
+                            audio: Vec::new(),
                         })
                         .context("send prompt to ACP runtime")?;
                 }
@@ -229,9 +230,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 break;
             }
             UiEvent::VoiceRecordingStarted
-            | UiEvent::VoiceTranscribing
-            | UiEvent::VoiceTranscriptionReady { .. }
-            | UiEvent::VoiceTranscriptionFailed { .. } => {}
+            | UiEvent::VoicePromptReady { .. }
+            | UiEvent::VoicePromptFailed { .. } => {}
             UiEvent::Warning(message) => {
                 if matches!(cfg.output_format, OutputFormat::StreamJson) {
                     emit_json(&StreamRecord::Warning { message: &message })?;
