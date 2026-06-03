@@ -13,8 +13,11 @@ mod config;
 mod event;
 mod headless;
 mod install;
+mod notifications;
+mod paths;
 mod picker;
 mod registry;
+mod remote;
 mod self_update;
 mod session;
 mod ui;
@@ -112,6 +115,8 @@ enum Commands {
     /// Use `--list` to print sessions from the configured default agent
     /// in headless mode (no TUI).
     Resume(ResumeArgs),
+    /// Start the local remote-control server.
+    Server,
 }
 
 #[derive(Debug, clap::Args)]
@@ -201,6 +206,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
     match &cli.command {
         Some(Commands::Resume(args)) => !args.list,
+        Some(Commands::Server) => false,
         None => true,
     }
 }
@@ -224,6 +230,7 @@ async fn main() -> Result<()> {
                 args.fullscreen_tui |= fullscreen_tui;
                 run_resume(args).await
             }
+            Commands::Server => remote::run_server().await,
         };
     }
 
@@ -456,33 +463,14 @@ fn prepare_worktree_for_arg(
 }
 
 fn worktree_label(worktree: Option<&CreatedWorktree>) -> Option<String> {
-    worktree
-        .and_then(|w| w.worktree_root.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
+    worktree.map(|w| paths::folder_label(&w.worktree_root))
 }
 
 fn project_label(cwd: &std::path::Path, worktree: Option<&CreatedWorktree>) -> String {
     if let Some(worktree) = worktree {
-        return folder_label(&worktree.project_root);
+        return paths::folder_label(&worktree.project_root);
     }
-    if let Some(parent) = parent_above_mjolnir(cwd) {
-        return folder_label(&parent);
-    }
-    folder_label(cwd)
-}
-
-fn folder_label(path: &std::path::Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-fn parent_above_mjolnir(path: &std::path::Path) -> Option<PathBuf> {
-    path.ancestors()
-        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".mjolnir"))
-        .and_then(|mjolnir_dir| mjolnir_dir.parent())
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(std::path::Path::to_path_buf)
+    paths::project_label_from_cwd(cwd)
 }
 
 fn handle_worktree_after_tui(worktree: Option<&CreatedWorktree>) -> bool {
@@ -741,14 +729,7 @@ fn selected_to_picker_outcome(agent: &SelectedAgent) -> PickerOutcome {
 }
 
 fn agent_header_label(agent: &SelectedAgent) -> String {
-    if agent.source_id == "custom" {
-        let mut words = Vec::with_capacity(agent.args.len() + 1);
-        words.push(agent.program.to_string_lossy().into_owned());
-        words.extend(agent.args.iter().cloned());
-        shell_words::join(words)
-    } else {
-        agent.source_id.clone()
-    }
+    remote::agent_display_label(agent)
 }
 
 async fn run_session(
@@ -767,10 +748,11 @@ async fn run_session(
         UiMode::FullscreenTui => ui::setup_fullscreen_terminal().context("setup terminal")?,
     };
 
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let voice_event_tx = event_tx.clone();
-    let voice_tx = voice::spawn(voice_event_tx);
+    let (event_tx, runtime_event_rx) = mpsc::unbounded_channel();
+    let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
+    let (runtime_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, mut ui_cmd_rx) = mpsc::unbounded_channel();
+    let voice_tx = voice::spawn(ui_event_tx.clone());
 
     let runtime_cfg = acp::AcpRuntimeConfig {
         command: agent.program.clone(),
@@ -796,13 +778,36 @@ async fn run_session(
     // agents use their source id so the header matches the picker/config,
     // while custom agents show the exact command line being launched.
     let agent_display_name = Some(agent_header_label(agent));
+    let remote_tracker =
+        remote::RemoteSessionTracker::new(project_label.clone(), agent_header_label(agent));
+
+    let event_tracker = remote_tracker.clone();
+    let event_proxy = tokio::spawn(async move {
+        let mut runtime_event_rx = runtime_event_rx;
+        while let Some(event) = runtime_event_rx.recv().await {
+            event_tracker.observe_event(&event);
+            if ui_event_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+
+    let cmd_tracker = remote_tracker.clone();
+    let cmd_proxy = tokio::spawn(async move {
+        while let Some(command) = ui_cmd_rx.recv().await {
+            cmd_tracker.observe_command(&command);
+            if runtime_cmd_tx.send(command).is_err() {
+                break;
+            }
+        }
+    });
 
     let ui_result = ui::run(
         &mut terminal,
         ui::UiChannels {
             cmd_tx,
             voice_tx,
-            event_rx,
+            event_rx: ui_event_rx,
         },
         HeaderLabels {
             project: project_label,
@@ -859,7 +864,25 @@ async fn run_session(
         }
     }
 
+    remote_tracker.shutdown().await;
+    wait_for_task("remote-control event proxy", event_proxy).await;
+    wait_for_task("remote-control command proxy", cmd_proxy).await;
+
     ui_result
+}
+
+async fn wait_for_task(label: &str, handle: tokio::task::JoinHandle<()>) {
+    let abort_handle = handle.abort_handle();
+    match tokio::time::timeout(Duration::from_secs(2), handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!("{label} join failed: {error}");
+        }
+        Err(_) => {
+            tracing::warn!("{label} did not exit within 2s; aborting");
+            abort_handle.abort();
+        }
+    }
 }
 
 fn init_logging(path: Option<&std::path::Path>) -> Result<()> {
@@ -1036,6 +1059,9 @@ mod tests {
 
         let cli = Cli::try_parse_from(["mj", "resume", "sess-123"]).expect("parse");
         assert!(should_run_startup_update_check(&cli));
+
+        let cli = Cli::try_parse_from(["mj", "server"]).expect("parse");
+        assert!(!should_run_startup_update_check(&cli));
     }
 
     #[test]
@@ -1108,6 +1134,12 @@ mod tests {
             assert!(args.cwd.is_none());
             assert!(args.agent_stderr.is_none());
         }
+    }
+
+    #[test]
+    fn parse_server_subcommand() {
+        let cli = Cli::try_parse_from(["mj", "server"]).expect("parse");
+        assert!(matches!(cli.command, Some(Commands::Server)));
     }
 
     #[test]

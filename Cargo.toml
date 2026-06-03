@@ -15,6 +15,11 @@ path = "src/main.rs"
 [dependencies]
 agent-client-protocol = { version = "0.12", features = ["unstable_session_model", "unstable_session_usage"] }
 anyhow = "1"
+axum = "0.8"
+# Use the ring CryptoProvider (already pulled by reqwest/rcgen) instead of the
+# default aws-lc-rs, which needs cmake + a C toolchain and fails to
+# cross-compile cleanly for the Android CI target.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 cpal = "0.16"
@@ -27,13 +32,17 @@ hound = "3"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = "0.2"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 shell-words = "1"
 tar = "0.4"
+time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
 toml = "0.8"
