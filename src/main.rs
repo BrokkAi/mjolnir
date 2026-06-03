@@ -15,6 +15,7 @@ mod headless;
 mod install;
 mod picker;
 mod registry;
+mod remote;
 mod self_update;
 mod session;
 mod ui;
@@ -111,6 +112,24 @@ enum Commands {
     /// Use `--list` to print sessions from the configured default agent
     /// in headless mode (no TUI).
     Resume(ResumeArgs),
+
+    /// Start the local remote-control server.
+    Server(ServerArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct ServerArgs {
+    /// Address to bind. Defaults to localhost for safety.
+    #[arg(long, default_value = "127.0.0.1")]
+    bind: std::net::IpAddr,
+
+    /// HTTPS port for the remote-control server.
+    #[arg(long, default_value_t = remote::DEFAULT_PORT)]
+    port: u16,
+
+    /// Regenerate the initial admin login token.
+    #[arg(long)]
+    reset_login_token: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -200,6 +219,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
     match &cli.command {
         Some(Commands::Resume(args)) => !args.list,
+        Some(Commands::Server(_)) => false,
         None => true,
     }
 }
@@ -222,6 +242,14 @@ async fn main() -> Result<()> {
             Commands::Resume(mut args) => {
                 args.fullscreen_tui |= fullscreen_tui;
                 run_resume(args).await
+            }
+            Commands::Server(args) => {
+                remote::run_server(remote::ServerConfig {
+                    bind: args.bind,
+                    port: args.port,
+                    reset_login_token: args.reset_login_token,
+                })
+                .await
             }
         };
     }
