@@ -5524,18 +5524,23 @@ mod tests {
             .draw(|frame| draw_permission_modal(frame, frame.area(), &pending, 1))
             .expect("draw");
 
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        let lines = buffer_lines(terminal.backend().buffer());
         assert!(
-            rendered.contains("git checkout"),
-            "missing first command line; rendered:\n{rendered}"
+            lines
+                .iter()
+                .any(|l| l.contains("git checkout") && !l.contains("--force")),
+            "first command segment should be on its own terminal row; lines:\n{}",
+            lines.join("\n")
         );
         assert!(
-            rendered.contains("--force feature-branch"),
-            "missing second command line; rendered:\n{rendered}"
+            lines.iter().any(|l| l.contains("--force feature-branch")),
+            "second command segment should be on its own terminal row; lines:\n{}",
+            lines.join("\n")
         );
         assert!(
-            !rendered.contains("\\\\n"),
-            "literal newline escape should not be rendered; rendered:\n{rendered}"
+            !lines.iter().any(|l| l.contains("\\n")),
+            "literal backslash-n escape must not appear; lines:\n{}",
+            lines.join("\n")
         );
     }
 
