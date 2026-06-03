@@ -185,6 +185,15 @@ pub enum ConnectionState {
     Fatal,
 }
 
+/// Lifecycle of optional voice input handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VoiceInputState {
+    #[default]
+    Idle,
+    Recording,
+    Transcribing,
+}
+
 /// Severity attached to transient status text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
@@ -319,6 +328,8 @@ pub struct AppState {
     pub exit_reason: Option<UiExitReason>,
     /// True once the runtime has stopped accepting commands.
     pub runtime_closed: bool,
+    /// Voice dictation state, independent from ACP prompt streaming.
+    pub voice_input_state: VoiceInputState,
     /// Transient status line with severity.
     pub status_line: Option<StatusMessage>,
     /// Timing for the active or most recently completed prompt turn.
@@ -449,6 +460,7 @@ impl AppState {
             expand_tool_outputs: false,
             exit_reason: None,
             runtime_closed: false,
+            voice_input_state: VoiceInputState::Idle,
             status_line: None,
             turn_started_at: None,
             last_turn_elapsed: None,
@@ -592,6 +604,10 @@ impl AppState {
         }
     }
 
+    pub fn has_voice_input_activity(&self) -> bool {
+        !matches!(self.voice_input_state, VoiceInputState::Idle)
+    }
+
     pub fn last_turn_elapsed(&self) -> Option<Duration> {
         self.last_turn_elapsed
     }
@@ -624,6 +640,7 @@ impl AppState {
     /// Mark the runtime as closed and switch the UI into read-only mode.
     pub fn mark_runtime_closed(&mut self) {
         self.runtime_closed = true;
+        self.voice_input_state = VoiceInputState::Idle;
         self.finish_turn_timer();
         self.cancel_all_pending_permissions();
         self.config_picker = None;
@@ -1019,6 +1036,25 @@ impl AppState {
                 self.finish_prompt_turn(true);
                 self.record_status_message(StatusKind::Warning, message);
                 self.update_autocomplete();
+            }
+            UiEvent::VoiceRecordingStarted => {
+                self.voice_input_state = VoiceInputState::Recording;
+                self.set_status_line(
+                    StatusKind::Info,
+                    "recording voice prompt... press Ctrl-R to stop and send",
+                );
+            }
+            UiEvent::VoiceTranscribing => {
+                self.voice_input_state = VoiceInputState::Transcribing;
+                self.set_status_line(StatusKind::Info, "transcribing voice prompt...");
+            }
+            UiEvent::VoiceTranscriptionReady { .. } => {
+                self.voice_input_state = VoiceInputState::Idle;
+                self.set_status_line(StatusKind::Info, "voice prompt captured; sending...");
+            }
+            UiEvent::VoiceTranscriptionFailed { message } => {
+                self.voice_input_state = VoiceInputState::Idle;
+                self.record_status_message(StatusKind::Warning, message);
             }
             UiEvent::Warning(msg) => {
                 self.record_status_message(StatusKind::Warning, msg);

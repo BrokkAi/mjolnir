@@ -54,6 +54,15 @@ pub enum UiEvent {
     /// The prompt request failed before returning a stop reason. UI can
     /// re-enable the input prompt and surface the error.
     PromptFailed { message: String },
+    /// Voice input has started recording from the default microphone.
+    VoiceRecordingStarted,
+    /// Voice recording ended and transcription is now in flight.
+    VoiceTranscribing,
+    /// Voice transcription finished successfully. The UI should merge
+    /// the text into the input and send it as a prompt.
+    VoiceTranscriptionReady { text: String },
+    /// Voice capture or transcription failed.
+    VoiceTranscriptionFailed { message: String },
     /// A non-fatal error from the runtime (e.g. transport hiccup we
     /// recovered from). Shown in the status line.
     Warning(String),

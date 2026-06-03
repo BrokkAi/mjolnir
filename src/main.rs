@@ -19,6 +19,7 @@ mod self_update;
 mod session;
 mod ui;
 mod version;
+mod voice;
 mod worktree;
 
 use anyhow::{Context, Result};
@@ -768,6 +769,8 @@ async fn run_session(
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let voice_event_tx = event_tx.clone();
+    let voice_tx = voice::spawn(voice_event_tx);
 
     let runtime_cfg = acp::AcpRuntimeConfig {
         command: agent.program.clone(),
@@ -796,8 +799,11 @@ async fn run_session(
 
     let ui_result = ui::run(
         &mut terminal,
-        cmd_tx,
-        event_rx,
+        ui::UiChannels {
+            cmd_tx,
+            voice_tx,
+            event_rx,
+        },
         HeaderLabels {
             project: project_label,
             worktree: worktree_label,

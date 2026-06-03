@@ -34,7 +34,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
     AppState, ConfigValueChoice, ConnectionState, Entry, PastedAttachment, PastedImageAttachment,
-    PendingPermission, StatusKind, StatusMessage, ToolCallOutput, UiExitReason,
+    PendingPermission, StatusKind, StatusMessage, ToolCallOutput, UiExitReason, VoiceInputState,
     config_option_choices, config_option_current_value_label, permission_kind_label,
 };
 use crate::clipboard::{
@@ -43,6 +43,7 @@ use crate::clipboard::{
 use crate::config;
 use crate::event::{PermissionDecision, PromptImage, UiCommand, UiEvent};
 use crate::version::mjolnir_version_label;
+use crate::voice::VoiceCommand;
 
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
 const TRANSCRIPT_SCROLL_WHEEL_STEP: usize = 3;
@@ -68,6 +69,12 @@ pub enum UiMode {
 pub struct HeaderLabels {
     pub project: String,
     pub worktree: Option<String>,
+}
+
+pub struct UiChannels {
+    pub cmd_tx: mpsc::UnboundedSender<UiCommand>,
+    pub voice_tx: mpsc::UnboundedSender<VoiceCommand>,
+    pub event_rx: mpsc::UnboundedReceiver<UiEvent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,8 +206,7 @@ impl TranscriptScrollState {
 /// of waiting for the agent to report its own name during handshake.
 pub async fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    cmd_tx: mpsc::UnboundedSender<UiCommand>,
-    mut event_rx: mpsc::UnboundedReceiver<UiEvent>,
+    mut channels: UiChannels,
     header_labels: HeaderLabels,
     initial_agent_label: Option<String>,
     history_path: Option<&Path>,
@@ -209,8 +215,7 @@ pub async fn run(
     let initial_history = history_path.map(config::load_history).unwrap_or_default();
     let (reason, session_id, history) = ui_loop(
         terminal,
-        &cmd_tx,
-        &mut event_rx,
+        &mut channels,
         header_labels,
         initial_agent_label,
         initial_history,
@@ -246,8 +251,7 @@ const TOOL_OUTPUT_COLLAPSED_LINES: usize = 6;
 
 async fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
-    event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
+    channels: &mut UiChannels,
     header_labels: HeaderLabels,
     initial_agent_label: Option<String>,
     initial_history: Vec<String>,
@@ -283,7 +287,13 @@ async fn ui_loop(
             maybe_ct = crossterm_events.next() => {
                 match maybe_ct {
                     Some(Ok(ev)) => {
-                        let request = handle_crossterm(&mut state, cmd_tx, ev, mode);
+                        let request = handle_crossterm(
+                            &mut state,
+                            &channels.cmd_tx,
+                            Some(&channels.voice_tx),
+                            ev,
+                            mode,
+                        );
                         apply_terminal_request(terminal, &mut state, request)?;
                     }
                     Some(Err(e)) => {
@@ -301,9 +311,9 @@ async fn ui_loop(
             // arm and exits the loop. The conditional pattern disables
             // the branch when the channel closes, which would leave the
             // TUI spinning on tick + crossterm forever.
-            maybe_ev = event_rx.recv(), if !state.runtime_closed => {
+            maybe_ev = channels.event_rx.recv(), if !state.runtime_closed => {
                 match maybe_ev {
-                    Some(ev) => state.apply_event(ev),
+                    Some(ev) => apply_ui_event(&mut state, &channels.cmd_tx, ev),
                     None => {
                         state.mark_runtime_closed();
                     }
@@ -325,7 +335,8 @@ async fn ui_loop(
         }
 
         if let Some(reason) = state.exit_reason {
-            let _ = cmd_tx.send(UiCommand::Shutdown);
+            let _ = channels.cmd_tx.send(UiCommand::Shutdown);
+            let _ = channels.voice_tx.send(VoiceCommand::Shutdown);
             if mode == UiMode::InlineChat {
                 flush_transcript_to_scrollback(terminal, &mut transcript_sink, &state)?;
                 sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
@@ -371,6 +382,7 @@ async fn ui_loop(
             set_mouse_capture(terminal, enabled)
         })?;
     }
+    let _ = channels.voice_tx.send(VoiceCommand::Shutdown);
     Ok((UiExitReason::Quit, None, state.prompt_history()))
 }
 
@@ -387,6 +399,17 @@ fn draw_terminal_frame(
             Ok(false)
         }
         Err(e) => Err(e).context("draw terminal"),
+    }
+}
+
+fn apply_ui_event(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>, event: UiEvent) {
+    match event {
+        UiEvent::VoiceTranscriptionReady { text } => {
+            state.apply_event(UiEvent::VoiceTranscriptionReady { text: text.clone() });
+            append_voice_transcript_to_input(state, &text);
+            submit_prompt(state, cmd_tx);
+        }
+        other => state.apply_event(other),
     }
 }
 
@@ -540,6 +563,7 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
 fn handle_crossterm(
     state: &mut AppState,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    voice_tx: Option<&mpsc::UnboundedSender<VoiceCommand>>,
     ev: CtEvent,
     mode: UiMode,
 ) -> TerminalRequest {
@@ -721,7 +745,12 @@ fn handle_crossterm(
 
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-            if state.is_streaming() {
+            if state.has_voice_input_activity() {
+                state.record_status_message(
+                    StatusKind::Info,
+                    "voice input is active; press Ctrl-R to stop and send",
+                );
+            } else if state.is_streaming() {
                 let _ = cmd_tx.send(UiCommand::CancelPrompt);
                 state.mark_cancelling();
                 state.status_line = Some(StatusMessage::info("cancelling..."));
@@ -747,6 +776,9 @@ fn handle_crossterm(
         }
         (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
             state.exit_reason = Some(UiExitReason::NewSession);
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
+            toggle_voice_recording(state, voice_tx);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
             state.toggle_expand_tool_outputs();
@@ -850,6 +882,48 @@ fn handle_crossterm(
         _ => {}
     }
     TerminalRequest::None
+}
+
+fn toggle_voice_recording(
+    state: &mut AppState,
+    voice_tx: Option<&mpsc::UnboundedSender<VoiceCommand>>,
+) {
+    if state.runtime_closed {
+        state.record_status_message(
+            StatusKind::Info,
+            "acp runtime closed; start a new session before recording voice",
+        );
+        return;
+    }
+    if state.is_streaming() {
+        state.record_status_message(
+            StatusKind::Warning,
+            "wait for the current turn to finish before using voice input",
+        );
+        return;
+    }
+    if state.has_pending_permission() || state.config_picker.is_some() || state.help_overlay {
+        state.record_status_message(
+            StatusKind::Warning,
+            "close the active overlay before using voice input",
+        );
+        return;
+    }
+    if matches!(state.voice_input_state, VoiceInputState::Transcribing) {
+        state.record_status_message(
+            StatusKind::Info,
+            "voice transcription is already in progress",
+        );
+        return;
+    }
+    let Some(voice_tx) = voice_tx else {
+        state.record_status_message(
+            StatusKind::Warning,
+            "voice input is unavailable in this context",
+        );
+        return;
+    };
+    let _ = voice_tx.send(VoiceCommand::ToggleRecording);
 }
 
 fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
@@ -1560,6 +1634,16 @@ fn should_open_help(modifiers: KeyModifiers, code: KeyCode) -> bool {
 }
 
 fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
+    if state.has_voice_input_activity() {
+        let message = match state.voice_input_state {
+            VoiceInputState::Recording => "finish the active voice recording first (Ctrl-R)",
+            VoiceInputState::Transcribing => "wait for voice transcription to finish",
+            VoiceInputState::Idle => unreachable!("voice activity should exclude idle state"),
+        };
+        state.record_status_message(StatusKind::Warning, message);
+        return;
+    }
+
     // Concatenate attachment contents (in order) with input text.
     let mut combined = String::new();
     for attachment in &state.attachments {
@@ -1643,6 +1727,22 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     let display_text = prompt_display_text(&text, images.len());
     state.record_user_prompt(display_text);
     let _ = cmd_tx.send(UiCommand::SendPrompt { text, images });
+}
+
+fn append_voice_transcript_to_input(state: &mut AppState, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        state.record_status_message(StatusKind::Warning, "voice transcription returned no text");
+        return;
+    }
+    if !state.input.is_empty() && !state.input.ends_with(char::is_whitespace) {
+        state.input.push(' ');
+    }
+    state.input.push_str(trimmed);
+    state.input_cursor = state.input.chars().count();
+    state.scroll_input_to_bottom();
+    state.reset_history_navigation();
+    state.update_autocomplete();
 }
 
 fn prompt_display_text(text: &str, image_count: usize) -> String {
@@ -3346,11 +3446,15 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     };
     let title = if state.runtime_closed {
         " runtime closed (/new or Ctrl-N for a new session | Ctrl-C to quit) ".to_string()
+    } else if matches!(state.voice_input_state, VoiceInputState::Recording) {
+        " recording voice... (Ctrl-R to stop and send) ".to_string()
+    } else if matches!(state.voice_input_state, VoiceInputState::Transcribing) {
+        " transcribing voice... ".to_string()
     } else if state.is_streaming() {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else {
         format!(
-            " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " prompt (Enter send | Ctrl-R voice | {PROMPT_NEWLINE_HINT} newline | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     };
     let style = if state.runtime_closed || state.is_streaming() {
@@ -3892,6 +3996,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
         Line::from("  Ctrl-K/U/W       delete to end/start of line or previous word"),
         Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
         Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
+        Line::from("  Ctrl-R           start/stop voice transcription and auto-send"),
         Line::from("  Ctrl-V/Ctrl-Alt-V paste image from clipboard"),
         Line::from("  Ctrl-Y           copy last agent message to clipboard"),
         Line::from("  Esc              clear input, chips, and browsing history"),
@@ -4339,7 +4444,7 @@ mod tests {
         cmd_tx: &mpsc::UnboundedSender<UiCommand>,
         ev: CtEvent,
     ) -> TerminalRequest {
-        super::handle_crossterm(state, cmd_tx, ev, UiMode::FullscreenTui)
+        super::handle_crossterm(state, cmd_tx, None, ev, UiMode::FullscreenTui)
     }
 
     fn handle_inline_crossterm(
@@ -4347,7 +4452,16 @@ mod tests {
         cmd_tx: &mpsc::UnboundedSender<UiCommand>,
         ev: CtEvent,
     ) -> TerminalRequest {
-        super::handle_crossterm(state, cmd_tx, ev, UiMode::InlineChat)
+        super::handle_crossterm(state, cmd_tx, None, ev, UiMode::InlineChat)
+    }
+
+    fn handle_crossterm_with_voice(
+        state: &mut AppState,
+        cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+        voice_tx: &mpsc::UnboundedSender<VoiceCommand>,
+        ev: CtEvent,
+    ) -> TerminalRequest {
+        super::handle_crossterm(state, cmd_tx, Some(voice_tx), ev, UiMode::FullscreenTui)
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -5049,13 +5163,19 @@ mod tests {
         super::handle_crossterm(
             &mut state,
             &cmd_tx,
+            None,
             mouse(MouseEventKind::ScrollUp),
             UiMode::InlineChat,
         );
         assert_eq!(state.scroll_offset, 0);
 
-        let request =
-            super::handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(12)), UiMode::InlineChat);
+        let request = super::handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            None,
+            key(KeyCode::F(12)),
+            UiMode::InlineChat,
+        );
         assert_eq!(request, TerminalRequest::None);
         assert!(!state.text_selection_mode);
     }
@@ -5069,6 +5189,7 @@ mod tests {
         super::handle_crossterm(
             &mut state,
             &cmd_tx,
+            None,
             key(KeyCode::PageUp),
             UiMode::InlineChat,
         );
@@ -5078,6 +5199,7 @@ mod tests {
         super::handle_crossterm(
             &mut state,
             &cmd_tx,
+            None,
             key_with_modifiers(KeyCode::Up, KeyModifiers::CONTROL),
             UiMode::InlineChat,
         );
@@ -6018,6 +6140,26 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_r_sends_toggle_to_voice_runtime() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let (voice_tx, mut voice_rx) = mpsc::unbounded_channel::<VoiceCommand>();
+
+        handle_crossterm_with_voice(
+            &mut state,
+            &cmd_tx,
+            &voice_tx,
+            key_with_modifiers(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        );
+
+        assert!(matches!(
+            voice_rx.try_recv(),
+            Ok(VoiceCommand::ToggleRecording)
+        ));
+    }
+
+    #[test]
     fn config_picker_renders_no_matches_state() {
         let mut state = AppState::new();
         state.session_config_options = vec![SessionConfigOption::select(
@@ -6713,6 +6855,35 @@ mod tests {
         }
         assert!(state.input.is_empty());
         assert!(state.attachments.is_empty());
+    }
+
+    #[test]
+    fn voice_transcription_ready_appends_text_and_auto_submits() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "summarize".to_string();
+        state.input_cursor = state.input.chars().count();
+        state.voice_input_state = VoiceInputState::Transcribing;
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        apply_ui_event(
+            &mut state,
+            &cmd_tx,
+            UiEvent::VoiceTranscriptionReady {
+                text: "the latest changes".to_string(),
+            },
+        );
+
+        let cmd = cmd_rx.try_recv().expect("prompt was sent");
+        match cmd {
+            UiCommand::SendPrompt { text, images } => {
+                assert_eq!(text, "summarize the latest changes");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert_eq!(state.voice_input_state, VoiceInputState::Idle);
+        assert!(state.input.is_empty());
     }
 
     #[test]

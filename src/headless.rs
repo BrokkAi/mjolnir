@@ -228,6 +228,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 let _ = cmd_tx.send(UiCommand::Shutdown);
                 break;
             }
+            UiEvent::VoiceRecordingStarted
+            | UiEvent::VoiceTranscribing
+            | UiEvent::VoiceTranscriptionReady { .. }
+            | UiEvent::VoiceTranscriptionFailed { .. } => {}
             UiEvent::Warning(message) => {
                 if matches!(cfg.output_format, OutputFormat::StreamJson) {
                     emit_json(&StreamRecord::Warning { message: &message })?;
