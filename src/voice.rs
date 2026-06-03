@@ -43,6 +43,7 @@ struct VoiceRuntime {
     recording: Option<ActiveRecording>,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum PreparedVoicePrompt {
     Text(String),
     Audio(PromptAudio),
