@@ -191,6 +191,7 @@ pub enum VoiceInputState {
     #[default]
     Idle,
     Recording,
+    Processing,
 }
 
 /// Severity attached to transient status text.
@@ -1045,6 +1046,20 @@ impl AppState {
                 self.set_status_line(
                     StatusKind::Info,
                     "recording voice prompt... press Ctrl-R to send",
+                );
+            }
+            UiEvent::VoicePromptPreparing => {
+                self.voice_input_state = VoiceInputState::Processing;
+                self.set_status_line(
+                    StatusKind::Info,
+                    "preparing voice prompt... transcribing locally or falling back to ACP audio",
+                );
+            }
+            UiEvent::VoiceTranscriptionReady { .. } => {
+                self.voice_input_state = VoiceInputState::Idle;
+                self.set_status_line(
+                    StatusKind::Info,
+                    "voice prompt transcribed locally; sending...",
                 );
             }
             UiEvent::VoicePromptReady { .. } => {

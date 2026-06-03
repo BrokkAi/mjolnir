@@ -230,6 +230,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 break;
             }
             UiEvent::VoiceRecordingStarted
+            | UiEvent::VoicePromptPreparing
+            | UiEvent::VoiceTranscriptionReady { .. }
             | UiEvent::VoicePromptReady { .. }
             | UiEvent::VoicePromptFailed { .. } => {}
             UiEvent::Warning(message) => {

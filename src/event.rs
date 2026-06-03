@@ -64,6 +64,11 @@ pub enum UiEvent {
     PromptFailed { message: String },
     /// Voice input has started recording from the default microphone.
     VoiceRecordingStarted,
+    /// Voice recording stopped and is being prepared for submission.
+    VoicePromptPreparing,
+    /// Voice recording was transcribed locally. The UI should merge the text
+    /// into the current prompt and send it immediately.
+    VoiceTranscriptionReady { text: String },
     /// Voice recording finished successfully. The UI should attach the
     /// captured audio to the current prompt and send it immediately.
     VoicePromptReady { audio: PromptAudio },

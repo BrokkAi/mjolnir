@@ -164,14 +164,15 @@ to permission prompts; the default rejects prompts so automation does not hang.
 ## Voice Input
 
 Press `Ctrl-R` inside the TUI to start recording from the default microphone.
-Press `Ctrl-R` again to stop; `mj` records a temporary `.wav`, attaches it to
-the current prompt as ACP audio content, and submits it automatically.
+Press `Ctrl-R` again to stop. On macOS, `mj` first tries on-device speech
+transcription through the OS and submits the recognized text directly. If local
+transcription is unavailable or fails, `mj` falls back to attaching the
+recorded `.wav` as ACP audio content when the active agent advertises audio
+prompt support.
 
-This path only uses the active harness through ACP. No separate transcription
-API key, model setting, or side-channel voice configuration is involved. The
-selected agent must advertise ACP audio prompt support; when it does not, `mj`
-keeps the shortcut disabled with an in-app warning instead of falling back to
-anything else.
+This path never uses a separate transcription API key, model setting, or
+side-channel voice service. It relies only on local OS speech services when
+available, plus the active harness through ACP for the normal prompt submit.
 
 ## Reference
 
