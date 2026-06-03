@@ -5341,7 +5341,10 @@ mod tests {
         handle_crossterm(
             &mut state,
             &cmd_tx,
-            key_with_modifiers(KeyCode::Char('T'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            key_with_modifiers(
+                KeyCode::Char('T'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
         );
 
         assert!(state.expand_tool_outputs);
