@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 
 use crate::app::UiExitReason;
 use crate::config::{Config, SelectedAgent, history_path};
+use crate::event::{UiCommand, UiEvent};
 use crate::picker::{PickerOutcome, PickerPreferences, PickerResult};
 use crate::session::SessionEntryJson;
 use crate::ui::{HeaderLabels, UiMode};
@@ -778,6 +779,74 @@ fn agent_header_label(agent: &SelectedAgent) -> String {
     }
 }
 
+async fn maybe_start_remote_client(
+    agent: &SelectedAgent,
+    cwd: &std::path::Path,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    event_tx: &mpsc::UnboundedSender<UiEvent>,
+) {
+    if !remote::probe_server().await {
+        return;
+    }
+
+    match remote::ensure_client_enrolled().await {
+        Ok(Some(message)) => {
+            let _ = event_tx.send(UiEvent::Warning(message));
+            return;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!("remote enrollment check failed: {e:#}");
+            return;
+        }
+    }
+
+    let remote_session =
+        match remote::register_client_session(cwd, &agent_header_label(agent)).await {
+            Ok(Some(session)) => session,
+            Ok(None) => return,
+            Err(e) => {
+                let _ = event_tx.send(UiEvent::Warning(format!(
+                    "Remote control server found, but client session registration failed: {e:#}"
+                )));
+                return;
+            }
+        };
+
+    let poller = remote_session.clone();
+    let cmd_tx = cmd_tx.clone();
+    let event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        let _ = poller.push_event("status", "mj client connected").await;
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            match poller.poll_prompt().await {
+                Ok(Some(prompt)) => {
+                    let prompt_id = prompt.id.clone();
+                    if cmd_tx
+                        .send(UiCommand::SendPrompt {
+                            text: prompt.text,
+                            images: Vec::new(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let _ = poller.complete_prompt(&prompt_id).await;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = event_tx.send(UiEvent::Warning(format!(
+                        "Remote control prompt poll failed: {e:#}"
+                    )));
+                    break;
+                }
+            }
+        }
+    });
+}
+
 async fn run_session(
     agent: &SelectedAgent,
     cwd: PathBuf,
@@ -796,6 +865,8 @@ async fn run_session(
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+
+    maybe_start_remote_client(agent, &cwd, &cmd_tx, &event_tx).await;
 
     let runtime_cfg = acp::AcpRuntimeConfig {
         command: agent.program.clone(),

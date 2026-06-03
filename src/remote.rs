@@ -28,6 +28,7 @@ use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
 pub const DEFAULT_PORT: u16 = 11399;
+pub const DEFAULT_URL: &str = "https://localhost:11399";
 const ADMIN_COOKIE: &str = "mj_remote_session";
 const SESSION_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
 
@@ -67,8 +68,221 @@ struct TlsListener {
     acceptor: TlsAcceptor,
 }
 
+pub fn ca_cert_path() -> PathBuf {
+    remote_data_dir().join("ca-cert.pem")
+}
+
+pub fn client_cert_path() -> PathBuf {
+    remote_client_data_dir().join("client-cert.pem")
+}
+
+pub fn client_key_path() -> PathBuf {
+    remote_client_data_dir().join("client-key.pem")
+}
+
+fn client_enrollment_id_path() -> PathBuf {
+    remote_client_data_dir().join("enrollment-id")
+}
+
+pub async fn probe_server() -> bool {
+    let ca_cert = match std::fs::read(ca_cert_path()) {
+        Ok(cert) => cert,
+        Err(_) => return false,
+    };
+    let cert = match reqwest::Certificate::from_pem(&ca_cert) {
+        Ok(cert) => cert,
+        Err(_) => return false,
+    };
+    let client = match reqwest::Client::builder()
+        .add_root_certificate(cert)
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.get(DEFAULT_URL).send(),
+        )
+        .await,
+        Ok(Ok(resp)) if resp.status().is_success()
+    )
+}
+
+pub async fn ensure_client_enrolled() -> Result<Option<String>> {
+    if client_cert_path().exists() && client_key_path().exists() {
+        return Ok(None);
+    }
+
+    let ca_cert = std::fs::read(ca_cert_path()).context("read remote server CA cert")?;
+    let root = reqwest::Certificate::from_pem(&ca_cert).context("parse remote server CA cert")?;
+    let client = reqwest::Client::builder()
+        .add_root_certificate(root)
+        .build()
+        .context("build remote enrollment client")?;
+
+    if let Ok(machine_id) = std::fs::read_to_string(client_enrollment_id_path()) {
+        let machine_id = machine_id.trim();
+        let status: EnrollmentStatus = client
+            .get(format!("{DEFAULT_URL}/client/enroll/{machine_id}"))
+            .send()
+            .await
+            .context("poll remote enrollment")?
+            .error_for_status()
+            .context("remote enrollment status rejected")?
+            .json()
+            .await
+            .context("parse remote enrollment status")?;
+        if status.status == "approved" {
+            let cert_pem = status
+                .cert_pem
+                .ok_or_else(|| anyhow!("approved remote enrollment did not include cert"))?;
+            std::fs::write(client_cert_path(), cert_pem).context("write remote client cert")?;
+            let _ = std::fs::remove_file(client_enrollment_id_path());
+            return Ok(Some(
+                "Remote control approved; this session will be visible in the web UI.".to_string(),
+            ));
+        }
+        return Ok(Some(format!(
+            "Remote control enrollment is {}. Approve this machine in the web UI to connect clients.",
+            status.status
+        )));
+    }
+
+    let client_dir = remote_client_data_dir();
+    std::fs::create_dir_all(&client_dir)
+        .with_context(|| format!("create {}", client_dir.display()))?;
+
+    let key = if client_key_path().exists() {
+        KeyPair::from_pem(&std::fs::read_to_string(client_key_path())?)?
+    } else {
+        let key = KeyPair::generate().context("generate remote client key")?;
+        std::fs::write(client_key_path(), key.serialize_pem())?;
+        key
+    };
+
+    let machine_name = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "local machine".to_string());
+    let params = CertificateParams::new(vec![machine_name.clone()])?;
+    let csr_pem = params.serialize_request(&key)?.pem()?;
+
+    let enrollment: EnrollResponse = client
+        .post(format!("{DEFAULT_URL}/client/enroll"))
+        .json(&EnrollRequest {
+            machine_name,
+            csr_pem,
+        })
+        .send()
+        .await
+        .context("submit remote enrollment")?
+        .error_for_status()
+        .context("remote enrollment rejected")?
+        .json()
+        .await
+        .context("parse remote enrollment response")?;
+
+    std::fs::write(client_enrollment_id_path(), &enrollment.machine_id)
+        .context("write remote enrollment id")?;
+    Ok(Some(format!(
+        "Remote control enrollment requested for this machine. Approve it in the web UI. Machine id: {}",
+        enrollment.machine_id
+    )))
+}
+
+pub async fn register_client_session(
+    cwd: &std::path::Path,
+    agent_label: &str,
+) -> Result<Option<RemoteClientSession>> {
+    if !client_cert_path().exists() || !client_key_path().exists() {
+        return Ok(None);
+    }
+    let ca_cert = std::fs::read(ca_cert_path()).context("read remote server CA cert")?;
+    let root = reqwest::Certificate::from_pem(&ca_cert).context("parse remote server CA cert")?;
+    let identity_pem = [
+        std::fs::read(client_cert_path()).context("read remote client cert")?,
+        std::fs::read(client_key_path()).context("read remote client key")?,
+    ]
+    .concat();
+    let identity =
+        reqwest::Identity::from_pem(&identity_pem).context("parse remote client identity")?;
+    let client = reqwest::Client::builder()
+        .add_root_certificate(root)
+        .identity(identity)
+        .build()
+        .context("build remote client")?;
+    let response: RegisterSessionResponse = client
+        .post(format!("{DEFAULT_URL}/client/sessions"))
+        .json(&RegisterSessionRequest {
+            cwd: Some(cwd.display().to_string()),
+            agent_label: Some(agent_label.to_string()),
+        })
+        .send()
+        .await
+        .context("register remote session")?
+        .error_for_status()
+        .context("remote session registration rejected")?
+        .json()
+        .await
+        .context("parse remote session response")?;
+    Ok(Some(RemoteClientSession {
+        client,
+        session_id: response.session_id,
+    }))
+}
+
+#[derive(Clone)]
+pub struct RemoteClientSession {
+    client: reqwest::Client,
+    session_id: String,
+}
+
+impl RemoteClientSession {
+    pub async fn push_event(&self, kind: &str, text: &str) -> Result<()> {
+        self.client
+            .post(format!(
+                "{DEFAULT_URL}/client/sessions/{}/events",
+                self.session_id
+            ))
+            .json(&PushEventRequest {
+                kind: kind.to_string(),
+                text: text.to_string(),
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn poll_prompt(&self) -> Result<Option<PromptDto>> {
+        let response = self
+            .client
+            .get(format!(
+                "{DEFAULT_URL}/client/sessions/{}/prompts/next",
+                self.session_id
+            ))
+            .send()
+            .await?
+            .error_for_status()?;
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        response.json().await.map(Some).map_err(Into::into)
+    }
+
+    pub async fn complete_prompt(&self, prompt_id: &str) -> Result<()> {
+        self.client
+            .post(format!("{DEFAULT_URL}/client/prompts/{prompt_id}/complete"))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+}
+
 pub async fn run_server(config: ServerConfig) -> Result<()> {
-    let remote_dir = remote_data_dir()?;
+    let remote_dir = remote_data_dir();
     std::fs::create_dir_all(&remote_dir)
         .with_context(|| format!("create {}", remote_dir.display()))?;
 
@@ -1020,11 +1234,18 @@ fn read_private_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
         .ok_or_else(|| anyhow!("no private key in {}", path.display()))
 }
 
-fn remote_data_dir() -> Result<PathBuf> {
-    Ok(dirs::data_dir()
+fn remote_data_dir() -> PathBuf {
+    dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from(".local/share"))
         .join("mj")
-        .join("remote"))
+        .join("remote")
+}
+
+fn remote_client_data_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from(".local/share"))
+        .join("mj")
+        .join("remote-client")
 }
 
 fn certificate_fingerprint_sha256(der: &[u8]) -> String {
@@ -1091,19 +1312,19 @@ struct LoginRequest {
     token: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct EnrollRequest {
     machine_name: String,
     csr_pem: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RegisterSessionRequest {
     cwd: Option<String>,
     agent_label: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PushEventRequest {
     kind: String,
     text: String,
@@ -1137,13 +1358,13 @@ impl ErrorResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct EnrollResponse {
     machine_id: String,
     status: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct EnrollmentStatus {
     status: String,
     cert_pem: Option<String>,
@@ -1193,15 +1414,15 @@ struct PromptQueuedResponse {
     id: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct RegisterSessionResponse {
     session_id: String,
 }
 
-#[derive(Serialize)]
-struct PromptDto {
-    id: String,
-    text: String,
+#[derive(Deserialize, Serialize)]
+pub struct PromptDto {
+    pub id: String,
+    pub text: String,
 }
 
 struct MachineIdentity {
