@@ -688,7 +688,15 @@ fn handle_crossterm(
                 state.exit_reason = Some(UiExitReason::NewSession);
                 return TerminalRequest::None;
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+            (modifiers, KeyCode::Char('t' | 'T'))
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && !modifiers.intersects(
+                        KeyModifiers::ALT
+                            | KeyModifiers::SUPER
+                            | KeyModifiers::HYPER
+                            | KeyModifiers::META,
+                    ) =>
+            {
                 state.toggle_expand_tool_outputs();
                 return TerminalRequest::None;
             }
@@ -832,7 +840,15 @@ fn handle_crossterm(
         (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
             state.exit_reason = Some(UiExitReason::NewSession);
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+        (modifiers, KeyCode::Char('t' | 'T'))
+            if modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.intersects(
+                    KeyModifiers::ALT
+                        | KeyModifiers::SUPER
+                        | KeyModifiers::HYPER
+                        | KeyModifiers::META,
+                ) =>
+        {
             state.toggle_expand_tool_outputs();
         }
         (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
@@ -5314,6 +5330,22 @@ mod tests {
             key_with_modifiers(KeyCode::Char('t'), KeyModifiers::CONTROL),
         );
         assert!(!state.expand_tool_outputs);
+    }
+
+    #[test]
+    fn ctrl_shift_t_also_toggles_tool_output_expansion() {
+        let mut state = AppState::new();
+        assert!(!state.expand_tool_outputs);
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('T'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+
+        assert!(state.expand_tool_outputs);
+        assert!(state.input.is_empty());
     }
 
     #[test]
