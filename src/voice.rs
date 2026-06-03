@@ -3,6 +3,9 @@
 //! Records a temporary WAV file on a background thread so microphone I/O never
 //! blocks the ratatui event loop. When recording stops, the captured audio is
 //! base64-encoded and handed back to the UI as an ACP audio prompt block.
+//! There is no separate transcription provider, model selection, or env-based
+//! voice configuration: prompt audio support comes only from the active ACP
+//! agent.
 
 use std::fs::File;
 use std::io::BufWriter;

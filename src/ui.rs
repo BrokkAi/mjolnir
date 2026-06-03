@@ -899,7 +899,7 @@ fn toggle_voice_recording(
     if !state.prompt_audio_supported {
         state.record_status_message(
             StatusKind::Warning,
-            "this agent does not advertise audio prompt support",
+            "this agent does not advertise ACP audio prompt support",
         );
         return;
     }
@@ -6163,6 +6163,26 @@ mod tests {
             voice_rx.try_recv(),
             Ok(VoiceCommand::ToggleRecording)
         ));
+    }
+
+    #[test]
+    fn ctrl_r_requires_acp_audio_prompt_support() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let (voice_tx, mut voice_rx) = mpsc::unbounded_channel::<VoiceCommand>();
+
+        handle_crossterm_with_voice(
+            &mut state,
+            &cmd_tx,
+            &voice_tx,
+            key_with_modifiers(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        );
+
+        assert!(voice_rx.try_recv().is_err());
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Warning);
+        assert_eq!(status.text, "this agent does not advertise ACP audio prompt support");
     }
 
     #[test]

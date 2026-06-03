@@ -167,10 +167,11 @@ Press `Ctrl-R` inside the TUI to start recording from the default microphone.
 Press `Ctrl-R` again to stop; `mj` records a temporary `.wav`, attaches it to
 the current prompt as ACP audio content, and submits it automatically.
 
-This path uses the active harness directly. No separate transcription API key
-or side-channel model configuration is required. The selected agent must
-advertise ACP audio prompt support; when it does not, `mj` keeps the shortcut
-disabled with an in-app warning instead of falling back to an unrelated API.
+This path only uses the active harness through ACP. No separate transcription
+API key, model setting, or side-channel voice configuration is involved. The
+selected agent must advertise ACP audio prompt support; when it does not, `mj`
+keeps the shortcut disabled with an in-app warning instead of falling back to
+anything else.
 
 ## Reference
 
