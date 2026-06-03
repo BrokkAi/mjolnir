@@ -313,10 +313,6 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
         println!("Initial admin login token (use this to log in to the web UI):");
         println!("  {token}");
         println!();
-        println!(
-            "Client machine IDs are not login tokens; approve pending machines after logging in."
-        );
-        println!();
     } else {
         println!("Remote control server listening at https://{local_addr}");
         println!(
