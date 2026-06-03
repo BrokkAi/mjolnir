@@ -13,6 +13,7 @@ mod config;
 mod event;
 mod headless;
 mod install;
+mod notifications;
 mod picker;
 mod registry;
 mod self_update;
