@@ -11,7 +11,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agent_client_protocol::schema::{AvailableCommandInput, ToolCallStatus};
+use agent_client_protocol::schema::{AvailableCommandInput, StopReason, ToolCallStatus};
 use anyhow::{Context, Result};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -41,7 +41,8 @@ use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
 };
 use crate::config;
-use crate::event::{PermissionDecision, PromptImage, UiCommand, UiEvent};
+use crate::event::{PermissionDecision, PermissionPrompt, PromptImage, UiCommand, UiEvent};
+use crate::notifications::TerminalNotificationBackend;
 use crate::version::mjolnir_version_label;
 
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
@@ -57,6 +58,7 @@ const INLINE_NON_CURSOR_SETUP_ATTEMPTS: usize = 3;
 const PASTE_BURST_CHAR_INTERVAL: Duration = Duration::from_millis(8);
 const PASTE_BURST_IDLE_TIMEOUT: Duration = Duration::from_millis(16);
 const PASTE_BURST_MIN_CHARS: usize = 3;
+const NOTIFICATION_PREVIEW_CHARS: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {
@@ -262,6 +264,7 @@ async fn ui_loop(
     }
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut transcript_sink = TranscriptSink::default();
+    let mut notification_backend = TerminalNotificationBackend::detect();
     let mut crossterm_events = EventStream::new();
     let mut inline_height = INLINE_CHAT_HEIGHT;
     // Wake-up timer so we still get scheduled to draw when no events
@@ -303,7 +306,15 @@ async fn ui_loop(
             // TUI spinning on tick + crossterm forever.
             maybe_ev = event_rx.recv(), if !state.runtime_closed => {
                 match maybe_ev {
-                    Some(ev) => state.apply_event(ev),
+                    Some(ev) => {
+                        let notification = notification_message_for_event(&state, &ev);
+                        state.apply_event(ev);
+                        post_terminal_notification(
+                            terminal,
+                            &mut notification_backend,
+                            notification.as_deref(),
+                        );
+                    }
                     None => {
                         state.mark_runtime_closed();
                     }
@@ -372,6 +383,79 @@ async fn ui_loop(
         })?;
     }
     Ok((UiExitReason::Quit, None, state.prompt_history()))
+}
+
+fn notification_message_for_event(state: &AppState, event: &UiEvent) -> Option<String> {
+    match event {
+        UiEvent::PromptDone { stop_reason, .. } => {
+            if *stop_reason == StopReason::Cancelled {
+                return None;
+            }
+            Some(
+                preview_notification_text(
+                    &state
+                        .last_agent_message()
+                        .unwrap_or_else(|| "Agent turn complete".to_string()),
+                )
+                .unwrap_or_else(|| "Agent turn complete".to_string()),
+            )
+        }
+        UiEvent::PromptFailed { message } => Some(format!(
+            "Prompt failed: {}",
+            preview_notification_text(message).unwrap_or_else(|| "agent error".to_string())
+        )),
+        UiEvent::PermissionRequest(prompt) => Some(permission_request_notification(prompt)),
+        _ => None,
+    }
+}
+
+fn permission_request_notification(prompt: &PermissionPrompt) -> String {
+    match prompt
+        .tool_call
+        .fields
+        .title
+        .as_deref()
+        .and_then(preview_notification_text)
+    {
+        Some(title) => format!("Permission requested: {title}"),
+        None => "Permission requested".to_string(),
+    }
+}
+
+fn preview_notification_text(text: &str) -> Option<String> {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let char_count = normalized.chars().count();
+    if char_count <= NOTIFICATION_PREVIEW_CHARS {
+        return Some(normalized);
+    }
+
+    let truncated = normalized
+        .chars()
+        .take(NOTIFICATION_PREVIEW_CHARS.saturating_sub(3))
+        .collect::<String>();
+    Some(format!("{truncated}..."))
+}
+
+fn post_terminal_notification(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    backend: &mut Option<TerminalNotificationBackend>,
+    message: Option<&str>,
+) {
+    let Some(message) = message else {
+        return;
+    };
+    let Some(active_backend) = backend.as_mut() else {
+        return;
+    };
+
+    if let Err(e) = active_backend.notify(terminal.backend_mut(), message) {
+        tracing::warn!("terminal notification failed; disabling notifications: {e}");
+        *backend = None;
+    }
 }
 
 fn draw_terminal_frame(
@@ -6815,5 +6899,65 @@ mod tests {
             Some(UiExitReason::Quit),
             "second Ctrl-C quits when everything is empty"
         );
+    }
+
+    #[test]
+    fn prompt_done_notification_uses_last_agent_message_preview() {
+        let mut state = AppState::new();
+        state.transcript.push(Entry::AgentMessage(
+            "  first line\nsecond line  ".to_string(),
+        ));
+
+        let message = notification_message_for_event(
+            &state,
+            &UiEvent::PromptDone {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        );
+
+        assert_eq!(message.as_deref(), Some("first line second line"));
+    }
+
+    #[test]
+    fn cancelled_prompt_done_does_not_notify() {
+        let state = AppState::new();
+
+        let message = notification_message_for_event(
+            &state,
+            &UiEvent::PromptDone {
+                stop_reason: StopReason::Cancelled,
+                usage: None,
+            },
+        );
+
+        assert!(message.is_none());
+    }
+
+    #[test]
+    fn permission_request_notification_uses_tool_title() {
+        let (responder, _rx) = tokio::sync::oneshot::channel();
+        let prompt = PermissionPrompt {
+            tool_call: agent_client_protocol::schema::ToolCallUpdate::new(
+                "call-1".to_string(),
+                agent_client_protocol::schema::ToolCallUpdateFields::default()
+                    .title("run dangerous command"),
+            ),
+            options: vec![],
+            responder,
+        };
+
+        let message = permission_request_notification(&prompt);
+
+        assert_eq!(message, "Permission requested: run dangerous command");
+    }
+
+    #[test]
+    fn preview_notification_text_truncates_long_messages() {
+        let long = "a".repeat(100);
+        let result = preview_notification_text(&long).expect("non-empty");
+        assert_eq!(result.len(), NOTIFICATION_PREVIEW_CHARS);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), NOTIFICATION_PREVIEW_CHARS);
     }
 }
