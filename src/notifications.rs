@@ -29,7 +29,7 @@ impl TerminalNotificationBackend {
         })
     }
 
-    pub fn notify<W: Write>(&mut self, writer: &mut W, message: &str) -> io::Result<()> {
+    pub fn notify<W: Write>(&self, writer: &mut W, message: &str) -> io::Result<()> {
         let message = sanitize_message(message);
         if message.is_empty() {
             return Ok(());

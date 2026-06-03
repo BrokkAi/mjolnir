@@ -428,8 +428,8 @@ fn preview_notification_text(text: &str) -> Option<String> {
         return None;
     }
 
-    let grapheme_count = normalized.chars().count();
-    if grapheme_count <= NOTIFICATION_PREVIEW_CHARS {
+    let char_count = normalized.chars().count();
+    if char_count <= NOTIFICATION_PREVIEW_CHARS {
         return Some(normalized);
     }
 
@@ -6950,5 +6950,14 @@ mod tests {
         let message = permission_request_notification(&prompt);
 
         assert_eq!(message, "Permission requested: run dangerous command");
+    }
+
+    #[test]
+    fn preview_notification_text_truncates_long_messages() {
+        let long = "a".repeat(100);
+        let result = preview_notification_text(&long).expect("non-empty");
+        assert_eq!(result.len(), NOTIFICATION_PREVIEW_CHARS);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), NOTIFICATION_PREVIEW_CHARS);
     }
 }
