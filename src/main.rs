@@ -15,18 +15,16 @@ mod headless;
 mod install;
 mod picker;
 mod registry;
-mod remote;
 mod self_update;
 mod session;
 mod ui;
 mod version;
 mod worktree;
 
-use std::path::PathBuf;
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::app::UiExitReason;
@@ -113,124 +111,6 @@ enum Commands {
     /// Use `--list` to print sessions from the configured default agent
     /// in headless mode (no TUI).
     Resume(ResumeArgs),
-    /// Manage remote mj clients through a lightweight control server.
-    Remote(RemoteArgs),
-}
-
-#[derive(Debug, clap::Args)]
-struct RemoteArgs {
-    #[command(subcommand)]
-    command: RemoteCommand,
-}
-
-#[derive(Debug, clap::Subcommand)]
-enum RemoteCommand {
-    /// Start an in-memory remote control server.
-    Server {
-        /// Address the server listens on.
-        #[arg(long, default_value = "127.0.0.1:7337")]
-        bind: std::net::SocketAddr,
-
-        /// Pairing/auth token. Generated at startup when omitted.
-        #[arg(long, env = "MJ_REMOTE_TOKEN")]
-        token: Option<String>,
-
-        /// Short code clients use for automatic LAN discovery pairing.
-        #[arg(long)]
-        join_code: Option<String>,
-
-        /// UDP address used to answer automatic LAN discovery requests.
-        #[arg(long, default_value = "0.0.0.0:7338")]
-        discovery_bind: std::net::SocketAddr,
-
-        /// Persisted server state file. Defaults to ~/.config/mj/remote-server.toml.
-        #[arg(long)]
-        state_file: Option<PathBuf>,
-    },
-    /// Join a remote control server as a managed client.
-    Join {
-        /// Pairing URI from `mj remote server`, or provide --code or --server/--token.
-        pairing_uri: Option<String>,
-
-        /// Short join code printed by `mj remote server`.
-        #[arg(long)]
-        code: Option<String>,
-
-        /// Expected SHA-256 fingerprint of the server CA for discovery pairing.
-        #[arg(long = "ca-sha256")]
-        ca_sha256: Option<String>,
-
-        /// Server base URL, for example https://127.0.0.1:7337.
-        #[arg(long, env = "MJ_REMOTE_SERVER")]
-        server: Option<String>,
-
-        /// Pairing/auth token.
-        #[arg(long, env = "MJ_REMOTE_TOKEN")]
-        token: Option<String>,
-
-        /// PEM file containing the remote server CA certificate for manual pairing.
-        #[arg(long)]
-        ca_cert: Option<PathBuf>,
-
-        /// Human-readable client name shown in fleet listings.
-        #[arg(long)]
-        name: Option<String>,
-
-        /// Working directory used for remote prompt jobs.
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-
-        /// Seconds between polling attempts.
-        #[arg(long, default_value_t = 5)]
-        poll_secs: u64,
-
-        /// UDP broadcast target used for automatic LAN discovery.
-        #[arg(long, default_value = "255.255.255.255:7338")]
-        discovery_addr: std::net::SocketAddr,
-    },
-    /// List registered clients.
-    List {
-        /// Server base URL, for example https://127.0.0.1:7337.
-        #[arg(long, env = "MJ_REMOTE_SERVER")]
-        server: String,
-
-        /// Pairing/auth token.
-        #[arg(long, env = "MJ_REMOTE_TOKEN")]
-        token: String,
-
-        /// PEM file containing the remote server CA certificate.
-        #[arg(long)]
-        ca_cert: Option<PathBuf>,
-    },
-    /// Run one prompt on a registered client.
-    Prompt {
-        /// Server base URL, for example https://127.0.0.1:7337.
-        #[arg(long, env = "MJ_REMOTE_SERVER")]
-        server: String,
-
-        /// Pairing/auth token.
-        #[arg(long, env = "MJ_REMOTE_TOKEN")]
-        token: String,
-
-        /// PEM file containing the remote server CA certificate.
-        #[arg(long)]
-        ca_cert: Option<PathBuf>,
-
-        /// Target client id from `mj remote list`.
-        #[arg(long)]
-        client: String,
-
-        /// Prompt to run remotely. Omit or pass - to read stdin.
-        prompt: Option<String>,
-
-        /// Permission handling used by the managed client.
-        #[arg(long, value_enum, default_value_t = HeadlessPermissionMode::Default)]
-        permission_mode: HeadlessPermissionMode,
-
-        /// Queue the prompt and exit without waiting for the result.
-        #[arg(long)]
-        no_wait: bool,
-    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -320,7 +200,6 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
     match &cli.command {
         Some(Commands::Resume(args)) => !args.list,
-        Some(Commands::Remote(_)) => false,
         None => true,
     }
 }
@@ -344,7 +223,6 @@ async fn main() -> Result<()> {
                 args.fullscreen_tui |= fullscreen_tui;
                 run_resume(args).await
             }
-            Commands::Remote(args) => run_remote(args).await,
         };
     }
 
@@ -543,75 +421,6 @@ async fn pick_agent_for_resume() -> Result<Option<SelectedAgent>> {
     cfg.save(&config_path)
         .with_context(|| format!("save {}", config_path.display()))?;
     Ok(selected)
-}
-
-async fn run_remote(args: RemoteArgs) -> Result<()> {
-    match args.command {
-        RemoteCommand::Server {
-            bind,
-            token,
-            join_code,
-            discovery_bind,
-            state_file,
-        } => remote::run_server(bind, token, join_code, discovery_bind, state_file).await,
-        RemoteCommand::Join {
-            pairing_uri,
-            code,
-            ca_sha256,
-            server,
-            token,
-            ca_cert,
-            name,
-            cwd,
-            poll_secs,
-            discovery_addr,
-        } => {
-            let cwd = match cwd {
-                Some(path) => path,
-                None => std::env::current_dir().context("current dir")?,
-            };
-            remote::run_client(remote::ClientConfig {
-                pairing_uri,
-                join_code: code,
-                ca_sha256,
-                server,
-                token,
-                ca_cert,
-                name,
-                cwd,
-                poll_interval: Duration::from_secs(poll_secs),
-                discovery_addr,
-                discovery_timeout: Duration::from_secs(3),
-            })
-            .await
-        }
-        RemoteCommand::List {
-            server,
-            token,
-            ca_cert,
-        } => remote::list_clients(&server, &token, ca_cert.as_deref()).await,
-        RemoteCommand::Prompt {
-            server,
-            token,
-            ca_cert,
-            client,
-            prompt,
-            permission_mode,
-            no_wait,
-        } => {
-            let prompt = read_headless_prompt(prompt.unwrap_or_else(|| "-".to_string()))?;
-            remote::submit_prompt(remote::SubmitPromptConfig {
-                server,
-                token,
-                ca_cert,
-                client_id: client,
-                prompt,
-                permission_mode: permission_mode.into(),
-                wait: !no_wait,
-            })
-            .await
-        }
-    }
 }
 
 fn read_headless_prompt(prompt_arg: String) -> Result<String> {
@@ -1219,18 +1028,6 @@ mod tests {
         let cli = Cli::try_parse_from(["mj", "resume", "--list"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
 
-        let cli = Cli::try_parse_from([
-            "mj",
-            "remote",
-            "list",
-            "--server",
-            "http://127.0.0.1:7337",
-            "--token",
-            "secret",
-        ])
-        .expect("parse");
-        assert!(!should_run_startup_update_check(&cli));
-
         let cli = Cli::try_parse_from(["mj", "resume", "sess-123"]).expect("parse");
         assert!(should_run_startup_update_check(&cli));
     }
@@ -1304,124 +1101,6 @@ mod tests {
             assert!(matches!(args.format, HeadlessOutputFormat::Text));
             assert!(args.cwd.is_none());
             assert!(args.agent_stderr.is_none());
-        }
-    }
-
-    #[test]
-    fn parse_remote_server_subcommand() {
-        let cli = Cli::try_parse_from(["mj", "remote", "server", "--bind", "127.0.0.1:9000"])
-            .expect("parse");
-        if let Some(Commands::Remote(RemoteArgs {
-            command:
-                RemoteCommand::Server {
-                    bind,
-                    token,
-                    join_code,
-                    discovery_bind,
-                    state_file,
-                },
-        })) = cli.command
-        {
-            assert_eq!(bind.to_string(), "127.0.0.1:9000");
-            assert!(token.is_none());
-            assert!(join_code.is_none());
-            assert_eq!(discovery_bind.to_string(), "0.0.0.0:7338");
-            assert!(state_file.is_none());
-        } else {
-            panic!("expected remote server subcommand");
-        }
-    }
-
-    #[test]
-    fn parse_remote_join_pairing_uri() {
-        let cli = Cli::try_parse_from([
-            "mj",
-            "remote",
-            "join",
-            "mj+remote://join?code=ABC123",
-            "--name",
-            "laptop",
-            "--poll-secs",
-            "1",
-        ])
-        .expect("parse");
-        if let Some(Commands::Remote(RemoteArgs {
-            command:
-                RemoteCommand::Join {
-                    pairing_uri,
-                    code,
-                    name,
-                    poll_secs,
-                    ..
-                },
-        })) = cli.command
-        {
-            assert!(pairing_uri.is_some());
-            assert!(code.is_none());
-            assert_eq!(name.as_deref(), Some("laptop"));
-            assert_eq!(poll_secs, 1);
-        } else {
-            panic!("expected remote join subcommand");
-        }
-    }
-
-    #[test]
-    fn parse_remote_join_code() {
-        let cli = Cli::try_parse_from(["mj", "remote", "join", "--code", "ABC123"]).expect("parse");
-        if let Some(Commands::Remote(RemoteArgs {
-            command:
-                RemoteCommand::Join {
-                    code,
-                    discovery_addr,
-                    ..
-                },
-        })) = cli.command
-        {
-            assert_eq!(code.as_deref(), Some("ABC123"));
-            assert_eq!(discovery_addr.to_string(), "255.255.255.255:7338");
-        } else {
-            panic!("expected remote join subcommand");
-        }
-    }
-
-    #[test]
-    fn parse_remote_prompt_subcommand() {
-        let cli = Cli::try_parse_from([
-            "mj",
-            "remote",
-            "prompt",
-            "--server",
-            "http://127.0.0.1:7337",
-            "--token",
-            "secret",
-            "--client",
-            "client-123",
-            "--permission-mode",
-            "acceptEdits",
-            "--no-wait",
-            "hello",
-        ])
-        .expect("parse");
-        if let Some(Commands::Remote(RemoteArgs {
-            command:
-                RemoteCommand::Prompt {
-                    client,
-                    prompt,
-                    permission_mode,
-                    no_wait,
-                    ..
-                },
-        })) = cli.command
-        {
-            assert_eq!(client, "client-123");
-            assert_eq!(prompt.as_deref(), Some("hello"));
-            assert!(matches!(
-                permission_mode,
-                HeadlessPermissionMode::AcceptEdits
-            ));
-            assert!(no_wait);
-        } else {
-            panic!("expected remote prompt subcommand");
         }
     }
 
