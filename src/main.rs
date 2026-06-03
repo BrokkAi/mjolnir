@@ -1071,6 +1071,9 @@ mod tests {
 
         let cli = Cli::try_parse_from(["mj", "resume", "sess-123"]).expect("parse");
         assert!(should_run_startup_update_check(&cli));
+
+        let cli = Cli::try_parse_from(["mj", "server"]).expect("parse");
+        assert!(!should_run_startup_update_check(&cli));
     }
 
     #[test]
@@ -1143,6 +1146,12 @@ mod tests {
             assert!(args.cwd.is_none());
             assert!(args.agent_stderr.is_none());
         }
+    }
+
+    #[test]
+    fn parse_server_subcommand() {
+        let cli = Cli::try_parse_from(["mj", "server"]).expect("parse");
+        assert!(matches!(cli.command, Some(Commands::Server)));
     }
 
     #[test]
