@@ -3632,6 +3632,7 @@ fn permission_detail_text(pending: &PendingPermission) -> String {
         .fields
         .title
         .clone()
+        .map(|title| title.replace("\\n", "\n"))
         .unwrap_or_else(|| pending.prompt.tool_call.tool_call_id.to_string())
 }
 
@@ -5506,6 +5507,35 @@ mod tests {
         assert!(
             rendered.contains("production credentials"),
             "missing final wrapped segment; rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn permission_modal_expands_literal_newlines_in_prompt_title() {
+        let pending = permission_pending_with_options(
+            "git checkout\\n--force feature-branch",
+            &["Allow once", "Reject"],
+            0,
+        );
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_permission_modal(frame, frame.area(), &pending, 1))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("git checkout"),
+            "missing first command line; rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("--force feature-branch"),
+            "missing second command line; rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("\\\\n"),
+            "literal newline escape should not be rendered; rendered:\n{rendered}"
         );
     }
 
