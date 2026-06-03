@@ -815,6 +815,7 @@ async fn maybe_start_remote_client(
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             interval.tick().await;
+            let _ = poller.push_event("status", "heartbeat").await;
             match poller.poll_prompt().await {
                 Ok(Some(prompt)) => {
                     let prompt_id = prompt.id.clone();

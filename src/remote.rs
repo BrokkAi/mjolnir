@@ -720,14 +720,18 @@ impl Store {
     }
 
     fn push_event(&self, session_id: &str, kind: &str, text: &str) -> Result<()> {
+        let now = now_ts();
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO session_events(session_id, kind, text, created_at) VALUES(?1, ?2, ?3, ?4)",
-            params![session_id, kind, text, now_ts()],
-        )?;
-        conn.execute(
             "UPDATE client_sessions SET last_seen_at = ?1 WHERE id = ?2",
-            params![now_ts(), session_id],
+            params![now, session_id],
+        )?;
+        if kind == "status" && text == "heartbeat" {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO session_events(session_id, kind, text, created_at) VALUES(?1, ?2, ?3, ?4)",
+            params![session_id, kind, text, now],
         )?;
         Ok(())
     }
