@@ -22,7 +22,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, UiCommand, UiEvent,
+    PermissionDecision, PermissionPrompt, PromptCompletion, PromptImage, SessionConfigTarget,
+    UiCommand, UiEvent,
 };
 
 pub struct AcpRuntimeConfig {
@@ -440,8 +441,14 @@ async fn drive_session(
 
     while let Some(cmd) = ui_rx.recv().await {
         match cmd {
-            UiCommand::SendPrompt { text, images } => {
-                if !drive_prompt_turn(&conn, &session_id, text, images, ui_tx, ui_rx).await? {
+            UiCommand::SendPrompt {
+                text,
+                images,
+                completion,
+            } => {
+                if !drive_prompt_turn(&conn, &session_id, text, images, completion, ui_tx, ui_rx)
+                    .await?
+                {
                     break;
                 }
             }
@@ -700,10 +707,14 @@ async fn drive_config_update(
                     Some(UiCommand::Shutdown) | None => {
                         return Ok(false);
                     }
-                    Some(UiCommand::SendPrompt { .. }) => {
+                    Some(UiCommand::SendPrompt { completion, .. }) => {
+                        let message = "prompt failed: config update already in flight".to_string();
                         let _ = ui_tx.send(UiEvent::PromptFailed {
-                            message: "prompt failed: config update already in flight".to_string(),
+                            message: message.clone(),
                         });
+                        if let Some(completion) = completion {
+                            let _ = completion.send(PromptCompletion::Failed(message));
+                        }
                     }
                     Some(UiCommand::SetSessionConfigOption { .. }) => {
                         let _ = ui_tx.send(UiEvent::Warning(
@@ -747,6 +758,7 @@ async fn drive_prompt_turn(
     session_id: &SessionId,
     text: String,
     images: Vec<PromptImage>,
+    completion: Option<oneshot::Sender<PromptCompletion>>,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
 ) -> Result<bool> {
@@ -764,11 +776,18 @@ async fn drive_prompt_turn(
                             stop_reason: resp.stop_reason,
                             usage: resp.usage,
                         });
+                        if let Some(completion) = completion {
+                            let _ = completion.send(PromptCompletion::Done);
+                        }
                     }
                     Err(e) => {
+                        let message = format!("prompt failed: {e}");
                         let _ = ui_tx.send(UiEvent::PromptFailed {
-                            message: format!("prompt failed: {e}"),
+                            message: message.clone(),
                         });
+                        if let Some(completion) = completion {
+                            let _ = completion.send(PromptCompletion::Failed(message));
+                        }
                     }
                 }
                 return Ok(true);
@@ -786,10 +805,12 @@ async fn drive_prompt_turn(
                     Some(UiCommand::Shutdown) | None => {
                         return Ok(false);
                     }
-                    Some(UiCommand::SendPrompt { .. }) => {
-                        let _ = ui_tx.send(UiEvent::Warning(
-                            "prompt already in flight".to_string(),
-                        ));
+                    Some(UiCommand::SendPrompt { completion, .. }) => {
+                        let message = "prompt already in flight".to_string();
+                        let _ = ui_tx.send(UiEvent::Warning(message.clone()));
+                        if let Some(completion) = completion {
+                            let _ = completion.send(PromptCompletion::Failed(message));
+                        }
                     }
                     Some(UiCommand::SetSessionConfigOption { .. }) => {
                         let _ = ui_tx.send(UiEvent::Warning(
@@ -1223,10 +1244,12 @@ mod tests {
             }
         }
 
+        let (completion_tx, completion_rx) = oneshot::channel();
         cmd_tx
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                completion: Some(completion_tx),
             })
             .expect("send prompt");
 
@@ -1252,6 +1275,10 @@ mod tests {
                 _ => {}
             }
         }
+        assert_eq!(
+            completion_rx.await.expect("prompt completion"),
+            PromptCompletion::Done
+        );
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
@@ -1302,6 +1329,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "resume".to_string(),
                 images: Vec::new(),
+                completion: None,
             })
             .expect("send prompt");
 
@@ -1363,10 +1391,12 @@ mod tests {
             }
         }
 
+        let (completion_tx, completion_rx) = oneshot::channel();
         cmd_tx
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                completion: Some(completion_tx),
             })
             .expect("send prompt");
 
@@ -1387,6 +1417,10 @@ mod tests {
                 _ => {}
             }
         }
+        let completion = completion_rx.await.expect("prompt completion");
+        assert!(
+            matches!(completion, PromptCompletion::Failed(message) if message.contains("boom"))
+        );
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
@@ -1429,10 +1463,12 @@ mod tests {
             }
         }
 
+        let (completion_tx, completion_rx) = oneshot::channel();
         cmd_tx
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                completion: Some(completion_tx),
             })
             .expect("send prompt");
         cmd_tx.send(UiCommand::CancelPrompt).expect("send cancel");
@@ -1452,6 +1488,10 @@ mod tests {
                 _ => {}
             }
         }
+        assert_eq!(
+            completion_rx.await.expect("prompt completion"),
+            PromptCompletion::Done
+        );
 
         assert_eq!(cancel_hits.load(Ordering::SeqCst), 1);
 
@@ -1552,10 +1592,12 @@ mod tests {
                 value: SessionConfigValueId::new("model-2"),
             })
             .expect("send config update");
+        let (completion_tx, completion_rx) = oneshot::channel();
         cmd_tx
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                completion: Some(completion_tx),
             })
             .expect("send prompt");
 
@@ -1573,6 +1615,10 @@ mod tests {
                 _ => {}
             }
         }
+        assert_eq!(
+            completion_rx.await.expect("prompt completion"),
+            PromptCompletion::Failed("prompt failed: config update already in flight".to_string())
+        );
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         let join = tokio::time::timeout(Duration::from_secs(2), client_task)

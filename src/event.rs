@@ -95,6 +95,7 @@ pub enum UiCommand {
     SendPrompt {
         text: String,
         images: Vec<PromptImage>,
+        completion: Option<oneshot::Sender<PromptCompletion>>,
     },
     /// Set a session configuration option to a new value.
     SetSessionConfigOption {
@@ -105,6 +106,12 @@ pub enum UiCommand {
     CancelPrompt,
     /// Tear down: kill the agent child and exit.
     Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptCompletion {
+    Done,
+    Failed(String),
 }
 
 /// Convenience: pull plain text out of a content block for rendering.

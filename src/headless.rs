@@ -183,6 +183,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         .send(UiCommand::SendPrompt {
                             text: cfg.prompt.clone(),
                             images: Vec::new(),
+                            completion: None,
                         })
                         .context("send prompt to ACP runtime")?;
                 }

@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::app::UiExitReason;
 use crate::config::{Config, SelectedAgent, history_path};
@@ -120,14 +120,6 @@ enum Commands {
 
 #[derive(Debug, clap::Args)]
 struct ServerArgs {
-    /// Address to bind. Defaults to localhost for safety.
-    #[arg(long, default_value = "127.0.0.1")]
-    bind: std::net::IpAddr,
-
-    /// HTTPS port for the remote-control server.
-    #[arg(long, default_value_t = remote::DEFAULT_PORT)]
-    port: u16,
-
     /// Regenerate the initial admin login token.
     #[arg(long)]
     reset_login_token: bool,
@@ -246,8 +238,6 @@ async fn main() -> Result<()> {
             }
             Commands::Server(args) => {
                 remote::run_server(remote::ServerConfig {
-                    bind: args.bind,
-                    port: args.port,
                     reset_login_token: args.reset_login_token,
                 })
                 .await
@@ -790,11 +780,15 @@ async fn maybe_start_remote_client(
     }
 
     match remote::ensure_client_enrolled().await {
-        Ok(Some(message)) => {
+        Ok(remote::ClientEnrollment::Ready(message)) => {
+            if let Some(message) = message {
+                let _ = event_tx.send(UiEvent::Warning(message));
+            }
+        }
+        Ok(remote::ClientEnrollment::Pending(message)) => {
             let _ = event_tx.send(UiEvent::Warning(message));
             return;
         }
-        Ok(None) => {}
         Err(e) => {
             tracing::warn!("remote enrollment check failed: {e:#}");
             return;
@@ -824,16 +818,40 @@ async fn maybe_start_remote_client(
             match poller.poll_prompt().await {
                 Ok(Some(prompt)) => {
                     let prompt_id = prompt.id.clone();
+                    let (completion_tx, completion_rx) = oneshot::channel();
                     if cmd_tx
                         .send(UiCommand::SendPrompt {
                             text: prompt.text,
                             images: Vec::new(),
+                            completion: Some(completion_tx),
                         })
                         .is_err()
                     {
+                        let _ = poller
+                            .fail_prompt(
+                                &prompt_id,
+                                "mj client could not forward the remote prompt to the ACP runtime",
+                            )
+                            .await;
                         break;
                     }
-                    let _ = poller.complete_prompt(&prompt_id).await;
+                    match completion_rx.await {
+                        Ok(crate::event::PromptCompletion::Done) => {
+                            let _ = poller.complete_prompt(&prompt_id).await;
+                        }
+                        Ok(crate::event::PromptCompletion::Failed(error)) => {
+                            let _ = poller.fail_prompt(&prompt_id, &error).await;
+                        }
+                        Err(_) => {
+                            let _ = poller
+                                .fail_prompt(
+                                    &prompt_id,
+                                    "mj client stopped before the remote prompt completed",
+                                )
+                                .await;
+                            break;
+                        }
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -1201,6 +1219,29 @@ mod tests {
             assert!(args.cwd.is_none());
             assert!(args.agent_stderr.is_none());
         }
+    }
+
+    #[test]
+    fn parse_server_subcommand_with_reset_login_token() {
+        let cli = Cli::try_parse_from(["mj", "server", "--reset-login-token"]).expect("parse");
+        if let Some(Commands::Server(args)) = cli.command {
+            assert!(args.reset_login_token);
+        } else {
+            panic!("expected Server subcommand");
+        }
+    }
+
+    #[test]
+    fn server_help_does_not_expose_bind_or_port_flags() {
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("server")
+            .expect("server subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--reset-login-token"));
+        assert!(!help.contains("--bind"));
+        assert!(!help.contains("--port"));
     }
 
     #[test]

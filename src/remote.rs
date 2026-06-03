@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,9 +34,13 @@ const SESSION_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    pub bind: IpAddr,
-    pub port: u16,
     pub reset_login_token: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientEnrollment {
+    Ready(Option<String>),
+    Pending(String),
 }
 
 #[derive(Clone)]
@@ -110,9 +114,9 @@ pub async fn probe_server() -> bool {
     )
 }
 
-pub async fn ensure_client_enrolled() -> Result<Option<String>> {
+pub async fn ensure_client_enrolled() -> Result<ClientEnrollment> {
     if client_cert_path().exists() && client_key_path().exists() {
-        return Ok(None);
+        return Ok(ClientEnrollment::Ready(None));
     }
 
     let ca_cert = std::fs::read(ca_cert_path()).context("read remote server CA cert")?;
@@ -140,11 +144,11 @@ pub async fn ensure_client_enrolled() -> Result<Option<String>> {
                 .ok_or_else(|| anyhow!("approved remote enrollment did not include cert"))?;
             std::fs::write(client_cert_path(), cert_pem).context("write remote client cert")?;
             let _ = std::fs::remove_file(client_enrollment_id_path());
-            return Ok(Some(
+            return Ok(ClientEnrollment::Ready(Some(
                 "Remote control approved; this session will be visible in the web UI.".to_string(),
-            ));
+            )));
         }
-        return Ok(Some(format!(
+        return Ok(ClientEnrollment::Pending(format!(
             "Remote control enrollment is {}. Open https://localhost:11399, log in with the admin token from `mj server`, then approve this pending machine. Do not paste the machine id into the login box.",
             status.status
         )));
@@ -185,7 +189,7 @@ pub async fn ensure_client_enrolled() -> Result<Option<String>> {
 
     std::fs::write(client_enrollment_id_path(), &enrollment.machine_id)
         .context("write remote enrollment id")?;
-    Ok(Some(
+    Ok(ClientEnrollment::Pending(
         "Remote control enrollment requested. Open https://localhost:11399, log in with the admin token from `mj server`, then approve the pending machine. No machine id needs to be pasted anywhere.".to_string(),
     ))
 }
@@ -278,6 +282,18 @@ impl RemoteClientSession {
             .error_for_status()?;
         Ok(())
     }
+
+    pub async fn fail_prompt(&self, prompt_id: &str, error: &str) -> Result<()> {
+        self.client
+            .post(format!("{DEFAULT_URL}/client/prompts/{prompt_id}/fail"))
+            .json(&PromptFailRequest {
+                error: error.to_string(),
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
 }
 
 pub async fn run_server(config: ServerConfig) -> Result<()> {
@@ -300,21 +316,20 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
     install_rustls_crypto_provider();
 
     let tls_config = Arc::new(load_tls_config(&certs)?);
-    let addr = SocketAddr::new(config.bind, config.port);
+    let addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT));
     let tcp = TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
-    let local_addr = tcp.local_addr().context("local address")?;
 
     if let Some(token) = new_token {
         println!("Remote control server initialized.");
-        println!("Admin URL: https://{local_addr}");
+        println!("Admin URL: {DEFAULT_URL}");
         println!();
         println!("Initial admin login token (use this to log in to the web UI):");
         println!("  {token}");
         println!();
     } else {
-        println!("Remote control server listening at https://{local_addr}");
+        println!("Remote control server listening at {DEFAULT_URL}");
         println!(
             "Open the admin UI in a browser. If you need a new login token, run `mj server --reset-login-token`."
         );
@@ -1339,7 +1354,7 @@ struct PromptSubmitRequest {
     text: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PromptFailRequest {
     error: String,
 }

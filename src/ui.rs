@@ -1642,7 +1642,11 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
 
     let display_text = prompt_display_text(&text, images.len());
     state.record_user_prompt(display_text);
-    let _ = cmd_tx.send(UiCommand::SendPrompt { text, images });
+    let _ = cmd_tx.send(UiCommand::SendPrompt {
+        text,
+        images,
+        completion: None,
+    });
 }
 
 fn prompt_display_text(text: &str, image_count: usize) -> String {
@@ -6374,9 +6378,14 @@ mod tests {
 
         let cmd = cmd_rx.try_recv().expect("prompt was sent");
         match cmd {
-            UiCommand::SendPrompt { text, images } => {
+            UiCommand::SendPrompt {
+                text,
+                images,
+                completion,
+            } => {
                 assert_eq!(text, "line one\nline two\nline three");
                 assert!(images.is_empty());
+                assert!(completion.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6670,9 +6679,14 @@ mod tests {
 
         let cmd = cmd_rx.try_recv().expect("prompt was sent");
         match cmd {
-            UiCommand::SendPrompt { text, images } => {
+            UiCommand::SendPrompt {
+                text,
+                images,
+                completion,
+            } => {
                 assert_eq!(text, "pasted-1\npasted-2\ntyped");
                 assert!(images.is_empty());
+                assert!(completion.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6694,13 +6708,18 @@ mod tests {
 
         let cmd = cmd_rx.try_recv().expect("prompt was sent");
         match cmd {
-            UiCommand::SendPrompt { text, images } => {
+            UiCommand::SendPrompt {
+                text,
+                images,
+                completion,
+            } => {
                 assert_eq!(text, "describe this");
                 assert_eq!(images.len(), 1);
                 assert_eq!(images[0].data_base64, "aW1hZ2U=");
                 assert_eq!(images[0].mime_type, "image/png");
                 assert_eq!(images[0].width, 640);
                 assert_eq!(images[0].height, 480);
+                assert!(completion.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
