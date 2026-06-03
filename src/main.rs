@@ -15,6 +15,7 @@ mod headless;
 mod install;
 mod picker;
 mod registry;
+mod remote;
 mod self_update;
 mod session;
 mod ui;
@@ -111,6 +112,8 @@ enum Commands {
     /// Use `--list` to print sessions from the configured default agent
     /// in headless mode (no TUI).
     Resume(ResumeArgs),
+    /// Start the local remote-control server.
+    Server,
 }
 
 #[derive(Debug, clap::Args)]
@@ -200,6 +203,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
     match &cli.command {
         Some(Commands::Resume(args)) => !args.list,
+        Some(Commands::Server) => false,
         None => true,
     }
 }
@@ -223,6 +227,7 @@ async fn main() -> Result<()> {
                 args.fullscreen_tui |= fullscreen_tui;
                 run_resume(args).await
             }
+            Commands::Server => remote::run_server().await,
         };
     }
 
@@ -740,14 +745,7 @@ fn selected_to_picker_outcome(agent: &SelectedAgent) -> PickerOutcome {
 }
 
 fn agent_header_label(agent: &SelectedAgent) -> String {
-    if agent.source_id == "custom" {
-        let mut words = Vec::with_capacity(agent.args.len() + 1);
-        words.push(agent.program.to_string_lossy().into_owned());
-        words.extend(agent.args.iter().cloned());
-        shell_words::join(words)
-    } else {
-        agent.source_id.clone()
-    }
+    remote::agent_display_label(agent)
 }
 
 async fn run_session(
@@ -766,8 +764,10 @@ async fn run_session(
         UiMode::FullscreenTui => ui::setup_fullscreen_terminal().context("setup terminal")?,
     };
 
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (event_tx, runtime_event_rx) = mpsc::unbounded_channel();
+    let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
+    let (runtime_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, mut ui_cmd_rx) = mpsc::unbounded_channel();
 
     let runtime_cfg = acp::AcpRuntimeConfig {
         command: agent.program.clone(),
@@ -793,11 +793,34 @@ async fn run_session(
     // agents use their source id so the header matches the picker/config,
     // while custom agents show the exact command line being launched.
     let agent_display_name = Some(agent_header_label(agent));
+    let remote_tracker =
+        remote::RemoteSessionTracker::new(project_label.clone(), agent_header_label(agent));
+
+    let event_tracker = remote_tracker.clone();
+    let event_proxy = tokio::spawn(async move {
+        let mut runtime_event_rx = runtime_event_rx;
+        while let Some(event) = runtime_event_rx.recv().await {
+            event_tracker.observe_event(&event);
+            if ui_event_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+
+    let cmd_tracker = remote_tracker.clone();
+    let cmd_proxy = tokio::spawn(async move {
+        while let Some(command) = ui_cmd_rx.recv().await {
+            cmd_tracker.observe_command(&command);
+            if runtime_cmd_tx.send(command).is_err() {
+                break;
+            }
+        }
+    });
 
     let ui_result = ui::run(
         &mut terminal,
         cmd_tx,
-        event_rx,
+        ui_event_rx,
         HeaderLabels {
             project: project_label,
             worktree: worktree_label,
@@ -853,7 +876,25 @@ async fn run_session(
         }
     }
 
+    remote_tracker.shutdown().await;
+    wait_for_task("remote-control event proxy", event_proxy).await;
+    wait_for_task("remote-control command proxy", cmd_proxy).await;
+
     ui_result
+}
+
+async fn wait_for_task(label: &str, handle: tokio::task::JoinHandle<()>) {
+    let abort_handle = handle.abort_handle();
+    match tokio::time::timeout(Duration::from_secs(1), handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!("{label} join failed: {error}");
+        }
+        Err(_) => {
+            tracing::warn!("{label} did not exit within 1s; aborting");
+            abort_handle.abort();
+        }
+    }
 }
 
 fn init_logging(path: Option<&std::path::Path>) -> Result<()> {

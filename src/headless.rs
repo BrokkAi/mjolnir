@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use crate::acp::{self, AcpRuntimeConfig};
 use crate::config;
 use crate::event::{PermissionDecision, UiCommand, UiEvent, content_block_text};
+use crate::remote;
 
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -122,6 +123,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         )
     })?;
 
+    let project_label = remote::project_label_from_cwd(&cfg.cwd);
+    let agent_label = remote::agent_display_label(&agent);
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let runtime_cfg = AcpRuntimeConfig {
@@ -134,6 +137,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     };
 
     let runtime = tokio::spawn(async move { acp::run(runtime_cfg, event_tx, cmd_rx).await });
+    let remote_tracker = remote::RemoteSessionTracker::new(project_label, agent_label);
 
     let mut state = HeadlessState::default();
     let mut sent_prompt = false;
@@ -147,6 +151,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let mut collecting_turn_output = false;
 
     while let Some(event) = event_rx.recv().await {
+        remote_tracker.observe_event(&event);
         if matches!(cfg.output_format, OutputFormat::StreamJson) {
             emit_stream_event(&event, &state)?;
         }
@@ -179,12 +184,12 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 if !sent_prompt {
                     sent_prompt = true;
                     prompt_sent = true;
-                    cmd_tx
-                        .send(UiCommand::SendPrompt {
-                            text: cfg.prompt.clone(),
-                            images: Vec::new(),
-                        })
-                        .context("send prompt to ACP runtime")?;
+                    let command = UiCommand::SendPrompt {
+                        text: cfg.prompt.clone(),
+                        images: Vec::new(),
+                    };
+                    remote_tracker.observe_command(&command);
+                    cmd_tx.send(command).context("send prompt to ACP runtime")?;
                 }
             }
             UiEvent::SessionUpdate(update) => {
@@ -250,6 +255,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             // we keep that behavior local to the spawned task.
         }
     }
+    remote_tracker.shutdown().await;
 
     let stop_reason_label = stop_reason.map(stop_reason_label).unwrap_or_else(|| {
         if terminal_error.is_some() {
