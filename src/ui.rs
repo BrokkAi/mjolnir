@@ -374,6 +374,7 @@ async fn ui_loop(
 
         if let Some(reason) = state.exit_reason {
             let _ = cmd_tx.send(UiCommand::Shutdown);
+            cancel_dictation_for_exit(&mut state, &mut dictation_cancel_tx);
             if mode == UiMode::InlineChat {
                 flush_transcript_to_scrollback(terminal, &mut transcript_sink, &state)?;
                 sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
@@ -414,6 +415,7 @@ async fn ui_loop(
             last_draw = Instant::now();
         }
     }
+    cancel_dictation_for_exit(&mut state, &mut dictation_cancel_tx);
     if mode == UiMode::FullscreenTui {
         reset_text_selection_mode_for_exit(&mut state, |enabled| {
             set_mouse_capture(terminal, enabled)
@@ -1669,15 +1671,34 @@ fn start_dictation(
 }
 
 fn stop_dictation(state: &mut AppState, dictation_cancel_tx: &mut Option<std_mpsc::Sender<()>>) {
-    if let Some(cancel_tx) = dictation_cancel_tx.take() {
-        let _ = cancel_tx.send(());
-    }
-    if state.voice_input_active {
+    let was_active = cancel_active_dictation(state, dictation_cancel_tx);
+    if was_active {
         state.voice_input_active = false;
         state.voice_input_range = None;
         state.status_line = Some(StatusMessage::info("stopped voice input"));
         state.voice_input_level = None;
     }
+}
+
+fn cancel_dictation_for_exit(
+    state: &mut AppState,
+    dictation_cancel_tx: &mut Option<std_mpsc::Sender<()>>,
+) {
+    if cancel_active_dictation(state, dictation_cancel_tx) {
+        state.voice_input_active = false;
+        state.voice_input_range = None;
+        state.voice_input_level = None;
+    }
+}
+
+fn cancel_active_dictation(
+    state: &AppState,
+    dictation_cancel_tx: &mut Option<std_mpsc::Sender<()>>,
+) -> bool {
+    if let Some(cancel_tx) = dictation_cancel_tx.take() {
+        let _ = cancel_tx.send(());
+    }
+    state.voice_input_active
 }
 
 fn update_dictation_partial(state: &mut AppState, text: &str) {
@@ -6575,6 +6596,25 @@ mod tests {
         assert!(state.voice_input_range.is_none());
         assert_eq!(state.input, "hello");
         assert!(cancel_tx.is_none());
+    }
+
+    #[test]
+    fn exit_cancels_dictation_without_status_message() {
+        let mut state = AppState::new();
+        state.voice_input_active = true;
+        state.voice_input_level = Some(0.5);
+        state.voice_input_range = Some((0, 0));
+        let (cancel_tx, cancel_rx) = std_mpsc::channel();
+        let mut cancel_tx = Some(cancel_tx);
+
+        cancel_dictation_for_exit(&mut state, &mut cancel_tx);
+
+        assert!(!state.voice_input_active);
+        assert!(state.voice_input_range.is_none());
+        assert!(state.voice_input_level.is_none());
+        assert!(state.status_line.is_none());
+        assert!(cancel_tx.is_none());
+        assert!(cancel_rx.try_recv().is_ok());
     }
 
     #[test]
