@@ -15,6 +15,8 @@
         --muted: #94a3b8;
         --accent: #60a5fa;
         --accent-soft: rgba(96, 165, 250, 0.18);
+        --danger: #f87171;
+        --danger-soft: rgba(248, 113, 113, 0.14);
         --shadow: 0 10px 30px rgba(15, 23, 42, 0.28);
         --user: #38bdf8;
         --user-soft: rgba(56, 189, 248, 0.12);
@@ -142,10 +144,9 @@
         align-items: stretch;
       }
 
-      .composer textarea {
+      .composer textarea,
+      .auth-card input {
         width: 100%;
-        min-height: 108px;
-        resize: vertical;
         border-radius: 10px;
         border: 1px solid var(--border);
         background: var(--panel);
@@ -154,7 +155,14 @@
         font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       }
 
-      .composer button {
+      .composer textarea {
+        min-height: 108px;
+        resize: vertical;
+      }
+
+      .composer button,
+      .auth-card button,
+      .toolbar button {
         border: 0;
         border-radius: 10px;
         padding: 0 18px;
@@ -165,9 +173,32 @@
         cursor: pointer;
       }
 
-      .composer button:disabled {
+      .composer button:disabled,
+      .auth-card button:disabled,
+      .toolbar button:disabled {
         opacity: 0.55;
         cursor: default;
+      }
+
+      .toolbar {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: 12px;
+      }
+
+      .toolbar p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .toolbar .danger {
+        background: var(--danger-soft);
+        color: var(--danger);
+        min-width: 0;
+        padding: 10px 14px;
       }
 
       .queue-meta {
@@ -336,6 +367,62 @@
         padding: 24px;
       }
 
+      .auth-screen {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+
+      .auth-card {
+        width: min(560px, 100%);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        background: var(--panel-alt);
+        box-shadow: var(--shadow);
+        padding: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .auth-card h1 {
+        margin: 0;
+        font-size: 24px;
+      }
+
+      .auth-card p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .auth-card form {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .auth-card label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .auth-card button {
+        height: 44px;
+      }
+
+      .auth-error {
+        min-height: 20px;
+        color: var(--danger);
+        font-size: 14px;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+
       @media (max-width: 900px) {
         .layout {
           grid-template-columns: 1fr;
@@ -350,15 +437,41 @@
         .main {
           min-height: 60vh;
         }
+
+        .composer-row,
+        .toolbar {
+          flex-direction: column;
+          align-items: stretch;
+        }
       }
     </style>
   </head>
   <body>
-    <div class="layout">
+    <section id="auth-screen" class="auth-screen">
+      <div class="auth-card">
+        <h1>Unlock Remote Sessions</h1>
+        <p>
+          Enter the six-digit viewer code printed by <code>mj server</code>. QR login still uses the
+          full embedded URL token on the server side, but manual browser unlock only needs this code.
+        </p>
+        <form id="auth-form">
+          <label for="auth-token">Viewer code</label>
+          <input id="auth-token" name="code" type="password" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" maxlength="6" pattern="[0-9]{6}">
+          <button id="auth-submit" type="submit">Unlock</button>
+        </form>
+        <div id="auth-error" class="auth-error"></div>
+      </div>
+    </section>
+
+    <div id="app" class="layout" hidden>
       <aside class="sidebar">
         <div class="panel-header">
           <h1>Remote Sessions</h1>
           <p id="status">Loading…</p>
+          <div class="toolbar">
+            <p>Authenticated with a local session cookie.</p>
+            <button id="logout-button" class="danger" type="button">Log Out</button>
+          </div>
         </div>
         <div id="sessions"></div>
       </aside>
@@ -380,6 +493,16 @@
     </div>
 
     <script>
+      const queryParams = new URLSearchParams(window.location.search);
+      const viewerToken = queryParams.get("token") || "";
+
+      const authScreenEl = document.getElementById("auth-screen");
+      const appEl = document.getElementById("app");
+      const authFormEl = document.getElementById("auth-form");
+      const authTokenEl = document.getElementById("auth-token");
+      const authSubmitEl = document.getElementById("auth-submit");
+      const authErrorEl = document.getElementById("auth-error");
+      const logoutButtonEl = document.getElementById("logout-button");
       const statusEl = document.getElementById("status");
       const sessionsEl = document.getElementById("sessions");
       const transcriptEl = document.getElementById("transcript");
@@ -393,7 +516,51 @@
       let selectedSessionId = null;
       let sessions = [];
       let queuedPrompts = [];
-      const authToken = "__MJ_REMOTE_TOKEN__";
+      let refreshTimer = null;
+      let authenticated = false;
+
+      function showAuth(message = "") {
+        authenticated = false;
+        authErrorEl.textContent = message;
+        authScreenEl.hidden = false;
+        appEl.hidden = true;
+        sessions = [];
+        queuedPrompts = [];
+        selectedSessionId = null;
+        if (refreshTimer) {
+          clearInterval(refreshTimer);
+          refreshTimer = null;
+        }
+      }
+
+      function showApp() {
+        authenticated = true;
+        authErrorEl.textContent = "";
+        authScreenEl.hidden = true;
+        appEl.hidden = false;
+        if (!refreshTimer) {
+          refreshTimer = setInterval(refreshSessions, 2000);
+        }
+      }
+
+      async function apiFetch(url, options = {}) {
+        const requestUrl = new URL(url, window.location.origin);
+        if (viewerToken && !requestUrl.searchParams.has("token")) {
+          requestUrl.searchParams.set("token", viewerToken);
+        }
+        const response = await fetch(requestUrl, {
+          ...options,
+          credentials: "same-origin",
+          headers: {
+            ...(options.headers || {}),
+          },
+        });
+        if (response.status === 401) {
+          showAuth("Your session expired. Enter the six-digit viewer code again.");
+          throw new Error("HTTP 401");
+        }
+        return response;
+      }
 
       function sessionLabel(session) {
         return session.name || session.session_id;
@@ -466,6 +633,7 @@
           button.addEventListener("click", () => {
             selectedSessionId = session.session_id;
             renderSessions();
+            refreshQueuedPrompts();
           });
 
           const title = document.createElement("div");
@@ -597,13 +765,44 @@
         }
       }
 
-      async function refreshSessions() {
+      async function tryResumeViewerSession() {
+        if (viewerToken) {
+          showApp();
+          await refreshSessions();
+          return;
+        }
         try {
           const response = await fetch("/live/sessions", {
+            credentials: "same-origin",
             cache: "no-store",
-            headers: {
-              Authorization: `Bearer ${authToken}`,
-            },
+          });
+          if (response.status === 401) {
+            showAuth();
+            authTokenEl.focus();
+            return;
+          }
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+
+          sessions = await response.json();
+          showApp();
+          statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+          renderSessions();
+          await refreshQueuedPrompts();
+        } catch (error) {
+          showAuth(`Unlock check failed: ${error.message}`);
+          authTokenEl.focus();
+        }
+      }
+
+      async function refreshSessions() {
+        if (!authenticated) {
+          return;
+        }
+        try {
+          const response = await apiFetch("/live/sessions", {
+            cache: "no-store",
           });
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -613,7 +812,9 @@
           renderSessions();
           await refreshQueuedPrompts();
         } catch (error) {
-          statusEl.textContent = `Update failed: ${error.message}`;
+          if (error.message !== "HTTP 401") {
+            statusEl.textContent = `Update failed: ${error.message}`;
+          }
         }
       }
 
@@ -625,11 +826,8 @@
           return;
         }
         try {
-          const response = await fetch(`/api/queued-prompts?session_id=${encodeURIComponent(sessionId)}`, {
+          const response = await apiFetch(`/api/queued-prompts?session_id=${encodeURIComponent(sessionId)}`, {
             cache: "no-store",
-            headers: {
-              Authorization: `Bearer ${authToken}`,
-            },
           });
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -638,7 +836,9 @@
           const selected = sessions.find((session) => session.session_id === selectedSessionId) || null;
           renderQueue(selected);
         } catch (error) {
-          queueStatusEl.textContent = `Queue update failed: ${error.message}`;
+          if (error.message !== "HTTP 401") {
+            queueStatusEl.textContent = `Queue update failed: ${error.message}`;
+          }
         }
       }
 
@@ -650,11 +850,10 @@
         }
         queueSubmitEl.disabled = true;
         try {
-          const response = await fetch("/api/queued-prompts", {
+          const response = await apiFetch("/api/queued-prompts", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              Authorization: `Bearer ${authToken}`,
             },
             body: JSON.stringify({
               session_id: sessionId,
@@ -667,12 +866,62 @@
           queueInputEl.value = "";
           await refreshSessions();
         } catch (error) {
-          queueStatusEl.textContent = `Queue submit failed: ${error.message}`;
+          if (error.message !== "HTTP 401") {
+            queueStatusEl.textContent = `Queue submit failed: ${error.message}`;
+          }
         } finally {
           queueSubmitEl.disabled = !selectedSessionId;
         }
       }
 
+      async function submitAuth(event) {
+        event.preventDefault();
+        const code = authTokenEl.value;
+        if (!code.trim()) {
+          authErrorEl.textContent = "Enter the six-digit viewer code from mj server.";
+          return;
+        }
+        authSubmitEl.disabled = true;
+        authErrorEl.textContent = "";
+        try {
+          const response = await fetch("/auth/session", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ code }),
+          });
+          if (response.status === 401) {
+            authErrorEl.textContent = "That viewer code was rejected.";
+            return;
+          }
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          authTokenEl.value = "";
+          showApp();
+          await refreshSessions();
+        } catch (error) {
+          authErrorEl.textContent = `Unlock failed: ${error.message}`;
+        } finally {
+          authSubmitEl.disabled = false;
+        }
+      }
+
+      async function logout() {
+        try {
+          await fetch("/auth/session", {
+            method: "DELETE",
+            credentials: "same-origin",
+          });
+        } finally {
+          showAuth("Logged out.");
+        }
+      }
+
+      authFormEl.addEventListener("submit", submitAuth);
+      logoutButtonEl.addEventListener("click", logout);
       queueSubmitEl.addEventListener("click", submitQueuedPrompt);
       queueInputEl.addEventListener("keydown", (event) => {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -681,8 +930,7 @@
         }
       });
 
-      refreshSessions();
-      setInterval(refreshSessions, 2000);
+      void tryResumeViewerSession();
     </script>
   </body>
 </html>

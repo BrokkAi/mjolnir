@@ -117,7 +117,14 @@ enum Commands {
     /// in headless mode (no TUI).
     Resume(ResumeArgs),
     /// Start the local remote-control server.
-    Server,
+    Server(ServerArgs),
+}
+
+#[derive(Debug, clap::Args, Default)]
+struct ServerArgs {
+    /// Public hostname to embed in the login QR code and TLS certificate.
+    #[arg(long)]
+    hostname: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -207,7 +214,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
     match &cli.command {
         Some(Commands::Resume(args)) => !args.list,
-        Some(Commands::Server) => false,
+        Some(Commands::Server(_)) => false,
         None => true,
     }
 }
@@ -231,7 +238,7 @@ async fn main() -> Result<()> {
                 args.fullscreen_tui |= fullscreen_tui;
                 run_resume(args).await
             }
-            Commands::Server => remote::run_server().await,
+            Commands::Server(args) => remote::run_server(args.hostname).await,
         };
     }
 
@@ -1180,7 +1187,22 @@ mod tests {
     #[test]
     fn parse_server_subcommand() {
         let cli = Cli::try_parse_from(["mj", "server"]).expect("parse");
-        assert!(matches!(cli.command, Some(Commands::Server)));
+        match cli.command {
+            Some(Commands::Server(args)) => assert!(args.hostname.is_none()),
+            _ => panic!("expected Server subcommand"),
+        }
+    }
+
+    #[test]
+    fn parse_server_subcommand_with_hostname() {
+        let cli =
+            Cli::try_parse_from(["mj", "server", "--hostname", "example.com"]).expect("parse");
+        match cli.command {
+            Some(Commands::Server(args)) => {
+                assert_eq!(args.hostname.as_deref(), Some("example.com"))
+            }
+            _ => panic!("expected Server subcommand"),
+        }
     }
 
     #[test]
