@@ -88,14 +88,9 @@ MjSpeechTranscriptionResult mj_transcribe_wav_file(const char *path) {
             if (recognizer == nil) {
                 return mj_result(1, nil, @"Speech recognizer is unavailable");
             }
-            if ([recognizer respondsToSelector:@selector(supportsOnDeviceRecognition)] &&
-                !recognizer.supportsOnDeviceRecognition) {
-                return mj_result(
-                    1,
-                    nil,
-                    @"On-device speech transcription is unavailable for the current locale"
-                );
-            }
+            BOOL supportsOnDeviceRecognition =
+                [recognizer respondsToSelector:@selector(supportsOnDeviceRecognition)] &&
+                recognizer.supportsOnDeviceRecognition;
 
             NSURL *url = [NSURL fileURLWithPath:filePath];
             SFSpeechURLRecognitionRequest *request =
@@ -104,7 +99,7 @@ MjSpeechTranscriptionResult mj_transcribe_wav_file(const char *path) {
                 return mj_result(2, nil, @"Failed to create speech recognition request");
             }
             if ([request respondsToSelector:@selector(setRequiresOnDeviceRecognition:)]) {
-                request.requiresOnDeviceRecognition = YES;
+                request.requiresOnDeviceRecognition = supportsOnDeviceRecognition;
             }
             request.shouldReportPartialResults = YES;
 

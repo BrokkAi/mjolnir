@@ -49,6 +49,12 @@ enum PreparedVoicePrompt {
     Audio(PromptAudio),
 }
 
+#[cfg(target_os = "macos")]
+enum LocalTranscriptionResult {
+    Text(String),
+    Unavailable(String),
+}
+
 impl VoiceRuntime {
     fn new(ui_tx: mpsc::UnboundedSender<UiEvent>) -> Self {
         Self {
@@ -233,8 +239,21 @@ fn finalize_writer(writer: SharedWriter) -> Result<()> {
 
 fn prepare_prompt(path: &Path, allow_audio_fallback: bool) -> Result<PreparedVoicePrompt> {
     #[cfg(target_os = "macos")]
-    if let Some(text) = try_local_transcription(path)? {
-        return Ok(PreparedVoicePrompt::Text(text));
+    match try_local_transcription(path)? {
+        LocalTranscriptionResult::Text(text) => {
+            return Ok(PreparedVoicePrompt::Text(text));
+        }
+        LocalTranscriptionResult::Unavailable(message) => {
+            if allow_audio_fallback {
+                tracing::info!(
+                    "falling back to ACP audio prompt after local macOS speech unavailability: {message}"
+                );
+            } else {
+                anyhow::bail!(
+                    "local voice transcription is unavailable: {message}; this agent does not advertise ACP audio prompt support"
+                );
+            }
+        }
     }
 
     if allow_audio_fallback {
@@ -304,20 +323,22 @@ fn temp_voice_path() -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
-fn try_local_transcription(path: &Path) -> Result<Option<String>> {
+fn try_local_transcription(path: &Path) -> Result<LocalTranscriptionResult> {
     let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
         .context("voice path contained an unexpected NUL byte")?;
     let raw = unsafe { mj_transcribe_wav_file(c_path.as_ptr()) };
     let text = unsafe { take_c_string(raw.text) };
     let message = unsafe { take_c_string(raw.message) };
     match raw.kind {
-        0 => Ok(text.filter(|text| !text.trim().is_empty())),
-        1 => {
-            if let Some(message) = message {
-                tracing::info!("local macOS speech transcription unavailable: {message}");
-            }
-            Ok(None)
-        }
+        0 => Ok(LocalTranscriptionResult::Text(
+            text.filter(|text| !text.trim().is_empty()).ok_or_else(|| {
+                anyhow::anyhow!("local macOS speech transcription returned empty text")
+            })?,
+        )),
+        1 => Ok(LocalTranscriptionResult::Unavailable(
+            message
+                .unwrap_or_else(|| "macOS speech recognition did not report a reason".to_string()),
+        )),
         _ => Err(anyhow::anyhow!(
             "{}",
             message.unwrap_or_else(|| "local macOS speech transcription failed".to_string())
