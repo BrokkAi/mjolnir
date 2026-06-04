@@ -321,6 +321,8 @@ pub struct AppState {
     pub runtime_closed: bool,
     /// Transient status line with severity.
     pub status_line: Option<StatusMessage>,
+    /// True while the local microphone dictation helper is running.
+    pub voice_input_active: bool,
     /// Timing for the active or most recently completed prompt turn.
     turn_started_at: Option<Instant>,
     last_turn_elapsed: Option<Duration>,
@@ -450,6 +452,7 @@ impl AppState {
             exit_reason: None,
             runtime_closed: false,
             status_line: None,
+            voice_input_active: false,
             turn_started_at: None,
             last_turn_elapsed: None,
             token_usage: TokenUsage::default(),

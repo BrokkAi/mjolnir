@@ -7,13 +7,17 @@ use anyhow::{Context, Result, bail};
 
 #[cfg(target_os = "macos")]
 use std::{
-    io::Write,
+    io::{BufRead, BufReader, Read, Write},
     process::{Command, Stdio},
 };
 
 #[cfg(target_os = "macos")]
+use base64::{Engine as _, engine::general_purpose};
+
+#[cfg(target_os = "macos")]
 const SWIFT_HELPER: &str = r#"
 import AVFoundation
+import Darwin
 import Foundation
 import Speech
 
@@ -47,6 +51,12 @@ func parseOptions(_ args: [String]) -> Options {
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(1)
+}
+
+func emit(_ kind: String, _ text: String) {
+    let encoded = Data(text.utf8).base64EncodedString()
+    print("\(kind)\t\(encoded)")
+    fflush(stdout)
 }
 
 func requestSpeechAuthorization() {
@@ -108,6 +118,7 @@ let startedAt = Date()
 let task = speechRecognizer.recognitionTask(with: request) { result, error in
     if let result {
         bestText = result.bestTranscription.formattedString
+        emit("PARTIAL", bestText)
         lastResultAt = Date()
         if result.isFinal {
             finished = true
@@ -140,11 +151,14 @@ inputNode.removeTap(onBus: 0)
 request.endAudio()
 task.cancel()
 
-print(bestText.trimmingCharacters(in: .whitespacesAndNewlines))
+emit("FINAL", bestText.trimmingCharacters(in: .whitespacesAndNewlines))
 "#;
 
 #[cfg(target_os = "macos")]
-pub fn dictate_prompt() -> Result<String> {
+pub fn run_dictation<F>(mut on_partial: F) -> Result<String>
+where
+    F: FnMut(String),
+{
     let mut child = Command::new("swift")
         .arg("-")
         .arg("--")
@@ -168,12 +182,35 @@ pub fn dictate_prompt() -> Result<String> {
             .context("write swift speech helper")?;
     }
 
-    let output = child
-        .wait_with_output()
-        .context("run swift speech helper")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("open swift speech helper stdout")?;
+    let mut final_text = None;
+    let mut last_partial = None;
+    for line in BufReader::new(stdout).lines() {
+        let line = line.context("read swift speech helper output")?;
+        if let Some(text) = decode_helper_line("PARTIAL", &line)? {
+            if last_partial.as_deref() != Some(text.as_str()) {
+                on_partial(text.clone());
+                last_partial = Some(text);
+            }
+        } else if let Some(text) = decode_helper_line("FINAL", &line)? {
+            final_text = Some(text);
+        }
+    }
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let status = child.wait().context("run swift speech helper")?;
+
+    let mut stderr = String::new();
+    if let Some(mut stderr_pipe) = child.stderr.take() {
+        stderr_pipe
+            .read_to_string(&mut stderr)
+            .context("read swift speech helper stderr")?;
+    }
+
+    if !status.success() {
+        let stderr = stderr.trim().to_string();
         bail!(
             "{}",
             if stderr.is_empty() {
@@ -184,16 +221,37 @@ pub fn dictate_prompt() -> Result<String> {
         );
     }
 
-    let text = String::from_utf8(output.stdout).context("decode speech helper output")?;
-    let text = text.trim().to_string();
+    let text = final_text
+        .or(last_partial)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if text.is_empty() {
         bail!("no speech was recognized");
     }
     Ok(text)
 }
 
+#[cfg(target_os = "macos")]
+fn decode_helper_line(kind: &str, line: &str) -> Result<Option<String>> {
+    let Some(encoded) = line
+        .strip_prefix(kind)
+        .and_then(|rest| rest.strip_prefix('\t'))
+    else {
+        return Ok(None);
+    };
+    let bytes = general_purpose::STANDARD
+        .decode(encoded)
+        .context("decode swift speech helper line")?;
+    let text = String::from_utf8(bytes).context("decode swift speech helper text")?;
+    Ok(Some(text))
+}
+
 #[cfg(not(target_os = "macos"))]
-pub fn dictate_prompt() -> Result<String> {
+pub fn run_dictation<F>(_on_partial: F) -> Result<String>
+where
+    F: FnMut(String),
+{
     bail!("voice dictation is only available on macOS")
 }
 

@@ -43,7 +43,7 @@ use crate::clipboard::{
 use crate::config;
 use crate::event::{PermissionDecision, PermissionPrompt, PromptImage, UiCommand, UiEvent};
 use crate::notifications::TerminalNotificationBackend;
-use crate::speech::{dictate_prompt, dictation_error_message};
+use crate::speech::{dictation_error_message, run_dictation};
 use crate::version::mjolnir_version_label;
 
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
@@ -77,6 +77,13 @@ pub struct HeaderLabels {
 enum TerminalRequest {
     None,
     ToggleTextSelectionMode,
+    StartDictation,
+}
+
+#[derive(Debug)]
+enum DictationEvent {
+    Partial(String),
+    Finished(std::result::Result<String, String>),
 }
 
 #[cfg(test)]
@@ -267,6 +274,7 @@ async fn ui_loop(
     let mut transcript_sink = TranscriptSink::default();
     let mut notification_backend = TerminalNotificationBackend::detect();
     let mut crossterm_events = EventStream::new();
+    let (dictation_tx, mut dictation_rx) = mpsc::unbounded_channel::<DictationEvent>();
     let mut inline_height = INLINE_CHAT_HEIGHT;
     // Wake-up timer so we still get scheduled to draw when no events
     // arrive (e.g. while waiting on the agent). `Delay` keeps it from
@@ -288,7 +296,7 @@ async fn ui_loop(
                 match maybe_ct {
                     Some(Ok(ev)) => {
                         let request = handle_crossterm(&mut state, cmd_tx, ev, mode);
-                        apply_terminal_request(terminal, &mut state, request)?;
+                        apply_terminal_request(terminal, &mut state, request, &dictation_tx)?;
                     }
                     Some(Err(e)) => {
                         state.record_status_message(
@@ -299,6 +307,19 @@ async fn ui_loop(
                     None => break,
                 }
                 dirty = true;
+            }
+            maybe_dictation = dictation_rx.recv() => {
+                match maybe_dictation {
+                    Some(DictationEvent::Partial(text)) => {
+                        update_dictation_partial(&mut state, &text);
+                        dirty = true;
+                    }
+                    Some(DictationEvent::Finished(result)) => {
+                        finish_dictation(&mut state, result);
+                        dirty = true;
+                    }
+                    None => {}
+                }
             }
             // Use the unconditional form (no `Some(ev) = ...`) so the
             // None case (runtime dropped the sender) reaches the match
@@ -518,13 +539,14 @@ fn repair_inline_viewport(
 }
 
 fn needs_live_redraw(state: &AppState) -> bool {
-    matches!(
-        state.connection_state,
-        ConnectionState::Launching
-            | ConnectionState::Initializing
-            | ConnectionState::Streaming
-            | ConnectionState::Cancelling
-    )
+    state.voice_input_active
+        || matches!(
+            state.connection_state,
+            ConnectionState::Launching
+                | ConnectionState::Initializing
+                | ConnectionState::Streaming
+                | ConnectionState::Cancelling
+        )
 }
 
 fn flush_transcript_to_scrollback(
@@ -856,7 +878,7 @@ fn handle_crossterm(
             copy_last_agent_message(state);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
-            dictate_into_prompt(state);
+            return TerminalRequest::StartDictation;
         }
         (modifiers, KeyCode::Char('v'))
             if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -984,6 +1006,7 @@ fn apply_terminal_request(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     request: TerminalRequest,
+    dictation_tx: &mpsc::UnboundedSender<DictationEvent>,
 ) -> Result<()> {
     match request {
         TerminalRequest::None => Ok(()),
@@ -996,6 +1019,10 @@ fn apply_terminal_request(
             } else {
                 "wheel scrolling enabled; press F12 to select text with the mouse"
             }));
+            Ok(())
+        }
+        TerminalRequest::StartDictation => {
+            start_dictation(state, dictation_tx);
             Ok(())
         }
     }
@@ -1562,18 +1589,48 @@ fn paste_clipboard_image(state: &mut AppState) {
     }
 }
 
-fn dictate_into_prompt(state: &mut AppState) {
+fn start_dictation(state: &mut AppState, dictation_tx: &mpsc::UnboundedSender<DictationEvent>) {
+    if state.voice_input_active {
+        state.status_line = Some(StatusMessage::info("voice input is already recording..."));
+        return;
+    }
+
     state.input_paste_burst.clear();
-    state.record_status_message(StatusKind::Info, "listening for voice input...");
-    match dictate_prompt() {
+    state.voice_input_active = true;
+    state.status_line = Some(StatusMessage::info("recording voice input: listening..."));
+
+    let dictation_tx = dictation_tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let partial_tx = dictation_tx.clone();
+        let result = run_dictation(move |text| {
+            let _ = partial_tx.send(DictationEvent::Partial(text));
+        })
+        .map_err(|e| dictation_error_message(&e));
+        let _ = dictation_tx.send(DictationEvent::Finished(result));
+    });
+}
+
+fn update_dictation_partial(state: &mut AppState, text: &str) {
+    if !state.voice_input_active {
+        return;
+    }
+    let preview = preview_notification_text(text).unwrap_or_else(|| "listening...".to_string());
+    state.status_line = Some(StatusMessage::info(format!(
+        "recording voice input: {preview}"
+    )));
+}
+
+fn finish_dictation(state: &mut AppState, result: std::result::Result<String, String>) {
+    state.voice_input_active = false;
+    match result {
         Ok(text) => {
             insert_text_at_cursor(state, &text);
             state.scroll_input_to_bottom();
             state.update_autocomplete();
-            state.record_status_message(StatusKind::Info, "inserted voice input");
+            state.status_line = Some(StatusMessage::info("inserted voice input"));
         }
-        Err(e) => {
-            state.record_status_message(StatusKind::Warning, dictation_error_message(&e));
+        Err(message) => {
+            state.record_status_message(StatusKind::Warning, message);
         }
     }
 }
@@ -3408,6 +3465,19 @@ fn input_cursor_position(
     (cursor_x, cursor_y)
 }
 
+fn voice_input_title(state: &AppState, width: u16) -> String {
+    let detail = state
+        .status_line
+        .as_ref()
+        .and_then(|status| status.text.strip_prefix("recording voice input: "))
+        .unwrap_or("speak now; text appears when recording stops");
+    let max_detail_width = usize::from(width).saturating_sub(22).max(10);
+    format!(
+        " recording voice: {} ",
+        compact_middle_display(detail, max_detail_width)
+    )
+}
+
 fn input_attachment_chips(state: &AppState) -> Vec<String> {
     let mut chips: Vec<(usize, String)> =
         Vec::with_capacity(state.attachments.len() + state.image_attachments.len());
@@ -3468,6 +3538,8 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         " runtime closed (/new or Ctrl-N for a new session | Ctrl-C to quit) ".to_string()
     } else if state.is_streaming() {
         " streaming... (Ctrl-C to cancel) ".to_string()
+    } else if state.voice_input_active {
+        voice_input_title(state, area.width)
     } else {
         format!(
             " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | F10 help | Ctrl-C quit{text_selection_hint}) "
@@ -6367,22 +6439,45 @@ mod tests {
         assert_eq!(state.input_cursor, 1);
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn ctrl_r_reports_voice_dictation_unavailable_off_macos() {
+    fn ctrl_r_requests_voice_dictation_start() {
         let mut state = AppState::new();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        handle_crossterm(
+        let request = handle_crossterm(
             &mut state,
             &cmd_tx,
             key_with_modifiers(KeyCode::Char('r'), KeyModifiers::CONTROL),
         );
 
         assert!(state.input.is_empty());
+        assert_eq!(request, TerminalRequest::StartDictation);
+    }
+
+    #[test]
+    fn dictation_partial_updates_visible_status() {
+        let mut state = AppState::new();
+        state.voice_input_active = true;
+
+        update_dictation_partial(&mut state, "hello from the microphone");
+
         let status = state.status_line.expect("status");
-        assert_eq!(status.kind, StatusKind::Warning);
-        assert!(status.text.contains("only available on macOS"));
+        assert_eq!(status.kind, StatusKind::Info);
+        assert!(status.text.contains("hello from the microphone"));
+    }
+
+    #[test]
+    fn dictation_finish_inserts_text_at_prompt_cursor() {
+        let mut state = AppState::new();
+        state.input = "before after".to_string();
+        state.input_cursor = "before ".chars().count();
+        state.voice_input_active = true;
+
+        finish_dictation(&mut state, Ok("voice ".to_string()));
+
+        assert!(!state.voice_input_active);
+        assert_eq!(state.input, "before voice after");
+        assert_eq!(state.input_cursor, "before voice ".chars().count());
     }
 
     #[test]
