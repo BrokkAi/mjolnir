@@ -1,6 +1,6 @@
 [package]
 name = "brokk-mjolnir"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 description = "Forge-grade terminal client for any Agent Client Protocol (ACP) server"
 license = "GPL-3.0"
