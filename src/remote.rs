@@ -1,8 +1,9 @@
 //! Simple remote-control server and local session registration.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallContent};
 use anyhow::{Context, Result, anyhow};
@@ -32,9 +33,23 @@ const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
 const REMOTE_CONTROL_UPSERT_URL: &str = "https://localhost:11921/api/sessions";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const SESSION_COOKIE_NAME: &str = "mj_remote_session";
+/// The six-digit viewer code is only ~20 bits of entropy, so the manual-unlock
+/// endpoint must be throttled or it can be brute-forced — especially once the
+/// server is bound publicly via `--hostname`. After this many consecutive
+/// failures the code path is locked for `VIEWER_CODE_LOCKOUT`; the QR/token
+/// path is unaffected, so the legitimate operator is never locked out.
+const MAX_VIEWER_CODE_ATTEMPTS: u32 = 5;
+const VIEWER_CODE_LOCKOUT: Duration = Duration::from_secs(30);
 /// A `SessionRecord` can include the full transcript history; allow room for
 /// larger snapshots while still capping request bodies to something reasonable.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Tracks consecutive failed viewer-code attempts to rate-limit brute force.
+#[derive(Debug, Default)]
+struct CodeAuthGuard {
+    failures: u32,
+    locked_until: Option<Instant>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRecord {
@@ -122,7 +137,6 @@ struct ServerPaths {
     cert_path: PathBuf,
     key_path: PathBuf,
     token_path: PathBuf,
-    session_cookie_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,8 +149,12 @@ struct ServerListenConfig {
 struct ServerState {
     db_path: Arc<PathBuf>,
     token: Arc<String>,
-    session_cookie: Arc<String>,
     viewer_code: Arc<String>,
+    /// Active viewer session cookie values. Each successful unlock mints a fresh
+    /// random id so logout can revoke exactly that browser's session, and a lost
+    /// cookie does not stay valid forever like a single shared secret would.
+    sessions: Arc<Mutex<HashSet<String>>>,
+    code_guard: Arc<Mutex<CodeAuthGuard>>,
 }
 
 impl TrackerState {
@@ -523,16 +541,10 @@ pub async fn run_server(hostname: Option<String>) -> Result<()> {
     let paths = ensure_server_paths(hostname.as_deref())?;
     init_db(&paths.db_path)?;
     let token = ensure_token(&paths.token_path)?;
-    let session_cookie = ensure_token(&paths.session_cookie_path)?;
     let viewer_code = generate_viewer_code()?;
     let viewer_url = remote_qr_login_url(&listen.viewer_host, &token);
 
-    let app = build_router(
-        paths.db_path.clone(),
-        token,
-        session_cookie,
-        viewer_code.clone(),
-    );
+    let app = build_router(paths.db_path.clone(), token, viewer_code.clone());
 
     let tls_config =
         axum_server::tls_rustls::RustlsConfig::from_pem_file(&paths.cert_path, &paths.key_path)
@@ -556,7 +568,10 @@ pub async fn run_server(hostname: Option<String>) -> Result<()> {
 
 fn remote_qr_login_url(host: &str, token: &str) -> String {
     let encoded = url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
-    format!("https://{host}:11921/?token={encoded}")
+    // Target `/auth/login` (not `/?token=`) so the server validates the token,
+    // sets the session cookie, and redirects to a clean `/`. This keeps the
+    // long-lived token out of the browser history and out of later requests.
+    format!("https://{host}:11921/auth/login?token={encoded}")
 }
 
 fn render_login_qr(url: &str) -> Result<String> {
@@ -590,17 +605,13 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-fn build_router(
-    db_path: PathBuf,
-    token: String,
-    session_cookie: String,
-    viewer_code: String,
-) -> Router {
+fn build_router(db_path: PathBuf, token: String, viewer_code: String) -> Router {
     let state = ServerState {
         db_path: Arc::new(db_path),
         token: Arc::new(token),
-        session_cookie: Arc::new(session_cookie),
         viewer_code: Arc::new(viewer_code),
+        sessions: Arc::new(Mutex::new(HashSet::new())),
+        code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
     };
 
     let protected = Router::new()
@@ -651,16 +662,19 @@ fn request_is_authorized(state: &ServerState, request: &Request) -> bool {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
     let query_token = request.uri().query().and_then(query_token_value);
-    token_matches(state.token.as_str(), bearer)
+    if token_matches(state.token.as_str(), bearer)
         || token_matches(state.token.as_str(), query_token.as_deref())
-        || cookie_matches(
-            request
-                .headers()
-                .get(COOKIE)
-                .and_then(|value| value.to_str().ok()),
-            SESSION_COOKIE_NAME,
-            state.session_cookie.as_str(),
-        )
+    {
+        return true;
+    }
+    let cookie_header = request
+        .headers()
+        .get(COOKIE)
+        .and_then(|value| value.to_str().ok());
+    let sessions = state.sessions.lock().expect("viewer sessions poisoned");
+    sessions
+        .iter()
+        .any(|session| cookie_matches(cookie_header, SESSION_COOKIE_NAME, session))
 }
 
 fn query_token_value(query: &str) -> Option<String> {
@@ -669,16 +683,17 @@ fn query_token_value(query: &str) -> Option<String> {
         .map(|(_, value)| value.into_owned())
 }
 
-fn cookie_matches(header: Option<&str>, name: &str, expected: &str) -> bool {
-    let Some(header) = header else {
-        return false;
-    };
-    header
+fn cookie_value<'a>(header: Option<&'a str>, name: &str) -> Option<&'a str> {
+    header?
         .split(';')
         .filter_map(|cookie| cookie.trim().split_once('='))
-        .any(|(cookie_name, cookie_value)| {
-            cookie_name == name && constant_time_eq(expected.as_bytes(), cookie_value.as_bytes())
-        })
+        .find(|(cookie_name, _)| *cookie_name == name)
+        .map(|(_, value)| value)
+}
+
+fn cookie_matches(header: Option<&str>, name: &str, expected: &str) -> bool {
+    cookie_value(header, name)
+        .is_some_and(|value| constant_time_eq(expected.as_bytes(), value.as_bytes()))
 }
 
 fn token_matches(expected: &str, provided: Option<&str>) -> bool {
@@ -743,26 +758,87 @@ fn create_code_session_response(
     code: &str,
     status: StatusCode,
 ) -> std::result::Result<Response, (StatusCode, String)> {
+    if viewer_code_locked(state) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many incorrect codes; wait a moment and try again".to_string(),
+        ));
+    }
+
     if !token_matches(state.viewer_code.as_str(), Some(code)) {
+        record_viewer_code_failure(state);
         return Err((StatusCode::UNAUTHORIZED, "unauthorized".to_string()));
     }
 
+    reset_viewer_code_failures(state);
     issue_session_cookie(state, status)
+}
+
+/// Returns whether the viewer-code path is currently locked out, clearing an
+/// expired lockout so the next failure starts a fresh count.
+fn viewer_code_locked(state: &ServerState) -> bool {
+    let mut guard = state.code_guard.lock().expect("viewer code guard poisoned");
+    match guard.locked_until {
+        Some(until) if Instant::now() < until => true,
+        Some(_) => {
+            guard.locked_until = None;
+            guard.failures = 0;
+            false
+        }
+        None => false,
+    }
+}
+
+fn record_viewer_code_failure(state: &ServerState) {
+    let mut guard = state.code_guard.lock().expect("viewer code guard poisoned");
+    guard.failures = guard.failures.saturating_add(1);
+    if guard.failures >= MAX_VIEWER_CODE_ATTEMPTS {
+        guard.failures = 0;
+        guard.locked_until = Some(Instant::now() + VIEWER_CODE_LOCKOUT);
+    }
+}
+
+fn reset_viewer_code_failures(state: &ServerState) {
+    let mut guard = state.code_guard.lock().expect("viewer code guard poisoned");
+    guard.failures = 0;
+    guard.locked_until = None;
 }
 
 fn issue_session_cookie(
     state: &ServerState,
     status: StatusCode,
 ) -> std::result::Result<Response, (StatusCode, String)> {
+    let session_id = generate_token().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to mint viewer session".to_string(),
+        )
+    })?;
+    let header = session_cookie_header(&session_id)?;
+    state
+        .sessions
+        .lock()
+        .expect("viewer sessions poisoned")
+        .insert(session_id);
+
     let mut response = status.into_response();
-    response.headers_mut().insert(
-        SET_COOKIE,
-        session_cookie_header(state.session_cookie.as_str())?,
-    );
+    response.headers_mut().insert(SET_COOKIE, header);
     Ok(response)
 }
 
-async fn clear_viewer_session() -> Response {
+async fn clear_viewer_session(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let cookie_header = headers.get(COOKIE).and_then(|value| value.to_str().ok());
+    if let Some(session_id) = cookie_value(cookie_header, SESSION_COOKIE_NAME) {
+        state
+            .sessions
+            .lock()
+            .expect("viewer sessions poisoned")
+            .remove(session_id);
+    }
+
     let mut response = StatusCode::NO_CONTENT.into_response();
     response
         .headers_mut()
@@ -947,7 +1023,6 @@ fn ensure_server_paths_in(root: &Path, hostname: Option<&str>) -> Result<ServerP
         cert_path,
         key_path,
         token_path: root.join("token"),
-        session_cookie_path: root.join("viewer-session"),
     })
 }
 
@@ -978,11 +1053,19 @@ fn generate_token() -> Result<String> {
 }
 
 fn generate_viewer_code() -> Result<String> {
-    let mut bytes = [0u8; 4];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| anyhow!("generate remote-control viewer code: {error}"))?;
-    let value = u32::from_le_bytes(bytes) % 1_000_000;
-    Ok(format!("{value:06}"))
+    const RANGE: u64 = 1_000_000;
+    // Reject the unaligned tail of the u32 space so every six-digit code is
+    // equally likely; a plain `% RANGE` would bias toward lower codes.
+    let bound = (1u64 << 32) - ((1u64 << 32) % RANGE);
+    loop {
+        let mut bytes = [0u8; 4];
+        getrandom::fill(&mut bytes)
+            .map_err(|error| anyhow!("generate remote-control viewer code: {error}"))?;
+        let raw = u32::from_le_bytes(bytes) as u64;
+        if raw < bound {
+            return Ok(format!("{:06}", raw % RANGE));
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1524,6 +1607,80 @@ mod tests {
         assert!(code.chars().all(|ch| ch.is_ascii_digit()));
     }
 
+    fn test_state() -> ServerState {
+        ServerState {
+            db_path: Arc::new(PathBuf::from("unused.sqlite3")),
+            token: Arc::new("integration-token".to_string()),
+            viewer_code: Arc::new("123456".to_string()),
+            sessions: Arc::new(Mutex::new(HashSet::new())),
+            code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
+        }
+    }
+
+    #[test]
+    fn viewer_code_locks_out_after_repeated_failures() {
+        let state = test_state();
+
+        // Each wrong code is rejected as unauthorized until the lockout trips.
+        for _ in 0..MAX_VIEWER_CODE_ATTEMPTS {
+            let err = create_code_session_response(&state, "000000", StatusCode::NO_CONTENT)
+                .expect_err("wrong code rejected");
+            assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        }
+
+        // Once locked, further attempts are throttled — even the correct code.
+        let throttled = create_code_session_response(&state, "000000", StatusCode::NO_CONTENT)
+            .expect_err("locked out");
+        assert_eq!(throttled.0, StatusCode::TOO_MANY_REQUESTS);
+        let correct_but_locked =
+            create_code_session_response(&state, "123456", StatusCode::NO_CONTENT)
+                .expect_err("correct code still locked");
+        assert_eq!(correct_but_locked.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn correct_viewer_code_resets_failure_counter() {
+        let state = test_state();
+        for _ in 0..(MAX_VIEWER_CODE_ATTEMPTS - 1) {
+            let _ = create_code_session_response(&state, "000000", StatusCode::NO_CONTENT);
+        }
+        // A success before the threshold clears the counter so we never lock out.
+        create_code_session_response(&state, "123456", StatusCode::NO_CONTENT).expect("unlock");
+        assert_eq!(state.code_guard.lock().expect("guard").failures, 0);
+    }
+
+    #[test]
+    fn issuing_and_clearing_a_session_revokes_the_cookie() {
+        let state = test_state();
+        let response =
+            issue_session_cookie(&state, StatusCode::NO_CONTENT).expect("issue session cookie");
+        let set_cookie = response
+            .headers()
+            .get(SET_COOKIE)
+            .expect("set-cookie")
+            .to_str()
+            .expect("set-cookie str");
+        let value = cookie_value(Some(set_cookie), SESSION_COOKIE_NAME)
+            .expect("session cookie value")
+            .to_string();
+
+        // The freshly minted id is a tracked, valid session.
+        assert!(state.sessions.lock().expect("sessions").contains(&value));
+
+        // Logout removes exactly that id, so the cookie no longer authorizes.
+        state.sessions.lock().expect("sessions").remove(&value);
+        assert!(!state.sessions.lock().expect("sessions").contains(&value));
+    }
+
+    #[test]
+    fn issued_session_ids_are_unique_per_unlock() {
+        let state = test_state();
+        for _ in 0..3 {
+            issue_session_cookie(&state, StatusCode::NO_CONTENT).expect("issue");
+        }
+        assert_eq!(state.sessions.lock().expect("sessions").len(), 3);
+    }
+
     #[test]
     fn ensure_token_persists_and_is_stable() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1539,11 +1696,11 @@ mod tests {
     fn remote_qr_login_url_encodes_query_token() {
         assert_eq!(
             remote_qr_login_url("localhost", "abc123"),
-            "https://localhost:11921/?token=abc123"
+            "https://localhost:11921/auth/login?token=abc123"
         );
         assert_eq!(
             remote_qr_login_url("example.com", "a+b/c=="),
-            "https://example.com:11921/?token=a%2Bb%2Fc%3D%3D"
+            "https://example.com:11921/auth/login?token=a%2Bb%2Fc%3D%3D"
         );
     }
 
@@ -1598,14 +1755,8 @@ mod tests {
         let db_path = dir.path().join("sessions.sqlite3");
         init_db(&db_path).expect("init db");
         let token = "integration-token".to_string();
-        let session_cookie_value = "persisted-viewer-session".to_string();
         let viewer_code = "123456".to_string();
-        let app = build_router(
-            db_path,
-            token.clone(),
-            session_cookie_value.clone(),
-            viewer_code.clone(),
-        );
+        let app = build_router(db_path, token.clone(), viewer_code.clone());
 
         let _client = build_client(&cert_path).expect("pinned client");
         let base = "https://127.0.0.1:11921";
@@ -1755,7 +1906,7 @@ mod tests {
             .to_str()
             .expect("bootstrap set-cookie str")
             .to_string();
-        assert!(bootstrap_cookie.contains(&session_cookie_value));
+        assert!(bootstrap_cookie.contains(SESSION_COOKIE_NAME));
 
         let viewer_sessions_unauthorized = app
             .clone()
@@ -1801,7 +1952,12 @@ mod tests {
         assert!(session_cookie.contains("HttpOnly"));
         assert!(session_cookie.contains("Secure"));
         assert!(session_cookie.contains("SameSite=Strict"));
-        assert!(session_cookie.contains(&session_cookie_value));
+        assert!(session_cookie.contains(SESSION_COOKIE_NAME));
+        // Only the cookie value is needed to replay the session; keep it so the
+        // logout step below can prove the same cookie is revoked server-side.
+        let session_cookie_value = cookie_value(Some(&session_cookie), SESSION_COOKIE_NAME)
+            .expect("session cookie value")
+            .to_string();
 
         let live_listed_via_cookie = app
             .clone()
@@ -1809,7 +1965,7 @@ mod tests {
                 axum::http::Request::builder()
                     .method("GET")
                     .uri(format!("{base}/live/sessions"))
-                    .header(axum::http::header::COOKIE, session_cookie)
+                    .header(axum::http::header::COOKIE, session_cookie.clone())
                     .body(axum::body::Body::empty())
                     .expect("request"),
             )
@@ -1834,12 +1990,35 @@ mod tests {
                 axum::http::Request::builder()
                     .method("DELETE")
                     .uri(format!("{base}/auth/session"))
+                    .header(axum::http::header::COOKIE, session_cookie.clone())
                     .body(axum::body::Body::empty())
                     .expect("request"),
             )
             .await
             .expect("logout request");
         assert_eq!(logout.status(), reqwest::StatusCode::NO_CONTENT);
+
+        // The cookie is revoked server-side: replaying the very same cookie now
+        // fails, so logout is not merely cosmetic client-side cookie clearing.
+        let live_after_logout = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("{base}/live/sessions"))
+                    .header(
+                        axum::http::header::COOKIE,
+                        format!("{SESSION_COOKIE_NAME}={session_cookie_value}"),
+                    )
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("live after logout request");
+        assert_eq!(
+            live_after_logout.status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
 
         let live_unauthorized = app
             .clone()
