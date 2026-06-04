@@ -1637,7 +1637,7 @@ fn start_dictation(
     dictation_cancel_tx: &mut Option<std_mpsc::Sender<()>>,
 ) {
     if state.voice_input_active {
-        state.status_line = Some(StatusMessage::info("voice input is already recording..."));
+        state.status_line = Some(StatusMessage::info("voice input is already active..."));
         return;
     }
 
@@ -1646,7 +1646,7 @@ fn start_dictation(
     state.voice_input_level = Some(0.0);
     let cursor = state.input_cursor.min(input_char_count(&state.input));
     state.voice_input_range = Some((cursor, cursor));
-    state.status_line = Some(StatusMessage::info("recording voice input..."));
+    state.status_line = Some(StatusMessage::info("listening..."));
 
     let (cancel_tx, cancel_rx) = std_mpsc::channel();
     *dictation_cancel_tx = Some(cancel_tx);
@@ -1690,7 +1690,7 @@ fn update_dictation_partial(state: &mut AppState, text: &str) {
     state.voice_input_range = Some(replace_input_range(state, range.0, range.1, text));
     state.scroll_input_to_bottom();
     state.update_autocomplete();
-    state.status_line = Some(StatusMessage::info("recording voice input..."));
+    state.status_line = Some(StatusMessage::info("listening..."));
 }
 
 fn update_dictation_level(state: &mut AppState, level: f32) {
@@ -3626,7 +3626,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else if state.voice_input_active {
         format!(
-            " 🎙 recording voice {} Ctrl-R stop ",
+            " 🎙 {} Ctrl-R stop ",
             voice_level_meter(state.voice_input_level)
         )
     } else {
@@ -6609,7 +6609,7 @@ mod tests {
         assert_eq!(state.input_cursor, "before hello world ".chars().count());
         let status = state.status_line.expect("status");
         assert_eq!(status.kind, StatusKind::Info);
-        assert_eq!(status.text, "recording voice input...");
+        assert_eq!(status.text, "listening...");
     }
 
     #[test]
