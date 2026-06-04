@@ -557,6 +557,9 @@ fn repair_inline_viewport(
 
 fn needs_live_redraw(state: &AppState) -> bool {
     state.voice_input_active
+        || state.help_overlay
+        || state.has_pending_permission()
+        || state.config_picker.is_some()
         || matches!(
             state.connection_state,
             ConnectionState::Launching
@@ -4792,6 +4795,131 @@ mod tests {
 
         state.connection_state = ConnectionState::Cancelling;
         assert!(should_repair_inline_view(UiMode::InlineChat, &state));
+    }
+
+    #[test]
+    fn inline_permission_prompt_keeps_repair_active_until_resolved() {
+        let pending =
+            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
+        let mut state = AppState::new();
+        state.connection_state = ConnectionState::Ready;
+        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+
+        assert!(state.has_pending_permission());
+        assert!(should_repair_inline_view(UiMode::InlineChat, &state));
+        assert!(!should_repair_inline_view(UiMode::FullscreenTui, &state));
+
+        let _ = state.take_pending_permission();
+        assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
+    }
+
+    #[test]
+    fn streaming_inline_help_overlay_keeps_repair_active_after_f10() {
+        let mut state = AppState::new();
+        state.record_user_prompt("hello".to_string());
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(10)));
+
+        assert!(state.is_streaming());
+        assert!(state.help_overlay);
+        assert!(should_repair_inline_view(UiMode::InlineChat, &state));
+        assert!(!should_repair_inline_view(UiMode::FullscreenTui, &state));
+
+        let desired = desired_inline_height(
+            &state,
+            Size {
+                width: 100,
+                height: 40,
+            },
+        );
+        assert!(
+            desired > INLINE_CHAT_HEIGHT,
+            "help overlay must request enough inline rows to render while streaming"
+        );
+
+        let backend = TestBackend::new(100, desired);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("help"), "rendered:\n{rendered}");
+        assert!(rendered.contains("General"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Ctrl-C"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn streaming_inline_config_shortcut_does_not_disrupt_help_overlay() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![
+                    SessionConfigSelectOption::new("model-1", "Model 1"),
+                    SessionConfigSelectOption::new("model-2", "Model 2"),
+                ],
+            ),
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "ask",
+                vec![
+                    SessionConfigSelectOption::new("ask", "Ask"),
+                    SessionConfigSelectOption::new("code", "Code"),
+                ],
+            ),
+        ];
+        state.record_user_prompt("hello".to_string());
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(10)));
+        let overlay_height = desired_inline_height(
+            &state,
+            Size {
+                width: 100,
+                height: 40,
+            },
+        );
+        assert!(overlay_height > INLINE_CHAT_HEIGHT);
+
+        handle_inline_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('1'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.is_streaming());
+        assert!(state.help_overlay, "help overlay should remain open while streaming");
+        assert!(state.config_picker.is_none(), "streaming must not open config picker");
+        assert!(state.status_line.is_none(), "help overlay should keep unrelated shortcuts from mutating status");
+        assert!(should_repair_inline_view(UiMode::InlineChat, &state));
+        assert_eq!(
+            desired_inline_height(
+                &state,
+                Size {
+                    width: 100,
+                    height: 40,
+                },
+            ),
+            overlay_height,
+            "streaming config shortcut must not collapse the inline overlay"
+        );
+
+        let backend = TestBackend::new(100, overlay_height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("help"), "rendered:\n{rendered}");
+        assert!(rendered.contains("General"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Model values"), "rendered:\n{rendered}");
     }
 
     #[test]
