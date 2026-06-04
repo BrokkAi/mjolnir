@@ -18,6 +18,11 @@ use std::{
 use base64::{Engine as _, engine::general_purpose};
 
 #[cfg(target_os = "macos")]
+const DICTATION_TIMEOUT_SECONDS: &str = "600";
+#[cfg(target_os = "macos")]
+const DICTATION_SILENCE_SECONDS: &str = "20";
+
+#[cfg(target_os = "macos")]
 const SWIFT_HELPER: &str = r#"
 import AVFoundation
 import Darwin
@@ -26,6 +31,7 @@ import Speech
 
 struct Options {
     var timeout: TimeInterval = 600
+    var silence: TimeInterval = 20
     var localeIdentifier: String? = nil
 }
 
@@ -36,6 +42,9 @@ func parseOptions(_ args: [String]) -> Options {
         switch args[index] {
         case "--timeout" where index + 1 < args.count:
             options.timeout = TimeInterval(args[index + 1]) ?? options.timeout
+            index += 2
+        case "--silence" where index + 1 < args.count:
+            options.silence = TimeInterval(args[index + 1]) ?? options.silence
             index += 2
         case "--locale" where index + 1 < args.count:
             options.localeIdentifier = args[index + 1]
@@ -147,6 +156,7 @@ inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
 }
 
 var bestText = ""
+var lastResultAt = Date()
 var finished = false
 let startedAt = Date()
 
@@ -154,6 +164,7 @@ let task = speechRecognizer.recognitionTask(with: request) { result, error in
     if let result {
         bestText = result.bestTranscription.formattedString
         emit("PARTIAL", bestText)
+        lastResultAt = Date()
         if result.isFinal {
             finished = true
         }
@@ -173,6 +184,9 @@ do {
 while !finished {
     RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
     if Date().timeIntervalSince(startedAt) >= options.timeout {
+        break
+    }
+    if !bestText.isEmpty && Date().timeIntervalSince(lastResultAt) >= options.silence {
         break
     }
 }
@@ -206,7 +220,9 @@ where
         .arg("-")
         .arg("--")
         .arg("--timeout")
-        .arg("600")
+        .arg(DICTATION_TIMEOUT_SECONDS)
+        .arg("--silence")
+        .arg(DICTATION_SILENCE_SECONDS)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
