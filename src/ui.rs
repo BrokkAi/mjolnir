@@ -667,6 +667,13 @@ fn handle_crossterm(
             {
                 return TerminalRequest::None;
             }
+            if matches!(state.voice_input_state, VoiceInputState::Processing) {
+                state.record_status_message(
+                    StatusKind::Warning,
+                    "voice prompt is still preparing; wait for it to send",
+                );
+                return TerminalRequest::None;
+            }
             state.input_paste_burst.clear();
             handle_paste(state, &text);
             return TerminalRequest::None;
@@ -774,6 +781,16 @@ fn handle_crossterm(
     }
 
     if open_config_value_picker_for_shortcut(state, key.modifiers, key.code) {
+        return TerminalRequest::None;
+    }
+
+    if matches!(state.voice_input_state, VoiceInputState::Processing)
+        && is_prompt_input_locked_while_voice_processing(key.modifiers, key.code)
+    {
+        state.record_status_message(
+            StatusKind::Warning,
+            "voice prompt is still preparing; wait for it to send",
+        );
         return TerminalRequest::None;
     }
 
@@ -1746,6 +1763,37 @@ fn is_prompt_newline_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
     {
         false
     }
+}
+
+fn is_prompt_input_locked_while_voice_processing(modifiers: KeyModifiers, code: KeyCode) -> bool {
+    matches!(
+        (modifiers, code),
+        (_, KeyCode::Enter)
+            | (_, KeyCode::Backspace)
+            | (_, KeyCode::Delete)
+            | (_, KeyCode::Left)
+            | (_, KeyCode::Right)
+            | (_, KeyCode::Up)
+            | (_, KeyCode::Down)
+            | (_, KeyCode::Home)
+            | (_, KeyCode::End)
+            | (_, KeyCode::PageUp)
+            | (_, KeyCode::PageDown)
+            | (_, KeyCode::Esc)
+            | (KeyModifiers::CONTROL, KeyCode::Char('a'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('b'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('d'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('e'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('f'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('k'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('u'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('w'))
+            | (KeyModifiers::ALT, KeyCode::Char('b'))
+            | (KeyModifiers::ALT, KeyCode::Char('f'))
+    ) || is_prompt_newline_key(modifiers, code)
+        || is_plain_character_input(modifiers, code)
+        || (modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && code == KeyCode::Char('v'))
 }
 
 fn should_open_help(modifiers: KeyModifiers, code: KeyCode) -> bool {
@@ -6807,6 +6855,51 @@ mod tests {
         assert!(state.input.is_empty());
         assert_eq!(state.attachments.len(), 1);
         assert_eq!(state.attachments[0].content, "a\nb\nc\nd\ne");
+    }
+
+    #[test]
+    fn voice_processing_blocks_prompt_typing() {
+        let mut state = AppState::new();
+        state.voice_input_state = VoiceInputState::Processing;
+        state.input = "summarize".to_string();
+        state.input_cursor = state.input.chars().count();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('!')));
+
+        assert_eq!(state.input, "summarize");
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Warning);
+        assert_eq!(
+            status.text,
+            "voice prompt is still preparing; wait for it to send"
+        );
+    }
+
+    #[test]
+    fn voice_processing_blocks_paste_and_submit() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.voice_input_state = VoiceInputState::Processing;
+        state.input = "summarize".to_string();
+        state.input_cursor = state.input.chars().count();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            CtEvent::Paste("blocked paste".to_string()),
+        );
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert_eq!(state.input, "summarize");
+        assert!(cmd_rx.try_recv().is_err(), "prompt must stay unsent");
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Warning);
+        assert_eq!(
+            status.text,
+            "voice prompt is still preparing; wait for it to send"
+        );
     }
 
     #[test]
