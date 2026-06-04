@@ -3,7 +3,10 @@
 //! macOS ships the Speech framework in Swift, so the TUI shells out to a tiny
 //! helper rather than binding Objective-C APIs from Rust.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
+
+#[cfg(target_os = "macos")]
+use anyhow::Context;
 
 #[cfg(target_os = "macos")]
 use std::{
