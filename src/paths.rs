@@ -57,7 +57,10 @@ mod tests {
     fn display_path_with_tilde_shortens_home_prefix() {
         let home = std::env::var_os("HOME").expect("HOME set for test environment");
         let home = PathBuf::from(home);
-        assert_eq!(display_path_with_tilde(&home.join("project/src")), "~/project/src");
+        assert_eq!(
+            display_path_with_tilde(&home.join("project/src")),
+            "~/project/src"
+        );
     }
 
     #[test]
