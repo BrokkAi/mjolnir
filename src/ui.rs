@@ -2523,7 +2523,6 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     ];
     let agent_label = state.agent_label.trim();
     if !agent_label.is_empty() {
-        spans.push(Span::styled("agent ", Style::default().fg(Color::Gray)));
         spans.push(Span::styled(
             agent_label.to_string(),
             Style::default().fg(Color::Cyan),
@@ -2538,7 +2537,6 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
             140..=179 => 40,
             _ => 56,
         };
-        spans.push(Span::styled("project ", Style::default().fg(Color::Gray)));
         spans.push(Span::styled(
             compact_middle_display(project_label, max_width),
             Style::default().fg(Color::LightMagenta),
@@ -2553,7 +2551,6 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
                 90..=139 => 18,
                 _ => 24,
             };
-            spans.push(Span::styled("worktree ", Style::default().fg(Color::Gray)));
             spans.push(Span::styled(
                 compact_middle_display(worktree_label, max_width),
                 Style::default()
@@ -4674,10 +4671,10 @@ mod tests {
     }
 
     #[test]
-    fn header_surfaces_project() {
+    fn header_surfaces_full_directory_path() {
         let mut state = AppState::new();
         state.agent_label = "anvil".to_string();
-        state.project_label = "project-a".to_string();
+        state.project_label = "~/code/project-a".to_string();
         let backend = TestBackend::new(140, 1);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
@@ -4690,20 +4687,22 @@ mod tests {
             rendered.contains(&mjolnir_version_label()),
             "rendered:\n{rendered}"
         );
-        assert!(rendered.contains("agent anvil"), "rendered:\n{rendered}");
+        assert!(rendered.contains("anvil"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("project project-a"),
+            rendered.contains("~/code/project-a"),
             "rendered:\n{rendered}"
         );
+        assert!(!rendered.contains("agent "), "rendered:\n{rendered}");
+        assert!(!rendered.contains("project "), "rendered:\n{rendered}");
         assert!(!rendered.contains("cwd"), "rendered:\n{rendered}");
         assert!(!rendered.contains("worktree"), "rendered:\n{rendered}");
     }
 
     #[test]
-    fn header_shows_project_worktree_and_session_title_without_session_id() {
+    fn header_shows_project_path_worktree_and_session_title_without_session_id() {
         let mut state = AppState::new();
         state.agent_label = "uvx".to_string();
-        state.project_label = "mjolnir".to_string();
+        state.project_label = "~/code/mjolnir/.mjolnir/worktrees/bold-willow".to_string();
         state.worktree_label = Some("bold-willow".to_string());
         state.session_id = Some("48c95a78-cdbf-416a-807a-b0c5124fcc72".to_string());
         state.session_title = Some("Review payment flow".to_string());
@@ -4716,18 +4715,16 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("mjolnir v"), "rendered:\n{rendered}");
+        assert!(rendered.contains("uvx"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("project mjolnir"),
+            rendered.contains("~/code/mjolnir/.mjolnir/worktrees/bold-willow"),
             "rendered:\n{rendered}"
         );
-        assert!(
-            rendered.contains("worktree bold-willow"),
-            "rendered:\n{rendered}"
-        );
-        assert!(
-            !rendered.contains(".mjolnir/worktrees"),
-            "rendered:\n{rendered}"
-        );
+        assert!(rendered.contains("bold-willow"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("worktree "), "rendered:\n{rendered}");
+        assert!(!rendered.contains("agent "), "rendered:\n{rendered}");
+        assert!(!rendered.contains("project "), "rendered:\n{rendered}");
+        assert!(!rendered.contains("/Users/"), "rendered:\n{rendered}");
         assert!(!rendered.contains("session"), "rendered:\n{rendered}");
         assert!(!rendered.contains("48c95a78"), "rendered:\n{rendered}");
         assert!(

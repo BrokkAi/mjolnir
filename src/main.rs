@@ -474,11 +474,8 @@ fn worktree_label(worktree: Option<&CreatedWorktree>) -> Option<String> {
     worktree.map(|w| paths::folder_label(&w.worktree_root))
 }
 
-fn project_label(cwd: &std::path::Path, worktree: Option<&CreatedWorktree>) -> String {
-    if let Some(worktree) = worktree {
-        return paths::folder_label(&worktree.project_root);
-    }
-    paths::project_label_from_cwd(cwd)
+fn project_label(cwd: &std::path::Path, _worktree: Option<&CreatedWorktree>) -> String {
+    paths::display_path_with_tilde(cwd)
 }
 
 fn handle_worktree_after_tui(worktree: Option<&CreatedWorktree>, mode: Option<UiMode>) -> bool {
@@ -964,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn project_label_uses_worktree_project_folder_name() {
+    fn project_label_uses_full_worktree_session_path_with_tilde() {
         let worktree = CreatedWorktree {
             project_root: PathBuf::from("/Users/ryan/code/mjolnir"),
             worktree_root: PathBuf::from("/Users/ryan/code/mjolnir/.mjolnir/worktrees/bold-willow"),
@@ -976,27 +973,20 @@ mod tests {
 
         assert_eq!(
             project_label(&worktree.session_cwd, Some(&worktree)),
-            "mjolnir"
+            paths::display_path_with_tilde(&worktree.session_cwd)
         );
     }
 
     #[test]
-    fn project_label_strips_mjolnir_worktree_path_to_project_folder_name() {
-        assert_eq!(
-            project_label(
-                std::path::Path::new("/Users/ryan/code/mjolnir/.mjolnir/worktrees/bold-willow/src"),
-                None
-            ),
-            "mjolnir"
-        );
+    fn project_label_uses_full_directory_path_inside_mjolnir_worktree() {
+        let cwd = std::path::Path::new("/Users/ryan/code/mjolnir/.mjolnir/worktrees/bold-willow/src");
+        assert_eq!(project_label(cwd, None), paths::display_path_with_tilde(cwd));
     }
 
     #[test]
-    fn project_label_uses_cwd_folder_name_without_worktree() {
-        assert_eq!(
-            project_label(std::path::Path::new("/Users/ryan/code/mjolnir/src"), None),
-            "src"
-        );
+    fn project_label_uses_full_directory_path_without_worktree() {
+        let cwd = std::path::Path::new("/Users/ryan/code/mjolnir/src");
+        assert_eq!(project_label(cwd, None), paths::display_path_with_tilde(cwd));
     }
 
     #[test]

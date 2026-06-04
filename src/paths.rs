@@ -10,6 +10,20 @@ pub fn folder_label(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Render a path for the UI, replacing the user's home directory prefix with
+/// `~` when possible so long paths stay a bit shorter.
+pub fn display_path_with_tilde(path: &Path) -> String {
+    let Some(home) = std::env::var_os("HOME") else {
+        return path.display().to_string();
+    };
+    let home = Path::new(&home);
+    match path.strip_prefix(home) {
+        Ok(relative) if relative.as_os_str().is_empty() => "~".to_string(),
+        Ok(relative) => format!("~/{}", relative.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 /// The directory containing a `.mjolnir` marker dir on the way up from `path`,
 /// if any. Used to label a session by its enclosing project rather than the
 /// internal worktree/checkout directory.
@@ -37,6 +51,13 @@ mod tests {
     #[test]
     fn folder_label_uses_last_component() {
         assert_eq!(folder_label(Path::new("/home/me/project")), "project");
+    }
+
+    #[test]
+    fn display_path_with_tilde_shortens_home_prefix() {
+        let home = std::env::var_os("HOME").expect("HOME set for test environment");
+        let home = PathBuf::from(home);
+        assert_eq!(display_path_with_tilde(&home.join("project/src")), "~/project/src");
     }
 
     #[test]
