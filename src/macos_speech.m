@@ -29,6 +29,18 @@ static MjSpeechTranscriptionResult mj_result(int kind, NSString *text, NSString 
     return result;
 }
 
+static NSString *mj_trimmed_string(NSString *value) {
+    if (value == nil) {
+        return nil;
+    }
+    NSString *trimmed = [value
+        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed == nil || trimmed.length == 0) {
+        return nil;
+    }
+    return trimmed;
+}
+
 MjSpeechTranscriptionResult mj_transcribe_wav_file(const char *path) {
     @autoreleasepool {
         if (path == NULL) {
@@ -94,7 +106,7 @@ MjSpeechTranscriptionResult mj_transcribe_wav_file(const char *path) {
             if ([request respondsToSelector:@selector(setRequiresOnDeviceRecognition:)]) {
                 request.requiresOnDeviceRecognition = YES;
             }
-            request.shouldReportPartialResults = NO;
+            request.shouldReportPartialResults = YES;
 
             dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
             __block NSString *bestText = nil;
@@ -119,7 +131,11 @@ MjSpeechTranscriptionResult mj_transcribe_wav_file(const char *path) {
                 dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC);
             if (dispatch_semaphore_wait(semaphore, timeout) != 0) {
                 [task cancel];
-                return mj_result(2, nil, @"Timed out while waiting for local speech transcription");
+                NSString *trimmed = mj_trimmed_string(bestText);
+                if (trimmed != nil) {
+                    return mj_result(0, trimmed, nil);
+                }
+                return mj_result(1, nil, @"Local speech transcription did not finish in time");
             }
 
             [task cancel];
@@ -127,10 +143,8 @@ MjSpeechTranscriptionResult mj_transcribe_wav_file(const char *path) {
                 return mj_result(2, nil, errorText);
             }
 
-            NSString *trimmed =
-                [bestText stringByTrimmingCharactersInSet:
-                              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (trimmed == nil || trimmed.length == 0) {
+            NSString *trimmed = mj_trimmed_string(bestText);
+            if (trimmed == nil) {
                 return mj_result(1, nil, @"Local speech transcription returned no text");
             }
 
