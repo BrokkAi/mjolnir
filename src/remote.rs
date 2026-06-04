@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_client_protocol::schema::SessionUpdate;
+use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallContent};
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
 use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{Html, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
@@ -28,9 +28,9 @@ use crate::event::{UiCommand, UiEvent};
 const REMOTE_CONTROL_ADDR: &str = "127.0.0.1:11921";
 const REMOTE_CONTROL_UPSERT_URL: &str = "https://localhost:11921/api/sessions";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
-/// A `SessionRecord` is a handful of short strings; cap request bodies well
-/// above that so a buggy or hostile local client cannot exhaust memory.
-const MAX_BODY_BYTES: usize = 64 * 1024;
+/// A `SessionRecord` can include the full transcript history; allow room for
+/// larger snapshots while still capping request bodies to something reasonable.
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRecord {
@@ -41,6 +41,16 @@ pub struct SessionRecord {
     pub total_messages: u64,
     pub project: String,
     pub agent: String,
+    #[serde(default)]
+    pub transcript: Vec<TranscriptEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TranscriptEntry {
+    pub kind: String,
+    pub text: String,
+    #[serde(default)]
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +71,7 @@ struct TrackerState {
     project: String,
     agent: String,
     agent_message_open: bool,
+    transcript: Vec<TranscriptEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +85,7 @@ struct ServerPaths {
 #[derive(Debug, Clone)]
 struct ServerState {
     db_path: Arc<PathBuf>,
+    token: Arc<String>,
 }
 
 impl TrackerState {
@@ -87,13 +99,15 @@ impl TrackerState {
             project,
             agent,
             agent_message_open: false,
+            transcript: Vec::new(),
         }
     }
 
     fn observe_command(&mut self, command: &UiCommand) {
-        if matches!(command, UiCommand::SendPrompt { .. }) {
+        if let UiCommand::SendPrompt { text, .. } = command {
             self.total_messages = self.total_messages.saturating_add(1);
             self.agent_message_open = false;
+            self.push_transcript_entry("user", text.clone());
             self.touch();
         }
     }
@@ -132,10 +146,34 @@ impl TrackerState {
 
     fn observe_session_update(&mut self, update: &SessionUpdate) {
         match update {
-            SessionUpdate::AgentMessageChunk(_) => {
+            SessionUpdate::AgentMessageChunk(chunk) => {
                 if !self.agent_message_open {
                     self.total_messages = self.total_messages.saturating_add(1);
                     self.agent_message_open = true;
+                }
+                self.append_transcript_text("agent", content_block_text(&chunk.content));
+                self.touch();
+            }
+            SessionUpdate::AgentThoughtChunk(chunk) => {
+                self.agent_message_open = false;
+                self.append_transcript_text("thought", content_block_text(&chunk.content));
+                self.touch();
+            }
+            SessionUpdate::ToolCall(tool_call) => {
+                self.agent_message_open = false;
+                self.push_transcript_entry(
+                    "tool",
+                    format_tool_call(tool_call.title.as_str(), &tool_call.content),
+                );
+                self.touch();
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                self.agent_message_open = false;
+                if let Some(content) = &update.fields.content {
+                    self.push_transcript_entry(
+                        "tool",
+                        format_tool_call(update.fields.title.as_deref().unwrap_or("tool"), content),
+                    );
                 }
                 self.touch();
             }
@@ -153,6 +191,24 @@ impl TrackerState {
         }
     }
 
+    fn append_transcript_text(&mut self, kind: &str, text: String) {
+        if let Some(last) = self.transcript.last_mut()
+            && last.kind == kind
+        {
+            last.text.push_str(&text);
+            return;
+        }
+        self.push_transcript_entry(kind, text);
+    }
+
+    fn push_transcript_entry(&mut self, kind: &str, text: String) {
+        self.transcript.push(TranscriptEntry {
+            kind: kind.to_string(),
+            text,
+            timestamp: now_rfc3339(),
+        });
+    }
+
     fn snapshot(&self) -> Option<SessionRecord> {
         let session_id = self.session_id.clone()?;
         let start_time = self.start_time.clone()?;
@@ -165,6 +221,7 @@ impl TrackerState {
             total_messages: self.total_messages,
             project: self.project.clone(),
             agent: self.agent.clone(),
+            transcript: self.transcript.clone(),
         })
     }
 
@@ -346,17 +403,25 @@ fn install_crypto_provider() {
 }
 
 fn build_router(db_path: PathBuf, token: String) -> Router {
-    Router::new()
+    let state = ServerState {
+        db_path: Arc::new(db_path),
+        token: Arc::new(token),
+    };
+
+    let protected = Router::new()
+        .route("/live/sessions", get(list_sessions))
         .route("/sessions", get(list_sessions))
         .route("/api/sessions", post(upsert_session))
         .layer(axum::middleware::from_fn_with_state(
-            Arc::new(token),
+            Arc::clone(&state.token),
             require_token,
-        ))
+        ));
+
+    Router::new()
+        .route("/", get(remote_viewer))
+        .merge(protected)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(ServerState {
-            db_path: Arc::new(db_path),
-        })
+        .with_state(state)
 }
 
 /// Reject any request that does not carry the expected `Authorization: Bearer`
@@ -397,6 +462,12 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+async fn remote_viewer(State(state): State<ServerState>) -> Html<String> {
+    let token = state.token.as_ref().clone();
+    let html = include_str!("remote_viewer.html").replace("__MJ_REMOTE_TOKEN__", &token);
+    Html(html)
 }
 
 pub fn agent_display_label(agent: &SelectedAgent) -> String {
@@ -602,6 +673,7 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                 total_messages: u64::try_from(total_messages).unwrap_or(0),
                 project: row.get(5)?,
                 agent: row.get(6)?,
+                transcript: Vec::new(),
             })
         })
         .context("query sessions")?;
@@ -626,6 +698,37 @@ async fn send_snapshot(
         .error_for_status()
         .context("remote-control server returned an error")?;
     Ok(())
+}
+
+fn content_block_text(block: &ContentBlock) -> String {
+    match block {
+        ContentBlock::Text(text) => text.text.clone(),
+        ContentBlock::Image(_) => "[image]".to_string(),
+        ContentBlock::Audio(_) => "[audio]".to_string(),
+        ContentBlock::ResourceLink(link) => format!("[link {}]", link.uri),
+        ContentBlock::Resource(_) => "[resource]".to_string(),
+        _ => "[unknown content]".to_string(),
+    }
+}
+
+fn format_tool_call(title: &str, content: &[ToolCallContent]) -> String {
+    let mut parts = Vec::new();
+    for item in content {
+        match item {
+            ToolCallContent::Content(block) => parts.push(content_block_text(&block.content)),
+            ToolCallContent::Diff(diff) => parts.push(format!("diff: {}", diff.path.display())),
+            ToolCallContent::Terminal(terminal) => {
+                parts.push(format!("terminal: {}", terminal.terminal_id))
+            }
+            _ => parts.push("unsupported tool content".to_string()),
+        }
+    }
+
+    if parts.is_empty() {
+        title.to_string()
+    } else {
+        format!("{}\n\n{}", title, parts.join("\n\n"))
+    }
 }
 
 fn now_rfc3339() -> String {
@@ -668,6 +771,42 @@ mod tests {
     }
 
     #[test]
+    fn tracker_records_transcript_history() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        state.observe_command(&UiCommand::SendPrompt {
+            text: "hello".to_string(),
+            images: Vec::new(),
+        });
+        state.observe_session_update(&SessionUpdate::AgentMessageChunk(
+            agent_client_protocol::schema::ContentChunk::new(
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("hi"),
+                ),
+            ),
+        ));
+        state.observe_session_update(&SessionUpdate::AgentMessageChunk(
+            agent_client_protocol::schema::ContentChunk::new(
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new(" there"),
+                ),
+            ),
+        ));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript.len(), 2);
+        assert_eq!(snapshot.transcript[0].kind, "user");
+        assert_eq!(snapshot.transcript[0].text, "hello");
+        assert!(!snapshot.transcript[0].timestamp.is_empty());
+        assert_eq!(snapshot.transcript[1].kind, "agent");
+        assert_eq!(snapshot.transcript[1].text, "hi there");
+        assert!(!snapshot.transcript[1].timestamp.is_empty());
+    }
+
+    #[test]
     fn sqlite_upsert_and_load_round_trip() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("sessions.sqlite3");
@@ -679,6 +818,7 @@ mod tests {
             total_messages: 4,
             project: "mjolnir".to_string(),
             agent: "anvil".to_string(),
+            transcript: Vec::new(),
         };
 
         upsert_session_record(&db_path, &session).expect("insert");
@@ -774,6 +914,7 @@ mod tests {
             total_messages: 1,
             project: "proj".to_string(),
             agent: "agent".to_string(),
+            transcript: Vec::new(),
         };
 
         // Without the bearer token the write is rejected.
@@ -806,6 +947,39 @@ mod tests {
             .expect("list json");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id, "sess-int");
+
+        let viewer = client
+            .get(format!("{base}/"))
+            .send()
+            .await
+            .expect("viewer request")
+            .text()
+            .await
+            .expect("viewer body");
+        assert!(viewer.contains("Remote Sessions"));
+        assert!(viewer.contains(&token));
+
+        let live_unauthorized = client
+            .get(format!("{base}/live/sessions"))
+            .send()
+            .await
+            .expect("live unauthenticated request");
+        assert_eq!(
+            live_unauthorized.status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+
+        let live_listed: Vec<SessionRecord> = client
+            .get(format!("{base}/live/sessions"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .expect("live list request")
+            .json()
+            .await
+            .expect("live list json");
+        assert_eq!(live_listed.len(), 1);
+        assert_eq!(live_listed[0].session_id, "sess-int");
 
         server.abort();
     }

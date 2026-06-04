@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mjolnir Remote Sessions</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #111827;
+        --panel: #1f2937;
+        --panel-alt: #0f172a;
+        --border: #334155;
+        --text: #e5e7eb;
+        --muted: #94a3b8;
+        --accent: #60a5fa;
+        --accent-soft: rgba(96, 165, 250, 0.18);
+        --shadow: 0 10px 30px rgba(15, 23, 42, 0.28);
+        --user: #38bdf8;
+        --user-soft: rgba(56, 189, 248, 0.12);
+        --agent: #34d399;
+        --agent-soft: rgba(52, 211, 153, 0.12);
+        --thought: #f59e0b;
+        --thought-soft: rgba(245, 158, 11, 0.12);
+        --tool: #a78bfa;
+        --tool-soft: rgba(167, 139, 250, 0.12);
+        --system: #94a3b8;
+        --system-soft: rgba(148, 163, 184, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--text);
+        background: var(--bg);
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 360px minmax(0, 1fr);
+        min-height: 100vh;
+      }
+
+      .sidebar,
+      .main {
+        min-height: 100vh;
+      }
+
+      .sidebar {
+        border-right: 1px solid var(--border);
+        background: var(--panel-alt);
+        display: flex;
+        flex-direction: column;
+      }
+
+      .main {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .panel-header {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .panel-header h1,
+      .panel-header h2 {
+        margin: 0;
+        font-size: 18px;
+      }
+
+      .panel-header p {
+        margin: 8px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      #sessions {
+        padding: 12px;
+        overflow: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .session-item {
+        width: 100%;
+        text-align: left;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        color: inherit;
+        border-radius: 10px;
+        padding: 14px;
+        cursor: pointer;
+        box-shadow: var(--shadow);
+      }
+
+      .session-item:hover,
+      .session-item.active {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+      }
+
+      .session-title {
+        font-weight: 600;
+        margin-bottom: 6px;
+        word-break: break-word;
+      }
+
+      .session-meta {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+        word-break: break-word;
+      }
+
+      #transcript {
+        flex: 1;
+        overflow: auto;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .entry {
+        border: 1px solid var(--border);
+        background: var(--panel);
+        border-radius: 14px;
+        padding: 14px;
+        box-shadow: var(--shadow);
+      }
+
+      .entry-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+
+      .entry-heading {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .entry-icon {
+        width: 30px;
+        height: 30px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 15px;
+        flex: 0 0 auto;
+      }
+
+      .entry-kind {
+        display: inline-block;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .entry-time {
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .entry-body {
+        border-top: 1px solid rgba(148, 163, 184, 0.14);
+        padding-top: 12px;
+      }
+
+      .entry-text {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+
+      .entry-user {
+        background: linear-gradient(180deg, var(--user-soft), rgba(31, 41, 55, 0.95));
+        border-color: rgba(56, 189, 248, 0.4);
+      }
+
+      .entry-user .entry-icon,
+      .entry-user .entry-kind {
+        color: var(--user);
+      }
+
+      .entry-user .entry-icon {
+        background: rgba(56, 189, 248, 0.18);
+      }
+
+      .entry-agent {
+        background: linear-gradient(180deg, var(--agent-soft), rgba(31, 41, 55, 0.95));
+        border-color: rgba(52, 211, 153, 0.35);
+      }
+
+      .entry-agent .entry-icon,
+      .entry-agent .entry-kind {
+        color: var(--agent);
+      }
+
+      .entry-agent .entry-icon {
+        background: rgba(52, 211, 153, 0.18);
+      }
+
+      .entry-thought {
+        background: linear-gradient(180deg, var(--thought-soft), rgba(31, 41, 55, 0.95));
+        border-color: rgba(245, 158, 11, 0.35);
+      }
+
+      .entry-thought .entry-icon,
+      .entry-thought .entry-kind {
+        color: var(--thought);
+      }
+
+      .entry-thought .entry-icon {
+        background: rgba(245, 158, 11, 0.18);
+      }
+
+      .entry-tool {
+        background: linear-gradient(180deg, var(--tool-soft), rgba(31, 41, 55, 0.95));
+        border-color: rgba(167, 139, 250, 0.38);
+      }
+
+      .entry-tool .entry-icon,
+      .entry-tool .entry-kind {
+        color: var(--tool);
+      }
+
+      .entry-tool .entry-icon {
+        background: rgba(167, 139, 250, 0.18);
+      }
+
+      .entry-system {
+        background: linear-gradient(180deg, var(--system-soft), rgba(31, 41, 55, 0.95));
+        border-color: rgba(148, 163, 184, 0.28);
+      }
+
+      .entry-system .entry-icon,
+      .entry-system .entry-kind {
+        color: var(--system);
+      }
+
+      .entry-system .entry-icon {
+        background: rgba(148, 163, 184, 0.16);
+      }
+
+      .empty {
+        color: var(--muted);
+        padding: 24px;
+      }
+
+      @media (max-width: 900px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          min-height: 40vh;
+          border-right: 0;
+          border-bottom: 1px solid var(--border);
+        }
+
+        .main {
+          min-height: 60vh;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="panel-header">
+          <h1>Remote Sessions</h1>
+          <p id="status">Loading…</p>
+        </div>
+        <div id="sessions"></div>
+      </aside>
+      <main class="main">
+        <div class="panel-header">
+          <h2 id="transcript-title">Transcript</h2>
+          <p id="transcript-meta">Select a session to inspect its history.</p>
+        </div>
+        <div id="transcript"></div>
+      </main>
+    </div>
+
+    <script>
+      const statusEl = document.getElementById("status");
+      const sessionsEl = document.getElementById("sessions");
+      const transcriptEl = document.getElementById("transcript");
+      const transcriptTitleEl = document.getElementById("transcript-title");
+      const transcriptMetaEl = document.getElementById("transcript-meta");
+
+      let selectedSessionId = null;
+      let sessions = [];
+      const authToken = "__MJ_REMOTE_TOKEN__";
+
+      function sessionLabel(session) {
+        return session.name || session.session_id;
+      }
+
+      function entryKind(entry) {
+        return entry && typeof entry.kind === "string" && entry.kind ? entry.kind : "system";
+      }
+
+      function entryLabel(kind) {
+        switch (kind) {
+          case "user":
+            return "User";
+          case "agent":
+            return "Agent";
+          case "thought":
+            return "Thought";
+          case "tool":
+            return "Tool";
+          default:
+            return "System";
+        }
+      }
+
+      function entryIcon(kind) {
+        switch (kind) {
+          case "user":
+            return "U";
+          case "agent":
+            return "A";
+          case "thought":
+            return "T";
+          case "tool":
+            return "#";
+          default:
+            return "i";
+        }
+      }
+
+      function formatTimestamp(value) {
+        if (!value) {
+          return "";
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+          return value;
+        }
+        return date.toLocaleString();
+      }
+
+      function renderSessions() {
+        sessionsEl.textContent = "";
+        if (!sessions.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No remote sessions have been published yet.";
+          sessionsEl.appendChild(empty);
+          renderTranscript(null);
+          return;
+        }
+
+        if (!selectedSessionId || !sessions.some((session) => session.session_id === selectedSessionId)) {
+          selectedSessionId = sessions[0].session_id;
+        }
+
+        for (const session of sessions) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "session-item" + (session.session_id === selectedSessionId ? " active" : "");
+          button.addEventListener("click", () => {
+            selectedSessionId = session.session_id;
+            renderSessions();
+          });
+
+          const title = document.createElement("div");
+          title.className = "session-title";
+          title.textContent = sessionLabel(session);
+          button.appendChild(title);
+
+          const meta = document.createElement("div");
+          meta.className = "session-meta";
+          meta.textContent = [
+            `Project: ${session.project || "-"}`,
+            `Agent: ${session.agent || "-"}`,
+            `Messages: ${session.total_messages ?? 0}`,
+            `Updated: ${session.last_update || "-"}`,
+          ].join("\n");
+          button.appendChild(meta);
+
+          sessionsEl.appendChild(button);
+        }
+
+        const selected = sessions.find((session) => session.session_id === selectedSessionId) || null;
+        renderTranscript(selected);
+      }
+
+      function renderTranscript(session) {
+        transcriptEl.textContent = "";
+        if (!session) {
+          transcriptTitleEl.textContent = "Transcript";
+          transcriptMetaEl.textContent = "Select a session to inspect its history.";
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No transcript available.";
+          transcriptEl.appendChild(empty);
+          return;
+        }
+
+        transcriptTitleEl.textContent = sessionLabel(session);
+        transcriptMetaEl.textContent = `${session.project || "-"} • ${session.agent || "-"} • ${session.session_id} • ${transcript.length} entries`;
+
+        const transcript = Array.isArray(session.transcript) ? session.transcript : [];
+        if (!transcript.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "This session has not produced any transcript entries yet.";
+          transcriptEl.appendChild(empty);
+          return;
+        }
+
+        for (const entry of transcript) {
+          const kindName = entryKind(entry);
+          const card = document.createElement("section");
+          card.className = `entry entry-${kindName}`;
+
+          const header = document.createElement("div");
+          header.className = "entry-header";
+
+          const heading = document.createElement("div");
+          heading.className = "entry-heading";
+
+          const icon = document.createElement("span");
+          icon.className = "entry-icon";
+          icon.textContent = entryIcon(kindName);
+          heading.appendChild(icon);
+
+          const kind = document.createElement("div");
+          kind.className = "entry-kind";
+          kind.textContent = entryLabel(kindName);
+          heading.appendChild(kind);
+
+          header.appendChild(heading);
+
+          const time = document.createElement("div");
+          time.className = "entry-time";
+          time.textContent = formatTimestamp(entry.timestamp);
+          header.appendChild(time);
+
+          card.appendChild(header);
+
+          const body = document.createElement("div");
+          body.className = "entry-body";
+
+          const text = document.createElement("pre");
+          text.className = "entry-text";
+          text.textContent = entry.text || "";
+          body.appendChild(text);
+
+          card.appendChild(body);
+          transcriptEl.appendChild(card);
+        }
+      }
+
+      async function refreshSessions() {
+        try {
+          const response = await fetch("/live/sessions", {
+            cache: "no-store",
+            headers: {
+              Authorization: `Bearer ${authToken}`,
+            },
+          });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          sessions = await response.json();
+          statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+          renderSessions();
+        } catch (error) {
+          statusEl.textContent = `Update failed: ${error.message}`;
+        }
+      }
+
+      refreshSessions();
+      setInterval(refreshSessions, 2000);
+    </script>
+  </body>
+</html>
