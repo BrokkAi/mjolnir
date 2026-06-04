@@ -26,6 +26,7 @@ mod worktree;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -266,7 +267,7 @@ async fn main() -> Result<()> {
     )
     .await;
 
-    let worktree_kept = handle_worktree_after_tui(worktree.as_ref());
+    let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(ui_mode(fullscreen_tui)));
 
     // Print resume hint so the user can come back to this session.
     match &result {
@@ -335,7 +336,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
             }
         }
         if worktree.as_ref().is_some_and(|w| w.was_created) {
-            let _ = handle_worktree_after_tui(worktree.as_ref());
+            let _ = handle_worktree_after_tui(worktree.as_ref(), None);
         }
         return Ok(());
     }
@@ -343,7 +344,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
     let agent = pick_agent_for_resume().await;
     let Some(agent) = agent? else {
         eprintln!("Cancelled.");
-        let _ = handle_worktree_after_tui(worktree.as_ref());
+        let _ = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
         return Ok(());
     };
 
@@ -359,7 +360,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
             mode,
         )
         .await;
-        let worktree_kept = handle_worktree_after_tui(worktree.as_ref());
+        let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
         // Show resume hint for the session we just ran
         if let Ok(Some(resumed_id)) = &result
             && worktree_kept
@@ -377,7 +378,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
         session::list_sessions(&agent, cwd.clone(), args.agent_stderr.as_deref()).await?;
     if sessions.is_empty() {
         eprintln!("No sessions available.");
-        let _ = handle_worktree_after_tui(worktree.as_ref());
+        let _ = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
         return Ok(());
     }
 
@@ -385,7 +386,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
     match outcome {
         session::ResumeOutcome::Cancelled => {
             eprintln!("Cancelled.");
-            let _ = handle_worktree_after_tui(worktree.as_ref());
+            let _ = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
             Ok(())
         }
         session::ResumeOutcome::Selected(entry) => {
@@ -400,7 +401,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
                 mode,
             )
             .await;
-            let worktree_kept = handle_worktree_after_tui(worktree.as_ref());
+            let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
             // Show resume hint for the session we just ran
             if let Ok(Some(resumed_id)) = &result
                 && worktree_kept
@@ -472,10 +473,23 @@ fn project_label(cwd: &std::path::Path, worktree: Option<&CreatedWorktree>) -> S
     paths::project_label_from_cwd(cwd)
 }
 
-fn handle_worktree_after_tui(worktree: Option<&CreatedWorktree>) -> bool {
+fn handle_worktree_after_tui(worktree: Option<&CreatedWorktree>, mode: Option<UiMode>) -> bool {
     let Some(w) = worktree else {
         return true;
     };
+
+    if mode == Some(UiMode::InlineChat) {
+        // Inline mode restores the cursor to the host prompt row. Move to a
+        // fresh line before printing post-session worktree messages so they do
+        // not end up appended to the shell prompt.
+        let stdout = std::io::stdout();
+        let mut output = stdout.lock();
+        if let Err(e) = writeln!(output) {
+            tracing::warn!("worktree cleanup spacing failed: {e}");
+        } else if let Err(e) = output.flush() {
+            tracing::warn!("worktree cleanup spacing flush failed: {e}");
+        }
+    }
 
     // Remind the user where the worktree lives so they don't lose track
     // of their work — the alt-screen has just been torn down, so writes
@@ -909,6 +923,7 @@ fn init_logging(path: Option<&std::path::Path>) -> Result<()> {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+    use std::io::Write;
 
     #[test]
     fn agent_header_label_uses_registry_source_id() {
@@ -970,6 +985,33 @@ mod tests {
         assert_eq!(
             project_label(std::path::Path::new("/Users/ryan/code/mjolnir/src"), None),
             "src"
+        );
+    }
+
+    #[test]
+    fn inline_worktree_cleanup_output_starts_on_fresh_line() {
+        let mut output = Vec::new();
+        write!(&mut output, "shell$ ").expect("seed prompt");
+
+        if Some(UiMode::InlineChat) == Some(UiMode::InlineChat) {
+            writeln!(&mut output).expect("spacing newline");
+            output.flush().expect("spacing flush");
+        }
+        writeln!(
+            &mut output,
+            "Worktree: /tmp/project/.mjolnir/worktrees/pale-tide"
+        )
+        .expect("worktree line");
+        write!(&mut output, "Remove worktree 'pale-tide'? [y/N] ").expect("prompt");
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(
+            rendered.starts_with("shell$ \nWorktree: /tmp/project/.mjolnir/worktrees/pale-tide\n"),
+            "inline cleanup output should begin on a fresh line: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\nRemove worktree 'pale-tide'? [y/N] "),
+            "cleanup prompt should not share the shell prompt line: {rendered:?}"
         );
     }
 
