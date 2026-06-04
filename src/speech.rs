@@ -25,8 +25,7 @@ import Foundation
 import Speech
 
 struct Options {
-    var timeout: TimeInterval = 30
-    var silence: TimeInterval = 1.4
+    var timeout: TimeInterval = 600
     var localeIdentifier: String? = nil
 }
 
@@ -37,9 +36,6 @@ func parseOptions(_ args: [String]) -> Options {
         switch args[index] {
         case "--timeout" where index + 1 < args.count:
             options.timeout = TimeInterval(args[index + 1]) ?? options.timeout
-            index += 2
-        case "--silence" where index + 1 < args.count:
-            options.silence = TimeInterval(args[index + 1]) ?? options.silence
             index += 2
         case "--locale" where index + 1 < args.count:
             options.localeIdentifier = args[index + 1]
@@ -114,7 +110,6 @@ inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
 }
 
 var bestText = ""
-var lastResultAt = Date()
 var finished = false
 let startedAt = Date()
 
@@ -122,7 +117,6 @@ let task = speechRecognizer.recognitionTask(with: request) { result, error in
     if let result {
         bestText = result.bestTranscription.formattedString
         emit("PARTIAL", bestText)
-        lastResultAt = Date()
         if result.isFinal {
             finished = true
         }
@@ -142,9 +136,6 @@ do {
 while !finished {
     RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
     if Date().timeIntervalSince(startedAt) >= options.timeout {
-        break
-    }
-    if !bestText.isEmpty && Date().timeIntervalSince(lastResultAt) >= options.silence {
         break
     }
 }
@@ -172,9 +163,7 @@ where
         .arg("-")
         .arg("--")
         .arg("--timeout")
-        .arg("30")
-        .arg("--silence")
-        .arg("1.4")
+        .arg("600")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
