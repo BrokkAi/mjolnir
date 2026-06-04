@@ -1298,8 +1298,6 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
 
@@ -1609,7 +1607,7 @@ mod tests {
             viewer_code.clone(),
         );
 
-        let client = build_client(&cert_path).expect("pinned client");
+        let _client = build_client(&cert_path).expect("pinned client");
         let base = "https://127.0.0.1:11921";
         let record = SessionRecord {
             session_id: "sess-int".to_string(),
@@ -1819,9 +1817,12 @@ mod tests {
             .expect("live list via cookie");
         assert_eq!(live_listed_via_cookie.status(), reqwest::StatusCode::OK);
         let live_listed_via_cookie: Vec<SessionRecord> = serde_json::from_slice(
-            &hyper::body::to_bytes(live_listed_via_cookie.into_body(), usize::MAX)
+            &live_listed_via_cookie
+                .into_body()
+                .collect()
                 .await
-                .expect("live list via cookie body"),
+                .expect("live list via cookie body")
+                .to_bytes(),
         )
         .expect("live list via cookie json");
         assert_eq!(live_listed_via_cookie.len(), 1);
@@ -1869,9 +1870,12 @@ mod tests {
             .expect("live list request");
         assert_eq!(live_listed.status(), reqwest::StatusCode::OK);
         let live_listed: Vec<SessionRecord> = serde_json::from_slice(
-            &hyper::body::to_bytes(live_listed.into_body(), usize::MAX)
+            &live_listed
+                .into_body()
+                .collect()
                 .await
-                .expect("live list body"),
+                .expect("live list body")
+                .to_bytes(),
         )
         .expect("live list json");
         assert_eq!(live_listed.len(), 1);

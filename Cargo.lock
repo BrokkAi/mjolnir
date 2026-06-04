@@ -435,7 +435,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -449,6 +449,7 @@ dependencies = [
  "flate2",
  "futures",
  "getrandom 0.3.4",
+ "http-body-util",
  "image",
  "libc",
  "qrcode",
@@ -468,6 +469,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "unicode-width",
