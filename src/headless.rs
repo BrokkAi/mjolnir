@@ -137,7 +137,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     };
 
     let runtime = tokio::spawn(async move { acp::run(runtime_cfg, event_tx, cmd_rx).await });
-    let remote_tracker = remote::RemoteSessionTracker::new(project_label, agent_label);
+    let remote_tracker =
+        remote::RemoteSessionTracker::new(project_label, agent_label, Some(cmd_tx.clone()));
 
     let mut state = HeadlessState::default();
     let mut sent_prompt = false;

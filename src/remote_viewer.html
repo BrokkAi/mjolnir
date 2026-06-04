@@ -127,6 +127,80 @@
         gap: 14px;
       }
 
+      .composer {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border);
+        background: rgba(15, 23, 42, 0.72);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .composer-row {
+        display: flex;
+        gap: 12px;
+        align-items: stretch;
+      }
+
+      .composer textarea {
+        width: 100%;
+        min-height: 108px;
+        resize: vertical;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        color: var(--text);
+        padding: 12px;
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+
+      .composer button {
+        border: 0;
+        border-radius: 10px;
+        padding: 0 18px;
+        min-width: 132px;
+        background: var(--accent);
+        color: #08111f;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .composer button:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+
+      .queue-meta {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .queue-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .queue-item {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: rgba(96, 165, 250, 0.08);
+        padding: 10px 12px;
+      }
+
+      .queue-item-time {
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 6px;
+      }
+
+      .queue-item-text {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+
       .entry {
         border: 1px solid var(--border);
         background: var(--panel);
@@ -293,6 +367,14 @@
           <h2 id="transcript-title">Transcript</h2>
           <p id="transcript-meta">Select a session to inspect its history.</p>
         </div>
+        <section class="composer">
+          <div class="composer-row">
+            <textarea id="queue-input" placeholder="Queue a prompt for the selected remote session"></textarea>
+            <button id="queue-submit" type="button">Queue Prompt</button>
+          </div>
+          <div id="queue-status" class="queue-meta">Select a session to queue prompts.</div>
+          <div id="queue-list" class="queue-list"></div>
+        </section>
         <div id="transcript"></div>
       </main>
     </div>
@@ -303,9 +385,14 @@
       const transcriptEl = document.getElementById("transcript");
       const transcriptTitleEl = document.getElementById("transcript-title");
       const transcriptMetaEl = document.getElementById("transcript-meta");
+      const queueInputEl = document.getElementById("queue-input");
+      const queueSubmitEl = document.getElementById("queue-submit");
+      const queueStatusEl = document.getElementById("queue-status");
+      const queueListEl = document.getElementById("queue-list");
 
       let selectedSessionId = null;
       let sessions = [];
+      let queuedPrompts = [];
       const authToken = "__MJ_REMOTE_TOKEN__";
 
       function sessionLabel(session) {
@@ -392,6 +479,7 @@
             `Project: ${session.project || "-"}`,
             `Agent: ${session.agent || "-"}`,
             `Messages: ${session.total_messages ?? 0}`,
+            `Queued: ${session.queued_prompt_count ?? 0}`,
             `Updated: ${session.last_update || "-"}`,
           ].join("\n");
           button.appendChild(meta);
@@ -400,7 +488,46 @@
         }
 
         const selected = sessions.find((session) => session.session_id === selectedSessionId) || null;
+        renderQueue(selected);
         renderTranscript(selected);
+      }
+
+      function renderQueue(session) {
+        queueListEl.textContent = "";
+        queueInputEl.disabled = !session;
+        queueSubmitEl.disabled = !session;
+
+        if (!session) {
+          queueStatusEl.textContent = "Select a session to queue prompts.";
+          return;
+        }
+
+        queueStatusEl.textContent = `${queuedPrompts.length} queued prompt${queuedPrompts.length === 1 ? "" : "s"} waiting for ${sessionLabel(session)}.`;
+
+        if (!queuedPrompts.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No queued prompts for this session.";
+          queueListEl.appendChild(empty);
+          return;
+        }
+
+        for (const prompt of queuedPrompts) {
+          const card = document.createElement("section");
+          card.className = "queue-item";
+
+          const time = document.createElement("div");
+          time.className = "queue-item-time";
+          time.textContent = `Queued ${formatTimestamp(prompt.created_at)}`;
+          card.appendChild(time);
+
+          const text = document.createElement("pre");
+          text.className = "queue-item-text";
+          text.textContent = prompt.text || "";
+          card.appendChild(text);
+
+          queueListEl.appendChild(card);
+        }
       }
 
       function renderTranscript(session) {
@@ -484,10 +611,75 @@
           sessions = await response.json();
           statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
           renderSessions();
+          await refreshQueuedPrompts();
         } catch (error) {
           statusEl.textContent = `Update failed: ${error.message}`;
         }
       }
+
+      async function refreshQueuedPrompts() {
+        const sessionId = selectedSessionId;
+        if (!sessionId) {
+          queuedPrompts = [];
+          renderQueue(null);
+          return;
+        }
+        try {
+          const response = await fetch(`/api/queued-prompts?session_id=${encodeURIComponent(sessionId)}`, {
+            cache: "no-store",
+            headers: {
+              Authorization: `Bearer ${authToken}`,
+            },
+          });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          queuedPrompts = await response.json();
+          const selected = sessions.find((session) => session.session_id === selectedSessionId) || null;
+          renderQueue(selected);
+        } catch (error) {
+          queueStatusEl.textContent = `Queue update failed: ${error.message}`;
+        }
+      }
+
+      async function submitQueuedPrompt() {
+        const sessionId = selectedSessionId;
+        const text = queueInputEl.value;
+        if (!sessionId || !text.trim()) {
+          return;
+        }
+        queueSubmitEl.disabled = true;
+        try {
+          const response = await fetch("/api/queued-prompts", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${authToken}`,
+            },
+            body: JSON.stringify({
+              session_id: sessionId,
+              text,
+            }),
+          });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          queueInputEl.value = "";
+          await refreshSessions();
+        } catch (error) {
+          queueStatusEl.textContent = `Queue submit failed: ${error.message}`;
+        } finally {
+          queueSubmitEl.disabled = !selectedSessionId;
+        }
+      }
+
+      queueSubmitEl.addEventListener("click", submitQueuedPrompt);
+      queueInputEl.addEventListener("keydown", (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+          event.preventDefault();
+          submitQueuedPrompt();
+        }
+      });
 
       refreshSessions();
       setInterval(refreshSessions, 2000);

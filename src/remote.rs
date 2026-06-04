@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallContent};
 use anyhow::{Context, Result, anyhow};
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{DefaultBodyLimit, Query, Request, State};
 use axum::http::StatusCode;
 use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
@@ -15,7 +15,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use rcgen::generate_simple_self_signed;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -43,6 +43,8 @@ pub struct SessionRecord {
     pub agent: String,
     #[serde(default)]
     pub transcript: Vec<TranscriptEntry>,
+    #[serde(default)]
+    pub queued_prompt_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,12 +55,37 @@ pub struct TranscriptEntry {
     pub timestamp: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuedPrompt {
+    pub id: i64,
+    pub session_id: String,
+    pub text: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct QueuePromptRequest {
+    session_id: String,
+    text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ClaimQueuedPromptRequest {
+    session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct SessionQueueQuery {
+    session_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteSessionTracker {
     client: Option<reqwest::Client>,
     token: Option<Arc<String>>,
     state: Arc<Mutex<TrackerState>>,
     heartbeat: Arc<Mutex<Option<JoinHandle<()>>>>,
+    queue_poller: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 #[derive(Debug)]
@@ -71,6 +98,7 @@ struct TrackerState {
     project: String,
     agent: String,
     agent_message_open: bool,
+    prompt_in_flight: bool,
     transcript: Vec<TranscriptEntry>,
 }
 
@@ -99,6 +127,7 @@ impl TrackerState {
             project,
             agent,
             agent_message_open: false,
+            prompt_in_flight: false,
             transcript: Vec::new(),
         }
     }
@@ -107,6 +136,7 @@ impl TrackerState {
         if let UiCommand::SendPrompt { text, .. } = command {
             self.total_messages = self.total_messages.saturating_add(1);
             self.agent_message_open = false;
+            self.prompt_in_flight = true;
             self.push_transcript_entry("user", text.clone());
             self.touch();
         }
@@ -126,6 +156,7 @@ impl TrackerState {
                 }
                 self.last_update = Some(now);
                 self.agent_message_open = false;
+                self.prompt_in_flight = false;
                 first_start
             }
             UiEvent::SessionUpdate(update) => {
@@ -134,6 +165,7 @@ impl TrackerState {
             }
             UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } | UiEvent::Fatal(_) => {
                 self.agent_message_open = false;
+                self.prompt_in_flight = false;
                 self.touch();
                 false
             }
@@ -222,6 +254,7 @@ impl TrackerState {
             project: self.project.clone(),
             agent: self.agent.clone(),
             transcript: self.transcript.clone(),
+            queued_prompt_count: 0,
         })
     }
 
@@ -233,19 +266,39 @@ impl TrackerState {
     fn touch(&mut self) {
         self.last_update = Some(now_rfc3339());
     }
+
+    fn reserve_remote_prompt_slot(&mut self) -> Option<String> {
+        if self.prompt_in_flight {
+            return None;
+        }
+        let session_id = self.session_id.clone()?;
+        self.prompt_in_flight = true;
+        Some(session_id)
+    }
+
+    fn release_remote_prompt_slot(&mut self) {
+        self.prompt_in_flight = false;
+    }
 }
 
 impl RemoteSessionTracker {
-    pub fn new(project: String, agent: String) -> Self {
+    pub fn new(
+        project: String,
+        agent: String,
+        command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
+    ) -> Self {
         let dir = remote_control_dir();
         let token = read_token(&dir.join("token")).map(Arc::new);
         let client = build_client(&dir.join("cert.pem"));
-        Self {
+        let tracker = Self {
             client,
             token,
             state: Arc::new(Mutex::new(TrackerState::new(project, agent))),
             heartbeat: Arc::new(Mutex::new(None)),
-        }
+            queue_poller: Arc::new(Mutex::new(None)),
+        };
+        tracker.ensure_queue_poller(command_tx);
+        tracker
     }
 
     pub fn observe_command(&self, command: &UiCommand) {
@@ -270,6 +323,15 @@ impl RemoteSessionTracker {
     pub async fn shutdown(&self) {
         let handle = self.heartbeat.lock().ok().and_then(|mut slot| slot.take());
         if let Some(handle) = handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+        let queue_poller = self
+            .queue_poller
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(handle) = queue_poller {
             handle.abort();
             let _ = handle.await;
         }
@@ -331,6 +393,67 @@ impl RemoteSessionTracker {
                 debug!("remote-control flush failed: {error:#}");
             }
         });
+    }
+
+    fn ensure_queue_poller(
+        &self,
+        command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(command_tx) = command_tx else {
+            return;
+        };
+        let Ok(mut slot) = self.queue_poller.lock() else {
+            return;
+        };
+        if slot.is_some() {
+            return;
+        }
+        let token = self.token.clone();
+        let state = Arc::clone(&self.state);
+        *slot = Some(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let session_id = {
+                    let Ok(mut guard) = state.lock() else {
+                        continue;
+                    };
+                    guard.reserve_remote_prompt_slot()
+                };
+                let Some(session_id) = session_id else {
+                    continue;
+                };
+
+                let queued = claim_remote_prompt(client.clone(), token.clone(), &session_id).await;
+                match queued {
+                    Ok(Some(prompt)) => {
+                        let command = UiCommand::SendPrompt {
+                            text: prompt.text,
+                            images: Vec::new(),
+                        };
+                        if let Ok(mut guard) = state.lock() {
+                            guard.observe_command(&command);
+                        }
+                        if command_tx.send(command).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        if let Ok(mut guard) = state.lock() {
+                            guard.release_remote_prompt_slot();
+                        }
+                    }
+                    Err(error) => {
+                        debug!("remote queued-prompt poll failed: {error:#}");
+                        if let Ok(mut guard) = state.lock() {
+                            guard.release_remote_prompt_slot();
+                        }
+                    }
+                }
+            }
+        }));
     }
 }
 
@@ -412,6 +535,11 @@ fn build_router(db_path: PathBuf, token: String) -> Router {
         .route("/live/sessions", get(list_sessions))
         .route("/sessions", get(list_sessions))
         .route("/api/sessions", post(upsert_session))
+        .route(
+            "/api/queued-prompts",
+            get(list_queued_prompts).post(queue_prompt),
+        )
+        .route("/api/queued-prompts/claim", post(claim_queued_prompt))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state.token),
             require_token,
@@ -507,6 +635,60 @@ async fn list_sessions(
     Ok(Json(sessions))
 }
 
+async fn list_queued_prompts(
+    State(state): State<ServerState>,
+    Query(query): Query<SessionQueueQuery>,
+) -> std::result::Result<Json<Vec<QueuedPrompt>>, (StatusCode, String)> {
+    let db_path = Arc::clone(&state.db_path);
+    let session_id = query.session_id;
+    let prompts = tokio::task::spawn_blocking(move || {
+        load_queued_prompts(db_path.as_ref().as_path(), &session_id)
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    Ok(Json(prompts))
+}
+
+async fn queue_prompt(
+    State(state): State<ServerState>,
+    Json(request): Json<QueuePromptRequest>,
+) -> std::result::Result<StatusCode, (StatusCode, String)> {
+    if request.text.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "prompt text must not be empty".to_string(),
+        ));
+    }
+    let db_path = Arc::clone(&state.db_path);
+    tokio::task::spawn_blocking(move || {
+        queue_prompt_record(
+            db_path.as_ref().as_path(),
+            &request.session_id,
+            &request.text,
+        )
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn claim_queued_prompt(
+    State(state): State<ServerState>,
+    Json(request): Json<ClaimQueuedPromptRequest>,
+) -> std::result::Result<Json<Option<QueuedPrompt>>, (StatusCode, String)> {
+    let db_path = Arc::clone(&state.db_path);
+    let session_id = request.session_id;
+    let prompt = tokio::task::spawn_blocking(move || {
+        claim_queued_prompt_record(db_path.as_ref().as_path(), &session_id)
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    Ok(Json(prompt))
+}
+
 fn internal_error(error: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
@@ -598,6 +780,12 @@ fn init_db(db_path: &Path) -> Result<()> {
             agent text not null,
             transcript_json text not null default '[]'
         );
+        create table if not exists queued_prompts (
+            id integer primary key autoincrement,
+            session_id text not null,
+            text text not null,
+            created_at text not null
+        );
         alter table sessions add column transcript_json text not null default '[]';",
     )
     .or_else(|_| {
@@ -611,6 +799,12 @@ fn init_db(db_path: &Path) -> Result<()> {
                 project text not null,
                 agent text not null,
                 transcript_json text not null default '[]'
+            );
+            create table if not exists queued_prompts (
+                id integer primary key autoincrement,
+                session_id text not null,
+                text text not null,
+                created_at text not null
             );",
         )
     })
@@ -679,7 +873,12 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                 total_messages,
                 project,
                 agent,
-                transcript_json
+                transcript_json,
+                (
+                    select count(*)
+                    from queued_prompts
+                    where queued_prompts.session_id = sessions.session_id
+                ) as queued_prompt_count
             from sessions
             order by last_update desc, session_id asc",
         )
@@ -688,6 +887,7 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
         .query_map([], |row| {
             let total_messages: i64 = row.get(4)?;
             let transcript_json: String = row.get(7)?;
+            let queued_prompt_count: i64 = row.get(8)?;
             let transcript = serde_json::from_str(&transcript_json).unwrap_or_default();
             Ok(SessionRecord {
                 session_id: row.get(0)?,
@@ -698,12 +898,91 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                 project: row.get(5)?,
                 agent: row.get(6)?,
                 transcript,
+                queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
             })
         })
         .context("query sessions")?;
 
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .context("collect sessions")
+}
+
+fn load_queued_prompts(db_path: &Path, session_id: &str) -> Result<Vec<QueuedPrompt>> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "select id, session_id, text, created_at
+            from queued_prompts
+            where session_id = ?1
+            order by id asc",
+        )
+        .context("prepare queued-prompt query")?;
+    let rows = stmt
+        .query_map(params![session_id], |row| {
+            Ok(QueuedPrompt {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                text: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .context("query queued prompts")?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect queued prompts")
+}
+
+fn queue_prompt_record(db_path: &Path, session_id: &str, text: &str) -> Result<()> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "insert into queued_prompts (session_id, text, created_at)
+        values (?1, ?2, ?3)",
+        params![session_id, text, now_rfc3339()],
+    )
+    .context("insert queued prompt")?;
+    Ok(())
+}
+
+fn claim_queued_prompt_record(db_path: &Path, session_id: &str) -> Result<Option<QueuedPrompt>> {
+    init_db(db_path)?;
+    let mut conn = open_db(db_path)?;
+    let tx = conn
+        .transaction()
+        .context("begin queued-prompt transaction")?;
+    let prompt = {
+        let mut stmt = tx
+            .prepare(
+                "select id, session_id, text, created_at
+                from queued_prompts
+                where session_id = ?1
+                order by id asc
+                limit 1",
+            )
+            .context("prepare queued-prompt claim query")?;
+        stmt.query_row(params![session_id], |row| {
+            Ok(QueuedPrompt {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                text: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .optional()
+        .context("load queued prompt to claim")?
+    };
+    if let Some(prompt) = prompt {
+        tx.execute(
+            "delete from queued_prompts where id = ?1",
+            params![prompt.id],
+        )
+        .context("delete claimed queued prompt")?;
+        tx.commit().context("commit queued-prompt claim")?;
+        Ok(Some(prompt))
+    } else {
+        tx.commit().context("commit empty queued-prompt claim")?;
+        Ok(None)
+    }
 }
 
 async fn send_snapshot(
@@ -722,6 +1001,31 @@ async fn send_snapshot(
         .error_for_status()
         .context("remote-control server returned an error")?;
     Ok(())
+}
+
+async fn claim_remote_prompt(
+    client: reqwest::Client,
+    token: Option<Arc<String>>,
+    session_id: &str,
+) -> Result<Option<QueuedPrompt>> {
+    let mut request = client
+        .post("https://localhost:11921/api/queued-prompts/claim")
+        .json(&ClaimQueuedPromptRequest {
+            session_id: session_id.to_string(),
+        });
+    if let Some(token) = token {
+        request = request.bearer_auth(token.as_str());
+    }
+    let response = request
+        .send()
+        .await
+        .context("claim remote queued prompt")?
+        .error_for_status()
+        .context("remote queued-prompt claim returned an error")?;
+    response
+        .json::<Option<QueuedPrompt>>()
+        .await
+        .context("decode claimed remote queued prompt")
 }
 
 fn content_block_text(block: &ContentBlock) -> String {
@@ -854,6 +1158,7 @@ mod tests {
                     timestamp: "2026-06-03T10:00:06Z".to_string(),
                 },
             ],
+            queued_prompt_count: 0,
         };
 
         upsert_session_record(&db_path, &session).expect("insert");
@@ -890,6 +1195,44 @@ mod tests {
         assert_eq!(sessions[0].transcript[0].text, "hello");
         assert_eq!(sessions[0].transcript[1].kind, "agent");
         assert_eq!(sessions[0].transcript[1].text, "hi there");
+    }
+
+    #[test]
+    fn queued_prompts_round_trip_and_claim_fifo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+
+        queue_prompt_record(&db_path, "sess-1", "first").expect("queue first");
+        queue_prompt_record(&db_path, "sess-1", "second").expect("queue second");
+        queue_prompt_record(&db_path, "sess-2", "other").expect("queue other");
+
+        let sess_1 = load_queued_prompts(&db_path, "sess-1").expect("load sess-1");
+        assert_eq!(sess_1.len(), 2);
+        assert_eq!(sess_1[0].text, "first");
+        assert_eq!(sess_1[1].text, "second");
+
+        let claimed = claim_queued_prompt_record(&db_path, "sess-1")
+            .expect("claim first")
+            .expect("prompt");
+        assert_eq!(claimed.text, "first");
+
+        let remaining = load_queued_prompts(&db_path, "sess-1").expect("load remaining");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].text, "second");
+
+        let second = claim_queued_prompt_record(&db_path, "sess-1")
+            .expect("claim second")
+            .expect("prompt");
+        assert_eq!(second.text, "second");
+        assert!(
+            claim_queued_prompt_record(&db_path, "sess-1")
+                .expect("claim empty")
+                .is_none()
+        );
+
+        let other = load_queued_prompts(&db_path, "sess-2").expect("load sess-2");
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].text, "other");
     }
 
     #[test]
@@ -967,6 +1310,7 @@ mod tests {
             project: "proj".to_string(),
             agent: "agent".to_string(),
             transcript: Vec::new(),
+            queued_prompt_count: 0,
         };
 
         // Without the bearer token the write is rejected.

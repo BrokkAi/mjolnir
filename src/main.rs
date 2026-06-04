@@ -776,8 +776,11 @@ async fn run_session(
     // agents use their source id so the header matches the picker/config,
     // while custom agents show the exact command line being launched.
     let agent_display_name = Some(agent_header_label(agent));
-    let remote_tracker =
-        remote::RemoteSessionTracker::new(project_label.clone(), agent_header_label(agent));
+    let remote_tracker = remote::RemoteSessionTracker::new(
+        project_label.clone(),
+        agent_header_label(agent),
+        Some(runtime_cmd_tx.clone()),
+    );
 
     let event_tracker = remote_tracker.clone();
     let event_proxy = tokio::spawn(async move {
