@@ -9,6 +9,9 @@ use anyhow::{Context, Result, bail};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 #[cfg(target_os = "macos")]
@@ -155,7 +158,13 @@ emit("FINAL", bestText.trimmingCharacters(in: .whitespacesAndNewlines))
 "#;
 
 #[cfg(target_os = "macos")]
-pub fn run_dictation<F>(mut on_partial: F) -> Result<String>
+enum HelperLine {
+    Partial(String),
+    Final(String),
+}
+
+#[cfg(target_os = "macos")]
+pub fn run_dictation<F>(mut on_partial: F, cancel_rx: mpsc::Receiver<()>) -> Result<String>
 where
     F: FnMut(String),
 {
@@ -186,21 +195,57 @@ where
         .stdout
         .take()
         .context("open swift speech helper stdout")?;
+    let (line_tx, line_rx) = mpsc::channel::<Result<HelperLine>>();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let parsed = line
+                .context("read swift speech helper output")
+                .and_then(|line| decode_helper_line(&line));
+            if line_tx.send(parsed).is_err() {
+                break;
+            }
+        }
+    });
+
     let mut final_text = None;
     let mut last_partial = None;
-    for line in BufReader::new(stdout).lines() {
-        let line = line.context("read swift speech helper output")?;
-        if let Some(text) = decode_helper_line("PARTIAL", &line)? {
-            if last_partial.as_deref() != Some(text.as_str()) {
-                on_partial(text.clone());
-                last_partial = Some(text);
+    let mut cancelled = false;
+    let status = loop {
+        while let Ok(line) = line_rx.try_recv() {
+            match line? {
+                HelperLine::Partial(text) => {
+                    if last_partial.as_deref() != Some(text.as_str()) {
+                        on_partial(text.clone());
+                        last_partial = Some(text);
+                    }
+                }
+                HelperLine::Final(text) => final_text = Some(text),
             }
-        } else if let Some(text) = decode_helper_line("FINAL", &line)? {
-            final_text = Some(text);
+        }
+
+        if cancel_rx.try_recv().is_ok() {
+            cancelled = true;
+            let _ = child.kill();
+        }
+
+        if let Some(status) = child.try_wait().context("poll swift speech helper")? {
+            break status;
+        }
+
+        thread::sleep(Duration::from_millis(30));
+    };
+
+    while let Ok(line) = line_rx.try_recv() {
+        match line? {
+            HelperLine::Partial(text) => {
+                if last_partial.as_deref() != Some(text.as_str()) {
+                    on_partial(text.clone());
+                    last_partial = Some(text);
+                }
+            }
+            HelperLine::Final(text) => final_text = Some(text),
         }
     }
-
-    let status = child.wait().context("run swift speech helper")?;
 
     let mut stderr = String::new();
     if let Some(mut stderr_pipe) = child.stderr.take() {
@@ -209,7 +254,7 @@ where
             .context("read swift speech helper stderr")?;
     }
 
-    if !status.success() {
+    if !cancelled && !status.success() {
         let stderr = stderr.trim().to_string();
         bail!(
             "{}",
@@ -226,29 +271,30 @@ where
         .unwrap_or_default()
         .trim()
         .to_string();
-    if text.is_empty() {
+    if !cancelled && text.is_empty() {
         bail!("no speech was recognized");
     }
     Ok(text)
 }
 
 #[cfg(target_os = "macos")]
-fn decode_helper_line(kind: &str, line: &str) -> Result<Option<String>> {
-    let Some(encoded) = line
-        .strip_prefix(kind)
-        .and_then(|rest| rest.strip_prefix('\t'))
-    else {
-        return Ok(None);
+fn decode_helper_line(line: &str) -> Result<HelperLine> {
+    let Some((kind, encoded)) = line.split_once('\t') else {
+        bail!("unexpected swift speech helper output");
     };
     let bytes = general_purpose::STANDARD
         .decode(encoded)
         .context("decode swift speech helper line")?;
     let text = String::from_utf8(bytes).context("decode swift speech helper text")?;
-    Ok(Some(text))
+    match kind {
+        "PARTIAL" => Ok(HelperLine::Partial(text)),
+        "FINAL" => Ok(HelperLine::Final(text)),
+        _ => bail!("unexpected swift speech helper output kind: {kind}"),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn run_dictation<F>(_on_partial: F) -> Result<String>
+pub fn run_dictation<F>(_on_partial: F, _cancel_rx: std::sync::mpsc::Receiver<()>) -> Result<String>
 where
     F: FnMut(String),
 {
