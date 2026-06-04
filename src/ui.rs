@@ -85,6 +85,7 @@ enum TerminalRequest {
 #[derive(Debug)]
 enum DictationEvent {
     Partial(String),
+    Level(f32),
     Finished(std::result::Result<String, String>),
 }
 
@@ -321,6 +322,10 @@ async fn ui_loop(
                 match maybe_dictation {
                     Some(DictationEvent::Partial(text)) => {
                         update_dictation_partial(&mut state, &text);
+                        dirty = true;
+                    }
+                    Some(DictationEvent::Level(level)) => {
+                        update_dictation_level(&mut state, level);
                         dirty = true;
                     }
                     Some(DictationEvent::Finished(result)) => {
@@ -1638,6 +1643,7 @@ fn start_dictation(
 
     state.input_paste_burst.clear();
     state.voice_input_active = true;
+    state.voice_input_level = Some(0.0);
     let cursor = state.input_cursor.min(input_char_count(&state.input));
     state.voice_input_range = Some((cursor, cursor));
     state.status_line = Some(StatusMessage::info("recording voice input..."));
@@ -1647,9 +1653,13 @@ fn start_dictation(
     let dictation_tx = dictation_tx.clone();
     tokio::task::spawn_blocking(move || {
         let partial_tx = dictation_tx.clone();
+        let level_tx = dictation_tx.clone();
         let result = run_dictation(
             move |text| {
                 let _ = partial_tx.send(DictationEvent::Partial(text));
+            },
+            move |level| {
+                let _ = level_tx.send(DictationEvent::Level(level));
             },
             cancel_rx,
         )
@@ -1666,6 +1676,7 @@ fn stop_dictation(state: &mut AppState, dictation_cancel_tx: &mut Option<std_mps
         state.voice_input_active = false;
         state.voice_input_range = None;
         state.status_line = Some(StatusMessage::info("stopped voice input"));
+        state.voice_input_level = None;
     }
 }
 
@@ -1682,11 +1693,18 @@ fn update_dictation_partial(state: &mut AppState, text: &str) {
     state.status_line = Some(StatusMessage::info("recording voice input..."));
 }
 
+fn update_dictation_level(state: &mut AppState, level: f32) {
+    if state.voice_input_active {
+        state.voice_input_level = Some(level.clamp(0.0, 1.0));
+    }
+}
+
 fn finish_dictation(state: &mut AppState, result: std::result::Result<String, String>) {
     if !state.voice_input_active {
         return;
     }
     state.voice_input_active = false;
+    state.voice_input_level = None;
     match result {
         Ok(text) => {
             let range = state
@@ -3580,6 +3598,17 @@ fn format_bytes(bytes: usize) -> String {
     }
 }
 
+fn voice_level_meter(level: Option<f32>) -> String {
+    const METER_WIDTH: usize = 10;
+    let filled = (level.unwrap_or(0.0).clamp(0.0, 1.0) * METER_WIDTH as f32).round() as usize;
+    let filled = filled.min(METER_WIDTH);
+    format!(
+        "[{}{}]",
+        "|".repeat(filled),
+        ".".repeat(METER_WIDTH - filled)
+    )
+}
+
 fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode) {
     let text_selection_hint = match mode {
         UiMode::InlineChat => String::new(),
@@ -3596,10 +3625,13 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     } else if state.is_streaming() {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else if state.voice_input_active {
-        " recording voice... Ctrl-R stop ".to_string()
+        format!(
+            " recording voice {} Ctrl-R stop ",
+            voice_level_meter(state.voice_input_level)
+        )
     } else {
         format!(
-            " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     };
     let style = if state.runtime_closed || state.is_streaming() {
@@ -6543,6 +6575,23 @@ mod tests {
         assert!(state.voice_input_range.is_none());
         assert_eq!(state.input, "hello");
         assert!(cancel_tx.is_none());
+    }
+
+    #[test]
+    fn dictation_level_updates_voice_meter_state() {
+        let mut state = AppState::new();
+        state.voice_input_active = true;
+
+        update_dictation_level(&mut state, 1.7);
+
+        assert_eq!(state.voice_input_level, Some(1.0));
+        assert_eq!(voice_level_meter(state.voice_input_level), "[||||||||||]");
+    }
+
+    #[test]
+    fn voice_level_meter_renders_empty_when_no_level_seen() {
+        assert_eq!(voice_level_meter(None), "[..........]");
+        assert_eq!(voice_level_meter(Some(0.35)), "[||||......]");
     }
 
     #[test]

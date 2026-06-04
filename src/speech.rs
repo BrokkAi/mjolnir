@@ -58,6 +58,41 @@ func emit(_ kind: String, _ text: String) {
     fflush(stdout)
 }
 
+final class LevelEmitter {
+    private var lastEmitAt = Date.distantPast
+
+    func emitLevel(from buffer: AVAudioPCMBuffer) {
+        let now = Date()
+        guard now.timeIntervalSince(lastEmitAt) >= 0.08 else {
+            return
+        }
+        lastEmitAt = now
+
+        guard let channelData = buffer.floatChannelData else {
+            emit("LEVEL", "0")
+            return
+        }
+        let channelCount = Int(buffer.format.channelCount)
+        let frameLength = Int(buffer.frameLength)
+        guard channelCount > 0 && frameLength > 0 else {
+            emit("LEVEL", "0")
+            return
+        }
+
+        var sum: Float = 0
+        for channel in 0..<channelCount {
+            let samples = channelData[channel]
+            for frame in 0..<frameLength {
+                let sample = samples[frame]
+                sum += sample * sample
+            }
+        }
+        let rms = sqrt(sum / Float(channelCount * frameLength))
+        let normalized = min(max(rms * 18, 0), 1)
+        emit("LEVEL", String(format: "%.3f", normalized))
+    }
+}
+
 func requestSpeechAuthorization() {
     let semaphore = DispatchSemaphore(value: 0)
     var status = SFSpeechRecognizerAuthorizationStatus.notDetermined
@@ -105,8 +140,10 @@ request.shouldReportPartialResults = true
 
 let inputNode = engine.inputNode
 let format = inputNode.outputFormat(forBus: 0)
+let levelEmitter = LevelEmitter()
 inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
     request.append(buffer)
+    levelEmitter.emitLevel(from: buffer)
 }
 
 var bestText = ""
@@ -152,12 +189,18 @@ emit("FINAL", bestText.trimmingCharacters(in: .whitespacesAndNewlines))
 enum HelperLine {
     Partial(String),
     Final(String),
+    Level(f32),
 }
 
 #[cfg(target_os = "macos")]
-pub fn run_dictation<F>(mut on_partial: F, cancel_rx: mpsc::Receiver<()>) -> Result<String>
+pub fn run_dictation<F, G>(
+    mut on_partial: F,
+    mut on_level: G,
+    cancel_rx: mpsc::Receiver<()>,
+) -> Result<String>
 where
     F: FnMut(String),
+    G: FnMut(f32),
 {
     let mut child = Command::new("swift")
         .arg("-")
@@ -209,6 +252,7 @@ where
                     }
                 }
                 HelperLine::Final(text) => final_text = Some(text),
+                HelperLine::Level(level) => on_level(level),
             }
         }
 
@@ -233,6 +277,7 @@ where
                 }
             }
             HelperLine::Final(text) => final_text = Some(text),
+            HelperLine::Level(level) => on_level(level),
         }
     }
 
@@ -278,14 +323,25 @@ fn decode_helper_line(line: &str) -> Result<HelperLine> {
     match kind {
         "PARTIAL" => Ok(HelperLine::Partial(text)),
         "FINAL" => Ok(HelperLine::Final(text)),
+        "LEVEL" => {
+            let level = text
+                .parse::<f32>()
+                .context("parse swift speech helper level")?;
+            Ok(HelperLine::Level(level.clamp(0.0, 1.0)))
+        }
         _ => bail!("unexpected swift speech helper output kind: {kind}"),
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn run_dictation<F>(_on_partial: F, _cancel_rx: std::sync::mpsc::Receiver<()>) -> Result<String>
+pub fn run_dictation<F, G>(
+    _on_partial: F,
+    _on_level: G,
+    _cancel_rx: std::sync::mpsc::Receiver<()>,
+) -> Result<String>
 where
     F: FnMut(String),
+    G: FnMut(f32),
 {
     bail!("voice dictation is only available on macOS")
 }
