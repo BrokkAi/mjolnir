@@ -323,6 +323,8 @@ pub struct AppState {
     pub status_line: Option<StatusMessage>,
     /// True while the local microphone dictation helper is running.
     pub voice_input_active: bool,
+    /// Prompt buffer range currently owned by live voice dictation.
+    pub voice_input_range: Option<(usize, usize)>,
     /// Timing for the active or most recently completed prompt turn.
     turn_started_at: Option<Instant>,
     last_turn_elapsed: Option<Duration>,
@@ -453,6 +455,7 @@ impl AppState {
             runtime_closed: false,
             status_line: None,
             voice_input_active: false,
+            voice_input_range: None,
             turn_started_at: None,
             last_turn_elapsed: None,
             token_usage: TokenUsage::default(),

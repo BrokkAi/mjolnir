@@ -1088,6 +1088,24 @@ fn delete_input_range(state: &mut AppState, start: usize, end: usize, new_cursor
     true
 }
 
+fn replace_input_range(
+    state: &mut AppState,
+    start: usize,
+    end: usize,
+    text: &str,
+) -> (usize, usize) {
+    state.reset_history_navigation();
+    let len = input_char_count(&state.input);
+    let start = start.min(len);
+    let end = end.min(len).max(start);
+    let byte_start = input_byte_index_at_char(&state.input, start);
+    let byte_end = input_byte_index_at_char(&state.input, end);
+    state.input.replace_range(byte_start..byte_end, text);
+    let next_end = start + input_char_count(text);
+    state.input_cursor = next_end;
+    (start, next_end)
+}
+
 fn delete_before_cursor(state: &mut AppState) -> bool {
     let cursor = state.input_cursor.min(input_char_count(&state.input));
     if cursor == 0 {
@@ -1597,7 +1615,9 @@ fn start_dictation(state: &mut AppState, dictation_tx: &mpsc::UnboundedSender<Di
 
     state.input_paste_burst.clear();
     state.voice_input_active = true;
-    state.status_line = Some(StatusMessage::info("recording voice input: listening..."));
+    let cursor = state.input_cursor.min(input_char_count(&state.input));
+    state.voice_input_range = Some((cursor, cursor));
+    state.status_line = Some(StatusMessage::info("recording voice input..."));
 
     let dictation_tx = dictation_tx.clone();
     tokio::task::spawn_blocking(move || {
@@ -1614,22 +1634,30 @@ fn update_dictation_partial(state: &mut AppState, text: &str) {
     if !state.voice_input_active {
         return;
     }
-    let preview = preview_notification_text(text).unwrap_or_else(|| "listening...".to_string());
-    state.status_line = Some(StatusMessage::info(format!(
-        "recording voice input: {preview}"
-    )));
+    let range = state
+        .voice_input_range
+        .unwrap_or((state.input_cursor, state.input_cursor));
+    state.voice_input_range = Some(replace_input_range(state, range.0, range.1, text));
+    state.scroll_input_to_bottom();
+    state.update_autocomplete();
+    state.status_line = Some(StatusMessage::info("recording voice input..."));
 }
 
 fn finish_dictation(state: &mut AppState, result: std::result::Result<String, String>) {
     state.voice_input_active = false;
     match result {
         Ok(text) => {
-            insert_text_at_cursor(state, &text);
+            let range = state
+                .voice_input_range
+                .take()
+                .unwrap_or((state.input_cursor, state.input_cursor));
+            replace_input_range(state, range.0, range.1, &text);
             state.scroll_input_to_bottom();
             state.update_autocomplete();
             state.status_line = Some(StatusMessage::info("inserted voice input"));
         }
         Err(message) => {
+            state.voice_input_range = None;
             state.record_status_message(StatusKind::Warning, message);
         }
     }
@@ -3465,19 +3493,6 @@ fn input_cursor_position(
     (cursor_x, cursor_y)
 }
 
-fn voice_input_title(state: &AppState, width: u16) -> String {
-    let detail = state
-        .status_line
-        .as_ref()
-        .and_then(|status| status.text.strip_prefix("recording voice input: "))
-        .unwrap_or("speak now; text appears when recording stops");
-    let max_detail_width = usize::from(width).saturating_sub(22).max(10);
-    format!(
-        " recording voice: {} ",
-        compact_middle_display(detail, max_detail_width)
-    )
-}
-
 fn input_attachment_chips(state: &AppState) -> Vec<String> {
     let mut chips: Vec<(usize, String)> =
         Vec::with_capacity(state.attachments.len() + state.image_attachments.len());
@@ -3539,7 +3554,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     } else if state.is_streaming() {
         " streaming... (Ctrl-C to cancel) ".to_string()
     } else if state.voice_input_active {
-        voice_input_title(state, area.width)
+        " recording voice... ".to_string()
     } else {
         format!(
             " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | F10 help | Ctrl-C quit{text_selection_hint}) "
@@ -6455,29 +6470,38 @@ mod tests {
     }
 
     #[test]
-    fn dictation_partial_updates_visible_status() {
-        let mut state = AppState::new();
-        state.voice_input_active = true;
-
-        update_dictation_partial(&mut state, "hello from the microphone");
-
-        let status = state.status_line.expect("status");
-        assert_eq!(status.kind, StatusKind::Info);
-        assert!(status.text.contains("hello from the microphone"));
-    }
-
-    #[test]
-    fn dictation_finish_inserts_text_at_prompt_cursor() {
+    fn dictation_partial_updates_prompt_text() {
         let mut state = AppState::new();
         state.input = "before after".to_string();
         state.input_cursor = "before ".chars().count();
         state.voice_input_active = true;
+        state.voice_input_range = Some((state.input_cursor, state.input_cursor));
 
+        update_dictation_partial(&mut state, "hello");
+        update_dictation_partial(&mut state, "hello world ");
+
+        assert_eq!(state.input, "before hello world after");
+        assert_eq!(state.input_cursor, "before hello world ".chars().count());
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Info);
+        assert_eq!(status.text, "recording voice input...");
+    }
+
+    #[test]
+    fn dictation_finish_replaces_live_partial_text() {
+        let mut state = AppState::new();
+        state.input = "before after".to_string();
+        state.input_cursor = "before ".chars().count();
+        state.voice_input_active = true;
+        state.voice_input_range = Some((state.input_cursor, state.input_cursor));
+
+        update_dictation_partial(&mut state, "rough draft");
         finish_dictation(&mut state, Ok("voice ".to_string()));
 
         assert!(!state.voice_input_active);
         assert_eq!(state.input, "before voice after");
         assert_eq!(state.input_cursor, "before voice ".chars().count());
+        assert!(state.voice_input_range.is_none());
     }
 
     #[test]
