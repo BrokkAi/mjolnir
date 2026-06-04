@@ -43,6 +43,7 @@ use crate::clipboard::{
 use crate::config;
 use crate::event::{PermissionDecision, PermissionPrompt, PromptImage, UiCommand, UiEvent};
 use crate::notifications::TerminalNotificationBackend;
+use crate::speech::{dictate_prompt, dictation_error_message};
 use crate::version::mjolnir_version_label;
 
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
@@ -854,6 +855,9 @@ fn handle_crossterm(
         (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
             copy_last_agent_message(state);
         }
+        (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
+            dictate_into_prompt(state);
+        }
         (modifiers, KeyCode::Char('v'))
             if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
@@ -1554,6 +1558,22 @@ fn paste_clipboard_image(state: &mut AppState) {
         }
         Err(e) => {
             state.record_status_message(StatusKind::Warning, format!("image paste failed: {e}"));
+        }
+    }
+}
+
+fn dictate_into_prompt(state: &mut AppState) {
+    state.input_paste_burst.clear();
+    state.record_status_message(StatusKind::Info, "listening for voice input...");
+    match dictate_prompt() {
+        Ok(text) => {
+            insert_text_at_cursor(state, &text);
+            state.scroll_input_to_bottom();
+            state.update_autocomplete();
+            state.record_status_message(StatusKind::Info, "inserted voice input");
+        }
+        Err(e) => {
+            state.record_status_message(StatusKind::Warning, dictation_error_message(&e));
         }
     }
 }
@@ -3992,6 +4012,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
         Line::from("  Ctrl-K/U/W       delete to end/start of line or previous word"),
         Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
         Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
+        Line::from("  Ctrl-R           dictate prompt text from the microphone (macOS)"),
         Line::from("  Ctrl-V/Ctrl-Alt-V paste image from clipboard"),
         Line::from("  Ctrl-Y           copy last agent message to clipboard"),
         Line::from("  Esc              clear input, chips, and browsing history"),
@@ -6344,6 +6365,24 @@ mod tests {
             key_with_modifiers(KeyCode::Char('f'), KeyModifiers::CONTROL),
         );
         assert_eq!(state.input_cursor, 1);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn ctrl_r_reports_voice_dictation_unavailable_off_macos() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.input.is_empty());
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Warning);
+        assert!(status.text.contains("only available on macOS"));
     }
 
     #[test]

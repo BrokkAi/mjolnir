@@ -20,6 +20,7 @@ mod registry;
 mod remote;
 mod self_update;
 mod session;
+mod speech;
 mod ui;
 mod version;
 mod worktree;
