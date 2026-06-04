@@ -4894,9 +4894,18 @@ mod tests {
         );
 
         assert!(state.is_streaming());
-        assert!(state.help_overlay, "help overlay should remain open while streaming");
-        assert!(state.config_picker.is_none(), "streaming must not open config picker");
-        assert!(state.status_line.is_none(), "help overlay should keep unrelated shortcuts from mutating status");
+        assert!(
+            state.help_overlay,
+            "help overlay should remain open while streaming"
+        );
+        assert!(
+            state.config_picker.is_none(),
+            "streaming must not open config picker"
+        );
+        assert!(
+            state.status_line.is_none(),
+            "help overlay should keep unrelated shortcuts from mutating status"
+        );
         assert!(should_repair_inline_view(UiMode::InlineChat, &state));
         assert_eq!(
             desired_inline_height(
