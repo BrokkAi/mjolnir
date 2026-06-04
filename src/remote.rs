@@ -595,9 +595,25 @@ fn init_db(db_path: &Path) -> Result<()> {
             last_update text not null,
             total_messages integer not null,
             project text not null,
-            agent text not null
-        );",
+            agent text not null,
+            transcript_json text not null default '[]'
+        );
+        alter table sessions add column transcript_json text not null default '[]';",
     )
+    .or_else(|_| {
+        conn.execute_batch(
+            "create table if not exists sessions (
+                session_id text primary key,
+                name text not null,
+                start_time text not null,
+                last_update text not null,
+                total_messages integer not null,
+                project text not null,
+                agent text not null,
+                transcript_json text not null default '[]'
+            );",
+        )
+    })
     .context("create remote-control schema")?;
     Ok(())
 }
@@ -614,6 +630,8 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
     let conn = open_db(db_path)?;
     let total_messages =
         i64::try_from(session.total_messages).context("total_messages exceeds sqlite integer")?;
+    let transcript_json =
+        serde_json::to_string(&session.transcript).context("serialize remote-control transcript")?;
     conn.execute(
         "insert into sessions (
             session_id,
@@ -622,15 +640,17 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             last_update,
             total_messages,
             project,
-            agent
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            agent,
+            transcript_json
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
             last_update = excluded.last_update,
             total_messages = excluded.total_messages,
             project = excluded.project,
-            agent = excluded.agent",
+            agent = excluded.agent,
+            transcript_json = excluded.transcript_json",
         params![
             session.session_id,
             session.name,
@@ -639,6 +659,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             total_messages,
             session.project,
             session.agent,
+            transcript_json,
         ],
     )
     .context("upsert remote-control session")?;
@@ -657,7 +678,8 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                 last_update,
                 total_messages,
                 project,
-                agent
+                agent,
+                transcript_json
             from sessions
             order by last_update desc, session_id asc",
         )
@@ -665,6 +687,8 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
     let rows = stmt
         .query_map([], |row| {
             let total_messages: i64 = row.get(4)?;
+            let transcript_json: String = row.get(7)?;
+            let transcript = serde_json::from_str(&transcript_json).unwrap_or_default();
             Ok(SessionRecord {
                 session_id: row.get(0)?,
                 name: row.get(1)?,
@@ -673,7 +697,7 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                 total_messages: u64::try_from(total_messages).unwrap_or(0),
                 project: row.get(5)?,
                 agent: row.get(6)?,
-                transcript: Vec::new(),
+                transcript,
             })
         })
         .context("query sessions")?;
@@ -818,7 +842,18 @@ mod tests {
             total_messages: 4,
             project: "mjolnir".to_string(),
             agent: "anvil".to_string(),
-            transcript: Vec::new(),
+            transcript: vec![
+                TranscriptEntry {
+                    kind: "user".to_string(),
+                    text: "hello".to_string(),
+                    timestamp: "2026-06-03T10:00:05Z".to_string(),
+                },
+                TranscriptEntry {
+                    kind: "agent".to_string(),
+                    text: "hi".to_string(),
+                    timestamp: "2026-06-03T10:00:06Z".to_string(),
+                },
+            ],
         };
 
         upsert_session_record(&db_path, &session).expect("insert");
@@ -827,6 +862,18 @@ mod tests {
             &SessionRecord {
                 total_messages: 6,
                 last_update: "2026-06-03T10:00:40Z".to_string(),
+                transcript: vec![
+                    TranscriptEntry {
+                        kind: "user".to_string(),
+                        text: "hello".to_string(),
+                        timestamp: "2026-06-03T10:00:05Z".to_string(),
+                    },
+                    TranscriptEntry {
+                        kind: "agent".to_string(),
+                        text: "hi there".to_string(),
+                        timestamp: "2026-06-03T10:00:06Z".to_string(),
+                    },
+                ],
                 ..session.clone()
             },
         )
@@ -838,6 +885,11 @@ mod tests {
         assert_eq!(sessions[0].total_messages, 6);
         assert_eq!(sessions[0].start_time, "2026-06-03T10:00:00Z");
         assert_eq!(sessions[0].last_update, "2026-06-03T10:00:40Z");
+        assert_eq!(sessions[0].transcript.len(), 2);
+        assert_eq!(sessions[0].transcript[0].kind, "user");
+        assert_eq!(sessions[0].transcript[0].text, "hello");
+        assert_eq!(sessions[0].transcript[1].kind, "agent");
+        assert_eq!(sessions[0].transcript[1].text, "hi there");
     }
 
     #[test]

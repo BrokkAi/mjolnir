@@ -415,10 +415,10 @@
           return;
         }
 
+        const transcript = Array.isArray(session.transcript) ? session.transcript : [];
         transcriptTitleEl.textContent = sessionLabel(session);
         transcriptMetaEl.textContent = `${session.project || "-"} • ${session.agent || "-"} • ${session.session_id} • ${transcript.length} entries`;
 
-        const transcript = Array.isArray(session.transcript) ? session.transcript : [];
         if (!transcript.length) {
           const empty = document.createElement("div");
           empty.className = "empty";
