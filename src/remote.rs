@@ -630,8 +630,8 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
     let conn = open_db(db_path)?;
     let total_messages =
         i64::try_from(session.total_messages).context("total_messages exceeds sqlite integer")?;
-    let transcript_json =
-        serde_json::to_string(&session.transcript).context("serialize remote-control transcript")?;
+    let transcript_json = serde_json::to_string(&session.transcript)
+        .context("serialize remote-control transcript")?;
     conn.execute(
         "insert into sessions (
             session_id,
