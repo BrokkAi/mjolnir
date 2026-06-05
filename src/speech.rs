@@ -3,10 +3,91 @@
 //! macOS ships the Speech framework in Swift, so the TUI shells out to a tiny
 //! helper rather than binding Objective-C APIs from Rust.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use std::path::PathBuf;
 
-#[cfg(target_os = "macos")]
-use anyhow::Context;
+const SHERPA_ONNX_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2";
+const SHERPA_ONNX_MODEL_DIR: &str = "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20";
+const SHERPA_ONNX_ENCODER: &str = "encoder-epoch-99-avg-1.onnx";
+const SHERPA_ONNX_DECODER: &str = "decoder-epoch-99-avg-1.onnx";
+const SHERPA_ONNX_JOINER: &str = "joiner-epoch-99-avg-1.onnx";
+const SHERPA_ONNX_TOKENS: &str = "tokens.txt";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DictationBackendKind {
+    AppleSpeech,
+    SherpaOnnx,
+}
+
+impl DictationBackendKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AppleSpeech => "Apple Speech",
+            Self::SherpaOnnx => "sherpa-onnx",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SherpaOnnxModelPaths {
+    dir: PathBuf,
+    encoder: PathBuf,
+    decoder: PathBuf,
+    joiner: PathBuf,
+    tokens: PathBuf,
+}
+
+impl SherpaOnnxModelPaths {
+    fn in_cache(cache_root: PathBuf) -> Self {
+        let dir = cache_root.join("voice").join(SHERPA_ONNX_MODEL_DIR);
+        Self {
+            encoder: dir.join(SHERPA_ONNX_ENCODER),
+            decoder: dir.join(SHERPA_ONNX_DECODER),
+            joiner: dir.join(SHERPA_ONNX_JOINER),
+            tokens: dir.join(SHERPA_ONNX_TOKENS),
+            dir,
+        }
+    }
+
+    fn is_installed(&self) -> bool {
+        self.encoder.is_file()
+            && self.decoder.is_file()
+            && self.joiner.is_file()
+            && self.tokens.is_file()
+    }
+}
+
+fn default_backend_kind() -> DictationBackendKind {
+    if cfg!(target_os = "macos") {
+        DictationBackendKind::AppleSpeech
+    } else {
+        DictationBackendKind::SherpaOnnx
+    }
+}
+
+fn mjolnir_cache_dir() -> Result<PathBuf> {
+    dirs::cache_dir()
+        .map(|dir| dir.join("mjolnir"))
+        .context("locate user cache directory")
+}
+
+fn sherpa_onnx_model_paths() -> Result<SherpaOnnxModelPaths> {
+    Ok(SherpaOnnxModelPaths::in_cache(mjolnir_cache_dir()?))
+}
+
+fn sherpa_onnx_auto_setup_message(paths: &SherpaOnnxModelPaths) -> String {
+    format!(
+        "voice dictation uses sherpa-onnx on this platform. Mjolnir can set this up automatically by downloading the default model from {SHERPA_ONNX_MODEL_URL} into {}.",
+        paths.dir.display()
+    )
+}
+
+fn sherpa_onnx_cli_hint(paths: &SherpaOnnxModelPaths) -> String {
+    format!(
+        "expected sherpa-onnx model files were not found under {}. Mjolnir will auto-install them once the bundled sherpa-onnx runtime is available.",
+        paths.dir.display()
+    )
+}
 
 #[cfg(target_os = "macos")]
 use std::{
@@ -362,13 +443,84 @@ where
     F: FnMut(String),
     G: FnMut(f32),
 {
-    bail!("voice dictation is only available on macOS")
+    run_sherpa_onnx_dictation()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_sherpa_onnx_dictation() -> Result<String> {
+    let paths = sherpa_onnx_model_paths()?;
+    if !paths.is_installed() {
+        bail!(
+            "{} {}",
+            sherpa_onnx_auto_setup_message(&paths),
+            sherpa_onnx_cli_hint(&paths)
+        );
+    }
+
+    bail!(
+        "sherpa-onnx dictation runtime is not bundled yet; model cache is ready at {}",
+        paths.dir.display()
+    )
 }
 
 pub fn dictation_error_message(error: &anyhow::Error) -> String {
     let message = error.to_string();
     if message.contains("No such file or directory") {
-        return "voice dictation requires the swift command on PATH".to_string();
+        return match default_backend_kind() {
+            DictationBackendKind::AppleSpeech => {
+                "voice dictation requires the swift command on PATH".to_string()
+            }
+            DictationBackendKind::SherpaOnnx => {
+                "voice dictation requires the bundled sherpa-onnx runtime".to_string()
+            }
+        };
     }
-    format!("voice dictation failed: {message}")
+    if message.contains("sherpa-onnx") {
+        return message;
+    }
+    format!(
+        "voice dictation failed using {}: {message}",
+        default_backend_kind().label()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_backend_uses_apple_speech_only_on_macos() {
+        let expected = if cfg!(target_os = "macos") {
+            DictationBackendKind::AppleSpeech
+        } else {
+            DictationBackendKind::SherpaOnnx
+        };
+        assert_eq!(default_backend_kind(), expected);
+    }
+
+    #[test]
+    fn sherpa_model_paths_are_under_voice_cache() {
+        let paths = SherpaOnnxModelPaths::in_cache(PathBuf::from("/cache/mjolnir"));
+        assert_eq!(
+            paths.dir,
+            PathBuf::from("/cache/mjolnir")
+                .join("voice")
+                .join(SHERPA_ONNX_MODEL_DIR)
+        );
+        assert_eq!(paths.encoder, paths.dir.join(SHERPA_ONNX_ENCODER));
+        assert_eq!(paths.decoder, paths.dir.join(SHERPA_ONNX_DECODER));
+        assert_eq!(paths.joiner, paths.dir.join(SHERPA_ONNX_JOINER));
+        assert_eq!(paths.tokens, paths.dir.join(SHERPA_ONNX_TOKENS));
+    }
+
+    #[test]
+    fn sherpa_setup_message_is_actionable_without_yaml() {
+        let paths = SherpaOnnxModelPaths::in_cache(PathBuf::from("/cache/mjolnir"));
+        let message = sherpa_onnx_auto_setup_message(&paths);
+        assert!(message.contains("sherpa-onnx"));
+        assert!(message.contains("automatically"));
+        assert!(message.contains(SHERPA_ONNX_MODEL_URL));
+        assert!(message.contains("/cache/mjolnir"));
+        assert!(!message.to_lowercase().contains("yaml"));
+    }
 }
