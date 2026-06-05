@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Mjolnir Remote Sessions</title>
+    <title>Mjolnir Web</title>
     <style>
       :root {
         color-scheme: dark;
@@ -449,15 +449,15 @@
   <body>
     <section id="auth-screen" class="auth-screen">
       <div class="auth-card">
-        <h1>Unlock Remote Sessions</h1>
+        <h1>Mjolnir Web</h1>
         <p>
           Enter the six-digit viewer code printed by <code>mj server</code>. QR login still uses the
-          full embedded URL token on the server side, but manual browser unlock only needs this code.
+          full embedded URL token on the server side, but manual browser access only needs this code.
         </p>
         <form id="auth-form">
           <label for="auth-token">Viewer code</label>
           <input id="auth-token" name="code" type="password" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" maxlength="6" pattern="[0-9]{6}">
-          <button id="auth-submit" type="submit">Unlock</button>
+          <button id="auth-submit" type="submit">Sign In</button>
         </form>
         <div id="auth-error" class="auth-error"></div>
       </div>
@@ -466,10 +466,10 @@
     <div id="app" class="layout" hidden>
       <aside class="sidebar">
         <div class="panel-header">
-          <h1>Remote Sessions</h1>
+          <h1>Sessions</h1>
           <p id="status">Loading…</p>
           <div class="toolbar">
-            <p>Authenticated with a local session cookie.</p>
+            <p>Signed in with a local session cookie.</p>
             <button id="logout-button" class="danger" type="button">Log Out</button>
           </div>
         </div>
@@ -482,7 +482,7 @@
         </div>
         <section class="composer">
           <div class="composer-row">
-            <textarea id="queue-input" placeholder="Queue a prompt for the selected remote session"></textarea>
+            <textarea id="queue-input" placeholder="Queue a prompt for the selected session"></textarea>
             <button id="queue-submit" type="button">Queue Prompt</button>
           </div>
           <div id="queue-status" class="queue-meta">Select a session to queue prompts.</div>
@@ -556,7 +556,7 @@
           },
         });
         if (response.status === 401) {
-          showAuth("Your session expired. Enter the six-digit viewer code again.");
+          showAuth("Your session expired. Enter the six-digit viewer code again if prompted.");
           throw new Error("HTTP 401");
         }
         return response;
@@ -616,7 +616,7 @@
         if (!sessions.length) {
           const empty = document.createElement("div");
           empty.className = "empty";
-          empty.textContent = "No remote sessions have been published yet.";
+          empty.textContent = "No sessions have been published yet.";
           sessionsEl.appendChild(empty);
           renderTranscript(null);
           return;
@@ -791,7 +791,7 @@
           renderSessions();
           await refreshQueuedPrompts();
         } catch (error) {
-          showAuth(`Unlock check failed: ${error.message}`);
+          showAuth(`Sign-in check failed: ${error.message}`);
           authTokenEl.focus();
         }
       }
@@ -903,7 +903,7 @@
           showApp();
           await refreshSessions();
         } catch (error) {
-          authErrorEl.textContent = `Unlock failed: ${error.message}`;
+          authErrorEl.textContent = `Sign-in failed: ${error.message}`;
         } finally {
           authSubmitEl.disabled = false;
         }

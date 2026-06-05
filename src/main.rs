@@ -122,7 +122,7 @@ enum Commands {
 
 #[derive(Debug, clap::Args, Default)]
 struct ServerArgs {
-    /// Public hostname to embed in the login QR code and TLS certificate.
+    /// Required for remote access QR login; omitted means localhost-only mode.
     #[arg(long)]
     hostname: Option<String>,
 }

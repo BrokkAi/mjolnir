@@ -150,6 +150,7 @@ struct ServerState {
     db_path: Arc<PathBuf>,
     token: Arc<String>,
     viewer_code: Arc<String>,
+    localhost_browser_auto_auth: bool,
     /// Active viewer session cookie values. Each successful unlock mints a fresh
     /// random id so logout can revoke exactly that browser's session, and a lost
     /// cookie does not stay valid forever like a single shared secret would.
@@ -537,33 +538,59 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
 pub async fn run_server(hostname: Option<String>) -> Result<()> {
     install_crypto_provider();
 
-    let listen = server_listen_config(hostname.as_deref())?;
-    let paths = ensure_server_paths(hostname.as_deref())?;
+    let requested_hostname = hostname
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let listen = server_listen_config(requested_hostname.as_deref())?;
+    let paths = ensure_server_paths(requested_hostname.as_deref())?;
     init_db(&paths.db_path)?;
     let token = ensure_token(&paths.token_path)?;
     let viewer_code = generate_viewer_code()?;
     let viewer_url = remote_qr_login_url(&listen.viewer_host, &token);
 
-    let app = build_router(paths.db_path.clone(), token, viewer_code.clone());
+    let app = build_router(
+        paths.db_path.clone(),
+        token,
+        viewer_code.clone(),
+        requested_hostname.is_none(),
+    );
 
     let tls_config =
         axum_server::tls_rustls::RustlsConfig::from_pem_file(&paths.cert_path, &paths.key_path)
             .await
             .context("load remote-control TLS certificate")?;
+    let listener = bind_server_listener(&listen.bind_addr)?;
 
     println!("Remote control listening on https://localhost:11921");
-    println!("{}", render_login_qr(&viewer_url)?);
-    println!("viewer code: {viewer_code}");
+    match requested_hostname {
+        Some(hostname) => {
+            println!("Public remote hostname: https://{hostname}:11921");
+            println!("{}", render_login_qr(&viewer_url)?);
+            println!("viewer code: {viewer_code}");
+        }
+        None => {
+            println!(
+                "Using the default localhost binding. For remote access and a useful login QR code, start `mj server --hostname <your-hostname>`.",
+            );
+        }
+    }
 
-    axum_server::bind_rustls(listen.bind_addr.parse()?, tls_config)
+    axum_server::from_tcp_rustls(listener, tls_config)
         .serve(app.into_make_service())
         .await
-        .with_context(|| {
-            format!(
-                "serve remote-control API on {} (is another `mj server` already running?)",
-                listen.bind_addr
-            )
-        })
+        .context("serve remote-control API")
+}
+
+fn bind_server_listener(bind_addr: &str) -> Result<std::net::TcpListener> {
+    let listener = std::net::TcpListener::bind(bind_addr).with_context(|| {
+        format!("bind remote-control API on {bind_addr} (is another `mj server` already running?)")
+    })?;
+    listener
+        .set_nonblocking(true)
+        .context("mark remote-control listener as nonblocking")?;
+    Ok(listener)
 }
 
 fn remote_qr_login_url(host: &str, token: &str) -> String {
@@ -605,11 +632,17 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-fn build_router(db_path: PathBuf, token: String, viewer_code: String) -> Router {
+fn build_router(
+    db_path: PathBuf,
+    token: String,
+    viewer_code: String,
+    localhost_browser_auto_auth: bool,
+) -> Router {
     let state = ServerState {
         db_path: Arc::new(db_path),
         token: Arc::new(token),
         viewer_code: Arc::new(viewer_code),
+        localhost_browser_auto_auth,
         sessions: Arc::new(Mutex::new(HashSet::new())),
         code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
     };
@@ -671,6 +704,10 @@ fn request_is_authorized(state: &ServerState, request: &Request) -> bool {
         .headers()
         .get(COOKIE)
         .and_then(|value| value.to_str().ok());
+    request_has_viewer_session(state, cookie_header)
+}
+
+fn request_has_viewer_session(state: &ServerState, cookie_header: Option<&str>) -> bool {
     let sessions = state.sessions.lock().expect("viewer sessions poisoned");
     sessions
         .iter()
@@ -716,8 +753,27 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-async fn remote_viewer() -> Html<&'static str> {
-    Html(include_str!("remote_viewer.html"))
+async fn remote_viewer(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> std::result::Result<Response, (StatusCode, String)> {
+    if state.localhost_browser_auto_auth {
+        let cookie_header = headers.get(COOKIE).and_then(|value| value.to_str().ok());
+        if request_has_viewer_session(&state, cookie_header) {
+            return Ok(Html(include_str!("remote_viewer.html")).into_response());
+        }
+        let mut response = issue_session_cookie(&state, StatusCode::OK)?;
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        );
+        *response.body_mut() = Html(include_str!("remote_viewer.html"))
+            .into_response()
+            .into_body();
+        return Ok(response);
+    }
+
+    Ok(Html(include_str!("remote_viewer.html")).into_response())
 }
 
 async fn create_viewer_session(
@@ -1612,6 +1668,7 @@ mod tests {
             db_path: Arc::new(PathBuf::from("unused.sqlite3")),
             token: Arc::new("integration-token".to_string()),
             viewer_code: Arc::new("123456".to_string()),
+            localhost_browser_auto_auth: false,
             sessions: Arc::new(Mutex::new(HashSet::new())),
             code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
         }
@@ -1705,6 +1762,24 @@ mod tests {
     }
 
     #[test]
+    fn server_hostname_argument_trims_blank_values_to_localhost_default() {
+        assert_eq!(
+            server_listen_config(Some("   ")).expect("config"),
+            server_listen_config(None).expect("config")
+        );
+    }
+
+    #[test]
+    fn bind_server_listener_rejects_occupied_port() {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("bind occupied port");
+        let addr = occupied.local_addr().expect("local addr");
+        let err = bind_server_listener(&addr.to_string()).expect_err("port should be busy");
+        let message = format!("{err:#}");
+        assert!(message.contains("bind remote-control API on"));
+        assert!(message.contains("already running"));
+    }
+
+    #[test]
     fn ensure_server_paths_reuses_stable_cert_paths() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = ensure_server_paths_in(dir.path(), Some("example.com")).expect("paths");
@@ -1737,6 +1812,52 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
+    #[tokio::test]
+    async fn localhost_browser_viewer_auto_authenticates_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = build_router(
+            dir.path().join("sessions.sqlite3"),
+            "integration-token".to_string(),
+            "123456".to_string(),
+            true,
+        );
+
+        let viewer = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("viewer request");
+        assert_eq!(viewer.status(), reqwest::StatusCode::OK);
+        let session_cookie = viewer
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("set-cookie header")
+            .to_str()
+            .expect("set-cookie str")
+            .to_string();
+        assert!(session_cookie.contains(SESSION_COOKIE_NAME));
+        assert!(session_cookie.contains("HttpOnly"));
+
+        let live = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/live/sessions")
+                    .header(axum::http::header::COOKIE, session_cookie)
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("live request");
+        assert_eq!(live.status(), reqwest::StatusCode::OK);
+    }
+
     // End-to-end check of the security-critical path: the ring CryptoProvider,
     // TLS served from a self-signed certificate that the client pins, and bearer
     // token enforcement on both endpoints.
@@ -1756,7 +1877,7 @@ mod tests {
         init_db(&db_path).expect("init db");
         let token = "integration-token".to_string();
         let viewer_code = "123456".to_string();
-        let app = build_router(db_path, token.clone(), viewer_code.clone());
+        let app = build_router(db_path, token.clone(), viewer_code.clone(), false);
 
         let _client = build_client(&cert_path).expect("pinned client");
         let base = "https://127.0.0.1:11921";
