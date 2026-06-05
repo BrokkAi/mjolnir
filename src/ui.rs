@@ -4194,7 +4194,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
         Line::from("  Ctrl-K/U/W       delete to end/start of line or previous word"),
         Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
         Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
-        Line::from("  🎙 Ctrl-R        start/stop macOS microphone dictation into the prompt"),
+        Line::from("  🎙 Ctrl-R        start/stop microphone dictation into the prompt"),
         Line::from("  Ctrl-V/Ctrl-Alt-V paste image from clipboard"),
         Line::from("  Ctrl-Y           copy last agent message to clipboard"),
         Line::from("  Esc              clear input, chips, and browsing history"),

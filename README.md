@@ -193,7 +193,9 @@ Keyboard basics:
 - `Esc`: dismiss autocomplete, clear input, or cancel a permission prompt.
 - `Ctrl-C`: cancel an in-flight prompt; when idle with an empty input, quit.
 - `Ctrl-D`: quit when the input is empty.
-- `🎙 Ctrl-R`: start/stop macOS microphone dictation into the prompt.
+- `🎙 Ctrl-R`: start/stop microphone dictation into the prompt. macOS uses
+  Apple Speech; other platforms install and cache the default sherpa-onnx
+  runtime/model on first use.
 
 On-disk files:
 

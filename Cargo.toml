@@ -20,6 +20,7 @@ axum = "0.8"
 # cross-compile cleanly for the Android CI target.
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
+bzip2 = "0.6"
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 dirs = "6"
@@ -30,7 +31,7 @@ image = { version = "0.25", default-features = false, features = ["gif", "jpeg",
 libc = "0.2"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 rcgen = "0.13"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 qrcode = { version = "0.14", default-features = false }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

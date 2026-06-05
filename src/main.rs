@@ -611,8 +611,10 @@ async fn run_app(
             &agent,
             cwd.clone(),
             agent_stderr.clone(),
-            project_label.clone(),
-            worktree_label.clone(),
+            HeaderLabels {
+                project: project_label.clone(),
+                worktree: worktree_label.clone(),
+            },
             resume,
             mode,
         )
@@ -754,8 +756,7 @@ async fn run_session(
     agent: &SelectedAgent,
     cwd: PathBuf,
     agent_stderr: Option<PathBuf>,
-    project_label: String,
-    worktree_label: Option<String>,
+    header_labels: HeaderLabels,
     resume_session: Option<String>,
     mode: UiMode,
 ) -> Result<(UiExitReason, Option<String>)> {
@@ -795,8 +796,9 @@ async fn run_session(
     // agents use their source id so the header matches the picker/config,
     // while custom agents show the exact command line being launched.
     let agent_display_name = Some(agent_header_label(agent));
+    let tracker_project_label = header_labels.project.clone();
     let remote_tracker = remote::RemoteSessionTracker::new(
-        project_label.clone(),
+        tracker_project_label,
         agent_header_label(agent),
         Some(runtime_cmd_tx.clone()),
     );
@@ -826,10 +828,7 @@ async fn run_session(
         &mut terminal,
         cmd_tx,
         ui_event_rx,
-        HeaderLabels {
-            project: project_label,
-            worktree: worktree_label,
-        },
+        header_labels,
         agent_display_name,
         Some(&hist_path),
         mode,

@@ -1,11 +1,19 @@
 //! Prompt dictation support.
 //!
-//! macOS ships the Speech framework in Swift, so the TUI shells out to a tiny
-//! helper rather than binding Objective-C APIs from Rust.
+//! macOS uses the system Speech framework through a tiny Swift helper. Other
+//! platforms use sherpa-onnx's microphone example binary when it is available.
 
 use anyhow::{Context, Result, bail};
 #[cfg(not(target_os = "macos"))]
-use std::path::PathBuf;
+use std::{
+    fs,
+    io::Read,
+    path::{Component, Path, PathBuf},
+    process::{Command, ExitStatus, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 
 #[cfg(not(target_os = "macos"))]
 const SHERPA_ONNX_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2";
@@ -19,6 +27,16 @@ const SHERPA_ONNX_DECODER: &str = "decoder-epoch-99-avg-1.onnx";
 const SHERPA_ONNX_JOINER: &str = "joiner-epoch-99-avg-1.onnx";
 #[cfg(not(target_os = "macos"))]
 const SHERPA_ONNX_TOKENS: &str = "tokens.txt";
+const SHERPA_ONNX_MICROPHONE_BIN: &str = "sherpa-onnx-microphone";
+#[cfg(not(target_os = "macos"))]
+const SHERPA_ONNX_RUNTIME_VERSION: &str = "v1.13.2";
+#[cfg(not(target_os = "macos"))]
+const SHERPA_ONNX_RELEASE_BASE_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download";
+#[cfg(not(target_os = "macos"))]
+const SHERPA_ONNX_DICTATION_TIMEOUT: Duration = Duration::from_secs(600);
+#[cfg(not(target_os = "macos"))]
+const SHERPA_ONNX_DICTATION_SILENCE: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DictationBackendKind {
@@ -47,8 +65,7 @@ struct SherpaOnnxModelPaths {
 
 #[cfg(not(target_os = "macos"))]
 impl SherpaOnnxModelPaths {
-    fn in_cache(cache_root: PathBuf) -> Self {
-        let dir = cache_root.join("voice").join(SHERPA_ONNX_MODEL_DIR);
+    fn in_dir(dir: PathBuf) -> Self {
         Self {
             encoder: dir.join(SHERPA_ONNX_ENCODER),
             decoder: dir.join(SHERPA_ONNX_DECODER),
@@ -56,6 +73,10 @@ impl SherpaOnnxModelPaths {
             tokens: dir.join(SHERPA_ONNX_TOKENS),
             dir,
         }
+    }
+
+    fn in_cache(cache_root: PathBuf) -> Self {
+        Self::in_dir(cache_root.join("voice").join(SHERPA_ONNX_MODEL_DIR))
     }
 
     fn is_installed(&self) -> bool {
@@ -77,7 +98,7 @@ fn default_backend_kind() -> DictationBackendKind {
 #[cfg(not(target_os = "macos"))]
 fn mjolnir_cache_dir() -> Result<PathBuf> {
     dirs::cache_dir()
-        .map(|dir| dir.join("mjolnir"))
+        .map(|dir| dir.join("mj"))
         .context("locate user cache directory")
 }
 
@@ -87,18 +108,21 @@ fn sherpa_onnx_model_paths() -> Result<SherpaOnnxModelPaths> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn sherpa_onnx_auto_setup_message(paths: &SherpaOnnxModelPaths) -> String {
+fn sherpa_onnx_model_setup_message(paths: &SherpaOnnxModelPaths) -> String {
     format!(
-        "voice dictation uses sherpa-onnx on this platform. Mjolnir can set this up automatically by downloading the default model from {SHERPA_ONNX_MODEL_URL} into {}.",
-        paths.dir.display()
+        "voice dictation uses sherpa-onnx on this platform. Mjolnir could not install the default model automatically under {}. Missing files: {}, {}, {}, and {}.",
+        paths.dir.display(),
+        SHERPA_ONNX_ENCODER,
+        SHERPA_ONNX_DECODER,
+        SHERPA_ONNX_JOINER,
+        SHERPA_ONNX_TOKENS
     )
 }
 
 #[cfg(not(target_os = "macos"))]
-fn sherpa_onnx_cli_hint(paths: &SherpaOnnxModelPaths) -> String {
+fn sherpa_onnx_runtime_setup_message() -> String {
     format!(
-        "expected sherpa-onnx model files were not found under {}. Mjolnir will auto-install them once the bundled sherpa-onnx runtime is available.",
-        paths.dir.display()
+        "Mjolnir could not install the sherpa-onnx runtime automatically, and {SHERPA_ONNX_MICROPHONE_BIN} was not available on PATH."
     )
 }
 
@@ -448,32 +472,391 @@ fn decode_helper_line(line: &str) -> Result<HelperLine> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn run_dictation<F, G>(
-    _on_partial: F,
+    on_partial: F,
     _on_level: G,
-    _cancel_rx: std::sync::mpsc::Receiver<()>,
+    cancel_rx: mpsc::Receiver<()>,
 ) -> Result<String>
 where
     F: FnMut(String),
     G: FnMut(f32),
 {
-    run_sherpa_onnx_dictation()
+    run_sherpa_onnx_dictation(on_partial, cancel_rx)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_sherpa_onnx_dictation() -> Result<String> {
+fn run_sherpa_onnx_dictation<F>(mut on_partial: F, cancel_rx: mpsc::Receiver<()>) -> Result<String>
+where
+    F: FnMut(String),
+{
     let paths = sherpa_onnx_model_paths()?;
+    ensure_sherpa_onnx_model_installed(&paths)?;
     if !paths.is_installed() {
+        bail!("{}", sherpa_onnx_model_setup_message(&paths));
+    }
+
+    let mut child = spawn_sherpa_onnx_microphone(&paths)?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("open sherpa-onnx microphone stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("open sherpa-onnx microphone stderr")?;
+
+    let (line_tx, line_rx) = mpsc::channel::<Result<String>>();
+    thread::spawn(move || read_sherpa_output_lines(stdout, line_tx));
+    let stderr_reader = thread::spawn(move || {
+        let mut output = String::new();
+        let mut reader = stderr;
+        reader
+            .read_to_string(&mut output)
+            .context("read sherpa-onnx microphone stderr")?;
+        Ok::<_, anyhow::Error>(output)
+    });
+
+    let started_at = Instant::now();
+    let mut last_result_at = Instant::now();
+    let mut last_text: Option<String> = None;
+    let mut cancelled = false;
+    let mut killed_by_timeout = false;
+    let status = loop {
+        while let Ok(line) = line_rx.try_recv() {
+            if let Some(text) = parse_sherpa_transcript_line(&line?) {
+                if last_text.as_deref() != Some(text.as_str()) {
+                    on_partial(text.clone());
+                    last_text = Some(text);
+                }
+                last_result_at = Instant::now();
+            }
+        }
+
+        if cancel_rx.try_recv().is_ok() {
+            cancelled = true;
+            break kill_and_wait(&mut child)?;
+        }
+
+        if last_text.is_some() && last_result_at.elapsed() >= SHERPA_ONNX_DICTATION_SILENCE {
+            killed_by_timeout = true;
+            break kill_and_wait(&mut child)?;
+        }
+
+        if started_at.elapsed() >= SHERPA_ONNX_DICTATION_TIMEOUT {
+            killed_by_timeout = true;
+            break kill_and_wait(&mut child)?;
+        }
+
+        if let Some(status) = child.try_wait().context("poll sherpa-onnx microphone")? {
+            break status;
+        }
+
+        thread::sleep(Duration::from_millis(30));
+    };
+
+    while let Ok(line) = line_rx.try_recv() {
+        if let Some(text) = parse_sherpa_transcript_line(&line?) {
+            if last_text.as_deref() != Some(text.as_str()) {
+                on_partial(text.clone());
+                last_text = Some(text);
+            }
+        }
+    }
+
+    let stderr = stderr_reader
+        .join()
+        .unwrap_or_else(|_| Ok("sherpa-onnx stderr reader panicked".to_string()))?;
+
+    if !cancelled && !killed_by_timeout && !status.success() {
+        let stderr = stderr.trim();
         bail!(
-            "{} {}",
-            sherpa_onnx_auto_setup_message(&paths),
-            sherpa_onnx_cli_hint(&paths)
+            "{}",
+            if stderr.is_empty() {
+                "sherpa-onnx microphone failed".to_string()
+            } else {
+                stderr.to_string()
+            }
         );
     }
 
-    bail!(
-        "sherpa-onnx dictation runtime is not bundled yet; model cache is ready at {}",
-        paths.dir.display()
-    )
+    let text = last_text.unwrap_or_default().trim().to_string();
+    if !cancelled && text.is_empty() {
+        bail!("no speech was recognized");
+    }
+    Ok(text)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn spawn_sherpa_onnx_microphone(paths: &SherpaOnnxModelPaths) -> Result<std::process::Child> {
+    let program = sherpa_onnx_microphone_program()?;
+    let mut command = Command::new(&program);
+    command
+        .arg(format!("--tokens={}", paths.tokens.display()))
+        .arg(format!("--encoder={}", paths.encoder.display()))
+        .arg(format!("--decoder={}", paths.decoder.display()))
+        .arg(format!("--joiner={}", paths.joiner.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.spawn().with_context(|| {
+        format!(
+            "start sherpa-onnx microphone backend {}; {}",
+            display_program(&program),
+            sherpa_onnx_runtime_setup_message()
+        )
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sherpa_onnx_microphone_program() -> Result<PathBuf> {
+    if let Some(path) = find_command_on_path(SHERPA_ONNX_MICROPHONE_BIN) {
+        return Ok(path);
+    }
+    ensure_sherpa_onnx_runtime_installed()?.context(sherpa_onnx_runtime_setup_message())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn display_program(program: &std::path::Path) -> String {
+    program.display().to_string()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_sherpa_onnx_model_installed(paths: &SherpaOnnxModelPaths) -> Result<()> {
+    if paths.is_installed() {
+        return Ok(());
+    }
+    let parent = paths
+        .dir
+        .parent()
+        .context("resolve sherpa-onnx model cache parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let archive = download_bytes(SHERPA_ONNX_MODEL_URL).context("download sherpa-onnx model")?;
+    extract_tar_bz2(&archive, parent).context("extract sherpa-onnx model")?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_sherpa_onnx_runtime_installed() -> Result<Option<PathBuf>> {
+    let Some(asset) = sherpa_onnx_runtime_asset_name() else {
+        return Ok(None);
+    };
+    let dir = mjolnir_cache_dir()?
+        .join("voice")
+        .join("sherpa-onnx-runtime")
+        .join(SHERPA_ONNX_RUNTIME_VERSION);
+    if let Some(path) = find_microphone_binary_under(&dir) {
+        return Ok(Some(path));
+    }
+
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let url = format!("{SHERPA_ONNX_RELEASE_BASE_URL}/{SHERPA_ONNX_RUNTIME_VERSION}/{asset}");
+    let archive = download_bytes(&url).context("download sherpa-onnx runtime")?;
+    extract_tar_bz2(&archive, &dir).context("extract sherpa-onnx runtime")?;
+    let Some(path) = find_microphone_binary_under(&dir) else {
+        return Ok(None);
+    };
+    ensure_executable(&path)?;
+    Ok(Some(path))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sherpa_onnx_runtime_asset_name() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("sherpa-onnx-v1.13.2-linux-x64-static-no-tts.tar.bz2"),
+        ("linux", "aarch64") => Some("sherpa-onnx-v1.13.2-linux-aarch64-static.tar.bz2"),
+        ("windows", "x86_64") => {
+            Some("sherpa-onnx-v1.13.2-win-x64-static-MT-Release-no-tts.tar.bz2")
+        }
+        ("windows", "aarch64") => {
+            Some("sherpa-onnx-v1.13.2-win-arm64-static-MT-Release-no-tts.tar.bz2")
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn download_bytes(url: &str) -> Result<Vec<u8>> {
+    let response = reqwest::blocking::Client::builder()
+        .user_agent("mjolnir-voice-setup")
+        .build()
+        .context("build download client")?
+        .get(url)
+        .send()
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("download {url}"))?;
+    Ok(response.bytes().context("read download body")?.to_vec())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn extract_tar_bz2(bytes: &[u8], dest: &Path) -> Result<()> {
+    let decoder = bzip2::read::BzDecoder::new(bytes);
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive.entries().context("read tar.bz2 entries")? {
+        let mut entry = entry.context("read tar.bz2 entry")?;
+        let entry_path = entry.path().context("read tar.bz2 entry path")?;
+        let relative = safe_archive_path(&entry_path).with_context(|| {
+            format!(
+                "archive entry escapes destination: {}",
+                entry_path.display()
+            )
+        })?;
+        let out_path = dest.join(relative);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        entry
+            .unpack(&out_path)
+            .with_context(|| format!("unpack {}", out_path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn safe_archive_path(path: &Path) -> Result<PathBuf> {
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir => {}
+            _ => bail!("unsafe archive path {}", path.display()),
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        bail!("empty archive path")
+    }
+    Ok(relative)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn find_command_on_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(executable_name(name)))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn find_microphone_binary_under(dir: &Path) -> Option<PathBuf> {
+    let executable = executable_name(SHERPA_ONNX_MICROPHONE_BIN);
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let entries = fs::read_dir(&next).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|name| name == executable) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(all(not(target_os = "macos"), unix))]
+fn ensure_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let mut permissions = metadata.permissions();
+    let mode = permissions.mode();
+    if mode & 0o111 == 0 {
+        permissions.set_mode(mode | 0o755);
+        fs::set_permissions(path, permissions)
+            .with_context(|| format!("make {} executable", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(all(not(target_os = "macos"), not(unix)))]
+fn ensure_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn executable_name(name: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn kill_and_wait(child: &mut std::process::Child) -> Result<ExitStatus> {
+    let _ = child.kill();
+    child.wait().context("wait for sherpa-onnx microphone")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_sherpa_output_lines<R>(mut reader: R, line_tx: mpsc::Sender<Result<String>>)
+where
+    R: Read,
+{
+    let mut pending = Vec::new();
+    let mut buffer = [0; 1024];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                for byte in &buffer[..read] {
+                    match *byte {
+                        b'\n' | b'\r' => {
+                            if !pending.is_empty() {
+                                let line = String::from_utf8(pending.clone())
+                                    .context("decode sherpa-onnx microphone output");
+                                if line_tx.send(line).is_err() {
+                                    return;
+                                }
+                                pending.clear();
+                            }
+                        }
+                        byte => pending.push(byte),
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = line_tx.send(Err(error).context("read sherpa-onnx microphone output"));
+                return;
+            }
+        }
+    }
+    if !pending.is_empty() {
+        let line = String::from_utf8(pending).context("decode sherpa-onnx microphone output");
+        let _ = line_tx.send(line);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn parse_sherpa_transcript_line(line: &str) -> Option<String> {
+    let text = line.trim();
+    if text.is_empty() || sherpa_line_is_status(text) {
+        return None;
+    }
+
+    let text = text
+        .split_once(':')
+        .and_then(|(prefix, value)| prefix.trim().parse::<usize>().ok().map(|_| value.trim()))
+        .unwrap_or(text)
+        .trim();
+    if text.is_empty() || sherpa_line_is_status(text) {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sherpa_line_is_status(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("sherpa-onnx/csrc/")
+        || lower.contains("parse-options.cc")
+        || lower.contains("please speak")
+        || lower.starts_with("started")
+        || lower.starts_with("creating")
+        || lower.starts_with("usage:")
+        || lower.starts_with("options:")
+        || lower.starts_with("--")
 }
 
 pub fn dictation_error_message(error: &anyhow::Error) -> String {
@@ -484,7 +867,9 @@ pub fn dictation_error_message(error: &anyhow::Error) -> String {
                 "voice dictation requires the swift command on PATH".to_string()
             }
             DictationBackendKind::SherpaOnnx => {
-                "voice dictation requires the bundled sherpa-onnx runtime".to_string()
+                format!(
+                    "voice dictation requires {SHERPA_ONNX_MICROPHONE_BIN}; Mjolnir installs the default sherpa-onnx runtime and model automatically on supported platforms"
+                )
             }
         };
     }
@@ -514,10 +899,10 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn sherpa_model_paths_are_under_voice_cache() {
-        let paths = SherpaOnnxModelPaths::in_cache(PathBuf::from("/cache/mjolnir"));
+        let paths = SherpaOnnxModelPaths::in_cache(PathBuf::from("/cache/mj"));
         assert_eq!(
             paths.dir,
-            PathBuf::from("/cache/mjolnir")
+            PathBuf::from("/cache/mj")
                 .join("voice")
                 .join(SHERPA_ONNX_MODEL_DIR)
         );
@@ -530,12 +915,44 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn sherpa_setup_message_is_actionable_without_yaml() {
-        let paths = SherpaOnnxModelPaths::in_cache(PathBuf::from("/cache/mjolnir"));
-        let message = sherpa_onnx_auto_setup_message(&paths);
+        let paths = SherpaOnnxModelPaths::in_cache(PathBuf::from("/cache/mj"));
+        let message = sherpa_onnx_model_setup_message(&paths);
         assert!(message.contains("sherpa-onnx"));
-        assert!(message.contains("automatically"));
-        assert!(message.contains(SHERPA_ONNX_MODEL_URL));
-        assert!(message.contains("/cache/mjolnir"));
+        assert!(message.contains("install"));
+        assert!(message.contains("/cache/mj"));
         assert!(!message.to_lowercase().contains("yaml"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn sherpa_runtime_message_names_path_fallback() {
+        let message = sherpa_onnx_runtime_setup_message();
+        assert!(message.contains(SHERPA_ONNX_MICROPHONE_BIN));
+        assert!(message.contains("PATH"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn sherpa_output_parser_ignores_status_lines() {
+        assert_eq!(parse_sherpa_transcript_line("Started! Please speak"), None);
+        assert_eq!(
+            parse_sherpa_transcript_line(
+                "sherpa-onnx/csrc/parse-options.cc:Read:361 --tokens=model/tokens.txt"
+            ),
+            None
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn sherpa_output_parser_accepts_plain_and_numbered_transcripts() {
+        assert_eq!(
+            parse_sherpa_transcript_line("hello world"),
+            Some("hello world".to_string())
+        );
+        assert_eq!(
+            parse_sherpa_transcript_line("0: hello world"),
+            Some("hello world".to_string())
+        );
     }
 }
