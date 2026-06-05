@@ -556,7 +556,7 @@
           },
         });
         if (response.status === 401) {
-          showAuth("Your session expired. Enter the six-digit viewer code again if prompted.");
+          await tryResumeViewerSession("Your session expired. Enter the six-digit viewer code again if prompted.");
           throw new Error("HTTP 401");
         }
         return response;
@@ -765,11 +765,11 @@
         }
       }
 
-      async function tryResumeViewerSession() {
+      async function tryResumeViewerSession(message = "") {
         if (viewerToken) {
           showApp();
           await refreshSessions();
-          return;
+          return true;
         }
         try {
           const response = await fetch("/live/sessions", {
@@ -777,9 +777,9 @@
             cache: "no-store",
           });
           if (response.status === 401) {
-            showAuth();
+            showAuth(message);
             authTokenEl.focus();
-            return;
+            return false;
           }
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -790,9 +790,11 @@
           statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
           renderSessions();
           await refreshQueuedPrompts();
+          return true;
         } catch (error) {
-          showAuth(`Sign-in check failed: ${error.message}`);
+          showAuth(message || `Sign-in check failed: ${error.message}`);
           authTokenEl.focus();
+          return false;
         }
       }
 
@@ -916,7 +918,7 @@
             credentials: "same-origin",
           });
         } finally {
-          showAuth("Logged out.");
+          await tryResumeViewerSession("Logged out.");
         }
       }
 
