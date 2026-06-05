@@ -4,13 +4,20 @@
 //! helper rather than binding Objective-C APIs from Rust.
 
 use anyhow::{Context, Result, bail};
+#[cfg(not(target_os = "macos"))]
 use std::path::PathBuf;
 
+#[cfg(not(target_os = "macos"))]
 const SHERPA_ONNX_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2";
+#[cfg(not(target_os = "macos"))]
 const SHERPA_ONNX_MODEL_DIR: &str = "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20";
+#[cfg(not(target_os = "macos"))]
 const SHERPA_ONNX_ENCODER: &str = "encoder-epoch-99-avg-1.onnx";
+#[cfg(not(target_os = "macos"))]
 const SHERPA_ONNX_DECODER: &str = "decoder-epoch-99-avg-1.onnx";
+#[cfg(not(target_os = "macos"))]
 const SHERPA_ONNX_JOINER: &str = "joiner-epoch-99-avg-1.onnx";
+#[cfg(not(target_os = "macos"))]
 const SHERPA_ONNX_TOKENS: &str = "tokens.txt";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +35,7 @@ impl DictationBackendKind {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SherpaOnnxModelPaths {
     dir: PathBuf,
@@ -37,6 +45,7 @@ struct SherpaOnnxModelPaths {
     tokens: PathBuf,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl SherpaOnnxModelPaths {
     fn in_cache(cache_root: PathBuf) -> Self {
         let dir = cache_root.join("voice").join(SHERPA_ONNX_MODEL_DIR);
@@ -65,16 +74,19 @@ fn default_backend_kind() -> DictationBackendKind {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn mjolnir_cache_dir() -> Result<PathBuf> {
     dirs::cache_dir()
         .map(|dir| dir.join("mjolnir"))
         .context("locate user cache directory")
 }
 
+#[cfg(not(target_os = "macos"))]
 fn sherpa_onnx_model_paths() -> Result<SherpaOnnxModelPaths> {
     Ok(SherpaOnnxModelPaths::in_cache(mjolnir_cache_dir()?))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn sherpa_onnx_auto_setup_message(paths: &SherpaOnnxModelPaths) -> String {
     format!(
         "voice dictation uses sherpa-onnx on this platform. Mjolnir can set this up automatically by downloading the default model from {SHERPA_ONNX_MODEL_URL} into {}.",
@@ -82,6 +94,7 @@ fn sherpa_onnx_auto_setup_message(paths: &SherpaOnnxModelPaths) -> String {
     )
 }
 
+#[cfg(not(target_os = "macos"))]
 fn sherpa_onnx_cli_hint(paths: &SherpaOnnxModelPaths) -> String {
     format!(
         "expected sherpa-onnx model files were not found under {}. Mjolnir will auto-install them once the bundled sherpa-onnx runtime is available.",
@@ -498,6 +511,7 @@ mod tests {
         assert_eq!(default_backend_kind(), expected);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn sherpa_model_paths_are_under_voice_cache() {
         let paths = SherpaOnnxModelPaths::in_cache(PathBuf::from("/cache/mjolnir"));
@@ -513,6 +527,7 @@ mod tests {
         assert_eq!(paths.tokens, paths.dir.join(SHERPA_ONNX_TOKENS));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn sherpa_setup_message_is_actionable_without_yaml() {
         let paths = SherpaOnnxModelPaths::in_cache(PathBuf::from("/cache/mjolnir"));
