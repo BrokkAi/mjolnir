@@ -554,11 +554,11 @@ where
     };
 
     while let Ok(line) = line_rx.try_recv() {
-        if let Some(text) = parse_sherpa_transcript_line(&line?) {
-            if last_text.as_deref() != Some(text.as_str()) {
-                on_partial(text.clone());
-                last_text = Some(text);
-            }
+        if let Some(text) = parse_sherpa_transcript_line(&line?)
+            && last_text.as_deref() != Some(text.as_str())
+        {
+            on_partial(text.clone());
+            last_text = Some(text);
         }
     }
 
