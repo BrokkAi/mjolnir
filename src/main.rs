@@ -981,19 +981,13 @@ mod tests {
     fn project_label_uses_full_directory_path_inside_mjolnir_worktree() {
         let cwd =
             std::path::Path::new("/Users/ryan/code/mjolnir/.mjolnir/worktrees/bold-willow/src");
-        assert_eq!(
-            project_label(cwd),
-            paths::display_path_with_tilde(cwd)
-        );
+        assert_eq!(project_label(cwd), paths::display_path_with_tilde(cwd));
     }
 
     #[test]
     fn project_label_uses_full_directory_path_without_worktree() {
         let cwd = std::path::Path::new("/Users/ryan/code/mjolnir/src");
-        assert_eq!(
-            project_label(cwd),
-            paths::display_path_with_tilde(cwd)
-        );
+        assert_eq!(project_label(cwd), paths::display_path_with_tilde(cwd));
     }
 
     #[test]
