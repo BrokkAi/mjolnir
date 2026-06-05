@@ -13,11 +13,10 @@ pub fn folder_label(path: &Path) -> String {
 /// Render a path for the UI, replacing the user's home directory prefix with
 /// `~` when possible so long paths stay a bit shorter.
 pub fn display_path_with_tilde(path: &Path) -> String {
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(home) = dirs::home_dir() else {
         return path.display().to_string();
     };
-    let home = Path::new(&home);
-    match path.strip_prefix(home) {
+    match path.strip_prefix(&home) {
         Ok(relative) if relative.as_os_str().is_empty() => "~".to_string(),
         Ok(relative) => format!("~/{}", relative.display()),
         Err(_) => path.display().to_string(),
@@ -55,8 +54,9 @@ mod tests {
 
     #[test]
     fn display_path_with_tilde_shortens_home_prefix() {
-        let home = std::env::var_os("HOME").expect("HOME set for test environment");
-        let home = PathBuf::from(home);
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
         assert_eq!(
             display_path_with_tilde(&home.join("project/src")),
             "~/project/src"
