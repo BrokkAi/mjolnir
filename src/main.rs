@@ -262,7 +262,7 @@ async fn main() -> Result<()> {
 
     let (cwd, worktree) = prepare_worktree_for_arg(cwd, cli.worktree.as_deref())?;
     let worktree_label = worktree_label(worktree.as_ref());
-    let project_label = project_label(&cwd, worktree.as_ref());
+    let project_label = project_label(&cwd);
 
     let result = run_app(
         cwd,
@@ -310,7 +310,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
     };
     let (cwd, worktree) = prepare_worktree_for_arg(cwd, args.worktree.as_deref())?;
     let worktree_label = worktree_label(worktree.as_ref());
-    let project_label = project_label(&cwd, worktree.as_ref());
+    let project_label = project_label(&cwd);
 
     // `--list`: headless listing, print and exit.
     if args.list {
@@ -474,7 +474,7 @@ fn worktree_label(worktree: Option<&CreatedWorktree>) -> Option<String> {
     worktree.map(|w| paths::folder_label(&w.worktree_root))
 }
 
-fn project_label(cwd: &std::path::Path, _worktree: Option<&CreatedWorktree>) -> String {
+fn project_label(cwd: &std::path::Path) -> String {
     paths::display_path_with_tilde(cwd)
 }
 
@@ -972,7 +972,7 @@ mod tests {
         };
 
         assert_eq!(
-            project_label(&worktree.session_cwd, Some(&worktree)),
+            project_label(&worktree.session_cwd),
             paths::display_path_with_tilde(&worktree.session_cwd)
         );
     }
@@ -982,7 +982,7 @@ mod tests {
         let cwd =
             std::path::Path::new("/Users/ryan/code/mjolnir/.mjolnir/worktrees/bold-willow/src");
         assert_eq!(
-            project_label(cwd, None),
+            project_label(cwd),
             paths::display_path_with_tilde(cwd)
         );
     }
@@ -991,7 +991,7 @@ mod tests {
     fn project_label_uses_full_directory_path_without_worktree() {
         let cwd = std::path::Path::new("/Users/ryan/code/mjolnir/src");
         assert_eq!(
-            project_label(cwd, None),
+            project_label(cwd),
             paths::display_path_with_tilde(cwd)
         );
     }
