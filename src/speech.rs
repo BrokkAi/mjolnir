@@ -536,7 +536,7 @@ where
             break kill_and_wait(&mut child)?;
         }
 
-        if last_text.is_some() && last_result_at.elapsed() >= SHERPA_ONNX_DICTATION_SILENCE {
+        if last_result_at.elapsed() >= SHERPA_ONNX_DICTATION_SILENCE {
             killed_by_timeout = true;
             break kill_and_wait(&mut child)?;
         }
@@ -659,32 +659,41 @@ fn ensure_sherpa_onnx_runtime_installed() -> Result<Option<PathBuf>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn sherpa_onnx_runtime_asset_name() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Some("sherpa-onnx-v1.13.2-linux-x64-static-no-tts.tar.bz2"),
-        ("linux", "aarch64") => Some("sherpa-onnx-v1.13.2-linux-aarch64-static.tar.bz2"),
-        ("windows", "x86_64") => {
-            Some("sherpa-onnx-v1.13.2-win-x64-static-MT-Release-no-tts.tar.bz2")
-        }
-        ("windows", "aarch64") => {
-            Some("sherpa-onnx-v1.13.2-win-arm64-static-MT-Release-no-tts.tar.bz2")
-        }
-        _ => None,
-    }
+fn sherpa_onnx_runtime_asset_name() -> Option<String> {
+    let v = SHERPA_ONNX_RUNTIME_VERSION;
+    let suffix = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x64-static-no-tts",
+        ("linux", "aarch64") => "linux-aarch64-static",
+        ("windows", "x86_64") => "win-x64-static-MT-Release-no-tts",
+        ("windows", "aarch64") => "win-arm64-static-MT-Release-no-tts",
+        _ => return None,
+    };
+    Some(format!("sherpa-onnx-{v}-{suffix}.tar.bz2"))
 }
 
 #[cfg(not(target_os = "macos"))]
 fn download_bytes(url: &str) -> Result<Vec<u8>> {
-    let response = reqwest::blocking::Client::builder()
-        .user_agent("mjolnir-voice-setup")
-        .build()
-        .context("build download client")?
-        .get(url)
-        .send()
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("download {url}"))?;
-    Ok(response.bytes().context("read download body")?.to_vec())
+    // reqwest::blocking creates its own Tokio runtime, which panics when called
+    // from within an existing Tokio context. Spawning a plain OS thread
+    // guarantees there is no ambient runtime, regardless of the call site.
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        let response = reqwest::blocking::Client::builder()
+            .user_agent("mjolnir-voice-setup")
+            .build()
+            .context("build download client")?
+            .get(&url)
+            .send()
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("download {url}"))?;
+        response
+            .bytes()
+            .context("read download body")
+            .map(|b| b.to_vec())
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("download thread panicked"))?
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -740,12 +749,17 @@ fn find_microphone_binary_under(dir: &Path) -> Option<PathBuf> {
     let executable = executable_name(SHERPA_ONNX_MICROPHONE_BIN);
     let mut stack = vec![dir.to_path_buf()];
     while let Some(next) = stack.pop() {
-        let entries = fs::read_dir(&next).ok()?;
+        let Ok(entries) = fs::read_dir(&next) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.file_name().is_some_and(|name| name == executable) {
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == executable.as_str())
+            {
                 return Some(path);
             }
         }
