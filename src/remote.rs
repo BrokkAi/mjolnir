@@ -1,6 +1,7 @@
 //! Simple remote-control server and local session registration.
 
 use std::collections::HashSet;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -555,15 +556,24 @@ pub async fn run_server(hostname: Option<String>) -> Result<()> {
     println!("{}", render_login_qr(&viewer_url)?);
     println!("viewer code: {viewer_code}");
 
-    axum_server::bind_rustls(listen.bind_addr.parse()?, tls_config)
+    let listener = bind_server_listener(&listen.bind_addr)?;
+
+    axum_server::from_tcp_rustls(listener, tls_config)
         .serve(app.into_make_service())
         .await
-        .with_context(|| {
-            format!(
-                "serve remote-control API on {} (is another `mj server` already running?)",
-                listen.bind_addr
-            )
-        })
+        .with_context(|| format!("serve remote-control API on {}", listen.bind_addr))
+}
+
+fn bind_server_listener(bind_addr: &str) -> Result<TcpListener> {
+    let listener = TcpListener::bind(bind_addr).with_context(|| {
+        format!(
+            "bind remote-control listener on {bind_addr} (is another `mj server` already running?)"
+        )
+    })?;
+    listener
+        .set_nonblocking(true)
+        .with_context(|| format!("set remote-control listener on {bind_addr} to non-blocking"))?;
+    Ok(listener)
 }
 
 fn remote_qr_login_url(host: &str, token: &str) -> String {
@@ -1597,6 +1607,20 @@ mod tests {
                 bind_addr: REMOTE_CONTROL_PUBLIC_ADDR.to_string(),
                 viewer_host: "example.com".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn bind_server_listener_reports_address_in_use() {
+        let occupied = TcpListener::bind("127.0.0.1:0").expect("occupy port");
+        let bind_addr = occupied.local_addr().expect("listener addr").to_string();
+
+        let err = bind_server_listener(&bind_addr).expect_err("second bind should fail");
+        let message = format!("{err:#}");
+        assert!(message.contains(&bind_addr), "unexpected error: {message}");
+        assert!(
+            message.contains("already running"),
+            "unexpected error: {message}"
         );
     }
 
