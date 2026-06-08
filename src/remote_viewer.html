@@ -62,6 +62,7 @@
       .main {
         display: flex;
         flex-direction: column;
+        min-height: 100vh;
       }
 
       .panel-header {
@@ -127,12 +128,23 @@
         display: flex;
         flex-direction: column;
         gap: 14px;
+        min-height: 0;
+        scroll-behavior: smooth;
+      }
+
+      .transcript-wrap {
+        position: relative;
+        flex: 1;
+        min-height: 0;
       }
 
       .composer {
+        position: sticky;
+        bottom: 0;
         padding: 16px 20px;
-        border-bottom: 1px solid var(--border);
-        background: rgba(15, 23, 42, 0.72);
+        border-top: 1px solid var(--border);
+        background: rgba(15, 23, 42, 0.92);
+        backdrop-filter: blur(12px);
         display: flex;
         flex-direction: column;
         gap: 12px;
@@ -157,7 +169,33 @@
 
       .composer textarea {
         min-height: 108px;
-        resize: vertical;
+        max-height: 240px;
+        resize: none;
+        overflow-y: auto;
+      }
+
+      .jump-to-latest {
+        position: absolute;
+        right: 20px;
+        bottom: 20px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: rgba(15, 23, 42, 0.94);
+        color: var(--text);
+        box-shadow: var(--shadow);
+        cursor: pointer;
+      }
+
+      .jump-to-latest:hover {
+        border-color: var(--accent);
+        background: rgba(30, 41, 59, 0.98);
+      }
+
+      .jump-to-latest.has-new {
+        border-color: var(--accent);
+        background: rgba(96, 165, 250, 0.16);
+        color: #dbeafe;
       }
 
       .composer button,
@@ -480,6 +518,10 @@
           <h2 id="transcript-title">Transcript</h2>
           <p id="transcript-meta">Select a session to inspect its history.</p>
         </div>
+        <div class="transcript-wrap">
+          <div id="transcript"></div>
+          <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
+        </div>
         <section class="composer">
           <div class="composer-row">
             <textarea id="queue-input" placeholder="Queue a prompt for the selected remote session"></textarea>
@@ -488,7 +530,6 @@
           <div id="queue-status" class="queue-meta">Select a session to queue prompts.</div>
           <div id="queue-list" class="queue-list"></div>
         </section>
-        <div id="transcript"></div>
       </main>
     </div>
 
@@ -512,12 +553,18 @@
       const queueSubmitEl = document.getElementById("queue-submit");
       const queueStatusEl = document.getElementById("queue-status");
       const queueListEl = document.getElementById("queue-list");
+      const jumpToLatestEl = document.getElementById("jump-to-latest");
 
       let selectedSessionId = null;
       let sessions = [];
       let queuedPrompts = [];
       let refreshTimer = null;
       let authenticated = false;
+      let shouldStickToBottom = true;
+      let forceScrollToBottom = false;
+      let pendingNewEntries = 0;
+      const draftBySessionId = new Map();
+      let renderedTranscriptSignature = null;
 
       function showAuth(message = "") {
         authenticated = false;
@@ -611,6 +658,54 @@
         return date.toLocaleString();
       }
 
+      function isNearTranscriptBottom() {
+        const threshold = 48;
+        const distanceFromBottom = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
+        return distanceFromBottom <= threshold;
+      }
+
+      function scrollTranscriptToBottom(behavior = "smooth") {
+        transcriptEl.scrollTo({
+          top: transcriptEl.scrollHeight,
+          behavior,
+        });
+        shouldStickToBottom = true;
+        jumpToLatestEl.hidden = true;
+      }
+
+      function updateJumpToLatestVisibility() {
+        const hasOverflow = transcriptEl.scrollHeight > transcriptEl.clientHeight + 8;
+        const nearBottom = isNearTranscriptBottom();
+        shouldStickToBottom = nearBottom;
+        jumpToLatestEl.hidden = !hasOverflow || nearBottom;
+        jumpToLatestEl.classList.toggle("has-new", pendingNewEntries > 0);
+        jumpToLatestEl.textContent = pendingNewEntries > 0
+          ? `Jump to latest (${pendingNewEntries} new)`
+          : "Jump to latest";
+      }
+
+      function saveDraftForSelectedSession() {
+        if (!selectedSessionId) {
+          return;
+        }
+        draftBySessionId.set(selectedSessionId, queueInputEl.value);
+      }
+
+      function restoreDraftForSelectedSession() {
+        queueInputEl.value = selectedSessionId ? (draftBySessionId.get(selectedSessionId) || "") : "";
+        syncComposerHeight();
+      }
+
+      function transcriptSignature(transcript) {
+        return transcript.map((entry) => `${entry.kind || "system"}|${entry.timestamp || ""}|${entry.text || ""}`).join("\u001f");
+      }
+
+      function syncComposerHeight() {
+        queueInputEl.style.height = "auto";
+        const nextHeight = Math.min(queueInputEl.scrollHeight, 240);
+        queueInputEl.style.height = `${Math.max(nextHeight, 108)}px`;
+      }
+
       function renderSessions() {
         sessionsEl.textContent = "";
         if (!sessions.length) {
@@ -631,7 +726,11 @@
           button.type = "button";
           button.className = "session-item" + (session.session_id === selectedSessionId ? " active" : "");
           button.addEventListener("click", () => {
+            saveDraftForSelectedSession();
             selectedSessionId = session.session_id;
+            queuedPrompts = [];
+            pendingNewEntries = 0;
+            forceScrollToBottom = true;
             renderSessions();
             refreshQueuedPrompts();
           });
@@ -657,6 +756,7 @@
 
         const selected = sessions.find((session) => session.session_id === selectedSessionId) || null;
         renderQueue(selected);
+        restoreDraftForSelectedSession();
         renderTranscript(selected);
       }
 
@@ -667,6 +767,8 @@
 
         if (!session) {
           queueStatusEl.textContent = "Select a session to queue prompts.";
+          queueInputEl.value = "";
+          syncComposerHeight();
           return;
         }
 
@@ -699,6 +801,7 @@
       }
 
       function renderTranscript(session) {
+        const pinnedToBottom = forceScrollToBottom || shouldStickToBottom || isNearTranscriptBottom();
         transcriptEl.textContent = "";
         if (!session) {
           transcriptTitleEl.textContent = "Transcript";
@@ -707,10 +810,16 @@
           empty.className = "empty";
           empty.textContent = "No transcript available.";
           transcriptEl.appendChild(empty);
+          renderedTranscriptSignature = null;
+          pendingNewEntries = 0;
+          jumpToLatestEl.hidden = true;
+          forceScrollToBottom = false;
           return;
         }
 
         const transcript = Array.isArray(session.transcript) ? session.transcript : [];
+        const nextSignature = transcriptSignature(transcript);
+        const transcriptChanged = renderedTranscriptSignature !== null && renderedTranscriptSignature !== nextSignature;
         transcriptTitleEl.textContent = sessionLabel(session);
         transcriptMetaEl.textContent = `${session.project || "-"} • ${session.agent || "-"} • ${session.session_id} • ${transcript.length} entries`;
 
@@ -719,6 +828,10 @@
           empty.className = "empty";
           empty.textContent = "This session has not produced any transcript entries yet.";
           transcriptEl.appendChild(empty);
+          renderedTranscriptSignature = nextSignature;
+          pendingNewEntries = 0;
+          jumpToLatestEl.hidden = true;
+          forceScrollToBottom = false;
           return;
         }
 
@@ -763,6 +876,18 @@
           card.appendChild(body);
           transcriptEl.appendChild(card);
         }
+
+        if (pinnedToBottom) {
+          pendingNewEntries = 0;
+          scrollTranscriptToBottom(forceScrollToBottom ? "instant" : "smooth");
+        } else {
+          if (transcriptChanged) {
+            pendingNewEntries += 1;
+          }
+          updateJumpToLatestVisibility();
+        }
+        renderedTranscriptSignature = nextSignature;
+        forceScrollToBottom = false;
       }
 
       async function tryResumeViewerSession() {
@@ -864,6 +989,10 @@
             throw new Error(`HTTP ${response.status}`);
           }
           queueInputEl.value = "";
+          draftBySessionId.set(sessionId, "");
+          syncComposerHeight();
+          pendingNewEntries = 0;
+          forceScrollToBottom = true;
           await refreshSessions();
         } catch (error) {
           if (error.message !== "HTTP 401") {
@@ -922,14 +1051,34 @@
 
       authFormEl.addEventListener("submit", submitAuth);
       logoutButtonEl.addEventListener("click", logout);
+      jumpToLatestEl.addEventListener("click", () => {
+        pendingNewEntries = 0;
+        scrollTranscriptToBottom();
+      });
+      transcriptEl.addEventListener("scroll", () => {
+        if (isNearTranscriptBottom()) {
+          pendingNewEntries = 0;
+        }
+        updateJumpToLatestVisibility();
+      }, { passive: true });
       queueSubmitEl.addEventListener("click", submitQueuedPrompt);
+      queueInputEl.addEventListener("input", () => {
+        saveDraftForSelectedSession();
+        syncComposerHeight();
+      });
       queueInputEl.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+          event.preventDefault();
+          submitQueuedPrompt();
+          return;
+        }
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
           event.preventDefault();
           submitQueuedPrompt();
         }
       });
 
+      syncComposerHeight();
       void tryResumeViewerSession();
     </script>
   </body>
