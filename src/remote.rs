@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallContent};
 use anyhow::{Context, Result, anyhow};
-use axum::extract::{DefaultBodyLimit, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
 use axum::http::StatusCode;
 use axum::http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE};
 use axum::middleware::Next;
@@ -32,6 +32,7 @@ const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
 const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
 const REMOTE_CONTROL_UPSERT_URL: &str = "https://localhost:11921/api/sessions";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+const CONNECTED_SESSION_TTL: Duration = Duration::from_secs(75);
 const SESSION_COOKIE_NAME: &str = "mj_remote_session";
 /// The six-digit viewer code is only ~20 bits of entropy, so the manual-unlock
 /// endpoint must be throttled or it can be brute-forced — especially once the
@@ -379,15 +380,19 @@ impl RemoteSessionTracker {
         let Some(client) = self.client.clone() else {
             return;
         };
-        let snapshot = self
-            .state
-            .lock()
-            .ok()
-            .and_then(|mut state| state.snapshot_with_heartbeat_touch());
+        let snapshot = self.state.lock().ok().and_then(|state| state.snapshot());
+        let session_id = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.session_id.clone());
         if let Some(snapshot) = snapshot
-            && let Err(error) = send_snapshot(client, self.token.clone(), snapshot).await
+            && let Err(error) = send_snapshot(client.clone(), self.token.clone(), snapshot).await
         {
             debug!("final remote-control flush failed: {error:#}");
+        }
+        if let Some(session_id) = session_id
+            && let Err(error) = send_disconnect(client, self.token.clone(), &session_id).await
+        {
+            debug!("remote-control disconnect failed: {error:#}");
         }
     }
 
@@ -618,6 +623,10 @@ fn build_router(db_path: PathBuf, token: String, viewer_code: String) -> Router 
         .route("/live/sessions", get(list_sessions))
         .route("/sessions", get(list_sessions))
         .route("/api/sessions", post(upsert_session))
+        .route(
+            "/api/sessions/{session_id}",
+            axum::routing::delete(disconnect_session),
+        )
         .route(
             "/api/queued-prompts",
             get(list_queued_prompts).post(queue_prompt),
@@ -890,15 +899,31 @@ async fn upsert_session(
     Ok(StatusCode::ACCEPTED)
 }
 
+async fn disconnect_session(
+    State(state): State<ServerState>,
+    AxumPath(session_id): AxumPath<String>,
+) -> std::result::Result<StatusCode, (StatusCode, String)> {
+    let db_path = Arc::clone(&state.db_path);
+    tokio::task::spawn_blocking(move || {
+        disconnect_session_record(db_path.as_ref().as_path(), &session_id)
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn list_sessions(
     State(state): State<ServerState>,
 ) -> std::result::Result<Json<Vec<SessionRecord>>, (StatusCode, String)> {
     let db_path = Arc::clone(&state.db_path);
-    let sessions =
-        tokio::task::spawn_blocking(move || load_session_records(db_path.as_ref().as_path()))
-            .await
-            .map_err(internal_error)?
-            .map_err(internal_error)?;
+    let cutoff = connected_session_cutoff_rfc3339();
+    let sessions = tokio::task::spawn_blocking(move || {
+        load_connected_session_records(db_path.as_ref().as_path(), &cutoff)
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
     Ok(Json(sessions))
 }
 
@@ -1091,37 +1116,39 @@ fn init_db(db_path: &Path) -> Result<()> {
             total_messages integer not null,
             project text not null,
             agent text not null,
-            transcript_json text not null default '[]'
+            transcript_json text not null default '[]',
+            connected integer not null default 0
         );
         create table if not exists queued_prompts (
             id integer primary key autoincrement,
             session_id text not null,
             text text not null,
             created_at text not null
-        );
-        alter table sessions add column transcript_json text not null default '[]';",
+        );",
     )
-    .or_else(|_| {
-        conn.execute_batch(
-            "create table if not exists sessions (
-                session_id text primary key,
-                name text not null,
-                start_time text not null,
-                last_update text not null,
-                total_messages integer not null,
-                project text not null,
-                agent text not null,
-                transcript_json text not null default '[]'
-            );
-            create table if not exists queued_prompts (
-                id integer primary key autoincrement,
-                session_id text not null,
-                text text not null,
-                created_at text not null
-            );",
-        )
-    })
     .context("create remote-control schema")?;
+    ensure_sessions_column(&conn, "transcript_json", "text not null default '[]'")?;
+    ensure_sessions_column(&conn, "connected", "integer not null default 0")?;
+    Ok(())
+}
+
+fn ensure_sessions_column(conn: &Connection, column: &str, definition: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare("pragma table_info(sessions)")
+        .context("prepare sessions schema query")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("query sessions schema")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect sessions schema")?;
+    if columns.iter().any(|existing| existing == column) {
+        return Ok(());
+    }
+
+    conn.execute_batch(&format!(
+        "alter table sessions add column {column} {definition}"
+    ))
+    .with_context(|| format!("add sessions.{column} column"))?;
     Ok(())
 }
 
@@ -1148,8 +1175,9 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             total_messages,
             project,
             agent,
-            transcript_json
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            transcript_json,
+            connected
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -1157,7 +1185,8 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             total_messages = excluded.total_messages,
             project = excluded.project,
             agent = excluded.agent,
-            transcript_json = excluded.transcript_json",
+            transcript_json = excluded.transcript_json,
+            connected = 1",
         params![
             session.session_id,
             session.name,
@@ -1173,6 +1202,18 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
     Ok(())
 }
 
+fn disconnect_session_record(db_path: &Path, session_id: &str) -> Result<()> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "update sessions set connected = 0 where session_id = ?1",
+        params![session_id],
+    )
+    .context("disconnect remote-control session")?;
+    Ok(())
+}
+
+#[cfg(test)]
 fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
     init_db(db_path)?;
     let conn = open_db(db_path)?;
@@ -1197,27 +1238,61 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
         )
         .context("prepare session query")?;
     let rows = stmt
-        .query_map([], |row| {
-            let total_messages: i64 = row.get(4)?;
-            let transcript_json: String = row.get(7)?;
-            let queued_prompt_count: i64 = row.get(8)?;
-            let transcript = serde_json::from_str(&transcript_json).unwrap_or_default();
-            Ok(SessionRecord {
-                session_id: row.get(0)?,
-                name: row.get(1)?,
-                start_time: row.get(2)?,
-                last_update: row.get(3)?,
-                total_messages: u64::try_from(total_messages).unwrap_or(0),
-                project: row.get(5)?,
-                agent: row.get(6)?,
-                transcript,
-                queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
-            })
-        })
+        .query_map([], session_record_from_row)
         .context("query sessions")?;
 
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .context("collect sessions")
+}
+
+fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<SessionRecord>> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "select
+                session_id,
+                name,
+                start_time,
+                last_update,
+                total_messages,
+                project,
+                agent,
+                transcript_json,
+                (
+                    select count(*)
+                    from queued_prompts
+                    where queued_prompts.session_id = sessions.session_id
+                ) as queued_prompt_count
+            from sessions
+            where connected = 1 and last_update >= ?1
+            order by last_update desc, session_id asc",
+        )
+        .context("prepare connected session query")?;
+    let rows = stmt
+        .query_map(params![cutoff], session_record_from_row)
+        .context("query connected sessions")?;
+
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect connected sessions")
+}
+
+fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
+    let total_messages: i64 = row.get(4)?;
+    let transcript_json: String = row.get(7)?;
+    let queued_prompt_count: i64 = row.get(8)?;
+    let transcript = serde_json::from_str(&transcript_json).unwrap_or_default();
+    Ok(SessionRecord {
+        session_id: row.get(0)?,
+        name: row.get(1)?,
+        start_time: row.get(2)?,
+        last_update: row.get(3)?,
+        total_messages: u64::try_from(total_messages).unwrap_or(0),
+        project: row.get(5)?,
+        agent: row.get(6)?,
+        transcript,
+        queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
+    })
 }
 
 fn load_queued_prompts(db_path: &Path, session_id: &str) -> Result<Vec<QueuedPrompt>> {
@@ -1316,6 +1391,26 @@ async fn send_snapshot(
     Ok(())
 }
 
+async fn send_disconnect(
+    client: reqwest::Client,
+    token: Option<Arc<String>>,
+    session_id: &str,
+) -> Result<()> {
+    let encoded_session_id =
+        url::form_urlencoded::byte_serialize(session_id.as_bytes()).collect::<String>();
+    let mut request = client.delete(format!("{REMOTE_CONTROL_UPSERT_URL}/{encoded_session_id}"));
+    if let Some(token) = token {
+        request = request.bearer_auth(token.as_str());
+    }
+    request
+        .send()
+        .await
+        .context("send remote-control disconnect")?
+        .error_for_status()
+        .context("remote-control disconnect returned an error")?;
+    Ok(())
+}
+
 async fn claim_remote_prompt(
     client: reqwest::Client,
     token: Option<Arc<String>>,
@@ -1374,6 +1469,12 @@ fn format_tool_call(title: &str, content: &[ToolCallContent]) -> String {
 
 fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+fn connected_session_cutoff_rfc3339() -> String {
+    (OffsetDateTime::now_utc() - time::Duration::seconds(CONNECTED_SESSION_TTL.as_secs() as i64))
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
@@ -1510,6 +1611,50 @@ mod tests {
         assert_eq!(sessions[0].transcript[0].text, "hello");
         assert_eq!(sessions[0].transcript[1].kind, "agent");
         assert_eq!(sessions[0].transcript[1].text, "hi there");
+    }
+
+    #[test]
+    fn connected_session_listing_excludes_disconnected_and_stale_sessions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let fresh = now_rfc3339();
+        let active = SessionRecord {
+            session_id: "sess-active".to_string(),
+            name: "active".to_string(),
+            start_time: fresh.clone(),
+            last_update: fresh.clone(),
+            total_messages: 1,
+            project: "mjolnir".to_string(),
+            agent: "agent".to_string(),
+            transcript: Vec::new(),
+            queued_prompt_count: 0,
+        };
+        let disconnected = SessionRecord {
+            session_id: "sess-disconnected".to_string(),
+            name: "disconnected".to_string(),
+            ..active.clone()
+        };
+        let stale = SessionRecord {
+            session_id: "sess-stale".to_string(),
+            name: "stale".to_string(),
+            start_time: "1970-01-01T00:00:00Z".to_string(),
+            last_update: "1970-01-01T00:00:00Z".to_string(),
+            ..active.clone()
+        };
+
+        upsert_session_record(&db_path, &active).expect("insert active");
+        upsert_session_record(&db_path, &disconnected).expect("insert disconnected");
+        upsert_session_record(&db_path, &stale).expect("insert stale");
+        disconnect_session_record(&db_path, "sess-disconnected").expect("disconnect");
+
+        let connected =
+            load_connected_session_records(&db_path, &connected_session_cutoff_rfc3339())
+                .expect("load connected");
+        assert_eq!(connected.len(), 1);
+        assert_eq!(connected[0].session_id, "sess-active");
+
+        let all = load_session_records(&db_path).expect("load all");
+        assert_eq!(all.len(), 3);
     }
 
     #[test]
@@ -1760,11 +1905,12 @@ mod tests {
 
         let _client = build_client(&cert_path).expect("pinned client");
         let base = "https://127.0.0.1:11921";
+        let record_time = now_rfc3339();
         let record = SessionRecord {
             session_id: "sess-int".to_string(),
             name: "demo".to_string(),
-            start_time: "2026-06-03T10:00:00Z".to_string(),
-            last_update: "2026-06-03T10:00:00Z".to_string(),
+            start_time: record_time.clone(),
+            last_update: record_time,
             total_messages: 1,
             project: "proj".to_string(),
             agent: "agent".to_string(),
