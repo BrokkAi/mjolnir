@@ -1,9 +1,5 @@
 # Repository Guidelines
 
-Follow the same repository guidance as `AGENTS.md`.
+`AGENTS.md` is the canonical repository guidance for Anvil and internal tooling.
 
-## UI Safety Requirements
-
-Permission dialogs must never truncate requested permission content. Long commands, titles, descriptions, and option labels must remain fully readable through wrapping, scrolling, paging, resizing, or an equivalent explicit expansion path. This applies to both inline and fullscreen UI modes.
-
-Do not recover from inline UI failures by falling back to the fullscreen TUI. That is a jarring mode switch and a poor user experience; inline terminal problems should be retried, degraded, or surfaced within inline mode instead.
+This `CLAUDE.md` file exists only for Claude compatibility. Keep it in sync with `AGENTS.md`, and if there is ever any ambiguity or drift, follow `AGENTS.md` as the source of truth.

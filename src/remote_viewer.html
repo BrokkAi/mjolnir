@@ -616,7 +616,7 @@
         if (!sessions.length) {
           const empty = document.createElement("div");
           empty.className = "empty";
-          empty.textContent = "No remote sessions have been published yet.";
+          empty.textContent = "No remote sessions are currently connected.";
           sessionsEl.appendChild(empty);
           renderTranscript(null);
           return;
