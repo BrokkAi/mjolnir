@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -116,6 +117,8 @@ pub struct RemoteSessionTracker {
     state: Arc<Mutex<TrackerState>>,
     heartbeat: Arc<Mutex<Option<JoinHandle<()>>>>,
     queue_poller: Arc<Mutex<Option<JoinHandle<()>>>>,
+    flushes: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    shutting_down: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -338,12 +341,17 @@ impl RemoteSessionTracker {
             state: Arc::new(Mutex::new(TrackerState::new(project, agent))),
             heartbeat: Arc::new(Mutex::new(None)),
             queue_poller: Arc::new(Mutex::new(None)),
+            flushes: Arc::new(Mutex::new(Vec::new())),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         };
         tracker.ensure_queue_poller(command_tx);
         tracker
     }
 
     pub fn observe_command(&self, command: &UiCommand) {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
         if let Ok(mut state) = self.state.lock() {
             state.observe_command(command);
         }
@@ -351,6 +359,9 @@ impl RemoteSessionTracker {
     }
 
     pub fn observe_event(&self, event: &UiEvent) {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
         let started = if let Ok(mut state) = self.state.lock() {
             state.observe_event(event)
         } else {
@@ -363,6 +374,7 @@ impl RemoteSessionTracker {
     }
 
     pub async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         let handle = self.heartbeat.lock().ok().and_then(|mut slot| slot.take());
         if let Some(handle) = handle {
             handle.abort();
@@ -375,6 +387,15 @@ impl RemoteSessionTracker {
             .and_then(|mut slot| slot.take());
         if let Some(handle) = queue_poller {
             handle.abort();
+            let _ = handle.await;
+        }
+        let flushes = self
+            .flushes
+            .lock()
+            .ok()
+            .map(|mut handles| handles.drain(..).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for handle in flushes {
             let _ = handle.await;
         }
         let Some(client) = self.client.clone() else {
@@ -426,6 +447,9 @@ impl RemoteSessionTracker {
     }
 
     fn spawn_flush(&self) {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -434,11 +458,15 @@ impl RemoteSessionTracker {
             return;
         };
         let token = self.token.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(error) = send_snapshot(client, token, snapshot).await {
                 debug!("remote-control flush failed: {error:#}");
             }
         });
+        if let Ok(mut flushes) = self.flushes.lock() {
+            flushes.retain(|handle| !handle.is_finished());
+            flushes.push(handle);
+        }
     }
 
     fn ensure_queue_poller(
@@ -620,7 +648,7 @@ fn build_router(db_path: PathBuf, token: String, viewer_code: String) -> Router 
     };
 
     let protected = Router::new()
-        .route("/live/sessions", get(list_sessions))
+        .route("/live/sessions", get(list_live_sessions))
         .route("/sessions", get(list_sessions))
         .route("/api/sessions", post(upsert_session))
         .route(
@@ -914,6 +942,18 @@ async fn disconnect_session(
 }
 
 async fn list_sessions(
+    State(state): State<ServerState>,
+) -> std::result::Result<Json<Vec<SessionRecord>>, (StatusCode, String)> {
+    let db_path = Arc::clone(&state.db_path);
+    let sessions =
+        tokio::task::spawn_blocking(move || load_session_records(db_path.as_ref().as_path()))
+            .await
+            .map_err(internal_error)?
+            .map_err(internal_error)?;
+    Ok(Json(sessions))
+}
+
+async fn list_live_sessions(
     State(state): State<ServerState>,
 ) -> std::result::Result<Json<Vec<SessionRecord>>, (StatusCode, String)> {
     let db_path = Arc::clone(&state.db_path);
@@ -1213,7 +1253,6 @@ fn disconnect_session_record(db_path: &Path, session_id: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
 fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
     init_db(db_path)?;
     let conn = open_db(db_path)?;
@@ -2183,6 +2222,7 @@ mod tests {
         );
 
         let live_listed = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("GET")
@@ -2205,5 +2245,70 @@ mod tests {
         .expect("live list json");
         assert_eq!(live_listed.len(), 1);
         assert_eq!(live_listed[0].session_id, "sess-int");
+
+        let disconnected = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(format!("{base}/api/sessions/{}", record.session_id))
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("disconnect request");
+        assert_eq!(disconnected.status(), reqwest::StatusCode::NO_CONTENT);
+
+        let historical_after_disconnect = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("{base}/sessions"))
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("historical list request");
+        assert_eq!(
+            historical_after_disconnect.status(),
+            reqwest::StatusCode::OK
+        );
+        let historical_after_disconnect: Vec<SessionRecord> = serde_json::from_slice(
+            &historical_after_disconnect
+                .into_body()
+                .collect()
+                .await
+                .expect("historical list body")
+                .to_bytes(),
+        )
+        .expect("historical list json");
+        assert_eq!(historical_after_disconnect.len(), 1);
+        assert_eq!(historical_after_disconnect[0].session_id, "sess-int");
+
+        let live_after_disconnect = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("{base}/live/sessions"))
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("live list after disconnect request");
+        assert_eq!(live_after_disconnect.status(), reqwest::StatusCode::OK);
+        let live_after_disconnect: Vec<SessionRecord> = serde_json::from_slice(
+            &live_after_disconnect
+                .into_body()
+                .collect()
+                .await
+                .expect("live list after disconnect body")
+                .to_bytes(),
+        )
+        .expect("live list after disconnect json");
+        assert!(live_after_disconnect.is_empty());
     }
 }
