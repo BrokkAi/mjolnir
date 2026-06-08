@@ -392,13 +392,13 @@ async fn ui_loop(
             return Ok((reason, state.session_id.clone(), state.prompt_history()));
         }
 
-        let repair_due = if force_inline_repair {
-            mode == UiMode::InlineChat
-        } else {
-            should_repair_inline_view(mode, &state)
-                && last_inline_repair.elapsed() >= INLINE_REPAIR_INTERVAL
-        };
-        if repair_due {
+        if should_attempt_inline_repair(
+            force_inline_repair,
+            mode,
+            &state,
+            last_inline_repair.elapsed(),
+        ) {
+            force_inline_repair = false;
             sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
             let repaired = repair_inline_viewport(terminal, &mut state, &mut transcript_scroll);
             let now = Instant::now();
@@ -406,7 +406,6 @@ async fn ui_loop(
             if repaired {
                 last_draw = now;
                 dirty = false;
-                force_inline_repair = false;
             } else {
                 dirty = true;
             }
@@ -524,6 +523,20 @@ fn draw_terminal_frame(
 
 fn should_force_inline_repair_for_event(mode: UiMode, ev: &CtEvent) -> bool {
     mode == UiMode::InlineChat && matches!(ev, CtEvent::FocusGained)
+}
+
+fn should_attempt_inline_repair(
+    force_inline_repair: bool,
+    mode: UiMode,
+    state: &AppState,
+    last_inline_repair_elapsed: Duration,
+) -> bool {
+    if force_inline_repair {
+        debug_assert_eq!(mode, UiMode::InlineChat);
+        return true;
+    }
+
+    should_repair_inline_view(mode, state) && last_inline_repair_elapsed >= INLINE_REPAIR_INTERVAL
 }
 
 fn should_repair_inline_view(mode: UiMode, state: &AppState) -> bool {
@@ -743,12 +756,6 @@ fn handle_crossterm(
         return TerminalRequest::ToggleTextSelectionMode;
     }
 
-    // Permission modal owns the keyboard while it's open.
-    if state.has_pending_permission() {
-        handle_permission_key(state, key.code);
-        return TerminalRequest::None;
-    }
-
     if state.help_overlay {
         if is_help_key(key.modifiers, key.code) || matches!(key.code, KeyCode::Esc) {
             state.help_overlay = false;
@@ -819,6 +826,12 @@ fn handle_crossterm(
             }
             _ => {}
         }
+    }
+
+    // Permission modal owns the keyboard while it's open.
+    if state.has_pending_permission() {
+        handle_permission_key(state, key.code);
+        return TerminalRequest::None;
     }
 
     if state.config_picker.is_some() {
@@ -4882,6 +4895,25 @@ mod tests {
     }
 
     #[test]
+    fn forced_inline_repair_bypasses_live_redraw_gate_once() {
+        let mut state = AppState::new();
+        state.connection_state = ConnectionState::Ready;
+
+        assert!(should_attempt_inline_repair(
+            true,
+            UiMode::InlineChat,
+            &state,
+            Duration::ZERO
+        ));
+        assert!(!should_attempt_inline_repair(
+            false,
+            UiMode::InlineChat,
+            &state,
+            Duration::ZERO
+        ));
+    }
+
+    #[test]
     fn streaming_inline_help_overlay_keeps_repair_active_after_f10() {
         let mut state = AppState::new();
         state.record_user_prompt("hello".to_string());
@@ -5171,6 +5203,28 @@ mod tests {
         );
 
         assert_eq!(state.exit_reason, Some(UiExitReason::Quit));
+    }
+
+    #[test]
+    fn runtime_closed_quits_on_ctrl_c_even_with_pending_permission() {
+        let pending =
+            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
+        let mut state = AppState::new();
+        state.runtime_closed = true;
+        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            CtEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        );
+
+        assert_eq!(state.exit_reason, Some(UiExitReason::Quit));
+        assert!(
+            state.has_pending_permission(),
+            "quit should not require dismissing the prompt"
+        );
     }
 
     #[test]
@@ -5979,8 +6033,8 @@ mod tests {
         let pending = state.pending_permission().expect("pending permission");
         assert_eq!(pending.selected, 1);
         assert!(
-            state.help_overlay,
-            "permission should preempt help without consuming it"
+            !state.help_overlay,
+            "permission request should dismiss stale help before taking focus"
         );
     }
 

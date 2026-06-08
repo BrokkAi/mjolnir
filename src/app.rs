@@ -1009,6 +1009,7 @@ impl AppState {
                 // pending prompt: overwriting would drop the prior
                 // oneshot responder, which the agent reads as a silent
                 // cancel even though the user never saw it.
+                self.help_overlay = false;
                 self.permission_queue.push_back(PendingPermission {
                     prompt,
                     selected: 0,
@@ -2117,6 +2118,21 @@ mod tests {
                 .to_string(),
             "call-a",
             "the first-enqueued prompt must remain at the front",
+        );
+    }
+
+    #[test]
+    fn permission_request_closes_help_overlay() {
+        let mut s = AppState::new();
+        let (prompt, _rx) = permission_prompt_with_id("call-a");
+        s.help_overlay = true;
+
+        s.apply_event(UiEvent::PermissionRequest(prompt));
+
+        assert!(s.has_pending_permission());
+        assert!(
+            !s.help_overlay,
+            "permission prompt should dismiss stale help"
         );
     }
 
