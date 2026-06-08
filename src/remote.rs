@@ -1,6 +1,7 @@
 //! Simple remote-control server and local session registration.
 
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -621,6 +622,9 @@ fn bind_server_listener(bind_addr: &str) -> Result<TcpListener> {
 
 fn clear_terminal_screen() -> Result<()> {
     let mut stdout = std::io::stdout();
+    if !stdout.is_terminal() {
+        return Ok(());
+    }
     execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))
         .context("clear terminal before starting remote-control server")?;
     Ok(())
