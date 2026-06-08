@@ -620,13 +620,6 @@ fn normalize_requested_hostname(hostname: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn normalize_requested_hostname(hostname: Option<&str>) -> Option<String> {
-    hostname
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
 fn remote_qr_login_url(host: &str, token: &str) -> String {
     let encoded = url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
     // Target `/auth/login` (not `/?token=`) so the server validates the token,
