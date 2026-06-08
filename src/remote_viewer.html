@@ -879,7 +879,7 @@
 
         if (pinnedToBottom) {
           pendingNewEntries = 0;
-          scrollTranscriptToBottom(forceScrollToBottom ? "instant" : "smooth");
+          scrollTranscriptToBottom(forceScrollToBottom ? "auto" : "smooth");
         } else {
           if (transcriptChanged) {
             pendingNewEntries += 1;
