@@ -586,8 +586,6 @@ pub async fn run_server(hostname: Option<String>) -> Result<()> {
             .await
             .context("load remote-control TLS certificate")?;
 
-    let listener = bind_server_listener(&listen.bind_addr)?;
-
     println!(
         "Remote control listening on https://{}:11921",
         listen.viewer_host
