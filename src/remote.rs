@@ -537,8 +537,9 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
 pub async fn run_server(hostname: Option<String>) -> Result<()> {
     install_crypto_provider();
 
-    let listen = server_listen_config(hostname.as_deref())?;
-    let paths = ensure_server_paths(hostname.as_deref())?;
+    let requested_hostname = normalize_requested_hostname(hostname.as_deref());
+    let listen = server_listen_config(requested_hostname.as_deref())?;
+    let paths = ensure_server_paths(requested_hostname.as_deref())?;
     init_db(&paths.db_path)?;
     let token = ensure_token(&paths.token_path)?;
     let viewer_code = generate_viewer_code()?;
@@ -564,6 +565,13 @@ pub async fn run_server(hostname: Option<String>) -> Result<()> {
                 listen.bind_addr
             )
         })
+}
+
+fn normalize_requested_hostname(hostname: Option<&str>) -> Option<String> {
+    hostname
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn remote_qr_login_url(host: &str, token: &str) -> String {
@@ -968,7 +976,7 @@ fn remote_control_dir() -> PathBuf {
 }
 
 fn server_listen_config(hostname: Option<&str>) -> Result<ServerListenConfig> {
-    match hostname.map(str::trim).filter(|value| !value.is_empty()) {
+    match normalize_requested_hostname(hostname).as_deref() {
         Some(hostname) => Ok(ServerListenConfig {
             bind_addr: REMOTE_CONTROL_PUBLIC_ADDR.to_string(),
             viewer_host: hostname.to_string(),
@@ -988,10 +996,8 @@ fn ensure_server_paths_in(root: &Path, hostname: Option<&str>) -> Result<ServerP
     std::fs::create_dir_all(root)
         .with_context(|| format!("create remote-control dir {}", root.display()))?;
 
-    let normalized_hostname = hostname
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("localhost");
+    let normalized_hostname = normalize_requested_hostname(hostname);
+    let normalized_hostname = normalized_hostname.as_deref().unwrap_or("localhost");
     let cert_path = root.join("cert.pem");
     let key_path = root.join("key.pem");
     let cert_hostname_path = root.join("cert-hostname");
@@ -1601,6 +1607,24 @@ mod tests {
     }
 
     #[test]
+    fn server_listen_config_treats_blank_hostname_as_localhost() {
+        assert_eq!(
+            server_listen_config(Some("   ")).expect("config"),
+            server_listen_config(None).expect("config")
+        );
+    }
+
+    #[test]
+    fn normalize_requested_hostname_trims_and_drops_blank_values() {
+        assert_eq!(
+            normalize_requested_hostname(Some("  example.com  ")).as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(normalize_requested_hostname(Some("   ")), None);
+        assert_eq!(normalize_requested_hostname(None), None);
+    }
+
+    #[test]
     fn viewer_code_is_six_digits() {
         let code = generate_viewer_code().expect("code");
         assert_eq!(code.len(), 6);
@@ -1713,6 +1737,16 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("cert-hostname")).expect("read hostname"),
             "example.com"
+        );
+    }
+
+    #[test]
+    fn ensure_server_paths_treats_blank_hostname_as_localhost() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        ensure_server_paths_in(dir.path(), Some("   ")).expect("paths");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cert-hostname")).expect("read hostname"),
+            "localhost"
         );
     }
 
