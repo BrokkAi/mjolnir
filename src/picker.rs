@@ -23,6 +23,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::install::{self, Progress};
+use crate::paths::expand_home_shortcut;
 use crate::registry::{DistributionKind, Registry};
 use crate::version::mjolnir_version_label;
 
@@ -657,8 +658,10 @@ fn parse_custom_command(s: &str) -> Result<PickerOutcome> {
     let program = iter.next().context("empty command")?;
     Ok(PickerOutcome {
         source_id: "custom".to_string(),
-        program: PathBuf::from(program),
-        args: iter.collect(),
+        program: expand_home_shortcut(&program),
+        args: iter
+            .map(|part| expand_home_shortcut(&part).to_string_lossy().into_owned())
+            .collect(),
         env: HashMap::new(),
     })
 }
@@ -1278,6 +1281,30 @@ mod tests {
         assert_eq!(outcome.source_id, "custom");
         assert_eq!(outcome.program, PathBuf::from("/usr/local/bin/agent"));
         assert_eq!(outcome.args, vec!["--flag", "with space"]);
+    }
+
+    #[test]
+    fn parse_custom_command_expands_home_shortcuts_in_program_and_args() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let outcome =
+            parse_custom_command("~/bin/agent --config $HOME/.config/agent.toml").expect("parse");
+        assert_eq!(outcome.program, home.join("bin/agent"));
+        assert_eq!(
+            outcome.args,
+            vec![
+                "--config".to_string(),
+                home.join(".config/agent.toml").display().to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_custom_command_leaves_non_supported_home_syntax_literal() {
+        let outcome = parse_custom_command("agent ${HOME}/config.toml").expect("parse");
+        assert_eq!(outcome.program, PathBuf::from("agent"));
+        assert_eq!(outcome.args, vec!["${HOME}/config.toml"]);
     }
 
     #[test]

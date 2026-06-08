@@ -10,6 +10,24 @@ pub fn folder_label(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Expand a limited set of home-directory shortcuts used in user-entered
+/// command/path fields. Supports `~`, `~/...`, `$HOME`, and `$HOME/...`.
+pub fn expand_home_shortcut(input: &str) -> PathBuf {
+    let Some(home) = dirs::home_dir() else {
+        return PathBuf::from(input);
+    };
+    if input == "~" || input == "$HOME" {
+        return home;
+    }
+    if let Some(rest) = input.strip_prefix("~/") {
+        return home.join(rest);
+    }
+    if let Some(rest) = input.strip_prefix("$HOME/") {
+        return home.join(rest);
+    }
+    PathBuf::from(input)
+}
+
 /// Render a path for the UI, replacing the user's home directory prefix with
 /// `~` when possible so long paths stay a bit shorter.
 pub fn display_path_with_tilde(path: &Path) -> String {
@@ -50,6 +68,35 @@ mod tests {
     #[test]
     fn folder_label_uses_last_component() {
         assert_eq!(folder_label(Path::new("/home/me/project")), "project");
+    }
+
+    #[test]
+    fn expand_home_shortcut_expands_tilde_and_home_env_forms() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        assert_eq!(expand_home_shortcut("~"), home);
+        assert_eq!(expand_home_shortcut("$HOME"), home);
+        assert_eq!(
+            expand_home_shortcut("~/project/src"),
+            home.join("project/src")
+        );
+        assert_eq!(
+            expand_home_shortcut("$HOME/project/src"),
+            home.join("project/src")
+        );
+    }
+
+    #[test]
+    fn expand_home_shortcut_leaves_other_inputs_unchanged() {
+        assert_eq!(
+            expand_home_shortcut("/tmp/project"),
+            PathBuf::from("/tmp/project")
+        );
+        assert_eq!(
+            expand_home_shortcut("${HOME}/project"),
+            PathBuf::from("${HOME}/project")
+        );
     }
 
     #[test]

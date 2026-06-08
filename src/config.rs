@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::paths::expand_home_shortcut;
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,11 +64,18 @@ impl Config {
     }
 
     fn normalize(&mut self) {
-        if let Some(agent) = self.agent.as_mut()
-            && agent.source_id == "anvil"
-        {
-            agent.program = PathBuf::from("uvx");
-            agent.args = vec!["brokk".to_string(), "acp".to_string()];
+        if let Some(agent) = self.agent.as_mut() {
+            if agent.source_id == "anvil" {
+                agent.program = PathBuf::from("uvx");
+                agent.args = vec!["brokk".to_string(), "acp".to_string()];
+            } else if agent.source_id == "custom" {
+                agent.program = expand_home_shortcut(&agent.program.to_string_lossy());
+                agent.args = agent
+                    .args
+                    .iter()
+                    .map(|arg| expand_home_shortcut(arg).to_string_lossy().into_owned())
+                    .collect();
+            }
         }
     }
 }
@@ -259,6 +268,38 @@ program = "anvil"
         assert_eq!(agent.source_id, "anvil");
         assert_eq!(agent.program, PathBuf::from("uvx"));
         assert_eq!(agent.args, vec!["brokk", "acp"]);
+    }
+
+    #[test]
+    fn load_expands_custom_agent_home_shortcuts() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+source_id = "custom"
+program = "~/bin/agent"
+args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
+"#,
+        )
+        .expect("write");
+
+        let cfg = Config::load(&path).expect("load");
+        let agent = cfg.agent.expect("agent");
+        assert_eq!(agent.source_id, "custom");
+        assert_eq!(agent.program, home.join("bin/agent"));
+        assert_eq!(
+            agent.args,
+            vec![
+                "--config".to_string(),
+                home.join(".config/agent.toml").display().to_string(),
+                "${HOME}/literal".to_string(),
+            ]
+        );
     }
 
     #[test]
