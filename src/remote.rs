@@ -588,7 +588,10 @@ pub async fn run_server(hostname: Option<String>) -> Result<()> {
 
     let listener = bind_server_listener(&listen.bind_addr)?;
 
-    println!("Remote control listening on https://{}:11921", listen.viewer_host);
+    println!(
+        "Remote control listening on https://{}:11921",
+        listen.viewer_host
+    );
     println!("{}", render_login_qr(&viewer_url)?);
     println!("viewer code: {viewer_code}");
 
