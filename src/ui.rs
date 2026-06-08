@@ -251,6 +251,11 @@ const FRAME_BUDGET: Duration = Duration::from_millis(33);
 /// inline viewport and forces a full redraw at a human-scale interval.
 const INLINE_REPAIR_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Permission prompts are safety-critical, so repair them more
+/// aggressively than the steady-state chat view when the terminal may
+/// have been damaged while backgrounded.
+const INLINE_PERMISSION_REPAIR_INTERVAL: Duration = Duration::from_millis(200);
+
 /// Maximum number of lines we render from each tool-output entry when
 /// `expand_tool_outputs` is false. Picked to keep the head of long
 /// stdout / diff dumps visible without flushing the surrounding
@@ -348,8 +353,13 @@ async fn ui_loop(
             maybe_ev = event_rx.recv(), if !state.runtime_closed => {
                 match maybe_ev {
                     Some(ev) => {
+                        let force_repair_for_event =
+                            should_force_inline_repair_for_ui_event(mode, &ev);
                         let notification = notification_message_for_event(&state, &ev);
                         state.apply_event(ev);
+                        if force_repair_for_event {
+                            force_inline_repair = true;
+                        }
                         post_terminal_notification(
                             terminal,
                             &mut notification_backend,
@@ -525,6 +535,10 @@ fn should_force_inline_repair_for_event(mode: UiMode, ev: &CtEvent) -> bool {
     mode == UiMode::InlineChat && matches!(ev, CtEvent::FocusGained)
 }
 
+fn should_force_inline_repair_for_ui_event(mode: UiMode, ev: &UiEvent) -> bool {
+    mode == UiMode::InlineChat && matches!(ev, UiEvent::PermissionRequest(_))
+}
+
 fn should_attempt_inline_repair(
     force_inline_repair: bool,
     mode: UiMode,
@@ -536,7 +550,16 @@ fn should_attempt_inline_repair(
         return true;
     }
 
-    should_repair_inline_view(mode, state) && last_inline_repair_elapsed >= INLINE_REPAIR_INTERVAL
+    should_repair_inline_view(mode, state)
+        && last_inline_repair_elapsed >= inline_repair_interval(state)
+}
+
+fn inline_repair_interval(state: &AppState) -> Duration {
+    if state.has_pending_permission() {
+        INLINE_PERMISSION_REPAIR_INTERVAL
+    } else {
+        INLINE_REPAIR_INTERVAL
+    }
 }
 
 fn should_repair_inline_view(mode: UiMode, state: &AppState) -> bool {
@@ -4910,6 +4933,51 @@ mod tests {
             UiMode::InlineChat,
             &state,
             Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn inline_permission_ui_event_forces_repair() {
+        let pending = permission_pending_with_options("run shell command", &["Allow once"], 0);
+
+        assert!(should_force_inline_repair_for_ui_event(
+            UiMode::InlineChat,
+            &UiEvent::PermissionRequest(pending.prompt)
+        ));
+        let other_pending =
+            permission_pending_with_options("run shell command", &["Allow once"], 0);
+        assert!(!should_force_inline_repair_for_ui_event(
+            UiMode::FullscreenTui,
+            &UiEvent::PermissionRequest(other_pending.prompt)
+        ));
+    }
+
+    #[test]
+    fn pending_permission_uses_faster_inline_repair_interval() {
+        let pending =
+            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
+        let mut state = AppState::new();
+        state.connection_state = ConnectionState::Ready;
+
+        assert_eq!(inline_repair_interval(&state), INLINE_REPAIR_INTERVAL);
+
+        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+
+        assert_eq!(
+            inline_repair_interval(&state),
+            INLINE_PERMISSION_REPAIR_INTERVAL
+        );
+        assert!(should_attempt_inline_repair(
+            false,
+            UiMode::InlineChat,
+            &state,
+            INLINE_PERMISSION_REPAIR_INTERVAL
+        ));
+        assert!(!should_attempt_inline_repair(
+            false,
+            UiMode::InlineChat,
+            &state,
+            INLINE_PERMISSION_REPAIR_INTERVAL.saturating_sub(Duration::from_millis(1))
         ));
     }
 
