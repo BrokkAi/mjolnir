@@ -39,6 +39,8 @@ Permission dialogs must never truncate requested permission content. Long comman
 
 Do not recover from inline UI failures by falling back to the fullscreen TUI. That is a jarring mode switch and a poor user experience; inline terminal problems should be retried, degraded, or surfaced within inline mode instead.
 
+Inline UI code must never exit, bail, return a fatal error, or switch to fullscreen solely because the terminal cursor position could not be read in time. Treat cursor-position/CPR timeouts as transient terminal conditions: retry, skip the affected redraw/repair/resize, or surface the issue within inline mode while keeping the session alive.
+
 ## Commit & Pull Request Guidelines
 
 Recent commits use concise, imperative summaries such as `rename crate to mjolnir, binary to mj`; some include PR numbers after merge. Keep commit subjects specific and lowercase where natural. Pull requests should describe the behavior change, list validation commands run, link related issues, and include screenshots or terminal recordings when UI rendering changes.

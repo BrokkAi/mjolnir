@@ -506,7 +506,7 @@ fn draw_terminal_frame(
     match terminal.draw(|f| draw(f, state, transcript_scroll, mode)) {
         Ok(_) => Ok(true),
         Err(e) if mode == UiMode::InlineChat && is_cursor_position_timeout_io(&e) => {
-            tracing::warn!("skip inline redraw while waiting for cursor position response: {e}");
+            trace_inline_cursor_position_timeout("redraw", &e);
             Ok(false)
         }
         Err(e) => Err(e).context("draw terminal"),
@@ -525,7 +525,7 @@ fn repair_inline_viewport(
     match terminal.autoresize() {
         Ok(()) => {}
         Err(e) if is_cursor_position_timeout_io(&e) => {
-            tracing::warn!("skip inline repair while waiting for cursor position response: {e}");
+            trace_inline_cursor_position_timeout("repair autoresize", &e);
             return false;
         }
         Err(e) => {
@@ -537,7 +537,7 @@ fn repair_inline_viewport(
     match terminal.clear() {
         Ok(()) => {}
         Err(e) if is_cursor_position_timeout_io(&e) => {
-            tracing::warn!("skip inline repair while waiting for cursor position response: {e}");
+            trace_inline_cursor_position_timeout("repair clear", &e);
             return false;
         }
         Err(e) => {
@@ -574,7 +574,14 @@ fn flush_transcript_to_scrollback(
     sink: &mut TranscriptSink,
     state: &AppState,
 ) -> Result<()> {
-    let width = terminal.size()?.width;
+    let width = match terminal.size() {
+        Ok(size) => size.width,
+        Err(e) if is_cursor_position_timeout_io(&e) => {
+            trace_inline_cursor_position_timeout("transcript flush size query", &e);
+            return Ok(());
+        }
+        Err(e) => return Err(e).context("query terminal size for transcript flush"),
+    };
     if width == 0 {
         return Ok(());
     }
@@ -589,11 +596,20 @@ fn flush_transcript_to_scrollback(
     if height == 0 {
         return Ok(());
     }
-    terminal.insert_before(height, |buf| {
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .render(buf.area, buf);
-    })?;
+    terminal
+        .insert_before(height, |buf| {
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .render(buf.area, buf);
+        })
+        .or_else(|e| {
+            if is_cursor_position_timeout_io(&e) {
+                trace_inline_cursor_position_timeout("transcript flush", &e);
+                Ok(())
+            } else {
+                Err(e).context("flush transcript to scrollback")
+            }
+        })?;
     Ok(())
 }
 
@@ -602,7 +618,14 @@ fn sync_inline_terminal_height(
     state: &AppState,
     current_height: &mut u16,
 ) -> Result<()> {
-    let size = terminal.size()?;
+    let size = match terminal.size() {
+        Ok(size) => size,
+        Err(e) if is_cursor_position_timeout_io(&e) => {
+            trace_inline_cursor_position_timeout("viewport resize size query", &e);
+            return Ok(());
+        }
+        Err(e) => return Err(e).context("query terminal size for inline viewport resize"),
+    };
     let desired = desired_inline_height(state, size);
     if desired == *current_height {
         return Ok(());
@@ -613,6 +636,10 @@ fn sync_inline_terminal_height(
         .backend_mut()
         .set_cursor_position(area.as_position())
     {
+        if is_cursor_position_timeout_io(&e) {
+            trace_inline_cursor_position_timeout("viewport resize cursor move", &e);
+            return Ok(());
+        }
         tracing::warn!("skip inline viewport resize: set cursor position failed: {e}");
         return Ok(());
     }
@@ -2242,19 +2269,30 @@ fn is_cursor_position_timeout_io(error: &io::Error) -> bool {
     is_cursor_position_timeout_error(error)
 }
 
+fn trace_inline_cursor_position_timeout(action: &str, error: &(dyn Error + 'static)) {
+    tracing::trace!(
+        "ignored transient inline cursor-position timeout during {action}; keeping inline UI active: {error}"
+    );
+}
+
 fn is_cursor_position_timeout_error(error: &(dyn Error + 'static)) -> bool {
     let mut cause = Some(error);
     while let Some(current) = cause {
         if let Some(io_error) = current.downcast_ref::<io::Error>()
             && io_error.kind() == io::ErrorKind::Other
-            && io_error.to_string() == CURSOR_POSITION_TIMEOUT_MESSAGE
+            && is_cursor_position_timeout_message(&io_error.to_string())
         {
             return true;
         }
         cause = current.source();
     }
 
-    error.to_string().contains(CURSOR_POSITION_TIMEOUT_MESSAGE)
+    is_cursor_position_timeout_message(&error.to_string())
+}
+
+fn is_cursor_position_timeout_message(message: &str) -> bool {
+    message.contains(CURSOR_POSITION_TIMEOUT_MESSAGE)
+        || (message.contains("cursor position") && message.contains("normal duration"))
 }
 
 /// Minimum input box height: three text rows between top and bottom borders.
@@ -4967,6 +5005,15 @@ mod tests {
             source: std::io::Error::other(CURSOR_POSITION_TIMEOUT_MESSAGE),
         };
         assert!(is_cursor_position_timeout_error(&wrapped));
+
+        let contextualized = std::io::Error::other(format!(
+            "ratatui inline terminal: {CURSOR_POSITION_TIMEOUT_MESSAGE}"
+        ));
+        assert!(is_cursor_position_timeout_io(&contextualized));
+
+        let phrasing_variant =
+            std::io::Error::other("failed to read cursor position within a normal duration");
+        assert!(is_cursor_position_timeout_io(&phrasing_variant));
 
         let other = std::io::Error::other("terminal unavailable");
         assert!(!is_cursor_position_timeout_io(&other));
