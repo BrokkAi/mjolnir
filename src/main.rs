@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::app::UiExitReason;
+use crate::app::{DraftState, UiExitReason, UiResumeState};
 use crate::config::{Config, SelectedAgent, history_path};
 use crate::picker::{PickerOutcome, PickerPreferences, PickerResult};
 use crate::session::SessionEntryJson;
@@ -578,27 +578,38 @@ async fn run_app(
     // Consume resume_session and initial_agent on the first iteration only.
     let mut initial_resume = resume_session;
     let mut initial_agent = initial_agent;
+    let mut initial_draft: Option<DraftState> = None;
     let mut pick_agent = should_open_initial_agent_picker(&cfg, initial_agent.as_ref());
     loop {
         let resume = initial_resume.take();
+        let previous_session_id = resume.clone();
         let agent = if let Some(agent) = initial_agent.take() {
             agent
         } else if pick_agent {
             pick_agent = false;
             let picker_result = run_agent_picker_once(&cfg).await?;
             apply_picker_preferences(&mut cfg, picker_result.preferences);
-            let Some(outcome) = picker_result.outcome else {
-                cfg.save(&config_path)
-                    .with_context(|| format!("save {}", config_path.display()))?;
-                return Ok(None);
-            };
-            let selected = picker_outcome_to_selected(outcome);
-            if cfg.agent.is_none() {
-                cfg.agent = Some(selected.clone());
+            match agent_picker_action(picker_result.outcome, previous_session_id.clone()) {
+                AgentPickerAction::Select(selected) => {
+                    if cfg.agent.is_none() {
+                        cfg.agent = Some(selected.clone());
+                    }
+                    cfg.save(&config_path)
+                        .with_context(|| format!("save {}", config_path.display()))?;
+                    selected
+                }
+                AgentPickerAction::Resume(session_id) => {
+                    cfg.save(&config_path)
+                        .with_context(|| format!("save {}", config_path.display()))?;
+                    initial_resume = Some(session_id);
+                    continue;
+                }
+                AgentPickerAction::Exit => {
+                    cfg.save(&config_path)
+                        .with_context(|| format!("save {}", config_path.display()))?;
+                    return Ok(None);
+                }
             }
-            cfg.save(&config_path)
-                .with_context(|| format!("save {}", config_path.display()))?;
-            selected
         } else {
             cfg.agent.clone().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -607,7 +618,7 @@ async fn run_app(
             })?
         };
 
-        let (reason, session_id) = run_session(
+        let (reason, resume_state) = run_session(
             &agent,
             cwd.clone(),
             agent_stderr.clone(),
@@ -616,12 +627,16 @@ async fn run_app(
                 worktree: worktree_label.clone(),
             },
             resume,
+            initial_draft.take(),
             mode,
         )
         .await?;
+        let UiResumeState { session_id, draft } = resume_state;
         match reason {
             UiExitReason::Quit => return Ok(session_id),
             UiExitReason::NewSession => {
+                initial_draft = Some(draft);
+                initial_agent = Some(agent);
                 pick_agent = true;
                 continue;
             }
@@ -632,6 +647,7 @@ async fn run_app(
                 match session_picker_action(run_session_picker_once(sessions).await?, session_id) {
                     SessionPickerAction::Resume(session_id) => {
                         initial_resume = Some(session_id);
+                        initial_draft = Some(draft);
                         initial_agent = Some(agent);
                         continue;
                     }
@@ -639,6 +655,26 @@ async fn run_app(
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentPickerAction {
+    Select(SelectedAgent),
+    Resume(String),
+    Exit,
+}
+
+fn agent_picker_action(
+    outcome: Option<PickerOutcome>,
+    current_session_id: Option<String>,
+) -> AgentPickerAction {
+    match outcome {
+        Some(outcome) => AgentPickerAction::Select(picker_outcome_to_selected(outcome)),
+        None => match current_session_id {
+            Some(session_id) => AgentPickerAction::Resume(session_id),
+            None => AgentPickerAction::Exit,
+        },
     }
 }
 
@@ -758,8 +794,9 @@ async fn run_session(
     agent_stderr: Option<PathBuf>,
     header_labels: HeaderLabels,
     resume_session: Option<String>,
+    initial_draft: Option<DraftState>,
     mode: UiMode,
-) -> Result<(UiExitReason, Option<String>)> {
+) -> Result<(UiExitReason, UiResumeState)> {
     let mut terminal = match mode {
         UiMode::InlineChat => {
             ui::setup_inline_chat_terminal(ui::INLINE_CHAT_HEIGHT).context("setup terminal")?
@@ -831,6 +868,7 @@ async fn run_session(
         header_labels,
         agent_display_name,
         Some(&hist_path),
+        initial_draft,
         mode,
     )
     .await;
@@ -1302,6 +1340,68 @@ mod tests {
         } else {
             panic!("expected Resume subcommand");
         }
+    }
+
+    #[test]
+    fn cancelling_agent_picker_resumes_current_session() {
+        let action = agent_picker_action(None, Some("current-session".to_string()));
+
+        assert_eq!(
+            action,
+            AgentPickerAction::Resume("current-session".to_string())
+        );
+    }
+
+    #[test]
+    fn cancelling_new_session_keeps_existing_draft() {
+        let draft = DraftState {
+            input: "keep this draft".to_string(),
+            input_cursor: 4,
+            input_scroll_offset: 1,
+            attachments: Vec::new(),
+            image_attachments: Vec::new(),
+            next_attachment_id: 0,
+        };
+
+        let resume_state = UiResumeState {
+            session_id: Some("current-session".to_string()),
+            draft,
+        };
+
+        assert_eq!(resume_state.session_id.as_deref(), Some("current-session"));
+        assert_eq!(resume_state.draft.input, "keep this draft");
+        assert_eq!(resume_state.draft.input_cursor, 4);
+        assert_eq!(resume_state.draft.input_scroll_offset, 1);
+    }
+
+    #[test]
+    fn cancelling_agent_picker_without_current_session_exits() {
+        let action = agent_picker_action(None, None);
+
+        assert_eq!(action, AgentPickerAction::Exit);
+    }
+
+    #[test]
+    fn selecting_agent_picker_entry_uses_selected_agent() {
+        let action = agent_picker_action(
+            Some(PickerOutcome {
+                source_id: "claude-acp".to_string(),
+                program: PathBuf::from("npx"),
+                args: vec!["-y".to_string(), "@x/claude".to_string()],
+                env: Default::default(),
+            }),
+            Some("current-session".to_string()),
+        );
+
+        assert_eq!(
+            action,
+            AgentPickerAction::Select(SelectedAgent {
+                source_id: "claude-acp".to_string(),
+                program: PathBuf::from("npx"),
+                args: vec!["-y".to_string(), "@x/claude".to_string()],
+                env: Default::default(),
+            })
+        );
     }
 
     #[test]

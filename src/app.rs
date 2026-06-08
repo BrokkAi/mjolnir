@@ -252,6 +252,22 @@ impl TokenUsage {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct DraftState {
+    pub input: String,
+    pub input_cursor: usize,
+    pub input_scroll_offset: usize,
+    pub attachments: Vec<PastedAttachment>,
+    pub image_attachments: Vec<PastedImageAttachment>,
+    pub next_attachment_id: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct UiResumeState {
+    pub session_id: Option<String>,
+    pub draft: DraftState,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub agent_label: String,
@@ -474,6 +490,34 @@ impl AppState {
     /// Return a copy of the prompt history for persistence.
     pub fn prompt_history(&self) -> Vec<String> {
         self.prompt_history.clone()
+    }
+
+    pub fn draft_state(&self) -> DraftState {
+        DraftState {
+            input: self.input.clone(),
+            input_cursor: self.input_cursor,
+            input_scroll_offset: self.input_scroll_offset,
+            attachments: self.attachments.clone(),
+            image_attachments: self.image_attachments.clone(),
+            next_attachment_id: self.next_attachment_id,
+        }
+    }
+
+    pub fn apply_draft_state(&mut self, draft: DraftState) {
+        self.input = draft.input;
+        self.input_cursor = draft.input_cursor;
+        self.input_scroll_offset = draft.input_scroll_offset;
+        self.attachments = draft.attachments;
+        self.image_attachments = draft.image_attachments;
+        self.next_attachment_id = draft.next_attachment_id;
+        self.update_autocomplete();
+    }
+
+    pub fn ui_resume_state(&self) -> UiResumeState {
+        UiResumeState {
+            session_id: self.session_id.clone(),
+            draft: self.draft_state(),
+        }
     }
 
     /// Replace the in-memory prompt history (e.g. with entries loaded

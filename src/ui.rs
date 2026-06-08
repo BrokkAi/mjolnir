@@ -34,9 +34,10 @@ use tokio::time::MissedTickBehavior;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    AppState, ConfigValueChoice, ConnectionState, Entry, PastedAttachment, PastedImageAttachment,
-    PendingPermission, StatusKind, StatusMessage, ToolCallOutput, UiExitReason,
-    config_option_choices, config_option_current_value_label, permission_kind_label,
+    AppState, ConfigValueChoice, ConnectionState, DraftState, Entry, PastedAttachment,
+    PastedImageAttachment, PendingPermission, StatusKind, StatusMessage, ToolCallOutput,
+    UiExitReason, UiResumeState, config_option_choices, config_option_current_value_label,
+    permission_kind_label,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -217,16 +218,18 @@ pub async fn run(
     header_labels: HeaderLabels,
     initial_agent_label: Option<String>,
     history_path: Option<&Path>,
+    initial_draft: Option<DraftState>,
     mode: UiMode,
-) -> Result<(UiExitReason, Option<String>)> {
+) -> Result<(UiExitReason, UiResumeState)> {
     let initial_history = history_path.map(config::load_history).unwrap_or_default();
-    let (reason, session_id, history) = ui_loop(
+    let (reason, resume_state, history) = ui_loop(
         terminal,
         &cmd_tx,
         &mut event_rx,
         header_labels,
         initial_agent_label,
         initial_history,
+        initial_draft,
         mode,
     )
     .await?;
@@ -235,7 +238,7 @@ pub async fn run(
     {
         tracing::warn!("save_history {path:?}: {e:#}");
     }
-    Ok((reason, session_id))
+    Ok((reason, resume_state))
 }
 
 /// Maximum redraw rate. Events/keystrokes flip a `dirty` flag, but the
@@ -269,10 +272,14 @@ async fn ui_loop(
     header_labels: HeaderLabels,
     initial_agent_label: Option<String>,
     initial_history: Vec<String>,
+    initial_draft: Option<DraftState>,
     mode: UiMode,
-) -> Result<(UiExitReason, Option<String>, Vec<String>)> {
+) -> Result<(UiExitReason, UiResumeState, Vec<String>)> {
     let mut state = AppState::new();
     state.set_prompt_history(initial_history);
+    if let Some(draft) = initial_draft {
+        state.apply_draft_state(draft);
+    }
     state.project_label = header_labels.project;
     state.worktree_label = header_labels.worktree;
     if let Some(label) = initial_agent_label {
@@ -399,7 +406,7 @@ async fn ui_loop(
                     set_mouse_capture(terminal, enabled)
                 })?;
             }
-            return Ok((reason, state.session_id.clone(), state.prompt_history()));
+            return Ok((reason, state.ui_resume_state(), state.prompt_history()));
         }
 
         if should_attempt_inline_repair(
@@ -439,7 +446,11 @@ async fn ui_loop(
             set_mouse_capture(terminal, enabled)
         })?;
     }
-    Ok((UiExitReason::Quit, None, state.prompt_history()))
+    Ok((
+        UiExitReason::Quit,
+        state.ui_resume_state(),
+        state.prompt_history(),
+    ))
 }
 
 fn notification_message_for_event(state: &AppState, event: &UiEvent) -> Option<String> {
@@ -5344,6 +5355,36 @@ mod tests {
 
         assert!(!state.help_overlay);
         assert_eq!(state.input, "?");
+    }
+
+    #[test]
+    fn apply_draft_state_restores_unsent_input_and_attachments() {
+        let mut state = AppState::new();
+        state.apply_draft_state(DraftState {
+            input: "draft prompt".to_string(),
+            input_cursor: 5,
+            input_scroll_offset: 2,
+            attachments: vec![PastedAttachment {
+                id: 1,
+                content: "long attachment".to_string(),
+            }],
+            image_attachments: vec![PastedImageAttachment {
+                id: 2,
+                data_base64: "abc".to_string(),
+                mime_type: "image/png".to_string(),
+                width: 10,
+                height: 20,
+                byte_len: 3,
+            }],
+            next_attachment_id: 3,
+        });
+
+        assert_eq!(state.input, "draft prompt");
+        assert_eq!(state.input_cursor, 5);
+        assert_eq!(state.input_scroll_offset, 2);
+        assert_eq!(state.attachments.len(), 1);
+        assert_eq!(state.image_attachments.len(), 1);
+        assert_eq!(state.next_attachment_id, 3);
     }
 
     #[test]
