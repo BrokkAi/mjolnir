@@ -276,7 +276,7 @@ const INLINE_REPAIR_INTERVAL: Duration = Duration::from_secs(1);
 /// Permission prompts are safety-critical, but repeated repair attempts
 /// after the prompt has already opened do more harm than good. Give the
 /// terminal a few early chances to repair damage, then stop.
-const INLINE_PERMISSION_REPAIR_INTERVAL: Duration = Duration::from_millis(667);
+const INLINE_PERMISSION_REPAIR_INTERVAL: Duration = Duration::from_secs(1);
 const INLINE_PERMISSION_REPAIR_WINDOW: Duration = Duration::from_secs(2);
 const INLINE_PERMISSION_REPAIR_ATTEMPTS: usize = 3;
 
@@ -323,6 +323,7 @@ async fn ui_loop(
     let mut last_draw = Instant::now();
     let mut last_inline_repair = Instant::now();
     let mut force_inline_repair = false;
+    let mut force_soft_inline_repair = false;
 
     loop {
         tokio::select! {
@@ -337,7 +338,7 @@ async fn ui_loop(
                         if mode == UiMode::InlineChat
                             && terminal_request_forces_inline_repair(request)
                         {
-                            force_inline_repair = true;
+                            force_soft_inline_repair = true;
                         }
                         apply_terminal_request(
                             terminal,
@@ -469,6 +470,25 @@ async fn ui_loop(
                 })?;
             }
             return Ok((reason, state.session_id.clone(), state.prompt_history()));
+        }
+
+        if force_soft_inline_repair {
+            force_soft_inline_repair = false;
+            sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
+            let repaired = repair_inline_viewport(
+                terminal,
+                &mut state,
+                &mut transcript_scroll,
+                InlineRepairMode::Soft,
+            );
+            let now = Instant::now();
+            last_inline_repair = now;
+            if repaired {
+                last_draw = now;
+                dirty = false;
+            } else {
+                dirty = true;
+            }
         }
 
         if should_attempt_inline_repair(
@@ -5146,6 +5166,16 @@ mod tests {
 
         assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
         assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn force_inline_repair_requests_one_soft_repair() {
+        assert!(terminal_request_forces_inline_repair(
+            TerminalRequest::ForceInlineRepair
+        ));
+        assert!(!terminal_request_forces_inline_repair(
+            TerminalRequest::None
+        ));
     }
 
     #[test]
