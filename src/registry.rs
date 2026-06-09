@@ -393,7 +393,10 @@ mod tests {
             "platform should look like 'os-arch', got {p}"
         );
         assert!(
-            p.starts_with("darwin-") || p.starts_with("linux-") || p.starts_with("windows-"),
+            p.starts_with("darwin-")
+                || p.starts_with("linux-")
+                || p.starts_with("windows-")
+                || p.starts_with("android-"),
             "unexpected os prefix in {p}"
         );
     }

@@ -634,7 +634,7 @@ fn draw_terminal_frame(
     }
 }
 
-fn should_force_inline_repair_for_event(mode: UiMode, _state: &AppState, ev: &CtEvent) -> bool {
+fn should_force_inline_repair_for_event(mode: UiMode, state: &AppState, ev: &CtEvent) -> bool {
     if mode != UiMode::InlineChat {
         return false;
     }
@@ -644,9 +644,9 @@ fn should_force_inline_repair_for_event(mode: UiMode, _state: &AppState, ev: &Ct
     }
 
     // Permission prompts get a few early repair attempts right after
-    // opening, but we do not keep forcing repairs for every key/resize
-    // for the lifetime of the modal.
-    false
+    // opening, and a hard repair when the inline viewport is resized
+    // while the modal is open.
+    state.has_pending_permission() && matches!(ev, CtEvent::Resize(_, _))
 }
 
 fn should_force_inline_repair_for_ui_event(mode: UiMode, ev: &UiEvent) -> bool {
@@ -5241,7 +5241,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_streaming_disables_timer_driven_live_redraws() {
+    fn inline_streaming_keeps_timer_redraws_but_disables_repair_heartbeat() {
         let mut state = AppState::new();
 
         state.connection_state = ConnectionState::Launching;
@@ -5251,12 +5251,12 @@ mod tests {
         state.connection_state = ConnectionState::Streaming;
         assert!(needs_live_redraw(&state));
         assert!(should_show_spinner(&state));
-        assert!(!timer_driven_live_redraw(UiMode::InlineChat, &state));
+        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
         assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
 
         state.connection_state = ConnectionState::Cancelling;
-        assert!(!timer_driven_live_redraw(UiMode::InlineChat, &state));
+        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
         assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
     }
@@ -5294,7 +5294,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_does_not_request_timer_driven_live_redraws() {
+    fn streaming_uses_timer_redraws_but_not_inline_repair_during_streaming() {
         let mut state = AppState::new();
 
         state.connection_state = ConnectionState::Launching;
@@ -5308,9 +5308,13 @@ mod tests {
         state.connection_state = ConnectionState::Streaming;
         assert!(state.is_streaming());
         assert!(should_show_spinner(&state));
-        assert!(
-            redraw_budget(UiMode::InlineChat, &state)
-                > redraw_budget(UiMode::FullscreenTui, &state)
+        assert_eq!(
+            redraw_budget(UiMode::InlineChat, &state),
+            INLINE_STREAMING_FRAME_BUDGET
+        );
+        assert_eq!(
+            redraw_budget(UiMode::FullscreenTui, &state),
+            STREAMING_FRAME_BUDGET
         );
         assert!(needs_live_redraw(&state));
         assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
@@ -5378,6 +5382,31 @@ mod tests {
             UiMode::InlineChat,
             &state,
             &CtEvent::FocusLost
+        ));
+    }
+
+    #[test]
+    fn permission_resize_forces_inline_repair() {
+        let pending =
+            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
+        let mut state = AppState::new();
+        state.connection_state = ConnectionState::Ready;
+        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+
+        assert!(should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
+            &CtEvent::Resize(120, 40)
+        ));
+        assert!(!should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
+            &CtEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        ));
+        assert!(!should_force_inline_repair_for_event(
+            UiMode::FullscreenTui,
+            &state,
+            &CtEvent::Resize(120, 40)
         ));
     }
 
@@ -5499,7 +5528,7 @@ mod tests {
             INLINE_PERMISSION_REPAIR_INTERVAL
         );
         assert!(permission_repair_budget_allows_attempt(&state));
-        assert!(should_attempt_inline_repair(
+        assert!(!should_attempt_inline_repair(
             false,
             UiMode::InlineChat,
             &state,
