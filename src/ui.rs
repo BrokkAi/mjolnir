@@ -672,6 +672,15 @@ fn should_attempt_inline_repair(
         return true;
     }
 
+    // Permission modals already get an immediate forced repair when they
+    // open, when focus returns, on resize, and when the user accepts or
+    // cancels. Avoid a background heartbeat while the modal merely stays
+    // open: the regular diff-based redraw path updates selection changes
+    // without full-screen flashing.
+    if state.has_pending_permission() {
+        return false;
+    }
+
     should_repair_inline_view(mode, state)
         && last_inline_repair_elapsed >= inline_repair_interval(state)
         && permission_repair_budget_allows_attempt(state)
@@ -5388,7 +5397,22 @@ mod tests {
         assert!(!should_force_inline_repair_for_event(
             UiMode::InlineChat,
             &state,
+            &CtEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        ));
+        assert!(should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
             &CtEvent::Resize(120, 40)
+        ));
+        assert!(!should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
+            &CtEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        ));
+        assert!(!should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
+            &CtEvent::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         ));
         assert!(!should_force_inline_repair_for_event(
             UiMode::FullscreenTui,
@@ -5485,7 +5509,13 @@ mod tests {
             false,
             UiMode::InlineChat,
             &state,
-            INLINE_PERMISSION_REPAIR_INTERVAL.saturating_sub(Duration::from_millis(1))
+            INLINE_PERMISSION_REPAIR_INTERVAL.saturating_mul(10)
+        ));
+        assert!(should_attempt_inline_repair(
+            true,
+            UiMode::InlineChat,
+            &state,
+            Duration::ZERO
         ));
 
         if let Some(permission) = state.pending_permission_mut() {
