@@ -251,10 +251,11 @@ const FRAME_BUDGET: Duration = Duration::from_millis(33);
 /// inline viewport and forces a full redraw at a human-scale interval.
 const INLINE_REPAIR_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Permission prompts are safety-critical, so repair them more
-/// aggressively than the steady-state chat view when the terminal may
-/// have been damaged while backgrounded.
-const INLINE_PERMISSION_REPAIR_INTERVAL: Duration = Duration::from_millis(200);
+/// Permission prompts are safety-critical, but clearing/repainting the
+/// whole inline viewport too often is visually harsh. Keep repairs more
+/// eager than the steady-state chat view without turning keyboard
+/// navigation into a rapid flash loop.
+const INLINE_PERMISSION_REPAIR_INTERVAL: Duration = Duration::from_millis(750);
 
 /// Maximum number of lines we render from each tool-output entry when
 /// `expand_tool_outputs` is false. Picked to keep the head of long
@@ -540,11 +541,19 @@ fn should_force_inline_repair_for_event(mode: UiMode, state: &AppState, ev: &CtE
         return true;
     }
 
-    // Permission prompts are safety-critical. Once one is on screen,
-    // force a full inline repair for the next terminal event so the
-    // prompt stays visible and the editor redraws immediately after the
-    // user accepts or cancels it.
-    state.has_pending_permission() && matches!(ev, CtEvent::Key(_) | CtEvent::Resize(_, _))
+    // Permission prompts are safety-critical, but we avoid forcing a
+    // full clear+redraw on every navigation key because that creates a
+    // painful flashing effect. Regular diff-based draws still update the
+    // selection immediately; reserve forced repairs for terminal damage
+    // signals (resize/focus) and prompt resolution (Enter/Esc).
+    state.has_pending_permission()
+        && match ev {
+            CtEvent::Resize(_, _) => true,
+            CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                matches!(key.code, KeyCode::Enter | KeyCode::Esc)
+            }
+            _ => false,
+        }
 }
 
 fn should_force_inline_repair_for_ui_event(mode: UiMode, ev: &UiEvent) -> bool {
@@ -560,6 +569,15 @@ fn should_attempt_inline_repair(
     if force_inline_repair {
         debug_assert_eq!(mode, UiMode::InlineChat);
         return true;
+    }
+
+    // Permission modals already get an immediate forced repair when they
+    // open, when focus returns, on resize, and when the user accepts or
+    // cancels. Avoid a background heartbeat while the modal merely stays
+    // open: the regular diff-based redraw path updates selection changes
+    // without full-screen flashing.
+    if state.has_pending_permission() {
+        return false;
     }
 
     should_repair_inline_view(mode, state)
@@ -4933,7 +4951,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_permission_key_forces_inline_repair_even_before_resolution() {
+    fn pending_permission_forces_inline_repair_only_for_resolution_or_resize() {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
         let mut state = AppState::new();
@@ -4948,7 +4966,22 @@ mod tests {
         assert!(should_force_inline_repair_for_event(
             UiMode::InlineChat,
             &state,
+            &CtEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        ));
+        assert!(should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
             &CtEvent::Resize(120, 40)
+        ));
+        assert!(!should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
+            &CtEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        ));
+        assert!(!should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
+            &CtEvent::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         ));
         assert!(!should_force_inline_repair_for_event(
             UiMode::FullscreenTui,
@@ -4993,21 +5026,18 @@ mod tests {
     }
 
     #[test]
-    fn pending_permission_uses_faster_inline_repair_interval() {
+    fn pending_permission_skips_background_inline_repair_heartbeat() {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
         let mut state = AppState::new();
         state.connection_state = ConnectionState::Ready;
-
-        assert_eq!(inline_repair_interval(&state), INLINE_REPAIR_INTERVAL);
-
         state.apply_event(UiEvent::PermissionRequest(pending.prompt));
 
         assert_eq!(
             inline_repair_interval(&state),
             INLINE_PERMISSION_REPAIR_INTERVAL
         );
-        assert!(should_attempt_inline_repair(
+        assert!(!should_attempt_inline_repair(
             false,
             UiMode::InlineChat,
             &state,
@@ -5017,7 +5047,13 @@ mod tests {
             false,
             UiMode::InlineChat,
             &state,
-            INLINE_PERMISSION_REPAIR_INTERVAL.saturating_sub(Duration::from_millis(1))
+            INLINE_PERMISSION_REPAIR_INTERVAL.saturating_mul(10)
+        ));
+        assert!(should_attempt_inline_repair(
+            true,
+            UiMode::InlineChat,
+            &state,
+            Duration::ZERO
         ));
     }
 
