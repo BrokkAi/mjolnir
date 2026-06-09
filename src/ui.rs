@@ -2800,42 +2800,26 @@ fn format_duration(duration: Duration) -> String {
 
 fn token_usage_label(state: &AppState) -> String {
     let usage = &state.token_usage;
-    if let Some(total) = usage.total_tokens {
-        let mut parts = vec![format!("tok {}", compact_count(total))];
-        if let Some(input) = usage.input_tokens {
-            parts.push(format!("in {}", compact_count(input)));
-        }
-        if let Some(output) = usage.output_tokens {
-            parts.push(format!("out {}", compact_count(output)));
-        }
-        if let Some(thought) = usage.thought_tokens {
-            parts.push(format!("think {}", compact_count(thought)));
-        }
-        return parts.join(" ");
+    let mut parts = Vec::new();
+
+    if let Some(input) = usage.input_tokens {
+        parts.push(format!("in: {}", compact_count(input)));
     }
-    if let (Some(used), Some(size)) = (usage.context_used, usage.context_size) {
-        let mut text = format!("ctx {}/{}", compact_count(used), compact_count(size));
-        if let Some(cost) = &usage.cost {
-            text.push(' ');
-            text.push_str(cost);
-        }
-        return text;
+    if let Some(output) = usage.output_tokens {
+        parts.push(format!("out: {}", compact_count(output)));
     }
-    "tok -".to_string()
+    if let Some(used) = usage.context_used {
+        parts.push(format!("ctx: {}", compact_count(used)));
+    }
+
+    if !parts.is_empty() {
+        return parts.join(" · ");
+    }
+
+    "in: - · out: - · ctx: -".to_string()
 }
 
-fn header_token_usage_label(state: &AppState, width: usize) -> String {
-    if width >= 160 {
-        return token_usage_label(state);
-    }
-
-    let usage = &state.token_usage;
-    if let Some(total) = usage.total_tokens {
-        return format!("tok {}", compact_count(total));
-    }
-    if let (Some(used), Some(size)) = (usage.context_used, usage.context_size) {
-        return format!("ctx {}/{}", compact_count(used), compact_count(size));
-    }
+fn header_token_usage_label(state: &AppState, _width: usize) -> String {
     token_usage_label(state)
 }
 
@@ -4767,6 +4751,43 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn token_usage_label_prefers_in_out_and_ctx_format() {
+        let mut state = AppState::new();
+        state.token_usage.input_tokens = Some(1233);
+        state.token_usage.output_tokens = Some(1282);
+        state.token_usage.context_used = Some(944);
+        state.token_usage.context_size = Some(128_000);
+        state.token_usage.total_tokens = Some(2515);
+
+        assert_eq!(token_usage_label(&state), "in: 1233 · out: 1282 · ctx: 944");
+        assert_eq!(
+            header_token_usage_label(&state, 80),
+            "in: 1233 · out: 1282 · ctx: 944"
+        );
+    }
+
+    #[test]
+    fn token_usage_label_never_falls_back_to_tok_or_think() {
+        let mut state = AppState::new();
+        state.token_usage.total_tokens = Some(411_400);
+        state.token_usage.input_tokens = Some(261_300);
+        state.token_usage.output_tokens = Some(3905);
+        state.token_usage.thought_tokens = Some(327);
+        state.token_usage.context_used = Some(944);
+
+        let label = token_usage_label(&state);
+        assert_eq!(label, "in: 261.3k · out: 3905 · ctx: 944");
+        assert!(!label.contains("tok:"), "label: {label}");
+        assert!(!label.contains("think:"), "label: {label}");
+    }
+
+    #[test]
+    fn token_usage_label_uses_dash_format_when_usage_is_missing() {
+        let state = AppState::new();
+        assert_eq!(token_usage_label(&state), "in: - · out: - · ctx: -");
     }
 
     #[test]
