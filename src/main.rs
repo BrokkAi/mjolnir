@@ -21,6 +21,7 @@ mod remote;
 mod self_update;
 mod session;
 mod speech;
+mod term;
 mod ui;
 mod version;
 mod worktree;
@@ -692,7 +693,7 @@ async fn settle_after_fullscreen_picker_restore() {
 }
 
 async fn run_picker_with_registry(
-    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    terminal: &mut ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>,
     cfg: &Config,
 ) -> Result<PickerResult> {
     let cache_path = registry::default_cache_path();

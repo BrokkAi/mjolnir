@@ -11,11 +11,11 @@ use std::io::Stdout;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::term::TrackedBackend;
 use anyhow::{Context, Result};
 use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -299,7 +299,7 @@ impl<'a> PickerState<'a> {
 /// Run the picker until the user selects an agent or cancels with Esc.
 /// Returns a result with `outcome: None` when the user cancels.
 pub async fn run_picker(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
     registry: &Registry,
     install_root: &Path,
     platform: &str,

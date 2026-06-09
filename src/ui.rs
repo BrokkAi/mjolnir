@@ -23,7 +23,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
-use ratatui::backend::{Backend, ClearType, CrosstermBackend};
+use ratatui::backend::{Backend, ClearType};
 use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -45,6 +45,7 @@ use crate::config;
 use crate::event::{PermissionDecision, PermissionPrompt, PromptImage, UiCommand, UiEvent};
 use crate::notifications::TerminalNotificationBackend;
 use crate::speech::{dictation_error_message, run_dictation};
+use crate::term::TrackedBackend;
 use crate::version::mjolnir_version_label;
 
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
@@ -216,7 +217,7 @@ impl TranscriptScrollState {
 /// the header so we show the configured agent name immediately instead
 /// of waiting for the agent to report its own name during handshake.
 pub async fn run(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     mut event_rx: mpsc::UnboundedReceiver<UiEvent>,
     header_labels: HeaderLabels,
@@ -287,7 +288,7 @@ const INLINE_PERMISSION_REPAIR_ATTEMPTS: usize = 3;
 const TOOL_OUTPUT_COLLAPSED_LINES: usize = 6;
 
 async fn ui_loop(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
     header_labels: HeaderLabels,
@@ -601,7 +602,7 @@ fn preview_notification_text(text: &str) -> Option<String> {
 }
 
 fn post_terminal_notification(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
     backend: &mut Option<TerminalNotificationBackend>,
     message: Option<&str>,
 ) {
@@ -619,7 +620,7 @@ fn post_terminal_notification(
 }
 
 fn draw_terminal_frame(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
     mode: UiMode,
@@ -725,7 +726,7 @@ enum InlineRepairMode {
 }
 
 fn repair_inline_viewport(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
     mode: InlineRepairMode,
@@ -796,7 +797,7 @@ fn needs_live_redraw(state: &AppState) -> bool {
 }
 
 fn flush_transcript_to_scrollback(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
     sink: &mut TranscriptSink,
     state: &AppState,
 ) -> Result<()> {
@@ -840,7 +841,7 @@ fn flush_transcript_to_scrollback(
 }
 
 fn sync_inline_terminal_height(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
     state: &AppState,
     current_height: &mut u16,
 ) -> Result<()> {
@@ -878,7 +879,11 @@ fn sync_inline_terminal_height(
         return Ok(());
     }
 
-    let backend = CrosstermBackend::new(io::stdout());
+    // Seed the new backend with the anchor the cursor was just moved to, so
+    // creating the inline viewport never issues a CPR query. A real query
+    // here deadlocks against the crossterm EventStream lock and times out,
+    // leaving the freshly cleared region blank until the next input event.
+    let backend = TrackedBackend::with_cursor_position(io::stdout(), area.as_position());
     let next = match Terminal::with_options(
         backend,
         TerminalOptions {
@@ -1279,7 +1284,7 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
 }
 
 fn apply_terminal_request(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
     state: &mut AppState,
     request: TerminalRequest,
     dictation_tx: &mpsc::UnboundedSender<DictationEvent>,
@@ -1310,10 +1315,7 @@ fn apply_terminal_request(
     }
 }
 
-fn set_mouse_capture(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    enabled: bool,
-) -> Result<()> {
+fn set_mouse_capture(terminal: &mut Terminal<TrackedBackend<Stdout>>, enabled: bool) -> Result<()> {
     if enabled {
         execute!(terminal.backend_mut(), EnableMouseCapture).context("enable mouse capture")
     } else {
@@ -2400,7 +2402,7 @@ fn config_shortcut_key(modifiers: KeyModifiers, code: KeyCode) -> Option<char> {
     }
 }
 
-pub fn setup_fullscreen_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+pub fn setup_fullscreen_terminal() -> Result<Terminal<TrackedBackend<Stdout>>> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
 
@@ -2411,14 +2413,12 @@ pub fn setup_fullscreen_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>>
         EnableBracketedPaste
     )
     .context("enter alt screen")?;
-    let backend = CrosstermBackend::new(stdout);
+    let backend = TrackedBackend::new(stdout);
     let terminal = Terminal::new(backend).context("ratatui terminal")?;
     Ok(terminal)
 }
 
-pub fn restore_fullscreen_terminal(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-) -> Result<()> {
+pub fn restore_fullscreen_terminal(terminal: &mut Terminal<TrackedBackend<Stdout>>) -> Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -2430,9 +2430,7 @@ pub fn restore_fullscreen_terminal(
     Ok(())
 }
 
-pub fn setup_inline_chat_terminal(
-    initial_height: u16,
-) -> Result<Terminal<CrosstermBackend<Stdout>>> {
+pub fn setup_inline_chat_terminal(initial_height: u16) -> Result<Terminal<TrackedBackend<Stdout>>> {
     let mut stdout = io::stdout();
     stdout.flush().context("flush stdout before inline setup")?;
     let mut stderr = io::stderr();
@@ -2457,7 +2455,7 @@ pub fn setup_inline_chat_terminal(
             return Err(err).context("ratatui inline terminal");
         }
 
-        let backend = CrosstermBackend::new(stdout);
+        let backend = TrackedBackend::new(stdout);
         match Terminal::with_options(
             backend,
             TerminalOptions {
@@ -2485,9 +2483,7 @@ pub fn setup_inline_chat_terminal(
     Err(final_error).context("ratatui inline terminal")
 }
 
-pub fn restore_inline_chat_terminal(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-) -> Result<()> {
+pub fn restore_inline_chat_terminal(terminal: &mut Terminal<TrackedBackend<Stdout>>) -> Result<()> {
     if let Err(e) = clear_inline_viewport_for_exit(terminal) {
         tracing::warn!("skip inline exit cleanup: {e}");
     } else if let Err(e) = Write::flush(terminal.backend_mut()) {

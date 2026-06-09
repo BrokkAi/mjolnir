@@ -9,6 +9,7 @@ use std::io::Stdout;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::term::TrackedBackend;
 use agent_client_protocol::schema::{
     InitializeRequest, ListSessionsRequest, ProtocolVersion, SessionInfo,
 };
@@ -17,7 +18,6 @@ use anyhow::{Context, Result};
 use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
@@ -216,7 +216,7 @@ impl SessionPickerState {
 
 /// Run the interactive session picker until the user selects or cancels.
 pub async fn run_session_picker(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
     sessions: Vec<SessionEntry>,
 ) -> Result<ResumeOutcome> {
     let mut state = SessionPickerState::new(sessions);
