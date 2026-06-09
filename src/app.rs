@@ -355,6 +355,8 @@ pub struct PendingPermission {
     pub prompt: PermissionPrompt,
     pub selected: usize,
     pub scroll_offset: Option<usize>,
+    pub opened_at: Instant,
+    pub repair_attempts: usize,
 }
 
 /// A pasted attachment that exceeded the chip threshold. Shown as a compact
@@ -1014,6 +1016,8 @@ impl AppState {
                     prompt,
                     selected: 0,
                     scroll_offset: None,
+                    opened_at: Instant::now(),
+                    repair_attempts: 0,
                 });
                 self.update_autocomplete();
             }

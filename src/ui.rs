@@ -80,6 +80,11 @@ enum TerminalRequest {
     ToggleTextSelectionMode,
     StartDictation,
     StopDictation,
+    ForceInlineRepair,
+}
+
+fn terminal_request_forces_inline_repair(request: TerminalRequest) -> bool {
+    matches!(request, TerminalRequest::ForceInlineRepair)
 }
 
 #[derive(Debug)]
@@ -238,12 +243,29 @@ pub async fn run(
     Ok((reason, session_id))
 }
 
-/// Maximum redraw rate. Events/keystrokes flip a `dirty` flag, but the
-/// terminal is only repainted at most once per frame budget. This caps
-/// CPU usage during streaming bursts (where every chunk used to trigger
-/// a full `Paragraph` word-wrap of the entire transcript) while keeping
-/// input latency below human perception.
+/// Maximum redraw rate for interactive local UI work such as typing,
+/// overlays, and picker updates.
 const FRAME_BUDGET: Duration = Duration::from_millis(33);
+
+/// Slower redraw rate while the agent is streaming output in the
+/// fullscreen TUI. This preserves a visible spinner without repainting
+/// the prompt area as aggressively as normal local editing.
+const STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(120);
+
+/// Much slower redraw rate for inline streaming UI. Inline terminals are
+/// more prone to visible prompt flicker, so keep the spinner alive but
+/// update it on a calm cadence.
+const INLINE_STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(75);
+
+fn redraw_budget(mode: UiMode, state: &AppState) -> Duration {
+    match (mode, state.connection_state) {
+        (UiMode::InlineChat, ConnectionState::Streaming | ConnectionState::Cancelling) => {
+            INLINE_STREAMING_FRAME_BUDGET
+        }
+        (_, ConnectionState::Streaming | ConnectionState::Cancelling) => STREAMING_FRAME_BUDGET,
+        _ => FRAME_BUDGET,
+    }
+}
 
 /// Slow inline repair cadence. Regular draws are diffed against ratatui's
 /// previous buffer, so they cannot repair terminal emulator damage that
@@ -251,10 +273,12 @@ const FRAME_BUDGET: Duration = Duration::from_millis(33);
 /// inline viewport and forces a full redraw at a human-scale interval.
 const INLINE_REPAIR_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Permission prompts are safety-critical, so repair them more
-/// aggressively than the steady-state chat view when the terminal may
-/// have been damaged while backgrounded.
-const INLINE_PERMISSION_REPAIR_INTERVAL: Duration = Duration::from_millis(200);
+/// Permission prompts are safety-critical, but repeated repair attempts
+/// after the prompt has already opened do more harm than good. Give the
+/// terminal a few early chances to repair damage, then stop.
+const INLINE_PERMISSION_REPAIR_INTERVAL: Duration = Duration::from_millis(667);
+const INLINE_PERMISSION_REPAIR_WINDOW: Duration = Duration::from_secs(2);
+const INLINE_PERMISSION_REPAIR_ATTEMPTS: usize = 3;
 
 /// Maximum number of lines we render from each tool-output entry when
 /// `expand_tool_outputs` is false. Picked to keep the head of long
@@ -288,7 +312,8 @@ async fn ui_loop(
     // Wake-up timer so we still get scheduled to draw when no events
     // arrive (e.g. while waiting on the agent). `Delay` keeps it from
     // burst-firing after a long busy period.
-    let mut frame_tick = tokio::time::interval(FRAME_BUDGET);
+    let mut frame_budget = redraw_budget(mode, &state);
+    let mut frame_tick = tokio::time::interval(frame_budget);
     frame_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     if mode == UiMode::InlineChat {
@@ -309,6 +334,11 @@ async fn ui_loop(
                             force_inline_repair = true;
                         }
                         let request = handle_crossterm(&mut state, cmd_tx, ev, mode);
+                        if mode == UiMode::InlineChat
+                            && terminal_request_forces_inline_repair(request)
+                        {
+                            force_inline_repair = true;
+                        }
                         apply_terminal_request(
                             terminal,
                             &mut state,
@@ -355,10 +385,23 @@ async fn ui_loop(
                     Some(ev) => {
                         let force_repair_for_event =
                             should_force_inline_repair_for_ui_event(mode, &ev);
-                        let notification = notification_message_for_event(&state, &ev);
+                        let notification = notification_message_for_event(mode, &state, &ev);
                         state.apply_event(ev);
                         if force_repair_for_event {
                             force_inline_repair = true;
+                            sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
+                            let repaired = repair_inline_viewport(
+                                terminal,
+                                &mut state,
+                                &mut transcript_scroll,
+                                InlineRepairMode::Hard,
+                            );
+                            let now = Instant::now();
+                            last_inline_repair = now;
+                            if repaired {
+                                last_draw = now;
+                                force_inline_repair = false;
+                            }
                         }
                         post_terminal_notification(
                             terminal,
@@ -376,9 +419,35 @@ async fn ui_loop(
                 if flush_input_paste_burst_if_due(&mut state, Instant::now(), false) {
                     dirty = true;
                 }
-                if needs_live_redraw(&state) {
+                if timer_driven_live_redraw(mode, &state) {
                     dirty = true;
                 }
+            }
+        }
+
+        let desired_frame_budget = redraw_budget(mode, &state);
+        if desired_frame_budget != frame_budget {
+            frame_budget = desired_frame_budget;
+            frame_tick = tokio::time::interval(frame_budget);
+            frame_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        }
+
+        if should_attempt_inline_repair_before_flush(force_inline_repair, mode, &state) {
+            force_inline_repair = false;
+            sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
+            let repaired = repair_inline_viewport(
+                terminal,
+                &mut state,
+                &mut transcript_scroll,
+                InlineRepairMode::Hard,
+            );
+            let now = Instant::now();
+            last_inline_repair = now;
+            if repaired {
+                last_draw = now;
+                dirty = false;
+            } else {
+                dirty = true;
             }
         }
 
@@ -410,7 +479,12 @@ async fn ui_loop(
         ) {
             force_inline_repair = false;
             sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
-            let repaired = repair_inline_viewport(terminal, &mut state, &mut transcript_scroll);
+            let repaired = repair_inline_viewport(
+                terminal,
+                &mut state,
+                &mut transcript_scroll,
+                InlineRepairMode::Hard,
+            );
             let now = Instant::now();
             last_inline_repair = now;
             if repaired {
@@ -421,11 +495,12 @@ async fn ui_loop(
             }
         }
 
-        // Throttle: redraw at most once per FRAME_BUDGET. Under a flood
-        // of events (`biased` select keeps picking the event arm before
-        // the timer), this elapsed-time check is what actually paces
-        // the redraws; the timer arm is the wake-up source when idle.
-        if dirty && last_draw.elapsed() >= FRAME_BUDGET {
+        // Throttle: redraw at most once per the current redraw budget.
+        // Under a flood of events (`biased` select keeps picking the
+        // event arm before the timer), this elapsed-time check is what
+        // actually paces the redraws; the timer arm is the wake-up
+        // source when idle.
+        if dirty && last_draw.elapsed() >= frame_budget {
             if mode == UiMode::InlineChat {
                 sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
             }
@@ -442,7 +517,15 @@ async fn ui_loop(
     Ok((UiExitReason::Quit, None, state.prompt_history()))
 }
 
-fn notification_message_for_event(state: &AppState, event: &UiEvent) -> Option<String> {
+fn notification_message_for_event(
+    mode: UiMode,
+    state: &AppState,
+    event: &UiEvent,
+) -> Option<String> {
+    if mode == UiMode::InlineChat && matches!(event, UiEvent::PermissionRequest(_)) {
+        return None;
+    }
+
     match event {
         UiEvent::PromptDone { stop_reason, .. } => {
             if *stop_reason == StopReason::Cancelled {
@@ -531,7 +614,7 @@ fn draw_terminal_frame(
     }
 }
 
-fn should_force_inline_repair_for_event(mode: UiMode, state: &AppState, ev: &CtEvent) -> bool {
+fn should_force_inline_repair_for_event(mode: UiMode, _state: &AppState, ev: &CtEvent) -> bool {
     if mode != UiMode::InlineChat {
         return false;
     }
@@ -540,15 +623,22 @@ fn should_force_inline_repair_for_event(mode: UiMode, state: &AppState, ev: &CtE
         return true;
     }
 
-    // Permission prompts are safety-critical. Once one is on screen,
-    // force a full inline repair for the next terminal event so the
-    // prompt stays visible and the editor redraws immediately after the
-    // user accepts or cancels it.
-    state.has_pending_permission() && matches!(ev, CtEvent::Key(_) | CtEvent::Resize(_, _))
+    // Permission prompts get a few early repair attempts right after
+    // opening, but we do not keep forcing repairs for every key/resize
+    // for the lifetime of the modal.
+    false
 }
 
 fn should_force_inline_repair_for_ui_event(mode: UiMode, ev: &UiEvent) -> bool {
     mode == UiMode::InlineChat && matches!(ev, UiEvent::PermissionRequest(_))
+}
+
+fn should_attempt_inline_repair_before_flush(
+    force_inline_repair: bool,
+    mode: UiMode,
+    state: &AppState,
+) -> bool {
+    mode == UiMode::InlineChat && force_inline_repair && state.has_pending_permission()
 }
 
 fn should_attempt_inline_repair(
@@ -564,6 +654,16 @@ fn should_attempt_inline_repair(
 
     should_repair_inline_view(mode, state)
         && last_inline_repair_elapsed >= inline_repair_interval(state)
+        && permission_repair_budget_allows_attempt(state)
+}
+
+fn permission_repair_budget_allows_attempt(state: &AppState) -> bool {
+    let Some(pending) = state.pending_permission() else {
+        return true;
+    };
+
+    pending.repair_attempts < INLINE_PERMISSION_REPAIR_ATTEMPTS
+        && pending.opened_at.elapsed() <= INLINE_PERMISSION_REPAIR_WINDOW
 }
 
 fn inline_repair_interval(state: &AppState) -> Duration {
@@ -574,15 +674,37 @@ fn inline_repair_interval(state: &AppState) -> Duration {
     }
 }
 
+fn inline_repair_heartbeat_active(state: &AppState) -> bool {
+    state.voice_input_active
+        || state.help_overlay
+        || state.has_pending_permission()
+        || state.config_picker.is_some()
+        || matches!(
+            state.connection_state,
+            ConnectionState::Launching | ConnectionState::Initializing
+        )
+}
+
 fn should_repair_inline_view(mode: UiMode, state: &AppState) -> bool {
-    mode == UiMode::InlineChat && needs_live_redraw(state)
+    mode == UiMode::InlineChat && inline_repair_heartbeat_active(state)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineRepairMode {
+    Soft,
+    Hard,
 }
 
 fn repair_inline_viewport(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
+    mode: InlineRepairMode,
 ) -> bool {
+    if let Some(pending) = state.pending_permission_mut() {
+        pending.repair_attempts = pending.repair_attempts.saturating_add(1);
+    }
+
     match terminal.autoresize() {
         Ok(()) => {}
         Err(e) if is_cursor_position_timeout_io(&e) => {
@@ -595,15 +717,17 @@ fn repair_inline_viewport(
         }
     }
 
-    match terminal.clear() {
-        Ok(()) => {}
-        Err(e) if is_cursor_position_timeout_io(&e) => {
-            trace_inline_cursor_position_timeout("repair clear", &e);
-            return false;
-        }
-        Err(e) => {
-            tracing::warn!("skip inline repair: {e}");
-            return false;
+    if matches!(mode, InlineRepairMode::Hard) {
+        match terminal.clear() {
+            Ok(()) => {}
+            Err(e) if is_cursor_position_timeout_io(&e) => {
+                trace_inline_cursor_position_timeout("repair clear", &e);
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!("skip inline repair: {e}");
+                return false;
+            }
         }
     }
 
@@ -616,18 +740,30 @@ fn repair_inline_viewport(
     }
 }
 
+fn timer_driven_live_redraw(mode: UiMode, state: &AppState) -> bool {
+    if mode == UiMode::InlineChat && state.is_streaming() {
+        return should_show_spinner(state);
+    }
+
+    needs_live_redraw(state)
+}
+
+fn should_show_spinner(state: &AppState) -> bool {
+    matches!(
+        state.connection_state,
+        ConnectionState::Launching
+            | ConnectionState::Initializing
+            | ConnectionState::Streaming
+            | ConnectionState::Cancelling
+    )
+}
+
 fn needs_live_redraw(state: &AppState) -> bool {
     state.voice_input_active
         || state.help_overlay
         || state.has_pending_permission()
         || state.config_picker.is_some()
-        || matches!(
-            state.connection_state,
-            ConnectionState::Launching
-                | ConnectionState::Initializing
-                | ConnectionState::Streaming
-                | ConnectionState::Cancelling
-        )
+        || should_show_spinner(state)
 }
 
 fn flush_transcript_to_scrollback(
@@ -794,6 +930,7 @@ fn handle_crossterm(
     if state.help_overlay {
         if is_help_key(key.modifiers, key.code) || matches!(key.code, KeyCode::Esc) {
             state.help_overlay = false;
+            return inline_repair_request(mode);
         }
         return TerminalRequest::None;
     }
@@ -865,13 +1002,11 @@ fn handle_crossterm(
 
     // Permission modal owns the keyboard while it's open.
     if state.has_pending_permission() {
-        handle_permission_key(state, key.code);
-        return TerminalRequest::None;
+        return handle_permission_key(state, key.code, mode);
     }
 
     if state.config_picker.is_some() {
-        handle_config_picker_key(state, cmd_tx, key.modifiers, key.code);
-        return TerminalRequest::None;
+        return handle_config_picker_key(state, cmd_tx, key.modifiers, key.code, mode);
     }
 
     if open_config_value_picker_for_shortcut(state, key.modifiers, key.code) {
@@ -890,7 +1025,7 @@ fn handle_crossterm(
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::NONE, KeyCode::Enter) => {
                 state.autocomplete_accept();
-                return TerminalRequest::None;
+                return inline_repair_request(mode);
             }
             (KeyModifiers::NONE, KeyCode::Up) => {
                 state.autocomplete_move(-1);
@@ -902,7 +1037,7 @@ fn handle_crossterm(
             }
             (_, KeyCode::Esc) => {
                 state.autocomplete_dismiss();
-                return TerminalRequest::None;
+                return inline_repair_request(mode);
             }
             _ => {}
         }
@@ -1142,6 +1277,7 @@ fn apply_terminal_request(
             stop_dictation(state, dictation_cancel_tx);
             Ok(())
         }
+        TerminalRequest::ForceInlineRepair => Ok(()),
     }
 }
 
@@ -2037,9 +2173,9 @@ fn clamp_permission_selected(selected: usize, option_count: usize) -> usize {
     selected.min(option_count.saturating_sub(1))
 }
 
-fn handle_permission_key(state: &mut AppState, code: KeyCode) {
+fn handle_permission_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> TerminalRequest {
     let Some(pending) = state.pending_permission_mut() else {
-        return;
+        return TerminalRequest::None;
     };
     let len = pending.prompt.options.len().max(1);
     pending.selected = clamp_permission_selected(pending.selected, pending.prompt.options.len());
@@ -2082,13 +2218,24 @@ fn handle_permission_key(state: &mut AppState, code: KeyCode) {
                 .unwrap_or(PermissionDecision::Cancelled);
             let _ = prompt.responder.send(decision);
             state.update_autocomplete();
+            return inline_repair_request(mode);
         }
         KeyCode::Esc => {
             let pending = state.take_pending_permission().expect("checked above");
             let _ = pending.prompt.responder.send(PermissionDecision::Cancelled);
             state.update_autocomplete();
+            return inline_repair_request(mode);
         }
         _ => {}
+    }
+    TerminalRequest::None
+}
+
+fn inline_repair_request(mode: UiMode) -> TerminalRequest {
+    if mode == UiMode::InlineChat {
+        TerminalRequest::ForceInlineRepair
+    } else {
+        TerminalRequest::None
     }
 }
 
@@ -2097,29 +2244,37 @@ fn handle_config_picker_key(
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     modifiers: KeyModifiers,
     code: KeyCode,
-) {
+    mode: UiMode,
+) -> TerminalRequest {
     if open_config_value_picker_for_shortcut(state, modifiers, code) {
-        return;
+        return TerminalRequest::None;
     }
 
     match (modifiers, code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             state.dismiss_config_picker();
+            inline_repair_request(mode)
         }
         (_, KeyCode::Esc) => {
             state.dismiss_config_picker();
+            inline_repair_request(mode)
         }
         (_, KeyCode::Tab) | (_, KeyCode::Enter) => {
             if let Some((target, value)) = state.config_picker_accept() {
                 state.status_line = Some(StatusMessage::info("updating config..."));
                 let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { target, value });
+                inline_repair_request(mode)
+            } else {
+                TerminalRequest::None
             }
         }
         (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
             state.config_picker_move(-1);
+            TerminalRequest::None
         }
         (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
             state.config_picker_move(1);
+            TerminalRequest::None
         }
         (_, KeyCode::Backspace) => {
             if let Some(picker) = state.config_picker.as_mut()
@@ -2128,6 +2283,7 @@ fn handle_config_picker_key(
                 let query = picker.search_query.clone();
                 state.config_picker_set_search(query);
             }
+            TerminalRequest::None
         }
         (_, KeyCode::Char(c)) if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
             state.config_picker_set_search({
@@ -2139,8 +2295,9 @@ fn handle_config_picker_key(
                 query.push(c);
                 query
             });
+            TerminalRequest::None
         }
-        _ => {}
+        _ => TerminalRequest::None,
     }
 }
 
@@ -2659,7 +2816,7 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
             spans.push(Span::raw("   "));
         }
     }
-    if needs_live_redraw(state) {
+    if should_show_spinner(state) {
         spans.push(Span::styled(
             spinner_frame(),
             Style::default().fg(conn_color),
@@ -2768,10 +2925,10 @@ fn connection_state_color(state: ConnectionState) -> Color {
 }
 
 fn spinner_frame() -> &'static str {
-    const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+    const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
     let idx = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| (duration.as_millis() / 120) as usize)
+        .map(|duration| (duration.as_millis() / 100) as usize)
         .unwrap_or(0)
         % FRAMES.len();
     FRAMES[idx]
@@ -4661,12 +4818,13 @@ fn config_value_row_text(choice: &ConfigValueChoice) -> String {
 #[cfg(test)]
 mod tests {
     use crate::app::StatusKind;
+    use crate::event::SessionConfigTarget;
 
     use super::*;
     use agent_client_protocol::schema::{
-        ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind, SessionConfigOption,
-        SessionConfigSelectOption, SessionUpdate, StopReason, TextContent, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        AvailableCommand, ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind,
+        SessionConfigOption, SessionConfigSelectOption, SessionUpdate, StopReason, TextContent,
+        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::{Backend, TestBackend};
@@ -4881,7 +5039,98 @@ mod tests {
             },
             selected,
             scroll_offset: None,
+            opened_at: Instant::now(),
+            repair_attempts: 0,
         }
+    }
+
+    #[test]
+    fn inline_help_close_requests_one_repair() {
+        let mut state = AppState::new();
+        state.help_overlay = true;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+
+        assert_eq!(request, TerminalRequest::ForceInlineRepair);
+        assert!(!state.help_overlay);
+    }
+
+    #[test]
+    fn inline_autocomplete_accept_requests_one_repair() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        state.available_commands = vec![
+            AvailableCommand::new("help", "show help"),
+            AvailableCommand::new("hello", "say hello"),
+        ];
+        state.input = "/he".to_string();
+        state.input_cursor = state.input.chars().count();
+        state.update_autocomplete();
+        assert!(state.autocomplete.visible);
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Tab));
+
+        assert_eq!(request, TerminalRequest::ForceInlineRepair);
+        assert!(!state.autocomplete.visible);
+    }
+
+    #[test]
+    fn inline_autocomplete_dismiss_requests_one_repair() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        state.available_commands = vec![
+            AvailableCommand::new("help", "show help"),
+            AvailableCommand::new("hello", "say hello"),
+        ];
+        state.input = "/he".to_string();
+        state.input_cursor = state.input.chars().count();
+        state.update_autocomplete();
+        assert!(state.autocomplete.visible);
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+
+        assert_eq!(request, TerminalRequest::ForceInlineRepair);
+        assert!(!state.autocomplete.visible);
+    }
+
+    #[test]
+    fn inline_permission_close_requests_one_repair() {
+        let pending = permission_pending_with_options("run shell command", &["Allow once"], 0);
+        let mut state = AppState::new();
+        state.connection_state = ConnectionState::Ready;
+        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert_eq!(request, TerminalRequest::ForceInlineRepair);
+        assert!(!state.has_pending_permission());
+    }
+
+    #[test]
+    fn inline_config_picker_close_requests_one_repair() {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        state.session_config_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "claude-sonnet",
+            vec![
+                SessionConfigSelectOption::new("claude-sonnet", "Claude Sonnet"),
+                SessionConfigSelectOption::new("gpt-4.1", "GPT-4.1"),
+            ],
+        )];
+        state.session_config_targets = vec![SessionConfigTarget::LegacyModel];
+        assert!(state.open_config_value_picker(0));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+
+        assert_eq!(request, TerminalRequest::ForceInlineRepair);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
@@ -4900,18 +5149,158 @@ mod tests {
     }
 
     #[test]
+    fn inline_streaming_uses_slow_spinner_timer_without_repair_heartbeat() {
+        let mut state = AppState::new();
+        state.connection_state = ConnectionState::Streaming;
+
+        assert!(needs_live_redraw(&state));
+        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
+        assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
+        assert_eq!(
+            redraw_budget(UiMode::InlineChat, &state),
+            INLINE_STREAMING_FRAME_BUDGET
+        );
+        assert_eq!(INLINE_STREAMING_FRAME_BUDGET, Duration::from_millis(75));
+        assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
+    }
+
+    #[test]
+    fn permission_open_uses_hard_inline_repair() {
+        assert_eq!(InlineRepairMode::Hard, InlineRepairMode::Hard);
+    }
+
+    #[test]
+    fn permission_open_repairs_before_inline_flush() {
+        let pending = permission_pending_with_options("run shell command", &["Allow once"], 0);
+        let mut state = AppState::new();
+        state.connection_state = ConnectionState::Ready;
+        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+
+        assert!(should_attempt_inline_repair_before_flush(
+            true,
+            UiMode::InlineChat,
+            &state,
+        ));
+        assert!(!should_attempt_inline_repair_before_flush(
+            false,
+            UiMode::InlineChat,
+            &state,
+        ));
+        assert!(!should_attempt_inline_repair_before_flush(
+            true,
+            UiMode::FullscreenTui,
+            &state,
+        ));
+
+        let mut ready = AppState::new();
+        ready.connection_state = ConnectionState::Ready;
+        assert!(!should_attempt_inline_repair_before_flush(
+            true,
+            UiMode::InlineChat,
+            &ready,
+        ));
+    }
+
+    #[test]
+    fn inline_streaming_disables_timer_driven_live_redraws() {
+        let mut state = AppState::new();
+
+        state.connection_state = ConnectionState::Launching;
+        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
+        assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
+
+        state.connection_state = ConnectionState::Streaming;
+        assert!(needs_live_redraw(&state));
+        assert!(should_show_spinner(&state));
+        assert!(!timer_driven_live_redraw(UiMode::InlineChat, &state));
+        assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
+        assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
+
+        state.connection_state = ConnectionState::Cancelling;
+        assert!(!timer_driven_live_redraw(UiMode::InlineChat, &state));
+        assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
+        assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
+    }
+
+    #[test]
+    fn redraw_budget_slows_during_streaming() {
+        let mut state = AppState::new();
+
+        assert_eq!(redraw_budget(UiMode::FullscreenTui, &state), FRAME_BUDGET);
+        assert_eq!(redraw_budget(UiMode::InlineChat, &state), FRAME_BUDGET);
+
+        state.connection_state = ConnectionState::Streaming;
+        assert_eq!(
+            redraw_budget(UiMode::FullscreenTui, &state),
+            STREAMING_FRAME_BUDGET
+        );
+        assert_eq!(
+            redraw_budget(UiMode::InlineChat, &state),
+            INLINE_STREAMING_FRAME_BUDGET
+        );
+
+        state.connection_state = ConnectionState::Cancelling;
+        assert_eq!(
+            redraw_budget(UiMode::FullscreenTui, &state),
+            STREAMING_FRAME_BUDGET
+        );
+        assert_eq!(
+            redraw_budget(UiMode::InlineChat, &state),
+            INLINE_STREAMING_FRAME_BUDGET
+        );
+
+        state.connection_state = ConnectionState::Ready;
+        assert_eq!(redraw_budget(UiMode::FullscreenTui, &state), FRAME_BUDGET);
+        assert_eq!(redraw_budget(UiMode::InlineChat, &state), FRAME_BUDGET);
+    }
+
+    #[test]
+    fn streaming_does_not_request_timer_driven_live_redraws() {
+        let mut state = AppState::new();
+
+        state.connection_state = ConnectionState::Launching;
+        assert!(needs_live_redraw(&state));
+        assert!(should_repair_inline_view(UiMode::InlineChat, &state));
+
+        state.connection_state = ConnectionState::Initializing;
+        assert!(needs_live_redraw(&state));
+        assert!(should_repair_inline_view(UiMode::InlineChat, &state));
+
+        state.connection_state = ConnectionState::Streaming;
+        assert!(state.is_streaming());
+        assert!(should_show_spinner(&state));
+        assert!(
+            redraw_budget(UiMode::InlineChat, &state)
+                > redraw_budget(UiMode::FullscreenTui, &state)
+        );
+        assert!(needs_live_redraw(&state));
+        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
+        assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
+
+        state.connection_state = ConnectionState::Cancelling;
+        assert!(state.is_streaming());
+        assert!(should_show_spinner(&state));
+        assert!(needs_live_redraw(&state));
+        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
+        assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
+    }
+
+    #[test]
     fn inline_repair_is_limited_to_live_inline_states() {
         let mut state = AppState::new();
 
-        state.connection_state = ConnectionState::Streaming;
+        state.connection_state = ConnectionState::Launching;
         assert!(should_repair_inline_view(UiMode::InlineChat, &state));
+
+        state.connection_state = ConnectionState::Streaming;
+        assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
         assert!(!should_repair_inline_view(UiMode::FullscreenTui, &state));
 
         state.connection_state = ConnectionState::Ready;
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
 
         state.connection_state = ConnectionState::Cancelling;
-        assert!(should_repair_inline_view(UiMode::InlineChat, &state));
+        assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
     }
 
     #[test]
@@ -4954,19 +5343,19 @@ mod tests {
     }
 
     #[test]
-    fn pending_permission_key_forces_inline_repair_even_before_resolution() {
+    fn permission_key_no_longer_forces_inline_repair() {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
         let mut state = AppState::new();
         state.connection_state = ConnectionState::Ready;
         state.apply_event(UiEvent::PermissionRequest(pending.prompt));
 
-        assert!(should_force_inline_repair_for_event(
+        assert!(!should_force_inline_repair_for_event(
             UiMode::InlineChat,
             &state,
             &CtEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         ));
-        assert!(should_force_inline_repair_for_event(
+        assert!(!should_force_inline_repair_for_event(
             UiMode::InlineChat,
             &state,
             &CtEvent::Resize(120, 40)
@@ -4998,6 +5387,32 @@ mod tests {
     }
 
     #[test]
+    fn inline_permission_request_skips_terminal_notification() {
+        let pending = permission_pending_with_options("run shell command", &["Allow once"], 0);
+        let state = AppState::new();
+
+        assert!(
+            notification_message_for_event(
+                UiMode::FullscreenTui,
+                &state,
+                &UiEvent::PermissionRequest(pending.prompt),
+            )
+            .is_some()
+        );
+
+        let other_pending =
+            permission_pending_with_options("run shell command", &["Allow once"], 0);
+        assert!(
+            notification_message_for_event(
+                UiMode::InlineChat,
+                &state,
+                &UiEvent::PermissionRequest(other_pending.prompt),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn inline_permission_ui_event_forces_repair() {
         let pending = permission_pending_with_options("run shell command", &["Allow once"], 0);
 
@@ -5014,13 +5429,14 @@ mod tests {
     }
 
     #[test]
-    fn pending_permission_uses_faster_inline_repair_interval() {
+    fn pending_permission_uses_limited_inline_repair_budget() {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
         let mut state = AppState::new();
         state.connection_state = ConnectionState::Ready;
 
         assert_eq!(inline_repair_interval(&state), INLINE_REPAIR_INTERVAL);
+        assert!(permission_repair_budget_allows_attempt(&state));
 
         state.apply_event(UiEvent::PermissionRequest(pending.prompt));
 
@@ -5028,6 +5444,7 @@ mod tests {
             inline_repair_interval(&state),
             INLINE_PERMISSION_REPAIR_INTERVAL
         );
+        assert!(permission_repair_budget_allows_attempt(&state));
         assert!(should_attempt_inline_repair(
             false,
             UiMode::InlineChat,
@@ -5040,6 +5457,24 @@ mod tests {
             &state,
             INLINE_PERMISSION_REPAIR_INTERVAL.saturating_sub(Duration::from_millis(1))
         ));
+
+        if let Some(permission) = state.pending_permission_mut() {
+            permission.repair_attempts = INLINE_PERMISSION_REPAIR_ATTEMPTS;
+        }
+        assert!(!permission_repair_budget_allows_attempt(&state));
+        assert!(!should_attempt_inline_repair(
+            false,
+            UiMode::InlineChat,
+            &state,
+            INLINE_PERMISSION_REPAIR_INTERVAL
+        ));
+
+        if let Some(permission) = state.pending_permission_mut() {
+            permission.repair_attempts = 0;
+            permission.opened_at =
+                Instant::now() - INLINE_PERMISSION_REPAIR_WINDOW - Duration::from_millis(1);
+        }
+        assert!(!permission_repair_budget_allows_attempt(&state));
     }
 
     #[test]
@@ -7709,6 +8144,7 @@ mod tests {
         ));
 
         let message = notification_message_for_event(
+            UiMode::FullscreenTui,
             &state,
             &UiEvent::PromptDone {
                 stop_reason: StopReason::EndTurn,
@@ -7724,6 +8160,7 @@ mod tests {
         let state = AppState::new();
 
         let message = notification_message_for_event(
+            UiMode::FullscreenTui,
             &state,
             &UiEvent::PromptDone {
                 stop_reason: StopReason::Cancelled,
