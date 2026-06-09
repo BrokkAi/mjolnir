@@ -305,7 +305,7 @@ async fn ui_loop(
             maybe_ct = crossterm_events.next() => {
                 match maybe_ct {
                     Some(Ok(ev)) => {
-                        if should_force_inline_repair_for_event(mode, &ev) {
+                        if should_force_inline_repair_for_event(mode, &state, &ev) {
                             force_inline_repair = true;
                         }
                         let request = handle_crossterm(&mut state, cmd_tx, ev, mode);
@@ -531,8 +531,20 @@ fn draw_terminal_frame(
     }
 }
 
-fn should_force_inline_repair_for_event(mode: UiMode, ev: &CtEvent) -> bool {
-    mode == UiMode::InlineChat && matches!(ev, CtEvent::FocusGained)
+fn should_force_inline_repair_for_event(mode: UiMode, state: &AppState, ev: &CtEvent) -> bool {
+    if mode != UiMode::InlineChat {
+        return false;
+    }
+
+    if matches!(ev, CtEvent::FocusGained) {
+        return true;
+    }
+
+    // Permission prompts are safety-critical. Once one is on screen,
+    // force a full inline repair for the next terminal event so the
+    // prompt stays visible and the editor redraws immediately after the
+    // user accepts or cancels it.
+    state.has_pending_permission() && matches!(ev, CtEvent::Key(_) | CtEvent::Resize(_, _))
 }
 
 fn should_force_inline_repair_for_ui_event(mode: UiMode, ev: &UiEvent) -> bool {
@@ -4905,15 +4917,43 @@ mod tests {
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
         assert!(should_force_inline_repair_for_event(
             UiMode::InlineChat,
+            &state,
             &CtEvent::FocusGained
         ));
         assert!(!should_force_inline_repair_for_event(
             UiMode::FullscreenTui,
+            &state,
             &CtEvent::FocusGained
         ));
         assert!(!should_force_inline_repair_for_event(
             UiMode::InlineChat,
+            &state,
             &CtEvent::FocusLost
+        ));
+    }
+
+    #[test]
+    fn pending_permission_key_forces_inline_repair_even_before_resolution() {
+        let pending =
+            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
+        let mut state = AppState::new();
+        state.connection_state = ConnectionState::Ready;
+        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+
+        assert!(should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
+            &CtEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        ));
+        assert!(should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
+            &CtEvent::Resize(120, 40)
+        ));
+        assert!(!should_force_inline_repair_for_event(
+            UiMode::FullscreenTui,
+            &state,
+            &CtEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         ));
     }
 
