@@ -508,6 +508,179 @@
         }
       }
 
+      .config-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+        gap: 12px 16px;
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--panel);
+
+        &:empty {
+          display: none;
+        }
+      }
+
+      .config-option {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        min-width: 0;
+      }
+
+      .config-option-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .config-option-name {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .config-option-status {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--accent);
+        white-space: nowrap;
+
+        &:empty {
+          display: none;
+        }
+      }
+
+      .config-combo {
+        position: relative;
+      }
+
+      .config-combo-trigger {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 9px 12px;
+        background: var(--panel-alt);
+        color: var(--text);
+        font: 13px/1.3 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        text-align: left;
+        cursor: pointer;
+        transition: border-color 0.12s ease;
+
+        &:hover {
+          border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+        }
+
+        &[aria-expanded="true"] {
+          border-color: var(--accent);
+        }
+
+        &:disabled {
+          cursor: progress;
+          opacity: 0.6;
+        }
+      }
+
+      .config-combo-value {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .config-combo-chevron {
+        flex: none;
+        width: 7px;
+        height: 7px;
+        border-right: 2px solid var(--muted);
+        border-bottom: 2px solid var(--muted);
+        transform: translateY(-2px) rotate(45deg);
+      }
+
+      /* Anchored above the trigger: the config bar lives at the bottom of the
+         screen next to the prompt box, so a downward popup would overflow. */
+      .config-combo-popup {
+        position: absolute;
+        z-index: 30;
+        bottom: calc(100% + 6px);
+        left: 0;
+        min-width: 100%;
+        max-width: min(360px, 80vw);
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 8px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        box-shadow: var(--shadow);
+      }
+
+      .config-combo-search {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 7px 10px;
+        background: var(--panel-alt);
+        color: var(--text);
+        font: 13px/1.3 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .config-combo-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        max-height: 244px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .config-combo-option {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 7px 10px;
+        border-radius: 7px;
+        cursor: pointer;
+
+        &.is-active {
+          background: color-mix(in srgb, var(--accent) 14%, transparent);
+        }
+
+        &.is-selected .config-combo-option-label {
+          font-weight: 700;
+          color: var(--accent);
+        }
+      }
+
+      .config-combo-option-label {
+        font-size: 13px;
+      }
+
+      .config-combo-option-desc {
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+
+      .config-combo-empty {
+        padding: 8px 10px;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+
       .permission-card {
         border: 1px solid color-mix(in srgb, var(--thought) 45%, var(--border));
         background: color-mix(in srgb, var(--thought) 8%, var(--panel));
@@ -811,6 +984,7 @@
           <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
         </div>
         <section class="composer">
+          <div id="session-config" class="config-list"></div>
           <div id="permissions" class="permission-list"></div>
           <div class="composer-row">
             <textarea id="queue-input" placeholder="Queue a prompt for this session" enterkeyhint="send" aria-label="Prompt to queue"></textarea>
@@ -870,6 +1044,15 @@
       </section>
     </template>
 
+    <template id="tpl-config-option">
+      <div class="config-option">
+        <span class="config-option-head">
+          <span class="config-option-name"></span>
+          <span class="config-option-status"></span>
+        </span>
+      </div>
+    </template>
+
     <script type="module">
       const queryParams = new URLSearchParams(window.location.search);
       const viewerToken = queryParams.get("token") || "";
@@ -891,6 +1074,7 @@
       const approvalBadgeEl = $("approval-badge");
       const backButtonEl = $("back-button");
       const permissionsEl = $("permissions");
+      const sessionConfigEl = $("session-config");
       const queueInputEl = $("queue-input");
       const queueSubmitEl = $("queue-submit");
       const queueStatusEl = $("queue-status");
@@ -900,6 +1084,7 @@
       const entryTpl = $("tpl-entry");
       const queueTpl = $("tpl-queue-item");
       const permissionTpl = $("tpl-permission");
+      const configOptionTpl = $("tpl-config-option");
 
       const POLL_MS = 2000;
       const WORKING_WINDOW_MS = 6000;
@@ -921,6 +1106,15 @@
       // so the buttons stay disabled until the pending request disappears
       // from the next snapshot.
       const sentDecisions = new Set();
+      // Config changes already POSTed, mapping "<session_id><target>" to
+      // the value we sent. The select stays disabled (showing the sent value)
+      // until the next snapshot's current_value matches, confirming the
+      // session applied it.
+      const sentConfigChanges = new Map();
+      // Persistent combobox controllers keyed by "<session_id><target>", kept
+      // across polls so an open/searched dropdown is never torn down by a
+      // background snapshot refresh.
+      const configCombos = new Map();
       // Keyed render state: the transcript DOM is patched in place instead of
       // rebuilt on every poll, so text selection and scroll momentum survive.
       let renderedSessionId = null;
@@ -960,6 +1154,8 @@
         sessionCardById.clear();
         activityBySessionId.clear();
         sentDecisions.clear();
+        sentConfigChanges.clear();
+        configCombos.clear();
         renderedSessionId = null;
         renderedEntries = [];
         if (refreshTimer) {
@@ -1613,9 +1809,310 @@
         }
       }
 
+      function sessionConfigOptions(session) {
+        return session && Array.isArray(session.session_config) ? session.session_config : [];
+      }
+
+      function configOptionKey(option) {
+        return `${option.target_kind}${option.config_id || ""}`;
+      }
+
+      function configChangeKey(sessionId, option) {
+        return `${sessionId}${configOptionKey(option)}`;
+      }
+
+      // A searchable single-select dropdown built from scratch so it stays
+      // usable with long option lists (e.g. model pickers) and matches the app
+      // styling. `key` ties it to its sent-change entry; `onSelect(value)` fires
+      // only when the user picks a different value. The renderer reuses one
+      // instance across polls via the returned controller.
+      function createCombobox(option, key, onSelect) {
+        let choices = option.choices || [];
+        let value = currentComboValue(option, key);
+        let open = false;
+        let filtered = choices.slice();
+        let activeIndex = -1;
+
+        const root = document.createElement("div");
+        root.className = "config-combo";
+
+        const trigger = document.createElement("button");
+        trigger.type = "button";
+        trigger.className = "config-combo-trigger";
+        trigger.setAttribute("aria-haspopup", "listbox");
+        trigger.setAttribute("aria-expanded", "false");
+        const valueEl = document.createElement("span");
+        valueEl.className = "config-combo-value";
+        const chevron = document.createElement("span");
+        chevron.className = "config-combo-chevron";
+        chevron.setAttribute("aria-hidden", "true");
+        trigger.append(valueEl, chevron);
+
+        const popup = document.createElement("div");
+        popup.className = "config-combo-popup";
+        popup.hidden = true;
+        const search = document.createElement("input");
+        search.type = "text";
+        search.className = "config-combo-search";
+        search.placeholder = "Search…";
+        search.setAttribute("aria-label", "Search options");
+        const list = document.createElement("ul");
+        list.className = "config-combo-list";
+        list.setAttribute("role", "listbox");
+        popup.append(search, list);
+        root.append(trigger, popup);
+
+        function labelFor(val) {
+          const choice = choices.find((c) => c.value === val);
+          return choice ? choice.label || choice.value : val || "—";
+        }
+
+        function renderValue() {
+          valueEl.textContent = labelFor(value);
+        }
+
+        function renderList() {
+          const q = search.value.trim().toLowerCase();
+          filtered = choices.filter((c) => {
+            if (!q) return true;
+            return (
+              (c.label || "").toLowerCase().includes(q)
+              || (c.value || "").toLowerCase().includes(q)
+              || (c.description || "").toLowerCase().includes(q)
+            );
+          });
+          list.replaceChildren();
+          if (!filtered.length) {
+            const empty = document.createElement("li");
+            empty.className = "config-combo-empty";
+            empty.textContent = "No matches";
+            list.appendChild(empty);
+            return;
+          }
+          filtered.forEach((choice, index) => {
+            const item = document.createElement("li");
+            item.className = "config-combo-option";
+            item.setAttribute("role", "option");
+            if (choice.value === value) {
+              item.classList.add("is-selected");
+              item.setAttribute("aria-selected", "true");
+            }
+            if (index === activeIndex) {
+              item.classList.add("is-active");
+            }
+            const label = document.createElement("span");
+            label.className = "config-combo-option-label";
+            label.textContent = choice.label || choice.value;
+            item.appendChild(label);
+            if (choice.description) {
+              const desc = document.createElement("span");
+              desc.className = "config-combo-option-desc";
+              desc.textContent = choice.description;
+              item.appendChild(desc);
+            }
+            // mousedown (not click) so the choice lands before the search
+            // input's blur can close the popup out from under it.
+            item.addEventListener("mousedown", (event) => {
+              event.preventDefault();
+              choose(choice.value);
+            });
+            item.addEventListener("mousemove", () => setActive(index));
+            list.appendChild(item);
+          });
+        }
+
+        function setActive(index) {
+          activeIndex = index;
+          [...list.children].forEach((el, i) => {
+            el.classList.toggle("is-active", i === activeIndex);
+          });
+          const active = list.children[activeIndex];
+          if (active && active.scrollIntoView) {
+            active.scrollIntoView({ block: "nearest" });
+          }
+        }
+
+        function onOutsidePointer(event) {
+          if (!root.contains(event.target)) closePopup();
+        }
+
+        function openPopup() {
+          if (open || trigger.disabled) return;
+          open = true;
+          popup.hidden = false;
+          trigger.setAttribute("aria-expanded", "true");
+          search.value = "";
+          activeIndex = -1;
+          renderList();
+          const selected = filtered.findIndex((c) => c.value === value);
+          if (selected >= 0) setActive(selected);
+          search.focus();
+          document.addEventListener("pointerdown", onOutsidePointer, true);
+        }
+
+        function closePopup() {
+          if (!open) return;
+          open = false;
+          popup.hidden = true;
+          trigger.setAttribute("aria-expanded", "false");
+          renderValue();
+          document.removeEventListener("pointerdown", onOutsidePointer, true);
+        }
+
+        function choose(val) {
+          closePopup();
+          if (val !== value) onSelect(val);
+        }
+
+        trigger.addEventListener("click", () => (open ? closePopup() : openPopup()));
+        search.addEventListener("input", () => {
+          activeIndex = -1;
+          renderList();
+          if (filtered.length) setActive(0);
+        });
+        search.addEventListener("keydown", (event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            if (filtered.length) setActive((activeIndex + 1) % filtered.length);
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            if (filtered.length) setActive((activeIndex - 1 + filtered.length) % filtered.length);
+          } else if (event.key === "Enter") {
+            event.preventDefault();
+            if (activeIndex >= 0 && filtered[activeIndex]) choose(filtered[activeIndex].value);
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            closePopup();
+            trigger.focus();
+          }
+        });
+
+        renderValue();
+
+        return {
+          element: root,
+          isOpen: () => open,
+          // Background polls refresh data, but never while the popup is open —
+          // that would yank the list and search box out from under the user.
+          // The new value/choices take effect on the next close instead.
+          update(nextOption) {
+            choices = nextOption.choices || [];
+            value = currentComboValue(nextOption, key);
+            const disabled = sentConfigChanges.has(key);
+            trigger.disabled = disabled;
+            if (disabled) closePopup();
+            if (!open) renderValue();
+          },
+        };
+      }
+
+      // The value a combo should display: the optimistic sent value while a
+      // change is in flight, otherwise whatever the snapshot reports.
+      function currentComboValue(option, key) {
+        return sentConfigChanges.has(key)
+          ? sentConfigChanges.get(key)
+          : option.current_value || "";
+      }
+
+      function renderConfig(session) {
+        const options = sessionConfigOptions(session);
+        // Forget sent changes the session has applied (current_value caught up)
+        // or that vanished from the snapshot, so the control re-enables.
+        if (session) {
+          for (const key of [...sentConfigChanges.keys()]) {
+            if (!key.startsWith(`${session.session_id}`)) {
+              continue;
+            }
+            const match = options.find(
+              (option) => configChangeKey(session.session_id, option) === key,
+            );
+            if (!match || match.current_value === sentConfigChanges.get(key)) {
+              sentConfigChanges.delete(key);
+            }
+          }
+        }
+        const desiredKeys = session
+          ? options.map((option) => configChangeKey(session.session_id, option))
+          : [];
+        const currentKeys = [...configCombos.keys()];
+        const sameStructure =
+          !!session
+          && currentKeys.length === desiredKeys.length
+          && currentKeys.every((key, index) => key === desiredKeys[index]);
+
+        if (!sameStructure) {
+          sessionConfigEl.replaceChildren();
+          configCombos.clear();
+          if (!session) return;
+          for (const option of options) {
+            const key = configChangeKey(session.session_id, option);
+            const row = cloneTemplate(configOptionTpl);
+            row.querySelector(".config-option-name").textContent =
+              option.name || option.config_id || "";
+            const statusEl = row.querySelector(".config-option-status");
+            const combo = createCombobox(option, key, (value) => {
+              void submitConfigChange(session.session_id, option, value);
+            });
+            row.appendChild(combo.element);
+            const entry = { combo, statusEl };
+            configCombos.set(key, entry);
+            applyConfigComboState(entry, key, option);
+            sessionConfigEl.appendChild(row);
+          }
+          return;
+        }
+
+        // Same option set as last render: patch the existing combos in place so
+        // an open dropdown or in-flight selection survives the poll refresh.
+        for (const option of options) {
+          const key = configChangeKey(session.session_id, option);
+          const entry = configCombos.get(key);
+          if (entry) applyConfigComboState(entry, key, option);
+        }
+      }
+
+      function applyConfigComboState(entry, key, option) {
+        const applying = sentConfigChanges.has(key);
+        entry.combo.update(option);
+        entry.statusEl.textContent = applying ? "applying…" : "";
+      }
+
+      async function submitConfigChange(sessionId, option, value) {
+        const key = configChangeKey(sessionId, option);
+        if (sentConfigChanges.get(key) === value) {
+          return;
+        }
+        sentConfigChanges.set(key, value);
+        renderChat();
+        try {
+          const response = await apiFetch("/api/config-changes", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              session_id: sessionId,
+              target_kind: option.target_kind,
+              config_id: option.config_id ?? null,
+              value,
+            }),
+          });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+        } catch (error) {
+          sentConfigChanges.delete(key);
+          if (error.message !== "HTTP 401") {
+            queueStatusEl.textContent = `Config change failed: ${error.message}`;
+          }
+          renderChat();
+        }
+      }
+
       function renderChat() {
         const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
         renderTranscript(session);
+        renderConfig(session);
         renderPermissions(session);
         renderQueue(session);
       }

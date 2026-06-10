@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::{
-    ContentBlock, PermissionOptionKind, SessionUpdate, ToolCallContent,
+    ContentBlock, PermissionOptionKind, SessionConfigId, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate,
+    ToolCallContent,
 };
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
@@ -36,7 +38,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::config::SelectedAgent;
-use crate::event::{PermissionPrompt, UiCommand, UiEvent};
+use crate::event::{PermissionPrompt, SessionConfigTarget, UiCommand, UiEvent};
 
 const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
 const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
@@ -88,6 +90,134 @@ pub struct SessionRecord {
     /// Permission prompts currently waiting for an answer in this session.
     #[serde(default)]
     pub pending_permissions: Vec<PendingPermissionRecord>,
+    /// Session configuration options (model, mode, thought level, ...) the
+    /// agent currently advertises, published so the remote viewer can show
+    /// the active value and queue a change.
+    #[serde(default)]
+    pub session_config: Vec<SessionConfigOptionRecord>,
+}
+
+/// A session configuration option projected for the remote viewer. Carries
+/// enough to render a selector and to reconstruct the [`SessionConfigTarget`]
+/// a queued change should drive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionConfigOptionRecord {
+    /// Which ACP method a change drives: `config_option`, `legacy_model`, or
+    /// `legacy_mode`. Paired with `config_id` it round-trips back into a
+    /// `SessionConfigTarget` when a viewer change is claimed.
+    pub target_kind: String,
+    /// Set only for `config_option` targets; the agent-assigned option id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_id: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Semantic category (`model`, `mode`, `thought_level`, ...) for UX only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    pub current_value: String,
+    pub choices: Vec<SessionConfigChoiceRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionConfigChoiceRecord {
+    pub value: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Project the parallel `options`/`targets` vectors the runtime emits into
+/// viewer-friendly records. Only `Select` options are representable; any other
+/// kind is skipped so the viewer never shows a control it cannot drive.
+fn config_option_records(
+    options: &[SessionConfigOption],
+    targets: &[SessionConfigTarget],
+) -> Vec<SessionConfigOptionRecord> {
+    options
+        .iter()
+        .zip(targets.iter())
+        .filter_map(|(option, target)| {
+            let SessionConfigKind::Select(select) = &option.kind else {
+                return None;
+            };
+            let (target_kind, config_id) = config_target_parts(target);
+            Some(SessionConfigOptionRecord {
+                target_kind,
+                config_id,
+                name: option.name.clone(),
+                description: option.description.clone(),
+                category: option.category.as_ref().map(config_category_label),
+                current_value: select.current_value.to_string(),
+                choices: select_choice_records(&select.options),
+            })
+        })
+        .collect()
+}
+
+fn select_choice_records(options: &SessionConfigSelectOptions) -> Vec<SessionConfigChoiceRecord> {
+    match options {
+        SessionConfigSelectOptions::Ungrouped(values) => values
+            .iter()
+            .map(|opt| SessionConfigChoiceRecord {
+                value: opt.value.to_string(),
+                label: opt.name.clone(),
+                description: opt.description.clone(),
+            })
+            .collect(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| {
+                let group_name = group.name.clone();
+                group
+                    .options
+                    .iter()
+                    .map(move |opt| SessionConfigChoiceRecord {
+                        value: opt.value.to_string(),
+                        label: format!("{group_name} / {}", opt.name),
+                        description: opt.description.clone(),
+                    })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn config_category_label(category: &SessionConfigOptionCategory) -> String {
+    use SessionConfigOptionCategory as C;
+    match category {
+        C::Mode => "mode".to_string(),
+        C::Model => "model".to_string(),
+        C::ThoughtLevel => "thought_level".to_string(),
+        C::Other(other) => other.clone(),
+        _ => "other".to_string(),
+    }
+}
+
+/// Split a [`SessionConfigTarget`] into the `(target_kind, config_id)` pair the
+/// viewer echoes back; [`config_target_from_parts`] is the inverse.
+fn config_target_parts(target: &SessionConfigTarget) -> (String, Option<String>) {
+    match target {
+        SessionConfigTarget::ConfigOption { config_id } => {
+            ("config_option".to_string(), Some(config_id.to_string()))
+        }
+        SessionConfigTarget::LegacyModel => ("legacy_model".to_string(), None),
+        SessionConfigTarget::LegacyMode => ("legacy_mode".to_string(), None),
+    }
+}
+
+fn config_target_from_parts(
+    target_kind: &str,
+    config_id: Option<&str>,
+) -> Option<SessionConfigTarget> {
+    match target_kind {
+        "config_option" => config_id.map(|id| SessionConfigTarget::ConfigOption {
+            config_id: SessionConfigId::from(id.to_string()),
+        }),
+        "legacy_model" => Some(SessionConfigTarget::LegacyModel),
+        "legacy_mode" => Some(SessionConfigTarget::LegacyMode),
+        _ => None,
+    }
 }
 
 /// A permission prompt the session is blocked on, published so the remote
@@ -175,6 +305,32 @@ struct ClaimPermissionDecisionRequest {
     session_id: String,
 }
 
+/// A viewer-made session-config change queued until the session claims it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigChangeRecord {
+    pub id: i64,
+    pub session_id: String,
+    pub target_kind: String,
+    #[serde(default)]
+    pub config_id: Option<String>,
+    pub value: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct QueueConfigChangeRequest {
+    session_id: String,
+    target_kind: String,
+    #[serde(default)]
+    config_id: Option<String>,
+    value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ClaimConfigChangeRequest {
+    session_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteSessionTracker {
     client: Option<reqwest::Client>,
@@ -207,6 +363,7 @@ struct TrackerState {
     prompt_in_flight: bool,
     transcript: Vec<TranscriptEntry>,
     pending_permissions: Vec<PendingPermissionRecord>,
+    session_config: Vec<SessionConfigOptionRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +406,7 @@ impl TrackerState {
             prompt_in_flight: false,
             transcript: Vec::new(),
             pending_permissions: Vec::new(),
+            session_config: Vec::new(),
         }
     }
 
@@ -277,6 +435,11 @@ impl TrackerState {
                 self.agent_message_open = false;
                 self.prompt_in_flight = false;
                 self.pending_permissions.clear();
+                self.session_config.clear();
+            }
+            UiEvent::SessionConfigOptions { options, targets } => {
+                self.session_config = config_option_records(options, targets);
+                self.touch();
             }
             UiEvent::SessionUpdate(update) => {
                 self.observe_session_update(update);
@@ -290,7 +453,6 @@ impl TrackerState {
                 self.touch();
             }
             UiEvent::Connected { .. }
-            | UiEvent::SessionConfigOptions { .. }
             | UiEvent::PermissionRequest(_)
             | UiEvent::RemotePermissionDecision { .. }
             | UiEvent::Warning(_) => {}
@@ -377,6 +539,7 @@ impl TrackerState {
             transcript: self.transcript.clone(),
             queued_prompt_count: 0,
             pending_permissions: self.pending_permissions.clone(),
+            session_config: self.session_config.clone(),
         })
     }
 
@@ -689,6 +852,42 @@ impl RemoteSessionTracker {
                     }
                 }
 
+                // Config changes apply whenever a session is live: the runtime
+                // accepts a queued change between turns, so unlike prompts they
+                // do not need the prompt slot. Map back to a target before
+                // sending; an unmappable change is dropped rather than guessed.
+                let config_session = state.lock().ok().and_then(|guard| guard.session_id.clone());
+                if let Some(session_id) = config_session {
+                    match claim_remote_config_change(client.clone(), token.clone(), &session_id)
+                        .await
+                    {
+                        Ok(Some(change)) => {
+                            match config_target_from_parts(
+                                &change.target_kind,
+                                change.config_id.as_deref(),
+                            ) {
+                                Some(target) => {
+                                    let command = UiCommand::SetSessionConfigOption {
+                                        target,
+                                        value: SessionConfigValueId::from(change.value),
+                                    };
+                                    if command_tx.send(command).is_err() {
+                                        break;
+                                    }
+                                }
+                                None => debug!(
+                                    "dropping remote config change with unmappable target {}",
+                                    change.target_kind
+                                ),
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            debug!("remote config-change poll failed: {error:#}");
+                        }
+                    }
+                }
+
                 let session_id = {
                     let Ok(mut guard) = state.lock() else {
                         continue;
@@ -818,8 +1017,8 @@ fn spawn_queue_pruner(db_path: PathBuf, history_ttl: Option<Duration>) {
                 Ok(Ok(counts)) if counts.any() => {
                     debug!(
                         "remote-control prune removed {} queued prompt(s), \
-                         {} permission decision(s), and {} session(s)",
-                        counts.prompts, counts.decisions, counts.sessions
+                         {} permission decision(s), {} config change(s), and {} session(s)",
+                        counts.prompts, counts.decisions, counts.changes, counts.sessions
                     );
                 }
                 Ok(Ok(_)) => {}
@@ -926,6 +1125,8 @@ fn build_router(db_path: PathBuf, token: String, viewer_code: String) -> Router 
             "/api/permission-decisions/claim",
             post(claim_permission_decision),
         )
+        .route("/api/config-changes", post(queue_config_change))
+        .route("/api/config-changes/claim", post(claim_config_change))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_token,
@@ -1327,6 +1528,52 @@ async fn claim_permission_decision(
     Ok(Json(decision))
 }
 
+async fn queue_config_change(
+    State(state): State<ServerState>,
+    Json(request): Json<QueueConfigChangeRequest>,
+) -> std::result::Result<StatusCode, (StatusCode, String)> {
+    if request.value.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "value must not be empty".to_string(),
+        ));
+    }
+    // Reject targets the runtime could never map back to a method, so a bad
+    // request fails loudly here instead of being silently dropped on claim.
+    if config_target_from_parts(&request.target_kind, request.config_id.as_deref()).is_none() {
+        return Err((StatusCode::BAD_REQUEST, "invalid config target".to_string()));
+    }
+    let db_path = Arc::clone(&state.db_path);
+    tokio::task::spawn_blocking(move || {
+        queue_config_change_record(
+            db_path.as_ref().as_path(),
+            &request.session_id,
+            &request.target_kind,
+            request.config_id.as_deref(),
+            &request.value,
+        )
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn claim_config_change(
+    State(state): State<ServerState>,
+    Json(request): Json<ClaimConfigChangeRequest>,
+) -> std::result::Result<Json<Option<ConfigChangeRecord>>, (StatusCode, String)> {
+    let db_path = Arc::clone(&state.db_path);
+    let session_id = request.session_id;
+    let change = tokio::task::spawn_blocking(move || {
+        claim_config_change_record(db_path.as_ref().as_path(), &session_id)
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    Ok(Json(change))
+}
+
 fn internal_error(error: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
@@ -1475,6 +1722,14 @@ fn init_db(db_path: &Path) -> Result<()> {
             request_id text not null,
             option_id text not null,
             created_at text not null
+        );
+        create table if not exists config_changes (
+            id integer primary key autoincrement,
+            session_id text not null,
+            target_kind text not null,
+            config_id text,
+            value text not null,
+            created_at text not null
         );",
     )
     .context("create remote-control schema")?;
@@ -1485,6 +1740,7 @@ fn init_db(db_path: &Path) -> Result<()> {
         "pending_permissions_json",
         "text not null default '[]'",
     )?;
+    ensure_sessions_column(&conn, "session_config_json", "text not null default '[]'")?;
     Ok(())
 }
 
@@ -1524,6 +1780,8 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
         .context("serialize remote-control transcript")?;
     let pending_permissions_json = serde_json::to_string(&session.pending_permissions)
         .context("serialize remote-control pending permissions")?;
+    let session_config_json = serde_json::to_string(&session.session_config)
+        .context("serialize remote-control session config")?;
     // The conflict arm refuses to move `last_update` backwards: every state
     // change touches the timestamp before the snapshot is taken, so a
     // delayed or replayed upload can never overwrite newer session state
@@ -1539,8 +1797,9 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             agent,
             transcript_json,
             pending_permissions_json,
+            session_config_json,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -1550,6 +1809,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             agent = excluded.agent,
             transcript_json = excluded.transcript_json,
             pending_permissions_json = excluded.pending_permissions_json,
+            session_config_json = excluded.session_config_json,
             connected = 1
         where excluded.last_update >= sessions.last_update",
         params![
@@ -1562,6 +1822,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             session.agent,
             transcript_json,
             pending_permissions_json,
+            session_config_json,
         ],
     )
     .context("upsert remote-control session")?;
@@ -1585,6 +1846,13 @@ fn disconnect_session_record(db_path: &Path, session_id: &str) -> Result<()> {
         params![session_id],
     )
     .context("clear permission decisions on disconnect")?;
+    // Config changes, like permission decisions, can only be applied by the
+    // live session in memory; once it goes away they are unclaimable.
+    conn.execute(
+        "delete from config_changes where session_id = ?1",
+        params![session_id],
+    )
+    .context("clear config changes on disconnect")?;
     Ok(())
 }
 
@@ -1592,12 +1860,13 @@ fn disconnect_session_record(db_path: &Path, session_id: &str) -> Result<()> {
 struct PruneCounts {
     prompts: usize,
     decisions: usize,
+    changes: usize,
     sessions: usize,
 }
 
 impl PruneCounts {
     fn any(&self) -> bool {
-        self.prompts > 0 || self.decisions > 0 || self.sessions > 0
+        self.prompts > 0 || self.decisions > 0 || self.changes > 0 || self.sessions > 0
     }
 }
 
@@ -1652,6 +1921,17 @@ fn prune_stale_records(db_path: &Path, history_ttl: Option<Duration>) -> Result<
             params![decision_cutoff, live_cutoff],
         )
         .context("prune stale permission decisions")?;
+    counts.changes = conn
+        .execute(
+            "delete from config_changes
+            where created_at < ?1
+                or session_id not in (
+                    select session_id from sessions
+                    where connected = 1 and last_update >= ?2
+                )",
+            params![decision_cutoff, live_cutoff],
+        )
+        .context("prune stale config changes")?;
     counts.prompts += conn
         .execute(
             "delete from queued_prompts where created_at < ?1",
@@ -1676,6 +1956,7 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                 agent,
                 transcript_json,
                 pending_permissions_json,
+                session_config_json,
                 (
                     select count(*)
                     from queued_prompts
@@ -1708,6 +1989,7 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                 agent,
                 transcript_json,
                 pending_permissions_json,
+                session_config_json,
                 (
                     select count(*)
                     from queued_prompts
@@ -1730,9 +2012,11 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let total_messages: i64 = row.get(4)?;
     let transcript_json: String = row.get(7)?;
     let pending_permissions_json: String = row.get(8)?;
-    let queued_prompt_count: i64 = row.get(9)?;
+    let session_config_json: String = row.get(9)?;
+    let queued_prompt_count: i64 = row.get(10)?;
     let transcript = serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
+    let session_config = serde_json::from_str(&session_config_json).unwrap_or_default();
     Ok(SessionRecord {
         session_id: row.get(0)?,
         name: row.get(1)?,
@@ -1744,6 +2028,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         transcript,
         queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
         pending_permissions,
+        session_config,
     })
 }
 
@@ -1888,6 +2173,70 @@ fn claim_permission_decision_record(
     }
 }
 
+fn queue_config_change_record(
+    db_path: &Path,
+    session_id: &str,
+    target_kind: &str,
+    config_id: Option<&str>,
+    value: &str,
+) -> Result<()> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "insert into config_changes (session_id, target_kind, config_id, value, created_at)
+        values (?1, ?2, ?3, ?4, ?5)",
+        params![session_id, target_kind, config_id, value, now_rfc3339()],
+    )
+    .context("insert config change")?;
+    Ok(())
+}
+
+fn claim_config_change_record(
+    db_path: &Path,
+    session_id: &str,
+) -> Result<Option<ConfigChangeRecord>> {
+    init_db(db_path)?;
+    let mut conn = open_db(db_path)?;
+    let tx = conn
+        .transaction()
+        .context("begin config-change transaction")?;
+    let change = {
+        let mut stmt = tx
+            .prepare(
+                "select id, session_id, target_kind, config_id, value, created_at
+                from config_changes
+                where session_id = ?1
+                order by id asc
+                limit 1",
+            )
+            .context("prepare config-change claim query")?;
+        stmt.query_row(params![session_id], |row| {
+            Ok(ConfigChangeRecord {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                target_kind: row.get(2)?,
+                config_id: row.get(3)?,
+                value: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .optional()
+        .context("load config change to claim")?
+    };
+    if let Some(change) = change {
+        tx.execute(
+            "delete from config_changes where id = ?1",
+            params![change.id],
+        )
+        .context("delete claimed config change")?;
+        tx.commit().context("commit config-change claim")?;
+        Ok(Some(change))
+    } else {
+        tx.commit().context("commit empty config-change claim")?;
+        Ok(None)
+    }
+}
+
 async fn send_snapshot(
     client: reqwest::Client,
     token: Option<Arc<String>>,
@@ -1976,6 +2325,31 @@ async fn claim_remote_permission_decision(
         .context("decode claimed remote permission decision")
 }
 
+async fn claim_remote_config_change(
+    client: reqwest::Client,
+    token: Option<Arc<String>>,
+    session_id: &str,
+) -> Result<Option<ConfigChangeRecord>> {
+    let mut request = client
+        .post("https://localhost:11921/api/config-changes/claim")
+        .json(&ClaimConfigChangeRequest {
+            session_id: session_id.to_string(),
+        });
+    if let Some(token) = token {
+        request = request.bearer_auth(token.as_str());
+    }
+    let response = request
+        .send()
+        .await
+        .context("claim remote config change")?
+        .error_for_status()
+        .context("remote config-change claim returned an error")?;
+    response
+        .json::<Option<ConfigChangeRecord>>()
+        .await
+        .context("decode claimed remote config change")
+}
+
 /// Stable machine-readable id for a permission option kind, used by the
 /// remote viewer to style allow/reject buttons.
 fn permission_option_kind_id(kind: PermissionOptionKind) -> &'static str {
@@ -2039,7 +2413,9 @@ fn rfc3339_before(age: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{PermissionOption, ToolCallUpdate, ToolCallUpdateFields};
+    use agent_client_protocol::schema::{
+        PermissionOption, SessionConfigSelectOption, ToolCallUpdate, ToolCallUpdateFields,
+    };
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
 
@@ -2156,6 +2532,7 @@ mod tests {
             ],
             queued_prompt_count: 0,
             pending_permissions: Vec::new(),
+            session_config: Vec::new(),
         };
 
         upsert_session_record(&db_path, &session).expect("insert");
@@ -2210,6 +2587,7 @@ mod tests {
             transcript: Vec::new(),
             queued_prompt_count: 0,
             pending_permissions: Vec::new(),
+            session_config: Vec::new(),
         };
         let disconnected = SessionRecord {
             session_id: "sess-disconnected".to_string(),
@@ -2301,6 +2679,7 @@ mod tests {
             transcript: Vec::new(),
             queued_prompt_count: 0,
             pending_permissions: Vec::new(),
+            session_config: Vec::new(),
         }
     }
 
@@ -2491,6 +2870,50 @@ mod tests {
     }
 
     #[test]
+    fn tracker_publishes_session_config_and_clears_on_new_session() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        tracker.observe_event(&UiEvent::SessionConfigOptions {
+            options: vec![SessionConfigOption::select(
+                "model",
+                "Model",
+                "gpt-5",
+                vec![SessionConfigSelectOption::new("gpt-5", "GPT-5")],
+            )],
+            targets: vec![SessionConfigTarget::ConfigOption {
+                config_id: SessionConfigId::from("model".to_string()),
+            }],
+        });
+
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(snapshot.session_config.len(), 1);
+        assert_eq!(snapshot.session_config[0].current_value, "gpt-5");
+
+        // Starting a fresh session drops the previous session's config so a
+        // viewer never shows options the new agent did not advertise.
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-2".to_string(),
+            resumed: false,
+        });
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert!(snapshot.session_config.is_empty());
+    }
+
+    #[test]
     fn upsert_rejects_snapshots_older_than_the_stored_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("sessions.sqlite3");
@@ -2624,6 +3047,7 @@ mod tests {
             transcript: Vec::new(),
             queued_prompt_count: 0,
             pending_permissions: vec![pending.clone()],
+            session_config: Vec::new(),
         };
 
         upsert_session_record(&db_path, &session).expect("insert");
@@ -2789,6 +3213,249 @@ mod tests {
             .expect("claim again");
         assert_eq!(empty.status(), StatusCode::OK);
         let empty: Option<PermissionDecisionRecord> = serde_json::from_slice(
+            &empty
+                .into_body()
+                .collect()
+                .await
+                .expect("empty claim body")
+                .to_bytes(),
+        )
+        .expect("empty claim json");
+        assert!(empty.is_none());
+    }
+
+    #[test]
+    fn config_option_records_projects_select_options_with_targets() {
+        let options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "gpt-5",
+                vec![
+                    SessionConfigSelectOption::new("gpt-5", "GPT-5"),
+                    SessionConfigSelectOption::new("gpt-4", "GPT-4").description("older"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+        ];
+        let targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: SessionConfigId::from("model".to_string()),
+        }];
+
+        let records = config_option_records(&options, &targets);
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.target_kind, "config_option");
+        assert_eq!(record.config_id.as_deref(), Some("model"));
+        assert_eq!(record.name, "Model");
+        assert_eq!(record.category.as_deref(), Some("model"));
+        assert_eq!(record.current_value, "gpt-5");
+        assert_eq!(record.choices.len(), 2);
+        assert_eq!(record.choices[1].value, "gpt-4");
+        assert_eq!(record.choices[1].description.as_deref(), Some("older"));
+
+        // The published pair round-trips back into the target to drive.
+        let target = config_target_from_parts(&record.target_kind, record.config_id.as_deref())
+            .expect("target reconstructs");
+        assert_eq!(target, targets[0]);
+    }
+
+    #[test]
+    fn config_target_parts_round_trip_and_reject_bad_input() {
+        for target in [
+            SessionConfigTarget::LegacyModel,
+            SessionConfigTarget::LegacyMode,
+        ] {
+            let (kind, id) = config_target_parts(&target);
+            assert_eq!(config_target_from_parts(&kind, id.as_deref()), Some(target));
+        }
+        // A config_option target is meaningless without its id, and unknown
+        // kinds are refused rather than guessed.
+        assert!(config_target_from_parts("config_option", None).is_none());
+        assert!(config_target_from_parts("nonsense", Some("x")).is_none());
+    }
+
+    #[test]
+    fn config_changes_queue_and_claim_fifo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+
+        queue_config_change_record(&db_path, "sess-1", "config_option", Some("model"), "gpt-5")
+            .expect("queue first");
+        queue_config_change_record(&db_path, "sess-1", "legacy_mode", None, "ask")
+            .expect("queue second");
+        queue_config_change_record(&db_path, "sess-2", "legacy_model", None, "opus")
+            .expect("queue other session");
+
+        let first = claim_config_change_record(&db_path, "sess-1")
+            .expect("claim first")
+            .expect("change");
+        assert_eq!(first.target_kind, "config_option");
+        assert_eq!(first.config_id.as_deref(), Some("model"));
+        assert_eq!(first.value, "gpt-5");
+
+        let second = claim_config_change_record(&db_path, "sess-1")
+            .expect("claim second")
+            .expect("change");
+        assert_eq!(second.target_kind, "legacy_mode");
+        assert_eq!(second.config_id, None);
+        assert_eq!(second.value, "ask");
+
+        assert!(
+            claim_config_change_record(&db_path, "sess-1")
+                .expect("claim empty")
+                .is_none()
+        );
+
+        let other = claim_config_change_record(&db_path, "sess-2")
+            .expect("claim other")
+            .expect("change");
+        assert_eq!(other.value, "opus");
+    }
+
+    #[tokio::test]
+    async fn config_change_endpoints_enforce_token_and_validate_input() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        init_db(&db_path).expect("init db");
+        let token = "integration-token".to_string();
+        let app = build_router(db_path, token.clone(), "123456".to_string());
+
+        let change_body = |target_kind: &str, config_id: Option<&str>, value: &str| {
+            serde_json::to_vec(&QueueConfigChangeRequest {
+                session_id: "sess-1".to_string(),
+                target_kind: target_kind.to_string(),
+                config_id: config_id.map(str::to_string),
+                value: value.to_string(),
+            })
+            .expect("change json")
+        };
+
+        // Without the bearer token the change is rejected.
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/config-changes")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(change_body(
+                        "config_option",
+                        Some("model"),
+                        "gpt-5",
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("send unauthenticated");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        // A config_option target missing its id is refused.
+        let no_id = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/config-changes")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(change_body(
+                        "config_option",
+                        None,
+                        "gpt-5",
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("send missing id");
+        assert_eq!(no_id.status(), StatusCode::BAD_REQUEST);
+
+        // A blank value is refused.
+        let blank = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/config-changes")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(change_body(
+                        "legacy_model",
+                        None,
+                        "   ",
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("send blank value");
+        assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
+
+        // A valid change is accepted, then claimed back exactly once.
+        let accepted = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/config-changes")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(change_body(
+                        "config_option",
+                        Some("model"),
+                        "gpt-5",
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("send change");
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+        let claim_body = serde_json::to_vec(&ClaimConfigChangeRequest {
+            session_id: "sess-1".to_string(),
+        })
+        .expect("claim json");
+        let claimed = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/config-changes/claim")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(claim_body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("claim change");
+        assert_eq!(claimed.status(), StatusCode::OK);
+        let claimed: Option<ConfigChangeRecord> = serde_json::from_slice(
+            &claimed
+                .into_body()
+                .collect()
+                .await
+                .expect("claim body")
+                .to_bytes(),
+        )
+        .expect("claim json");
+        let claimed = claimed.expect("a change was queued");
+        assert_eq!(claimed.target_kind, "config_option");
+        assert_eq!(claimed.config_id.as_deref(), Some("model"));
+        assert_eq!(claimed.value, "gpt-5");
+
+        let empty = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/config-changes/claim")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(claim_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("claim again");
+        assert_eq!(empty.status(), StatusCode::OK);
+        let empty: Option<ConfigChangeRecord> = serde_json::from_slice(
             &empty
                 .into_body()
                 .collect()
@@ -3064,6 +3731,7 @@ mod tests {
             transcript: Vec::new(),
             queued_prompt_count: 0,
             pending_permissions: Vec::new(),
+            session_config: Vec::new(),
         };
 
         // Without the bearer token the write is rejected.
