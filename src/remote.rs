@@ -180,9 +180,17 @@ pub struct RemoteSessionTracker {
     client: Option<reqwest::Client>,
     token: Option<Arc<String>>,
     state: Arc<Mutex<TrackerState>>,
-    heartbeat: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Single task that owns every snapshot upload (including heartbeats),
+    /// with at most one request in flight. Serializing here means a newer
+    /// snapshot can never be overtaken by an older one — the fast
+    /// pending-permission add/remove path depends on that ordering.
+    publisher: Arc<Mutex<Option<JoinHandle<()>>>>,
+    publish_signal: Arc<tokio::sync::Notify>,
     queue_poller: Arc<Mutex<Option<JoinHandle<()>>>>,
-    flushes: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// False when no UI event channel exists (headless): remote permission
+    /// decisions could never be applied, so pending permissions must not
+    /// be advertised to viewers at all.
+    publish_permissions: bool,
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -254,11 +262,10 @@ impl TrackerState {
         }
     }
 
-    fn observe_event(&mut self, event: &UiEvent) -> bool {
+    fn observe_event(&mut self, event: &UiEvent) {
         match event {
             UiEvent::SessionStarted { session_id, .. } => {
                 let now = now_rfc3339();
-                let first_start = self.session_id.is_none();
                 self.session_id = Some(session_id.clone());
                 if self.name.is_none() {
                     self.name = Some(session_id.clone());
@@ -270,11 +277,9 @@ impl TrackerState {
                 self.agent_message_open = false;
                 self.prompt_in_flight = false;
                 self.pending_permissions.clear();
-                first_start
             }
             UiEvent::SessionUpdate(update) => {
                 self.observe_session_update(update);
-                false
             }
             UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } | UiEvent::Fatal(_) => {
                 self.agent_message_open = false;
@@ -283,13 +288,12 @@ impl TrackerState {
                 // cancelled by the runtime, so don't advertise it.
                 self.pending_permissions.clear();
                 self.touch();
-                false
             }
             UiEvent::Connected { .. }
             | UiEvent::SessionConfigOptions { .. }
             | UiEvent::PermissionRequest(_)
             | UiEvent::RemotePermissionDecision { .. }
-            | UiEvent::Warning(_) => false,
+            | UiEvent::Warning(_) => {}
         }
     }
 
@@ -376,11 +380,6 @@ impl TrackerState {
         })
     }
 
-    fn snapshot_with_heartbeat_touch(&mut self) -> Option<SessionRecord> {
-        self.touch();
-        self.snapshot()
-    }
-
     fn touch(&mut self) {
         self.last_update = Some(now_rfc3339());
     }
@@ -433,9 +432,10 @@ impl RemoteSessionTracker {
             client,
             token,
             state: Arc::new(Mutex::new(TrackerState::new(project, agent))),
-            heartbeat: Arc::new(Mutex::new(None)),
+            publisher: Arc::new(Mutex::new(None)),
+            publish_signal: Arc::new(tokio::sync::Notify::new()),
             queue_poller: Arc::new(Mutex::new(None)),
-            flushes: Arc::new(Mutex::new(Vec::new())),
+            publish_permissions: ui_event_tx.is_some(),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
         tracker.ensure_queue_poller(command_tx, ui_event_tx);
@@ -450,9 +450,10 @@ impl RemoteSessionTracker {
             client: None,
             token: None,
             state: Arc::new(Mutex::new(TrackerState::new(project, agent))),
-            heartbeat: Arc::new(Mutex::new(None)),
+            publisher: Arc::new(Mutex::new(None)),
+            publish_signal: Arc::new(tokio::sync::Notify::new()),
             queue_poller: Arc::new(Mutex::new(None)),
-            flushes: Arc::new(Mutex::new(Vec::new())),
+            publish_permissions: true,
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -461,8 +462,12 @@ impl RemoteSessionTracker {
     /// their responder wrapped so the tracker can publish the pending
     /// request to the remote-control server and retract it the moment it
     /// is answered — locally, remotely, or by cancellation.
+    ///
+    /// A no-op when remote decisions cannot be applied (headless): viewers
+    /// must never see approval buttons that would be accepted with a 202
+    /// and then silently dropped.
     pub fn intercept_event(&self, event: UiEvent) -> UiEvent {
-        if self.shutting_down.load(Ordering::Relaxed) {
+        if !self.publish_permissions || self.shutting_down.load(Ordering::Relaxed) {
             return event;
         }
         match event {
@@ -498,7 +503,7 @@ impl RemoteSessionTracker {
         if let Ok(mut state) = self.state.lock() {
             state.push_pending_permission(record);
         }
-        self.spawn_flush();
+        self.request_flush();
 
         let PermissionPrompt {
             tool_call,
@@ -517,7 +522,7 @@ impl RemoteSessionTracker {
             if let Ok(decision) = decision {
                 let _ = responder.send(decision);
             }
-            tracker.spawn_flush();
+            tracker.request_flush();
         });
         PermissionPrompt {
             tool_call,
@@ -533,27 +538,22 @@ impl RemoteSessionTracker {
         if let Ok(mut state) = self.state.lock() {
             state.observe_command(command);
         }
-        self.spawn_flush();
+        self.request_flush();
     }
 
     pub fn observe_event(&self, event: &UiEvent) {
         if self.shutting_down.load(Ordering::Relaxed) {
             return;
         }
-        let started = if let Ok(mut state) = self.state.lock() {
-            state.observe_event(event)
-        } else {
-            false
-        };
-        if started {
-            self.ensure_heartbeat();
+        if let Ok(mut state) = self.state.lock() {
+            state.observe_event(event);
         }
-        self.spawn_flush();
+        self.request_flush();
     }
 
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
-        let handle = self.heartbeat.lock().ok().and_then(|mut slot| slot.take());
+        let handle = self.publisher.lock().ok().and_then(|mut slot| slot.take());
         if let Some(handle) = handle {
             handle.abort();
             let _ = handle.await;
@@ -565,15 +565,6 @@ impl RemoteSessionTracker {
             .and_then(|mut slot| slot.take());
         if let Some(handle) = queue_poller {
             handle.abort();
-            let _ = handle.await;
-        }
-        let flushes = self
-            .flushes
-            .lock()
-            .ok()
-            .map(|mut handles| handles.drain(..).collect::<Vec<_>>())
-            .unwrap_or_default();
-        for handle in flushes {
             let _ = handle.await;
         }
         let Some(client) = self.client.clone() else {
@@ -595,11 +586,23 @@ impl RemoteSessionTracker {
         }
     }
 
-    fn ensure_heartbeat(&self) {
+    /// Ask the publisher for a fresh snapshot upload. Signals coalesce: any
+    /// number of requests while an upload is in flight result in exactly one
+    /// follow-up upload, which re-reads the state and therefore always
+    /// carries the newest snapshot.
+    fn request_flush(&self) {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
+        self.ensure_publisher();
+        self.publish_signal.notify_one();
+    }
+
+    fn ensure_publisher(&self) {
         let Some(client) = self.client.clone() else {
             return;
         };
-        let Ok(mut slot) = self.heartbeat.lock() else {
+        let Ok(mut slot) = self.publisher.lock() else {
             return;
         };
         if slot.is_some() {
@@ -607,44 +610,28 @@ impl RemoteSessionTracker {
         }
         let state = Arc::clone(&self.state);
         let token = self.token.clone();
+        let signal = Arc::clone(&self.publish_signal);
         *slot = Some(tokio::spawn(async move {
             loop {
-                tokio::time::sleep(HEARTBEAT_INTERVAL).await;
-                let snapshot = state
-                    .lock()
-                    .ok()
-                    .and_then(|mut state| state.snapshot_with_heartbeat_touch());
+                tokio::select! {
+                    _ = signal.notified() => {}
+                    _ = tokio::time::sleep(HEARTBEAT_INTERVAL) => {
+                        // Heartbeat: refresh last_update so an idle session
+                        // stays inside the server's liveness window.
+                        if let Ok(mut state) = state.lock() {
+                            state.touch();
+                        }
+                    }
+                }
+                let snapshot = state.lock().ok().and_then(|state| state.snapshot());
                 let Some(snapshot) = snapshot else {
                     continue;
                 };
                 if let Err(error) = send_snapshot(client.clone(), token.clone(), snapshot).await {
-                    debug!("remote-control heartbeat failed: {error:#}");
+                    debug!("remote-control publish failed: {error:#}");
                 }
             }
         }));
-    }
-
-    fn spawn_flush(&self) {
-        if self.shutting_down.load(Ordering::Relaxed) {
-            return;
-        }
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        let snapshot = self.state.lock().ok().and_then(|state| state.snapshot());
-        let Some(snapshot) = snapshot else {
-            return;
-        };
-        let token = self.token.clone();
-        let handle = tokio::spawn(async move {
-            if let Err(error) = send_snapshot(client, token, snapshot).await {
-                debug!("remote-control flush failed: {error:#}");
-            }
-        });
-        if let Ok(mut flushes) = self.flushes.lock() {
-            flushes.retain(|handle| !handle.is_finished());
-            flushes.push(handle);
-        }
     }
 
     fn ensure_queue_poller(
@@ -1537,6 +1524,10 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
         .context("serialize remote-control transcript")?;
     let pending_permissions_json = serde_json::to_string(&session.pending_permissions)
         .context("serialize remote-control pending permissions")?;
+    // The conflict arm refuses to move `last_update` backwards: every state
+    // change touches the timestamp before the snapshot is taken, so a
+    // delayed or replayed upload can never overwrite newer session state
+    // (in particular a cleared pending permission).
     conn.execute(
         "insert into sessions (
             session_id,
@@ -1559,7 +1550,8 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             agent = excluded.agent,
             transcript_json = excluded.transcript_json,
             pending_permissions_json = excluded.pending_permissions_json,
-            connected = 1",
+            connected = 1
+        where excluded.last_update >= sessions.last_update",
         params![
             session.session_id,
             session.name,
@@ -2496,6 +2488,91 @@ mod tests {
             .snapshot()
             .expect("snapshot");
         assert!(snapshot.pending_permissions.is_empty());
+    }
+
+    #[test]
+    fn upsert_rejects_snapshots_older_than_the_stored_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+
+        // A "pending permission" snapshot arrives late, after the cleared
+        // snapshot with a newer last_update was already stored.
+        let cleared = SessionRecord {
+            pending_permissions: Vec::new(),
+            ..session_named("sess-1", "2026-06-10T10:00:02Z")
+        };
+        let stale_pending = SessionRecord {
+            pending_permissions: vec![PendingPermissionRecord {
+                request_id: "call-1".to_string(),
+                title: "run something".to_string(),
+                options: Vec::new(),
+                requested_at: "2026-06-10T10:00:01Z".to_string(),
+            }],
+            ..session_named("sess-1", "2026-06-10T10:00:01Z")
+        };
+
+        upsert_session_record(&db_path, &cleared).expect("store newer");
+        upsert_session_record(&db_path, &stale_pending).expect("late stale write");
+
+        let loaded = load_session_records(&db_path).expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].last_update, "2026-06-10T10:00:02Z");
+        assert!(
+            loaded[0].pending_permissions.is_empty(),
+            "a stale snapshot must not resurrect a cleared permission"
+        );
+
+        // An equal-or-newer snapshot still updates the row.
+        let newer = SessionRecord {
+            total_messages: 9,
+            ..session_named("sess-1", "2026-06-10T10:00:03Z")
+        };
+        upsert_session_record(&db_path, &newer).expect("store newest");
+        let loaded = load_session_records(&db_path).expect("reload");
+        assert_eq!(loaded[0].total_messages, 9);
+    }
+
+    #[tokio::test]
+    async fn intercept_is_a_passthrough_without_a_ui_event_channel() {
+        // Headless trackers cannot apply remote decisions, so they must not
+        // advertise pending permissions: the prompt passes through with its
+        // original responder and the snapshot stays clean.
+        let tracker = RemoteSessionTracker {
+            publish_permissions: false,
+            ..RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string())
+        };
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let (prompt, rx) = permission_prompt("call-1");
+        let event = tracker.intercept_event(UiEvent::PermissionRequest(prompt));
+
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert!(
+            snapshot.pending_permissions.is_empty(),
+            "headless sessions must not publish approval UI"
+        );
+
+        // The responder is the original one: answering it resolves the
+        // runtime receiver directly, with no wrapper task involved.
+        let UiEvent::PermissionRequest(prompt) = event else {
+            panic!("intercept must preserve the event kind");
+        };
+        prompt
+            .responder
+            .send(PermissionDecision::Selected("allow".to_string()))
+            .expect("responder open");
+        match rx.await {
+            Ok(PermissionDecision::Selected(id)) => assert_eq!(id, "allow"),
+            other => panic!("expected direct decision, got {other:?}"),
+        }
     }
 
     #[tokio::test]

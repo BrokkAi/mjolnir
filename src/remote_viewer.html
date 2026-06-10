@@ -1082,6 +1082,10 @@
         }
         if (!selectedSessionId || !sessions.some((s) => s.session_id === selectedSessionId)) {
           selectedSessionId = sessions[0].session_id;
+          // Reset per-session view state exactly like the route-change
+          // path, so the previous session's queue never bleeds through.
+          queuedPrompts = [];
+          pendingNewEntries = 0;
           forceScrollToBottom = true;
           restoreDraftForSelectedSession();
           void refreshQueuedPrompts();
