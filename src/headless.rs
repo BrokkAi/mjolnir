@@ -137,8 +137,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     };
 
     let runtime = tokio::spawn(async move { acp::run(runtime_cfg, event_tx, cmd_rx).await });
+    // No UI event channel: headless answers permissions by policy, so
+    // remote decisions have nothing to resolve.
     let remote_tracker =
-        remote::RemoteSessionTracker::new(project_label, agent_label, Some(cmd_tx.clone()));
+        remote::RemoteSessionTracker::new(project_label, agent_label, Some(cmd_tx.clone()), None);
 
     let mut state = HeadlessState::default();
     let mut sent_prompt = false;
@@ -152,6 +154,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let mut collecting_turn_output = false;
 
     while let Some(event) = event_rx.recv().await {
+        let event = remote_tracker.intercept_event(event);
         remote_tracker.observe_event(&event);
         if matches!(cfg.output_format, OutputFormat::StreamJson) {
             emit_stream_event(&event, &state)?;
@@ -241,6 +244,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     eprintln!("warning: {message}");
                 }
             }
+            // Headless runs never receive remote decisions (no UI event
+            // channel is registered with the tracker).
+            UiEvent::RemotePermissionDecision { .. } => {}
         }
     }
 

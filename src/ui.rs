@@ -651,7 +651,13 @@ fn should_force_inline_repair_for_event(mode: UiMode, state: &AppState, ev: &CtE
 }
 
 fn should_force_inline_repair_for_ui_event(mode: UiMode, ev: &UiEvent) -> bool {
-    mode == UiMode::InlineChat && matches!(ev, UiEvent::PermissionRequest(_))
+    // A remote decision can dismiss the inline permission view, which
+    // needs the same viewport repair as the view appearing.
+    mode == UiMode::InlineChat
+        && matches!(
+            ev,
+            UiEvent::PermissionRequest(_) | UiEvent::RemotePermissionDecision { .. }
+        )
 }
 
 fn should_attempt_inline_repair_before_flush(

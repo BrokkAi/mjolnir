@@ -54,6 +54,13 @@ pub enum UiEvent {
     /// The prompt request failed before returning a stop reason. UI can
     /// re-enable the input prompt and surface the error.
     PromptFailed { message: String },
+    /// A permission decision made through the remote-control viewer
+    /// (`mj server`). The UI resolves the matching queued permission
+    /// prompt as if the user had selected the option locally.
+    RemotePermissionDecision {
+        request_id: String,
+        option_id: String,
+    },
     /// A non-fatal error from the runtime (e.g. transport hiccup we
     /// recovered from). Shown in the status line.
     Warning(String),

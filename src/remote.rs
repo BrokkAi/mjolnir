@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::{ContentBlock, SessionUpdate, ToolCallContent};
+use agent_client_protocol::schema::{
+    ContentBlock, PermissionOptionKind, SessionUpdate, ToolCallContent,
+};
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
 use axum::http::StatusCode;
@@ -34,13 +36,23 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::config::SelectedAgent;
-use crate::event::{UiCommand, UiEvent};
+use crate::event::{PermissionPrompt, UiCommand, UiEvent};
 
 const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
 const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
 const REMOTE_CONTROL_UPSERT_URL: &str = "https://localhost:11921/api/sessions";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const CONNECTED_SESSION_TTL: Duration = Duration::from_secs(75);
+/// How often `mj server` sweeps dead queue entries out of sqlite.
+const QUEUE_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+/// Queued prompts survive disconnects on purpose: `mj resume <session-id>`
+/// re-registers the same session id and claims them. They only become dead
+/// weight once it is clear nobody will resume, so the cap is generous.
+const QUEUED_PROMPT_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Permission decisions, by contrast, can only ever apply to a prompt held
+/// in a live session's memory. A live session claims within seconds, so an
+/// old unclaimed decision is unambiguously dead.
+const PERMISSION_DECISION_TTL: Duration = Duration::from_secs(60 * 60);
 const SESSION_COOKIE_NAME: &str = "mj_remote_session";
 /// The six-digit viewer code is only ~20 bits of entropy, so the manual-unlock
 /// endpoint must be throttled or it can be brute-forced — especially once the
@@ -73,6 +85,40 @@ pub struct SessionRecord {
     pub transcript: Vec<TranscriptEntry>,
     #[serde(default)]
     pub queued_prompt_count: u64,
+    /// Permission prompts currently waiting for an answer in this session.
+    #[serde(default)]
+    pub pending_permissions: Vec<PendingPermissionRecord>,
+}
+
+/// A permission prompt the session is blocked on, published so the remote
+/// viewer can render the options and queue a decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingPermissionRecord {
+    /// The tool-call id of the request; decisions reference it so a stale
+    /// answer can never resolve a different prompt.
+    pub request_id: String,
+    pub title: String,
+    pub options: Vec<PermissionOptionRecord>,
+    pub requested_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PermissionOptionRecord {
+    pub option_id: String,
+    pub label: String,
+    /// Stable machine-readable kind (`allow_once`, `reject_always`, ...)
+    /// so the viewer can style allow/reject buttons differently.
+    pub kind: String,
+}
+
+/// A viewer-made permission decision queued until the session claims it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PermissionDecisionRecord {
+    pub id: i64,
+    pub session_id: String,
+    pub request_id: String,
+    pub option_id: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +163,18 @@ struct SessionQueueQuery {
     session_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct QueuePermissionDecisionRequest {
+    session_id: String,
+    request_id: String,
+    option_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ClaimPermissionDecisionRequest {
+    session_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteSessionTracker {
     client: Option<reqwest::Client>,
@@ -140,6 +198,7 @@ struct TrackerState {
     agent_message_open: bool,
     prompt_in_flight: bool,
     transcript: Vec<TranscriptEntry>,
+    pending_permissions: Vec<PendingPermissionRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +240,7 @@ impl TrackerState {
             agent_message_open: false,
             prompt_in_flight: false,
             transcript: Vec::new(),
+            pending_permissions: Vec::new(),
         }
     }
 
@@ -209,6 +269,7 @@ impl TrackerState {
                 self.last_update = Some(now);
                 self.agent_message_open = false;
                 self.prompt_in_flight = false;
+                self.pending_permissions.clear();
                 first_start
             }
             UiEvent::SessionUpdate(update) => {
@@ -218,12 +279,16 @@ impl TrackerState {
             UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } | UiEvent::Fatal(_) => {
                 self.agent_message_open = false;
                 self.prompt_in_flight = false;
+                // The turn is over; any prompt still listed here was
+                // cancelled by the runtime, so don't advertise it.
+                self.pending_permissions.clear();
                 self.touch();
                 false
             }
             UiEvent::Connected { .. }
             | UiEvent::SessionConfigOptions { .. }
             | UiEvent::PermissionRequest(_)
+            | UiEvent::RemotePermissionDecision { .. }
             | UiEvent::Warning(_) => false,
         }
     }
@@ -307,6 +372,7 @@ impl TrackerState {
             agent: self.agent.clone(),
             transcript: self.transcript.clone(),
             queued_prompt_count: 0,
+            pending_permissions: self.pending_permissions.clone(),
         })
     }
 
@@ -331,6 +397,26 @@ impl TrackerState {
     fn release_remote_prompt_slot(&mut self) {
         self.prompt_in_flight = false;
     }
+
+    fn push_pending_permission(&mut self, record: PendingPermissionRecord) {
+        self.pending_permissions.push(record);
+        self.touch();
+    }
+
+    fn remove_pending_permission(&mut self, request_id: &str) {
+        self.pending_permissions
+            .retain(|pending| pending.request_id != request_id);
+        self.touch();
+    }
+
+    /// Session id to claim permission decisions for, when at least one
+    /// permission prompt is waiting.
+    fn permission_claim_session(&self) -> Option<String> {
+        if self.pending_permissions.is_empty() {
+            return None;
+        }
+        self.session_id.clone()
+    }
 }
 
 impl RemoteSessionTracker {
@@ -338,6 +424,7 @@ impl RemoteSessionTracker {
         project: String,
         agent: String,
         command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
+        ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
     ) -> Self {
         let dir = remote_control_dir();
         let token = read_token(&dir.join("token")).map(Arc::new);
@@ -351,8 +438,92 @@ impl RemoteSessionTracker {
             flushes: Arc::new(Mutex::new(Vec::new())),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
-        tracker.ensure_queue_poller(command_tx);
+        tracker.ensure_queue_poller(command_tx, ui_event_tx);
         tracker
+    }
+
+    /// Tracker with no HTTP client and no pollers, so tests can exercise
+    /// state transitions without touching the filesystem or network.
+    #[cfg(test)]
+    fn new_disconnected(project: String, agent: String) -> Self {
+        Self {
+            client: None,
+            token: None,
+            state: Arc::new(Mutex::new(TrackerState::new(project, agent))),
+            heartbeat: Arc::new(Mutex::new(None)),
+            queue_poller: Arc::new(Mutex::new(None)),
+            flushes: Arc::new(Mutex::new(Vec::new())),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Pass events through on their way to the UI. Permission prompts get
+    /// their responder wrapped so the tracker can publish the pending
+    /// request to the remote-control server and retract it the moment it
+    /// is answered — locally, remotely, or by cancellation.
+    pub fn intercept_event(&self, event: UiEvent) -> UiEvent {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return event;
+        }
+        match event {
+            UiEvent::PermissionRequest(prompt) => {
+                UiEvent::PermissionRequest(self.track_permission_prompt(prompt))
+            }
+            other => other,
+        }
+    }
+
+    fn track_permission_prompt(&self, prompt: PermissionPrompt) -> PermissionPrompt {
+        let request_id = prompt.tool_call.tool_call_id.to_string();
+        let record = PendingPermissionRecord {
+            request_id: request_id.clone(),
+            title: prompt
+                .tool_call
+                .fields
+                .title
+                .clone()
+                .map(|title| title.replace("\\n", "\n"))
+                .unwrap_or_else(|| request_id.clone()),
+            options: prompt
+                .options
+                .iter()
+                .map(|option| PermissionOptionRecord {
+                    option_id: option.option_id.to_string(),
+                    label: option.name.clone(),
+                    kind: permission_option_kind_id(option.kind).to_string(),
+                })
+                .collect(),
+            requested_at: now_rfc3339(),
+        };
+        if let Ok(mut state) = self.state.lock() {
+            state.push_pending_permission(record);
+        }
+        self.spawn_flush();
+
+        let PermissionPrompt {
+            tool_call,
+            options,
+            responder,
+        } = prompt;
+        let (wrapped_tx, wrapped_rx) = tokio::sync::oneshot::channel();
+        let tracker = self.clone();
+        tokio::spawn(async move {
+            let decision = wrapped_rx.await;
+            if let Ok(mut state) = tracker.state.lock() {
+                state.remove_pending_permission(&request_id);
+            }
+            // On Err the UI dropped its sender (cancel); dropping
+            // `responder` here forwards exactly that signal.
+            if let Ok(decision) = decision {
+                let _ = responder.send(decision);
+            }
+            tracker.spawn_flush();
+        });
+        PermissionPrompt {
+            tool_call,
+            options,
+            responder: wrapped_tx,
+        }
     }
 
     pub fn observe_command(&self, command: &UiCommand) {
@@ -479,6 +650,7 @@ impl RemoteSessionTracker {
     fn ensure_queue_poller(
         &self,
         command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
+        ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
     ) {
         let Some(client) = self.client.clone() else {
             return;
@@ -497,6 +669,39 @@ impl RemoteSessionTracker {
         *slot = Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
+
+                // Permission decisions first: while a permission prompt is
+                // pending the turn is blocked, so the prompt-claim path
+                // below is a no-op anyway. Decisions only make sense when
+                // a UI is attached to apply them; headless answers
+                // permissions by policy instead.
+                if let Some(ui_event_tx) = ui_event_tx.as_ref() {
+                    let claim_session = state
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.permission_claim_session());
+                    if let Some(session_id) = claim_session {
+                        match claim_remote_permission_decision(
+                            client.clone(),
+                            token.clone(),
+                            &session_id,
+                        )
+                        .await
+                        {
+                            Ok(Some(decision)) => {
+                                let _ = ui_event_tx.send(UiEvent::RemotePermissionDecision {
+                                    request_id: decision.request_id,
+                                    option_id: decision.option_id,
+                                });
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                debug!("remote permission-decision poll failed: {error:#}");
+                            }
+                        }
+                    }
+                }
+
                 let session_id = {
                     let Ok(mut guard) = state.lock() else {
                         continue;
@@ -574,7 +779,7 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
     }
 }
 
-pub async fn run_server(hostname: Option<String>) -> Result<()> {
+pub async fn run_server(hostname: Option<String>, history_days: u32) -> Result<()> {
     clear_terminal_screen()?;
     install_crypto_provider();
 
@@ -595,6 +800,10 @@ pub async fn run_server(hostname: Option<String>) -> Result<()> {
 
     let listener = bind_server_listener(&listen.bind_addr)?;
 
+    let history_ttl =
+        (history_days > 0).then(|| Duration::from_secs(u64::from(history_days) * 24 * 60 * 60));
+    spawn_queue_pruner(paths.db_path.clone(), history_ttl);
+
     println!(
         "Remote control listening on https://{}:11921",
         listen.viewer_host
@@ -606,6 +815,33 @@ pub async fn run_server(hostname: Option<String>) -> Result<()> {
         .serve(app.into_make_service())
         .await
         .with_context(|| format!("serve remote-control API on {}", listen.bind_addr))
+}
+
+/// Periodically sweep dead queue entries and expired session history out
+/// of sqlite. Runs once immediately so a restart also cleans up garbage
+/// left by the previous run.
+fn spawn_queue_pruner(db_path: PathBuf, history_ttl: Option<Duration>) {
+    tokio::spawn(async move {
+        loop {
+            let prune_path = db_path.clone();
+            let pruned =
+                tokio::task::spawn_blocking(move || prune_stale_records(&prune_path, history_ttl))
+                    .await;
+            match pruned {
+                Ok(Ok(counts)) if counts.any() => {
+                    debug!(
+                        "remote-control prune removed {} queued prompt(s), \
+                         {} permission decision(s), and {} session(s)",
+                        counts.prompts, counts.decisions, counts.sessions
+                    );
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => debug!("remote-control prune failed: {error:#}"),
+                Err(error) => debug!("remote-control prune task panicked: {error}"),
+            }
+            tokio::time::sleep(QUEUE_PRUNE_INTERVAL).await;
+        }
+    });
 }
 
 fn bind_server_listener(bind_addr: &str) -> Result<TcpListener> {
@@ -698,6 +934,11 @@ fn build_router(db_path: PathBuf, token: String, viewer_code: String) -> Router 
             get(list_queued_prompts).post(queue_prompt),
         )
         .route("/api/queued-prompts/claim", post(claim_queued_prompt))
+        .route("/api/permission-decisions", post(queue_permission_decision))
+        .route(
+            "/api/permission-decisions/claim",
+            post(claim_permission_decision),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_token,
@@ -1059,6 +1300,46 @@ async fn claim_queued_prompt(
     Ok(Json(prompt))
 }
 
+async fn queue_permission_decision(
+    State(state): State<ServerState>,
+    Json(request): Json<QueuePermissionDecisionRequest>,
+) -> std::result::Result<StatusCode, (StatusCode, String)> {
+    if request.request_id.trim().is_empty() || request.option_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "request_id and option_id must not be empty".to_string(),
+        ));
+    }
+    let db_path = Arc::clone(&state.db_path);
+    tokio::task::spawn_blocking(move || {
+        queue_permission_decision_record(
+            db_path.as_ref().as_path(),
+            &request.session_id,
+            &request.request_id,
+            &request.option_id,
+        )
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn claim_permission_decision(
+    State(state): State<ServerState>,
+    Json(request): Json<ClaimPermissionDecisionRequest>,
+) -> std::result::Result<Json<Option<PermissionDecisionRecord>>, (StatusCode, String)> {
+    let db_path = Arc::clone(&state.db_path);
+    let session_id = request.session_id;
+    let decision = tokio::task::spawn_blocking(move || {
+        claim_permission_decision_record(db_path.as_ref().as_path(), &session_id)
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    Ok(Json(decision))
+}
+
 fn internal_error(error: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
@@ -1200,11 +1481,23 @@ fn init_db(db_path: &Path) -> Result<()> {
             session_id text not null,
             text text not null,
             created_at text not null
+        );
+        create table if not exists permission_decisions (
+            id integer primary key autoincrement,
+            session_id text not null,
+            request_id text not null,
+            option_id text not null,
+            created_at text not null
         );",
     )
     .context("create remote-control schema")?;
     ensure_sessions_column(&conn, "transcript_json", "text not null default '[]'")?;
     ensure_sessions_column(&conn, "connected", "integer not null default 0")?;
+    ensure_sessions_column(
+        &conn,
+        "pending_permissions_json",
+        "text not null default '[]'",
+    )?;
     Ok(())
 }
 
@@ -1242,6 +1535,8 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
         i64::try_from(session.total_messages).context("total_messages exceeds sqlite integer")?;
     let transcript_json = serde_json::to_string(&session.transcript)
         .context("serialize remote-control transcript")?;
+    let pending_permissions_json = serde_json::to_string(&session.pending_permissions)
+        .context("serialize remote-control pending permissions")?;
     conn.execute(
         "insert into sessions (
             session_id,
@@ -1252,8 +1547,9 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             project,
             agent,
             transcript_json,
+            pending_permissions_json,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -1262,6 +1558,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             project = excluded.project,
             agent = excluded.agent,
             transcript_json = excluded.transcript_json,
+            pending_permissions_json = excluded.pending_permissions_json,
             connected = 1",
         params![
             session.session_id,
@@ -1272,6 +1569,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             session.project,
             session.agent,
             transcript_json,
+            pending_permissions_json,
         ],
     )
     .context("upsert remote-control session")?;
@@ -1286,7 +1584,89 @@ fn disconnect_session_record(db_path: &Path, session_id: &str) -> Result<()> {
         params![session_id],
     )
     .context("disconnect remote-control session")?;
+    // A permission decision can only resolve a prompt held in the live
+    // session's memory, so the session going away makes its queued
+    // decisions unclaimable; drop them immediately. Queued prompts stay:
+    // resuming the session re-registers the same id and claims them.
+    conn.execute(
+        "delete from permission_decisions where session_id = ?1",
+        params![session_id],
+    )
+    .context("clear permission decisions on disconnect")?;
     Ok(())
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PruneCounts {
+    prompts: usize,
+    decisions: usize,
+    sessions: usize,
+}
+
+impl PruneCounts {
+    fn any(&self) -> bool {
+        self.prompts > 0 || self.decisions > 0 || self.sessions > 0
+    }
+}
+
+/// Remove records that can never be useful again.
+///
+/// Three different policies on purpose:
+/// - Session history: disconnected sessions whose last update is older
+///   than `history_ttl` are deleted along with their queued prompts.
+///   `None` keeps history forever (`--history-days 0`).
+/// - Permission decisions die with their session: anything whose session
+///   is not currently live (or that sat unclaimed past a generous age cap)
+///   is unclaimable garbage.
+/// - Queued prompts survive disconnects so `mj resume` can claim them;
+///   beyond expired-session cleanup, only entries past `QUEUED_PROMPT_TTL`
+///   are dropped.
+fn prune_stale_records(db_path: &Path, history_ttl: Option<Duration>) -> Result<PruneCounts> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    let mut counts = PruneCounts::default();
+
+    if let Some(history_ttl) = history_ttl {
+        let history_cutoff = rfc3339_before(history_ttl);
+        counts.prompts += conn
+            .execute(
+                "delete from queued_prompts
+                where session_id in (
+                    select session_id from sessions
+                    where connected = 0 and last_update < ?1
+                )",
+                params![history_cutoff],
+            )
+            .context("prune queued prompts of expired sessions")?;
+        counts.sessions = conn
+            .execute(
+                "delete from sessions where connected = 0 and last_update < ?1",
+                params![history_cutoff],
+            )
+            .context("prune expired session history")?;
+    }
+
+    let live_cutoff = connected_session_cutoff_rfc3339();
+    let decision_cutoff = rfc3339_before(PERMISSION_DECISION_TTL);
+    let prompt_cutoff = rfc3339_before(QUEUED_PROMPT_TTL);
+    counts.decisions = conn
+        .execute(
+            "delete from permission_decisions
+            where created_at < ?1
+                or session_id not in (
+                    select session_id from sessions
+                    where connected = 1 and last_update >= ?2
+                )",
+            params![decision_cutoff, live_cutoff],
+        )
+        .context("prune stale permission decisions")?;
+    counts.prompts += conn
+        .execute(
+            "delete from queued_prompts where created_at < ?1",
+            params![prompt_cutoff],
+        )
+        .context("prune stale queued prompts")?;
+    Ok(counts)
 }
 
 fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
@@ -1303,6 +1683,7 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                 project,
                 agent,
                 transcript_json,
+                pending_permissions_json,
                 (
                     select count(*)
                     from queued_prompts
@@ -1334,6 +1715,7 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                 project,
                 agent,
                 transcript_json,
+                pending_permissions_json,
                 (
                     select count(*)
                     from queued_prompts
@@ -1355,8 +1737,10 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
 fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
     let total_messages: i64 = row.get(4)?;
     let transcript_json: String = row.get(7)?;
-    let queued_prompt_count: i64 = row.get(8)?;
+    let pending_permissions_json: String = row.get(8)?;
+    let queued_prompt_count: i64 = row.get(9)?;
     let transcript = serde_json::from_str(&transcript_json).unwrap_or_default();
+    let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
     Ok(SessionRecord {
         session_id: row.get(0)?,
         name: row.get(1)?,
@@ -1367,6 +1751,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         agent: row.get(6)?,
         transcript,
         queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
+        pending_permissions,
     })
 }
 
@@ -1448,6 +1833,69 @@ fn claim_queued_prompt_record(db_path: &Path, session_id: &str) -> Result<Option
     }
 }
 
+fn queue_permission_decision_record(
+    db_path: &Path,
+    session_id: &str,
+    request_id: &str,
+    option_id: &str,
+) -> Result<()> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "insert into permission_decisions (session_id, request_id, option_id, created_at)
+        values (?1, ?2, ?3, ?4)",
+        params![session_id, request_id, option_id, now_rfc3339()],
+    )
+    .context("insert permission decision")?;
+    Ok(())
+}
+
+fn claim_permission_decision_record(
+    db_path: &Path,
+    session_id: &str,
+) -> Result<Option<PermissionDecisionRecord>> {
+    init_db(db_path)?;
+    let mut conn = open_db(db_path)?;
+    let tx = conn
+        .transaction()
+        .context("begin permission-decision transaction")?;
+    let decision = {
+        let mut stmt = tx
+            .prepare(
+                "select id, session_id, request_id, option_id, created_at
+                from permission_decisions
+                where session_id = ?1
+                order by id asc
+                limit 1",
+            )
+            .context("prepare permission-decision claim query")?;
+        stmt.query_row(params![session_id], |row| {
+            Ok(PermissionDecisionRecord {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                request_id: row.get(2)?,
+                option_id: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .optional()
+        .context("load permission decision to claim")?
+    };
+    if let Some(decision) = decision {
+        tx.execute(
+            "delete from permission_decisions where id = ?1",
+            params![decision.id],
+        )
+        .context("delete claimed permission decision")?;
+        tx.commit().context("commit permission-decision claim")?;
+        Ok(Some(decision))
+    } else {
+        tx.commit()
+            .context("commit empty permission-decision claim")?;
+        Ok(None)
+    }
+}
+
 async fn send_snapshot(
     client: reqwest::Client,
     token: Option<Arc<String>>,
@@ -1511,6 +1959,44 @@ async fn claim_remote_prompt(
         .context("decode claimed remote queued prompt")
 }
 
+async fn claim_remote_permission_decision(
+    client: reqwest::Client,
+    token: Option<Arc<String>>,
+    session_id: &str,
+) -> Result<Option<PermissionDecisionRecord>> {
+    let mut request = client
+        .post("https://localhost:11921/api/permission-decisions/claim")
+        .json(&ClaimPermissionDecisionRequest {
+            session_id: session_id.to_string(),
+        });
+    if let Some(token) = token {
+        request = request.bearer_auth(token.as_str());
+    }
+    let response = request
+        .send()
+        .await
+        .context("claim remote permission decision")?
+        .error_for_status()
+        .context("remote permission-decision claim returned an error")?;
+    response
+        .json::<Option<PermissionDecisionRecord>>()
+        .await
+        .context("decode claimed remote permission decision")
+}
+
+/// Stable machine-readable id for a permission option kind, used by the
+/// remote viewer to style allow/reject buttons.
+fn permission_option_kind_id(kind: PermissionOptionKind) -> &'static str {
+    use PermissionOptionKind as K;
+    match kind {
+        K::AllowOnce => "allow_once",
+        K::AllowAlways => "allow_always",
+        K::RejectOnce => "reject_once",
+        K::RejectAlways => "reject_always",
+        _ => "other",
+    }
+}
+
 fn content_block_text(block: &ContentBlock) -> String {
     match block {
         ContentBlock::Text(text) => text.text.clone(),
@@ -1549,7 +2035,11 @@ fn now_rfc3339() -> String {
 }
 
 fn connected_session_cutoff_rfc3339() -> String {
-    (OffsetDateTime::now_utc() - time::Duration::seconds(CONNECTED_SESSION_TTL.as_secs() as i64))
+    rfc3339_before(CONNECTED_SESSION_TTL)
+}
+
+fn rfc3339_before(age: Duration) -> String {
+    (OffsetDateTime::now_utc() - time::Duration::seconds(age.as_secs() as i64))
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
@@ -1557,8 +2047,31 @@ fn connected_session_cutoff_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::{PermissionOption, ToolCallUpdate, ToolCallUpdateFields};
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
+
+    use crate::event::PermissionDecision;
+
+    /// Build a `PermissionPrompt` and keep the original responder receiver
+    /// so tests can assert what decision was forwarded to the runtime.
+    fn permission_prompt(
+        call_id: &str,
+    ) -> (
+        PermissionPrompt,
+        tokio::sync::oneshot::Receiver<PermissionDecision>,
+    ) {
+        let (responder, rx) = tokio::sync::oneshot::channel();
+        let prompt = PermissionPrompt {
+            tool_call: ToolCallUpdate::new(call_id.to_string(), ToolCallUpdateFields::default()),
+            options: vec![
+                PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+                PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+            ],
+            responder,
+        };
+        (prompt, rx)
+    }
 
     #[test]
     fn tracker_counts_user_prompts_and_agent_replies() {
@@ -1650,6 +2163,7 @@ mod tests {
                 },
             ],
             queued_prompt_count: 0,
+            pending_permissions: Vec::new(),
         };
 
         upsert_session_record(&db_path, &session).expect("insert");
@@ -1703,6 +2217,7 @@ mod tests {
             agent: "agent".to_string(),
             transcript: Vec::new(),
             queued_prompt_count: 0,
+            pending_permissions: Vec::new(),
         };
         let disconnected = SessionRecord {
             session_id: "sess-disconnected".to_string(),
@@ -1768,6 +2283,444 @@ mod tests {
         let other = load_queued_prompts(&db_path, "sess-2").expect("load sess-2");
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].text, "other");
+    }
+
+    /// Insert a queue row with an explicit `created_at`, bypassing the
+    /// public helpers that always stamp "now".
+    fn insert_decision_at(db_path: &Path, session_id: &str, created_at: &str) {
+        let conn = open_db(db_path).expect("open db");
+        conn.execute(
+            "insert into permission_decisions (session_id, request_id, option_id, created_at)
+            values (?1, 'call-old', 'allow', ?2)",
+            params![session_id, created_at],
+        )
+        .expect("insert decision");
+    }
+
+    fn session_named(session_id: &str, last_update: &str) -> SessionRecord {
+        SessionRecord {
+            session_id: session_id.to_string(),
+            name: session_id.to_string(),
+            start_time: "2026-06-10T08:00:00Z".to_string(),
+            last_update: last_update.to_string(),
+            total_messages: 1,
+            project: "proj".to_string(),
+            agent: "agent".to_string(),
+            transcript: Vec::new(),
+            queued_prompt_count: 0,
+            pending_permissions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prune_keeps_decisions_for_live_sessions_and_drops_the_rest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let now = now_rfc3339();
+
+        upsert_session_record(&db_path, &session_named("sess-live", &now)).expect("live");
+        upsert_session_record(&db_path, &session_named("sess-disconnected", &now))
+            .expect("disconnected");
+        disconnect_session_record(&db_path, "sess-disconnected").expect("disconnect");
+        upsert_session_record(
+            &db_path,
+            &session_named("sess-stale", "1970-01-01T00:00:00Z"),
+        )
+        .expect("stale");
+
+        queue_permission_decision_record(&db_path, "sess-live", "call-1", "allow")
+            .expect("live decision");
+        queue_permission_decision_record(&db_path, "sess-disconnected", "call-2", "allow")
+            .expect("disconnected decision");
+        queue_permission_decision_record(&db_path, "sess-stale", "call-3", "allow")
+            .expect("stale decision");
+        queue_permission_decision_record(&db_path, "sess-ghost", "call-4", "allow")
+            .expect("ghost decision");
+        // Even a live session's decision dies once it outlives the age cap.
+        insert_decision_at(&db_path, "sess-live", "1970-01-01T00:00:00Z");
+
+        let counts = prune_stale_records(&db_path, None).expect("prune");
+        assert_eq!(counts.prompts, 0);
+        assert_eq!(counts.decisions, 4);
+
+        let kept = claim_permission_decision_record(&db_path, "sess-live")
+            .expect("claim live")
+            .expect("live decision kept");
+        assert_eq!(kept.request_id, "call-1");
+        for session in ["sess-live", "sess-disconnected", "sess-stale", "sess-ghost"] {
+            assert!(
+                claim_permission_decision_record(&db_path, session)
+                    .expect("claim")
+                    .is_none(),
+                "no decisions should remain for {session}"
+            );
+        }
+    }
+
+    #[test]
+    fn prune_drops_only_ancient_queued_prompts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let now = now_rfc3339();
+
+        upsert_session_record(&db_path, &session_named("sess-1", &now)).expect("session");
+        disconnect_session_record(&db_path, "sess-1").expect("disconnect");
+
+        // A prompt queued for a disconnected session must survive pruning
+        // so `mj resume` can still claim it...
+        queue_prompt_record(&db_path, "sess-1", "run after resume").expect("queue fresh");
+        // ...but an ancient one is dead weight.
+        let conn = open_db(&db_path).expect("open db");
+        conn.execute(
+            "insert into queued_prompts (session_id, text, created_at)
+            values ('sess-1', 'forgotten', '1970-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("insert ancient prompt");
+        drop(conn);
+
+        let counts = prune_stale_records(&db_path, None).expect("prune");
+        assert_eq!(counts.prompts, 1);
+
+        let remaining = load_queued_prompts(&db_path, "sess-1").expect("load");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].text, "run after resume");
+    }
+
+    #[test]
+    fn prune_expires_disconnected_session_history_with_its_prompts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let now = now_rfc3339();
+        let history_ttl = Duration::from_secs(30 * 24 * 60 * 60);
+
+        // Recent disconnected session: history kept.
+        upsert_session_record(&db_path, &session_named("sess-recent", &now)).expect("recent");
+        disconnect_session_record(&db_path, "sess-recent").expect("disconnect recent");
+        // Ancient disconnected session: history and its prompts deleted.
+        upsert_session_record(
+            &db_path,
+            &session_named("sess-ancient", "1970-01-01T00:00:00Z"),
+        )
+        .expect("ancient");
+        disconnect_session_record(&db_path, "sess-ancient").expect("disconnect ancient");
+        queue_prompt_record(&db_path, "sess-ancient", "never ran").expect("queue prompt");
+
+        // With history pruning disabled nothing is touched...
+        let counts = prune_stale_records(&db_path, None).expect("prune disabled");
+        assert_eq!(counts.sessions, 0);
+        assert_eq!(load_session_records(&db_path).expect("load all").len(), 2);
+
+        // ...with a TTL only the expired session (and its prompts) goes.
+        let counts = prune_stale_records(&db_path, Some(history_ttl)).expect("prune");
+        assert_eq!(counts.sessions, 1);
+        assert_eq!(counts.prompts, 1);
+        let remaining = load_session_records(&db_path).expect("load remaining");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].session_id, "sess-recent");
+        assert!(
+            load_queued_prompts(&db_path, "sess-ancient")
+                .expect("load prompts")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn disconnect_clears_permission_decisions_but_keeps_queued_prompts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let now = now_rfc3339();
+
+        upsert_session_record(&db_path, &session_named("sess-1", &now)).expect("session");
+        queue_permission_decision_record(&db_path, "sess-1", "call-1", "allow")
+            .expect("queue decision");
+        queue_prompt_record(&db_path, "sess-1", "next task").expect("queue prompt");
+
+        disconnect_session_record(&db_path, "sess-1").expect("disconnect");
+
+        assert!(
+            claim_permission_decision_record(&db_path, "sess-1")
+                .expect("claim decision")
+                .is_none(),
+            "disconnect must drop queued permission decisions"
+        );
+        let prompts = load_queued_prompts(&db_path, "sess-1").expect("load prompts");
+        assert_eq!(prompts.len(), 1, "queued prompts must survive disconnect");
+    }
+
+    #[tokio::test]
+    async fn intercept_publishes_pending_permission_and_clears_on_answer() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let (prompt, rx) = permission_prompt("call-1");
+        let event = tracker.intercept_event(UiEvent::PermissionRequest(prompt));
+
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(snapshot.pending_permissions.len(), 1);
+        let pending = &snapshot.pending_permissions[0];
+        assert_eq!(pending.request_id, "call-1");
+        assert_eq!(pending.options.len(), 2);
+        assert_eq!(pending.options[0].option_id, "allow");
+        assert_eq!(pending.options[0].label, "Allow");
+        assert_eq!(pending.options[0].kind, "allow_once");
+        assert_eq!(pending.options[1].kind, "reject_once");
+
+        // Answering through the wrapped responder forwards the decision to
+        // the original (runtime) receiver and retracts the pending entry
+        // before the forward, so the snapshot is already clean here.
+        let UiEvent::PermissionRequest(wrapped) = event else {
+            panic!("intercept must preserve the event kind");
+        };
+        wrapped
+            .responder
+            .send(PermissionDecision::Selected("allow".to_string()))
+            .expect("wrapped responder open");
+        match rx.await {
+            Ok(PermissionDecision::Selected(id)) => assert_eq!(id, "allow"),
+            other => panic!("expected forwarded decision, got {other:?}"),
+        }
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert!(snapshot.pending_permissions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn intercept_clears_pending_permission_when_prompt_is_dropped() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let (prompt, rx) = permission_prompt("call-1");
+        let event = tracker.intercept_event(UiEvent::PermissionRequest(prompt));
+        // The UI dropped the prompt without answering (e.g. cancel-all on
+        // shutdown). The runtime sees the cancel and the entry is retracted.
+        drop(event);
+        assert!(rx.await.is_err(), "drop must propagate as a closed channel");
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert!(snapshot.pending_permissions.is_empty());
+    }
+
+    #[test]
+    fn pending_permissions_round_trip_through_sqlite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let pending = PendingPermissionRecord {
+            request_id: "call-1".to_string(),
+            title: "run `cargo test`".to_string(),
+            options: vec![PermissionOptionRecord {
+                option_id: "allow".to_string(),
+                label: "Allow".to_string(),
+                kind: "allow_once".to_string(),
+            }],
+            requested_at: "2026-06-10T10:00:00Z".to_string(),
+        };
+        let session = SessionRecord {
+            session_id: "sess-1".to_string(),
+            name: "demo".to_string(),
+            start_time: "2026-06-10T10:00:00Z".to_string(),
+            last_update: "2026-06-10T10:00:20Z".to_string(),
+            total_messages: 1,
+            project: "mjolnir".to_string(),
+            agent: "anvil".to_string(),
+            transcript: Vec::new(),
+            queued_prompt_count: 0,
+            pending_permissions: vec![pending.clone()],
+        };
+
+        upsert_session_record(&db_path, &session).expect("insert");
+        let loaded = load_session_records(&db_path).expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].pending_permissions, vec![pending]);
+
+        // The next snapshot without the permission retracts it.
+        upsert_session_record(
+            &db_path,
+            &SessionRecord {
+                pending_permissions: Vec::new(),
+                ..session
+            },
+        )
+        .expect("update");
+        let loaded = load_session_records(&db_path).expect("reload");
+        assert!(loaded[0].pending_permissions.is_empty());
+    }
+
+    #[test]
+    fn permission_decisions_queue_and_claim_fifo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+
+        queue_permission_decision_record(&db_path, "sess-1", "call-1", "allow")
+            .expect("queue first");
+        queue_permission_decision_record(&db_path, "sess-1", "call-2", "reject")
+            .expect("queue second");
+        queue_permission_decision_record(&db_path, "sess-2", "call-9", "allow")
+            .expect("queue other session");
+
+        let first = claim_permission_decision_record(&db_path, "sess-1")
+            .expect("claim first")
+            .expect("decision");
+        assert_eq!(first.request_id, "call-1");
+        assert_eq!(first.option_id, "allow");
+
+        let second = claim_permission_decision_record(&db_path, "sess-1")
+            .expect("claim second")
+            .expect("decision");
+        assert_eq!(second.request_id, "call-2");
+        assert_eq!(second.option_id, "reject");
+
+        assert!(
+            claim_permission_decision_record(&db_path, "sess-1")
+                .expect("claim empty")
+                .is_none()
+        );
+
+        let other = claim_permission_decision_record(&db_path, "sess-2")
+            .expect("claim other")
+            .expect("decision");
+        assert_eq!(other.request_id, "call-9");
+    }
+
+    #[tokio::test]
+    async fn permission_decision_endpoints_enforce_token_and_validate_input() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        init_db(&db_path).expect("init db");
+        let token = "integration-token".to_string();
+        let app = build_router(db_path, token.clone(), "123456".to_string());
+
+        let decision_body = |request_id: &str, option_id: &str| {
+            serde_json::to_vec(&QueuePermissionDecisionRequest {
+                session_id: "sess-1".to_string(),
+                request_id: request_id.to_string(),
+                option_id: option_id.to_string(),
+            })
+            .expect("decision json")
+        };
+
+        // Without the bearer token the decision is rejected.
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/permission-decisions")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(decision_body("call-1", "allow")))
+                    .expect("request"),
+            )
+            .await
+            .expect("send unauthenticated");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        // Blank fields are rejected even with a valid token.
+        let blank = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/permission-decisions")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(decision_body("call-1", "   ")))
+                    .expect("request"),
+            )
+            .await
+            .expect("send blank option");
+        assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
+
+        // A valid decision is accepted, then claimed back exactly once.
+        let accepted = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/permission-decisions")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(decision_body("call-1", "allow")))
+                    .expect("request"),
+            )
+            .await
+            .expect("send decision");
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+        let claim_body = serde_json::to_vec(&ClaimPermissionDecisionRequest {
+            session_id: "sess-1".to_string(),
+        })
+        .expect("claim json");
+        let claimed = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/permission-decisions/claim")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(claim_body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("claim decision");
+        assert_eq!(claimed.status(), StatusCode::OK);
+        let claimed: Option<PermissionDecisionRecord> = serde_json::from_slice(
+            &claimed
+                .into_body()
+                .collect()
+                .await
+                .expect("claim body")
+                .to_bytes(),
+        )
+        .expect("claim json");
+        let claimed = claimed.expect("a decision was queued");
+        assert_eq!(claimed.request_id, "call-1");
+        assert_eq!(claimed.option_id, "allow");
+
+        let empty = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/permission-decisions/claim")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(claim_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("claim again");
+        assert_eq!(empty.status(), StatusCode::OK);
+        let empty: Option<PermissionDecisionRecord> = serde_json::from_slice(
+            &empty
+                .into_body()
+                .collect()
+                .await
+                .expect("empty claim body")
+                .to_bytes(),
+        )
+        .expect("empty claim json");
+        assert!(empty.is_none());
     }
 
     #[test]
@@ -2033,6 +2986,7 @@ mod tests {
             agent: "agent".to_string(),
             transcript: Vec::new(),
             queued_prompt_count: 0,
+            pending_permissions: Vec::new(),
         };
 
         // Without the bearer token the write is rejected.

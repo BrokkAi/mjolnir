@@ -712,6 +712,38 @@ impl AppState {
         }
     }
 
+    /// Resolve a queued permission prompt with a decision made in the
+    /// remote-control viewer. Matches by tool-call id and only consumes
+    /// the prompt when the option exists on it, so a stale decision for an
+    /// already-answered request is dropped instead of cancelling an
+    /// unrelated prompt. Returns true when a prompt was resolved.
+    pub fn resolve_permission_remotely(&mut self, request_id: &str, option_id: &str) -> bool {
+        let Some(index) = self.permission_queue.iter().position(|pending| {
+            pending.prompt.tool_call.tool_call_id.to_string() == request_id
+                && pending
+                    .prompt
+                    .options
+                    .iter()
+                    .any(|option| option.option_id.to_string() == option_id)
+        }) else {
+            return false;
+        };
+        let pending = self
+            .permission_queue
+            .remove(index)
+            .expect("position returned a valid index");
+        let _ = pending
+            .prompt
+            .responder
+            .send(PermissionDecision::Selected(option_id.to_string()));
+        self.record_status_message(
+            StatusKind::Info,
+            "permission request answered from the remote viewer".to_string(),
+        );
+        self.update_autocomplete();
+        true
+    }
+
     /// Push a user prompt into the transcript immediately, before the
     /// command reaches the runtime. Keeps the UI responsive.
     pub fn record_user_prompt(&mut self, text: String) {
@@ -1020,6 +1052,12 @@ impl AppState {
                     repair_attempts: 0,
                 });
                 self.update_autocomplete();
+            }
+            UiEvent::RemotePermissionDecision {
+                request_id,
+                option_id,
+            } => {
+                self.resolve_permission_remotely(&request_id, &option_id);
             }
             UiEvent::PromptDone { stop_reason, usage } => {
                 self.finish_prompt_turn(matches!(stop_reason, StopReason::Cancelled));
@@ -2123,6 +2161,58 @@ mod tests {
             "call-a",
             "the first-enqueued prompt must remain at the front",
         );
+    }
+
+    #[test]
+    fn remote_decision_resolves_matching_queued_prompt() {
+        let mut s = AppState::new();
+        let (prompt_a, rx_a) = permission_prompt_with_id("call-a");
+        let (prompt_b, _rx_b) = permission_prompt_with_id("call-b");
+        s.apply_event(UiEvent::PermissionRequest(prompt_a));
+        s.apply_event(UiEvent::PermissionRequest(prompt_b));
+
+        s.apply_event(UiEvent::RemotePermissionDecision {
+            request_id: "call-a".to_string(),
+            option_id: "allow".to_string(),
+        });
+
+        // The matching prompt was consumed and answered; the other stays.
+        assert_eq!(s.pending_permission_count(), 1);
+        assert_eq!(
+            s.pending_permission()
+                .expect("remaining prompt")
+                .prompt
+                .tool_call
+                .tool_call_id
+                .to_string(),
+            "call-b"
+        );
+        match rx_a.blocking_recv() {
+            Ok(PermissionDecision::Selected(id)) => assert_eq!(id, "allow"),
+            other => panic!("expected Selected decision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_decision_for_unknown_request_or_option_is_dropped() {
+        let mut s = AppState::new();
+        let (prompt, _rx) = permission_prompt_with_id("call-a");
+        s.apply_event(UiEvent::PermissionRequest(prompt));
+
+        // Unknown request id: nothing is consumed.
+        s.apply_event(UiEvent::RemotePermissionDecision {
+            request_id: "call-z".to_string(),
+            option_id: "allow".to_string(),
+        });
+        assert_eq!(s.pending_permission_count(), 1);
+
+        // Known request id but an option the prompt never offered: a stale
+        // or corrupted decision must not cancel the prompt either.
+        s.apply_event(UiEvent::RemotePermissionDecision {
+            request_id: "call-a".to_string(),
+            option_id: "no-such-option".to_string(),
+        });
+        assert_eq!(s.pending_permission_count(), 1);
     }
 
     #[test]

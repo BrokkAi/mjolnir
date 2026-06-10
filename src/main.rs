@@ -126,6 +126,11 @@ struct ServerArgs {
     /// Public hostname to embed in the login QR code and TLS certificate.
     #[arg(long)]
     hostname: Option<String>,
+    /// Days of disconnected-session history to keep. Sessions (and their
+    /// queued prompts) whose last update is older are deleted by the
+    /// periodic sweeper. Pass 0 to keep history forever.
+    #[arg(long, default_value_t = 30)]
+    history_days: u32,
 }
 
 #[derive(Debug, clap::Args)]
@@ -239,7 +244,7 @@ async fn main() -> Result<()> {
                 args.fullscreen_tui |= fullscreen_tui;
                 run_resume(args).await
             }
-            Commands::Server(args) => remote::run_server(args.hostname).await,
+            Commands::Server(args) => remote::run_server(args.hostname, args.history_days).await,
         };
     }
 
@@ -802,12 +807,17 @@ async fn run_session(
         tracker_project_label,
         agent_header_label(agent),
         Some(runtime_cmd_tx.clone()),
+        Some(ui_event_tx.clone()),
     );
 
     let event_tracker = remote_tracker.clone();
     let event_proxy = tokio::spawn(async move {
         let mut runtime_event_rx = runtime_event_rx;
         while let Some(event) = runtime_event_rx.recv().await {
+            // Intercept before observing: permission prompts get their
+            // responder wrapped so remote viewers see (and can answer)
+            // the pending request.
+            let event = event_tracker.intercept_event(event);
             event_tracker.observe_event(&event);
             if ui_event_tx.send(event).is_err() {
                 break;
