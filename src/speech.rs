@@ -1,972 +1,684 @@
 //! Prompt dictation support.
 //!
-//! macOS uses the system Speech framework through a tiny Swift helper. Other
-//! platforms use sherpa-onnx's microphone example binary when it is available.
+//! All platforms share one in-process pipeline built on the official
+//! sherpa-onnx Rust bindings: cpal microphone capture, Silero VAD speech
+//! segmentation, and the multilingual NeMo Parakeet TDT 0.6b v3 offline
+//! recognizer (25 European languages) decoded incrementally so partial
+//! results stream into the prompt while the user speaks.
 
-use anyhow::{Context, Result, bail};
-#[cfg(not(target_os = "macos"))]
-use std::{
-    fs,
-    io::Read,
-    path::{Component, Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
-    sync::mpsc,
-    thread,
-    time::{Duration, Instant},
-};
+use anyhow::Result;
+#[cfg(target_os = "android")]
+use anyhow::bail;
 
-#[cfg(not(target_os = "macos"))]
-const SHERPA_ONNX_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2";
-#[cfg(not(target_os = "macos"))]
-const SHERPA_ONNX_MODEL_DIR: &str = "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20";
-#[cfg(not(target_os = "macos"))]
-const SHERPA_ONNX_ENCODER: &str = "encoder-epoch-99-avg-1.onnx";
-#[cfg(not(target_os = "macos"))]
-const SHERPA_ONNX_DECODER: &str = "decoder-epoch-99-avg-1.onnx";
-#[cfg(not(target_os = "macos"))]
-const SHERPA_ONNX_JOINER: &str = "joiner-epoch-99-avg-1.onnx";
-#[cfg(not(target_os = "macos"))]
-const SHERPA_ONNX_TOKENS: &str = "tokens.txt";
-const SHERPA_ONNX_MICROPHONE_BIN: &str = "sherpa-onnx-microphone";
-#[cfg(not(target_os = "macos"))]
-const SHERPA_ONNX_RUNTIME_VERSION: &str = "v1.13.2";
-#[cfg(not(target_os = "macos"))]
-const SHERPA_ONNX_RELEASE_BASE_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download";
-#[cfg(not(target_os = "macos"))]
-const SHERPA_ONNX_DICTATION_TIMEOUT: Duration = Duration::from_secs(600);
-#[cfg(not(target_os = "macos"))]
-const SHERPA_ONNX_DICTATION_SILENCE: Duration = Duration::from_secs(20);
+#[cfg(not(target_os = "android"))]
+mod backend {
+    use anyhow::{Context, Result, bail};
+    use cpal::SampleFormat;
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use sherpa_onnx::{
+        LinearResampler, OfflineRecognizer, OfflineRecognizerConfig, VadModelConfig,
+        VoiceActivityDetector,
+    };
+    use std::{
+        fs,
+        io::{Read, Write},
+        path::{Component, Path, PathBuf},
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DictationBackendKind {
-    AppleSpeech,
-    SherpaOnnx,
-}
+    const ASR_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
+    const ASR_MODEL_DIR: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
+    const ASR_ENCODER: &str = "encoder.int8.onnx";
+    const ASR_DECODER: &str = "decoder.int8.onnx";
+    const ASR_JOINER: &str = "joiner.int8.onnx";
+    const ASR_TOKENS: &str = "tokens.txt";
+    const VAD_MODEL_URL: &str =
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx";
+    const VAD_MODEL_FILE: &str = "silero_vad.onnx";
 
-impl DictationBackendKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::AppleSpeech => "Apple Speech",
-            Self::SherpaOnnx => "sherpa-onnx",
-        }
-    }
-}
+    const DICTATION_TIMEOUT: Duration = Duration::from_secs(600);
+    const DICTATION_SILENCE: Duration = Duration::from_secs(20);
 
-#[cfg(not(target_os = "macos"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SherpaOnnxModelPaths {
-    dir: PathBuf,
-    encoder: PathBuf,
-    decoder: PathBuf,
-    joiner: PathBuf,
-    tokens: PathBuf,
-}
+    const SAMPLE_RATE: i32 = 16000;
+    const VAD_WINDOW_SIZE: usize = 512;
+    const INTERIM_DECODE_INTERVAL: Duration = Duration::from_millis(250);
+    const LEVEL_EMIT_INTERVAL: Duration = Duration::from_millis(80);
 
-#[cfg(not(target_os = "macos"))]
-impl SherpaOnnxModelPaths {
-    fn in_dir(dir: PathBuf) -> Self {
-        Self {
-            encoder: dir.join(SHERPA_ONNX_ENCODER),
-            decoder: dir.join(SHERPA_ONNX_DECODER),
-            joiner: dir.join(SHERPA_ONNX_JOINER),
-            tokens: dir.join(SHERPA_ONNX_TOKENS),
-            dir,
-        }
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct ModelPaths {
+        pub dir: PathBuf,
+        pub encoder: PathBuf,
+        pub decoder: PathBuf,
+        pub joiner: PathBuf,
+        pub tokens: PathBuf,
+        pub vad: PathBuf,
     }
 
-    fn in_cache(cache_root: PathBuf) -> Self {
-        Self::in_dir(cache_root.join("voice").join(SHERPA_ONNX_MODEL_DIR))
-    }
-
-    fn is_installed(&self) -> bool {
-        self.encoder.is_file()
-            && self.decoder.is_file()
-            && self.joiner.is_file()
-            && self.tokens.is_file()
-    }
-}
-
-fn default_backend_kind() -> DictationBackendKind {
-    if cfg!(target_os = "macos") {
-        DictationBackendKind::AppleSpeech
-    } else {
-        DictationBackendKind::SherpaOnnx
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn mjolnir_cache_dir() -> Result<PathBuf> {
-    dirs::cache_dir()
-        .map(|dir| dir.join("mj"))
-        .context("locate user cache directory")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sherpa_onnx_model_paths() -> Result<SherpaOnnxModelPaths> {
-    Ok(SherpaOnnxModelPaths::in_cache(mjolnir_cache_dir()?))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sherpa_onnx_model_setup_message(paths: &SherpaOnnxModelPaths) -> String {
-    format!(
-        "voice dictation uses sherpa-onnx on this platform. Mjolnir could not install the default model automatically under {}. Missing files: {}, {}, {}, and {}.",
-        paths.dir.display(),
-        SHERPA_ONNX_ENCODER,
-        SHERPA_ONNX_DECODER,
-        SHERPA_ONNX_JOINER,
-        SHERPA_ONNX_TOKENS
-    )
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sherpa_onnx_runtime_setup_message() -> String {
-    format!(
-        "Mjolnir could not install the sherpa-onnx runtime automatically, and {SHERPA_ONNX_MICROPHONE_BIN} was not available on PATH."
-    )
-}
-
-#[cfg(target_os = "macos")]
-use std::{
-    io::{BufRead, BufReader, Read, Write},
-    process::{Command, Stdio},
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
-
-#[cfg(target_os = "macos")]
-use base64::{Engine as _, engine::general_purpose};
-
-#[cfg(target_os = "macos")]
-const DICTATION_TIMEOUT_SECONDS: &str = "600";
-#[cfg(target_os = "macos")]
-const DICTATION_SILENCE_SECONDS: &str = "20";
-
-#[cfg(target_os = "macos")]
-const SWIFT_HELPER: &str = r#"
-import AVFoundation
-import Darwin
-import Foundation
-import Speech
-
-struct Options {
-    var timeout: TimeInterval = 600
-    var silence: TimeInterval = 20
-    var localeIdentifier: String? = nil
-}
-
-func parseOptions(_ args: [String]) -> Options {
-    var options = Options()
-    var index = 0
-    while index < args.count {
-        switch args[index] {
-        case "--timeout" where index + 1 < args.count:
-            options.timeout = TimeInterval(args[index + 1]) ?? options.timeout
-            index += 2
-        case "--silence" where index + 1 < args.count:
-            options.silence = TimeInterval(args[index + 1]) ?? options.silence
-            index += 2
-        case "--locale" where index + 1 < args.count:
-            options.localeIdentifier = args[index + 1]
-            index += 2
-        default:
-            index += 1
-        }
-    }
-    return options
-}
-
-func fail(_ message: String) -> Never {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
-    exit(1)
-}
-
-func emit(_ kind: String, _ text: String) {
-    let encoded = Data(text.utf8).base64EncodedString()
-    print("\(kind)\t\(encoded)")
-    fflush(stdout)
-}
-
-final class LevelEmitter {
-    private var lastEmitAt = Date.distantPast
-
-    func emitLevel(from buffer: AVAudioPCMBuffer) {
-        let now = Date()
-        guard now.timeIntervalSince(lastEmitAt) >= 0.08 else {
-            return
-        }
-        lastEmitAt = now
-
-        guard let channelData = buffer.floatChannelData else {
-            emit("LEVEL", "0")
-            return
-        }
-        let channelCount = Int(buffer.format.channelCount)
-        let frameLength = Int(buffer.frameLength)
-        guard channelCount > 0 && frameLength > 0 else {
-            emit("LEVEL", "0")
-            return
-        }
-
-        var sum: Float = 0
-        for channel in 0..<channelCount {
-            let samples = channelData[channel]
-            for frame in 0..<frameLength {
-                let sample = samples[frame]
-                sum += sample * sample
+    impl ModelPaths {
+        pub(super) fn in_cache(cache_root: PathBuf) -> Self {
+            let voice = cache_root.join("voice");
+            let dir = voice.join(ASR_MODEL_DIR);
+            Self {
+                encoder: dir.join(ASR_ENCODER),
+                decoder: dir.join(ASR_DECODER),
+                joiner: dir.join(ASR_JOINER),
+                tokens: dir.join(ASR_TOKENS),
+                vad: voice.join(VAD_MODEL_FILE),
+                dir,
             }
         }
-        let rms = sqrt(sum / Float(channelCount * frameLength))
-        let normalized = min(max(rms * 18, 0), 1)
-        emit("LEVEL", String(format: "%.3f", normalized))
-    }
-}
 
-func requestSpeechAuthorization() {
-    let semaphore = DispatchSemaphore(value: 0)
-    var status = SFSpeechRecognizerAuthorizationStatus.notDetermined
-    SFSpeechRecognizer.requestAuthorization { nextStatus in
-        status = nextStatus
-        semaphore.signal()
-    }
-    semaphore.wait()
-    guard status == .authorized else {
-        fail("speech recognition permission was not granted")
-    }
-}
-
-func requestMicrophoneAuthorization() {
-    let semaphore = DispatchSemaphore(value: 0)
-    var granted = false
-    AVCaptureDevice.requestAccess(for: .audio) { nextGranted in
-        granted = nextGranted
-        semaphore.signal()
-    }
-    semaphore.wait()
-    guard granted else {
-        fail("microphone permission was not granted")
-    }
-}
-
-let options = parseOptions(Array(CommandLine.arguments.dropFirst()))
-requestSpeechAuthorization()
-requestMicrophoneAuthorization()
-
-let locale = options.localeIdentifier.map(Locale.init(identifier:))
-let recognizer: SFSpeechRecognizer?
-if let locale {
-    recognizer = SFSpeechRecognizer(locale: locale)
-} else {
-    recognizer = SFSpeechRecognizer()
-}
-guard let speechRecognizer = recognizer, speechRecognizer.isAvailable else {
-    fail("speech recognizer is not available")
-}
-
-let engine = AVAudioEngine()
-let request = SFSpeechAudioBufferRecognitionRequest()
-request.shouldReportPartialResults = true
-
-let inputNode = engine.inputNode
-let format = inputNode.outputFormat(forBus: 0)
-let levelEmitter = LevelEmitter()
-inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-    request.append(buffer)
-    levelEmitter.emitLevel(from: buffer)
-}
-
-var bestText = ""
-var lastResultAt = Date()
-var finished = false
-let startedAt = Date()
-
-let task = speechRecognizer.recognitionTask(with: request) { result, error in
-    if let result {
-        bestText = result.bestTranscription.formattedString
-        emit("PARTIAL", bestText)
-        lastResultAt = Date()
-        if result.isFinal {
-            finished = true
+        pub(super) fn is_installed(&self) -> bool {
+            self.encoder.is_file()
+                && self.decoder.is_file()
+                && self.joiner.is_file()
+                && self.tokens.is_file()
+                && self.vad.is_file()
         }
     }
-    if error != nil {
-        finished = true
+
+    fn mjolnir_cache_dir() -> Result<PathBuf> {
+        dirs::cache_dir()
+            .map(|dir| dir.join("mj"))
+            .context("locate user cache directory")
     }
-}
 
-do {
-    engine.prepare()
-    try engine.start()
-} catch {
-    fail("could not start microphone capture: \(error.localizedDescription)")
-}
-
-while !finished {
-    RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
-    if Date().timeIntervalSince(startedAt) >= options.timeout {
-        break
+    pub(super) fn model_paths() -> Result<ModelPaths> {
+        Ok(ModelPaths::in_cache(mjolnir_cache_dir()?))
     }
-    if !bestText.isEmpty && Date().timeIntervalSince(lastResultAt) >= options.silence {
-        break
-    }
-}
 
-engine.stop()
-inputNode.removeTap(onBus: 0)
-request.endAudio()
-task.cancel()
-
-emit("FINAL", bestText.trimmingCharacters(in: .whitespacesAndNewlines))
-"#;
-
-#[cfg(target_os = "macos")]
-enum HelperLine {
-    Partial(String),
-    Final(String),
-    Level(f32),
-}
-
-#[cfg(target_os = "macos")]
-pub fn run_dictation<F, G>(
-    mut on_partial: F,
-    mut on_level: G,
-    cancel_rx: mpsc::Receiver<()>,
-) -> Result<String>
-where
-    F: FnMut(String),
-    G: FnMut(f32),
-{
-    let mut child = Command::new("swift")
-        .arg("-")
-        .arg("--")
-        .arg("--timeout")
-        .arg(DICTATION_TIMEOUT_SECONDS)
-        .arg("--silence")
-        .arg(DICTATION_SILENCE_SECONDS)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("start swift speech helper")?;
-
+    /// Stream a URL to `dest`, reporting (downloaded, total) byte counts.
+    ///
+    /// reqwest::blocking creates its own Tokio runtime, which panics when
+    /// called from within an existing Tokio context. Downloading on a plain OS
+    /// thread guarantees there is no ambient runtime, regardless of call site;
+    /// progress flows back over a channel so the callback need not be Send.
+    fn download_to_file<F>(url: &str, dest: &Path, mut on_progress: F) -> Result<()>
+    where
+        F: FnMut(u64, Option<u64>),
     {
-        let mut stdin = child
-            .stdin
-            .take()
-            .context("open swift speech helper stdin")?;
-        stdin
-            .write_all(SWIFT_HELPER.as_bytes())
-            .context("write swift speech helper")?;
+        let url = url.to_string();
+        let dest = dest.to_path_buf();
+        let (progress_tx, progress_rx) = mpsc::channel::<(u64, Option<u64>)>();
+        let worker = thread::spawn(move || -> Result<()> {
+            let mut response = reqwest::blocking::Client::builder()
+                .user_agent("mjolnir-voice-setup")
+                .build()
+                .context("build download client")?
+                .get(&url)
+                .send()
+                .with_context(|| format!("GET {url}"))?
+                .error_for_status()
+                .with_context(|| format!("download {url}"))?;
+            let total = response.content_length();
+            let mut file =
+                fs::File::create(&dest).with_context(|| format!("create {}", dest.display()))?;
+            let mut buffer = [0u8; 64 * 1024];
+            let mut downloaded = 0u64;
+            loop {
+                let read = response.read(&mut buffer).context("read download body")?;
+                if read == 0 {
+                    break;
+                }
+                file.write_all(&buffer[..read])
+                    .with_context(|| format!("write {}", dest.display()))?;
+                downloaded += read as u64;
+                let _ = progress_tx.send((downloaded, total));
+            }
+            Ok(())
+        });
+        for (downloaded, total) in progress_rx {
+            on_progress(downloaded, total);
+        }
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("download thread panicked"))?
     }
 
-    let stdout = child
-        .stdout
-        .take()
-        .context("open swift speech helper stdout")?;
-    let (line_tx, line_rx) = mpsc::channel::<Result<HelperLine>>();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let parsed = line
-                .context("read swift speech helper output")
-                .and_then(|line| decode_helper_line(&line));
-            if line_tx.send(parsed).is_err() {
+    fn extract_tar_bz2_file(archive: &Path, dest: &Path) -> Result<()> {
+        let file =
+            fs::File::open(archive).with_context(|| format!("open {}", archive.display()))?;
+        let decoder = bzip2::read::BzDecoder::new(file);
+        let mut tar = tar::Archive::new(decoder);
+        for entry in tar.entries().context("read tar.bz2 entries")? {
+            let mut entry = entry.context("read tar.bz2 entry")?;
+            let entry_path = entry.path().context("read tar.bz2 entry path")?;
+            let relative = safe_archive_path(&entry_path).with_context(|| {
+                format!(
+                    "archive entry escapes destination: {}",
+                    entry_path.display()
+                )
+            })?;
+            let out_path = dest.join(relative);
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            entry
+                .unpack(&out_path)
+                .with_context(|| format!("unpack {}", out_path.display()))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn safe_archive_path(path: &Path) -> Result<PathBuf> {
+        let mut relative = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(part) => relative.push(part),
+                Component::CurDir => {}
+                _ => bail!("unsafe archive path {}", path.display()),
+            }
+        }
+        if relative.as_os_str().is_empty() {
+            bail!("empty archive path")
+        }
+        Ok(relative)
+    }
+
+    fn megabytes(bytes: u64) -> u64 {
+        bytes / (1024 * 1024)
+    }
+
+    pub(super) fn ensure_models_installed<H>(paths: &ModelPaths, on_status: &mut H) -> Result<()>
+    where
+        H: FnMut(String),
+    {
+        if paths.is_installed() {
+            return Ok(());
+        }
+        let voice_dir = paths
+            .dir
+            .parent()
+            .context("resolve voice model cache parent")?;
+        fs::create_dir_all(voice_dir).with_context(|| format!("create {}", voice_dir.display()))?;
+
+        if !paths.vad.is_file() {
+            on_status("downloading voice activity model...".to_string());
+            let tmp = paths.vad.with_extension("onnx.part");
+            download_to_file(VAD_MODEL_URL, &tmp, |_, _| {})
+                .context("download silero VAD model")?;
+            fs::rename(&tmp, &paths.vad)
+                .with_context(|| format!("install {}", paths.vad.display()))?;
+        }
+
+        if !(paths.encoder.is_file()
+            && paths.decoder.is_file()
+            && paths.joiner.is_file()
+            && paths.tokens.is_file())
+        {
+            let archive = voice_dir.join(format!("{ASR_MODEL_DIR}.tar.bz2.part"));
+            let mut last_percent = u64::MAX;
+            download_to_file(ASR_MODEL_URL, &archive, |downloaded, total| {
+                let message = match total {
+                    Some(total) if total > 0 => {
+                        let percent = downloaded * 100 / total;
+                        if percent == last_percent {
+                            return;
+                        }
+                        last_percent = percent;
+                        format!(
+                            "downloading voice model (one-time): {percent}% of {} MB",
+                            megabytes(total)
+                        )
+                    }
+                    _ => format!(
+                        "downloading voice model (one-time): {} MB",
+                        megabytes(downloaded)
+                    ),
+                };
+                on_status(message);
+            })
+            .context("download voice recognition model")?;
+            on_status("unpacking voice model...".to_string());
+            extract_tar_bz2_file(&archive, voice_dir).context("extract voice model")?;
+            let _ = fs::remove_file(&archive);
+        }
+
+        if !paths.is_installed() {
+            bail!(
+                "voice model installation under {} is incomplete; delete the directory and retry",
+                paths.dir.display()
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn create_vad(paths: &ModelPaths) -> Result<VoiceActivityDetector> {
+        let mut config = VadModelConfig::default();
+        config.silero_vad.model = Some(paths.vad.display().to_string());
+        config.silero_vad.threshold = 0.5;
+        config.silero_vad.min_silence_duration = 0.25;
+        config.silero_vad.min_speech_duration = 0.25;
+        config.silero_vad.max_speech_duration = 5.0;
+        config.silero_vad.window_size = VAD_WINDOW_SIZE as i32;
+        config.sample_rate = SAMPLE_RATE;
+        VoiceActivityDetector::create(&config, 60.0).context("create voice activity detector")
+    }
+
+    pub(super) fn create_recognizer(paths: &ModelPaths) -> Result<OfflineRecognizer> {
+        let mut config = OfflineRecognizerConfig::default();
+        config.model_config.transducer.encoder = Some(paths.encoder.display().to_string());
+        config.model_config.transducer.decoder = Some(paths.decoder.display().to_string());
+        config.model_config.transducer.joiner = Some(paths.joiner.display().to_string());
+        config.model_config.tokens = Some(paths.tokens.display().to_string());
+        config.model_config.model_type = Some("nemo_transducer".to_string());
+        config.model_config.num_threads = decode_threads();
+        OfflineRecognizer::create(&config).context("load voice recognition model")
+    }
+
+    fn decode_threads() -> i32 {
+        thread::available_parallelism()
+            .map(|n| n.get().min(4) as i32)
+            .unwrap_or(2)
+    }
+
+    /// Build a cpal input stream that forwards mono f32 samples at the
+    /// device's native rate.
+    fn build_input_stream(
+        device: &cpal::Device,
+        tx: mpsc::Sender<Vec<f32>>,
+    ) -> Result<(cpal::Stream, i32)> {
+        let supported = device
+            .default_input_config()
+            .context("query microphone input format")?;
+        let config = supported.config();
+        let sample_format = supported.sample_format();
+        let channels = config.channels.max(1) as usize;
+        let sample_rate = config.sample_rate.0 as i32;
+        let err_fn = |_err| {};
+
+        let stream = match sample_format {
+            SampleFormat::F32 => device.build_input_stream(
+                &config,
+                move |data: &[f32], _| {
+                    let _ = tx.send(downmix(data.iter().copied(), channels));
+                },
+                err_fn,
+                None,
+            ),
+            SampleFormat::I16 => device.build_input_stream(
+                &config,
+                move |data: &[i16], _| {
+                    let samples = data.iter().map(|&s| s as f32 / i16::MAX as f32);
+                    let _ = tx.send(downmix(samples, channels));
+                },
+                err_fn,
+                None,
+            ),
+            SampleFormat::U16 => device.build_input_stream(
+                &config,
+                move |data: &[u16], _| {
+                    let samples = data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0);
+                    let _ = tx.send(downmix(samples, channels));
+                },
+                err_fn,
+                None,
+            ),
+            other => bail!("unsupported microphone sample format: {other:?}"),
+        }
+        .context("open microphone input stream")?;
+        Ok((stream, sample_rate))
+    }
+
+    fn downmix<I>(samples: I, channels: usize) -> Vec<f32>
+    where
+        I: Iterator<Item = f32>,
+    {
+        let frames: Vec<f32> = samples.collect();
+        frames
+            .chunks(channels)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+            .collect()
+    }
+
+    /// Normalize a raw RMS value into the 0.0..=1.0 meter range used by the UI.
+    pub(super) fn normalized_level(rms: f32) -> f32 {
+        (rms * 18.0).clamp(0.0, 1.0)
+    }
+
+    fn chunk_rms(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let sum: f32 = samples.iter().map(|s| s * s).sum();
+        (sum / samples.len() as f32).sqrt()
+    }
+
+    /// Join finalized utterances and the in-progress interim transcript.
+    pub(super) fn compose_transcript(finalized: &[String], interim: &str) -> String {
+        let mut parts: Vec<&str> = finalized
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let interim = interim.trim();
+        if !interim.is_empty() {
+            parts.push(interim);
+        }
+        parts.join(" ")
+    }
+
+    pub(super) fn run<F, G, H>(
+        mut on_partial: F,
+        mut on_level: G,
+        mut on_status: H,
+        cancel_rx: mpsc::Receiver<()>,
+    ) -> Result<String>
+    where
+        F: FnMut(String),
+        G: FnMut(f32),
+        H: FnMut(String),
+    {
+        let paths = model_paths()?;
+        ensure_models_installed(&paths, &mut on_status)?;
+
+        on_status("loading voice model...".to_string());
+        let vad = create_vad(&paths)?;
+        let recognizer = create_recognizer(&paths)?;
+
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .context("no microphone input device was found")?;
+        let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>();
+        let (stream, mic_sample_rate) = build_input_stream(&device, audio_tx)?;
+        let resampler = if mic_sample_rate != SAMPLE_RATE {
+            Some(
+                LinearResampler::create(mic_sample_rate, SAMPLE_RATE)
+                    .context("create microphone resampler")?,
+            )
+        } else {
+            None
+        };
+        stream.play().context("start microphone capture")?;
+        on_status("listening...".to_string());
+
+        let started_at = Instant::now();
+        let mut last_activity_at = Instant::now();
+        let mut last_level_at = Instant::now() - LEVEL_EMIT_INTERVAL;
+        let mut last_interim_decode_at = Instant::now();
+
+        let mut buffer = Vec::<f32>::new();
+        let mut vad_offset = 0usize;
+        let mut speech_started = false;
+
+        let mut finalized = Vec::<String>::new();
+        let mut interim = String::new();
+        let mut last_emitted: Option<String> = None;
+        let mut cancelled = false;
+
+        loop {
+            if cancel_rx.try_recv().is_ok() {
+                cancelled = true;
                 break;
             }
-        }
-    });
+            if started_at.elapsed() >= DICTATION_TIMEOUT {
+                break;
+            }
+            if last_activity_at.elapsed() >= DICTATION_SILENCE {
+                break;
+            }
 
-    let mut final_text = None;
-    let mut last_partial = None;
-    let mut cancelled = false;
-    let status = loop {
-        while let Ok(line) = line_rx.try_recv() {
-            match line? {
-                HelperLine::Partial(text) => {
-                    if last_partial.as_deref() != Some(text.as_str()) {
-                        on_partial(text.clone());
-                        last_partial = Some(text);
+            match audio_rx.recv_timeout(Duration::from_millis(30)) {
+                Ok(samples) => {
+                    if last_level_at.elapsed() >= LEVEL_EMIT_INTERVAL {
+                        on_level(normalized_level(chunk_rms(&samples)));
+                        last_level_at = Instant::now();
+                    }
+                    match &resampler {
+                        Some(resampler) => {
+                            buffer.extend_from_slice(&resampler.resample(&samples, false))
+                        }
+                        None => buffer.extend_from_slice(&samples),
                     }
                 }
-                HelperLine::Final(text) => final_text = Some(text),
-                HelperLine::Level(level) => on_level(level),
-            }
-        }
-
-        if cancel_rx.try_recv().is_ok() {
-            cancelled = true;
-            let _ = child.kill();
-        }
-
-        if let Some(status) = child.try_wait().context("poll swift speech helper")? {
-            break status;
-        }
-
-        thread::sleep(Duration::from_millis(30));
-    };
-
-    while let Ok(line) = line_rx.try_recv() {
-        match line? {
-            HelperLine::Partial(text) => {
-                if last_partial.as_deref() != Some(text.as_str()) {
-                    on_partial(text.clone());
-                    last_partial = Some(text);
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!("microphone capture stopped unexpectedly")
                 }
             }
-            HelperLine::Final(text) => final_text = Some(text),
-            HelperLine::Level(level) => on_level(level),
-        }
-    }
 
-    let mut stderr = String::new();
-    if let Some(mut stderr_pipe) = child.stderr.take() {
-        stderr_pipe
-            .read_to_string(&mut stderr)
-            .context("read swift speech helper stderr")?;
-    }
-
-    if !cancelled && !status.success() {
-        let stderr = stderr.trim().to_string();
-        bail!(
-            "{}",
-            if stderr.is_empty() {
-                "speech helper failed".to_string()
-            } else {
-                stderr
+            // Feed the VAD in fixed-size windows.
+            while vad_offset + VAD_WINDOW_SIZE <= buffer.len() {
+                vad.accept_waveform(&buffer[vad_offset..vad_offset + VAD_WINDOW_SIZE]);
+                if vad.detected() {
+                    last_activity_at = Instant::now();
+                    if !speech_started {
+                        speech_started = true;
+                        last_interim_decode_at = Instant::now();
+                    }
+                }
+                vad_offset += VAD_WINDOW_SIZE;
             }
-        );
-    }
 
-    let text = final_text
-        .or(last_partial)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if !cancelled && text.is_empty() {
-        bail!("no speech was recognized");
-    }
-    Ok(text)
-}
+            // Keep only a short pre-speech tail so the buffer cannot grow
+            // without bound while the user is silent.
+            if !speech_started && buffer.len() > 10 * VAD_WINDOW_SIZE {
+                let keep_from = buffer.len() - 10 * VAD_WINDOW_SIZE;
+                buffer.drain(..keep_from);
+                vad_offset = vad_offset.saturating_sub(keep_from);
+            }
 
-#[cfg(target_os = "macos")]
-fn decode_helper_line(line: &str) -> Result<HelperLine> {
-    let Some((kind, encoded)) = line.split_once('\t') else {
-        bail!("unexpected swift speech helper output");
-    };
-    let bytes = general_purpose::STANDARD
-        .decode(encoded)
-        .context("decode swift speech helper line")?;
-    let text = String::from_utf8(bytes).context("decode swift speech helper text")?;
-    match kind {
-        "PARTIAL" => Ok(HelperLine::Partial(text)),
-        "FINAL" => Ok(HelperLine::Final(text)),
-        "LEVEL" => {
-            let level = text
-                .parse::<f32>()
-                .context("parse swift speech helper level")?;
-            Ok(HelperLine::Level(level.clamp(0.0, 1.0)))
+            // Decode the in-progress utterance periodically for live partials.
+            if speech_started && last_interim_decode_at.elapsed() >= INTERIM_DECODE_INTERVAL {
+                interim = decode_segment(&recognizer, SAMPLE_RATE, &buffer);
+                last_interim_decode_at = Instant::now();
+            }
+
+            // Finalize utterances the VAD has closed.
+            while !vad.is_empty() {
+                if let Some(segment) = vad.front() {
+                    let text = decode_segment(&recognizer, SAMPLE_RATE, segment.samples());
+                    if !text.is_empty() {
+                        finalized.push(text);
+                        last_activity_at = Instant::now();
+                    }
+                }
+                vad.pop();
+                buffer.clear();
+                vad_offset = 0;
+                speech_started = false;
+                interim.clear();
+            }
+
+            let transcript = compose_transcript(&finalized, &interim);
+            if !transcript.is_empty() && last_emitted.as_deref() != Some(transcript.as_str()) {
+                on_partial(transcript.clone());
+                last_emitted = Some(transcript);
+            }
         }
-        _ => bail!("unexpected swift speech helper output kind: {kind}"),
+
+        drop(stream);
+
+        // Flush the VAD so a trailing utterance that never hit a silence
+        // boundary is still transcribed.
+        if !cancelled {
+            vad.flush();
+            while !vad.is_empty() {
+                if let Some(segment) = vad.front() {
+                    let text = decode_segment(&recognizer, SAMPLE_RATE, segment.samples());
+                    if !text.is_empty() {
+                        finalized.push(text);
+                        interim.clear();
+                    }
+                }
+                vad.pop();
+            }
+        }
+
+        let text = compose_transcript(&finalized, &interim);
+        if !cancelled && text.is_empty() {
+            bail!("no speech was recognized");
+        }
+        Ok(text)
+    }
+
+    pub(super) fn decode_segment(
+        recognizer: &OfflineRecognizer,
+        sample_rate: i32,
+        samples: &[f32],
+    ) -> String {
+        if samples.is_empty() {
+            return String::new();
+        }
+        let stream = recognizer.create_stream();
+        stream.accept_waveform(sample_rate, samples);
+        recognizer.decode(&stream);
+        stream
+            .get_result()
+            .map(|result| result.text.trim().to_string())
+            .unwrap_or_default()
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn run_dictation<F, G>(
+/// Capture microphone audio and return the recognized transcript.
+///
+/// `on_partial` receives the cumulative transcript as it grows, `on_level`
+/// receives normalized microphone levels for the input meter, and `on_status`
+/// receives transient progress messages (model download, loading). Sending on
+/// `cancel_rx` stops capture and returns whatever was recognized so far.
+#[cfg(not(target_os = "android"))]
+pub fn run_dictation<F, G, H>(
     on_partial: F,
-    _on_level: G,
-    cancel_rx: mpsc::Receiver<()>,
+    on_level: G,
+    on_status: H,
+    cancel_rx: std::sync::mpsc::Receiver<()>,
 ) -> Result<String>
 where
     F: FnMut(String),
     G: FnMut(f32),
+    H: FnMut(String),
 {
-    run_sherpa_onnx_dictation(on_partial, cancel_rx)
+    backend::run(on_partial, on_level, on_status, cancel_rx)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn run_sherpa_onnx_dictation<F>(mut on_partial: F, cancel_rx: mpsc::Receiver<()>) -> Result<String>
+#[cfg(target_os = "android")]
+pub fn run_dictation<F, G, H>(
+    _on_partial: F,
+    _on_level: G,
+    _on_status: H,
+    _cancel_rx: std::sync::mpsc::Receiver<()>,
+) -> Result<String>
 where
     F: FnMut(String),
+    G: FnMut(f32),
+    H: FnMut(String),
 {
-    let paths = sherpa_onnx_model_paths()?;
-    ensure_sherpa_onnx_model_installed(&paths)?;
-    if !paths.is_installed() {
-        bail!("{}", sherpa_onnx_model_setup_message(&paths));
-    }
-
-    let mut child = spawn_sherpa_onnx_microphone(&paths)?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("open sherpa-onnx microphone stdout")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("open sherpa-onnx microphone stderr")?;
-
-    let (line_tx, line_rx) = mpsc::channel::<Result<String>>();
-    thread::spawn(move || read_sherpa_output_lines(stdout, line_tx));
-    let stderr_reader = thread::spawn(move || {
-        let mut output = String::new();
-        let mut reader = stderr;
-        reader
-            .read_to_string(&mut output)
-            .context("read sherpa-onnx microphone stderr")?;
-        Ok::<_, anyhow::Error>(output)
-    });
-
-    let started_at = Instant::now();
-    let mut last_result_at = Instant::now();
-    let mut last_text: Option<String> = None;
-    let mut cancelled = false;
-    let mut killed_by_timeout = false;
-    let status = loop {
-        while let Ok(line) = line_rx.try_recv() {
-            if let Some(text) = parse_sherpa_transcript_line(&line?) {
-                if last_text.as_deref() != Some(text.as_str()) {
-                    on_partial(text.clone());
-                    last_text = Some(text);
-                }
-                last_result_at = Instant::now();
-            }
-        }
-
-        if cancel_rx.try_recv().is_ok() {
-            cancelled = true;
-            break kill_and_wait(&mut child)?;
-        }
-
-        if last_result_at.elapsed() >= SHERPA_ONNX_DICTATION_SILENCE {
-            killed_by_timeout = true;
-            break kill_and_wait(&mut child)?;
-        }
-
-        if started_at.elapsed() >= SHERPA_ONNX_DICTATION_TIMEOUT {
-            killed_by_timeout = true;
-            break kill_and_wait(&mut child)?;
-        }
-
-        if let Some(status) = child.try_wait().context("poll sherpa-onnx microphone")? {
-            break status;
-        }
-
-        thread::sleep(Duration::from_millis(30));
-    };
-
-    while let Ok(line) = line_rx.try_recv() {
-        if let Some(text) = parse_sherpa_transcript_line(&line?)
-            && last_text.as_deref() != Some(text.as_str())
-        {
-            on_partial(text.clone());
-            last_text = Some(text);
-        }
-    }
-
-    let stderr = stderr_reader
-        .join()
-        .unwrap_or_else(|_| Ok("sherpa-onnx stderr reader panicked".to_string()))?;
-
-    if !cancelled && !killed_by_timeout && !status.success() {
-        let stderr = stderr.trim();
-        bail!(
-            "{}",
-            if stderr.is_empty() {
-                "sherpa-onnx microphone failed".to_string()
-            } else {
-                stderr.to_string()
-            }
-        );
-    }
-
-    let text = last_text.unwrap_or_default().trim().to_string();
-    if !cancelled && text.is_empty() {
-        bail!("no speech was recognized");
-    }
-    Ok(text)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn spawn_sherpa_onnx_microphone(paths: &SherpaOnnxModelPaths) -> Result<std::process::Child> {
-    let program = sherpa_onnx_microphone_program()?;
-    let mut command = Command::new(&program);
-    command
-        .arg(format!("--tokens={}", paths.tokens.display()))
-        .arg(format!("--encoder={}", paths.encoder.display()))
-        .arg(format!("--decoder={}", paths.decoder.display()))
-        .arg(format!("--joiner={}", paths.joiner.display()))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command.spawn().with_context(|| {
-        format!(
-            "start sherpa-onnx microphone backend {}; {}",
-            display_program(&program),
-            sherpa_onnx_runtime_setup_message()
-        )
-    })
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sherpa_onnx_microphone_program() -> Result<PathBuf> {
-    if let Some(path) = find_command_on_path(SHERPA_ONNX_MICROPHONE_BIN) {
-        return Ok(path);
-    }
-    ensure_sherpa_onnx_runtime_installed()?.context(sherpa_onnx_runtime_setup_message())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn display_program(program: &std::path::Path) -> String {
-    program.display().to_string()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn ensure_sherpa_onnx_model_installed(paths: &SherpaOnnxModelPaths) -> Result<()> {
-    if paths.is_installed() {
-        return Ok(());
-    }
-    let parent = paths
-        .dir
-        .parent()
-        .context("resolve sherpa-onnx model cache parent")?;
-    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let archive = download_bytes(SHERPA_ONNX_MODEL_URL).context("download sherpa-onnx model")?;
-    extract_tar_bz2(&archive, parent).context("extract sherpa-onnx model")?;
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn ensure_sherpa_onnx_runtime_installed() -> Result<Option<PathBuf>> {
-    let Some(asset) = sherpa_onnx_runtime_asset_name() else {
-        return Ok(None);
-    };
-    let dir = mjolnir_cache_dir()?
-        .join("voice")
-        .join("sherpa-onnx-runtime")
-        .join(SHERPA_ONNX_RUNTIME_VERSION);
-    if let Some(path) = find_microphone_binary_under(&dir) {
-        return Ok(Some(path));
-    }
-
-    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let url = format!("{SHERPA_ONNX_RELEASE_BASE_URL}/{SHERPA_ONNX_RUNTIME_VERSION}/{asset}");
-    let archive = download_bytes(&url).context("download sherpa-onnx runtime")?;
-    extract_tar_bz2(&archive, &dir).context("extract sherpa-onnx runtime")?;
-    let Some(path) = find_microphone_binary_under(&dir) else {
-        return Ok(None);
-    };
-    ensure_executable(&path)?;
-    Ok(Some(path))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sherpa_onnx_runtime_asset_name() -> Option<String> {
-    let v = SHERPA_ONNX_RUNTIME_VERSION;
-    let suffix = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => "linux-x64-static-no-tts",
-        ("linux", "aarch64") => "linux-aarch64-static",
-        ("windows", "x86_64") => "win-x64-static-MT-Release-no-tts",
-        ("windows", "aarch64") => "win-arm64-static-MT-Release-no-tts",
-        _ => return None,
-    };
-    Some(format!("sherpa-onnx-{v}-{suffix}.tar.bz2"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn download_bytes(url: &str) -> Result<Vec<u8>> {
-    // reqwest::blocking creates its own Tokio runtime, which panics when called
-    // from within an existing Tokio context. Spawning a plain OS thread
-    // guarantees there is no ambient runtime, regardless of the call site.
-    let url = url.to_string();
-    std::thread::spawn(move || {
-        let response = reqwest::blocking::Client::builder()
-            .user_agent("mjolnir-voice-setup")
-            .build()
-            .context("build download client")?
-            .get(&url)
-            .send()
-            .with_context(|| format!("GET {url}"))?
-            .error_for_status()
-            .with_context(|| format!("download {url}"))?;
-        response
-            .bytes()
-            .context("read download body")
-            .map(|b| b.to_vec())
-    })
-    .join()
-    .map_err(|_| anyhow::anyhow!("download thread panicked"))?
-}
-
-#[cfg(not(target_os = "macos"))]
-fn extract_tar_bz2(bytes: &[u8], dest: &Path) -> Result<()> {
-    let decoder = bzip2::read::BzDecoder::new(bytes);
-    let mut archive = tar::Archive::new(decoder);
-    for entry in archive.entries().context("read tar.bz2 entries")? {
-        let mut entry = entry.context("read tar.bz2 entry")?;
-        let entry_path = entry.path().context("read tar.bz2 entry path")?;
-        let relative = safe_archive_path(&entry_path).with_context(|| {
-            format!(
-                "archive entry escapes destination: {}",
-                entry_path.display()
-            )
-        })?;
-        let out_path = dest.join(relative);
-        if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-        entry
-            .unpack(&out_path)
-            .with_context(|| format!("unpack {}", out_path.display()))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn safe_archive_path(path: &Path) -> Result<PathBuf> {
-    let mut relative = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => relative.push(part),
-            Component::CurDir => {}
-            _ => bail!("unsafe archive path {}", path.display()),
-        }
-    }
-    if relative.as_os_str().is_empty() {
-        bail!("empty archive path")
-    }
-    Ok(relative)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn find_command_on_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    std::env::split_paths(&path_var)
-        .map(|dir| dir.join(executable_name(name)))
-        .find(|candidate| candidate.is_file())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn find_microphone_binary_under(dir: &Path) -> Option<PathBuf> {
-    let executable = executable_name(SHERPA_ONNX_MICROPHONE_BIN);
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(next) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&next) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path
-                .file_name()
-                .is_some_and(|name| name == executable.as_str())
-            {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(all(not(target_os = "macos"), unix))]
-fn ensure_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let metadata = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-    let mut permissions = metadata.permissions();
-    let mode = permissions.mode();
-    if mode & 0o111 == 0 {
-        permissions.set_mode(mode | 0o755);
-        fs::set_permissions(path, permissions)
-            .with_context(|| format!("make {} executable", path.display()))?;
-    }
-    Ok(())
-}
-
-#[cfg(all(not(target_os = "macos"), not(unix)))]
-fn ensure_executable(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn executable_name(name: &str) -> String {
-    if cfg!(target_os = "windows") {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn kill_and_wait(child: &mut std::process::Child) -> Result<ExitStatus> {
-    let _ = child.kill();
-    child.wait().context("wait for sherpa-onnx microphone")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn read_sherpa_output_lines<R>(mut reader: R, line_tx: mpsc::Sender<Result<String>>)
-where
-    R: Read,
-{
-    let mut pending = Vec::new();
-    let mut buffer = [0; 1024];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => {
-                for byte in &buffer[..read] {
-                    match *byte {
-                        b'\n' | b'\r' => {
-                            if !pending.is_empty() {
-                                let line = String::from_utf8(pending.clone())
-                                    .context("decode sherpa-onnx microphone output");
-                                if line_tx.send(line).is_err() {
-                                    return;
-                                }
-                                pending.clear();
-                            }
-                        }
-                        byte => pending.push(byte),
-                    }
-                }
-            }
-            Err(error) => {
-                let _ = line_tx.send(Err(error).context("read sherpa-onnx microphone output"));
-                return;
-            }
-        }
-    }
-    if !pending.is_empty() {
-        let line = String::from_utf8(pending).context("decode sherpa-onnx microphone output");
-        let _ = line_tx.send(line);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn parse_sherpa_transcript_line(line: &str) -> Option<String> {
-    let text = line.trim();
-    if text.is_empty() || sherpa_line_is_status(text) {
-        return None;
-    }
-
-    let text = text
-        .split_once(':')
-        .and_then(|(prefix, value)| prefix.trim().parse::<usize>().ok().map(|_| value.trim()))
-        .unwrap_or(text)
-        .trim();
-    if text.is_empty() || sherpa_line_is_status(text) {
-        None
-    } else {
-        Some(text.to_string())
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sherpa_line_is_status(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("sherpa-onnx/csrc/")
-        || lower.contains("parse-options.cc")
-        || lower.contains("please speak")
-        || lower.starts_with("started")
-        || lower.starts_with("creating")
-        || lower.starts_with("usage:")
-        || lower.starts_with("options:")
-        || lower.starts_with("--")
+    bail!("voice dictation is not supported on Android")
 }
 
 pub fn dictation_error_message(error: &anyhow::Error) -> String {
     let message = error.to_string();
-    if message.contains("No such file or directory") {
-        return match default_backend_kind() {
-            DictationBackendKind::AppleSpeech => {
-                "voice dictation requires the swift command on PATH".to_string()
-            }
-            DictationBackendKind::SherpaOnnx => {
-                format!(
-                    "voice dictation requires {SHERPA_ONNX_MICROPHONE_BIN}; Mjolnir installs the default sherpa-onnx runtime and model automatically on supported platforms"
-                )
-            }
-        };
-    }
-    if message.contains("sherpa-onnx") {
+    if message.starts_with("voice") || message.starts_with("no speech") {
         return message;
     }
-    format!(
-        "voice dictation failed using {}: {message}",
-        default_backend_kind().label()
-    )
+    if message.contains("microphone") {
+        return format!("voice dictation could not use the microphone: {message}");
+    }
+    format!("voice dictation failed: {message}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "android"))]
+    use std::path::PathBuf;
+
+    /// End-to-end check of the model pipeline: downloads the real models into
+    /// the user cache (~0.7 GB, one-time), loads the recognizer and VAD, and
+    /// decodes a test wav shipped with the model archive.
+    #[cfg(not(target_os = "android"))]
     #[test]
-    fn default_backend_uses_apple_speech_only_on_macos() {
-        let expected = if cfg!(target_os = "macos") {
-            DictationBackendKind::AppleSpeech
-        } else {
-            DictationBackendKind::SherpaOnnx
-        };
-        assert_eq!(default_backend_kind(), expected);
+    #[ignore = "downloads ~0.7 GB of models; run with: cargo test -- --ignored"]
+    fn dictation_models_install_and_decode_test_wav() {
+        let paths = backend::model_paths().expect("resolve model paths");
+        backend::ensure_models_installed(&paths, &mut |status| eprintln!("{status}"))
+            .expect("install voice models");
+
+        backend::create_vad(&paths).expect("load VAD model");
+        let recognizer = backend::create_recognizer(&paths).expect("load recognizer");
+
+        let wav_dir = paths.dir.join("test_wavs");
+        let wav = std::fs::read_dir(&wav_dir)
+            .expect("list test_wavs")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "wav"))
+            .expect("find a test wav");
+        let wave =
+            sherpa_onnx::Wave::read(wav.to_str().expect("utf-8 wav path")).expect("read test wav");
+
+        let text = backend::decode_segment(&recognizer, wave.sample_rate(), wave.samples());
+        eprintln!("decoded {}: {text}", wav.display());
+        assert!(!text.is_empty(), "expected a non-empty transcript");
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_os = "android"))]
     #[test]
-    fn sherpa_model_paths_are_under_voice_cache() {
-        let paths = SherpaOnnxModelPaths::in_cache(PathBuf::from("/cache/mj"));
+    fn model_paths_are_under_voice_cache() {
+        let paths = backend::ModelPaths::in_cache(PathBuf::from("/cache/mj"));
+        let voice = PathBuf::from("/cache/mj").join("voice");
         assert_eq!(
             paths.dir,
-            PathBuf::from("/cache/mj")
-                .join("voice")
-                .join(SHERPA_ONNX_MODEL_DIR)
+            voice.join("sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
         );
-        assert_eq!(paths.encoder, paths.dir.join(SHERPA_ONNX_ENCODER));
-        assert_eq!(paths.decoder, paths.dir.join(SHERPA_ONNX_DECODER));
-        assert_eq!(paths.joiner, paths.dir.join(SHERPA_ONNX_JOINER));
-        assert_eq!(paths.tokens, paths.dir.join(SHERPA_ONNX_TOKENS));
+        assert_eq!(paths.encoder, paths.dir.join("encoder.int8.onnx"));
+        assert_eq!(paths.decoder, paths.dir.join("decoder.int8.onnx"));
+        assert_eq!(paths.joiner, paths.dir.join("joiner.int8.onnx"));
+        assert_eq!(paths.tokens, paths.dir.join("tokens.txt"));
+        assert_eq!(paths.vad, voice.join("silero_vad.onnx"));
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_os = "android"))]
     #[test]
-    fn sherpa_setup_message_is_actionable_without_yaml() {
-        let paths = SherpaOnnxModelPaths::in_cache(PathBuf::from("/cache/mj"));
-        let message = sherpa_onnx_model_setup_message(&paths);
-        assert!(message.contains("sherpa-onnx"));
-        assert!(message.contains("install"));
-        assert!(message.contains("/cache/mj"));
-        assert!(!message.to_lowercase().contains("yaml"));
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn sherpa_runtime_message_names_path_fallback() {
-        let message = sherpa_onnx_runtime_setup_message();
-        assert!(message.contains(SHERPA_ONNX_MICROPHONE_BIN));
-        assert!(message.contains("PATH"));
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn sherpa_output_parser_ignores_status_lines() {
-        assert_eq!(parse_sherpa_transcript_line("Started! Please speak"), None);
+    fn compose_transcript_joins_finalized_and_interim() {
+        let finalized = vec!["Hello there.".to_string(), "How are you?".to_string()];
         assert_eq!(
-            parse_sherpa_transcript_line(
-                "sherpa-onnx/csrc/parse-options.cc:Read:361 --tokens=model/tokens.txt"
-            ),
-            None
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn sherpa_output_parser_accepts_plain_and_numbered_transcripts() {
-        assert_eq!(
-            parse_sherpa_transcript_line("hello world"),
-            Some("hello world".to_string())
+            backend::compose_transcript(&finalized, "I am"),
+            "Hello there. How are you? I am"
         );
         assert_eq!(
-            parse_sherpa_transcript_line("0: hello world"),
-            Some("hello world".to_string())
+            backend::compose_transcript(&finalized, "  "),
+            "Hello there. How are you?"
+        );
+        assert_eq!(backend::compose_transcript(&[], ""), "");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn safe_archive_path_rejects_escapes() {
+        assert!(backend::safe_archive_path(std::path::Path::new("a/b.onnx")).is_ok());
+        assert!(backend::safe_archive_path(std::path::Path::new("../evil")).is_err());
+        assert!(backend::safe_archive_path(std::path::Path::new("/abs/evil")).is_err());
+        assert!(backend::safe_archive_path(std::path::Path::new("")).is_err());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn normalized_level_clamps_to_meter_range() {
+        assert_eq!(backend::normalized_level(0.0), 0.0);
+        assert_eq!(backend::normalized_level(1.0), 1.0);
+        assert!(backend::normalized_level(0.01) > 0.0);
+        assert!(backend::normalized_level(0.01) < 1.0);
+    }
+
+    #[test]
+    fn error_messages_are_prefixed_for_context() {
+        let err = anyhow::anyhow!("some backend exploded");
+        assert_eq!(
+            dictation_error_message(&err),
+            "voice dictation failed: some backend exploded"
+        );
+        let err = anyhow::anyhow!("no speech was recognized");
+        assert_eq!(dictation_error_message(&err), "no speech was recognized");
+        let err = anyhow::anyhow!("voice dictation is not supported on Android");
+        assert_eq!(
+            dictation_error_message(&err),
+            "voice dictation is not supported on Android"
         );
     }
 }

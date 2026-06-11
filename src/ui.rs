@@ -92,6 +92,7 @@ fn terminal_request_forces_inline_repair(request: TerminalRequest) -> bool {
 enum DictationEvent {
     Partial(String),
     Level(f32),
+    Status(String),
     Finished(std::result::Result<String, String>),
 }
 
@@ -367,6 +368,10 @@ async fn ui_loop(
                     }
                     Some(DictationEvent::Level(level)) => {
                         update_dictation_level(&mut state, level);
+                        dirty = true;
+                    }
+                    Some(DictationEvent::Status(message)) => {
+                        update_dictation_status(&mut state, message);
                         dirty = true;
                     }
                     Some(DictationEvent::Finished(result)) => {
@@ -1920,12 +1925,16 @@ fn start_dictation(
     tokio::task::spawn_blocking(move || {
         let partial_tx = dictation_tx.clone();
         let level_tx = dictation_tx.clone();
+        let status_tx = dictation_tx.clone();
         let result = run_dictation(
             move |text| {
                 let _ = partial_tx.send(DictationEvent::Partial(text));
             },
             move |level| {
                 let _ = level_tx.send(DictationEvent::Level(level));
+            },
+            move |message| {
+                let _ = status_tx.send(DictationEvent::Status(message));
             },
             cancel_rx,
         )
@@ -1981,6 +1990,12 @@ fn update_dictation_partial(state: &mut AppState, text: &str) {
 fn update_dictation_level(state: &mut AppState, level: f32) {
     if state.voice_input_active {
         state.voice_input_level = Some(level.clamp(0.0, 1.0));
+    }
+}
+
+fn update_dictation_status(state: &mut AppState, message: String) {
+    if state.voice_input_active {
+        state.status_line = Some(StatusMessage::info(message));
     }
 }
 
