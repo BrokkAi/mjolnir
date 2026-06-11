@@ -19,6 +19,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux audio dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
+
       - name: Verify tag matches Cargo.toml version
         run: |
           tag="${GITHUB_REF_NAME#v}"

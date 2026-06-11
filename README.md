@@ -214,7 +214,9 @@ the input.
 
 ## Development
 
-You only need Rust when building from source or contributing.
+You only need Rust when building from source or contributing. On Linux,
+microphone dictation links against ALSA, so install its development headers
+first (e.g. `sudo apt-get install libasound2-dev` on Debian/Ubuntu).
 
 ```bash
 cargo build --release

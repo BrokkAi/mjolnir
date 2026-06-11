@@ -1,0 +1,8 @@
+# cross runs the build inside a per-target Docker image, so host-installed
+# packages are not visible. cpal links against ALSA on Linux, so install the
+# development headers for the target architecture before building.
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update && apt-get install --assume-yes libasound2-dev:$CROSS_DEB_ARCH",
+]
