@@ -1088,6 +1088,13 @@
 
       const POLL_MS = 2000;
       const WORKING_WINDOW_MS = 6000;
+      // How long a sent config change may stay "applying…" before the control
+      // re-enables. The session applies changes only between turns, and a
+      // change it cannot apply at all (agent rejected it) never shows up in a
+      // snapshot — without this cap such a change would disable its combobox
+      // forever. The queued change itself is unaffected: it still applies (or
+      // dies with the session) server-side.
+      const CONFIG_APPLY_TIMEOUT_MS = 60000;
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
       const narrowScreen = window.matchMedia("(max-width: 800px)");
 
@@ -1106,10 +1113,11 @@
       // so the buttons stay disabled until the pending request disappears
       // from the next snapshot.
       const sentDecisions = new Set();
-      // Config changes already POSTed, mapping "<session_id><target>" to
-      // the value we sent. The select stays disabled (showing the sent value)
-      // until the next snapshot's current_value matches, confirming the
-      // session applied it.
+      // Config changes already POSTed, mapping "<session_id>\u001f<target>" to
+      // { value, sentAt } for the change we sent. The select stays disabled
+      // (showing the sent value) until the next snapshot's current_value
+      // matches, confirming the session applied it, or until
+      // CONFIG_APPLY_TIMEOUT_MS passes.
       const sentConfigChanges = new Map();
       // Persistent combobox controllers keyed by "<session_id><target>", kept
       // across polls so an open/searched dropdown is never torn down by a
@@ -1814,11 +1822,11 @@
       }
 
       function configOptionKey(option) {
-        return `${option.target_kind}${option.config_id || ""}`;
+        return `${option.target_kind}\u001f${option.config_id || ""}`;
       }
 
       function configChangeKey(sessionId, option) {
-        return `${sessionId}${configOptionKey(option)}`;
+        return `${sessionId}\u001f${configOptionKey(option)}`;
       }
 
       // A searchable single-select dropdown built from scratch so it stays
@@ -2009,24 +2017,28 @@
       // The value a combo should display: the optimistic sent value while a
       // change is in flight, otherwise whatever the snapshot reports.
       function currentComboValue(option, key) {
-        return sentConfigChanges.has(key)
-          ? sentConfigChanges.get(key)
-          : option.current_value || "";
+        const sent = sentConfigChanges.get(key);
+        return sent ? sent.value : option.current_value || "";
       }
 
       function renderConfig(session) {
         const options = sessionConfigOptions(session);
-        // Forget sent changes the session has applied (current_value caught up)
-        // or that vanished from the snapshot, so the control re-enables.
+        // Forget sent changes the session has applied (current_value caught
+        // up), that vanished from the snapshot, or that timed out waiting to
+        // apply, so the control re-enables.
         if (session) {
-          for (const key of [...sentConfigChanges.keys()]) {
-            if (!key.startsWith(`${session.session_id}`)) {
+          for (const [key, sent] of [...sentConfigChanges.entries()]) {
+            if (!key.startsWith(`${session.session_id}\u001f`)) {
               continue;
             }
             const match = options.find(
               (option) => configChangeKey(session.session_id, option) === key,
             );
-            if (!match || match.current_value === sentConfigChanges.get(key)) {
+            if (
+              !match
+              || match.current_value === sent.value
+              || Date.now() - sent.sentAt > CONFIG_APPLY_TIMEOUT_MS
+            ) {
               sentConfigChanges.delete(key);
             }
           }
@@ -2079,10 +2091,10 @@
 
       async function submitConfigChange(sessionId, option, value) {
         const key = configChangeKey(sessionId, option);
-        if (sentConfigChanges.get(key) === value) {
+        if (sentConfigChanges.get(key)?.value === value) {
           return;
         }
-        sentConfigChanges.set(key, value);
+        sentConfigChanges.set(key, { value, sentAt: Date.now() });
         renderChat();
         try {
           const response = await apiFetch("/api/config-changes", {

@@ -579,6 +579,18 @@ impl TrackerState {
         }
         self.session_id.clone()
     }
+
+    /// Session id to claim config changes for. The runtime only applies
+    /// `SetSessionConfigOption` while idle (a command arriving mid-turn is
+    /// dropped with a warning), and claiming removes the change from the
+    /// queue, so claim nothing while a prompt turn is in flight — the change
+    /// stays queued until the session is idle again.
+    fn config_claim_session(&self) -> Option<String> {
+        if self.prompt_in_flight {
+            return None;
+        }
+        self.session_id.clone()
+    }
 }
 
 impl RemoteSessionTracker {
@@ -852,11 +864,15 @@ impl RemoteSessionTracker {
                     }
                 }
 
-                // Config changes apply whenever a session is live: the runtime
-                // accepts a queued change between turns, so unlike prompts they
-                // do not need the prompt slot. Map back to a target before
-                // sending; an unmappable change is dropped rather than guessed.
-                let config_session = state.lock().ok().and_then(|guard| guard.session_id.clone());
+                // Config changes are claimed only while the session is idle:
+                // the runtime drops a `SetSessionConfigOption` that arrives
+                // mid-turn, and a claimed change cannot be re-queued. Map back
+                // to a target before sending; an unmappable change is dropped
+                // rather than guessed.
+                let config_session = state
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.config_claim_session());
                 if let Some(session_id) = config_session {
                     match claim_remote_config_change(client.clone(), token.clone(), &session_id)
                         .await
@@ -874,6 +890,11 @@ impl RemoteSessionTracker {
                                     if command_tx.send(command).is_err() {
                                         break;
                                     }
+                                    // Give the config update the rest of this
+                                    // tick: a prompt sent while it is still in
+                                    // flight would be rejected by the runtime
+                                    // and lost.
+                                    continue;
                                 }
                                 None => debug!(
                                     "dropping remote config change with unmappable target {}",
@@ -2911,6 +2932,32 @@ mod tests {
             .snapshot()
             .expect("snapshot");
         assert!(snapshot.session_config.is_empty());
+    }
+
+    #[test]
+    fn config_claim_waits_for_idle_session() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        // No session yet: nothing to claim for.
+        assert!(state.config_claim_session().is_none());
+
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        assert_eq!(state.config_claim_session().as_deref(), Some("sess-1"));
+
+        // While a prompt turn is in flight the runtime would drop the change,
+        // so the claim is withheld until the turn finishes.
+        state.observe_command(&UiCommand::SendPrompt {
+            text: "hello".to_string(),
+            images: Vec::new(),
+        });
+        assert!(state.config_claim_session().is_none());
+
+        state.observe_event(&UiEvent::PromptFailed {
+            message: "boom".to_string(),
+        });
+        assert_eq!(state.config_claim_session().as_deref(), Some("sess-1"));
     }
 
     #[test]
