@@ -98,6 +98,13 @@
         font-size: 12.5px;
       }
 
+      .new-session {
+        width: 100%;
+        height: 38px;
+        margin-top: 10px;
+        font-size: 14px;
+      }
+
       .ghost-danger {
         border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
         background: transparent;
@@ -966,6 +973,7 @@
             <button id="logout-button" class="ghost-danger" type="button">Log out</button>
           </div>
           <p id="status">Loading…</p>
+          <button id="new-session-button" class="primary new-session" type="button">New session</button>
         </div>
         <div id="sessions"></div>
       </aside>
@@ -1065,6 +1073,7 @@
       const authSubmitEl = $("auth-submit");
       const authErrorEl = $("auth-error");
       const logoutButtonEl = $("logout-button");
+      const newSessionButtonEl = $("new-session-button");
       const statusEl = $("status");
       const sessionsEl = $("sessions");
       const transcriptEl = $("transcript");
@@ -2303,10 +2312,45 @@
         }
       }
 
+      async function createNewSession() {
+        if (!authenticated) {
+          return;
+        }
+        newSessionButtonEl.disabled = true;
+        const knownBefore = new Set(sessions.map((session) => session.session_id));
+        try {
+          const response = await apiFetch("/api/launch-session", { method: "POST" });
+          if (!response.ok) {
+            const detail = await response.text().catch(() => "");
+            throw new Error(detail.trim() || `HTTP ${response.status}`);
+          }
+          statusEl.textContent = "Starting a new session…";
+          // The agent assigns its session id asynchronously; poll a few times
+          // so we can open the new session as soon as it registers. The
+          // background refresh would surface it regardless.
+          for (let attempt = 0; attempt < 16; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            await refreshSessions();
+            const fresh = sessions.find((session) => !knownBefore.has(session.session_id));
+            if (fresh) {
+              navigateToSession(fresh.session_id);
+              return;
+            }
+          }
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            statusEl.textContent = `New session failed: ${error.message}`;
+          }
+        } finally {
+          newSessionButtonEl.disabled = false;
+        }
+      }
+
       /* ---- wiring ---- */
 
       authFormEl.addEventListener("submit", submitAuth);
       logoutButtonEl.addEventListener("click", logout);
+      newSessionButtonEl.addEventListener("click", createNewSession);
       backButtonEl.addEventListener("click", navigateToList);
       window.addEventListener("hashchange", applyRoute);
       narrowScreen.addEventListener("change", () => {
