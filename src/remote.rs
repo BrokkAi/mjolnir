@@ -34,11 +34,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use crate::config::SelectedAgent;
-use crate::event::{PermissionPrompt, SessionConfigTarget, UiCommand, UiEvent};
+use crate::acp::{self, AcpRuntimeConfig};
+use crate::config::{self, SelectedAgent};
+use crate::event::{PermissionDecision, PermissionPrompt, SessionConfigTarget, UiCommand, UiEvent};
 
 const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
 const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
@@ -390,6 +392,20 @@ struct ServerState {
     /// cookie does not stay valid forever like a single shared secret would.
     sessions: Arc<Mutex<HashSet<String>>>,
     code_guard: Arc<Mutex<CodeAuthGuard>>,
+    owned_session_config: Option<Arc<OwnedSessionConfig>>,
+    owned_sessions: Arc<Mutex<Vec<OwnedRemoteSession>>>,
+}
+
+#[derive(Debug, Clone)]
+struct OwnedSessionConfig {
+    cwd: PathBuf,
+    agent: SelectedAgent,
+}
+
+#[derive(Debug)]
+struct OwnedRemoteSession {
+    command_tx: mpsc::UnboundedSender<UiCommand>,
+    task: JoinHandle<()>,
 }
 
 impl TrackerState {
@@ -990,6 +1006,17 @@ pub async fn run_server(hostname: Option<String>, history_days: u32) -> Result<(
     clear_terminal_screen()?;
     install_crypto_provider();
 
+    let cwd = std::env::current_dir().context("current dir")?;
+    let config_path = config::default_config_path();
+    let cfg = config::Config::load(&config_path)
+        .with_context(|| format!("load {}", config_path.display()))?;
+    let agent = cfg.agent.ok_or_else(|| {
+        anyhow!(
+            "no default agent configured; run `mj` once to pick an agent before starting `mj server`"
+        )
+    })?;
+    let owned_session_config = OwnedSessionConfig { cwd, agent };
+
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
     let listen = server_listen_config(requested_hostname.as_deref())?;
     let paths = ensure_server_paths(requested_hostname.as_deref())?;
@@ -998,7 +1025,14 @@ pub async fn run_server(hostname: Option<String>, history_days: u32) -> Result<(
     let viewer_code = generate_viewer_code()?;
     let viewer_url = remote_qr_login_url(&listen.viewer_host, &token);
 
-    let app = build_router(paths.db_path.clone(), token, viewer_code.clone());
+    let owned_sessions = Arc::new(Mutex::new(Vec::new()));
+    let app = build_router_with_owned_sessions(
+        paths.db_path.clone(),
+        token,
+        viewer_code.clone(),
+        owned_session_config,
+        Arc::clone(&owned_sessions),
+    );
 
     let tls_config =
         axum_server::tls_rustls::RustlsConfig::from_pem_file(&paths.cert_path, &paths.key_path)
@@ -1018,10 +1052,32 @@ pub async fn run_server(hostname: Option<String>, history_days: u32) -> Result<(
     println!("{}", render_login_qr(&viewer_url)?);
     println!("viewer code: {viewer_code}");
 
-    axum_server::from_tcp_rustls(listener, tls_config)
-        .serve(app.into_make_service())
-        .await
-        .with_context(|| format!("serve remote-control API on {}", listen.bind_addr))
+    let server_handle = axum_server::Handle::new();
+    let server = axum_server::from_tcp_rustls(listener, tls_config)
+        .handle(server_handle.clone())
+        .serve(app.into_make_service());
+    tokio::pin!(server);
+
+    let mut owned_sessions_shutdown = false;
+    let result = tokio::select! {
+        result = &mut server => {
+            result
+        }
+        signal = tokio::signal::ctrl_c() => {
+            if let Err(error) = signal {
+                warn!("remote-control shutdown signal failed: {error}");
+            }
+            println!("Stopping remote control...");
+            shutdown_owned_remote_sessions(Arc::clone(&owned_sessions)).await;
+            owned_sessions_shutdown = true;
+            server_handle.graceful_shutdown(Some(Duration::from_secs(2)));
+            (&mut server).await
+        }
+    };
+    if !owned_sessions_shutdown {
+        shutdown_owned_remote_sessions(Arc::clone(&owned_sessions)).await;
+    }
+    result.with_context(|| format!("serve remote-control API on {}", listen.bind_addr))
 }
 
 /// Periodically sweep dead queue entries and expired session history out
@@ -1119,19 +1175,55 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+#[cfg(test)]
 fn build_router(db_path: PathBuf, token: String, viewer_code: String) -> Router {
+    build_router_with_optional_owned_sessions(
+        db_path,
+        token,
+        viewer_code,
+        None,
+        Arc::new(Mutex::new(Vec::new())),
+    )
+}
+
+fn build_router_with_owned_sessions(
+    db_path: PathBuf,
+    token: String,
+    viewer_code: String,
+    owned_session_config: OwnedSessionConfig,
+    owned_sessions: Arc<Mutex<Vec<OwnedRemoteSession>>>,
+) -> Router {
+    build_router_with_optional_owned_sessions(
+        db_path,
+        token,
+        viewer_code,
+        Some(Arc::new(owned_session_config)),
+        owned_sessions,
+    )
+}
+
+fn build_router_with_optional_owned_sessions(
+    db_path: PathBuf,
+    token: String,
+    viewer_code: String,
+    owned_session_config: Option<Arc<OwnedSessionConfig>>,
+    owned_sessions: Arc<Mutex<Vec<OwnedRemoteSession>>>,
+) -> Router {
     let state = ServerState {
         db_path: Arc::new(db_path),
         token: Arc::new(token),
         viewer_code: Arc::new(viewer_code),
         sessions: Arc::new(Mutex::new(HashSet::new())),
         code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
+        owned_session_config,
+        owned_sessions,
     };
 
     let protected = Router::new()
         .route("/live/sessions", get(list_live_sessions))
         .route("/sessions", get(list_sessions))
         .route("/api/sessions", post(upsert_session))
+        .route("/api/sessions/new", post(create_owned_session))
         .route(
             "/api/sessions/{session_id}",
             axum::routing::delete(disconnect_session),
@@ -1398,6 +1490,170 @@ pub fn agent_display_label(agent: &SelectedAgent) -> String {
         shell_words::join(words)
     } else {
         agent.source_id.clone()
+    }
+}
+
+async fn create_owned_session(
+    State(state): State<ServerState>,
+) -> std::result::Result<StatusCode, (StatusCode, String)> {
+    let Some(config) = state.owned_session_config.clone() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server-owned sessions are not configured".to_string(),
+        ));
+    };
+    let session = spawn_owned_remote_session(config);
+    state
+        .owned_sessions
+        .lock()
+        .map_err(|_| internal_error("owned session registry poisoned"))?
+        .push(session);
+    Ok(StatusCode::ACCEPTED)
+}
+
+fn spawn_owned_remote_session(config: Arc<OwnedSessionConfig>) -> OwnedRemoteSession {
+    let (runtime_event_tx, mut runtime_event_rx) = mpsc::unbounded_channel();
+    let (runtime_cmd_tx, runtime_cmd_rx) = mpsc::unbounded_channel();
+    let (remote_event_tx, mut remote_event_rx) = mpsc::unbounded_channel();
+    let agent = config.agent.clone();
+    let cwd = config.cwd.clone();
+    let project_label = crate::paths::project_label_from_cwd(&cwd);
+    let agent_label = agent_display_label(&agent);
+    let tracker = RemoteSessionTracker::new(
+        project_label,
+        agent_label,
+        Some(runtime_cmd_tx.clone()),
+        Some(remote_event_tx),
+    );
+    let runtime_cfg = AcpRuntimeConfig {
+        command: agent.program,
+        args: agent.args,
+        cwd,
+        resume_session: None,
+        env: agent.env,
+        agent_stderr: None,
+    };
+    let command_tx = runtime_cmd_tx.clone();
+    let shutdown_tx = runtime_cmd_tx.clone();
+
+    let task = tokio::spawn(async move {
+        let runtime = tokio::spawn(async move {
+            if let Err(error) = acp::run(runtime_cfg, runtime_event_tx, runtime_cmd_rx).await {
+                debug!("owned remote-control ACP runtime exited: {error:#}");
+            }
+        });
+        tokio::pin!(runtime);
+        let mut pending_permissions = std::collections::HashMap::new();
+        let mut runtime_done = false;
+
+        loop {
+            tokio::select! {
+                event = runtime_event_rx.recv() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    handle_owned_runtime_event(event, &tracker, &mut pending_permissions);
+                }
+                event = remote_event_rx.recv() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    handle_owned_remote_event(event, &mut pending_permissions);
+                }
+                joined = &mut runtime => {
+                    if let Err(error) = joined {
+                        debug!("owned remote-control runtime task join failed: {error}");
+                    }
+                    runtime_done = true;
+                    break;
+                }
+            }
+        }
+
+        if !runtime_done {
+            let _ = shutdown_tx.send(UiCommand::Shutdown);
+            let abort_handle = runtime.as_ref().abort_handle();
+            match tokio::time::timeout(Duration::from_secs(2), &mut runtime).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    debug!("owned remote-control runtime task join failed: {error}");
+                }
+                Err(_) => {
+                    debug!("owned remote-control runtime did not exit within 2s; aborting");
+                    abort_handle.abort();
+                }
+            }
+        }
+        pending_permissions.clear();
+        tracker.shutdown().await;
+    });
+
+    OwnedRemoteSession { command_tx, task }
+}
+
+fn handle_owned_runtime_event(
+    event: UiEvent,
+    tracker: &RemoteSessionTracker,
+    pending_permissions: &mut std::collections::HashMap<String, PermissionPrompt>,
+) {
+    let event = tracker.intercept_event(event);
+    tracker.observe_event(&event);
+    match event {
+        UiEvent::PermissionRequest(prompt) => {
+            pending_permissions.insert(prompt.tool_call.tool_call_id.to_string(), prompt);
+        }
+        UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } | UiEvent::Fatal(_) => {
+            pending_permissions.clear();
+        }
+        _ => {}
+    }
+}
+
+fn handle_owned_remote_event(
+    event: UiEvent,
+    pending_permissions: &mut std::collections::HashMap<String, PermissionPrompt>,
+) {
+    if let UiEvent::RemotePermissionDecision {
+        request_id,
+        option_id,
+    } = event
+    {
+        let valid_option = pending_permissions.get(&request_id).is_some_and(|prompt| {
+            prompt
+                .options
+                .iter()
+                .any(|option| option.option_id.to_string() == option_id)
+        });
+        if !valid_option {
+            return;
+        }
+        let Some(prompt) = pending_permissions.remove(&request_id) else {
+            return;
+        };
+        let _ = prompt
+            .responder
+            .send(PermissionDecision::Selected(option_id));
+    }
+}
+
+async fn shutdown_owned_remote_sessions(owned_sessions: Arc<Mutex<Vec<OwnedRemoteSession>>>) {
+    let sessions = owned_sessions
+        .lock()
+        .map(|mut guard| guard.drain(..).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for session in sessions {
+        let _ = session.command_tx.send(UiCommand::Shutdown);
+        let abort_handle = session.task.abort_handle();
+        match tokio::time::timeout(Duration::from_secs(2), session.task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!("owned remote-control session task join failed: {error}");
+            }
+            Err(_) => {
+                warn!("owned remote-control session did not exit within 2s; aborting");
+                abort_handle.abort();
+            }
+        }
     }
 }
 
@@ -2460,6 +2716,48 @@ mod tests {
             responder,
         };
         (prompt, rx)
+    }
+
+    #[test]
+    fn owned_remote_permission_decision_rejects_unknown_option() {
+        let (prompt, mut rx) = permission_prompt("call-a");
+        let mut pending = std::collections::HashMap::new();
+        pending.insert("call-a".to_string(), prompt);
+
+        handle_owned_remote_event(
+            UiEvent::RemotePermissionDecision {
+                request_id: "call-a".to_string(),
+                option_id: "no-such-option".to_string(),
+            },
+            &mut pending,
+        );
+
+        assert_eq!(pending.len(), 1, "invalid options must not consume prompts");
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid options must not answer the runtime"
+        );
+    }
+
+    #[test]
+    fn owned_remote_permission_decision_resolves_known_option() {
+        let (prompt, mut rx) = permission_prompt("call-a");
+        let mut pending = std::collections::HashMap::new();
+        pending.insert("call-a".to_string(), prompt);
+
+        handle_owned_remote_event(
+            UiEvent::RemotePermissionDecision {
+                request_id: "call-a".to_string(),
+                option_id: "allow".to_string(),
+            },
+            &mut pending,
+        );
+
+        assert!(pending.is_empty());
+        match rx.try_recv() {
+            Ok(PermissionDecision::Selected(option_id)) => assert_eq!(option_id, "allow"),
+            other => panic!("expected selected permission decision, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3610,6 +3908,8 @@ mod tests {
             viewer_code: Arc::new("123456".to_string()),
             sessions: Arc::new(Mutex::new(HashSet::new())),
             code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
+            owned_session_config: None,
+            owned_sessions: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -3815,6 +4115,23 @@ mod tests {
             .await
             .expect("send authenticated");
         assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+
+        let new_session_unavailable = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("{base}/api/sessions/new"))
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("new session request");
+        assert_eq!(
+            new_session_unavailable.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
 
         let listed = app
             .clone()

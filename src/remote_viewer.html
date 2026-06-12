@@ -92,10 +92,35 @@
         }
       }
 
+      .sidebar-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 0 0 auto;
+      }
+
       #status {
         margin: 6px 0 0;
         color: var(--muted);
         font-size: 12.5px;
+      }
+
+      .ghost-primary {
+        border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+        background: color-mix(in srgb, var(--accent) 9%, transparent);
+        color: var(--accent);
+        border-radius: 8px;
+        padding: 6px 12px;
+        cursor: pointer;
+
+        &:hover {
+          background: color-mix(in srgb, var(--accent) 14%, transparent);
+        }
+
+        &:disabled {
+          opacity: 0.55;
+          cursor: default;
+        }
       }
 
       .ghost-danger {
@@ -963,7 +988,10 @@
         <div class="panel-header">
           <div class="sidebar-title-row">
             <h1>Remote Sessions</h1>
-            <button id="logout-button" class="ghost-danger" type="button">Log out</button>
+            <div class="sidebar-actions">
+              <button id="new-session-button" class="ghost-primary" type="button">New session</button>
+              <button id="logout-button" class="ghost-danger" type="button">Log out</button>
+            </div>
           </div>
           <p id="status">Loading…</p>
         </div>
@@ -1064,6 +1092,7 @@
       const authTokenEl = $("auth-token");
       const authSubmitEl = $("auth-submit");
       const authErrorEl = $("auth-error");
+      const newSessionButtonEl = $("new-session-button");
       const logoutButtonEl = $("logout-button");
       const statusEl = $("status");
       const sessionsEl = $("sessions");
@@ -2256,6 +2285,26 @@
         }
       }
 
+      async function createNewSession() {
+        newSessionButtonEl.disabled = true;
+        statusEl.textContent = "Starting new session…";
+        try {
+          const response = await apiFetch("/api/sessions/new", {
+            method: "POST",
+          });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          await refreshSessions();
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            statusEl.textContent = `New session failed: ${error.message}`;
+          }
+        } finally {
+          newSessionButtonEl.disabled = false;
+        }
+      }
+
       async function submitAuth(event) {
         event.preventDefault();
         const code = authTokenEl.value;
@@ -2306,6 +2355,7 @@
       /* ---- wiring ---- */
 
       authFormEl.addEventListener("submit", submitAuth);
+      newSessionButtonEl.addEventListener("click", createNewSession);
       logoutButtonEl.addEventListener("click", logout);
       backButtonEl.addEventListener("click", navigateToList);
       window.addEventListener("hashchange", applyRoute);
