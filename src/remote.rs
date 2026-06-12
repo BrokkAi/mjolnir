@@ -1,6 +1,6 @@
 //! Simple remote-control server and local session registration.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -34,11 +34,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+use crate::acp::{self, AcpRuntimeConfig};
 use crate::config::SelectedAgent;
-use crate::event::{PermissionPrompt, SessionConfigTarget, UiCommand, UiEvent};
+use crate::event::{PermissionDecision, PermissionPrompt, SessionConfigTarget, UiCommand, UiEvent};
 
 const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
 const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
@@ -390,6 +392,17 @@ struct ServerState {
     /// cookie does not stay valid forever like a single shared secret would.
     sessions: Arc<Mutex<HashSet<String>>>,
     code_guard: Arc<Mutex<CodeAuthGuard>>,
+    /// Directory `mj server` was launched from. A "new session" launched from
+    /// the viewer roots its agent here, exactly as if the user had run `mj` in
+    /// this directory.
+    launch_cwd: Arc<PathBuf>,
+    /// Where to read the default agent from when launching a session. Held as
+    /// a field (rather than recomputed) so tests can point it at a fixture.
+    config_path: Arc<PathBuf>,
+    /// Join handles for the agent sessions this server owns. Their lifetime is
+    /// bound to the server: [`abort_owned_sessions`] aborts every one at
+    /// shutdown so no agent outlives the process.
+    owned_sessions: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl TrackerState {
@@ -998,7 +1011,21 @@ pub async fn run_server(hostname: Option<String>, history_days: u32) -> Result<(
     let viewer_code = generate_viewer_code()?;
     let viewer_url = remote_qr_login_url(&listen.viewer_host, &token);
 
-    let app = build_router(paths.db_path.clone(), token, viewer_code.clone());
+    // The directory `mj server` was launched from roots every "new session"
+    // started from the viewer. Captured once here because it never changes.
+    let launch_cwd = std::env::current_dir().context("determine server launch directory")?;
+    let owned_sessions: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+    let state = ServerState {
+        db_path: Arc::new(paths.db_path.clone()),
+        token: Arc::new(token),
+        viewer_code: Arc::new(viewer_code.clone()),
+        sessions: Arc::new(Mutex::new(HashSet::new())),
+        code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
+        launch_cwd: Arc::new(launch_cwd),
+        config_path: Arc::new(crate::config::default_config_path()),
+        owned_sessions: Arc::clone(&owned_sessions),
+    };
+    let app = build_router_from_state(state);
 
     let tls_config =
         axum_server::tls_rustls::RustlsConfig::from_pem_file(&paths.cert_path, &paths.key_path)
@@ -1018,10 +1045,69 @@ pub async fn run_server(hostname: Option<String>, history_days: u32) -> Result<(
     println!("{}", render_login_qr(&viewer_url)?);
     println!("viewer code: {viewer_code}");
 
-    axum_server::from_tcp_rustls(listener, tls_config)
+    // Graceful shutdown on Ctrl-C / SIGTERM. `serve` returns once the handle
+    // is told to shut down; we then abort every server-owned session so its
+    // agent child is dropped and killed (no orphan survives the server).
+    let shutdown_handle = axum_server::Handle::new();
+    spawn_shutdown_listener(shutdown_handle.clone());
+
+    let serve_result = axum_server::from_tcp_rustls(listener, tls_config)
+        .handle(shutdown_handle)
         .serve(app.into_make_service())
-        .await
-        .with_context(|| format!("serve remote-control API on {}", listen.bind_addr))
+        .await;
+
+    abort_owned_sessions(&owned_sessions).await;
+
+    serve_result.with_context(|| format!("serve remote-control API on {}", listen.bind_addr))
+}
+
+/// Wait for a shutdown signal, then ask the server to stop accepting new
+/// connections and drain in-flight requests within a short deadline.
+fn spawn_shutdown_listener(handle: axum_server::Handle) {
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        handle.graceful_shutdown(Some(Duration::from_secs(3)));
+    });
+}
+
+/// Resolve once either Ctrl-C or (on Unix) SIGTERM arrives. SIGTERM matters
+/// because that is what process supervisors and `kill` send by default.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(error) => {
+                warn!("remote-control: SIGTERM handler unavailable: {error}");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Abort every server-owned session and wait for each task to unwind. Awaiting
+/// an aborted task to completion guarantees its future has been dropped, which
+/// drops the agent child and triggers `kill_on_drop` — so when this returns no
+/// owned agent is left running.
+async fn abort_owned_sessions(owned: &Arc<Mutex<Vec<JoinHandle<()>>>>) {
+    let handles = match owned.lock() {
+        Ok(mut guard) => std::mem::take(&mut *guard),
+        Err(_) => return,
+    };
+    for handle in handles {
+        handle.abort();
+        let _ = handle.await;
+    }
 }
 
 /// Periodically sweep dead queue entries and expired session history out
@@ -1119,6 +1205,9 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// Test-only convenience: build a router with default launch settings. The
+/// server builds its [`ServerState`] directly (see [`run_server`]).
+#[cfg(test)]
 fn build_router(db_path: PathBuf, token: String, viewer_code: String) -> Router {
     let state = ServerState {
         db_path: Arc::new(db_path),
@@ -1126,11 +1215,18 @@ fn build_router(db_path: PathBuf, token: String, viewer_code: String) -> Router 
         viewer_code: Arc::new(viewer_code),
         sessions: Arc::new(Mutex::new(HashSet::new())),
         code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
+        launch_cwd: Arc::new(PathBuf::from(".")),
+        config_path: Arc::new(crate::config::default_config_path()),
+        owned_sessions: Arc::new(Mutex::new(Vec::new())),
     };
+    build_router_from_state(state)
+}
 
+fn build_router_from_state(state: ServerState) -> Router {
     let protected = Router::new()
         .route("/live/sessions", get(list_live_sessions))
         .route("/sessions", get(list_sessions))
+        .route("/api/launch-session", post(launch_owned_session))
         .route("/api/sessions", post(upsert_session))
         .route(
             "/api/sessions/{session_id}",
@@ -1399,6 +1495,146 @@ pub fn agent_display_label(agent: &SelectedAgent) -> String {
     } else {
         agent.source_id.clone()
     }
+}
+
+/// Launch a server-owned agent session: the configured default agent, that
+/// agent's default options, rooted at the directory `mj server` was launched
+/// from. The agent runs in-process; the new session shows up in the registry
+/// like any other and is driven entirely through the existing prompt /
+/// permission / config queues.
+async fn launch_owned_session(
+    State(state): State<ServerState>,
+) -> std::result::Result<StatusCode, (StatusCode, String)> {
+    let agent = resolve_default_agent(state.config_path.as_ref())
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    let cwd = state.launch_cwd.as_ref().clone();
+    let project_label = crate::paths::project_label_from_cwd(&cwd);
+    let agent_label = agent_display_label(&agent);
+    let handle = tokio::spawn(run_owned_session(agent, cwd, project_label, agent_label));
+    if let Ok(mut guard) = state.owned_sessions.lock() {
+        // Forget sessions that already ended so the registry does not grow
+        // without bound across many launches.
+        guard.retain(|handle| !handle.is_finished());
+        guard.push(handle);
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Read the default agent the same way the normal startup path does: from the
+/// user config file. Returns a viewer-friendly message when none is set.
+fn resolve_default_agent(config_path: &Path) -> std::result::Result<SelectedAgent, String> {
+    let config = crate::config::Config::load(config_path)
+        .map_err(|error| format!("load agent configuration: {error:#}"))?;
+    config
+        .agent
+        .ok_or_else(|| "no default agent is configured; run `mj` once to choose one".to_string())
+}
+
+/// Drive a server-owned in-process agent session until the agent exits or this
+/// task is aborted at shutdown. Unlike `headless::run` it never sends an initial
+/// prompt and never stops after one turn: prompts arrive over the remote-control
+/// queue, and the session lives for as long as the server does.
+///
+/// The agent child is owned by `acp::run`, which is awaited inline here (not as
+/// a detached task), so dropping this future — exactly what aborting the task
+/// does — drops the child and `kill_on_drop(true)` reliably kills the agent.
+/// That single, portable kill path is the whole reason the session runs
+/// in-process instead of as a detached subprocess.
+async fn run_owned_session(
+    agent: SelectedAgent,
+    cwd: PathBuf,
+    project_label: String,
+    agent_label: String,
+) {
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let runtime_cfg = AcpRuntimeConfig {
+        command: agent.program,
+        args: agent.args,
+        cwd,
+        resume_session: None,
+        env: agent.env,
+        agent_stderr: None,
+    };
+    // Wire the command channel so the queue poller can deliver prompts and
+    // config changes, and the UI-event channel so remote permission decisions
+    // come back as `RemotePermissionDecision` events this loop can apply.
+    let tracker = RemoteSessionTracker::new(
+        project_label,
+        agent_label,
+        Some(cmd_tx.clone()),
+        Some(event_tx.clone()),
+    );
+
+    // Permission prompts awaiting a remote decision, keyed by tool-call id.
+    let mut pending_permissions: HashMap<String, PermissionPrompt> = HashMap::new();
+
+    let session_loop = async {
+        while let Some(event) = event_rx.recv().await {
+            // Intercept publishes/retracts the pending permission for viewers;
+            // observe folds the event into the published snapshot.
+            let event = tracker.intercept_event(event);
+            tracker.observe_event(&event);
+            match event {
+                UiEvent::PermissionRequest(prompt) => {
+                    let request_id = prompt.tool_call.tool_call_id.to_string();
+                    pending_permissions.insert(request_id, prompt);
+                }
+                UiEvent::RemotePermissionDecision {
+                    request_id,
+                    option_id,
+                } => {
+                    resolve_owned_permission(&mut pending_permissions, &request_id, &option_id);
+                }
+                UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } | UiEvent::Fatal(_) => {
+                    // Turn over: any prompt still waiting was cancelled by the
+                    // runtime. Dropping the wrapped responders forwards that
+                    // cancellation, matching the TUI's behavior.
+                    pending_permissions.clear();
+                }
+                _ => {}
+            }
+        }
+    };
+
+    tokio::select! {
+        result = acp::run(runtime_cfg, event_tx, cmd_rx) => {
+            if let Err(error) = result {
+                debug!("server-owned session runtime ended: {error:#}");
+            }
+        }
+        _ = session_loop => {}
+    }
+
+    tracker.shutdown().await;
+}
+
+/// Resolve a pending permission prompt with a decision made in the viewer.
+/// Mirrors `app.rs::resolve_permission_remotely`: only consumes the prompt when
+/// the option actually exists on it, so a stale decision for an already-answered
+/// request is dropped instead of cancelling an unrelated prompt. Returns whether
+/// a prompt was resolved.
+fn resolve_owned_permission(
+    pending: &mut HashMap<String, PermissionPrompt>,
+    request_id: &str,
+    option_id: &str,
+) -> bool {
+    let option_exists = pending.get(request_id).is_some_and(|prompt| {
+        prompt
+            .options
+            .iter()
+            .any(|option| option.option_id.to_string() == option_id)
+    });
+    if !option_exists {
+        return false;
+    }
+    let prompt = pending
+        .remove(request_id)
+        .expect("option_exists implies the entry is present");
+    let _ = prompt
+        .responder
+        .send(PermissionDecision::Selected(option_id.to_string()));
+    true
 }
 
 async fn upsert_session(
@@ -3603,6 +3839,205 @@ mod tests {
         assert!(code.chars().all(|ch| ch.is_ascii_digit()));
     }
 
+    fn pending_with(
+        call_id: &str,
+    ) -> (
+        HashMap<String, PermissionPrompt>,
+        tokio::sync::oneshot::Receiver<PermissionDecision>,
+    ) {
+        let (prompt, rx) = permission_prompt(call_id);
+        let mut pending = HashMap::new();
+        pending.insert(call_id.to_string(), prompt);
+        (pending, rx)
+    }
+
+    #[test]
+    fn resolve_owned_permission_forwards_valid_decision() {
+        let (mut pending, mut rx) = pending_with("call-1");
+        assert!(resolve_owned_permission(&mut pending, "call-1", "allow"));
+        assert!(pending.is_empty(), "a resolved prompt is consumed");
+        match rx.try_recv() {
+            Ok(PermissionDecision::Selected(id)) => assert_eq!(id, "allow"),
+            other => panic!("expected forwarded decision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_owned_permission_ignores_unknown_request() {
+        let (mut pending, _rx) = pending_with("call-1");
+        // A decision for a different request must not touch the queued prompt.
+        assert!(!resolve_owned_permission(
+            &mut pending,
+            "call-other",
+            "allow"
+        ));
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn resolve_owned_permission_ignores_missing_option() {
+        let (mut pending, _rx) = pending_with("call-1");
+        // The option is not one the prompt offered: a stale answer must not
+        // resolve (or cancel) it.
+        assert!(!resolve_owned_permission(
+            &mut pending,
+            "call-1",
+            "nonexistent"
+        ));
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn resolve_default_agent_errors_without_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("config.toml");
+        let err = resolve_default_agent(&missing).expect_err("no agent configured");
+        assert!(
+            err.contains("no default agent"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_default_agent_reads_configured_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let config = crate::config::Config {
+            agent: Some(SelectedAgent {
+                source_id: "custom".to_string(),
+                program: PathBuf::from("/usr/bin/example-agent"),
+                args: vec!["--acp".to_string()],
+                env: HashMap::new(),
+            }),
+            ..Default::default()
+        };
+        config.save(&path).expect("save config");
+
+        let agent = resolve_default_agent(&path).expect("agent resolves");
+        assert_eq!(agent.source_id, "custom");
+        assert_eq!(agent.program, PathBuf::from("/usr/bin/example-agent"));
+        assert_eq!(agent.args, vec!["--acp".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn launch_session_rejects_without_configured_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        init_db(&db_path).expect("init db");
+        let token = "integration-token".to_string();
+        let state = ServerState {
+            db_path: Arc::new(db_path),
+            token: Arc::new(token.clone()),
+            viewer_code: Arc::new("123456".to_string()),
+            sessions: Arc::new(Mutex::new(HashSet::new())),
+            code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
+            launch_cwd: Arc::new(dir.path().to_path_buf()),
+            // No config file exists at this path -> no default agent.
+            config_path: Arc::new(dir.path().join("config.toml")),
+            owned_sessions: Arc::new(Mutex::new(Vec::new())),
+        };
+        let app = build_router_from_state(state);
+
+        // Unauthenticated requests are rejected before any agent lookup.
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/launch-session")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("send unauthenticated");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        // Authenticated but no agent configured -> a clear 400.
+        let no_agent = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/launch-session")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("send authenticated");
+        assert_eq!(no_agent.status(), StatusCode::BAD_REQUEST);
+        let body = String::from_utf8(
+            no_agent
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes()
+                .to_vec(),
+        )
+        .expect("utf8");
+        assert!(body.contains("no default agent"), "unexpected body: {body}");
+    }
+
+    // Uses /bin/sh as a throwaway "agent": it is not an ACP agent, so the
+    // spawned session ends on its own almost immediately. The point is only to
+    // prove the endpoint accepts the launch and registers the owned session so
+    // shutdown can later reap it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_session_accepts_and_registers_owned_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        init_db(&db_path).expect("init db");
+        let config_path = dir.path().join("config.toml");
+        crate::config::Config {
+            agent: Some(SelectedAgent {
+                source_id: "custom".to_string(),
+                program: PathBuf::from("/bin/sh"),
+                args: vec!["-c".to_string(), "exit 0".to_string()],
+                env: HashMap::new(),
+            }),
+            ..Default::default()
+        }
+        .save(&config_path)
+        .expect("save config");
+
+        let token = "integration-token".to_string();
+        let owned_sessions: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+        let state = ServerState {
+            db_path: Arc::new(db_path),
+            token: Arc::new(token.clone()),
+            viewer_code: Arc::new("123456".to_string()),
+            sessions: Arc::new(Mutex::new(HashSet::new())),
+            code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
+            launch_cwd: Arc::new(dir.path().to_path_buf()),
+            config_path: Arc::new(config_path),
+            owned_sessions: Arc::clone(&owned_sessions),
+        };
+        let app = build_router_from_state(state);
+
+        let accepted = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/launch-session")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("send launch");
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            owned_sessions.lock().expect("owned sessions").len(),
+            1,
+            "the launched session is registered for shutdown"
+        );
+
+        // Reap the throwaway session so the test leaves nothing running.
+        abort_owned_sessions(&owned_sessions).await;
+        assert!(owned_sessions.lock().expect("owned sessions").is_empty());
+    }
+
     fn test_state() -> ServerState {
         ServerState {
             db_path: Arc::new(PathBuf::from("unused.sqlite3")),
@@ -3610,6 +4045,9 @@ mod tests {
             viewer_code: Arc::new("123456".to_string()),
             sessions: Arc::new(Mutex::new(HashSet::new())),
             code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
+            launch_cwd: Arc::new(PathBuf::from(".")),
+            config_path: Arc::new(PathBuf::from("unused-config.toml")),
+            owned_sessions: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
