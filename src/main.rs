@@ -237,6 +237,11 @@ async fn main() -> Result<()> {
         tracing::warn!("startup update check failed: {e:#}");
     }
 
+    let cwd = match cli.cwd.clone() {
+        Some(p) => p,
+        None => std::env::current_dir().context("current dir")?,
+    };
+
     // Dispatch to subcommand if provided.
     if let Some(command) = cli.command {
         return match command {
@@ -244,14 +249,11 @@ async fn main() -> Result<()> {
                 args.fullscreen_tui |= fullscreen_tui;
                 run_resume(args).await
             }
-            Commands::Server(args) => remote::run_server(args.hostname, args.history_days).await,
+            Commands::Server(args) => {
+                remote::run_server(args.hostname, args.history_days, cwd).await
+            }
         };
     }
-
-    let cwd = match cli.cwd {
-        Some(p) => p,
-        None => std::env::current_dir().context("current dir")?,
-    };
 
     if let Some(prompt_arg) = cli.print {
         let prompt = read_headless_prompt(prompt_arg)?;
@@ -1192,6 +1194,13 @@ mod tests {
             Some(Commands::Server(args)) => assert!(args.hostname.is_none()),
             _ => panic!("expected Server subcommand"),
         }
+    }
+
+    #[test]
+    fn parse_server_subcommand_with_global_cwd() {
+        let cli = Cli::try_parse_from(["mj", "--cwd", "/tmp/test", "server"]).expect("parse");
+        assert_eq!(cli.cwd, Some(PathBuf::from("/tmp/test")));
+        assert!(matches!(cli.command, Some(Commands::Server(_))));
     }
 
     #[test]
