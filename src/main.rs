@@ -126,6 +126,9 @@ struct ServerArgs {
     /// Public hostname to embed in the login QR code and TLS certificate.
     #[arg(long)]
     hostname: Option<String>,
+    /// TCP port for the remote-control server.
+    #[arg(long, default_value_t = remote::DEFAULT_REMOTE_CONTROL_PORT, value_parser = parse_server_port)]
+    port: u16,
     /// Days of disconnected-session history to keep. Sessions (and their
     /// queued prompts) whose last update is older are deleted by the
     /// periodic sweeper. Pass 0 to keep history forever.
@@ -175,6 +178,16 @@ enum HeadlessOutputFormat {
     Text,
     Json,
     StreamJson,
+}
+
+fn parse_server_port(value: &str) -> std::result::Result<u16, String> {
+    let port = value
+        .parse::<u16>()
+        .map_err(|_| "port must be an integer between 1 and 65535".to_string())?;
+    if port == 0 {
+        return Err("port must be between 1 and 65535".to_string());
+    }
+    Ok(port)
 }
 
 impl From<HeadlessOutputFormat> for headless::OutputFormat {
@@ -250,7 +263,7 @@ async fn main() -> Result<()> {
                 run_resume(args).await
             }
             Commands::Server(args) => {
-                remote::run_server(args.hostname, args.history_days, cwd).await
+                remote::run_server(args.hostname, args.history_days, args.port, cwd).await
             }
         };
     }
@@ -1191,9 +1204,27 @@ mod tests {
     fn parse_server_subcommand() {
         let cli = Cli::try_parse_from(["mj", "server"]).expect("parse");
         match cli.command {
-            Some(Commands::Server(args)) => assert!(args.hostname.is_none()),
+            Some(Commands::Server(args)) => {
+                assert!(args.hostname.is_none());
+                assert_eq!(args.port, remote::DEFAULT_REMOTE_CONTROL_PORT);
+            }
             _ => panic!("expected Server subcommand"),
         }
+    }
+
+    #[test]
+    fn parse_server_subcommand_with_port() {
+        let cli = Cli::try_parse_from(["mj", "server", "--port", "11922"]).expect("parse");
+        match cli.command {
+            Some(Commands::Server(args)) => assert_eq!(args.port, 11922),
+            _ => panic!("expected Server subcommand"),
+        }
+    }
+
+    #[test]
+    fn parse_server_subcommand_rejects_zero_port() {
+        let err = Cli::try_parse_from(["mj", "server", "--port", "0"]).expect_err("reject");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

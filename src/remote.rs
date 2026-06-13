@@ -42,9 +42,7 @@ use crate::acp::{self, AcpRuntimeConfig};
 use crate::config::{self, SelectedAgent};
 use crate::event::{PermissionDecision, PermissionPrompt, SessionConfigTarget, UiCommand, UiEvent};
 
-const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
-const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
-const REMOTE_CONTROL_UPSERT_URL: &str = "https://localhost:11921/api/sessions";
+pub const DEFAULT_REMOTE_CONTROL_PORT: u16 = 11921;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const CONNECTED_SESSION_TTL: Duration = Duration::from_secs(75);
 /// How often `mj server` sweeps dead queue entries out of sqlite.
@@ -349,6 +347,7 @@ pub struct RemoteSessionTracker {
     /// decisions could never be applied, so pending permissions must not
     /// be advertised to viewers at all.
     publish_permissions: bool,
+    server_base_url: Arc<String>,
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -374,12 +373,14 @@ struct ServerPaths {
     cert_path: PathBuf,
     key_path: PathBuf,
     token_path: PathBuf,
+    port_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerListenConfig {
     bind_addr: String,
     viewer_host: String,
+    port: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -608,6 +609,17 @@ impl RemoteSessionTracker {
         command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
         ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
     ) -> Self {
+        let port = read_server_port(&remote_control_dir());
+        Self::new_with_port(project, agent, command_tx, ui_event_tx, port)
+    }
+
+    fn new_with_port(
+        project: String,
+        agent: String,
+        command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
+        ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
+        port: u16,
+    ) -> Self {
         let dir = remote_control_dir();
         let token = read_token(&dir.join("token")).map(Arc::new);
         let client = build_client(&dir.join("cert.pem"));
@@ -619,6 +631,7 @@ impl RemoteSessionTracker {
             publish_signal: Arc::new(tokio::sync::Notify::new()),
             queue_poller: Arc::new(Mutex::new(None)),
             publish_permissions: ui_event_tx.is_some(),
+            server_base_url: Arc::new(remote_control_base_url(port)),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
         tracker.ensure_queue_poller(command_tx, ui_event_tx);
@@ -637,6 +650,7 @@ impl RemoteSessionTracker {
             publish_signal: Arc::new(tokio::sync::Notify::new()),
             queue_poller: Arc::new(Mutex::new(None)),
             publish_permissions: true,
+            server_base_url: Arc::new(remote_control_base_url(DEFAULT_REMOTE_CONTROL_PORT)),
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -753,17 +767,25 @@ impl RemoteSessionTracker {
         let Some(client) = self.client.clone() else {
             return;
         };
+        let server_base_url = Arc::clone(&self.server_base_url);
         let snapshot = self.state.lock().ok().and_then(|state| state.snapshot());
         let session_id = snapshot
             .as_ref()
             .map(|snapshot| snapshot.session_id.clone());
         if let Some(snapshot) = snapshot
-            && let Err(error) = send_snapshot(client.clone(), self.token.clone(), snapshot).await
+            && let Err(error) = send_snapshot(
+                client.clone(),
+                self.token.clone(),
+                Arc::clone(&server_base_url),
+                snapshot,
+            )
+            .await
         {
             debug!("final remote-control flush failed: {error:#}");
         }
         if let Some(session_id) = session_id
-            && let Err(error) = send_disconnect(client, self.token.clone(), &session_id).await
+            && let Err(error) =
+                send_disconnect(client, self.token.clone(), server_base_url, &session_id).await
         {
             debug!("remote-control disconnect failed: {error:#}");
         }
@@ -794,6 +816,7 @@ impl RemoteSessionTracker {
         let state = Arc::clone(&self.state);
         let token = self.token.clone();
         let signal = Arc::clone(&self.publish_signal);
+        let server_base_url = Arc::clone(&self.server_base_url);
         *slot = Some(tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -810,7 +833,14 @@ impl RemoteSessionTracker {
                 let Some(snapshot) = snapshot else {
                     continue;
                 };
-                if let Err(error) = send_snapshot(client.clone(), token.clone(), snapshot).await {
+                if let Err(error) = send_snapshot(
+                    client.clone(),
+                    token.clone(),
+                    Arc::clone(&server_base_url),
+                    snapshot,
+                )
+                .await
+                {
                     debug!("remote-control publish failed: {error:#}");
                 }
             }
@@ -836,6 +866,7 @@ impl RemoteSessionTracker {
         }
         let token = self.token.clone();
         let state = Arc::clone(&self.state);
+        let server_base_url = Arc::clone(&self.server_base_url);
         *slot = Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -854,6 +885,7 @@ impl RemoteSessionTracker {
                         match claim_remote_permission_decision(
                             client.clone(),
                             token.clone(),
+                            Arc::clone(&server_base_url),
                             &session_id,
                         )
                         .await
@@ -882,8 +914,13 @@ impl RemoteSessionTracker {
                     .ok()
                     .and_then(|guard| guard.config_claim_session());
                 if let Some(session_id) = config_session {
-                    match claim_remote_config_change(client.clone(), token.clone(), &session_id)
-                        .await
+                    match claim_remote_config_change(
+                        client.clone(),
+                        token.clone(),
+                        Arc::clone(&server_base_url),
+                        &session_id,
+                    )
+                    .await
                     {
                         Ok(Some(change)) => {
                             match config_target_from_parts(
@@ -927,7 +964,13 @@ impl RemoteSessionTracker {
                     continue;
                 };
 
-                let queued = claim_remote_prompt(client.clone(), token.clone(), &session_id).await;
+                let queued = claim_remote_prompt(
+                    client.clone(),
+                    token.clone(),
+                    Arc::clone(&server_base_url),
+                    &session_id,
+                )
+                .await;
                 match queued {
                     Ok(Some(prompt)) => {
                         let command = UiCommand::SendPrompt {
@@ -994,7 +1037,12 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
     }
 }
 
-pub async fn run_server(hostname: Option<String>, history_days: u32, cwd: PathBuf) -> Result<()> {
+pub async fn run_server(
+    hostname: Option<String>,
+    history_days: u32,
+    port: u16,
+    cwd: PathBuf,
+) -> Result<()> {
     clear_terminal_screen()?;
     install_crypto_provider();
 
@@ -1008,12 +1056,13 @@ pub async fn run_server(hostname: Option<String>, history_days: u32, cwd: PathBu
     })?;
 
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
-    let listen = server_listen_config(requested_hostname.as_deref())?;
+    let listen = server_listen_config(requested_hostname.as_deref(), port)?;
     let paths = ensure_server_paths(requested_hostname.as_deref())?;
     init_db(&paths.db_path)?;
     let token = ensure_token(&paths.token_path)?;
+    write_server_port(&paths.port_path, port)?;
     let viewer_code = generate_viewer_code()?;
-    let viewer_url = remote_qr_login_url(&listen.viewer_host, &token);
+    let viewer_url = remote_qr_login_url(&listen.viewer_host, listen.port, &token);
 
     let app = build_router(paths.db_path.clone(), token, viewer_code.clone());
 
@@ -1029,8 +1078,8 @@ pub async fn run_server(hostname: Option<String>, history_days: u32, cwd: PathBu
     spawn_queue_pruner(paths.db_path.clone(), history_ttl);
 
     println!(
-        "Remote control listening on https://{}:11921",
-        listen.viewer_host
+        "Remote control listening on https://{}:{}",
+        listen.viewer_host, listen.port
     );
     println!("{}", render_login_qr(&viewer_url)?);
     println!("viewer code: {viewer_code}");
@@ -1042,7 +1091,7 @@ pub async fn run_server(hostname: Option<String>, history_days: u32, cwd: PathBu
     let server_task = tokio::spawn(server);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let agent_session = start_server_agent_session(agent, cwd);
+    let agent_session = start_server_agent_session(agent, cwd, listen.port);
     let mut agent_session = Some(agent_session);
     let mut server_task = server_task;
     let result = tokio::select! {
@@ -1064,17 +1113,18 @@ pub async fn run_server(hostname: Option<String>, history_days: u32, cwd: PathBu
     result.with_context(|| format!("serve remote-control API on {}", listen.bind_addr))
 }
 
-fn start_server_agent_session(agent: SelectedAgent, cwd: PathBuf) -> ServerAgentSession {
+fn start_server_agent_session(agent: SelectedAgent, cwd: PathBuf, port: u16) -> ServerAgentSession {
     let (runtime_event_tx, mut runtime_event_rx) = mpsc::unbounded_channel();
     let (runtime_cmd_tx, runtime_cmd_rx) = mpsc::unbounded_channel();
     let (remote_event_tx, mut remote_event_rx) = mpsc::unbounded_channel();
     let agent_label = agent_display_label(&agent);
     let project_label = crate::paths::project_label_from_cwd(&cwd);
-    let tracker = RemoteSessionTracker::new(
+    let tracker = RemoteSessionTracker::new_with_port(
         project_label,
         agent_label,
         Some(runtime_cmd_tx.clone()),
         Some(remote_event_tx),
+        port,
     );
     let runtime_cfg = AcpRuntimeConfig {
         command: agent.program,
@@ -1256,12 +1306,16 @@ fn normalize_requested_hostname(hostname: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn remote_qr_login_url(host: &str, token: &str) -> String {
+fn remote_control_base_url(port: u16) -> String {
+    format!("https://localhost:{port}")
+}
+
+fn remote_qr_login_url(host: &str, port: u16, token: &str) -> String {
     let encoded = url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
     // Target `/auth/login` (not `/?token=`) so the server validates the token,
     // sets the session cookie, and redirects to a clean `/`. This keeps the
     // long-lived token out of the browser history and out of later requests.
-    format!("https://{host}:11921/auth/login?token={encoded}")
+    format!("https://{host}:{port}/auth/login?token={encoded}")
 }
 
 fn render_login_qr(url: &str) -> Result<String> {
@@ -1782,15 +1836,17 @@ fn remote_control_dir() -> PathBuf {
         .join("remote-control")
 }
 
-fn server_listen_config(hostname: Option<&str>) -> Result<ServerListenConfig> {
+fn server_listen_config(hostname: Option<&str>, port: u16) -> Result<ServerListenConfig> {
     match normalize_requested_hostname(hostname).as_deref() {
         Some(hostname) => Ok(ServerListenConfig {
-            bind_addr: REMOTE_CONTROL_PUBLIC_ADDR.to_string(),
+            bind_addr: format!("0.0.0.0:{port}"),
             viewer_host: hostname.to_string(),
+            port,
         }),
         None => Ok(ServerListenConfig {
-            bind_addr: REMOTE_CONTROL_LOCAL_ADDR.to_string(),
+            bind_addr: format!("127.0.0.1:{port}"),
             viewer_host: "localhost".to_string(),
+            port,
         }),
     }
 }
@@ -1836,7 +1892,21 @@ fn ensure_server_paths_in(root: &Path, hostname: Option<&str>) -> Result<ServerP
         cert_path,
         key_path,
         token_path: root.join("token"),
+        port_path: root.join("port"),
     })
+}
+
+fn write_server_port(port_path: &Path, port: u16) -> Result<()> {
+    std::fs::write(port_path, port.to_string())
+        .with_context(|| format!("write {}", port_path.display()))?;
+    Ok(())
+}
+
+fn read_server_port(root: &Path) -> u16 {
+    read_token(&root.join("port"))
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .unwrap_or(DEFAULT_REMOTE_CONTROL_PORT)
 }
 
 /// Load the shared bearer token, generating and persisting one on first run.
@@ -2437,9 +2507,12 @@ fn claim_config_change_record(
 async fn send_snapshot(
     client: reqwest::Client,
     token: Option<Arc<String>>,
+    server_base_url: Arc<String>,
     snapshot: SessionRecord,
 ) -> Result<()> {
-    let mut request = client.post(REMOTE_CONTROL_UPSERT_URL).json(&snapshot);
+    let mut request = client
+        .post(format!("{server_base_url}/api/sessions"))
+        .json(&snapshot);
     if let Some(token) = token {
         request = request.bearer_auth(token.as_str());
     }
@@ -2455,11 +2528,14 @@ async fn send_snapshot(
 async fn send_disconnect(
     client: reqwest::Client,
     token: Option<Arc<String>>,
+    server_base_url: Arc<String>,
     session_id: &str,
 ) -> Result<()> {
     let encoded_session_id =
         url::form_urlencoded::byte_serialize(session_id.as_bytes()).collect::<String>();
-    let mut request = client.delete(format!("{REMOTE_CONTROL_UPSERT_URL}/{encoded_session_id}"));
+    let mut request = client.delete(format!(
+        "{server_base_url}/api/sessions/{encoded_session_id}"
+    ));
     if let Some(token) = token {
         request = request.bearer_auth(token.as_str());
     }
@@ -2475,10 +2551,11 @@ async fn send_disconnect(
 async fn claim_remote_prompt(
     client: reqwest::Client,
     token: Option<Arc<String>>,
+    server_base_url: Arc<String>,
     session_id: &str,
 ) -> Result<Option<QueuedPrompt>> {
     let mut request = client
-        .post("https://localhost:11921/api/queued-prompts/claim")
+        .post(format!("{server_base_url}/api/queued-prompts/claim"))
         .json(&ClaimQueuedPromptRequest {
             session_id: session_id.to_string(),
         });
@@ -2500,10 +2577,11 @@ async fn claim_remote_prompt(
 async fn claim_remote_permission_decision(
     client: reqwest::Client,
     token: Option<Arc<String>>,
+    server_base_url: Arc<String>,
     session_id: &str,
 ) -> Result<Option<PermissionDecisionRecord>> {
     let mut request = client
-        .post("https://localhost:11921/api/permission-decisions/claim")
+        .post(format!("{server_base_url}/api/permission-decisions/claim"))
         .json(&ClaimPermissionDecisionRequest {
             session_id: session_id.to_string(),
         });
@@ -2525,10 +2603,11 @@ async fn claim_remote_permission_decision(
 async fn claim_remote_config_change(
     client: reqwest::Client,
     token: Option<Arc<String>>,
+    server_base_url: Arc<String>,
     session_id: &str,
 ) -> Result<Option<ConfigChangeRecord>> {
     let mut request = client
-        .post("https://localhost:11921/api/config-changes/claim")
+        .post(format!("{server_base_url}/api/config-changes/claim"))
         .json(&ClaimConfigChangeRequest {
             session_id: session_id.to_string(),
         });
@@ -3763,10 +3842,11 @@ mod tests {
     #[test]
     fn server_listen_config_defaults_to_localhost() {
         assert_eq!(
-            server_listen_config(None).expect("config"),
+            server_listen_config(None, DEFAULT_REMOTE_CONTROL_PORT).expect("config"),
             ServerListenConfig {
-                bind_addr: REMOTE_CONTROL_LOCAL_ADDR.to_string(),
+                bind_addr: "127.0.0.1:11921".to_string(),
                 viewer_host: "localhost".to_string(),
+                port: DEFAULT_REMOTE_CONTROL_PORT,
             }
         );
     }
@@ -3774,10 +3854,11 @@ mod tests {
     #[test]
     fn server_listen_config_uses_public_hostname() {
         assert_eq!(
-            server_listen_config(Some("example.com")).expect("config"),
+            server_listen_config(Some("example.com"), 11922).expect("config"),
             ServerListenConfig {
-                bind_addr: REMOTE_CONTROL_PUBLIC_ADDR.to_string(),
+                bind_addr: "0.0.0.0:11922".to_string(),
                 viewer_host: "example.com".to_string(),
+                port: 11922,
             }
         );
     }
@@ -3785,8 +3866,8 @@ mod tests {
     #[test]
     fn server_listen_config_treats_blank_hostname_as_localhost() {
         assert_eq!(
-            server_listen_config(Some("   ")).expect("config"),
-            server_listen_config(None).expect("config")
+            server_listen_config(Some("   "), 11923).expect("config"),
+            server_listen_config(None, 11923).expect("config")
         );
     }
 
@@ -3907,14 +3988,30 @@ mod tests {
     }
 
     #[test]
+    fn server_port_persists_and_invalid_values_fall_back_to_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(read_server_port(dir.path()), DEFAULT_REMOTE_CONTROL_PORT);
+
+        let port_path = dir.path().join("port");
+        write_server_port(&port_path, 11922).expect("write");
+        assert_eq!(read_server_port(dir.path()), 11922);
+
+        std::fs::write(&port_path, "0").expect("write");
+        assert_eq!(read_server_port(dir.path()), DEFAULT_REMOTE_CONTROL_PORT);
+
+        std::fs::write(&port_path, "not-a-port").expect("write");
+        assert_eq!(read_server_port(dir.path()), DEFAULT_REMOTE_CONTROL_PORT);
+    }
+
+    #[test]
     fn remote_qr_login_url_encodes_query_token() {
         assert_eq!(
-            remote_qr_login_url("localhost", "abc123"),
+            remote_qr_login_url("localhost", DEFAULT_REMOTE_CONTROL_PORT, "abc123"),
             "https://localhost:11921/auth/login?token=abc123"
         );
         assert_eq!(
-            remote_qr_login_url("example.com", "a+b/c=="),
-            "https://example.com:11921/auth/login?token=a%2Bb%2Fc%3D%3D"
+            remote_qr_login_url("example.com", 11922, "a+b/c=="),
+            "https://example.com:11922/auth/login?token=a%2Bb%2Fc%3D%3D"
         );
     }
 
