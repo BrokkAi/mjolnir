@@ -126,6 +126,9 @@ struct ServerArgs {
     /// Public hostname to embed in the login QR code and TLS certificate.
     #[arg(long)]
     hostname: Option<String>,
+    /// Port to listen on. Defaults to 11921 when not given.
+    #[arg(long)]
+    port: Option<u16>,
     /// Days of disconnected-session history to keep. Sessions (and their
     /// queued prompts) whose last update is older are deleted by the
     /// periodic sweeper. Pass 0 to keep history forever.
@@ -244,7 +247,9 @@ async fn main() -> Result<()> {
                 args.fullscreen_tui |= fullscreen_tui;
                 run_resume(args).await
             }
-            Commands::Server(args) => remote::run_server(args.hostname, args.history_days).await,
+            Commands::Server(args) => {
+                remote::run_server(args.hostname, args.port, args.history_days).await
+            }
         };
     }
 
@@ -1189,7 +1194,10 @@ mod tests {
     fn parse_server_subcommand() {
         let cli = Cli::try_parse_from(["mj", "server"]).expect("parse");
         match cli.command {
-            Some(Commands::Server(args)) => assert!(args.hostname.is_none()),
+            Some(Commands::Server(args)) => {
+                assert!(args.hostname.is_none());
+                assert!(args.port.is_none());
+            }
             _ => panic!("expected Server subcommand"),
         }
     }
@@ -1202,6 +1210,15 @@ mod tests {
             Some(Commands::Server(args)) => {
                 assert_eq!(args.hostname.as_deref(), Some("example.com"))
             }
+            _ => panic!("expected Server subcommand"),
+        }
+    }
+
+    #[test]
+    fn parse_server_subcommand_with_port() {
+        let cli = Cli::try_parse_from(["mj", "server", "--port", "12000"]).expect("parse");
+        match cli.command {
+            Some(Commands::Server(args)) => assert_eq!(args.port, Some(12000)),
             _ => panic!("expected Server subcommand"),
         }
     }

@@ -42,8 +42,16 @@ use crate::acp::{self, AcpRuntimeConfig};
 use crate::config::{self, SelectedAgent};
 use crate::event::{PermissionDecision, PermissionPrompt, SessionConfigTarget, UiCommand, UiEvent};
 
-const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
-const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
+/// Default port for the remote-control server, used when `mj server` is run
+/// without `--port`. The loopback client URLs below intentionally pin this
+/// default: in-process clients always reach the server over `localhost`.
+const DEFAULT_REMOTE_CONTROL_PORT: u16 = 11921;
+/// Loopback bind host used when no `--hostname` is given (reachable only from
+/// the same machine).
+const REMOTE_CONTROL_LOCAL_HOST: &str = "127.0.0.1";
+/// Wildcard bind host used with `--hostname` so other devices on the network
+/// can reach the server.
+const REMOTE_CONTROL_PUBLIC_HOST: &str = "0.0.0.0";
 const REMOTE_CONTROL_UPSERT_URL: &str = "https://localhost:11921/api/sessions";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const CONNECTED_SESSION_TTL: Duration = Duration::from_secs(75);
@@ -380,6 +388,8 @@ struct ServerPaths {
 struct ServerListenConfig {
     bind_addr: String,
     viewer_host: String,
+    /// Port the server binds and the viewer URL / QR advertise.
+    port: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -1002,7 +1012,11 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
     }
 }
 
-pub async fn run_server(hostname: Option<String>, history_days: u32) -> Result<()> {
+pub async fn run_server(
+    hostname: Option<String>,
+    port: Option<u16>,
+    history_days: u32,
+) -> Result<()> {
     clear_terminal_screen()?;
     install_crypto_provider();
 
@@ -1017,13 +1031,14 @@ pub async fn run_server(hostname: Option<String>, history_days: u32) -> Result<(
     })?;
     let owned_session_config = OwnedSessionConfig { cwd, agent };
 
+    let port = port.unwrap_or(DEFAULT_REMOTE_CONTROL_PORT);
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
-    let listen = server_listen_config(requested_hostname.as_deref())?;
+    let listen = server_listen_config(requested_hostname.as_deref(), port)?;
     let paths = ensure_server_paths(requested_hostname.as_deref())?;
     init_db(&paths.db_path)?;
     let token = ensure_token(&paths.token_path)?;
     let viewer_code = generate_viewer_code()?;
-    let viewer_url = remote_qr_login_url(&listen.viewer_host, &token);
+    let viewer_url = remote_qr_login_url(&listen.viewer_host, listen.port, &token);
 
     let owned_sessions = Arc::new(Mutex::new(Vec::new()));
     let app = build_router_with_owned_sessions(
@@ -1046,8 +1061,8 @@ pub async fn run_server(hostname: Option<String>, history_days: u32) -> Result<(
     spawn_queue_pruner(paths.db_path.clone(), history_ttl);
 
     println!(
-        "Remote control listening on https://{}:11921",
-        listen.viewer_host
+        "Remote control listening on https://{}:{}",
+        listen.viewer_host, listen.port
     );
     println!("{}", render_login_qr(&viewer_url)?);
     println!("viewer code: {viewer_code}");
@@ -1136,12 +1151,12 @@ fn normalize_requested_hostname(hostname: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn remote_qr_login_url(host: &str, token: &str) -> String {
+fn remote_qr_login_url(host: &str, port: u16, token: &str) -> String {
     let encoded = url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
     // Target `/auth/login` (not `/?token=`) so the server validates the token,
     // sets the session cookie, and redirects to a clean `/`. This keeps the
     // long-lived token out of the browser history and out of later requests.
-    format!("https://{host}:11921/auth/login?token={encoded}")
+    format!("https://{host}:{port}/auth/login?token={encoded}")
 }
 
 fn render_login_qr(url: &str) -> Result<String> {
@@ -1862,15 +1877,17 @@ fn remote_control_dir() -> PathBuf {
         .join("remote-control")
 }
 
-fn server_listen_config(hostname: Option<&str>) -> Result<ServerListenConfig> {
+fn server_listen_config(hostname: Option<&str>, port: u16) -> Result<ServerListenConfig> {
     match normalize_requested_hostname(hostname).as_deref() {
         Some(hostname) => Ok(ServerListenConfig {
-            bind_addr: REMOTE_CONTROL_PUBLIC_ADDR.to_string(),
+            bind_addr: format!("{REMOTE_CONTROL_PUBLIC_HOST}:{port}"),
             viewer_host: hostname.to_string(),
+            port,
         }),
         None => Ok(ServerListenConfig {
-            bind_addr: REMOTE_CONTROL_LOCAL_ADDR.to_string(),
+            bind_addr: format!("{REMOTE_CONTROL_LOCAL_HOST}:{port}"),
             viewer_host: "localhost".to_string(),
+            port,
         }),
     }
 }
@@ -3843,10 +3860,11 @@ mod tests {
     #[test]
     fn server_listen_config_defaults_to_localhost() {
         assert_eq!(
-            server_listen_config(None).expect("config"),
+            server_listen_config(None, DEFAULT_REMOTE_CONTROL_PORT).expect("config"),
             ServerListenConfig {
-                bind_addr: REMOTE_CONTROL_LOCAL_ADDR.to_string(),
+                bind_addr: "127.0.0.1:11921".to_string(),
                 viewer_host: "localhost".to_string(),
+                port: 11921,
             }
         );
     }
@@ -3854,10 +3872,31 @@ mod tests {
     #[test]
     fn server_listen_config_uses_public_hostname() {
         assert_eq!(
-            server_listen_config(Some("example.com")).expect("config"),
+            server_listen_config(Some("example.com"), DEFAULT_REMOTE_CONTROL_PORT).expect("config"),
             ServerListenConfig {
-                bind_addr: REMOTE_CONTROL_PUBLIC_ADDR.to_string(),
+                bind_addr: "0.0.0.0:11921".to_string(),
                 viewer_host: "example.com".to_string(),
+                port: 11921,
+            }
+        );
+    }
+
+    #[test]
+    fn server_listen_config_honors_custom_port() {
+        assert_eq!(
+            server_listen_config(None, 12000).expect("config"),
+            ServerListenConfig {
+                bind_addr: "127.0.0.1:12000".to_string(),
+                viewer_host: "localhost".to_string(),
+                port: 12000,
+            }
+        );
+        assert_eq!(
+            server_listen_config(Some("example.com"), 12000).expect("config"),
+            ServerListenConfig {
+                bind_addr: "0.0.0.0:12000".to_string(),
+                viewer_host: "example.com".to_string(),
+                port: 12000,
             }
         );
     }
@@ -3865,8 +3904,8 @@ mod tests {
     #[test]
     fn server_listen_config_treats_blank_hostname_as_localhost() {
         assert_eq!(
-            server_listen_config(Some("   ")).expect("config"),
-            server_listen_config(None).expect("config")
+            server_listen_config(Some("   "), DEFAULT_REMOTE_CONTROL_PORT).expect("config"),
+            server_listen_config(None, DEFAULT_REMOTE_CONTROL_PORT).expect("config")
         );
     }
 
@@ -3991,12 +4030,20 @@ mod tests {
     #[test]
     fn remote_qr_login_url_encodes_query_token() {
         assert_eq!(
-            remote_qr_login_url("localhost", "abc123"),
+            remote_qr_login_url("localhost", DEFAULT_REMOTE_CONTROL_PORT, "abc123"),
             "https://localhost:11921/auth/login?token=abc123"
         );
         assert_eq!(
-            remote_qr_login_url("example.com", "a+b/c=="),
+            remote_qr_login_url("example.com", DEFAULT_REMOTE_CONTROL_PORT, "a+b/c=="),
             "https://example.com:11921/auth/login?token=a%2Bb%2Fc%3D%3D"
+        );
+    }
+
+    #[test]
+    fn remote_qr_login_url_reflects_custom_port() {
+        assert_eq!(
+            remote_qr_login_url("example.com", 12000, "abc123"),
+            "https://example.com:12000/auth/login?token=abc123"
         );
     }
 
