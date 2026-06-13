@@ -1162,11 +1162,16 @@
       }
 
       function withViewTransition(update) {
-        if (document.startViewTransition && !reducedMotion.matches) {
-          document.startViewTransition(update);
-        } else {
-          update();
-        }
+        // document.startViewTransition() paints a root snapshot overlay in the
+        // top layer while it animates. For its whole duration the live DOM is
+        // not hit-testable: a mouse click on any control (e.g. "New session")
+        // that lands mid-transition resolves to <html> and is silently dropped,
+        // so the action never fires. Overlapping transitions (init + resume, or
+        // route changes during SSE polling) also reject with an unhandled
+        // "AbortError: Transition was skipped". The crossfade is purely
+        // cosmetic, so run the update directly and keep the UI responsive to
+        // input at all times.
+        update();
       }
 
       function cloneTemplate(template) {
