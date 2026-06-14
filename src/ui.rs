@@ -2222,11 +2222,12 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         // prompt fires as soon as `PromptDone(Cancelled)` lands instead
         // of waiting for the original response to finish (steering).
         // A second Enter replaces the stashed prompt (last-write-wins);
-        // the cancel is only sent on the first Enter for a given turn
-        // because `connection_state` is already `Cancelling` afterwards.
+        // the cancel is only sent on the first Enter for the turn
+        // because once we transition into Cancelling the agent already
+        // has the request — resending would only race the next turn.
         let preview = queued_prompt_preview(&display_text);
         let replacing = state.queued_prompt().is_some();
-        let cancel_in_flight = state.connection_state == ConnectionState::Cancelling;
+        let cancel_in_flight = state.is_cancelling();
         state.set_queued_prompt(QueuedPrompt {
             text,
             images,
@@ -2237,7 +2238,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
             state.mark_cancelling();
         }
         let label = if replacing {
-            "steering: replaced queued prompt"
+            "replaced steering target"
         } else {
             "steering"
         };
@@ -8495,6 +8496,48 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn steering_cancel_does_not_clobber_the_steering_status_line() {
+        // Regression: PromptDone(Cancelled) used to overwrite the
+        // "steering: ..." status with "turn done: Cancelled" before the
+        // steered prompt started streaming, leaving a misleading
+        // status hanging through the new turn.
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "redirect");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        // Drain the cancel the submit just queued.
+        match cmd_rx.try_recv().expect("cancel dispatched") {
+            UiCommand::CancelPrompt => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+        let steering_status = state
+            .status_line
+            .clone()
+            .expect("steering status set after submit");
+        assert!(
+            steering_status.text.starts_with("steering: "),
+            "expected steering status, got {:?}",
+            steering_status.text
+        );
+
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::Cancelled,
+            usage: None,
+        });
+
+        let after_cancel = state
+            .status_line
+            .clone()
+            .expect("status line preserved across steering cancel");
+        assert_eq!(
+            after_cancel.text, steering_status.text,
+            "PromptDone(Cancelled) must not clobber the steering status",
+        );
     }
 
     #[test]

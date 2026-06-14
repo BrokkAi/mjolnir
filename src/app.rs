@@ -645,6 +645,15 @@ impl AppState {
         )
     }
 
+    /// True while a cancel notification is already in flight to the agent
+    /// for the current turn. Steering uses this to dedupe `CancelPrompt`
+    /// — `mark_cancelling` only ever flips Streaming → Cancelling, so any
+    /// new `is_streaming`-true state we add later must also imply a cancel
+    /// has been sent (or update this method) for the dedup to stay sound.
+    pub fn is_cancelling(&self) -> bool {
+        self.connection_state == ConnectionState::Cancelling
+    }
+
     pub fn active_turn_elapsed(&self) -> Option<Duration> {
         if self.is_streaming() {
             self.turn_started_at.map(|started| started.elapsed())
@@ -1115,7 +1124,18 @@ impl AppState {
                 if let Some(usage) = usage {
                     self.token_usage.apply_prompt_usage(usage);
                 }
-                self.set_status_line(StatusKind::Info, format!("turn done: {stop_reason:?}"));
+                // Keep the "steering: ..." indicator visible across the
+                // steering cancel handoff. Without this guard, a
+                // PromptDone(Cancelled) landing while a steering target
+                // is queued would overwrite "steering: <preview>" with
+                // "turn done: Cancelled" and that stale message would
+                // hang around through the new turn (record_user_prompt
+                // and drain_queued_prompt do not touch status_line).
+                let suppress_for_steering =
+                    matches!(stop_reason, StopReason::Cancelled) && self.queued_prompt.is_some();
+                if !suppress_for_steering {
+                    self.set_status_line(StatusKind::Info, format!("turn done: {stop_reason:?}"));
+                }
                 self.update_autocomplete();
             }
             UiEvent::PromptFailed { message } => {
