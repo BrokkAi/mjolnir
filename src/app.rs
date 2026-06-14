@@ -1140,7 +1140,18 @@ impl AppState {
             }
             UiEvent::PromptFailed { message } => {
                 self.finish_prompt_turn(true);
-                self.record_status_message(StatusKind::Warning, message);
+                // Drop any queued/steering prompt: finish_prompt_turn flips
+                // back to Ready, which the next drain pass would otherwise
+                // read as "fire the stash" and auto-resubmit into a
+                // possibly-degraded runtime before the user has seen the
+                // failure. Mirrors mark_runtime_closed and the Ctrl-C path.
+                let had_queued = self.queued_prompt.take().is_some();
+                let surfaced = if had_queued {
+                    format!("{message} (steering target dropped)")
+                } else {
+                    message
+                };
+                self.record_status_message(StatusKind::Warning, surfaced);
                 self.update_autocomplete();
             }
             UiEvent::Warning(msg) => {
@@ -2132,6 +2143,71 @@ mod tests {
             Entry::System(text) => assert_eq!(text, "warning: prompt failed: boom"),
             other => panic!("unexpected entry: {other:?}"),
         }
+    }
+
+    #[test]
+    fn prompt_failed_drops_queued_prompt_and_surfaces_drop() {
+        // Regression for #156: a PromptFailed mid-steering used to flip
+        // back to Ready with the queued prompt intact, which the UI
+        // drain pass then auto-fired into a possibly-degraded runtime
+        // before the user saw the failure.
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::Connected {
+            agent_name: Some("anvil".into()),
+            agent_version: None,
+            prompt_images_supported: false,
+        });
+        s.apply_event(UiEvent::SessionStarted {
+            session_id: "sess-1".into(),
+            resumed: false,
+        });
+        s.record_user_prompt("first".to_string());
+        s.set_queued_prompt(QueuedPrompt {
+            text: "steered body".to_string(),
+            images: Vec::new(),
+            display_text: "steered body".to_string(),
+        });
+
+        s.apply_event(UiEvent::PromptFailed {
+            message: "prompt failed: transport blip".to_string(),
+        });
+
+        assert_eq!(s.connection_state, ConnectionState::Ready);
+        assert!(
+            s.queued_prompt().is_none(),
+            "PromptFailed must drop the queued/steering prompt so the next drain does not auto-fire it"
+        );
+        let status = s.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Warning);
+        assert_eq!(
+            status.text,
+            "prompt failed: transport blip (steering target dropped)"
+        );
+    }
+
+    #[test]
+    fn prompt_failed_without_queue_keeps_message_unchanged() {
+        // When there is no queued prompt, the warning text must match
+        // what callers send verbatim — no spurious "(steering target
+        // dropped)" suffix.
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::Connected {
+            agent_name: Some("anvil".into()),
+            agent_version: None,
+            prompt_images_supported: false,
+        });
+        s.apply_event(UiEvent::SessionStarted {
+            session_id: "sess-1".into(),
+            resumed: false,
+        });
+        s.record_user_prompt("hi".to_string());
+
+        s.apply_event(UiEvent::PromptFailed {
+            message: "prompt failed: boom".to_string(),
+        });
+
+        let status = s.status_line.expect("status");
+        assert_eq!(status.text, "prompt failed: boom");
     }
 
     #[test]
