@@ -2219,7 +2219,9 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     if state.is_streaming() {
         // The previous turn is still running. Stash this submission so it
         // fires automatically when `PromptDone` lands. A second Enter
-        // replaces it (last-write-wins).
+        // replaces it (last-write-wins). The title bar already shows the
+        // queued prompt persistently — keep this feedback transient (via
+        // `status_line`) instead of polluting the transcript.
         let preview = queued_prompt_preview(&display_text);
         let replacing = state.queued_prompt().is_some();
         state.set_queued_prompt(QueuedPrompt {
@@ -2232,7 +2234,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         } else {
             "queued prompt"
         };
-        state.record_status_message(StatusKind::Info, format!("{label}: {preview}"));
+        state.status_line = Some(StatusMessage::info(format!("{label}: {preview}")));
         return;
     }
 
