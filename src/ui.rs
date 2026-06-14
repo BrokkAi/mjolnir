@@ -1136,7 +1136,7 @@ fn handle_crossterm(
                 let had_queued = state.queued_prompt().is_some();
                 state.clear_queued_prompt();
                 let msg = if had_queued {
-                    "cancelling... (queued prompt dropped)"
+                    "cancelling... (steering target dropped)"
                 } else {
                     "cancelling..."
                 };
@@ -2217,22 +2217,29 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     state.scroll_input_to_bottom();
 
     if state.is_streaming() {
-        // The previous turn is still running. Stash this submission so it
-        // fires automatically when `PromptDone` lands. A second Enter
-        // replaces it (last-write-wins). The title bar already shows the
-        // queued prompt persistently — keep this feedback transient (via
-        // `status_line`) instead of polluting the transcript.
+        // The previous turn is still running. Stash this submission and
+        // ask the agent to cancel the in-flight turn so the queued
+        // prompt fires as soon as `PromptDone(Cancelled)` lands instead
+        // of waiting for the original response to finish (steering).
+        // A second Enter replaces the stashed prompt (last-write-wins);
+        // the cancel is only sent on the first Enter for a given turn
+        // because `connection_state` is already `Cancelling` afterwards.
         let preview = queued_prompt_preview(&display_text);
         let replacing = state.queued_prompt().is_some();
+        let cancel_in_flight = state.connection_state == ConnectionState::Cancelling;
         state.set_queued_prompt(QueuedPrompt {
             text,
             images,
             display_text,
         });
+        if !cancel_in_flight {
+            let _ = cmd_tx.send(UiCommand::CancelPrompt);
+            state.mark_cancelling();
+        }
         let label = if replacing {
-            "replaced queued prompt"
+            "steering: replaced queued prompt"
         } else {
-            "queued prompt"
+            "steering"
         };
         state.status_line = Some(StatusMessage::info(format!("{label}: {preview}")));
         return;
@@ -2243,9 +2250,12 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
 }
 
 /// Re-issue a previously queued prompt now that the in-flight turn has
-/// finished. Mirrors the final dispatch in `submit_prompt`. No-ops if
-/// nothing is queued, the runtime closed, or another turn already started
-/// (e.g. because the user typed another prompt between two `PromptDone`
+/// finished. With steering this typically fires off the back of a
+/// `PromptDone(Cancelled)` triggered when the user submitted the queued
+/// prompt; if the turn ended naturally first the same path applies.
+/// Mirrors the final dispatch in `submit_prompt`. No-ops if nothing is
+/// queued, the runtime closed, or another turn already started (e.g.
+/// because the user typed another prompt between two `PromptDone`
 /// events — handled by the next drain).
 fn drain_queued_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
     if state.is_streaming() || state.runtime_closed || state.session_id.is_none() {
@@ -2262,7 +2272,7 @@ fn drain_queued_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCo
 }
 
 /// Truncate the display text to a short single-line preview for the
-/// "queued: ..." status indicator. Newlines collapse to spaces.
+/// "steering: ..." status indicator. Newlines collapse to spaces.
 fn queued_prompt_preview(display_text: &str) -> String {
     let flat: String = display_text
         .chars()
@@ -3999,10 +4009,10 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     } else if state.is_streaming() {
         match state.queued_prompt() {
             Some(queued) => format!(
-                " streaming... (queued: {} | Ctrl-C cancels both) ",
+                " streaming... (steering: {} | Ctrl-C cancels both) ",
                 queued_prompt_preview(&queued.display_text)
             ),
-            None => " streaming... (Enter queues next | Ctrl-C cancel) ".to_string(),
+            None => " streaming... (Enter steers | Ctrl-C cancel) ".to_string(),
         }
     } else if state.voice_input_active {
         format!(
@@ -8391,7 +8401,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_during_streaming_queues_instead_of_dispatching() {
+    fn enter_during_streaming_steers_by_cancelling_and_queueing() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
         assert!(state.is_streaming());
@@ -8400,37 +8410,98 @@ mod tests {
         type_string(&mut state, &cmd_tx, "next one");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
+        match cmd_rx.try_recv().expect("steering cancel dispatched") {
+            UiCommand::CancelPrompt => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
         assert!(
             cmd_rx.try_recv().is_err(),
-            "queued prompt should not be dispatched while streaming"
+            "the steered prompt itself is held until the cancel lands"
         );
-        let queued = state.queued_prompt().expect("queued prompt is set");
+        assert_eq!(
+            state.connection_state,
+            ConnectionState::Cancelling,
+            "submitting while streaming transitions into Cancelling"
+        );
+        let queued = state.queued_prompt().expect("steering target is set");
         assert_eq!(queued.text, "next one");
         assert_eq!(queued.display_text, "next one");
-        assert!(state.input.is_empty(), "input cleared after queuing");
+        assert!(state.input.is_empty(), "input cleared after steering");
         assert_eq!(state.input_cursor, 0);
     }
 
     #[test]
-    fn second_enter_while_queued_replaces_the_queued_prompt() {
+    fn second_enter_while_steering_replaces_target_without_resending_cancel() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
 
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         type_string(&mut state, &cmd_tx, "alpha");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        // First Enter sends exactly one CancelPrompt.
+        match cmd_rx.try_recv().expect("first cancel dispatched") {
+            UiCommand::CancelPrompt => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+
         type_string(&mut state, &cmd_tx, "beta");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
-        let queued = state.queued_prompt().expect("queued prompt is set");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "second Enter must not resend CancelPrompt while one is already in flight"
+        );
+        let queued = state.queued_prompt().expect("steering target is set");
         assert_eq!(
             queued.text, "beta",
-            "last-write-wins replaces earlier queue entry"
+            "last-write-wins replaces earlier steering target"
         );
     }
 
     #[test]
-    fn prompt_done_drains_queued_prompt_and_dispatches_it() {
+    fn steering_cancel_landing_drains_the_queued_prompt() {
+        // Simulates the full steering flow: user steers, the agent
+        // acknowledges with PromptDone(Cancelled), the stashed prompt
+        // fires immediately as the next turn.
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "steered body");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        // Drain the steering CancelPrompt the submit just queued.
+        match cmd_rx.try_recv().expect("cancel dispatched") {
+            UiCommand::CancelPrompt => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert_eq!(state.connection_state, ConnectionState::Cancelling);
+
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::Cancelled,
+            usage: None,
+        });
+        super::drain_queued_prompt(&mut state, &cmd_tx);
+
+        assert!(state.queued_prompt().is_none(), "queue drained");
+        assert!(
+            state.is_streaming(),
+            "the steered prompt becomes the next active turn"
+        );
+        let cmd = cmd_rx.try_recv().expect("send prompt dispatched");
+        match cmd {
+            UiCommand::SendPrompt { text, images } => {
+                assert_eq!(text, "steered body");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn natural_prompt_done_still_drains_queued_prompt() {
+        // Defence in depth: if the cancel notification races the agent
+        // and the turn ends EndTurn before the cancel lands, the stash
+        // must still fire.
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
         state.set_queued_prompt(QueuedPrompt {

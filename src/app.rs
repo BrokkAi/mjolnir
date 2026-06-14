@@ -21,7 +21,7 @@ use crate::event::{
     content_block_text,
 };
 
-/// Maximum width of the "queued: ..." preview shown in the input footer.
+/// Maximum width of the "steering: ..." preview shown in the input footer.
 /// Beyond this we truncate with an ellipsis.
 pub const QUEUED_PROMPT_PREVIEW_WIDTH: usize = 40;
 
@@ -354,14 +354,16 @@ pub struct AppState {
     #[allow(dead_code)]
     pub clipboard_lease: Option<ClipboardLease>,
     /// A prompt the user submitted while a previous turn was still in
-    /// flight. Fires automatically once the turn lands. Replaced by later
-    /// submissions (last-write-wins) and cleared by Ctrl-C / runtime close.
+    /// flight. Submitting also asks the agent to cancel the in-flight
+    /// turn (steering), so the stash fires as soon as the cancellation
+    /// lands. Replaced by later submissions (last-write-wins) and cleared
+    /// by Ctrl-C / runtime close.
     queued_prompt: Option<QueuedPrompt>,
 }
 
 /// A prompt staged behind the currently streaming turn. The runtime takes
-/// it from the UI loop once `is_streaming` flips back to false and
-/// `session_id` is still bound.
+/// it from the UI loop once `is_streaming` flips back to false (typically
+/// from the steering cancel landing) and `session_id` is still bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedPrompt {
     /// Raw text sent to the agent (attachments already concatenated).
