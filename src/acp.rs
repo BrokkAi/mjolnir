@@ -212,6 +212,12 @@ pub async fn run(
             return Err(anyhow::anyhow!(text));
         }
     };
+    // Snapshot the agent PID up front. It doubles as the process-group
+    // id (Unix) / Windows process-group root, so we can still target
+    // the entire descendant tree later even if `child.wait()` or
+    // `try_wait()` has already reaped the immediate child by the time
+    // we call `kill_agent_tree`.
+    let agent_pid = child.id();
     let transport = ByteStreams::new(child_stdin.compat_write(), child_stdout.compat());
 
     // Race the ACP client against `child.wait()`. If the agent process
@@ -255,12 +261,11 @@ pub async fn run(
     // "we killed it after a different error".
     let pre_kill_exit = child.try_wait().ok().flatten();
 
-    // `kill` is a no-op (and returns ESRCH on Unix) when the child has
-    // already exited via the wait branch above. We tolerate both.
-    let kill = child.kill().await;
-    if let Err(e) = kill {
-        tracing::warn!("kill child: {e}");
-    }
+    // Reap the entire agent subtree, not just the immediate child.
+    // Wrappers like `uvx brokk acp` fork a Python interpreter as a
+    // grandchild; killing only the wrapper PID orphans the grandchild
+    // and leaks the actual agent across mjolnir sessions.
+    kill_agent_tree(&mut child, agent_pid).await;
     // Generic catch-all: anything that escaped the launch-phase classifier
     // (e.g. a transport error after initialize succeeded) gets a plain
     // fatal so the user sees *something*. Launch-phase failures and the
@@ -489,6 +494,23 @@ pub(crate) fn spawn_agent(
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // Place the agent into a new process group / Windows process group
+    // so `kill_agent_tree` can reach every descendant on shutdown.
+    // Without this, wrappers like `uvx brokk acp` (which fork a Python
+    // interpreter to host the actual agent) leave that grandchild as
+    // an orphan when mjolnir kills only the immediate child PID.
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        // CREATE_NEW_PROCESS_GROUP from winbase.h. The child becomes
+        // the root of a new group; `taskkill /T` walks the tree from
+        // there.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
     match stderr_path {
         Some(path) => {
             let file = std::fs::OpenOptions::new()
@@ -520,6 +542,84 @@ pub(crate) fn spawn_agent(
             source: std::io::Error::other("child stdout not piped"),
         })?;
     Ok((child, stdin, stdout))
+}
+
+/// Kill the agent process and every descendant it spawned, then reap.
+///
+/// `spawn_agent` puts the child into a new process group (Unix) or new
+/// Windows process group, so we can target the whole subtree here:
+///
+/// * **Unix** — `SIGTERM` the group for graceful exit, poll briefly for
+///   the child to reap, then escalate to `SIGKILL` for any holdouts.
+/// * **Windows** — `taskkill /T /F /PID <pid>` walks the parent/child
+///   tree and force-terminates each process.
+///
+/// `agent_pid` is the value captured at spawn time. We can't rely on
+/// `child.id()` here because the caller may have already reaped the
+/// immediate child via `try_wait`/`wait` (in which case `id()` returns
+/// `None`) — but the original PID is still a valid PGID handle for any
+/// surviving grandchildren that inherited the group at fork time.
+///
+/// The trailing `child.kill().await` is a belt-and-braces step: it
+/// reaps the immediate child if it survived the group/tree kill, and
+/// is a no-op (ESRCH / "process not found") when it didn't. Failures
+/// are logged but not propagated — by the time we reach shutdown the
+/// caller has no meaningful recovery action.
+async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) {
+    if let Some(pid) = agent_pid {
+        #[cfg(unix)]
+        {
+            // SAFETY: `killpg` is async-signal-safe and takes only a
+            // pid_t plus an int; no Rust invariants involved. The PGID
+            // equals the child's original PID because we spawned with
+            // `process_group(0)`.
+            unsafe {
+                if libc::killpg(pid as libc::pid_t, libc::SIGTERM) != 0 {
+                    let errno = std::io::Error::last_os_error();
+                    // ESRCH just means the group is already gone.
+                    if errno.raw_os_error() != Some(libc::ESRCH) {
+                        tracing::warn!("killpg SIGTERM agent group {pid}: {errno}");
+                    }
+                }
+            }
+            // Up to ~250ms grace for the group to exit cleanly before
+            // we SIGKILL. Keeps the exit fast while still giving
+            // agents that flush state on SIGTERM a chance to do so.
+            for _ in 0..5 {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            unsafe {
+                if libc::killpg(pid as libc::pid_t, libc::SIGKILL) != 0 {
+                    let errno = std::io::Error::last_os_error();
+                    if errno.raw_os_error() != Some(libc::ESRCH) {
+                        tracing::warn!("killpg SIGKILL agent group {pid}: {errno}");
+                    }
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            // /T = tree, /F = force. Targets the wrapper plus every
+            // descendant it spawned (uvx -> python.exe, etc.).
+            let status = tokio::process::Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &pid.to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+            if let Err(e) = status {
+                tracing::warn!("taskkill agent pid {pid}: {e}");
+            }
+        }
+    }
+
+    if let Err(e) = child.kill().await {
+        tracing::warn!("kill child: {e}");
+    }
 }
 
 fn session_config_from_parts(
