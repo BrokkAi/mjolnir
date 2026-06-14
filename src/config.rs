@@ -17,12 +17,18 @@ pub struct Config {
     pub agent: Option<SelectedAgent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub favorite_agents: Vec<String>,
+    /// Named custom agents shown in the picker alongside registry entries.
+    /// Their `source_id` in [`SelectedAgent`]/`PickerOutcome` is
+    /// `custom:<name>`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_agents: Vec<CustomAgent>,
 }
 
 /// Launch command resolved by the picker. `source_id` identifies where
 /// the choice came from so the picker can highlight the default row.
-/// `"anvil"` and `"custom"` are reserved; everything else is a registry
-/// agent id.
+/// `"anvil"` and `"custom"` are reserved (`"custom"` is a legacy shape
+/// for the single ad-hoc custom command); named custom agents use
+/// `custom:<name>`. Everything else is a registry agent id.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SelectedAgent {
     pub source_id: String,
@@ -32,6 +38,23 @@ pub struct SelectedAgent {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
 }
+
+/// A named, persistent custom agent the user added through the picker.
+/// Shown as a first-class entry in the picker so it never needs to be
+/// re-typed and can be set as the default.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CustomAgent {
+    pub name: String,
+    pub program: PathBuf,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+/// Prefix marking a [`SelectedAgent::source_id`] as a named custom agent
+/// (`custom:<name>`).
+pub const CUSTOM_AGENT_SOURCE_PREFIX: &str = "custom:";
 
 impl Config {
     /// Read the config from `path`. Returns `Config::default()` when the
@@ -68,7 +91,9 @@ impl Config {
             if agent.source_id == "anvil" {
                 agent.program = PathBuf::from("uvx");
                 agent.args = vec!["brokk".to_string(), "acp".to_string()];
-            } else if agent.source_id == "custom" {
+            } else if agent.source_id == "custom"
+                || agent.source_id.starts_with(CUSTOM_AGENT_SOURCE_PREFIX)
+            {
                 agent.program = expand_home_shortcut(&agent.program.to_string_lossy());
                 agent.args = agent
                     .args
@@ -76,6 +101,14 @@ impl Config {
                     .map(|arg| expand_home_shortcut(arg).to_string_lossy().into_owned())
                     .collect();
             }
+        }
+        for custom in self.custom_agents.iter_mut() {
+            custom.program = expand_home_shortcut(&custom.program.to_string_lossy());
+            custom.args = custom
+                .args
+                .iter()
+                .map(|arg| expand_home_shortcut(arg).to_string_lossy().into_owned())
+                .collect();
         }
     }
 }
@@ -221,6 +254,7 @@ mod tests {
                 env: HashMap::from([("FOO".to_string(), "bar".to_string())]),
             }),
             favorite_agents: vec!["claude-acp".to_string(), "anvil".to_string()],
+            custom_agents: Vec::new(),
         };
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
@@ -244,6 +278,7 @@ mod tests {
                 env: HashMap::new(),
             }),
             favorite_agents: Vec::new(),
+            custom_agents: Vec::new(),
         };
         cfg.save(&path).expect("save");
         assert!(path.exists());
@@ -310,6 +345,100 @@ args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
         let err = Config::load(&path).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("parse"), "error mentions parse: {msg}");
+    }
+
+    #[test]
+    fn custom_agents_roundtrip_through_save_and_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let cfg = Config {
+            agent: None,
+            favorite_agents: Vec::new(),
+            custom_agents: vec![
+                CustomAgent {
+                    name: "local-claude".to_string(),
+                    program: PathBuf::from("/usr/local/bin/claude-acp"),
+                    args: vec!["--debug".to_string()],
+                    description: "claude with debug logging".to_string(),
+                },
+                CustomAgent {
+                    name: "staging-agent".to_string(),
+                    program: PathBuf::from("npx"),
+                    args: vec!["-y".to_string(), "@example/staging".to_string()],
+                    description: String::new(),
+                },
+            ],
+        };
+        cfg.save(&path).expect("save");
+        let loaded = Config::load(&path).expect("load");
+        assert_eq!(loaded.custom_agents.len(), 2);
+        assert_eq!(loaded.custom_agents[0].name, "local-claude");
+        assert_eq!(loaded.custom_agents[0].args, vec!["--debug"]);
+        assert_eq!(loaded.custom_agents[1].name, "staging-agent");
+        assert_eq!(loaded.custom_agents[1].description, "");
+    }
+
+    #[test]
+    fn load_expands_home_shortcuts_in_custom_agents() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[custom_agents]]
+name = "my-agent"
+program = "~/bin/agent"
+args = ["--config", "$HOME/.config/agent.toml"]
+description = "test"
+"#,
+        )
+        .expect("write");
+
+        let cfg = Config::load(&path).expect("load");
+        assert_eq!(cfg.custom_agents.len(), 1);
+        let agent = &cfg.custom_agents[0];
+        assert_eq!(agent.program, home.join("bin/agent"));
+        assert_eq!(
+            agent.args,
+            vec![
+                "--config".to_string(),
+                home.join(".config/agent.toml").display().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_expands_home_shortcuts_for_named_custom_default_agent() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+source_id = "custom:my-agent"
+program = "~/bin/agent"
+args = ["--flag", "$HOME/data"]
+"#,
+        )
+        .expect("write");
+
+        let cfg = Config::load(&path).expect("load");
+        let agent = cfg.agent.expect("agent");
+        assert_eq!(agent.source_id, "custom:my-agent");
+        assert_eq!(agent.program, home.join("bin/agent"));
+        assert_eq!(
+            agent.args,
+            vec![
+                "--flag".to_string(),
+                home.join("data").display().to_string()
+            ]
+        );
     }
 
     #[test]

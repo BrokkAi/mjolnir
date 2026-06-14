@@ -34,8 +34,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::app::UiExitReason;
-use crate::config::{Config, SelectedAgent, history_path};
-use crate::picker::{PickerOutcome, PickerPreferences, PickerResult};
+use crate::config::{Config, CustomAgent as ConfigCustomAgent, SelectedAgent, history_path};
+use crate::picker::{
+    CustomAgent as PickerCustomAgent, PickerOutcome, PickerPreferences, PickerResult,
+};
 use crate::session::SessionEntryJson;
 use crate::ui::{HeaderLabels, UiMode};
 use crate::worktree::CreatedWorktree;
@@ -730,12 +732,40 @@ fn picker_preferences_from_config(cfg: &Config) -> PickerPreferences {
     PickerPreferences {
         default_agent: cfg.agent.as_ref().map(selected_to_picker_outcome),
         favorite_source_ids: cfg.favorite_agents.clone(),
+        custom_agents: cfg
+            .custom_agents
+            .iter()
+            .map(config_custom_to_picker_custom)
+            .collect(),
     }
 }
 
 fn apply_picker_preferences(cfg: &mut Config, preferences: PickerPreferences) {
     cfg.agent = preferences.default_agent.map(picker_outcome_to_selected);
     cfg.favorite_agents = preferences.favorite_source_ids;
+    cfg.custom_agents = preferences
+        .custom_agents
+        .into_iter()
+        .map(picker_custom_to_config_custom)
+        .collect();
+}
+
+fn config_custom_to_picker_custom(c: &ConfigCustomAgent) -> PickerCustomAgent {
+    PickerCustomAgent {
+        name: c.name.clone(),
+        program: c.program.clone(),
+        args: c.args.clone(),
+        description: c.description.clone(),
+    }
+}
+
+fn picker_custom_to_config_custom(c: PickerCustomAgent) -> ConfigCustomAgent {
+    ConfigCustomAgent {
+        name: c.name,
+        program: c.program,
+        args: c.args,
+        description: c.description,
+    }
 }
 
 fn picker_outcome_to_selected(o: PickerOutcome) -> SelectedAgent {
@@ -1049,6 +1079,7 @@ mod tests {
             &Config {
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
+                custom_agents: Vec::new(),
             },
             None
         ));
@@ -1056,6 +1087,46 @@ mod tests {
             &Config::default(),
             Some(&initial)
         ));
+
+        // A named custom agent set as default skips the picker exactly like any
+        // other configured default; the launch reads program/args from cfg.agent.
+        let custom_default = SelectedAgent {
+            source_id: "custom:my-agent".to_string(),
+            program: PathBuf::from("/usr/local/bin/agent"),
+            args: vec!["--flag".to_string()],
+            env: Default::default(),
+        };
+        assert!(!should_open_initial_agent_picker(
+            &Config {
+                agent: Some(custom_default),
+                favorite_agents: Vec::new(),
+                custom_agents: Vec::new(),
+            },
+            None
+        ));
+    }
+
+    #[test]
+    fn picker_preferences_round_trip_custom_agents() {
+        let cfg = Config {
+            agent: None,
+            favorite_agents: Vec::new(),
+            custom_agents: vec![ConfigCustomAgent {
+                name: "my-agent".to_string(),
+                program: PathBuf::from("/usr/local/bin/agent"),
+                args: vec!["--flag".to_string()],
+                description: "test".to_string(),
+            }],
+        };
+        let prefs = picker_preferences_from_config(&cfg);
+        assert_eq!(prefs.custom_agents.len(), 1);
+        assert_eq!(prefs.custom_agents[0].name, "my-agent");
+
+        let mut roundtripped = Config::default();
+        apply_picker_preferences(&mut roundtripped, prefs);
+        assert_eq!(roundtripped.custom_agents.len(), 1);
+        assert_eq!(roundtripped.custom_agents[0].name, "my-agent");
+        assert_eq!(roundtripped.custom_agents[0].description, "test");
     }
 
     #[test]

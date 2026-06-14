@@ -36,11 +36,38 @@ pub struct PickerOutcome {
     pub env: HashMap<String, String>,
 }
 
+/// A user-defined custom agent surfaced as a first-class picker row.
+/// Mirrors `config::CustomAgent`, but kept here so the picker module
+/// stays decoupled from the on-disk config types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomAgent {
+    pub name: String,
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub description: String,
+}
+
+impl CustomAgent {
+    pub fn source_id(&self) -> String {
+        format!("custom:{}", self.name)
+    }
+
+    fn to_outcome(&self) -> PickerOutcome {
+        PickerOutcome {
+            source_id: self.source_id(),
+            program: self.program.clone(),
+            args: self.args.clone(),
+            env: HashMap::new(),
+        }
+    }
+}
+
 /// Persistent picker preferences owned by the caller's global config.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PickerPreferences {
     pub default_agent: Option<PickerOutcome>,
     pub favorite_source_ids: Vec<String>,
+    pub custom_agents: Vec<CustomAgent>,
 }
 
 /// Picker completion state. `outcome` is `None` only when the user cancels.
@@ -50,12 +77,15 @@ pub struct PickerResult {
     pub preferences: PickerPreferences,
 }
 
-/// One row in the picker. `Anvil` and `Custom` are synthetic entries;
-/// `Agent` indexes into the registry's agent list.
+/// One row in the picker. `Anvil` and `Custom` are synthetic entries
+/// (`Custom` is the "Add custom agent..." row); `Agent` indexes into
+/// the registry's agent list and `CustomAgent` indexes into the
+/// caller's persisted custom agents.
 #[derive(Debug, Clone)]
 enum Item {
     Anvil,
     Agent(usize),
+    CustomAgent(usize),
     Custom,
 }
 
@@ -65,11 +95,20 @@ enum ItemAction {
     SetDefault,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum AddCustomFocus {
+    Name,
+    Command,
+}
+
 enum Mode {
     Browse,
-    CustomInput {
-        input: String,
+    AddCustomAgent {
+        name: String,
+        command: String,
+        focus: AddCustomFocus,
         action: ItemAction,
+        error: Option<String>,
     },
     Installing {
         label: String,
@@ -135,6 +174,16 @@ impl<'a> PickerState<'a> {
         for i in indices {
             items.push(Item::Agent(i));
         }
+        let mut custom_indices: Vec<usize> = (0..self.preferences.custom_agents.len()).collect();
+        custom_indices.sort_by(|&a, &b| {
+            self.preferences.custom_agents[a]
+                .name
+                .to_lowercase()
+                .cmp(&self.preferences.custom_agents[b].name.to_lowercase())
+        });
+        for i in custom_indices {
+            items.push(Item::CustomAgent(i));
+        }
         items.push(Item::Custom);
 
         items.sort_by(|a, b| {
@@ -157,18 +206,29 @@ impl<'a> PickerState<'a> {
     fn item_label(&self, item: &Item) -> String {
         match item {
             Item::Anvil => "anvil".to_string(),
-            Item::Custom => "Custom command...".to_string(),
+            Item::Custom => "Add custom agent...".to_string(),
             Item::Agent(idx) => self.registry.agents[*idx].name.clone(),
+            Item::CustomAgent(idx) => self.preferences.custom_agents[*idx].name.clone(),
         }
     }
 
     fn item_search_key(&self, item: &Item) -> String {
         match item {
             Item::Anvil => "anvil brokk acp uvx".to_string(),
-            Item::Custom => "custom command".to_string(),
+            Item::Custom => "add custom agent command".to_string(),
             Item::Agent(idx) => {
                 let a = &self.registry.agents[*idx];
                 format!("{} {} {}", a.name, a.id, a.description).to_lowercase()
+            }
+            Item::CustomAgent(idx) => {
+                let a = &self.preferences.custom_agents[*idx];
+                format!(
+                    "{} {} {}",
+                    a.name,
+                    a.program.to_string_lossy(),
+                    a.description
+                )
+                .to_lowercase()
             }
         }
     }
@@ -178,18 +238,29 @@ impl<'a> PickerState<'a> {
             Item::Anvil => "anvil".to_string(),
             Item::Custom => "custom".to_string(),
             Item::Agent(idx) => self.registry.agents[*idx].id.clone(),
+            Item::CustomAgent(idx) => self.preferences.custom_agents[*idx].source_id(),
         }
     }
 
     fn item_hint(&self, item: &Item) -> String {
         match item {
             Item::Anvil => "uvx brokk acp".to_string(),
-            Item::Custom => "type your own command".to_string(),
+            Item::Custom => "save a named command for next time".to_string(),
             Item::Agent(idx) => {
                 let a = &self.registry.agents[*idx];
                 match a.preferred_kind(&self.platform) {
                     Some(kind) => format!("{} v{}", kind.label(), a.version),
                     None => "no compatible distribution".to_string(),
+                }
+            }
+            Item::CustomAgent(idx) => {
+                let a = &self.preferences.custom_agents[*idx];
+                if !a.description.is_empty() {
+                    a.description.clone()
+                } else {
+                    let mut parts = vec![a.program.to_string_lossy().into_owned()];
+                    parts.extend(a.args.iter().cloned());
+                    parts.join(" ")
                 }
             }
         }
@@ -442,32 +513,89 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
                 state.mode = Mode::Browse;
             }
         }
-        Mode::CustomInput { input, action } => match (key.modifiers, key.code) {
+        Mode::AddCustomAgent {
+            name,
+            command,
+            focus,
+            action,
+            error,
+        } => match (key.modifiers, key.code) {
             (_, KeyCode::Esc) => {
                 state.mode = Mode::Browse;
             }
+            (_, KeyCode::Tab) | (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+                *focus = match focus {
+                    AddCustomFocus::Name => AddCustomFocus::Command,
+                    AddCustomFocus::Command => AddCustomFocus::Name,
+                };
+            }
             (_, KeyCode::Enter) => {
-                let raw = input.trim().to_string();
-                if raw.is_empty() {
-                    state.mode = Mode::Error("custom command cannot be empty".to_string());
+                if matches!(focus, AddCustomFocus::Name) {
+                    // Enter on the name field advances to the command field rather
+                    // than committing; the user explicitly confirms from Command.
+                    *focus = AddCustomFocus::Command;
                 } else {
-                    match parse_custom_command(&raw) {
-                        Ok(outcome) => match *action {
-                            ItemAction::Select => return Ok(Some(outcome)),
-                            ItemAction::SetDefault => {
-                                state.set_default_outcome(outcome, "custom command".to_string());
+                    let trimmed_name = name.trim().to_string();
+                    let trimmed_command = command.trim().to_string();
+                    if trimmed_name.is_empty() {
+                        *error = Some("name cannot be empty".to_string());
+                        *focus = AddCustomFocus::Name;
+                    } else if trimmed_command.is_empty() {
+                        *error = Some("command cannot be empty".to_string());
+                    } else if state
+                        .preferences
+                        .custom_agents
+                        .iter()
+                        .any(|a| a.name == trimmed_name)
+                    {
+                        *error = Some(format!(
+                            "a custom agent named '{trimmed_name}' already exists"
+                        ));
+                        *focus = AddCustomFocus::Name;
+                    } else {
+                        match parse_custom_command(&trimmed_command) {
+                            Ok(parsed) => {
+                                let custom = CustomAgent {
+                                    name: trimmed_name.clone(),
+                                    program: parsed.program,
+                                    args: parsed.args,
+                                    description: String::new(),
+                                };
+                                let outcome = custom.to_outcome();
+                                let label = custom.name.clone();
+                                state.preferences.custom_agents.push(custom);
+                                let act = *action;
+                                let source_id = outcome.source_id.clone();
+                                state.rebuild_items(Some(&source_id));
+                                state.notice = Some(format!("added custom agent: {label}"));
+                                state.mode = Mode::Browse;
+                                match act {
+                                    ItemAction::Select => return Ok(Some(outcome)),
+                                    ItemAction::SetDefault => {
+                                        state.set_default_outcome(outcome, label);
+                                    }
+                                }
                             }
-                        },
-                        Err(e) => state.mode = Mode::Error(format!("{e:#}")),
+                            Err(e) => {
+                                *error = Some(format!("{e:#}"));
+                                *focus = AddCustomFocus::Command;
+                            }
+                        }
                     }
                 }
             }
-            (_, KeyCode::Backspace) => {
-                input.pop();
-            }
-            (_, KeyCode::Char(c)) => {
-                input.push(c);
-            }
+            (_, KeyCode::Backspace) => match focus {
+                AddCustomFocus::Name => {
+                    name.pop();
+                }
+                AddCustomFocus::Command => {
+                    command.pop();
+                }
+            },
+            (_, KeyCode::Char(c)) => match focus {
+                AddCustomFocus::Name => name.push(c),
+                AddCustomFocus::Command => command.push(c),
+            },
             _ => {}
         },
         Mode::Cancelled => {}
@@ -539,17 +667,25 @@ async fn start_item_action(
             }
         }
         Item::Custom => {
-            if matches!(action, ItemAction::Select)
-                && let Some(default_agent) = state.preferences.default_agent.as_ref()
-                && default_agent.source_id == "custom"
-            {
-                return Ok(Some(default_agent.clone()));
-            }
-            state.mode = Mode::CustomInput {
-                input: String::new(),
+            state.mode = Mode::AddCustomAgent {
+                name: String::new(),
+                command: String::new(),
+                focus: AddCustomFocus::Name,
                 action,
+                error: None,
             };
             Ok(None)
+        }
+        Item::CustomAgent(idx) => {
+            let custom = state.preferences.custom_agents[*idx].clone();
+            let outcome = custom.to_outcome();
+            match action {
+                ItemAction::Select => Ok(Some(outcome)),
+                ItemAction::SetDefault => {
+                    state.set_default_outcome(outcome, custom.name);
+                    Ok(None)
+                }
+            }
         }
         Item::Agent(idx) => {
             let agent = state.registry.agents[*idx].clone();
@@ -683,7 +819,13 @@ fn draw(f: &mut ratatui::Frame, state: &PickerState<'_>) {
     draw_footer(f, chunks[3], state);
 
     match &state.mode {
-        Mode::CustomInput { input, .. } => draw_custom_input_modal(f, f.area(), input),
+        Mode::AddCustomAgent {
+            name,
+            command,
+            focus,
+            error,
+            ..
+        } => draw_add_custom_agent_modal(f, f.area(), name, command, *focus, error.as_deref()),
         Mode::Installing {
             label,
             total_bytes,
@@ -833,9 +975,16 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
     f.render_widget(p, area);
 }
 
-fn draw_custom_input_modal(f: &mut ratatui::Frame, area: Rect, input: &str) {
+fn draw_add_custom_agent_modal(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    name: &str,
+    command: &str,
+    focus: AddCustomFocus,
+    error: Option<&str>,
+) {
     let width = area.width.saturating_sub(8).min(80);
-    let height = 7.min(area.height.saturating_sub(4));
+    let height = 11.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     let rect = Rect::new(x, y, width, height);
@@ -843,7 +992,7 @@ fn draw_custom_input_modal(f: &mut ratatui::Frame, area: Rect, input: &str) {
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" custom command ")
+        .title(" add custom agent ")
         .style(Style::default().fg(Color::Cyan));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -851,23 +1000,79 @@ fn draw_custom_input_modal(f: &mut ratatui::Frame, area: Rect, input: &str) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
         .split(inner);
 
-    let help = Paragraph::new("type a shell command (e.g. `/path/to/agent --flag`)")
+    let name_label = if matches!(focus, AddCustomFocus::Name) {
+        Span::styled(
+            "name (focused)",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("name", Style::default().fg(Color::DarkGray))
+    };
+    f.render_widget(Paragraph::new(Line::from(vec![name_label])), layout[0]);
+
+    let name_cursor = if matches!(focus, AddCustomFocus::Name) {
+        "_"
+    } else {
+        ""
+    };
+    let name_body = Paragraph::new(Line::from(vec![
+        Span::raw("> "),
+        Span::raw(name.to_string()),
+        Span::raw(name_cursor),
+    ]));
+    f.render_widget(name_body, layout[1]);
+
+    let cmd_label = if matches!(focus, AddCustomFocus::Command) {
+        Span::styled(
+            "command (focused)",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("command", Style::default().fg(Color::DarkGray))
+    };
+    f.render_widget(Paragraph::new(Line::from(vec![cmd_label])), layout[2]);
+
+    let cmd_cursor = if matches!(focus, AddCustomFocus::Command) {
+        "_"
+    } else {
+        ""
+    };
+    let cmd_body = Paragraph::new(Line::from(vec![
+        Span::raw("> "),
+        Span::raw(command.to_string()),
+        Span::raw(cmd_cursor),
+    ]));
+    f.render_widget(cmd_body, layout[3]);
+
+    let help = Paragraph::new("e.g. `/path/to/agent --flag` — saved for next time")
         .style(Style::default().fg(Color::DarkGray))
         .wrap(Wrap { trim: false });
-    f.render_widget(help, layout[0]);
+    f.render_widget(help, layout[4]);
 
-    let body = Paragraph::new(Line::from(vec![Span::raw("> "), Span::raw(input)]));
-    f.render_widget(body, layout[1]);
+    if let Some(err) = error {
+        let err_p = Paragraph::new(err)
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: false });
+        f.render_widget(err_p, layout[5]);
+    }
 
-    let footer = Paragraph::new("Enter to confirm | Esc to cancel")
+    let footer = Paragraph::new("Tab switches fields | Enter confirms | Esc cancels")
         .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(footer, layout[2]);
+    f.render_widget(footer, layout[6]);
 }
 
 fn draw_install_modal(
@@ -1086,7 +1291,7 @@ mod tests {
                     args: vec!["brokk".to_string(), "acp".to_string()],
                     env: HashMap::new(),
                 }),
-                favorite_source_ids: Vec::new(),
+                ..Default::default()
             },
         );
         assert!(state.item_is_default(&Item::Anvil));
@@ -1166,7 +1371,7 @@ mod tests {
                     args: vec!["-y".to_string(), "@x/claude@0.36.1".to_string()],
                     env: HashMap::new(),
                 }),
-                favorite_source_ids: Vec::new(),
+                ..Default::default()
             },
         );
 
@@ -1182,8 +1387,8 @@ mod tests {
             "darwin-aarch64".to_string(),
             PathBuf::from("/tmp"),
             PickerPreferences {
-                default_agent: None,
                 favorite_source_ids: vec!["claude-acp".to_string()],
+                ..Default::default()
             },
         );
 
@@ -1358,6 +1563,241 @@ mod tests {
             state.filter, "h",
             "backspace must pop one char while search is focused"
         );
+    }
+
+    fn fixture_custom_agents() -> Vec<CustomAgent> {
+        vec![
+            CustomAgent {
+                name: "local-claude".to_string(),
+                program: PathBuf::from("/usr/local/bin/claude-acp"),
+                args: vec!["--debug".to_string()],
+                description: "claude with debug logging".to_string(),
+            },
+            CustomAgent {
+                name: "experiment".to_string(),
+                program: PathBuf::from("/tmp/agent"),
+                args: vec![],
+                description: String::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn picker_lists_persisted_custom_agents_as_rows() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        // 1 anvil + 3 registry + 2 custom-agent + 1 "Add custom" = 7.
+        assert_eq!(state.items.len(), 7);
+        let sources: Vec<String> = state
+            .items
+            .iter()
+            .map(|i| state.item_source_id(i))
+            .collect();
+        assert!(sources.contains(&"custom:local-claude".to_string()));
+        assert!(sources.contains(&"custom:experiment".to_string()));
+        assert!(sources.contains(&"custom".to_string()));
+    }
+
+    #[tokio::test]
+    async fn selecting_persisted_custom_agent_returns_its_command() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        let item = state
+            .items
+            .iter()
+            .find(|item| state.item_source_id(item) == "custom:local-claude")
+            .expect("custom row")
+            .clone();
+
+        let outcome = start_item_action(&mut state, &item, ItemAction::Select)
+            .await
+            .expect("select")
+            .expect("outcome");
+
+        assert_eq!(outcome.source_id, "custom:local-claude");
+        assert_eq!(outcome.program, PathBuf::from("/usr/local/bin/claude-acp"));
+        assert_eq!(outcome.args, vec!["--debug"]);
+    }
+
+    #[tokio::test]
+    async fn setting_custom_agent_as_default_records_it_in_preferences() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        let item = state
+            .items
+            .iter()
+            .find(|item| state.item_source_id(item) == "custom:experiment")
+            .expect("custom row")
+            .clone();
+
+        let result = start_item_action(&mut state, &item, ItemAction::SetDefault)
+            .await
+            .expect("set default");
+        assert!(result.is_none(), "set-default does not return an outcome");
+
+        let default = state
+            .preferences
+            .default_agent
+            .as_ref()
+            .expect("default set");
+        assert_eq!(default.source_id, "custom:experiment");
+        assert_eq!(default.program, PathBuf::from("/tmp/agent"));
+    }
+
+    #[test]
+    fn picker_custom_agent_hint_prefers_description_then_command() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        let local_claude = state
+            .items
+            .iter()
+            .find(|item| state.item_source_id(item) == "custom:local-claude")
+            .expect("local-claude");
+        assert_eq!(state.item_hint(local_claude), "claude with debug logging");
+
+        let experiment = state
+            .items
+            .iter()
+            .find(|item| state.item_source_id(item) == "custom:experiment")
+            .expect("experiment");
+        assert_eq!(state.item_hint(experiment), "/tmp/agent");
+    }
+
+    #[tokio::test]
+    async fn add_custom_agent_flow_persists_and_returns_outcome_on_select() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+
+        // Trigger the "Add custom agent..." row -> opens the modal.
+        let custom_item = Item::Custom;
+        let res = start_item_action(&mut state, &custom_item, ItemAction::Select)
+            .await
+            .expect("trigger");
+        assert!(res.is_none());
+        assert!(matches!(state.mode, Mode::AddCustomAgent { .. }));
+
+        // Type a name + command and confirm.
+        for c in "my-agent".chars() {
+            let key = crossterm::event::KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+            handle_event(&mut state, CtEvent::Key(key)).await.unwrap();
+        }
+        // Tab to command field.
+        let tab = crossterm::event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(tab)).await.unwrap();
+        for c in "/usr/local/bin/agent --flag".chars() {
+            let key = crossterm::event::KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+            handle_event(&mut state, CtEvent::Key(key)).await.unwrap();
+        }
+        let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let outcome = handle_event(&mut state, CtEvent::Key(enter))
+            .await
+            .unwrap()
+            .expect("outcome on confirm");
+
+        assert_eq!(outcome.source_id, "custom:my-agent");
+        assert_eq!(outcome.program, PathBuf::from("/usr/local/bin/agent"));
+        assert_eq!(outcome.args, vec!["--flag"]);
+        assert_eq!(state.preferences.custom_agents.len(), 1);
+        assert_eq!(state.preferences.custom_agents[0].name, "my-agent");
+    }
+
+    #[tokio::test]
+    async fn add_custom_agent_rejects_duplicate_name() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        state.mode = Mode::AddCustomAgent {
+            name: "local-claude".to_string(),
+            command: "/bin/agent".to_string(),
+            focus: AddCustomFocus::Command,
+            action: ItemAction::Select,
+            error: None,
+        };
+
+        let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let result = handle_event(&mut state, CtEvent::Key(enter)).await.unwrap();
+        assert!(result.is_none());
+        let Mode::AddCustomAgent { error, .. } = &state.mode else {
+            panic!("expected AddCustomAgent mode, got something else");
+        };
+        let err = error.as_ref().expect("error set");
+        assert!(err.contains("already exists"), "err: {err}");
+        assert_eq!(
+            state.preferences.custom_agents.len(),
+            2,
+            "no new agent added"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_custom_agent_rejects_empty_name() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        state.mode = Mode::AddCustomAgent {
+            name: "  ".to_string(),
+            command: "/bin/agent".to_string(),
+            focus: AddCustomFocus::Command,
+            action: ItemAction::Select,
+            error: None,
+        };
+
+        let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let result = handle_event(&mut state, CtEvent::Key(enter)).await.unwrap();
+        assert!(result.is_none());
+        let Mode::AddCustomAgent { error, focus, .. } = &state.mode else {
+            panic!("expected AddCustomAgent mode");
+        };
+        assert!(error.as_ref().unwrap().contains("name"));
+        assert!(matches!(focus, AddCustomFocus::Name));
     }
 
     #[test]
