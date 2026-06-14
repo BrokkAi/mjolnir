@@ -17,8 +17,13 @@ use agent_client_protocol::schema::{
 use crate::clipboard::ClipboardLease;
 
 use crate::event::{
-    PermissionDecision, PermissionPrompt, SessionConfigTarget, UiEvent, content_block_text,
+    PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, UiEvent,
+    content_block_text,
 };
+
+/// Maximum width of the "queued: ..." preview shown in the input footer.
+/// Beyond this we truncate with an ellipsis.
+pub const QUEUED_PROMPT_PREVIEW_WIDTH: usize = 40;
 
 const BUILTIN_NEW_COMMAND: &str = "new";
 const BUILTIN_LOAD_COMMAND: &str = "load";
@@ -348,6 +353,24 @@ pub struct AppState {
     /// on Linux/X11 where the owning process must stay alive.
     #[allow(dead_code)]
     pub clipboard_lease: Option<ClipboardLease>,
+    /// A prompt the user submitted while a previous turn was still in
+    /// flight. Fires automatically once the turn lands. Replaced by later
+    /// submissions (last-write-wins) and cleared by Ctrl-C / runtime close.
+    queued_prompt: Option<QueuedPrompt>,
+}
+
+/// A prompt staged behind the currently streaming turn. The runtime takes
+/// it from the UI loop once `is_streaming` flips back to false and
+/// `session_id` is still bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedPrompt {
+    /// Raw text sent to the agent (attachments already concatenated).
+    pub text: String,
+    /// Image content blocks captured at queue time.
+    pub images: Vec<PromptImage>,
+    /// Transcript-ready display text (matches what `submit_prompt` would
+    /// have produced if the prompt had fired immediately).
+    pub display_text: String,
 }
 
 #[derive(Debug)]
@@ -470,7 +493,32 @@ impl AppState {
             project_label: String::new(),
             worktree_label: None,
             clipboard_lease: None,
+            queued_prompt: None,
         }
+    }
+
+    /// Stage a prompt to fire when the current turn completes. Replaces
+    /// any previously queued prompt (last-write-wins).
+    pub fn set_queued_prompt(&mut self, prompt: QueuedPrompt) {
+        self.queued_prompt = Some(prompt);
+    }
+
+    /// Drop the queued prompt, if any. Used by Ctrl-C and runtime close so
+    /// the user doesn't get an unexpected submission after cancelling.
+    pub fn clear_queued_prompt(&mut self) {
+        self.queued_prompt = None;
+    }
+
+    /// The currently queued prompt, if any. The UI uses this to render the
+    /// footer indicator without taking ownership.
+    pub fn queued_prompt(&self) -> Option<&QueuedPrompt> {
+        self.queued_prompt.as_ref()
+    }
+
+    /// Pull the queued prompt out for submission. Returns `None` if none
+    /// is staged.
+    pub fn take_queued_prompt(&mut self) -> Option<QueuedPrompt> {
+        self.queued_prompt.take()
     }
 
     /// Return a copy of the prompt history for persistence.
@@ -639,6 +687,7 @@ impl AppState {
         self.cancel_all_pending_permissions();
         self.config_picker = None;
         self.autocomplete = Autocomplete::default();
+        self.queued_prompt = None;
         // Preserve Fatal: a fatal event always supersedes a clean close,
         // since the channel-drop that triggers this method follows the
         // Fatal event by design.

@@ -35,8 +35,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
     AppState, ConfigValueChoice, ConnectionState, Entry, PastedAttachment, PastedImageAttachment,
-    PendingPermission, StatusKind, StatusMessage, ToolCallOutput, UiExitReason,
-    config_option_choices, config_option_current_value_label, permission_kind_label,
+    PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, StatusKind, StatusMessage,
+    ToolCallOutput, UiExitReason, config_option_choices, config_option_current_value_label,
+    permission_kind_label,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -394,6 +395,7 @@ async fn ui_loop(
                             should_force_inline_repair_for_ui_event(mode, &ev);
                         let notification = notification_message_for_event(mode, &state, &ev);
                         state.apply_event(ev);
+                        drain_queued_prompt(&mut state, cmd_tx);
                         if force_repair_for_event {
                             force_inline_repair = true;
                             sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
@@ -1127,7 +1129,18 @@ fn handle_crossterm(
             if state.is_streaming() {
                 let _ = cmd_tx.send(UiCommand::CancelPrompt);
                 state.mark_cancelling();
-                state.status_line = Some(StatusMessage::info("cancelling..."));
+                // The user explicitly cancelled — drop the queued prompt
+                // so the next turn doesn't fire something they no longer
+                // want. Without this, Ctrl-C would interrupt the current
+                // response only to launch the queued one moments later.
+                let had_queued = state.queued_prompt().is_some();
+                state.clear_queued_prompt();
+                let msg = if had_queued {
+                    "cancelling... (queued prompt dropped)"
+                } else {
+                    "cancelling..."
+                };
+                state.status_line = Some(StatusMessage::info(msg));
             } else if state.input.is_empty() && attachment_count(state) == 0 {
                 state.exit_reason = Some(UiExitReason::Quit);
             } else if !state.input.is_empty() {
@@ -2192,22 +2205,74 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         );
         return;
     }
-    if state.is_streaming() {
-        state.record_status_message(StatusKind::Warning, "a prompt is already in flight");
-        return;
-    }
     if state.session_id.is_none() {
         state.record_status_message(StatusKind::Warning, "waiting for session...");
         return;
     }
+
+    let display_text = prompt_display_text(&text, images.len());
     state.input.clear();
     clear_attachments(state);
     state.input_cursor = 0;
     state.scroll_input_to_bottom();
 
-    let display_text = prompt_display_text(&text, images.len());
+    if state.is_streaming() {
+        // The previous turn is still running. Stash this submission so it
+        // fires automatically when `PromptDone` lands. A second Enter
+        // replaces it (last-write-wins).
+        let preview = queued_prompt_preview(&display_text);
+        let replacing = state.queued_prompt().is_some();
+        state.set_queued_prompt(QueuedPrompt {
+            text,
+            images,
+            display_text,
+        });
+        let label = if replacing {
+            "replaced queued prompt"
+        } else {
+            "queued prompt"
+        };
+        state.record_status_message(StatusKind::Info, format!("{label}: {preview}"));
+        return;
+    }
+
     state.record_user_prompt(display_text);
     let _ = cmd_tx.send(UiCommand::SendPrompt { text, images });
+}
+
+/// Re-issue a previously queued prompt now that the in-flight turn has
+/// finished. Mirrors the final dispatch in `submit_prompt`. No-ops if
+/// nothing is queued, the runtime closed, or another turn already started
+/// (e.g. because the user typed another prompt between two `PromptDone`
+/// events — handled by the next drain).
+fn drain_queued_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
+    if state.is_streaming() || state.runtime_closed || state.session_id.is_none() {
+        return;
+    }
+    let Some(queued) = state.take_queued_prompt() else {
+        return;
+    };
+    state.record_user_prompt(queued.display_text);
+    let _ = cmd_tx.send(UiCommand::SendPrompt {
+        text: queued.text,
+        images: queued.images,
+    });
+}
+
+/// Truncate the display text to a short single-line preview for the
+/// "queued: ..." status indicator. Newlines collapse to spaces.
+fn queued_prompt_preview(display_text: &str) -> String {
+    let flat: String = display_text
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let trimmed = flat.trim();
+    if trimmed.chars().count() <= QUEUED_PROMPT_PREVIEW_WIDTH {
+        trimmed.to_string()
+    } else {
+        let head: String = trimmed.chars().take(QUEUED_PROMPT_PREVIEW_WIDTH).collect();
+        format!("{head}...")
+    }
 }
 
 fn prompt_display_text(text: &str, image_count: usize) -> String {
@@ -3930,7 +3995,13 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     let title = if state.runtime_closed {
         " runtime closed (/new or Ctrl-N for a new session | Ctrl-C to quit) ".to_string()
     } else if state.is_streaming() {
-        " streaming... (Ctrl-C to cancel) ".to_string()
+        match state.queued_prompt() {
+            Some(queued) => format!(
+                " streaming... (queued: {} | Ctrl-C cancels both) ",
+                queued_prompt_preview(&queued.display_text)
+            ),
+            None => " streaming... (Enter queues next | Ctrl-C cancel) ".to_string(),
+        }
     } else if state.voice_input_active {
         format!(
             " 🎙 {} Ctrl-R stop ",
@@ -8302,5 +8373,160 @@ mod tests {
         assert_eq!(result.len(), NOTIFICATION_PREVIEW_CHARS);
         assert!(result.ends_with("..."));
         assert_eq!(result.chars().count(), NOTIFICATION_PREVIEW_CHARS);
+    }
+
+    fn ready_state_with_session() -> AppState {
+        let mut state = AppState::new();
+        state.session_id = Some("session-1".to_string());
+        state.connection_state = ConnectionState::Ready;
+        state
+    }
+
+    fn type_string(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>, text: &str) {
+        for c in text.chars() {
+            handle_crossterm(state, cmd_tx, key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn enter_during_streaming_queues_instead_of_dispatching() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+        assert!(state.is_streaming());
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "next one");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "queued prompt should not be dispatched while streaming"
+        );
+        let queued = state.queued_prompt().expect("queued prompt is set");
+        assert_eq!(queued.text, "next one");
+        assert_eq!(queued.display_text, "next one");
+        assert!(state.input.is_empty(), "input cleared after queuing");
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn second_enter_while_queued_replaces_the_queued_prompt() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "alpha");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        type_string(&mut state, &cmd_tx, "beta");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        let queued = state.queued_prompt().expect("queued prompt is set");
+        assert_eq!(
+            queued.text, "beta",
+            "last-write-wins replaces earlier queue entry"
+        );
+    }
+
+    #[test]
+    fn prompt_done_drains_queued_prompt_and_dispatches_it() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+        state.set_queued_prompt(QueuedPrompt {
+            text: "queued body".to_string(),
+            images: Vec::new(),
+            display_text: "queued body".to_string(),
+        });
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        super::drain_queued_prompt(&mut state, &cmd_tx);
+
+        assert!(state.queued_prompt().is_none(), "queue drained");
+        assert!(
+            state.is_streaming(),
+            "draining a queued prompt starts the next turn"
+        );
+        let cmd = cmd_rx.try_recv().expect("send prompt dispatched");
+        match cmd {
+            UiCommand::SendPrompt { text, images } => {
+                assert_eq!(text, "queued body");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ctrl_c_during_streaming_drops_queued_prompt() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+        state.set_queued_prompt(QueuedPrompt {
+            text: "abandon me".to_string(),
+            images: Vec::new(),
+            display_text: "abandon me".to_string(),
+        });
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.queued_prompt().is_none(), "queue cleared by Ctrl-C");
+        assert_eq!(state.connection_state, ConnectionState::Cancelling);
+        match cmd_rx.try_recv().expect("cancel dispatched") {
+            UiCommand::CancelPrompt => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_close_clears_queued_prompt() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+        state.set_queued_prompt(QueuedPrompt {
+            text: "stale".to_string(),
+            images: Vec::new(),
+            display_text: "stale".to_string(),
+        });
+
+        state.mark_runtime_closed();
+
+        assert!(state.queued_prompt().is_none());
+    }
+
+    #[test]
+    fn drain_is_a_no_op_when_nothing_is_queued() {
+        let mut state = ready_state_with_session();
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        super::drain_queued_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(!state.is_streaming());
+    }
+
+    #[test]
+    fn queued_prompt_preview_truncates_long_text_with_ellipsis() {
+        let long = "x".repeat(QUEUED_PROMPT_PREVIEW_WIDTH * 2);
+        let preview = super::queued_prompt_preview(&long);
+        assert!(preview.ends_with("..."));
+        assert_eq!(
+            preview.chars().count(),
+            QUEUED_PROMPT_PREVIEW_WIDTH + 3,
+            "ellipsis adds three chars"
+        );
+    }
+
+    #[test]
+    fn queued_prompt_preview_collapses_newlines() {
+        let preview = super::queued_prompt_preview("line one\nline two\r\nline three");
+        assert!(!preview.contains('\n'));
+        assert!(!preview.contains('\r'));
+        assert!(preview.starts_with("line one"));
     }
 }
