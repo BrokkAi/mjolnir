@@ -1234,9 +1234,9 @@ mod tests {
             PathBuf::from("/tmp"),
             PickerPreferences::default(),
         );
-        // 1 anvil + 3 registry + 1 custom = 5 items
+        // 1 anvil + 3 registry + 1 custom-add = 5 items
         assert_eq!(state.items.len(), 5);
-        assert!(matches!(state.items[0], Item::Anvil));
+        assert!(state.items.iter().any(|item| matches!(item, Item::Anvil)));
         assert!(state.items.iter().any(|item| matches!(item, Item::Custom)));
     }
 
@@ -1421,7 +1421,17 @@ mod tests {
 
         state.toggle_favorite(&claude);
         assert!(state.preferences.favorite_source_ids.is_empty());
-        assert_eq!(state.item_source_id(&state.items[0]), "anvil");
+        // After un-favoriting, items are sorted alphabetically by label
+        // (case-insensitive). The "Add custom agent..." row sorts ahead of
+        // "anvil" by that ordering.
+        let labels: Vec<String> = state
+            .items
+            .iter()
+            .map(|item| state.item_label(item).to_lowercase())
+            .collect();
+        let mut sorted = labels.clone();
+        sorted.sort();
+        assert_eq!(labels, sorted);
     }
 
     #[test]
