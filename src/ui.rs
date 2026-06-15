@@ -208,6 +208,16 @@ impl TranscriptScrollState {
     }
 }
 
+/// OpenRouter key context handed to the UI: the masked options for the
+/// `/key` selector, the active label shown in the header, and where to
+/// persist a switch. Carries no secret material.
+#[derive(Debug, Default, Clone)]
+pub struct OpenRouterKeyView {
+    pub options: Vec<config::KeyOption>,
+    pub active_label: Option<String>,
+    pub config_path: Option<PathBuf>,
+}
+
 /// Run the UI loop until the user quits or asks for a new session. The
 /// caller owns the terminal lifecycle (`setup_fullscreen_terminal` or
 /// `setup_inline_chat_terminal`, with the matching restore function).
@@ -218,6 +228,7 @@ impl TranscriptScrollState {
 /// on exit. `initial_agent_label` pre-populates the agent section of
 /// the header so we show the configured agent name immediately instead
 /// of waiting for the agent to report its own name during handshake.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
@@ -226,6 +237,7 @@ pub async fn run(
     initial_agent_label: Option<String>,
     history_path: Option<&Path>,
     mode: UiMode,
+    openrouter: OpenRouterKeyView,
 ) -> Result<(UiExitReason, Option<String>)> {
     let initial_history = history_path.map(config::load_history).unwrap_or_default();
     let (reason, session_id, history) = ui_loop(
@@ -236,6 +248,7 @@ pub async fn run(
         initial_agent_label,
         initial_history,
         mode,
+        openrouter,
     )
     .await?;
     if let Some(path) = history_path
@@ -289,6 +302,7 @@ const INLINE_PERMISSION_REPAIR_ATTEMPTS: usize = 3;
 /// conversation out of the viewport while a turn is streaming.
 const TOOL_OUTPUT_COLLAPSED_LINES: usize = 6;
 
+#[allow(clippy::too_many_arguments)]
 async fn ui_loop(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
@@ -297,6 +311,7 @@ async fn ui_loop(
     initial_agent_label: Option<String>,
     initial_history: Vec<String>,
     mode: UiMode,
+    openrouter: OpenRouterKeyView,
 ) -> Result<(UiExitReason, Option<String>, Vec<String>)> {
     let mut state = AppState::new();
     state.set_prompt_history(initial_history);
@@ -305,6 +320,9 @@ async fn ui_loop(
     if let Some(label) = initial_agent_label {
         state.agent_label = label;
     }
+    state.openrouter_keys = openrouter.options;
+    state.active_openrouter_key = openrouter.active_label;
+    let openrouter_config_path = openrouter.config_path;
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut transcript_sink = TranscriptSink::default();
     let mut notification_backend = TerminalNotificationBackend::detect();
@@ -338,6 +356,7 @@ async fn ui_loop(
                             force_inline_repair = true;
                         }
                         let request = handle_crossterm(&mut state, cmd_tx, ev, mode);
+                        persist_pending_openrouter_key(&mut state, openrouter_config_path.as_deref());
                         if mode == UiMode::InlineChat
                             && terminal_request_forces_inline_repair(request)
                         {
@@ -2137,6 +2156,72 @@ fn should_open_help(modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty() && matches!(code, KeyCode::F(10))
 }
 
+/// Handle the client-side `/key` command. With no argument it lists the
+/// configured OpenRouter keys (masked); with `/key <label>` it switches the
+/// active key (queued for persistence by `persist_pending_openrouter_key`).
+fn handle_key_command(state: &mut AppState, text: &str) {
+    let arg = text
+        .strip_prefix("/keys")
+        .or_else(|| text.strip_prefix("/key"))
+        .unwrap_or("")
+        .trim();
+
+    if arg.is_empty() {
+        match state.openrouter_key_listing() {
+            Some(listing) => state.push_system_message(listing),
+            None => state.record_status_message(
+                StatusKind::Info,
+                "no OpenRouter keys configured; add them under [[openrouter_keys]] in config.toml",
+            ),
+        }
+        return;
+    }
+
+    if state.select_openrouter_key(arg) {
+        state.record_status_message(
+            StatusKind::Info,
+            format!("active OpenRouter key: {arg} (applies on the next /new)"),
+        );
+    } else {
+        let available: Vec<&str> = state
+            .openrouter_keys
+            .iter()
+            .map(|k| k.label.as_str())
+            .collect();
+        let hint = if available.is_empty() {
+            "no OpenRouter keys configured".to_string()
+        } else {
+            format!("available keys: {}", available.join(", "))
+        };
+        state.record_status_message(
+            StatusKind::Warning,
+            format!("unknown OpenRouter key '{arg}'; {hint}"),
+        );
+    }
+}
+
+/// Persist a pending `/key` switch to disk, if one is queued. Failures are
+/// surfaced to the user but do not interrupt the session.
+fn persist_pending_openrouter_key(state: &mut AppState, config_path: Option<&Path>) {
+    let Some(label) = state.take_pending_key_persist() else {
+        return;
+    };
+    let Some(path) = config_path else {
+        return;
+    };
+    match config::set_active_openrouter_key_on_disk(path, &label) {
+        Ok(true) => {}
+        Ok(false) => state.record_status_message(
+            StatusKind::Warning,
+            format!("could not persist key '{label}': no longer present in config"),
+        ),
+        Err(e) => state.record_status_message(
+            StatusKind::Warning,
+            format!("failed to persist active key: {e:#}"),
+        ),
+    }
+}
+
 fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
     // Concatenate attachment contents (in order) with input text.
     let mut combined = String::new();
@@ -2184,6 +2269,22 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         state.input_cursor = 0;
         state.scroll_input_to_bottom();
         state.exit_reason = Some(UiExitReason::LoadSession);
+        return;
+    }
+
+    // `/key` lists configured OpenRouter keys (masked); `/key <label>`
+    // switches the active one. Handled entirely client-side.
+    if images.is_empty()
+        && (text == "/key"
+            || text == "/keys"
+            || text.starts_with("/key ")
+            || text.starts_with("/keys "))
+    {
+        handle_key_command(state, &text);
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
         return;
     }
 
@@ -2908,6 +3009,16 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
             Style::default().fg(Color::Cyan),
         ));
         spans.push(Span::raw("   "));
+    }
+    if let Some(key_label) = state.active_openrouter_key.as_deref() {
+        let key_label = key_label.trim();
+        if !key_label.is_empty() {
+            spans.push(Span::styled(
+                format!("key:{key_label}"),
+                Style::default().fg(Color::Yellow),
+            ));
+            spans.push(Span::raw("   "));
+        }
     }
     let project_label = state.project_label.trim();
     if !project_label.is_empty() {
@@ -6079,6 +6190,91 @@ mod tests {
             Entry::System(text) => assert_eq!(text, "warning: unknown mj command: /mj:bogus"),
             other => panic!("unexpected entry: {other:?}"),
         }
+    }
+
+    fn seed_keys(state: &mut AppState) {
+        state.openrouter_keys = vec![
+            config::KeyOption {
+                label: "work".to_string(),
+                masked: "••••1111".to_string(),
+            },
+            config::KeyOption {
+                label: "personal".to_string(),
+                masked: "••••2222".to_string(),
+            },
+        ];
+        state.active_openrouter_key = Some("work".to_string());
+    }
+
+    #[test]
+    fn slash_key_no_arg_lists_masked_keys_without_exit() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        seed_keys(&mut state);
+        state.input = "/key".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.exit_reason.is_none());
+        assert!(cmd_rx.try_recv().is_err());
+        // The listing is shown and masks the keys.
+        let listed = state
+            .transcript
+            .iter()
+            .any(|e| matches!(e, Entry::System(t) if t.contains("••••1111")));
+        assert!(listed, "transcript: {:?}", state.transcript);
+        // Input is cleared after the client-side command.
+        assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn slash_key_with_label_switches_active_and_queues_persist() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        seed_keys(&mut state);
+        state.input = "/key personal".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.exit_reason.is_none());
+        assert!(cmd_rx.try_recv().is_err());
+        assert_eq!(state.active_openrouter_key.as_deref(), Some("personal"));
+        assert_eq!(
+            state.take_pending_key_persist().as_deref(),
+            Some("personal")
+        );
+    }
+
+    #[test]
+    fn slash_key_with_unknown_label_warns_and_keeps_active() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        seed_keys(&mut state);
+        state.input = "/key ghost".to_string();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert_eq!(state.active_openrouter_key.as_deref(), Some("work"));
+        let warn = state.status_line.expect("warning");
+        assert_eq!(warn.kind, StatusKind::Warning);
+        assert!(warn.text.contains("ghost"), "msg: {}", warn.text);
+    }
+
+    #[test]
+    fn slash_key_no_keys_configured_reports_info() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "/key".to_string();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Info);
+        assert!(state.active_openrouter_key.is_none());
     }
 
     #[test]

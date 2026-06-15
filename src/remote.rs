@@ -1001,11 +1001,19 @@ pub async fn run_server(hostname: Option<String>, history_days: u32, cwd: PathBu
     let config_path = config::default_config_path();
     let cfg = config::Config::load(&config_path)
         .with_context(|| format!("load {}", config_path.display()))?;
-    let agent = cfg.agent.ok_or_else(|| {
+    let active_openrouter_key = cfg.active_openrouter_key().cloned();
+    let mut agent = cfg.agent.ok_or_else(|| {
         anyhow!(
             "no default agent configured; run `mj` once to pick an agent before starting `mj server`"
         )
     })?;
+    // Inject the active OpenRouter key so a migrated config (key lifted out
+    // of agent.env) still authenticates when serving remote sessions.
+    if let Some(key) = &active_openrouter_key {
+        agent
+            .env
+            .insert(config::OPENROUTER_API_KEY_ENV.to_string(), key.key.clone());
+    }
 
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
     let listen = server_listen_config(requested_hostname.as_deref())?;

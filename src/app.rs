@@ -15,6 +15,7 @@ use agent_client_protocol::schema::{
 };
 
 use crate::clipboard::ClipboardLease;
+use crate::config::KeyOption;
 
 use crate::event::{
     PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, UiEvent,
@@ -27,6 +28,7 @@ pub const QUEUED_PROMPT_PREVIEW_WIDTH: usize = 40;
 
 const BUILTIN_NEW_COMMAND: &str = "new";
 const BUILTIN_LOAD_COMMAND: &str = "load";
+const BUILTIN_KEY_COMMAND: &str = "key";
 
 fn builtin_new_command() -> AvailableCommand {
     AvailableCommand::new(BUILTIN_NEW_COMMAND, "start a new session")
@@ -36,10 +38,20 @@ fn builtin_load_command() -> AvailableCommand {
     AvailableCommand::new(BUILTIN_LOAD_COMMAND, "load a previous session")
 }
 
+fn builtin_key_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_KEY_COMMAND,
+        "list or switch the active OpenRouter key",
+    )
+}
+
 fn install_builtin_commands(commands: &mut Vec<AvailableCommand>) {
     commands.retain(|command| {
-        command.name != BUILTIN_NEW_COMMAND && command.name != BUILTIN_LOAD_COMMAND
+        command.name != BUILTIN_NEW_COMMAND
+            && command.name != BUILTIN_LOAD_COMMAND
+            && command.name != BUILTIN_KEY_COMMAND
     });
+    commands.insert(0, builtin_key_command());
     commands.insert(0, builtin_load_command());
     commands.insert(0, builtin_new_command());
 }
@@ -260,6 +272,15 @@ impl TokenUsage {
 #[derive(Debug)]
 pub struct AppState {
     pub agent_label: String,
+    /// Masked OpenRouter key options (label + masked tail) offered by the
+    /// `/key` selector. Empty when no named keys are configured.
+    pub openrouter_keys: Vec<KeyOption>,
+    /// Label of the active OpenRouter key, shown in the header. `None` when
+    /// no keys are configured.
+    pub active_openrouter_key: Option<String>,
+    /// Label of a key selected via `/key` that the UI loop still needs to
+    /// persist to disk. Consumed by `take_pending_key_persist`.
+    pending_key_persist: Option<String>,
     pub session_id: Option<String>,
     pub session_title: Option<String>,
     pub connection_state: ConnectionState,
@@ -451,6 +472,9 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             agent_label: String::new(),
+            openrouter_keys: Vec::new(),
+            active_openrouter_key: None,
+            pending_key_persist: None,
             session_id: None,
             session_title: None,
             connection_state: ConnectionState::Launching,
@@ -678,6 +702,48 @@ impl AppState {
     pub fn push_system_message(&mut self, text: impl Into<String>) {
         self.transcript.push(Entry::System(text.into()));
         self.bump_transcript_revision();
+    }
+
+    /// Apply a `/key <label>` selection. On a match, updates the active
+    /// label, queues the change for persistence, and returns `true`. On no
+    /// match, leaves state untouched and returns `false` so the caller can
+    /// surface an error.
+    ///
+    /// The switch takes effect on the next agent spawn (`/new`): anvil reads
+    /// `OPENROUTER_API_KEY` once at startup, so the running session keeps
+    /// its current key.
+    pub fn select_openrouter_key(&mut self, label: &str) -> bool {
+        if self.openrouter_keys.iter().any(|k| k.label == label) {
+            self.active_openrouter_key = Some(label.to_string());
+            self.pending_key_persist = Some(label.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Take the label of a `/key` selection awaiting persistence, if any.
+    pub fn take_pending_key_persist(&mut self) -> Option<String> {
+        self.pending_key_persist.take()
+    }
+
+    /// One masked line per configured key for the `/key` listing, marking
+    /// the active one. Returns `None` when no keys are configured.
+    pub fn openrouter_key_listing(&self) -> Option<String> {
+        if self.openrouter_keys.is_empty() {
+            return None;
+        }
+        let mut out = String::from("OpenRouter keys:");
+        for option in &self.openrouter_keys {
+            let marker = if self.active_openrouter_key.as_deref() == Some(option.label.as_str()) {
+                "*"
+            } else {
+                " "
+            };
+            out.push_str(&format!("\n {marker} {}  {}", option.label, option.masked));
+        }
+        out.push_str("\nuse /key <label> to switch (applies on the next /new)");
+        Some(out)
     }
 
     pub fn record_status_message(&mut self, kind: StatusKind, text: impl Into<String>) {
@@ -2552,7 +2618,7 @@ mod tests {
             .iter()
             .map(|&i| s.available_commands[i].name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "load"]);
+        assert_eq!(names, vec!["new", "load", "key"]);
     }
 
     #[test]
@@ -2571,12 +2637,64 @@ mod tests {
             .iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "load", "review_pr"]);
+        assert_eq!(names, vec!["new", "load", "key", "review_pr"]);
         assert_eq!(s.available_commands[0].description, "start a new session");
         assert_eq!(
             s.available_commands[1].description,
             "load a previous session"
         );
+    }
+
+    fn seed_openrouter_keys(s: &mut AppState) {
+        s.openrouter_keys = vec![
+            KeyOption {
+                label: "work".to_string(),
+                masked: "••••1111".to_string(),
+            },
+            KeyOption {
+                label: "personal".to_string(),
+                masked: "••••2222".to_string(),
+            },
+        ];
+        s.active_openrouter_key = Some("work".to_string());
+    }
+
+    #[test]
+    fn select_openrouter_key_switches_active_and_queues_persist() {
+        let mut s = AppState::new();
+        seed_openrouter_keys(&mut s);
+        assert!(s.select_openrouter_key("personal"));
+        assert_eq!(s.active_openrouter_key.as_deref(), Some("personal"));
+        assert_eq!(s.take_pending_key_persist().as_deref(), Some("personal"));
+        // Taken once, then cleared.
+        assert!(s.take_pending_key_persist().is_none());
+    }
+
+    #[test]
+    fn select_openrouter_key_rejects_unknown_label() {
+        let mut s = AppState::new();
+        seed_openrouter_keys(&mut s);
+        assert!(!s.select_openrouter_key("ghost"));
+        // Active label and persist queue are untouched on a miss.
+        assert_eq!(s.active_openrouter_key.as_deref(), Some("work"));
+        assert!(s.take_pending_key_persist().is_none());
+    }
+
+    #[test]
+    fn openrouter_key_listing_marks_active_and_masks() {
+        let mut s = AppState::new();
+        seed_openrouter_keys(&mut s);
+        let listing = s.openrouter_key_listing().expect("listing");
+        assert!(listing.contains("* work  ••••1111"));
+        assert!(listing.contains("  personal  ••••2222"));
+        // Never leaks raw key material.
+        assert!(!listing.contains("1111111"));
+    }
+
+    #[test]
+    fn openrouter_key_listing_none_when_no_keys() {
+        let s = AppState::new();
+        assert!(s.openrouter_key_listing().is_none());
     }
 
     #[test]

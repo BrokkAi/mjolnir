@@ -588,6 +588,12 @@ async fn run_app(
     let mut initial_agent = initial_agent;
     let mut pick_agent = should_open_initial_agent_picker(&cfg, initial_agent.as_ref());
     loop {
+        // Re-read the config at the top of each supervisor iteration so an
+        // OpenRouter key switched via `/key` during the previous session
+        // (persisted to disk by the UI) is injected into the next spawn.
+        if let Ok(reloaded) = Config::load(&config_path) {
+            cfg = reloaded;
+        }
         let resume = initial_resume.take();
         let agent = if let Some(agent) = initial_agent.take() {
             agent
@@ -625,6 +631,11 @@ async fn run_app(
             },
             resume,
             mode,
+            OpenRouterSession {
+                active_key: cfg.active_openrouter_key().cloned(),
+                options: cfg.openrouter_key_options(),
+                config_path: config_path.clone(),
+            },
         )
         .await?;
         match reason {
@@ -760,6 +771,15 @@ fn agent_header_label(agent: &SelectedAgent) -> String {
     remote::agent_display_label(agent)
 }
 
+/// OpenRouter key material handed to a session: the active key (injected
+/// into the spawned agent's environment), the masked options shown by the
+/// `/key` selector, and where to persist a switch.
+struct OpenRouterSession {
+    active_key: Option<config::OpenRouterKey>,
+    options: Vec<config::KeyOption>,
+    config_path: PathBuf,
+}
+
 async fn run_session(
     agent: &SelectedAgent,
     cwd: PathBuf,
@@ -767,6 +787,7 @@ async fn run_session(
     header_labels: HeaderLabels,
     resume_session: Option<String>,
     mode: UiMode,
+    openrouter: OpenRouterSession,
 ) -> Result<(UiExitReason, Option<String>)> {
     let mut terminal = match mode {
         UiMode::InlineChat => {
@@ -780,12 +801,20 @@ async fn run_session(
     let (runtime_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (cmd_tx, mut ui_cmd_rx) = mpsc::unbounded_channel();
 
+    // Inject the active OpenRouter key as `OPENROUTER_API_KEY` at spawn
+    // time, overriding any stale value left in the agent env. anvil reads
+    // this once at startup, so a key switch takes effect on the next spawn.
+    let mut env = agent.env.clone();
+    if let Some(key) = &openrouter.active_key {
+        env.insert(config::OPENROUTER_API_KEY_ENV.to_string(), key.key.clone());
+    }
+
     let runtime_cfg = acp::AcpRuntimeConfig {
         command: agent.program.clone(),
         args: agent.args.clone(),
         cwd,
         resume_session,
-        env: agent.env.clone(),
+        env,
         agent_stderr,
     };
 
@@ -837,6 +866,7 @@ async fn run_session(
         }
     });
 
+    let active_openrouter_label = openrouter.active_key.as_ref().map(|k| k.label.clone());
     let ui_result = ui::run(
         &mut terminal,
         cmd_tx,
@@ -845,6 +875,11 @@ async fn run_session(
         agent_display_name,
         Some(&hist_path),
         mode,
+        ui::OpenRouterKeyView {
+            options: openrouter.options,
+            active_label: active_openrouter_label,
+            config_path: Some(openrouter.config_path),
+        },
     )
     .await;
 
@@ -1049,6 +1084,7 @@ mod tests {
             &Config {
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
+                ..Default::default()
             },
             None
         ));

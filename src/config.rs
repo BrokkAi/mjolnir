@@ -11,12 +11,71 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths::expand_home_shortcut;
 
+/// Environment variable carrying the OpenRouter API key. mjolnir injects
+/// the active named key under this name when spawning the agent; anvil
+/// reads it at startup (taking precedence over its on-disk credential).
+pub const OPENROUTER_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
+
+/// Label assigned to a single legacy key when migrating an older config
+/// that stored `OPENROUTER_API_KEY` directly in the agent environment.
+pub const DEFAULT_OPENROUTER_KEY_LABEL: &str = "default";
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SelectedAgent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub favorite_agents: Vec<String>,
+    /// Named OpenRouter API keys the user can switch between. Labels are
+    /// unique; the raw key is never shown in the UI (see [`OpenRouterKey::masked`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openrouter_keys: Vec<OpenRouterKey>,
+    /// Label of the currently selected key in `openrouter_keys`. Persisted
+    /// globally so the choice survives across sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_openrouter_key: Option<String>,
+}
+
+/// A single named OpenRouter API key. `label` is a human-friendly, unique
+/// identifier shown in the picker/header; `key` is the secret and is never
+/// rendered in full.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OpenRouterKey {
+    pub label: String,
+    pub key: String,
+}
+
+impl OpenRouterKey {
+    /// Masked rendering of the secret: at most the last four characters,
+    /// prefixed with bullets. Never reveals more than the tail so it is
+    /// safe to log or show on screen.
+    pub fn masked(&self) -> String {
+        mask_secret(&self.key)
+    }
+}
+
+/// A label + masked-key pair safe to hand to the UI. Carries no secret
+/// material so it can live in `AppState` and be rendered freely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyOption {
+    pub label: String,
+    pub masked: String,
+}
+
+/// Mask a secret to at most its last four characters, prefixed with
+/// bullets. Strings of four characters or fewer are fully masked so a
+/// short secret is never echoed back in the clear.
+pub fn mask_secret(secret: &str) -> String {
+    let count = secret.chars().count();
+    if count <= 4 {
+        return "•".repeat(count);
+    }
+    let last4: String = {
+        let mut chars: Vec<char> = secret.chars().collect();
+        chars.drain(..chars.len() - 4);
+        chars.into_iter().collect()
+    };
+    format!("••••{last4}")
 }
 
 /// Launch command resolved by the picker. `source_id` identifies where
@@ -77,7 +136,89 @@ impl Config {
                     .collect();
             }
         }
+        self.migrate_openrouter_keys();
+        self.normalize_openrouter_keys();
     }
+
+    /// Backward-compat migration: an older config kept the OpenRouter key
+    /// directly in the agent environment as `OPENROUTER_API_KEY`. Lift it
+    /// into a single labeled entry so existing setups keep working and the
+    /// key becomes switchable. Only runs when no named keys exist yet, so
+    /// it never clobbers a config that already opted into the new model.
+    fn migrate_openrouter_keys(&mut self) {
+        if !self.openrouter_keys.is_empty() {
+            return;
+        }
+        let Some(agent) = self.agent.as_mut() else {
+            return;
+        };
+        if let Some(key) = agent.env.remove(OPENROUTER_API_KEY_ENV) {
+            self.openrouter_keys.push(OpenRouterKey {
+                label: DEFAULT_OPENROUTER_KEY_LABEL.to_string(),
+                key,
+            });
+            self.active_openrouter_key = Some(DEFAULT_OPENROUTER_KEY_LABEL.to_string());
+        }
+    }
+
+    /// Enforce the invariants the rest of the code relies on: unique labels
+    /// (first occurrence wins) and an `active_openrouter_key` that always
+    /// points at an existing entry (defaulting to the first key, or `None`
+    /// when the list is empty).
+    fn normalize_openrouter_keys(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        self.openrouter_keys
+            .retain(|k| seen.insert(k.label.clone()));
+
+        let active_valid = self
+            .active_openrouter_key
+            .as_ref()
+            .is_some_and(|label| self.openrouter_keys.iter().any(|k| &k.label == label));
+        if !active_valid {
+            self.active_openrouter_key = self.openrouter_keys.first().map(|k| k.label.clone());
+        }
+    }
+
+    /// The currently selected key, if one is configured.
+    pub fn active_openrouter_key(&self) -> Option<&OpenRouterKey> {
+        let label = self.active_openrouter_key.as_ref()?;
+        self.openrouter_keys.iter().find(|k| &k.label == label)
+    }
+
+    /// Select the key with `label` as active. Returns `false` (leaving the
+    /// previous selection untouched) when no key carries that label.
+    pub fn set_active_openrouter_key(&mut self, label: &str) -> bool {
+        if self.openrouter_keys.iter().any(|k| k.label == label) {
+            self.active_openrouter_key = Some(label.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Label + masked-key pairs for every configured key, in order. Safe to
+    /// hand to the UI — carries no secret material.
+    pub fn openrouter_key_options(&self) -> Vec<KeyOption> {
+        self.openrouter_keys
+            .iter()
+            .map(|k| KeyOption {
+                label: k.label.clone(),
+                masked: k.masked(),
+            })
+            .collect()
+    }
+}
+
+/// Read-modify-write the active OpenRouter key on disk. Loads the config at
+/// `path`, switches the active key, and saves it back, preserving every
+/// other field. Returns `Ok(false)` when no key with `label` exists.
+pub fn set_active_openrouter_key_on_disk(path: &Path, label: &str) -> Result<bool> {
+    let mut cfg = Config::load(path)?;
+    if !cfg.set_active_openrouter_key(label) {
+        return Ok(false);
+    }
+    cfg.save(path)?;
+    Ok(true)
 }
 
 /// Default config path: `$XDG_CONFIG_HOME/mj/config.toml` (or
@@ -221,6 +362,7 @@ mod tests {
                 env: HashMap::from([("FOO".to_string(), "bar".to_string())]),
             }),
             favorite_agents: vec!["claude-acp".to_string(), "anvil".to_string()],
+            ..Default::default()
         };
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
@@ -244,6 +386,7 @@ mod tests {
                 env: HashMap::new(),
             }),
             favorite_agents: Vec::new(),
+            ..Default::default()
         };
         cfg.save(&path).expect("save");
         assert!(path.exists());
@@ -310,6 +453,239 @@ args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
         let err = Config::load(&path).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("parse"), "error mentions parse: {msg}");
+    }
+
+    #[test]
+    fn mask_secret_shows_at_most_last_four_chars() {
+        assert_eq!(mask_secret("sk-or-v1-abcdef1234"), "••••1234");
+        // Exactly four or fewer is fully masked — never echoed.
+        assert_eq!(mask_secret("1234"), "••••");
+        assert_eq!(mask_secret("ab"), "••");
+        assert_eq!(mask_secret(""), "");
+    }
+
+    #[test]
+    fn masked_key_never_reveals_more_than_tail() {
+        let key = OpenRouterKey {
+            label: "work".to_string(),
+            key: "sk-or-v1-supersecretvalue9876".to_string(),
+        };
+        let masked = key.masked();
+        assert_eq!(masked, "••••9876");
+        assert!(!masked.contains("supersecret"));
+    }
+
+    #[test]
+    fn legacy_env_key_migrates_to_named_default_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+source_id = "anvil"
+program = "uvx"
+
+[agent.env]
+OPENROUTER_API_KEY = "sk-or-legacy-key-0001"
+OTHER = "keepme"
+"#,
+        )
+        .expect("write");
+
+        let cfg = Config::load(&path).expect("load");
+        // The legacy key is lifted into a single labeled, active entry.
+        assert_eq!(cfg.openrouter_keys.len(), 1);
+        assert_eq!(cfg.openrouter_keys[0].label, "default");
+        assert_eq!(cfg.openrouter_keys[0].key, "sk-or-legacy-key-0001");
+        assert_eq!(cfg.active_openrouter_key.as_deref(), Some("default"));
+        assert_eq!(
+            cfg.active_openrouter_key().map(|k| k.key.as_str()),
+            Some("sk-or-legacy-key-0001")
+        );
+        // It is removed from the agent env (single source of truth) but
+        // unrelated env vars are preserved.
+        let agent = cfg.agent.expect("agent");
+        assert!(!agent.env.contains_key("OPENROUTER_API_KEY"));
+        assert_eq!(agent.env.get("OTHER"), Some(&"keepme".to_string()));
+    }
+
+    #[test]
+    fn migration_skipped_when_named_keys_already_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+active_openrouter_key = "work"
+
+[agent]
+source_id = "anvil"
+program = "uvx"
+
+[agent.env]
+OPENROUTER_API_KEY = "stale-env-key"
+
+[[openrouter_keys]]
+label = "work"
+key = "sk-work-1111"
+
+[[openrouter_keys]]
+label = "personal"
+key = "sk-personal-2222"
+"#,
+        )
+        .expect("write");
+
+        let cfg = Config::load(&path).expect("load");
+        // The new model wins; the stale env key is left untouched in env
+        // (spawn-time injection overrides it with the active named key).
+        assert_eq!(cfg.openrouter_keys.len(), 2);
+        assert_eq!(cfg.active_openrouter_key.as_deref(), Some("work"));
+        assert_eq!(
+            cfg.active_openrouter_key().map(|k| k.key.as_str()),
+            Some("sk-work-1111")
+        );
+    }
+
+    #[test]
+    fn config_with_no_openrouter_key_stays_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+source_id = "claude-acp"
+program = "/usr/bin/claude-acp"
+"#,
+        )
+        .expect("write");
+
+        let cfg = Config::load(&path).expect("load");
+        assert!(cfg.openrouter_keys.is_empty());
+        assert!(cfg.active_openrouter_key.is_none());
+        assert!(cfg.active_openrouter_key().is_none());
+    }
+
+    #[test]
+    fn set_active_openrouter_key_rejects_unknown_label() {
+        let mut cfg = Config {
+            openrouter_keys: vec![OpenRouterKey {
+                label: "work".to_string(),
+                key: "sk-work".to_string(),
+            }],
+            active_openrouter_key: Some("work".to_string()),
+            ..Default::default()
+        };
+        assert!(!cfg.set_active_openrouter_key("nope"));
+        assert_eq!(cfg.active_openrouter_key.as_deref(), Some("work"));
+        assert!(cfg.set_active_openrouter_key("work"));
+    }
+
+    #[test]
+    fn invalid_active_label_falls_back_to_first_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+active_openrouter_key = "ghost"
+
+[[openrouter_keys]]
+label = "alpha"
+key = "sk-alpha"
+
+[[openrouter_keys]]
+label = "beta"
+key = "sk-beta"
+"#,
+        )
+        .expect("write");
+
+        let cfg = Config::load(&path).expect("load");
+        assert_eq!(cfg.active_openrouter_key.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn duplicate_labels_are_deduped_keeping_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[openrouter_keys]]
+label = "dup"
+key = "first-wins"
+
+[[openrouter_keys]]
+label = "dup"
+key = "second-loses"
+"#,
+        )
+        .expect("write");
+
+        let cfg = Config::load(&path).expect("load");
+        assert_eq!(cfg.openrouter_keys.len(), 1);
+        assert_eq!(cfg.openrouter_keys[0].key, "first-wins");
+    }
+
+    #[test]
+    fn set_active_openrouter_key_on_disk_persists_and_preserves_other_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let cfg = Config {
+            agent: Some(SelectedAgent {
+                source_id: "anvil".to_string(),
+                program: PathBuf::from("uvx"),
+                args: vec!["brokk".to_string(), "acp".to_string()],
+                env: HashMap::from([("OTHER".to_string(), "keep".to_string())]),
+            }),
+            favorite_agents: vec!["anvil".to_string()],
+            openrouter_keys: vec![
+                OpenRouterKey {
+                    label: "work".to_string(),
+                    key: "sk-work".to_string(),
+                },
+                OpenRouterKey {
+                    label: "personal".to_string(),
+                    key: "sk-personal".to_string(),
+                },
+            ],
+            active_openrouter_key: Some("work".to_string()),
+        };
+        cfg.save(&path).expect("save");
+
+        // Unknown label is rejected and nothing is written.
+        assert!(!set_active_openrouter_key_on_disk(&path, "ghost").expect("rmw"));
+        assert_eq!(
+            Config::load(&path).expect("load").active_openrouter_key,
+            Some("work".to_string())
+        );
+
+        // Valid switch persists and leaves every other field intact.
+        assert!(set_active_openrouter_key_on_disk(&path, "personal").expect("rmw"));
+        let reloaded = Config::load(&path).expect("load");
+        assert_eq!(reloaded.active_openrouter_key.as_deref(), Some("personal"));
+        assert_eq!(reloaded.openrouter_keys.len(), 2);
+        assert_eq!(reloaded.favorite_agents, vec!["anvil".to_string()]);
+        let agent = reloaded.agent.expect("agent");
+        assert_eq!(agent.env.get("OTHER"), Some(&"keep".to_string()));
+    }
+
+    #[test]
+    fn openrouter_key_options_are_masked() {
+        let cfg = Config {
+            openrouter_keys: vec![OpenRouterKey {
+                label: "work".to_string(),
+                key: "sk-or-v1-abcd9999".to_string(),
+            }],
+            ..Default::default()
+        };
+        let options = cfg.openrouter_key_options();
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].label, "work");
+        assert_eq!(options[0].masked, "••••9999");
     }
 
     #[test]

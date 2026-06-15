@@ -116,6 +116,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let config_path = config::default_config_path();
     let app_config = config::Config::load(&config_path)
         .with_context(|| format!("load {}", config_path.display()))?;
+    let active_openrouter_key = app_config.active_openrouter_key().cloned();
     let agent = app_config.agent.ok_or_else(|| {
         anyhow!(
             "no agent configured; run interactive `mj` once to pick an agent, or write {}",
@@ -127,12 +128,19 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let agent_label = remote::agent_display_label(&agent);
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    // Inject the active OpenRouter key the same way the interactive path
+    // does, so a migrated config (key lifted out of agent.env) still
+    // authenticates in headless runs.
+    let mut env = agent.env;
+    if let Some(key) = &active_openrouter_key {
+        env.insert(config::OPENROUTER_API_KEY_ENV.to_string(), key.key.clone());
+    }
     let runtime_cfg = AcpRuntimeConfig {
         command: agent.program,
         args: agent.args,
         cwd: cfg.cwd,
         resume_session: cfg.resume_session.clone(),
-        env: agent.env,
+        env,
         agent_stderr: cfg.agent_stderr,
     };
 
