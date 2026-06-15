@@ -2923,23 +2923,6 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ));
         spans.push(Span::raw("   "));
     }
-    if let Some(worktree_label) = state.worktree_label.as_deref() {
-        let worktree_label = worktree_label.trim();
-        if !worktree_label.is_empty() {
-            let max_width = match width {
-                0..=89 => 12,
-                90..=139 => 18,
-                _ => 24,
-            };
-            spans.push(Span::styled(
-                compact_middle_display(worktree_label, max_width),
-                Style::default()
-                    .fg(Color::LightCyan)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw("   "));
-        }
-    }
     if should_show_spinner(state) {
         spans.push(Span::styled(
             spinner_frame(),
@@ -5128,7 +5111,11 @@ mod tests {
             rendered.contains("~/code/mjolnir/.mjolnir/worktrees/bold-willow"),
             "rendered:\n{rendered}"
         );
-        assert!(rendered.contains("bold-willow"), "rendered:\n{rendered}");
+        assert_eq!(
+            rendered.matches("bold-willow").count(),
+            1,
+            "worktree name should only appear as part of the project path:\n{rendered}"
+        );
         assert!(!rendered.contains("worktree "), "rendered:\n{rendered}");
         assert!(!rendered.contains("agent "), "rendered:\n{rendered}");
         assert!(!rendered.contains("project "), "rendered:\n{rendered}");
