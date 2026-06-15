@@ -1125,14 +1125,16 @@ impl AppState {
                     self.token_usage.apply_prompt_usage(usage);
                 }
                 // Keep the "steering: ..." indicator visible across the
-                // steering cancel handoff. Without this guard, a
-                // PromptDone(Cancelled) landing while a steering target
-                // is queued would overwrite "steering: <preview>" with
-                // "turn done: Cancelled" and that stale message would
-                // hang around through the new turn (record_user_prompt
-                // and drain_queued_prompt do not touch status_line).
-                let suppress_for_steering =
-                    matches!(stop_reason, StopReason::Cancelled) && self.queued_prompt.is_some();
+                // steering cancel handoff. A queued steering prompt is
+                // about to fire as the next turn and will own the status
+                // line, so any "turn done: <reason>" we set here would
+                // only flash and then hang around stale through the new
+                // turn (record_user_prompt and drain_queued_prompt do not
+                // touch status_line). Suppress it regardless of the stop
+                // reason: an agent may report a steer-cancel as EndTurn
+                // rather than Cancelled, and either way the queued prompt
+                // is what matters next.
+                let suppress_for_steering = self.queued_prompt.is_some();
                 if !suppress_for_steering {
                     self.set_status_line(StatusKind::Info, format!("turn done: {stop_reason:?}"));
                 }
@@ -2235,6 +2237,64 @@ mod tests {
         assert_eq!(s.token_usage.input_tokens, Some(30));
         assert_eq!(s.token_usage.output_tokens, Some(12));
         assert_eq!(s.token_usage.thought_tokens, Some(4));
+    }
+
+    #[test]
+    fn prompt_done_keeps_steering_status_for_any_stop_reason_when_queued() {
+        // Regression: a queued steering prompt is about to fire as the
+        // next turn and owns the status line. PromptDone must not clobber
+        // the "steering: ..." indicator with "turn done: ...", regardless
+        // of the stop reason — agents may report a steer-cancel as
+        // EndTurn (or anything else) rather than the spec's Cancelled.
+        for reason in [
+            StopReason::EndTurn,
+            StopReason::Cancelled,
+            StopReason::MaxTokens,
+        ] {
+            let mut s = AppState::new();
+            s.apply_event(UiEvent::SessionStarted {
+                session_id: "sess-1".into(),
+                resumed: false,
+            });
+            s.record_user_prompt("first".to_string());
+            s.set_queued_prompt(QueuedPrompt {
+                text: "steered".to_string(),
+                images: Vec::new(),
+                display_text: "steered".to_string(),
+            });
+            s.status_line = Some(StatusMessage::info("steering: steered"));
+
+            s.apply_event(UiEvent::PromptDone {
+                stop_reason: reason,
+                usage: None,
+            });
+
+            let status = s.status_line.clone().expect("status line preserved");
+            assert_eq!(
+                status.text, "steering: steered",
+                "queued steer must keep its status across PromptDone({reason:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_done_sets_turn_done_status_without_a_queued_prompt() {
+        // Without a steer queued, PromptDone still surfaces the usual
+        // "turn done: ..." status — the suppression is scoped to steering.
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::SessionStarted {
+            session_id: "sess-1".into(),
+            resumed: false,
+        });
+        s.record_user_prompt("first".to_string());
+
+        s.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+
+        let status = s.status_line.clone().expect("status line set");
+        assert_eq!(status.text, "turn done: EndTurn");
     }
 
     #[test]

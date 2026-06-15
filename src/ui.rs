@@ -929,7 +929,10 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
     } else if state.config_picker.is_some() {
         inline_config_view_line_count(state, width)
     } else {
-        usize::from(INLINE_CHAT_HEIGHT)
+        // A pending steer adds a "queued: ..." chip row above the input;
+        // request one extra row so the input box keeps its full height
+        // instead of shrinking while steering.
+        usize::from(INLINE_CHAT_HEIGHT) + usize::from(state.queued_prompt().is_some())
     };
 
     (desired.min(usize::from(u16::MAX)) as u16).clamp(INLINE_CHAT_HEIGHT, max_height)
@@ -2662,11 +2665,14 @@ fn draw(
     let input_height = (chip_rows + input_lines + 2) as u16;
     let input_height = input_height.clamp(MIN_INPUT_HEIGHT, MAX_INPUT_HEIGHT);
 
+    let queued_row = u16::from(state.queued_prompt().is_some());
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(1),
+            Constraint::Length(queued_row),
             Constraint::Length(input_height),
             Constraint::Length(if has_config_options { 1 } else { 0 }),
         ])
@@ -2674,8 +2680,9 @@ fn draw(
 
     draw_transcript(f, chunks[0], state, transcript_scroll);
     draw_header(f, chunks[1], state);
-    draw_input(f, chunks[2], state, mode);
-    draw_config_shortcuts_row(f, chunks[3], state);
+    draw_queued_prompt_row(f, chunks[2], state);
+    draw_input(f, chunks[3], state, mode);
+    draw_config_shortcuts_row(f, chunks[4], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -2711,18 +2718,21 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
 
     let has_config_options = !state.selectable_config_options().is_empty();
     let config_height = if has_config_options { 1 } else { 0 };
+    let queued_row = u16::from(state.queued_prompt().is_some());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(queued_row),
             Constraint::Min(MIN_INPUT_HEIGHT),
             Constraint::Length(config_height),
         ])
         .split(f.area());
 
     draw_header(f, chunks[0], state);
-    draw_input(f, chunks[1], state, UiMode::InlineChat);
-    draw_config_shortcuts_row(f, chunks[2], state);
+    draw_queued_prompt_row(f, chunks[1], state);
+    draw_input(f, chunks[2], state, UiMode::InlineChat);
+    draw_config_shortcuts_row(f, chunks[3], state);
 
     if state.autocomplete.visible && !state.has_pending_permission() {
         draw_inline_autocomplete_popover(f, f.area(), state);
@@ -3992,6 +4002,33 @@ fn voice_level_meter(level: Option<f32>) -> String {
         "|".repeat(filled),
         ".".repeat(METER_WIDTH - filled)
     )
+}
+
+/// Render the pending steering prompt as a single chip row directly above
+/// the input box. Visible only while a prompt is queued — i.e. during a
+/// steer, after the user submitted it and before the in-flight turn ends
+/// and `drain_queued_prompt` fires it. Styled as a distinct chip so it
+/// reads as "waiting to send", never as a message already in the
+/// transcript.
+fn draw_queued_prompt_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    if area.height == 0 {
+        return;
+    }
+    let Some(queued) = state.queued_prompt() else {
+        return;
+    };
+    let label = format!(
+        " ↳ queued: {} ",
+        queued_prompt_preview(&queued.display_text)
+    );
+    let chip = Paragraph::new(Line::from(Span::styled(
+        label,
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )));
+    f.render_widget(chip, area);
 }
 
 fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode) {
@@ -8429,6 +8466,85 @@ mod tests {
         assert_eq!(queued.display_text, "next one");
         assert!(state.input.is_empty(), "input cleared after steering");
         assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn queued_steer_renders_as_chip_above_input_and_stays_out_of_transcript() {
+        // The pending steer must show as a persistent "queued" chip above
+        // the input box (in both UI modes) while it waits, and must NOT be
+        // recorded into the transcript — it isn't sent yet.
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "steer me");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        let _ = cmd_rx.try_recv(); // consume the steering CancelPrompt
+
+        assert!(state.queued_prompt().is_some(), "steer target queued");
+        assert!(
+            !state
+                .transcript
+                .iter()
+                .any(|e| matches!(e, Entry::UserPrompt(t) if t == "steer me")),
+            "queued steer must not enter the transcript while pending"
+        );
+
+        for render_mode in [UiMode::FullscreenTui, UiMode::InlineChat] {
+            let backend = TestBackend::new(80, 12);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            let mut scroll = TranscriptScrollState::default();
+            terminal
+                .draw(|frame| draw(frame, &mut state, &mut scroll, render_mode))
+                .expect("draw");
+            let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+            assert!(
+                rendered.contains("queued: steer me"),
+                "{render_mode:?} must show the queued chip above the input:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_chip_disappears_after_the_steer_drains() {
+        // Once the in-flight turn ends and the steer drains into the next
+        // turn, the chip must clear (queued_prompt is taken) and the
+        // prompt then appears in the transcript as a real turn.
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "steer me");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        let _ = cmd_rx.try_recv(); // consume the steering CancelPrompt
+
+        // Agent ends the turn (EndTurn, as a real agent reports a cancel);
+        // the drain fires the steer as the next turn.
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        drain_queued_prompt(&mut state, &cmd_tx);
+        assert!(state.queued_prompt().is_none(), "steer drained");
+
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut scroll = TranscriptScrollState::default();
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            !rendered.contains("queued:"),
+            "queued chip must clear once the steer drains:\n{rendered}"
+        );
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|e| matches!(e, Entry::UserPrompt(t) if t == "steer me")),
+            "drained steer must now appear in the transcript"
+        );
     }
 
     #[test]
