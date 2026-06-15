@@ -4046,10 +4046,11 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         " runtime closed (/new or Ctrl-N for a new session | Ctrl-C to quit) ".to_string()
     } else if state.is_streaming() {
         match state.queued_prompt() {
-            Some(queued) => format!(
-                " streaming... (steering: {} | Ctrl-C cancels both) ",
-                queued_prompt_preview(&queued.display_text)
-            ),
+            // The queued text itself is shown in the chip row above the
+            // input (draw_queued_prompt_row); the title only carries the
+            // steering hint so the preview isn't duplicated on two
+            // adjacent lines.
+            Some(_) => " streaming... (steering — Ctrl-C cancels both) ".to_string(),
             None => " streaming... (Enter steers | Ctrl-C cancel) ".to_string(),
         }
     } else if state.voice_input_active {
