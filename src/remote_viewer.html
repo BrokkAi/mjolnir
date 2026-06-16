@@ -24,6 +24,7 @@
         --radius: 12px;
         --shadow: 0 6px 20px light-dark(rgb(16 24 40 / 0.06), rgb(0 0 0 / 0.35));
         --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        --keyboard-inset: 0px;
         accent-color: var(--accent);
       }
 
@@ -508,14 +509,70 @@
         }
       }
 
+      .config-panel {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--panel);
+
+        &[hidden] {
+          display: none;
+        }
+      }
+
+      .config-panel-summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-height: 42px;
+        padding: 9px 12px;
+        cursor: pointer;
+        list-style: none;
+
+        &::-webkit-details-marker {
+          display: none;
+        }
+      }
+
+      .config-panel-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .config-panel-meta {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .config-panel-chevron {
+        flex: none;
+        width: 8px;
+        height: 8px;
+        border-right: 2px solid var(--muted);
+        border-bottom: 2px solid var(--muted);
+        transform: translateY(-2px) rotate(45deg);
+        transition: transform 0.12s ease;
+      }
+
+      .config-panel[open] .config-panel-chevron {
+        transform: translateY(2px) rotate(225deg);
+      }
+
       .config-list {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
         gap: 12px 16px;
         padding: 12px 14px;
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        background: var(--panel);
+        border-top: 1px solid var(--border);
 
         &:empty {
           display: none;
@@ -930,6 +987,79 @@
         .sidebar .panel-header {
           padding-top: calc(14px + env(safe-area-inset-top));
         }
+
+        .composer {
+          gap: 8px;
+          padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+        }
+
+        .config-panel-summary {
+          min-height: 38px;
+          padding: 7px 10px;
+        }
+
+        .config-list {
+          grid-template-columns: 1fr;
+          gap: 8px;
+          max-height: min(34dvh, 260px);
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          padding: 8px;
+        }
+
+        .config-option {
+          gap: 4px;
+        }
+
+        .config-combo-trigger {
+          min-height: 38px;
+          padding: 7px 10px;
+        }
+
+        .config-combo-popup {
+          position: fixed;
+          left: 10px;
+          right: 10px;
+          bottom: calc(var(--keyboard-inset) + env(safe-area-inset-bottom) + 10px);
+          min-width: 0;
+          max-width: calc(100vw - 20px);
+          max-height: min(58dvh, calc(100dvh - var(--keyboard-inset) - 28px));
+          z-index: 80;
+        }
+
+        .config-combo-popup.is-searching {
+          top: calc(env(safe-area-inset-top) + 10px);
+          max-height: none;
+        }
+
+        .config-combo-search {
+          font-size: 16px;
+        }
+
+        .config-combo-list {
+          max-height: min(44dvh, calc(100dvh - var(--keyboard-inset) - 128px));
+        }
+
+        .config-combo-popup.is-searching .config-combo-list {
+          flex: 1;
+          min-height: 0;
+          max-height: none;
+        }
+
+        .composer textarea {
+          min-height: 44px;
+          max-height: 130px;
+          padding: 10px;
+        }
+
+        .primary {
+          height: 40px;
+          padding: 0 14px;
+        }
+
+        .queue-list {
+          max-height: 18dvh;
+        }
       }
 
       @media (prefers-reduced-motion: reduce) {
@@ -984,7 +1114,14 @@
           <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
         </div>
         <section class="composer">
-          <div id="session-config" class="config-list"></div>
+          <details id="session-config-panel" class="config-panel" hidden>
+            <summary class="config-panel-summary">
+              <span class="config-panel-title">Session settings</span>
+              <span id="session-config-summary" class="config-panel-meta"></span>
+              <span class="config-panel-chevron" aria-hidden="true"></span>
+            </summary>
+            <div id="session-config" class="config-list"></div>
+          </details>
           <div id="permissions" class="permission-list"></div>
           <div class="composer-row">
             <textarea id="queue-input" placeholder="Queue a prompt for this session" enterkeyhint="send" aria-label="Prompt to queue"></textarea>
@@ -1074,6 +1211,8 @@
       const approvalBadgeEl = $("approval-badge");
       const backButtonEl = $("back-button");
       const permissionsEl = $("permissions");
+      const sessionConfigPanelEl = $("session-config-panel");
+      const sessionConfigSummaryEl = $("session-config-summary");
       const sessionConfigEl = $("session-config");
       const queueInputEl = $("queue-input");
       const queueSubmitEl = $("queue-submit");
@@ -1106,6 +1245,8 @@
       let shouldStickToBottom = true;
       let forceScrollToBottom = false;
       let pendingNewEntries = 0;
+      let configPanelUserToggled = false;
+      let expectedConfigPanelOpen = null;
       const draftBySessionId = new Map();
       const activityBySessionId = new Map();
       const sessionCardById = new Map();
@@ -1130,6 +1271,18 @@
 
       function scrollBehavior() {
         return reducedMotion.matches ? "auto" : "smooth";
+      }
+
+      function syncKeyboardInset() {
+        const viewport = window.visualViewport;
+        const inset = viewport
+          ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
+          : 0;
+        document.documentElement.style.setProperty("--keyboard-inset", `${Math.round(inset)}px`);
+      }
+
+      function isNarrowScreen() {
+        return narrowScreen.matches || window.innerWidth <= 800;
       }
 
       function withViewTransition(update) {
@@ -1164,6 +1317,7 @@
         sentDecisions.clear();
         sentConfigChanges.clear();
         configCombos.clear();
+        configPanelUserToggled = false;
         renderedSessionId = null;
         renderedEntries = [];
         if (refreshTimer) {
@@ -1270,6 +1424,7 @@
           selectedSessionId = routed;
           queuedPrompts = [];
           pendingNewEntries = 0;
+          configPanelUserToggled = false;
           forceScrollToBottom = true;
           restoreDraftForSelectedSession();
           void refreshQueuedPrompts();
@@ -1281,7 +1436,7 @@
       }
 
       function maybeAutoSelectSession() {
-        if (routeSessionId() || narrowScreen.matches || !sessions.length) {
+        if (routeSessionId() || isNarrowScreen() || !sessions.length) {
           return;
         }
         if (!selectedSessionId || !sessions.some((s) => s.session_id === selectedSessionId)) {
@@ -1290,6 +1445,7 @@
           // path, so the previous session's queue never bleeds through.
           queuedPrompts = [];
           pendingNewEntries = 0;
+          configPanelUserToggled = false;
           forceScrollToBottom = true;
           restoreDraftForSelectedSession();
           void refreshQueuedPrompts();
@@ -1821,6 +1977,31 @@
         return session && Array.isArray(session.session_config) ? session.session_config : [];
       }
 
+      function setConfigPanelOpen(open) {
+        if (sessionConfigPanelEl.open === open) {
+          return;
+        }
+        expectedConfigPanelOpen = open;
+        sessionConfigPanelEl.open = open;
+      }
+
+      function updateConfigPanel(session, options) {
+        const hasOptions = Boolean(session && options.length);
+        sessionConfigPanelEl.hidden = !hasOptions;
+        if (!hasOptions) {
+          sessionConfigSummaryEl.textContent = "";
+          configPanelUserToggled = false;
+          setConfigPanelOpen(false);
+          return;
+        }
+
+        sessionConfigSummaryEl.textContent =
+          `${options.length} option${options.length === 1 ? "" : "s"}`;
+        if (!configPanelUserToggled) {
+          setConfigPanelOpen(!isNarrowScreen());
+        }
+      }
+
       function configOptionKey(option) {
         return `${option.target_kind}\u001f${option.config_id || ""}`;
       }
@@ -1929,6 +2110,15 @@
           });
         }
 
+        function updateSearchMode() {
+          popup.classList.toggle(
+            "is-searching",
+            isNarrowScreen()
+              && open
+              && (document.activeElement === search || search.value.trim().length > 0),
+          );
+        }
+
         function setActive(index) {
           activeIndex = index;
           [...list.children].forEach((el, i) => {
@@ -1954,7 +2144,10 @@
           renderList();
           const selected = filtered.findIndex((c) => c.value === value);
           if (selected >= 0) setActive(selected);
-          search.focus();
+          if (!isNarrowScreen()) {
+            search.focus();
+          }
+          updateSearchMode();
           document.addEventListener("pointerdown", onOutsidePointer, true);
         }
 
@@ -1963,6 +2156,10 @@
           open = false;
           popup.hidden = true;
           trigger.setAttribute("aria-expanded", "false");
+          if (document.activeElement === search) {
+            search.blur();
+          }
+          popup.classList.remove("is-searching");
           renderValue();
           document.removeEventListener("pointerdown", onOutsidePointer, true);
         }
@@ -1973,10 +2170,21 @@
         }
 
         trigger.addEventListener("click", () => (open ? closePopup() : openPopup()));
+        search.addEventListener("focus", () => {
+          syncKeyboardInset();
+          updateSearchMode();
+        });
+        search.addEventListener("click", () => {
+          setTimeout(updateSearchMode, 0);
+        });
+        search.addEventListener("blur", () => {
+          setTimeout(updateSearchMode, 0);
+        });
         search.addEventListener("input", () => {
           activeIndex = -1;
           renderList();
           if (filtered.length) setActive(0);
+          updateSearchMode();
         });
         search.addEventListener("keydown", (event) => {
           if (event.key === "ArrowDown") {
@@ -2023,6 +2231,7 @@
 
       function renderConfig(session) {
         const options = sessionConfigOptions(session);
+        updateConfigPanel(session, options);
         // Forget sent changes the session has applied (current_value caught
         // up), that vanished from the snapshot, or that timed out waiting to
         // apply, so the control re-enables.
@@ -2308,12 +2517,26 @@
       authFormEl.addEventListener("submit", submitAuth);
       logoutButtonEl.addEventListener("click", logout);
       backButtonEl.addEventListener("click", navigateToList);
+      sessionConfigPanelEl.addEventListener("toggle", () => {
+        if (expectedConfigPanelOpen === sessionConfigPanelEl.open) {
+          expectedConfigPanelOpen = null;
+          return;
+        }
+        expectedConfigPanelOpen = null;
+        configPanelUserToggled = true;
+      });
       window.addEventListener("hashchange", applyRoute);
       narrowScreen.addEventListener("change", () => {
+        configPanelUserToggled = false;
         if (authenticated) {
           renderAll();
         }
       });
+      window.addEventListener("resize", syncKeyboardInset);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", syncKeyboardInset);
+        window.visualViewport.addEventListener("scroll", syncKeyboardInset);
+      }
       jumpToLatestEl.addEventListener("click", () => {
         pendingNewEntries = 0;
         scrollTranscriptToBottom();
@@ -2342,6 +2565,7 @@
       });
 
       syncComposerHeight();
+      syncKeyboardInset();
       applyRoute();
       void tryResumeViewerSession();
     </script>
