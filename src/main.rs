@@ -635,6 +635,10 @@ async fn run_app(
                 pick_agent = true;
                 continue;
             }
+            UiExitReason::ClearSession => {
+                initial_agent = Some(agent);
+                continue;
+            }
             UiExitReason::LoadSession => {
                 let sessions =
                     session::list_sessions(&agent, cwd.clone(), agent_stderr.as_deref()).await?;

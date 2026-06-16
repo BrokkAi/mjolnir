@@ -2183,6 +2183,15 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
+    if images.is_empty() && text == "/clear" {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        state.exit_reason = Some(UiExitReason::ClearSession);
+        return;
+    }
+
     if images.is_empty() && text == "/load" {
         state.input.clear();
         clear_attachments(state);
@@ -2206,7 +2215,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     if state.runtime_closed {
         state.record_status_message(
             StatusKind::Info,
-            "acp runtime closed; type /new or press Ctrl-N for a new session, or Ctrl-C to quit",
+            "acp runtime closed; type /clear for the same agent, /new for the picker, or Ctrl-C to quit",
         );
         return;
     }
@@ -4055,7 +4064,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         }
     };
     let title = if state.runtime_closed {
-        " runtime closed (/new or Ctrl-N for a new session | Ctrl-C to quit) ".to_string()
+        " runtime closed (/clear same agent | /new picker | Ctrl-C quit) ".to_string()
     } else if state.is_streaming() {
         let queued = state.queued_prompt_count();
         if queued > 0 {
@@ -4616,7 +4625,9 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
         )]),
         Line::from("  F1..F9 / Ctrl-1..9 / Up/Down  edit or move inside choices"),
         Line::from(""),
-        Line::from("Built-in commands: /new starts a session; /load opens session picker"),
+        Line::from(
+            "Built-in commands: /clear keeps agent; /new opens agent picker; /load opens session picker",
+        ),
     ]);
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -6057,7 +6068,7 @@ mod tests {
         match &state.transcript[0] {
             Entry::System(text) => assert_eq!(
                 text,
-                "acp runtime closed; type /new or press Ctrl-N for a new session, or Ctrl-C to quit"
+                "acp runtime closed; type /clear for the same agent, /new for the picker, or Ctrl-C to quit"
             ),
             other => panic!("unexpected entry: {other:?}"),
         }
@@ -6116,6 +6127,20 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
 
         assert_eq!(state.exit_reason, Some(UiExitReason::LoadSession));
+        // Must not forward the command to the agent.
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn slash_clear_triggers_clear_session_exit_reason() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "/clear".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert_eq!(state.exit_reason, Some(UiExitReason::ClearSession));
         // Must not forward the command to the agent.
         assert!(cmd_rx.try_recv().is_err());
     }

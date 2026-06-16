@@ -27,10 +27,18 @@ use crate::event::{
 pub const QUEUED_PROMPT_PREVIEW_WIDTH: usize = 40;
 
 const BUILTIN_NEW_COMMAND: &str = "new";
+const BUILTIN_CLEAR_COMMAND: &str = "clear";
 const BUILTIN_LOAD_COMMAND: &str = "load";
 
 fn builtin_new_command() -> AvailableCommand {
     AvailableCommand::new(BUILTIN_NEW_COMMAND, "start a new session")
+}
+
+fn builtin_clear_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_CLEAR_COMMAND,
+        "start a fresh session with the current agent",
+    )
 }
 
 fn builtin_load_command() -> AvailableCommand {
@@ -39,9 +47,12 @@ fn builtin_load_command() -> AvailableCommand {
 
 fn install_builtin_commands(commands: &mut Vec<AvailableCommand>) {
     commands.retain(|command| {
-        command.name != BUILTIN_NEW_COMMAND && command.name != BUILTIN_LOAD_COMMAND
+        command.name != BUILTIN_NEW_COMMAND
+            && command.name != BUILTIN_CLEAR_COMMAND
+            && command.name != BUILTIN_LOAD_COMMAND
     });
     commands.insert(0, builtin_load_command());
+    commands.insert(0, builtin_clear_command());
     commands.insert(0, builtin_new_command());
 }
 
@@ -51,6 +62,7 @@ fn install_builtin_commands(commands: &mut Vec<AvailableCommand>) {
 pub enum UiExitReason {
     Quit,
     NewSession,
+    ClearSession,
     LoadSession,
 }
 
@@ -2601,7 +2613,7 @@ mod tests {
             .iter()
             .map(|&i| s.available_commands[i].name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "load"]);
+        assert_eq!(names, vec!["new", "clear", "load"]);
     }
 
     #[test]
@@ -2611,6 +2623,7 @@ mod tests {
             SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
                 cmd("review_pr"),
                 AvailableCommand::new("new", "agent-provided command"),
+                AvailableCommand::new("clear", "agent-provided command"),
                 AvailableCommand::new("load", "agent-provided command"),
             ])),
         ));
@@ -2620,10 +2633,14 @@ mod tests {
             .iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "load", "review_pr"]);
+        assert_eq!(names, vec!["new", "clear", "load", "review_pr"]);
         assert_eq!(s.available_commands[0].description, "start a new session");
         assert_eq!(
             s.available_commands[1].description,
+            "start a fresh session with the current agent"
+        );
+        assert_eq!(
+            s.available_commands[2].description,
             "load a previous session"
         );
     }
