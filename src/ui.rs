@@ -63,6 +63,7 @@ const PASTE_BURST_CHAR_INTERVAL: Duration = Duration::from_millis(8);
 const PASTE_BURST_IDLE_TIMEOUT: Duration = Duration::from_millis(16);
 const PASTE_BURST_MIN_CHARS: usize = 3;
 const NOTIFICATION_PREVIEW_CHARS: usize = 80;
+const VOICE_INPUT_SUPPORTED: bool = cfg!(not(target_os = "android"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {
@@ -1182,11 +1183,7 @@ fn handle_crossterm(
             copy_last_agent_message(state);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
-            return if state.voice_input_active {
-                TerminalRequest::StopDictation
-            } else {
-                TerminalRequest::StartDictation
-            };
+            return dictation_request_for_state(state, VOICE_INPUT_SUPPORTED);
         }
         (modifiers, KeyCode::Char('v'))
             if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -1284,6 +1281,16 @@ fn handle_crossterm(
         _ => {}
     }
     TerminalRequest::None
+}
+
+fn dictation_request_for_state(state: &AppState, voice_input_supported: bool) -> TerminalRequest {
+    if !voice_input_supported {
+        TerminalRequest::None
+    } else if state.voice_input_active {
+        TerminalRequest::StopDictation
+    } else {
+        TerminalRequest::StartDictation
+    }
 }
 
 fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
@@ -3987,6 +3994,18 @@ fn voice_level_meter(level: Option<f32>) -> String {
     )
 }
 
+fn idle_prompt_title(voice_input_supported: bool, text_selection_hint: &str) -> String {
+    if voice_input_supported {
+        format!(
+            " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
+        )
+    } else {
+        format!(
+            " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | F10 help | Ctrl-C quit{text_selection_hint}) "
+        )
+    }
+}
+
 /// Render the pending steering prompt as a single chip row directly above
 /// the input box. Visible only while a prompt is queued — i.e. during a
 /// steer, after the user submitted it and before the in-flight turn ends
@@ -4042,9 +4061,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
             voice_level_meter(state.voice_input_level)
         )
     } else {
-        format!(
-            " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
-        )
+        idle_prompt_title(VOICE_INPUT_SUPPORTED, &text_selection_hint)
     };
     let style = if state.runtime_closed || state.is_streaming() {
         Style::default().fg(Color::DarkGray)
@@ -4566,37 +4583,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let mut lines = vec![
-        Line::from(vec![Span::styled(
-            "General",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  Ctrl-N          new session"),
-        Line::from("  Ctrl-O          load session"),
-        Line::from("  Enter           send prompt / accept selected item"),
-        Line::from(format!(
-            "  {PROMPT_NEWLINE_HINT:<15} insert a newline in the prompt"
-        )),
-        Line::from("  Left/Right       move the prompt cursor"),
-        Line::from("  Up/Down          cursor line or browse prompt history (top/bottom)"),
-        Line::from("  PageUp/Down      move the cursor five lines"),
-        Line::from("  Home/End         jump to the start / end of the current line"),
-        Line::from("  Ctrl-A/E/B/F     line start/end and char left/right"),
-        Line::from("  Ctrl-K/U/W       delete to end/start of line or previous word"),
-        Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
-        Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
-        Line::from("  🎙 Ctrl-R        start/stop microphone dictation into the prompt"),
-        Line::from("  Ctrl-V/Ctrl-Alt-V paste image from clipboard"),
-        Line::from("  Ctrl-Y           copy last agent message to clipboard"),
-        Line::from("  Esc              clear input, chips, and browsing history"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Pasted chips (>3 lines)",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  Backspace / Esc / Enter  remove chip / clear / send chips + input"),
-        Line::from(""),
-    ];
+    let mut lines = general_help_lines(VOICE_INPUT_SUPPORTED);
     if mode == UiMode::FullscreenTui {
         lines.extend([
             Line::from("  F12              toggle mouse text selection / wheel scrolling"),
@@ -4627,6 +4614,47 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(paragraph, inner);
+}
+
+fn general_help_lines(voice_input_supported: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(vec![Span::styled(
+            "General",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  Ctrl-N          new session"),
+        Line::from("  Ctrl-O          load session"),
+        Line::from("  Enter           send prompt / accept selected item"),
+        Line::from(format!(
+            "  {PROMPT_NEWLINE_HINT:<15} insert a newline in the prompt"
+        )),
+        Line::from("  Left/Right       move the prompt cursor"),
+        Line::from("  Up/Down          cursor line or browse prompt history (top/bottom)"),
+        Line::from("  PageUp/Down      move the cursor five lines"),
+        Line::from("  Home/End         jump to the start / end of the current line"),
+        Line::from("  Ctrl-A/E/B/F     line start/end and char left/right"),
+        Line::from("  Ctrl-K/U/W       delete to end/start of line or previous word"),
+        Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
+        Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
+    ];
+    if voice_input_supported {
+        lines.push(Line::from(
+            "  🎙 Ctrl-R        start/stop microphone dictation into the prompt",
+        ));
+    }
+    lines.extend([
+        Line::from("  Ctrl-V/Ctrl-Alt-V paste image from clipboard"),
+        Line::from("  Ctrl-Y           copy last agent message to clipboard"),
+        Line::from("  Esc              clear input, chips, and browsing history"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Pasted chips (>3 lines)",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  Backspace / Esc / Enter  remove chip / clear / send chips + input"),
+        Line::from(""),
+    ]);
+    lines
 }
 
 fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -7669,6 +7697,42 @@ mod tests {
         );
 
         assert_eq!(request, TerminalRequest::StopDictation);
+    }
+
+    #[test]
+    fn ctrl_r_is_ignored_when_voice_input_is_unsupported() {
+        let mut state = AppState::new();
+
+        assert_eq!(
+            dictation_request_for_state(&state, false),
+            TerminalRequest::None
+        );
+
+        state.voice_input_active = true;
+        assert_eq!(
+            dictation_request_for_state(&state, false),
+            TerminalRequest::None
+        );
+    }
+
+    #[test]
+    fn android_prompt_title_hides_voice_shortcut() {
+        let title = idle_prompt_title(false, "");
+
+        assert!(!title.contains("Ctrl-R"));
+        assert!(!title.contains("voice"));
+    }
+
+    #[test]
+    fn android_help_hides_voice_shortcut() {
+        let help = general_help_lines(false)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!help.contains("Ctrl-R"));
+        assert!(!help.contains("dictation"));
     }
 
     #[test]

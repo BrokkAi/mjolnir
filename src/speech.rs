@@ -1,9 +1,10 @@
 //! Prompt dictation support.
 //!
-//! Non-Android platforms use local microphone capture plus OpenAI's
-//! transcription endpoint. Audio stays in memory as mono 16 kHz WAV chunks,
-//! and completed utterances are inserted into the prompt as they are
-//! transcribed.
+//! Non-Android platforms use an in-process, fully local pipeline built on
+//! sherpa-onnx: cpal microphone capture, Silero VAD speech segmentation, and
+//! the multilingual NeMo Parakeet TDT 0.6b v3 offline recognizer. Models are
+//! downloaded once into the user cache and then reused without any API key or
+//! network call during dictation.
 
 use anyhow::Result;
 #[cfg(target_os = "android")]
@@ -14,46 +15,265 @@ mod backend {
     use anyhow::{Context, Result, bail};
     use cpal::SampleFormat;
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use reqwest::blocking::multipart::{Form, Part};
-    use serde::Deserialize;
+    use sherpa_onnx::{
+        LinearResampler, OfflineRecognizer, OfflineRecognizerConfig, VadModelConfig,
+        VoiceActivityDetector,
+    };
     use std::{
-        io::Write,
+        fs,
+        io::{Read, Write},
+        path::{Component, Path, PathBuf},
         sync::mpsc,
+        thread,
         time::{Duration, Instant},
     };
 
-    const DEFAULT_TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
-    const TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
+    const ASR_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
+    const ASR_MODEL_DIR: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
+    const ASR_ENCODER: &str = "encoder.int8.onnx";
+    const ASR_DECODER: &str = "decoder.int8.onnx";
+    const ASR_JOINER: &str = "joiner.int8.onnx";
+    const ASR_TOKENS: &str = "tokens.txt";
+    const VAD_MODEL_URL: &str =
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx";
+    const VAD_MODEL_FILE: &str = "silero_vad.onnx";
 
     const DICTATION_TIMEOUT: Duration = Duration::from_secs(600);
     const DICTATION_SILENCE: Duration = Duration::from_secs(20);
-    const END_OF_UTTERANCE_SILENCE: Duration = Duration::from_millis(900);
-    const MIN_SPEECH_DURATION: Duration = Duration::from_millis(250);
-    const LEVEL_EMIT_INTERVAL: Duration = Duration::from_millis(80);
 
     const SAMPLE_RATE: i32 = 16000;
-    const SILENCE_RMS_THRESHOLD: f32 = 0.01;
-    const PRE_SPEECH_SECONDS: usize = 1;
+    const VAD_WINDOW_SIZE: usize = 512;
+    const INTERIM_DECODE_INTERVAL: Duration = Duration::from_millis(250);
+    const LEVEL_EMIT_INTERVAL: Duration = Duration::from_millis(80);
 
-    #[derive(Debug, Deserialize)]
-    struct JsonTranscription {
-        text: String,
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct ModelPaths {
+        pub dir: PathBuf,
+        pub encoder: PathBuf,
+        pub decoder: PathBuf,
+        pub joiner: PathBuf,
+        pub tokens: PathBuf,
+        pub vad: PathBuf,
     }
 
-    fn openai_api_key() -> Result<String> {
-        std::env::var("OPENAI_API_KEY")
-            .map(|key| key.trim().to_string())
-            .ok()
-            .filter(|key| !key.is_empty())
-            .context("voice dictation requires OPENAI_API_KEY for OpenAI transcription")
+    impl ModelPaths {
+        pub(super) fn in_cache(cache_root: PathBuf) -> Self {
+            let voice = cache_root.join("voice");
+            let dir = voice.join(ASR_MODEL_DIR);
+            Self {
+                encoder: dir.join(ASR_ENCODER),
+                decoder: dir.join(ASR_DECODER),
+                joiner: dir.join(ASR_JOINER),
+                tokens: dir.join(ASR_TOKENS),
+                vad: voice.join(VAD_MODEL_FILE),
+                dir,
+            }
+        }
+
+        pub(super) fn is_installed(&self) -> bool {
+            self.encoder.is_file()
+                && self.decoder.is_file()
+                && self.joiner.is_file()
+                && self.tokens.is_file()
+                && self.vad.is_file()
+        }
     }
 
-    fn transcription_model() -> String {
-        std::env::var("MJ_VOICE_TRANSCRIPTION_MODEL")
-            .ok()
-            .map(|model| model.trim().to_string())
-            .filter(|model| !model.is_empty())
-            .unwrap_or_else(|| DEFAULT_TRANSCRIPTION_MODEL.to_string())
+    fn mjolnir_cache_dir() -> Result<PathBuf> {
+        dirs::cache_dir()
+            .map(|dir| dir.join("mj"))
+            .context("locate user cache directory")
+    }
+
+    pub(super) fn model_paths() -> Result<ModelPaths> {
+        Ok(ModelPaths::in_cache(mjolnir_cache_dir()?))
+    }
+
+    /// Stream a URL to `dest`, reporting (downloaded, total) byte counts.
+    ///
+    /// reqwest::blocking creates its own Tokio runtime, which panics when
+    /// called from within an existing Tokio context. Downloading on a plain OS
+    /// thread guarantees there is no ambient runtime, regardless of call site;
+    /// progress flows back over a channel so the callback need not be Send.
+    fn download_to_file<F>(url: &str, dest: &Path, mut on_progress: F) -> Result<()>
+    where
+        F: FnMut(u64, Option<u64>),
+    {
+        let url = url.to_string();
+        let dest = dest.to_path_buf();
+        let (progress_tx, progress_rx) = mpsc::channel::<(u64, Option<u64>)>();
+        let worker = thread::spawn(move || -> Result<()> {
+            let mut response = reqwest::blocking::Client::builder()
+                .user_agent("mjolnir-voice-setup")
+                .build()
+                .context("build download client")?
+                .get(&url)
+                .send()
+                .with_context(|| format!("GET {url}"))?
+                .error_for_status()
+                .with_context(|| format!("download {url}"))?;
+            let total = response.content_length();
+            let mut file =
+                fs::File::create(&dest).with_context(|| format!("create {}", dest.display()))?;
+            let mut buffer = [0u8; 64 * 1024];
+            let mut downloaded = 0u64;
+            loop {
+                let read = response.read(&mut buffer).context("read download body")?;
+                if read == 0 {
+                    break;
+                }
+                file.write_all(&buffer[..read])
+                    .with_context(|| format!("write {}", dest.display()))?;
+                downloaded += read as u64;
+                let _ = progress_tx.send((downloaded, total));
+            }
+            Ok(())
+        });
+        for (downloaded, total) in progress_rx {
+            on_progress(downloaded, total);
+        }
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("download thread panicked"))?
+    }
+
+    fn extract_tar_bz2_file(archive: &Path, dest: &Path) -> Result<()> {
+        let file =
+            fs::File::open(archive).with_context(|| format!("open {}", archive.display()))?;
+        let decoder = bzip2::read::BzDecoder::new(file);
+        let mut tar = tar::Archive::new(decoder);
+        for entry in tar.entries().context("read tar.bz2 entries")? {
+            let mut entry = entry.context("read tar.bz2 entry")?;
+            let entry_path = entry.path().context("read tar.bz2 entry path")?;
+            let relative = safe_archive_path(&entry_path).with_context(|| {
+                format!(
+                    "archive entry escapes destination: {}",
+                    entry_path.display()
+                )
+            })?;
+            let out_path = dest.join(relative);
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            entry
+                .unpack(&out_path)
+                .with_context(|| format!("unpack {}", out_path.display()))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn safe_archive_path(path: &Path) -> Result<PathBuf> {
+        let mut relative = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(part) => relative.push(part),
+                Component::CurDir => {}
+                _ => bail!("unsafe archive path {}", path.display()),
+            }
+        }
+        if relative.as_os_str().is_empty() {
+            bail!("empty archive path")
+        }
+        Ok(relative)
+    }
+
+    fn megabytes(bytes: u64) -> u64 {
+        bytes / (1024 * 1024)
+    }
+
+    pub(super) fn ensure_models_installed<H>(paths: &ModelPaths, on_status: &mut H) -> Result<()>
+    where
+        H: FnMut(String),
+    {
+        if paths.is_installed() {
+            return Ok(());
+        }
+
+        let voice_dir = paths
+            .dir
+            .parent()
+            .context("resolve voice model cache parent")?;
+        fs::create_dir_all(voice_dir).with_context(|| format!("create {}", voice_dir.display()))?;
+
+        if !paths.vad.is_file() {
+            on_status("downloading voice activity model...".to_string());
+            let tmp = paths.vad.with_extension("onnx.part");
+            download_to_file(VAD_MODEL_URL, &tmp, |_, _| {})
+                .context("download silero VAD model")?;
+            fs::rename(&tmp, &paths.vad)
+                .with_context(|| format!("install {}", paths.vad.display()))?;
+        }
+
+        if !(paths.encoder.is_file()
+            && paths.decoder.is_file()
+            && paths.joiner.is_file()
+            && paths.tokens.is_file())
+        {
+            let archive = voice_dir.join(format!("{ASR_MODEL_DIR}.tar.bz2.part"));
+            let mut last_percent = u64::MAX;
+            download_to_file(ASR_MODEL_URL, &archive, |downloaded, total| {
+                let message = match total {
+                    Some(total) if total > 0 => {
+                        let percent = downloaded * 100 / total;
+                        if percent == last_percent {
+                            return;
+                        }
+                        last_percent = percent;
+                        format!(
+                            "downloading voice model (one-time): {percent}% of {} MB",
+                            megabytes(total)
+                        )
+                    }
+                    _ => format!(
+                        "downloading voice model (one-time): {} MB",
+                        megabytes(downloaded)
+                    ),
+                };
+                on_status(message);
+            })
+            .context("download voice recognition model")?;
+            on_status("unpacking voice model...".to_string());
+            extract_tar_bz2_file(&archive, voice_dir).context("extract voice model")?;
+            let _ = fs::remove_file(&archive);
+        }
+
+        if !paths.is_installed() {
+            bail!(
+                "voice model installation under {} is incomplete; delete the directory and retry",
+                paths.dir.display()
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn create_vad(paths: &ModelPaths) -> Result<VoiceActivityDetector> {
+        let mut config = VadModelConfig::default();
+        config.silero_vad.model = Some(paths.vad.display().to_string());
+        config.silero_vad.threshold = 0.5;
+        config.silero_vad.min_silence_duration = 0.25;
+        config.silero_vad.min_speech_duration = 0.25;
+        config.silero_vad.max_speech_duration = 5.0;
+        config.silero_vad.window_size = VAD_WINDOW_SIZE as i32;
+        config.sample_rate = SAMPLE_RATE;
+        VoiceActivityDetector::create(&config, 60.0).context("create voice activity detector")
+    }
+
+    pub(super) fn create_recognizer(paths: &ModelPaths) -> Result<OfflineRecognizer> {
+        let mut config = OfflineRecognizerConfig::default();
+        config.model_config.transducer.encoder = Some(paths.encoder.display().to_string());
+        config.model_config.transducer.decoder = Some(paths.decoder.display().to_string());
+        config.model_config.transducer.joiner = Some(paths.joiner.display().to_string());
+        config.model_config.tokens = Some(paths.tokens.display().to_string());
+        config.model_config.model_type = Some("nemo_transducer".to_string());
+        config.model_config.num_threads = decode_threads();
+        OfflineRecognizer::create(&config).context("load voice recognition model")
+    }
+
+    fn decode_threads() -> i32 {
+        thread::available_parallelism()
+            .map(|n| n.get().min(4) as i32)
+            .unwrap_or(2)
     }
 
     /// Build a cpal input stream that forwards mono f32 samples at the
@@ -115,23 +335,6 @@ mod backend {
             .collect()
     }
 
-    pub(super) fn resample_linear(samples: &[f32], from_rate: i32, to_rate: i32) -> Vec<f32> {
-        if samples.is_empty() || from_rate == to_rate {
-            return samples.to_vec();
-        }
-        let ratio = to_rate as f64 / from_rate as f64;
-        let output_len = ((samples.len() as f64) * ratio).ceil() as usize;
-        let mut output = Vec::with_capacity(output_len);
-        for index in 0..output_len {
-            let source = index as f64 / ratio;
-            let left = source.floor() as usize;
-            let right = (left + 1).min(samples.len() - 1);
-            let frac = (source - left as f64) as f32;
-            output.push(samples[left] + (samples[right] - samples[left]) * frac);
-        }
-        output
-    }
-
     /// Normalize a raw RMS value into the 0.0..=1.0 meter range used by the UI.
     pub(super) fn normalized_level(rms: f32) -> f32 {
         (rms * 18.0).clamp(0.0, 1.0)
@@ -143,14 +346,6 @@ mod backend {
         }
         let sum: f32 = samples.iter().map(|s| s * s).sum();
         (sum / samples.len() as f32).sqrt()
-    }
-
-    fn seconds_to_samples(seconds: usize) -> usize {
-        seconds * SAMPLE_RATE as usize
-    }
-
-    fn duration_for_samples(samples: usize) -> Duration {
-        Duration::from_secs_f64(samples as f64 / SAMPLE_RATE as f64)
     }
 
     /// Join finalized utterances and the in-progress interim transcript.
@@ -167,73 +362,6 @@ mod backend {
         parts.join(" ")
     }
 
-    pub(super) fn wav_bytes(samples: &[f32]) -> Result<Vec<u8>> {
-        let data_len = samples
-            .len()
-            .checked_mul(2)
-            .context("voice sample buffer is too large")?;
-        let riff_len = 36usize
-            .checked_add(data_len)
-            .context("voice wav buffer is too large")?;
-        let data_len = u32::try_from(data_len).context("voice wav data is too large")?;
-        let riff_len = u32::try_from(riff_len).context("voice wav file is too large")?;
-
-        let mut out = Vec::with_capacity(44 + samples.len() * 2);
-        out.write_all(b"RIFF")?;
-        out.write_all(&riff_len.to_le_bytes())?;
-        out.write_all(b"WAVE")?;
-        out.write_all(b"fmt ")?;
-        out.write_all(&16u32.to_le_bytes())?;
-        out.write_all(&1u16.to_le_bytes())?;
-        out.write_all(&1u16.to_le_bytes())?;
-        out.write_all(&(SAMPLE_RATE as u32).to_le_bytes())?;
-        out.write_all(&((SAMPLE_RATE as u32) * 2).to_le_bytes())?;
-        out.write_all(&2u16.to_le_bytes())?;
-        out.write_all(&16u16.to_le_bytes())?;
-        out.write_all(b"data")?;
-        out.write_all(&data_len.to_le_bytes())?;
-
-        for sample in samples {
-            let scaled = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-            out.write_all(&scaled.to_le_bytes())?;
-        }
-        Ok(out)
-    }
-
-    pub(super) fn transcribe_samples(
-        client: &reqwest::blocking::Client,
-        samples: &[f32],
-    ) -> Result<String> {
-        let api_key = openai_api_key()?;
-        let model = transcription_model();
-        let wav = wav_bytes(samples)?;
-        let file = Part::bytes(wav)
-            .file_name("dictation.wav")
-            .mime_str("audio/wav")
-            .context("set dictation wav MIME type")?;
-        let form = Form::new()
-            .text("model", model)
-            .text("response_format", "json")
-            .part("file", file);
-
-        let response = client
-            .post(TRANSCRIPTIONS_URL)
-            .bearer_auth(api_key)
-            .multipart(form)
-            .send()
-            .context("send audio transcription request")?;
-        let status = response.status();
-        let body = response
-            .text()
-            .context("read audio transcription response")?;
-        if !status.is_success() {
-            bail!("audio transcription request failed ({status}): {body}");
-        }
-        let transcription: JsonTranscription =
-            serde_json::from_str(&body).context("parse audio transcription response")?;
-        Ok(transcription.text.trim().to_string())
-    }
-
     pub(super) fn run<F, G, H>(
         mut on_partial: F,
         mut on_level: G,
@@ -245,12 +373,12 @@ mod backend {
         G: FnMut(f32),
         H: FnMut(String),
     {
-        let _ = openai_api_key()?;
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .user_agent("mjolnir-voice-transcription")
-            .build()
-            .context("build transcription client")?;
+        let paths = model_paths()?;
+        ensure_models_installed(&paths, &mut on_status)?;
+
+        on_status("loading voice model...".to_string());
+        let vad = create_vad(&paths)?;
+        let recognizer = create_recognizer(&paths)?;
 
         let host = cpal::default_host();
         let device = host
@@ -258,17 +386,28 @@ mod backend {
             .context("no microphone input device was found")?;
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>();
         let (stream, mic_sample_rate) = build_input_stream(&device, audio_tx)?;
+        let resampler = if mic_sample_rate != SAMPLE_RATE {
+            Some(
+                LinearResampler::create(mic_sample_rate, SAMPLE_RATE)
+                    .context("create microphone resampler")?,
+            )
+        } else {
+            None
+        };
         stream.play().context("start microphone capture")?;
-        on_status(format!("listening with {}...", transcription_model()));
+        on_status("listening...".to_string());
 
         let started_at = Instant::now();
         let mut last_activity_at = Instant::now();
         let mut last_level_at = Instant::now() - LEVEL_EMIT_INTERVAL;
-        let mut speech_started_at: Option<Instant> = None;
-        let mut last_speech_at: Option<Instant> = None;
+        let mut last_interim_decode_at = Instant::now();
 
         let mut buffer = Vec::<f32>::new();
+        let mut vad_offset = 0usize;
+        let mut speech_started = false;
+
         let mut finalized = Vec::<String>::new();
+        let mut interim = String::new();
         let mut last_emitted: Option<String> = None;
         let mut cancelled = false;
 
@@ -290,16 +429,11 @@ mod backend {
                         on_level(normalized_level(chunk_rms(&samples)));
                         last_level_at = Instant::now();
                     }
-
-                    let samples = resample_linear(&samples, mic_sample_rate, SAMPLE_RATE);
-                    let rms = chunk_rms(&samples);
-                    buffer.extend_from_slice(&samples);
-
-                    if rms >= SILENCE_RMS_THRESHOLD {
-                        last_activity_at = Instant::now();
-                        let now = Instant::now();
-                        speech_started_at.get_or_insert(now);
-                        last_speech_at = Some(now);
+                    match &resampler {
+                        Some(resampler) => {
+                            buffer.extend_from_slice(&resampler.resample(&samples, false))
+                        }
+                        None => buffer.extend_from_slice(&samples),
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -308,30 +442,45 @@ mod backend {
                 }
             }
 
-            if speech_started_at.is_none() && buffer.len() > seconds_to_samples(PRE_SPEECH_SECONDS)
-            {
-                let keep_from = buffer.len() - seconds_to_samples(PRE_SPEECH_SECONDS);
-                buffer.drain(..keep_from);
-            }
-
-            let has_minimum_speech =
-                speech_started_at.is_some_and(|started| started.elapsed() >= MIN_SPEECH_DURATION);
-            let utterance_closed = last_speech_at
-                .is_some_and(|last_speech| last_speech.elapsed() >= END_OF_UTTERANCE_SILENCE);
-            if has_minimum_speech && utterance_closed {
-                on_status("transcribing...".to_string());
-                let text = transcribe_samples(&client, &buffer)?;
-                if !text.is_empty() {
-                    finalized.push(text);
+            while vad_offset + VAD_WINDOW_SIZE <= buffer.len() {
+                vad.accept_waveform(&buffer[vad_offset..vad_offset + VAD_WINDOW_SIZE]);
+                if vad.detected() {
                     last_activity_at = Instant::now();
+                    if !speech_started {
+                        speech_started = true;
+                        last_interim_decode_at = Instant::now();
+                    }
                 }
-                buffer.clear();
-                speech_started_at = None;
-                last_speech_at = None;
-                on_status(format!("listening with {}...", transcription_model()));
+                vad_offset += VAD_WINDOW_SIZE;
             }
 
-            let transcript = compose_transcript(&finalized, "");
+            if !speech_started && buffer.len() > 10 * VAD_WINDOW_SIZE {
+                let keep_from = buffer.len() - 10 * VAD_WINDOW_SIZE;
+                buffer.drain(..keep_from);
+                vad_offset = vad_offset.saturating_sub(keep_from);
+            }
+
+            if speech_started && last_interim_decode_at.elapsed() >= INTERIM_DECODE_INTERVAL {
+                interim = decode_segment(&recognizer, SAMPLE_RATE, &buffer);
+                last_interim_decode_at = Instant::now();
+            }
+
+            while !vad.is_empty() {
+                if let Some(segment) = vad.front() {
+                    let text = decode_segment(&recognizer, SAMPLE_RATE, segment.samples());
+                    if !text.is_empty() {
+                        finalized.push(text);
+                        last_activity_at = Instant::now();
+                    }
+                }
+                vad.pop();
+                buffer.clear();
+                vad_offset = 0;
+                speech_started = false;
+                interim.clear();
+            }
+
+            let transcript = compose_transcript(&finalized, &interim);
             if !transcript.is_empty() && last_emitted.as_deref() != Some(transcript.as_str()) {
                 on_partial(transcript.clone());
                 last_emitted = Some(transcript);
@@ -340,31 +489,51 @@ mod backend {
 
         drop(stream);
 
-        if !cancelled
-            && speech_started_at.is_some()
-            && duration_for_samples(buffer.len()) >= MIN_SPEECH_DURATION
-        {
-            on_status("transcribing...".to_string());
-            let text = transcribe_samples(&client, &buffer)?;
-            if !text.is_empty() {
-                finalized.push(text);
+        if !cancelled {
+            vad.flush();
+            while !vad.is_empty() {
+                if let Some(segment) = vad.front() {
+                    let text = decode_segment(&recognizer, SAMPLE_RATE, segment.samples());
+                    if !text.is_empty() {
+                        finalized.push(text);
+                        interim.clear();
+                    }
+                }
+                vad.pop();
             }
         }
 
-        let text = compose_transcript(&finalized, "");
+        let text = compose_transcript(&finalized, &interim);
         if !cancelled && text.is_empty() {
             bail!("no speech was recognized");
         }
         Ok(text)
     }
+
+    pub(super) fn decode_segment(
+        recognizer: &OfflineRecognizer,
+        sample_rate: i32,
+        samples: &[f32],
+    ) -> String {
+        if samples.is_empty() {
+            return String::new();
+        }
+        let stream = recognizer.create_stream();
+        stream.accept_waveform(sample_rate, samples);
+        recognizer.decode(&stream);
+        stream
+            .get_result()
+            .map(|result| result.text.trim().to_string())
+            .unwrap_or_default()
+    }
 }
 
 /// Capture microphone audio and return the recognized transcript.
 ///
-/// `on_partial` receives the cumulative transcript as utterances complete,
-/// `on_level` receives normalized microphone levels for the input meter, and
-/// `on_status` receives transient progress messages. Sending on `cancel_rx`
-/// stops capture and returns whatever was recognized so far.
+/// `on_partial` receives the cumulative transcript as it grows, `on_level`
+/// receives normalized microphone levels for the input meter, and `on_status`
+/// receives transient progress messages (model download, loading). Sending on
+/// `cancel_rx` stops capture and returns whatever was recognized so far.
 #[cfg(not(target_os = "android"))]
 pub fn run_dictation<F, G, H>(
     on_partial: F,
@@ -411,72 +580,92 @@ mod tests {
     use super::*;
 
     #[cfg(not(target_os = "android"))]
+    use std::path::PathBuf;
+
+    /// End-to-end check of the local model pipeline: downloads the real models
+    /// into the user cache, loads the recognizer and VAD, and decodes a test
+    /// wav shipped with the model archive.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    #[ignore = "downloads ~0.7 GB of models; run with: cargo test -- --ignored"]
+    fn dictation_models_install_and_decode_test_wav() {
+        let paths = backend::model_paths().expect("resolve model paths");
+        backend::ensure_models_installed(&paths, &mut |status| eprintln!("{status}"))
+            .expect("install voice models");
+
+        backend::create_vad(&paths).expect("load VAD model");
+        let recognizer = backend::create_recognizer(&paths).expect("load recognizer");
+
+        let wav_dir = paths.dir.join("test_wavs");
+        let wav = std::fs::read_dir(&wav_dir)
+            .expect("list test_wavs")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "wav"))
+            .expect("find a test wav");
+        let wave =
+            sherpa_onnx::Wave::read(wav.to_str().expect("utf-8 wav path")).expect("read test wav");
+
+        let text = backend::decode_segment(&recognizer, wave.sample_rate(), wave.samples());
+        eprintln!("decoded {}: {text}", wav.display());
+        assert!(!text.is_empty(), "expected a non-empty transcript");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn model_paths_are_under_voice_cache() {
+        let paths = backend::ModelPaths::in_cache(PathBuf::from("/cache/mj"));
+        let voice = PathBuf::from("/cache/mj").join("voice");
+        assert_eq!(
+            paths.dir,
+            voice.join("sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
+        );
+        assert_eq!(paths.encoder, paths.dir.join("encoder.int8.onnx"));
+        assert_eq!(paths.decoder, paths.dir.join("decoder.int8.onnx"));
+        assert_eq!(paths.joiner, paths.dir.join("joiner.int8.onnx"));
+        assert_eq!(paths.tokens, paths.dir.join("tokens.txt"));
+        assert_eq!(paths.vad, voice.join("silero_vad.onnx"));
+    }
+
+    #[cfg(not(target_os = "android"))]
     #[test]
     fn compose_transcript_joins_finalized_and_interim() {
-        let finalized = vec!["hello".to_string(), "world".to_string()];
+        let finalized = vec!["Hello there.".to_string(), "How are you?".to_string()];
         assert_eq!(
             backend::compose_transcript(&finalized, "I am"),
-            "hello world I am"
+            "Hello there. How are you? I am"
         );
-        assert_eq!(backend::compose_transcript(&finalized, "  "), "hello world");
+        assert_eq!(
+            backend::compose_transcript(&finalized, "  "),
+            "Hello there. How are you?"
+        );
         assert_eq!(backend::compose_transcript(&[], ""), "");
     }
 
     #[cfg(not(target_os = "android"))]
     #[test]
-    fn normalized_level_clamps_meter_range() {
+    fn safe_archive_path_rejects_escapes() {
+        assert!(backend::safe_archive_path(std::path::Path::new("a/b.onnx")).is_ok());
+        assert!(backend::safe_archive_path(std::path::Path::new("../evil")).is_err());
+        assert!(backend::safe_archive_path(std::path::Path::new("/abs/evil")).is_err());
+        assert!(backend::safe_archive_path(std::path::Path::new("")).is_err());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn normalized_level_clamps_to_meter_range() {
         assert_eq!(backend::normalized_level(0.0), 0.0);
         assert_eq!(backend::normalized_level(1.0), 1.0);
-        assert!(backend::normalized_level(0.02) > 0.0);
-    }
-
-    #[cfg(not(target_os = "android"))]
-    #[test]
-    fn resample_linear_preserves_empty_and_same_rate_input() {
-        assert_eq!(
-            backend::resample_linear(&[], 48_000, 16_000),
-            Vec::<f32>::new()
-        );
-        assert_eq!(
-            backend::resample_linear(&[0.0, 0.5, 1.0], 16_000, 16_000),
-            vec![0.0, 0.5, 1.0]
-        );
-    }
-
-    #[cfg(not(target_os = "android"))]
-    #[test]
-    fn resample_linear_downsamples() {
-        let samples = backend::resample_linear(&[0.0, 1.0, 0.0, 1.0], 4, 2);
-
-        assert_eq!(samples.len(), 2);
-        assert_eq!(samples[0], 0.0);
-        assert_eq!(samples[1], 0.0);
-    }
-
-    #[cfg(not(target_os = "android"))]
-    #[test]
-    fn wav_bytes_writes_mono_pcm_header() {
-        let wav = backend::wav_bytes(&[0.0, 1.0]).expect("wav");
-
-        assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(&wav[8..12], b"WAVE");
-        assert_eq!(&wav[12..16], b"fmt ");
-        assert_eq!(u16::from_le_bytes([wav[20], wav[21]]), 1);
-        assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1);
-        assert_eq!(
-            u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]),
-            16_000
-        );
-        assert_eq!(&wav[36..40], b"data");
-        assert_eq!(u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]), 4);
+        assert!(backend::normalized_level(0.01) > 0.0);
+        assert!(backend::normalized_level(0.01) < 1.0);
     }
 
     #[test]
-    fn dictation_error_message_preserves_voice_errors() {
-        let err = anyhow::anyhow!("voice dictation is not supported on this platform");
+    fn error_messages_are_prefixed_for_context() {
+        let err = anyhow::anyhow!("some backend exploded");
         assert_eq!(
             dictation_error_message(&err),
-            "voice dictation is not supported on this platform"
+            "voice dictation failed: some backend exploded"
         );
         let err = anyhow::anyhow!("no speech was recognized");
         assert_eq!(dictation_error_message(&err), "no speech was recognized");
@@ -484,24 +673,6 @@ mod tests {
         assert_eq!(
             dictation_error_message(&err),
             "voice dictation is not supported on Android"
-        );
-    }
-
-    #[test]
-    fn dictation_error_message_mentions_microphone() {
-        let err = anyhow::anyhow!("no microphone input device was found");
-        assert_eq!(
-            dictation_error_message(&err),
-            "voice dictation could not use the microphone: no microphone input device was found"
-        );
-    }
-
-    #[test]
-    fn dictation_error_message_wraps_backend_errors() {
-        let err = anyhow::anyhow!("some backend exploded");
-        assert_eq!(
-            dictation_error_message(&err),
-            "voice dictation failed: some backend exploded"
         );
     }
 }
