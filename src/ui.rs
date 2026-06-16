@@ -55,6 +55,7 @@ const PROMPT_SIDE_PADDING: u16 = 1;
 pub const INLINE_CHAT_HEIGHT: u16 = 8;
 const INLINE_EXPANDED_MAX_HEIGHT: u16 = 20;
 const INLINE_HELP_HEIGHT: u16 = 18;
+const QUEUED_PROMPT_VISIBLE_ROWS: usize = 3;
 const CURSOR_POSITION_TIMEOUT_MESSAGE: &str =
     "The cursor position could not be read within a normal duration";
 const INLINE_SETUP_RETRY_DELAY: Duration = Duration::from_millis(75);
@@ -929,10 +930,9 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
     } else if state.config_picker.is_some() {
         inline_config_view_line_count(state, width)
     } else {
-        // A pending steer adds a "queued: ..." chip row above the input;
-        // request one extra row so the input box keeps its full height
-        // instead of shrinking while steering.
-        usize::from(INLINE_CHAT_HEIGHT) + usize::from(state.queued_prompt().is_some())
+        // Queued prompts render above the input; request extra rows so
+        // the input box keeps its full height while the queue is visible.
+        usize::from(INLINE_CHAT_HEIGHT) + usize::from(queued_prompt_row_count(state))
     };
 
     (desired.min(usize::from(u16::MAX)) as u16).clamp(INLINE_CHAT_HEIGHT, max_height)
@@ -1132,16 +1132,11 @@ fn handle_crossterm(
             if state.is_streaming() {
                 let _ = cmd_tx.send(UiCommand::CancelPrompt);
                 state.mark_cancelling();
-                // The user explicitly cancelled — drop the queued prompt
-                // so the next turn doesn't fire something they no longer
-                // want. Without this, Ctrl-C would interrupt the current
-                // response only to launch the queued one moments later.
-                let had_queued = state.queued_prompt().is_some();
-                state.clear_queued_prompt();
-                let msg = if had_queued {
-                    "cancelling... (steering target dropped)"
+                let queued = state.queued_prompt_count();
+                let msg = if queued > 0 {
+                    format!("cancelling current turn... ({queued} queued)")
                 } else {
-                    "cancelling..."
+                    "cancelling current turn...".to_string()
                 };
                 state.status_line = Some(StatusMessage::info(msg));
             } else if state.input.is_empty() && attachment_count(state) == 0 {
@@ -2221,31 +2216,15 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
 
     if state.is_streaming() {
         // The previous turn is still running. Stash this submission and
-        // ask the agent to cancel the in-flight turn so the queued
-        // prompt fires as soon as `PromptDone(Cancelled)` lands instead
-        // of waiting for the original response to finish (steering).
-        // A second Enter replaces the stashed prompt (last-write-wins);
-        // the cancel is only sent on the first Enter for the turn
-        // because once we transition into Cancelling the agent already
-        // has the request — resending would only race the next turn.
+        // keep it out of the transcript until it is actually sent.
         let preview = queued_prompt_preview(&display_text);
-        let replacing = state.queued_prompt().is_some();
-        let cancel_in_flight = state.is_cancelling();
-        state.set_queued_prompt(QueuedPrompt {
+        state.push_queued_prompt(QueuedPrompt {
             text,
             images,
             display_text,
         });
-        if !cancel_in_flight {
-            let _ = cmd_tx.send(UiCommand::CancelPrompt);
-            state.mark_cancelling();
-        }
-        let label = if replacing {
-            "replaced steering target"
-        } else {
-            "steering"
-        };
-        state.status_line = Some(StatusMessage::info(format!("{label}: {preview}")));
+        let queued = state.queued_prompt_count();
+        state.status_line = Some(StatusMessage::info(format!("queued {queued}: {preview}")));
         return;
     }
 
@@ -2254,9 +2233,8 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
 }
 
 /// Re-issue a previously queued prompt now that the in-flight turn has
-/// finished. With steering this typically fires off the back of a
-/// `PromptDone(Cancelled)` triggered when the user submitted the queued
-/// prompt; if the turn ended naturally first the same path applies.
+/// finished. This fires after either a natural `PromptDone` or a
+/// `PromptDone(Cancelled)` from Ctrl-C.
 /// Mirrors the final dispatch in `submit_prompt`. No-ops if nothing is
 /// queued, the runtime closed, or another turn already started (e.g.
 /// because the user typed another prompt between two `PromptDone`
@@ -2276,7 +2254,7 @@ fn drain_queued_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCo
 }
 
 /// Truncate the display text to a short single-line preview for the
-/// "steering: ..." status indicator. Newlines collapse to spaces.
+/// queued-prompt indicator. Newlines collapse to spaces.
 fn queued_prompt_preview(display_text: &str) -> String {
     let flat: String = display_text
         .chars()
@@ -2665,7 +2643,7 @@ fn draw(
     let input_height = (chip_rows + input_lines + 2) as u16;
     let input_height = input_height.clamp(MIN_INPUT_HEIGHT, MAX_INPUT_HEIGHT);
 
-    let queued_row = u16::from(state.queued_prompt().is_some());
+    let queued_row = queued_prompt_row_count(state);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2718,7 +2696,7 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
 
     let has_config_options = !state.selectable_config_options().is_empty();
     let config_height = if has_config_options { 1 } else { 0 };
-    let queued_row = u16::from(state.queued_prompt().is_some());
+    let queued_row = queued_prompt_row_count(state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -3987,30 +3965,62 @@ fn voice_level_meter(level: Option<f32>) -> String {
     )
 }
 
-/// Render the pending steering prompt as a single chip row directly above
-/// the input box. Visible only while a prompt is queued — i.e. during a
-/// steer, after the user submitted it and before the in-flight turn ends
-/// and `drain_queued_prompt` fires it. Styled as a distinct chip so it
-/// reads as "waiting to send", never as a message already in the
+fn queued_prompt_row_count(state: &AppState) -> u16 {
+    let count = state.queued_prompt_count();
+    if count == 0 {
+        return 0;
+    }
+    let visible = count.min(QUEUED_PROMPT_VISIBLE_ROWS);
+    let overflow = usize::from(count > QUEUED_PROMPT_VISIBLE_ROWS);
+    (visible + overflow).min(u16::MAX as usize) as u16
+}
+
+/// Render queued prompts directly above the input box. Visible only while
+/// prompts are waiting behind the active turn. Styled as distinct chips so
+/// they read as "waiting to send", never as messages already in the
 /// transcript.
 fn draw_queued_prompt_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if area.height == 0 {
         return;
     }
-    let Some(queued) = state.queued_prompt() else {
+    let total = state.queued_prompt_count();
+    if total == 0 {
         return;
     };
-    let label = format!(
-        " ↳ queued: {} ",
-        queued_prompt_preview(&queued.display_text)
-    );
-    let chip = Paragraph::new(Line::from(Span::styled(
-        label,
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )));
+    let visible = usize::from(area.height)
+        .min(total)
+        .min(QUEUED_PROMPT_VISIBLE_ROWS);
+    let mut lines = state
+        .queued_prompts()
+        .take(visible)
+        .enumerate()
+        .map(|(idx, queued)| {
+            let label = format!(
+                " ↳ queued {}/{}: {} ",
+                idx + 1,
+                total,
+                queued_prompt_preview(&queued.display_text)
+            );
+            Line::from(Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(if idx == 0 {
+                        Color::Yellow
+                    } else {
+                        Color::LightYellow
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect::<Vec<_>>();
+    if total > visible && lines.len() < usize::from(area.height) {
+        lines.push(Line::from(Span::styled(
+            format!(" ↳ ... {} more queued ", total - visible),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    let chip = Paragraph::new(lines);
     f.render_widget(chip, area);
 }
 
@@ -4028,13 +4038,11 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     let title = if state.runtime_closed {
         " runtime closed (/new or Ctrl-N for a new session | Ctrl-C to quit) ".to_string()
     } else if state.is_streaming() {
-        match state.queued_prompt() {
-            // The queued text itself is shown in the chip row above the
-            // input (draw_queued_prompt_row); the title only carries the
-            // steering hint so the preview isn't duplicated on two
-            // adjacent lines.
-            Some(_) => " streaming... (steering — Ctrl-C cancels both) ".to_string(),
-            None => " streaming... (Enter steers | Ctrl-C cancel) ".to_string(),
+        let queued = state.queued_prompt_count();
+        if queued > 0 {
+            format!(" streaming... ({queued} queued | Enter queue next | Ctrl-C cancel current) ")
+        } else {
+            " streaming... (Enter queue next | Ctrl-C cancel current) ".to_string()
         }
     } else if state.voice_input_active {
         format!(
@@ -4046,7 +4054,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
             " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     };
-    let style = if state.runtime_closed || state.is_streaming() {
+    let style = if state.runtime_closed {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
@@ -4129,7 +4137,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         PROMPT_PREFIX_WIDTH,
         content_area.height,
     );
-    let gutter_style = if state.runtime_closed || state.is_streaming() {
+    let gutter_style = if state.runtime_closed {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
@@ -4140,7 +4148,6 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     f.render_widget(gutter, gutter_area);
 
     if !state.runtime_closed
-        && !state.is_streaming()
         && !state.has_pending_permission()
         && state.config_picker.is_none()
         && !state.help_overlay
@@ -8427,7 +8434,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_during_streaming_steers_by_cancelling_and_queueing() {
+    fn enter_during_streaming_queues_without_cancelling() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
         assert!(state.is_streaming());
@@ -8436,50 +8443,52 @@ mod tests {
         type_string(&mut state, &cmd_tx, "next one");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
-        match cmd_rx.try_recv().expect("steering cancel dispatched") {
-            UiCommand::CancelPrompt => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
         assert!(
             cmd_rx.try_recv().is_err(),
-            "the steered prompt itself is held until the cancel lands"
+            "queued prompt must not be sent until the active turn finishes"
         );
         assert_eq!(
             state.connection_state,
-            ConnectionState::Cancelling,
-            "submitting while streaming transitions into Cancelling"
+            ConnectionState::Streaming,
+            "submitting while streaming must not cancel the active turn"
         );
-        let queued = state.queued_prompt().expect("steering target is set");
+        let queued = state.queued_prompts().next().expect("prompt queued");
         assert_eq!(queued.text, "next one");
         assert_eq!(queued.display_text, "next one");
-        assert!(state.input.is_empty(), "input cleared after steering");
+        assert_eq!(state.queued_prompt_count(), 1);
+        assert!(state.input.is_empty(), "input cleared after queueing");
         assert_eq!(state.input_cursor, 0);
     }
 
     #[test]
-    fn queued_steer_renders_as_chip_above_input_and_stays_out_of_transcript() {
-        // The pending steer must show as a persistent "queued" chip above
-        // the input box (in both UI modes) while it waits, and must NOT be
-        // recorded into the transcript — it isn't sent yet.
+    fn queued_prompts_render_above_input_and_stay_out_of_transcript() {
+        // Queued prompts must show as persistent chips above the input box
+        // while they wait, and must NOT be recorded into the transcript;
+        // they have not been sent yet.
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        type_string(&mut state, &cmd_tx, "steer me");
+        type_string(&mut state, &cmd_tx, "alpha");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-        let _ = cmd_rx.try_recv(); // consume the steering CancelPrompt
+        type_string(&mut state, &cmd_tx, "beta");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "queueing must not send commands"
+        );
 
-        assert!(state.queued_prompt().is_some(), "steer target queued");
+        assert_eq!(state.queued_prompt_count(), 2);
         assert!(
             !state
                 .transcript
                 .iter()
-                .any(|e| matches!(e, Entry::UserPrompt(t) if t == "steer me")),
-            "queued steer must not enter the transcript while pending"
+                .any(|e| matches!(e, Entry::UserPrompt(t) if t == "alpha" || t == "beta")),
+            "queued prompts must not enter the transcript while pending"
         );
 
         for render_mode in [UiMode::FullscreenTui, UiMode::InlineChat] {
-            let backend = TestBackend::new(80, 12);
+            let backend = TestBackend::new(80, 14);
             let mut terminal = Terminal::new(backend).expect("terminal");
             let mut scroll = TranscriptScrollState::default();
             terminal
@@ -8487,33 +8496,40 @@ mod tests {
                 .expect("draw");
             let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
             assert!(
-                rendered.contains("queued: steer me"),
-                "{render_mode:?} must show the queued chip above the input:\n{rendered}"
+                rendered.contains("queued 1/2: alpha") && rendered.contains("queued 2/2: beta"),
+                "{render_mode:?} must show the queued list above the input:\n{rendered}"
             );
         }
     }
 
     #[test]
-    fn queued_chip_disappears_after_the_steer_drains() {
-        // Once the in-flight turn ends and the steer drains into the next
-        // turn, the chip must clear (queued_prompt is taken) and the
-        // prompt then appears in the transcript as a real turn.
+    fn queued_chip_disappears_after_the_queue_drains() {
+        // Once the in-flight turn ends and the queue drains into the next
+        // turn, the chip must clear and the prompt then appears in the
+        // transcript as a real turn.
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        type_string(&mut state, &cmd_tx, "steer me");
+        type_string(&mut state, &cmd_tx, "queued body");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-        let _ = cmd_rx.try_recv(); // consume the steering CancelPrompt
+        assert!(cmd_rx.try_recv().is_err());
 
-        // Agent ends the turn (EndTurn, as a real agent reports a cancel);
-        // the drain fires the steer as the next turn.
+        // Agent ends the active turn; the drain fires the queued prompt as
+        // the next turn.
         state.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
             usage: None,
         });
         drain_queued_prompt(&mut state, &cmd_tx);
-        assert!(state.queued_prompt().is_none(), "steer drained");
+        assert!(state.queued_prompts().next().is_none(), "queue drained");
+        match cmd_rx.try_recv().expect("queued prompt dispatched") {
+            UiCommand::SendPrompt { text, images } => {
+                assert_eq!(text, "queued body");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
 
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -8523,58 +8539,60 @@ mod tests {
             .expect("draw");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            !rendered.contains("queued:"),
-            "queued chip must clear once the steer drains:\n{rendered}"
+            !rendered.contains("↳ queued") && !rendered.contains("queued 1/"),
+            "queued chip must clear once the queue drains:\n{rendered}"
         );
         assert!(
             state
                 .transcript
                 .iter()
-                .any(|e| matches!(e, Entry::UserPrompt(t) if t == "steer me")),
-            "drained steer must now appear in the transcript"
+                .any(|e| matches!(e, Entry::UserPrompt(t) if t == "queued body")),
+            "drained prompt must now appear in the transcript"
         );
     }
 
     #[test]
-    fn second_enter_while_steering_replaces_target_without_resending_cancel() {
+    fn second_enter_while_streaming_appends_fifo_without_sending_cancel() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         type_string(&mut state, &cmd_tx, "alpha");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-        // First Enter sends exactly one CancelPrompt.
-        match cmd_rx.try_recv().expect("first cancel dispatched") {
-            UiCommand::CancelPrompt => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
-
         type_string(&mut state, &cmd_tx, "beta");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
         assert!(
             cmd_rx.try_recv().is_err(),
-            "second Enter must not resend CancelPrompt while one is already in flight"
+            "Enter while streaming must only queue locally"
         );
-        let queued = state.queued_prompt().expect("steering target is set");
-        assert_eq!(
-            queued.text, "beta",
-            "last-write-wins replaces earlier steering target"
-        );
+        let queued = state
+            .queued_prompts()
+            .map(|prompt| prompt.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(queued, vec!["alpha", "beta"]);
     }
 
     #[test]
-    fn steering_cancel_landing_drains_the_queued_prompt() {
-        // Simulates the full steering flow: user steers, the agent
-        // acknowledges with PromptDone(Cancelled), the stashed prompt
-        // fires immediately as the next turn.
+    fn cancelled_turn_landing_drains_the_oldest_queued_prompt() {
+        // Simulates user queueing prompts, then pressing Ctrl-C. When the
+        // agent acknowledges with PromptDone(Cancelled), the oldest queued
+        // prompt fires immediately as the next turn.
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        type_string(&mut state, &cmd_tx, "steered body");
+        type_string(&mut state, &cmd_tx, "alpha");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-        // Drain the steering CancelPrompt the submit just queued.
+        type_string(&mut state, &cmd_tx, "beta");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        assert!(cmd_rx.try_recv().is_err());
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
         match cmd_rx.try_recv().expect("cancel dispatched") {
             UiCommand::CancelPrompt => {}
             other => panic!("unexpected command: {other:?}"),
@@ -8587,15 +8605,23 @@ mod tests {
         });
         super::drain_queued_prompt(&mut state, &cmd_tx);
 
-        assert!(state.queued_prompt().is_none(), "queue drained");
+        assert_eq!(state.queued_prompt_count(), 1, "only oldest prompt drained");
+        assert_eq!(
+            state
+                .queued_prompts()
+                .next()
+                .expect("remaining prompt")
+                .text,
+            "beta"
+        );
         assert!(
             state.is_streaming(),
-            "the steered prompt becomes the next active turn"
+            "the queued prompt becomes the next active turn"
         );
         let cmd = cmd_rx.try_recv().expect("send prompt dispatched");
         match cmd {
             UiCommand::SendPrompt { text, images } => {
-                assert_eq!(text, "steered body");
+                assert_eq!(text, "alpha");
                 assert!(images.is_empty());
             }
             other => panic!("unexpected command: {other:?}"),
@@ -8603,30 +8629,26 @@ mod tests {
     }
 
     #[test]
-    fn steering_cancel_does_not_clobber_the_steering_status_line() {
-        // Regression: PromptDone(Cancelled) used to overwrite the
-        // "steering: ..." status with "turn done: Cancelled" before the
-        // steered prompt started streaming, leaving a misleading
-        // status hanging through the new turn.
+    fn prompt_done_does_not_clobber_the_queue_status_line() {
+        // Regression: PromptDone(Cancelled) used to overwrite queued
+        // status with "turn done: Cancelled" before the queued prompt
+        // started streaming, leaving a misleading status through the new
+        // turn.
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         type_string(&mut state, &cmd_tx, "redirect");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-        // Drain the cancel the submit just queued.
-        match cmd_rx.try_recv().expect("cancel dispatched") {
-            UiCommand::CancelPrompt => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
-        let steering_status = state
+        assert!(cmd_rx.try_recv().is_err());
+        let queued_status = state
             .status_line
             .clone()
-            .expect("steering status set after submit");
+            .expect("queue status set after submit");
         assert!(
-            steering_status.text.starts_with("steering: "),
-            "expected steering status, got {:?}",
-            steering_status.text
+            queued_status.text.starts_with("queued 1: "),
+            "expected queue status, got {:?}",
+            queued_status.text
         );
 
         state.apply_event(UiEvent::PromptDone {
@@ -8637,21 +8659,18 @@ mod tests {
         let after_cancel = state
             .status_line
             .clone()
-            .expect("status line preserved across steering cancel");
+            .expect("status line preserved across cancel");
         assert_eq!(
-            after_cancel.text, steering_status.text,
-            "PromptDone(Cancelled) must not clobber the steering status",
+            after_cancel.text, queued_status.text,
+            "PromptDone(Cancelled) must not clobber the queue status",
         );
     }
 
     #[test]
     fn natural_prompt_done_still_drains_queued_prompt() {
-        // Defence in depth: if the cancel notification races the agent
-        // and the turn ends EndTurn before the cancel lands, the stash
-        // must still fire.
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
-        state.set_queued_prompt(QueuedPrompt {
+        state.push_queued_prompt(QueuedPrompt {
             text: "queued body".to_string(),
             images: Vec::new(),
             display_text: "queued body".to_string(),
@@ -8664,7 +8683,7 @@ mod tests {
         });
         super::drain_queued_prompt(&mut state, &cmd_tx);
 
-        assert!(state.queued_prompt().is_none(), "queue drained");
+        assert!(state.queued_prompts().next().is_none(), "queue drained");
         assert!(
             state.is_streaming(),
             "draining a queued prompt starts the next turn"
@@ -8680,13 +8699,13 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_during_streaming_drops_queued_prompt() {
+    fn ctrl_c_during_streaming_preserves_queued_prompt() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
-        state.set_queued_prompt(QueuedPrompt {
-            text: "abandon me".to_string(),
+        state.push_queued_prompt(QueuedPrompt {
+            text: "keep me".to_string(),
             images: Vec::new(),
-            display_text: "abandon me".to_string(),
+            display_text: "keep me".to_string(),
         });
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
@@ -8696,7 +8715,11 @@ mod tests {
             key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
         );
 
-        assert!(state.queued_prompt().is_none(), "queue cleared by Ctrl-C");
+        assert_eq!(state.queued_prompt_count(), 1, "queue preserved by Ctrl-C");
+        assert_eq!(
+            state.queued_prompts().next().expect("queued prompt").text,
+            "keep me"
+        );
         assert_eq!(state.connection_state, ConnectionState::Cancelling);
         match cmd_rx.try_recv().expect("cancel dispatched") {
             UiCommand::CancelPrompt => {}
@@ -8708,7 +8731,7 @@ mod tests {
     fn runtime_close_clears_queued_prompt() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
-        state.set_queued_prompt(QueuedPrompt {
+        state.push_queued_prompt(QueuedPrompt {
             text: "stale".to_string(),
             images: Vec::new(),
             display_text: "stale".to_string(),
@@ -8716,7 +8739,7 @@ mod tests {
 
         state.mark_runtime_closed();
 
-        assert!(state.queued_prompt().is_none());
+        assert!(state.queued_prompts().next().is_none());
     }
 
     #[test]

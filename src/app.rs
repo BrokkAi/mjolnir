@@ -1,8 +1,9 @@
 //! UI state machine.
 //!
-//! Holds the transcript, current tool-call table, input buffer, and the
-//! FIFO queue of pending permission prompts. Every incoming ACP event is
-//! folded in through `apply_event`; ratatui then renders from this state.
+//! Holds the transcript, current tool-call table, input buffer, and FIFO
+//! queues for pending user prompts and permission prompts. Every incoming
+//! ACP event is folded in through `apply_event`; ratatui then renders from
+//! this state.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -21,7 +22,7 @@ use crate::event::{
     content_block_text,
 };
 
-/// Maximum width of the "steering: ..." preview shown in the input footer.
+/// Maximum width of the queued-prompt preview shown above the input.
 /// Beyond this we truncate with an ellipsis.
 pub const QUEUED_PROMPT_PREVIEW_WIDTH: usize = 40;
 
@@ -353,17 +354,15 @@ pub struct AppState {
     /// on Linux/X11 where the owning process must stay alive.
     #[allow(dead_code)]
     pub clipboard_lease: Option<ClipboardLease>,
-    /// A prompt the user submitted while a previous turn was still in
-    /// flight. Submitting also asks the agent to cancel the in-flight
-    /// turn (steering), so the stash fires as soon as the cancellation
-    /// lands. Replaced by later submissions (last-write-wins) and cleared
-    /// by Ctrl-C / runtime close.
-    queued_prompt: Option<QueuedPrompt>,
+    /// Prompts the user submitted while a previous turn was still in
+    /// flight. They stay out of the transcript until the runtime actually
+    /// sends them, then drain oldest-first.
+    queued_prompts: VecDeque<QueuedPrompt>,
 }
 
 /// A prompt staged behind the currently streaming turn. The runtime takes
-/// it from the UI loop once `is_streaming` flips back to false (typically
-/// from the steering cancel landing) and `session_id` is still bound.
+/// it from the UI loop once `is_streaming` flips back to false and
+/// `session_id` is still bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedPrompt {
     /// Raw text sent to the agent (attachments already concatenated).
@@ -495,32 +494,40 @@ impl AppState {
             project_label: String::new(),
             worktree_label: None,
             clipboard_lease: None,
-            queued_prompt: None,
+            queued_prompts: VecDeque::new(),
         }
     }
 
-    /// Stage a prompt to fire when the current turn completes. Replaces
-    /// any previously queued prompt (last-write-wins).
-    pub fn set_queued_prompt(&mut self, prompt: QueuedPrompt) {
-        self.queued_prompt = Some(prompt);
+    /// Stage a prompt to fire when the current turn completes.
+    pub fn push_queued_prompt(&mut self, prompt: QueuedPrompt) {
+        self.queued_prompts.push_back(prompt);
     }
 
-    /// Drop the queued prompt, if any. Used by Ctrl-C and runtime close so
-    /// the user doesn't get an unexpected submission after cancelling.
-    pub fn clear_queued_prompt(&mut self) {
-        self.queued_prompt = None;
+    /// Drop all queued prompts, if any. Used when the runtime closes or a
+    /// prompt failure makes automatic resubmission unsafe.
+    pub fn clear_queued_prompts(&mut self) {
+        self.queued_prompts.clear();
     }
 
-    /// The currently queued prompt, if any. The UI uses this to render the
-    /// footer indicator without taking ownership.
-    pub fn queued_prompt(&self) -> Option<&QueuedPrompt> {
-        self.queued_prompt.as_ref()
+    /// Iterate over queued prompts in send order.
+    pub fn queued_prompts(&self) -> impl Iterator<Item = &QueuedPrompt> {
+        self.queued_prompts.iter()
     }
 
-    /// Pull the queued prompt out for submission. Returns `None` if none
-    /// is staged.
+    /// Number of queued user prompts waiting behind the active turn.
+    pub fn queued_prompt_count(&self) -> usize {
+        self.queued_prompts.len()
+    }
+
+    /// True when at least one user prompt is queued behind the active turn.
+    pub fn has_queued_prompts(&self) -> bool {
+        !self.queued_prompts.is_empty()
+    }
+
+    /// Pull the oldest queued prompt out for submission. Returns `None` if
+    /// none is staged.
     pub fn take_queued_prompt(&mut self) -> Option<QueuedPrompt> {
-        self.queued_prompt.take()
+        self.queued_prompts.pop_front()
     }
 
     /// Return a copy of the prompt history for persistence.
@@ -645,15 +652,6 @@ impl AppState {
         )
     }
 
-    /// True while a cancel notification is already in flight to the agent
-    /// for the current turn. Steering uses this to dedupe `CancelPrompt`
-    /// — `mark_cancelling` only ever flips Streaming → Cancelling, so any
-    /// new `is_streaming`-true state we add later must also imply a cancel
-    /// has been sent (or update this method) for the dedup to stay sound.
-    pub fn is_cancelling(&self) -> bool {
-        self.connection_state == ConnectionState::Cancelling
-    }
-
     pub fn active_turn_elapsed(&self) -> Option<Duration> {
         if self.is_streaming() {
             self.turn_started_at.map(|started| started.elapsed())
@@ -698,7 +696,7 @@ impl AppState {
         self.cancel_all_pending_permissions();
         self.config_picker = None;
         self.autocomplete = Autocomplete::default();
-        self.queued_prompt = None;
+        self.clear_queued_prompts();
         // Preserve Fatal: a fatal event always supersedes a clean close,
         // since the channel-drop that triggers this method follows the
         // Fatal event by design.
@@ -970,7 +968,7 @@ impl AppState {
     /// - the input starts with `/`,
     /// - no permission modal is open (it owns the keyboard),
     /// - the runtime is still accepting commands,
-    /// - we're not mid-stream (the input is greyed-out anyway).
+    /// - the runtime is still accepting commands.
     ///
     /// Filtering: case-insensitive prefix match on the slug after `/`,
     /// and falls back to substring match if no prefix hits, so a typo
@@ -981,8 +979,7 @@ impl AppState {
         let trigger_active = self.input.starts_with('/')
             && !self.has_pending_permission()
             && self.config_picker.is_none()
-            && !self.runtime_closed
-            && !self.is_streaming();
+            && !self.runtime_closed;
         if !trigger_active {
             self.autocomplete = Autocomplete::default();
             return;
@@ -1124,32 +1121,26 @@ impl AppState {
                 if let Some(usage) = usage {
                     self.token_usage.apply_prompt_usage(usage);
                 }
-                // Keep the "steering: ..." indicator visible across the
-                // steering cancel handoff. A queued steering prompt is
-                // about to fire as the next turn and will own the status
-                // line, so any "turn done: <reason>" we set here would
-                // only flash and then hang around stale through the new
-                // turn (record_user_prompt and drain_queued_prompt do not
-                // touch status_line). Suppress it regardless of the stop
-                // reason: an agent may report a steer-cancel as EndTurn
-                // rather than Cancelled, and either way the queued prompt
-                // is what matters next.
-                let suppress_for_steering = self.queued_prompt.is_some();
-                if !suppress_for_steering {
+                // A queued prompt is about to fire as the next turn and
+                // will own the status line, so any "turn done: <reason>"
+                // would only flash and then hang around stale through the
+                // new turn.
+                if !self.has_queued_prompts() {
                     self.set_status_line(StatusKind::Info, format!("turn done: {stop_reason:?}"));
                 }
                 self.update_autocomplete();
             }
             UiEvent::PromptFailed { message } => {
                 self.finish_prompt_turn(true);
-                // Drop any queued/steering prompt: finish_prompt_turn flips
-                // back to Ready, which the next drain pass would otherwise
-                // read as "fire the stash" and auto-resubmit into a
+                // Drop queued prompts: finish_prompt_turn flips back to
+                // Ready, which the next drain pass would otherwise read as
+                // "fire the stash" and auto-resubmit into a
                 // possibly-degraded runtime before the user has seen the
-                // failure. Mirrors mark_runtime_closed and the Ctrl-C path.
-                let had_queued = self.queued_prompt.take().is_some();
-                let surfaced = if had_queued {
-                    format!("{message} (steering target dropped)")
+                // failure. Mirrors mark_runtime_closed.
+                let queued_count = self.queued_prompt_count();
+                self.clear_queued_prompts();
+                let surfaced = if queued_count > 0 {
+                    format!("{message} ({queued_count} queued prompt(s) dropped)")
                 } else {
                     message
                 };
@@ -2148,8 +2139,8 @@ mod tests {
     }
 
     #[test]
-    fn prompt_failed_drops_queued_prompt_and_surfaces_drop() {
-        // Regression for #156: a PromptFailed mid-steering used to flip
+    fn prompt_failed_drops_queued_prompts_and_surfaces_drop() {
+        // Regression for #156: a PromptFailed mid-queue used to flip
         // back to Ready with the queued prompt intact, which the UI
         // drain pass then auto-fired into a possibly-degraded runtime
         // before the user saw the failure.
@@ -2164,10 +2155,10 @@ mod tests {
             resumed: false,
         });
         s.record_user_prompt("first".to_string());
-        s.set_queued_prompt(QueuedPrompt {
-            text: "steered body".to_string(),
+        s.push_queued_prompt(QueuedPrompt {
+            text: "queued body".to_string(),
             images: Vec::new(),
-            display_text: "steered body".to_string(),
+            display_text: "queued body".to_string(),
         });
 
         s.apply_event(UiEvent::PromptFailed {
@@ -2176,22 +2167,21 @@ mod tests {
 
         assert_eq!(s.connection_state, ConnectionState::Ready);
         assert!(
-            s.queued_prompt().is_none(),
-            "PromptFailed must drop the queued/steering prompt so the next drain does not auto-fire it"
+            s.queued_prompts().next().is_none(),
+            "PromptFailed must drop queued prompts so the next drain does not auto-fire them"
         );
         let status = s.status_line.expect("status");
         assert_eq!(status.kind, StatusKind::Warning);
         assert_eq!(
             status.text,
-            "prompt failed: transport blip (steering target dropped)"
+            "prompt failed: transport blip (1 queued prompt(s) dropped)"
         );
     }
 
     #[test]
     fn prompt_failed_without_queue_keeps_message_unchanged() {
         // When there is no queued prompt, the warning text must match
-        // what callers send verbatim — no spurious "(steering target
-        // dropped)" suffix.
+        // what callers send verbatim with no spurious drop suffix.
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
             agent_name: Some("anvil".into()),
@@ -2240,12 +2230,11 @@ mod tests {
     }
 
     #[test]
-    fn prompt_done_keeps_steering_status_for_any_stop_reason_when_queued() {
-        // Regression: a queued steering prompt is about to fire as the
+    fn prompt_done_keeps_queue_status_for_any_stop_reason_when_queued() {
+        // Regression: a queued prompt is about to fire as the
         // next turn and owns the status line. PromptDone must not clobber
-        // the "steering: ..." indicator with "turn done: ...", regardless
-        // of the stop reason — agents may report a steer-cancel as
-        // EndTurn (or anything else) rather than the spec's Cancelled.
+        // the "queued ..." indicator with "turn done: ...", regardless
+        // of the stop reason.
         for reason in [
             StopReason::EndTurn,
             StopReason::Cancelled,
@@ -2257,12 +2246,12 @@ mod tests {
                 resumed: false,
             });
             s.record_user_prompt("first".to_string());
-            s.set_queued_prompt(QueuedPrompt {
-                text: "steered".to_string(),
+            s.push_queued_prompt(QueuedPrompt {
+                text: "queued".to_string(),
                 images: Vec::new(),
-                display_text: "steered".to_string(),
+                display_text: "queued".to_string(),
             });
-            s.status_line = Some(StatusMessage::info("steering: steered"));
+            s.status_line = Some(StatusMessage::info("queued 1: queued"));
 
             s.apply_event(UiEvent::PromptDone {
                 stop_reason: reason,
@@ -2271,16 +2260,16 @@ mod tests {
 
             let status = s.status_line.clone().expect("status line preserved");
             assert_eq!(
-                status.text, "steering: steered",
-                "queued steer must keep its status across PromptDone({reason:?})"
+                status.text, "queued 1: queued",
+                "queued prompt must keep its status across PromptDone({reason:?})"
             );
         }
     }
 
     #[test]
     fn prompt_done_sets_turn_done_status_without_a_queued_prompt() {
-        // Without a steer queued, PromptDone still surfaces the usual
-        // "turn done: ..." status — the suppression is scoped to steering.
+        // Without a prompt queued, PromptDone still surfaces the usual
+        // "turn done: ..." status.
         let mut s = AppState::new();
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -2736,7 +2725,7 @@ mod tests {
     }
 
     #[test]
-    fn autocomplete_hidden_during_streaming_or_with_pending_permission() {
+    fn autocomplete_stays_visible_during_streaming() {
         let mut s = AppState::new();
         seed_commands(&mut s);
         s.input = "/cre".to_string();
@@ -2744,19 +2733,19 @@ mod tests {
         s.input = "/cre".to_string();
         s.update_autocomplete();
         assert!(
-            !s.autocomplete.visible,
-            "input is greyed out during streaming; popover must hide"
+            s.autocomplete.visible,
+            "input remains editable during streaming; popover should stay available"
         );
     }
 
     #[test]
-    fn autocomplete_reappears_when_streaming_finishes() {
+    fn autocomplete_remains_visible_when_streaming_finishes() {
         let mut s = AppState::new();
         seed_commands(&mut s);
         s.record_user_prompt("placeholder".to_string());
         s.input = "/cre".to_string();
         s.update_autocomplete();
-        assert!(!s.autocomplete.visible);
+        assert!(s.autocomplete.visible);
 
         s.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
@@ -2821,24 +2810,24 @@ mod tests {
         s.update_autocomplete();
         assert!(s.autocomplete.visible, "Ready: popover must be visible");
 
-        // Streaming: input is greyed out, popover hides, Ctrl-C cancels.
+        // Streaming: input stays editable, popover remains available, Ctrl-C cancels.
         s.input.clear();
         s.record_user_prompt("hi".to_string());
         assert_eq!(s.connection_state, ConnectionState::Streaming);
         assert!(s.is_streaming(), "Streaming must count as streaming");
         s.input = "/cre".to_string();
         s.update_autocomplete();
-        assert!(!s.autocomplete.visible, "Streaming: popover must be hidden");
+        assert!(s.autocomplete.visible, "Streaming: popover must be visible");
 
-        // Cancelling: still a turn in flight; popover stays hidden, the
+        // Cancelling: still a turn in flight; popover stays available, the
         // prompt timer keeps running, duplicate user chunks stay suppressed.
         s.mark_cancelling();
         assert_eq!(s.connection_state, ConnectionState::Cancelling);
         assert!(s.is_streaming(), "Cancelling must still count as streaming");
         s.update_autocomplete();
         assert!(
-            !s.autocomplete.visible,
-            "Cancelling: popover must remain hidden"
+            s.autocomplete.visible,
+            "Cancelling: popover must remain visible"
         );
         assert!(
             s.active_turn_elapsed().is_some(),
