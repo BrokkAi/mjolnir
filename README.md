@@ -193,10 +193,12 @@ Keyboard basics:
 - `Esc`: dismiss autocomplete, clear input, or cancel a permission prompt.
 - `Ctrl-C`: cancel an in-flight prompt; when idle with an empty input, quit.
 - `Ctrl-D`: quit when the input is empty.
-- `🎙 Ctrl-R`: start/stop microphone dictation into the prompt. All platforms
-  use in-process sherpa-onnx speech recognition with the multilingual Parakeet
-  TDT v3 model (25 European languages); the model (~0.7 GB) is downloaded and
-  cached under `~/.cache/mj/voice/` on first use.
+- `🎙 Ctrl-R`: start/stop microphone dictation into the prompt. Dictation
+  captures microphone audio locally, sends completed WAV utterances to
+  OpenAI's transcription API, and inserts the resulting text into the prompt.
+  Set `OPENAI_API_KEY`; override the default `gpt-4o-transcribe` model with
+  `MJ_VOICE_TRANSCRIPTION_MODEL=whisper-1` or another supported
+  transcription model.
 
 On-disk files:
 
