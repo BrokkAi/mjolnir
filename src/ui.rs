@@ -664,6 +664,14 @@ fn should_force_inline_repair_for_event(mode: UiMode, state: &AppState, ev: &CtE
         return true;
     }
 
+    if matches!(ev, CtEvent::Paste(_))
+        && !state.help_overlay
+        && !state.has_pending_permission()
+        && state.config_picker.is_none()
+    {
+        return true;
+    }
+
     // Permission prompts get a few early repair attempts right after
     // opening, and a hard repair when the inline viewport is resized
     // while the modal is open.
@@ -5776,6 +5784,34 @@ mod tests {
     }
 
     #[test]
+    fn inline_paste_forces_repair_when_input_is_focused() {
+        let state = AppState::new();
+
+        assert!(should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
+            &CtEvent::Paste("clipboard".to_string())
+        ));
+        assert!(!should_force_inline_repair_for_event(
+            UiMode::FullscreenTui,
+            &state,
+            &CtEvent::Paste("clipboard".to_string())
+        ));
+    }
+
+    #[test]
+    fn inline_paste_does_not_force_repair_when_modal_owns_input() {
+        let mut state = AppState::new();
+        state.help_overlay = true;
+
+        assert!(!should_force_inline_repair_for_event(
+            UiMode::InlineChat,
+            &state,
+            &CtEvent::Paste("clipboard".to_string())
+        ));
+    }
+
+    #[test]
     fn permission_resize_forces_inline_repair() {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
@@ -7968,6 +8004,18 @@ mod tests {
 
         assert_eq!(state.input, "prefix hello\nworld\n!");
         assert_eq!(state.input_cursor, state.input.chars().count());
+    }
+
+    #[test]
+    fn bracketed_paste_inserts_cleaned_text_at_cursor() {
+        let mut state = AppState::new();
+        state.input = "before after".to_string();
+        state.input_cursor = "before ".chars().count();
+
+        handle_paste(&mut state, "pasted ");
+
+        assert_eq!(state.input, "before pasted after");
+        assert_eq!(state.input_cursor, "before pasted ".chars().count());
     }
 
     #[test]
