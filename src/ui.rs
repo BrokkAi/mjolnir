@@ -157,8 +157,12 @@ impl TranscriptSink {
         if stable_entries <= self.emitted_entries {
             return Vec::new();
         }
-        let lines =
-            render_transcript_entry_range(state, width, self.emitted_entries..stable_entries);
+        let lines = render_transcript_entry_range(
+            state,
+            width,
+            self.emitted_entries..stable_entries,
+            transcript_collapse_limit(state),
+        );
         self.emitted_entries = stable_entries;
         lines
     }
@@ -462,7 +466,10 @@ async fn ui_loop(
             }
         }
 
-        if mode == UiMode::InlineChat {
+        // Pause scrollback flushing while the full-transcript reader owns the
+        // viewport: `insert_before` would scroll the terminal under the user
+        // mid-read. Entries that go stable meanwhile are flushed on close.
+        if mode == UiMode::InlineChat && !state.transcript_viewer {
             flush_transcript_to_scrollback(terminal, &mut transcript_sink, &state)?;
         }
 
@@ -919,6 +926,16 @@ fn sync_inline_terminal_height(
 }
 
 fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
+    // The full-transcript reader takes the whole terminal (minus one row) so
+    // long histories are calm to page through. It outranks the compact
+    // overlays below but yields to a pending permission prompt, which must
+    // stay visible and actionable.
+    if state.transcript_viewer && !state.has_pending_permission() {
+        return terminal_size
+            .height
+            .saturating_sub(1)
+            .max(INLINE_CHAT_HEIGHT);
+    }
     let max_height = terminal_size
         .height
         .saturating_sub(1)
@@ -991,6 +1008,13 @@ fn handle_crossterm(
         return TerminalRequest::None;
     }
 
+    // The full-transcript reader owns the keyboard while open so scrolling
+    // keys don't leak into the prompt. A pending permission prompt takes
+    // precedence: it suspends the reader (drawn over it) until resolved.
+    if state.transcript_viewer && !state.has_pending_permission() {
+        return handle_transcript_viewer_key(state, key.modifiers, key.code, mode);
+    }
+
     if state.runtime_closed {
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c'))
@@ -1016,7 +1040,7 @@ fn handle_crossterm(
                             | KeyModifiers::META,
                     ) =>
             {
-                state.toggle_expand_tool_outputs();
+                toggle_transcript_expansion(state, mode);
                 return TerminalRequest::None;
             }
             (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
@@ -1172,7 +1196,7 @@ fn handle_crossterm(
                         | KeyModifiers::META,
                 ) =>
         {
-            state.toggle_expand_tool_outputs();
+            toggle_transcript_expansion(state, mode);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
             copy_last_agent_message(state);
@@ -2099,6 +2123,62 @@ fn scroll_to_bottom(state: &mut AppState) {
     state.scroll_offset = 0;
 }
 
+/// Ctrl-T behaviour. The fullscreen TUI re-renders the whole transcript every
+/// frame, so toggling the collapse setting applies retroactively there. Inline
+/// scrollback is immutable once flushed, so the toggle could never reach
+/// already-printed output; instead Ctrl-T opens the full-transcript reader.
+fn toggle_transcript_expansion(state: &mut AppState, mode: UiMode) {
+    if mode == UiMode::InlineChat {
+        state.open_transcript_viewer();
+    } else {
+        state.toggle_expand_tool_outputs();
+    }
+}
+
+/// Keyboard handling while the inline full-transcript reader is open. The
+/// reader reuses `scroll_offset` as the index of the top visible line (0 =
+/// top); it is clamped to the last screen of content during draw, so adding
+/// past the end and `usize::MAX` (jump to bottom) are both safe here.
+fn handle_transcript_viewer_key(
+    state: &mut AppState,
+    modifiers: KeyModifiers,
+    code: KeyCode,
+    mode: UiMode,
+) -> TerminalRequest {
+    let closes_reader = matches!(code, KeyCode::Esc)
+        || (modifiers == KeyModifiers::NONE && matches!(code, KeyCode::Char('q')))
+        || (modifiers.contains(KeyModifiers::CONTROL)
+            && !modifiers.intersects(
+                KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
+            )
+            && matches!(code, KeyCode::Char('t' | 'T')));
+    if closes_reader {
+        state.close_transcript_viewer();
+        // Shrinking the viewport back down needs an inline repair so the
+        // vacated rows are cleared cleanly.
+        return inline_repair_request(mode);
+    }
+
+    match code {
+        KeyCode::Up => state.scroll_offset = state.scroll_offset.saturating_sub(1),
+        KeyCode::Down => state.scroll_offset = state.scroll_offset.saturating_add(1),
+        KeyCode::PageUp => {
+            state.scroll_offset = state
+                .scroll_offset
+                .saturating_sub(TRANSCRIPT_SCROLL_PAGE_STEP)
+        }
+        KeyCode::PageDown => {
+            state.scroll_offset = state
+                .scroll_offset
+                .saturating_add(TRANSCRIPT_SCROLL_PAGE_STEP)
+        }
+        KeyCode::Home => state.scroll_offset = 0,
+        KeyCode::End => state.scroll_offset = usize::MAX,
+        _ => {}
+    }
+    TerminalRequest::None
+}
+
 fn is_help_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty() && matches!(code, KeyCode::F(10))
 }
@@ -2710,6 +2790,11 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
         return;
     }
 
+    if state.transcript_viewer {
+        draw_inline_transcript_viewer(f, f.area(), state);
+        return;
+    }
+
     let has_config_options = !state.selectable_config_options().is_empty();
     let config_height = if has_config_options { 1 } else { 0 };
     let queued_row = queued_prompt_row_count(state);
@@ -2874,6 +2959,46 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
     f.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
         layout[4],
+    );
+}
+
+/// Full-screen inline reader for the entire transcript with tool outputs
+/// expanded. `scroll_offset` is the index of the top visible line and is
+/// clamped here so End / PageDown can never scroll past the final screen.
+fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
+    f.render_widget(Clear, area);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" transcript — full history ")
+        .style(Style::default().fg(Color::Green));
+    let inner = block.inner(layout[0]);
+    f.render_widget(block, layout[0]);
+
+    if inner.width > 0 && inner.height > 0 {
+        let lines = render_full_transcript_lines(state, inner.width);
+        let total = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(inner.width);
+        let max_offset = total.saturating_sub(usize::from(inner.height));
+        state.scroll_offset = state.scroll_offset.min(max_offset);
+        let top = state.scroll_offset.min(u16::MAX as usize) as u16;
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((top, 0)),
+            inner,
+        );
+    }
+
+    f.render_widget(
+        Paragraph::new("Up/Down PgUp/PgDn scroll · Home/End top/bottom · Esc or Ctrl-T to close")
+            .style(Style::default().fg(Color::DarkGray)),
+        layout[1],
     );
 }
 
@@ -3177,20 +3302,39 @@ fn transcript_block_title(state: &AppState) -> String {
 }
 
 fn render_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
-    render_transcript_entry_range(state, width, 0..state.transcript.len())
+    render_transcript_entry_range(
+        state,
+        width,
+        0..state.transcript.len(),
+        transcript_collapse_limit(state),
+    )
+}
+
+/// Render the whole transcript with every tool output fully expanded,
+/// regardless of the session collapse setting. Used by the inline
+/// full-transcript reader so users can re-read truncated output in full.
+fn render_full_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
+    render_transcript_entry_range(state, width, 0..state.transcript.len(), None)
+}
+
+/// Line budget per tool-output entry for the streaming transcript: `None`
+/// (no limit) when the user expanded outputs, otherwise the collapsed
+/// default that keeps long dumps from flushing the conversation off-screen.
+fn transcript_collapse_limit(state: &AppState) -> Option<usize> {
+    if state.expand_tool_outputs {
+        None
+    } else {
+        Some(TOOL_OUTPUT_COLLAPSED_LINES)
+    }
 }
 
 fn render_transcript_entry_range(
     state: &AppState,
     width: u16,
     entry_range: Range<usize>,
+    collapse_limit: Option<usize>,
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
-    let collapse_limit = if state.expand_tool_outputs {
-        None
-    } else {
-        Some(TOOL_OUTPUT_COLLAPSED_LINES)
-    };
     for entry in state.transcript[entry_range].iter() {
         match entry {
             Entry::UserPrompt(text) => push_plain_block(&mut out, "you", Color::Cyan, text.clone()),
@@ -4612,6 +4756,17 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
                 Style::default().add_modifier(Modifier::BOLD),
             )]),
             Line::from("  Wheel / Ctrl+Up/Down / Ctrl+PageUp/Down / Ctrl+Home/End / Ctrl-T"),
+            Line::from(""),
+        ]);
+    } else {
+        lines.extend([
+            Line::from(vec![Span::styled(
+                "Read transcript",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(
+                "  Ctrl-T           open full transcript reader (Up/Down/PgUp/PgDn, Esc closes)",
+            ),
             Line::from(""),
         ]);
     }
@@ -6676,6 +6831,124 @@ mod tests {
 
         assert!(state.expand_tool_outputs);
         assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn inline_ctrl_t_opens_transcript_reader_instead_of_toggling() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_inline_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.transcript_viewer, "inline Ctrl-T opens the reader");
+        assert!(
+            !state.expand_tool_outputs,
+            "inline Ctrl-T must not flip the collapse setting"
+        );
+        assert!(state.input.is_empty(), "'t' must not leak into the prompt");
+
+        // While open, Ctrl-T closes the reader again.
+        handle_inline_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+        assert!(!state.transcript_viewer);
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn transcript_reader_scrolls_with_arrows_and_closes_on_esc() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        state.open_transcript_viewer();
+        assert_eq!(
+            state.scroll_offset,
+            usize::MAX,
+            "reader opens at the bottom"
+        );
+
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Home));
+        assert_eq!(state.scroll_offset, 0);
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        assert_eq!(state.scroll_offset, 1);
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
+        assert_eq!(state.scroll_offset, 1 + TRANSCRIPT_SCROLL_PAGE_STEP);
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        assert_eq!(state.scroll_offset, TRANSCRIPT_SCROLL_PAGE_STEP);
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::End));
+        assert_eq!(state.scroll_offset, usize::MAX);
+        // Typing while the reader owns the keyboard must not edit the prompt.
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('a')));
+        assert!(state.input.is_empty());
+
+        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+        assert!(!state.transcript_viewer);
+        assert_eq!(state.scroll_offset, 0);
+        assert!(
+            terminal_request_forces_inline_repair(request),
+            "closing the reader must repair the shrunken inline viewport"
+        );
+    }
+
+    #[test]
+    fn transcript_reader_renders_collapsed_tool_output_in_full() {
+        let mut state = AppState::new();
+        let long = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "log".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Text(long)],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+        // The session is still in collapsed mode...
+        assert!(!state.expand_tool_outputs);
+        state.open_transcript_viewer();
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        // ...yet the reader shows every line, with no truncation hint.
+        assert!(rendered.contains("line 1"), "rendered:\n{rendered}");
+        assert!(rendered.contains("line 20"), "rendered:\n{rendered}");
+        assert!(
+            !rendered.contains("more lines hidden"),
+            "reader must not collapse output, rendered:\n{rendered}"
+        );
+        assert!(rendered.contains("transcript"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Esc"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn transcript_reader_requests_full_inline_height() {
+        let mut state = AppState::new();
+        state.open_transcript_viewer();
+
+        let desired = desired_inline_height(
+            &state,
+            Size {
+                width: 100,
+                height: 40,
+            },
+        );
+        assert_eq!(desired, 39, "reader takes the whole terminal minus one row");
+        assert!(desired > INLINE_EXPANDED_MAX_HEIGHT);
     }
 
     #[test]

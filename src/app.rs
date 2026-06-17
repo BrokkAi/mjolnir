@@ -475,8 +475,14 @@ pub struct AppState {
     pub scroll_offset: usize,
     /// When false, tool-call outputs are truncated to a small line budget
     /// in the transcript so streaming bursts don't push the conversation
-    /// off-screen. Ctrl-T flips this for the whole session.
+    /// off-screen. In the fullscreen TUI, Ctrl-T flips this for the whole
+    /// session.
     pub expand_tool_outputs: bool,
+    /// When true (inline mode only), the compact chat view is replaced by a
+    /// full-height, scrollable reader showing the entire transcript with
+    /// tool outputs fully expanded. Inline scrollback is immutable once
+    /// flushed, so this reader is how users re-read earlier output in full.
+    pub transcript_viewer: bool,
     pub exit_reason: Option<UiExitReason>,
     /// True once the runtime has stopped accepting commands.
     pub runtime_closed: bool,
@@ -634,6 +640,7 @@ impl AppState {
             config_picker: None,
             scroll_offset: 0,
             expand_tool_outputs: false,
+            transcript_viewer: false,
             exit_reason: None,
             runtime_closed: false,
             status_line: None,
@@ -779,6 +786,20 @@ impl AppState {
     pub fn toggle_expand_tool_outputs(&mut self) {
         self.expand_tool_outputs = !self.expand_tool_outputs;
         self.bump_transcript_revision();
+    }
+
+    /// Open the inline full-transcript reader. The reader starts pinned to
+    /// the newest line (`scroll_offset` is reused as the top-visible line
+    /// index and clamped to the last screen during draw).
+    pub fn open_transcript_viewer(&mut self) {
+        self.transcript_viewer = true;
+        self.scroll_offset = usize::MAX;
+    }
+
+    /// Close the inline full-transcript reader and reset its scroll position.
+    pub fn close_transcript_viewer(&mut self) {
+        self.transcript_viewer = false;
+        self.scroll_offset = 0;
     }
 
     /// Extract the text of the most recent agent message from the transcript.
