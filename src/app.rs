@@ -265,15 +265,24 @@ impl TokenUsage {
         self.thought_tokens = usage.thought_tokens;
     }
 
-    fn apply_usage_update(&mut self, update: UsageUpdate) {
+    /// Apply a usage update and return a Claude rate-limit label when it is
+    /// newly observed (i.e. it differs from the last one seen). The caller
+    /// surfaces that label in the transcript; the header intentionally omits
+    /// it. Deduplicating against the stored value keeps the frequent usage
+    /// updates from spamming the transcript with the same status.
+    fn apply_usage_update(&mut self, update: UsageUpdate) -> Option<String> {
         let rate_limit = claude_rate_limit_label(update.meta.as_ref());
         self.context_used = Some(update.used);
         self.context_size = Some(update.size);
         self.cost = update
             .cost
             .map(|cost| format!("{:.4} {}", cost.amount, cost.currency));
-        if let Some(rate_limit) = rate_limit {
-            self.rate_limit = Some(rate_limit);
+        match rate_limit {
+            Some(rate_limit) if self.rate_limit.as_deref() != Some(rate_limit.as_str()) => {
+                self.rate_limit = Some(rate_limit.clone());
+                Some(rate_limit)
+            }
+            _ => None,
         }
     }
 }
@@ -1453,7 +1462,9 @@ impl AppState {
                 }
             }
             SessionUpdate::UsageUpdate(u) => {
-                self.token_usage.apply_usage_update(u);
+                if let Some(rate_limit) = self.token_usage.apply_usage_update(u) {
+                    self.push_system_message(format!("claude rate limit: {rate_limit}"));
+                }
             }
             _ => {
                 self.transcript
@@ -2524,6 +2535,39 @@ mod tests {
             s.token_usage.rate_limit.as_deref(),
             Some("rejected requests reset 2026-06-16 12:30:00 overage disabled")
         );
+    }
+
+    #[test]
+    fn usage_update_surfaces_claude_rate_limit_in_transcript_once() {
+        let mut s = AppState::new();
+        let make_update = || {
+            let mut meta = serde_json::Map::new();
+            meta.insert(
+                CLAUDE_RATE_LIMIT_META_KEY.to_string(),
+                serde_json::json!({
+                    "status": "allowed_warning",
+                    "rateLimitType": "tokens",
+                    "utilization": 0.85,
+                }),
+            );
+            UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
+                UsageUpdate::new(12_000, 128_000).meta(meta),
+            ))
+        };
+
+        // First observation surfaces the status in the transcript.
+        s.apply_event(make_update());
+        // An identical follow-up update must not duplicate the message.
+        s.apply_event(make_update());
+
+        let rate_limit_entries = s
+            .transcript
+            .iter()
+            .filter(|entry| {
+                matches!(entry, Entry::System(text) if text == "claude rate limit: allowed-warning tokens 85%")
+            })
+            .count();
+        assert_eq!(rate_limit_entries, 1);
     }
 
     #[test]

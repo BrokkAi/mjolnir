@@ -3079,9 +3079,9 @@ fn token_usage_label(state: &AppState) -> String {
     if let Some(used) = usage.context_used {
         parts.push(format!("ctx: {}", compact_count(used)));
     }
-    if let Some(rate_limit) = usage.rate_limit.as_deref() {
-        parts.push(format!("rl: {rate_limit}"));
-    }
+    // The Claude rate-limit status is surfaced in the transcript (see
+    // `apply_usage_update`), not the header, so it is intentionally omitted
+    // here.
 
     if !parts.is_empty() {
         return parts.join(" · ");
@@ -5128,17 +5128,19 @@ mod tests {
     }
 
     #[test]
-    fn token_usage_label_includes_rate_limit_when_present() {
+    fn token_usage_label_omits_rate_limit_from_header() {
+        // The Claude rate-limit status belongs in the transcript, not the
+        // header, so the header label must not surface it even when present.
         let mut state = AppState::new();
         state.token_usage.input_tokens = Some(1233);
         state.token_usage.output_tokens = Some(1282);
         state.token_usage.context_used = Some(944);
         state.token_usage.rate_limit = Some("allowed-warning tokens 85%".to_string());
 
-        assert_eq!(
-            token_usage_label(&state),
-            "in: 1233 · out: 1282 · ctx: 944 · rl: allowed-warning tokens 85%"
-        );
+        let label = token_usage_label(&state);
+        assert_eq!(label, "in: 1233 · out: 1282 · ctx: 944");
+        assert!(!label.contains("rl:"), "label: {label}");
+        assert!(!label.contains("85%"), "label: {label}");
     }
 
     #[test]
