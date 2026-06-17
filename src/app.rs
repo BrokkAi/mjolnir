@@ -13,6 +13,8 @@ use agent_client_protocol::schema::{
     SessionConfigValueId, SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
     ToolCallUpdate, ToolKind, Usage, UsageUpdate,
 };
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::clipboard::ClipboardLease;
 
@@ -281,6 +283,7 @@ fn format_claude_rate_limit(value: &serde_json::Value) -> Option<String> {
         parts.push(kind.replace('_', "-"));
     }
     if let Some(utilization) = number_field(object, "utilization", "utilization") {
+        // Claude SDK does not document the unit, so accept both 0..1 and 0..100.
         let percent = if utilization <= 1.0 {
             utilization * 100.0
         } else {
@@ -350,17 +353,38 @@ fn value_field(
             if let Some(s) = value.as_str() {
                 (!s.is_empty()).then(|| compact_reset_label(s))
             } else if value.is_number() {
-                Some(value.to_string())
+                numeric_reset_label(value).or_else(|| Some(value.to_string()))
             } else {
                 None
             }
         })
 }
 
+fn numeric_reset_label(value: &serde_json::Value) -> Option<String> {
+    let epoch = value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| {
+            value.as_f64().and_then(|value| {
+                (value.is_finite() && value >= i64::MIN as f64 && value <= i64::MAX as f64)
+                    .then(|| value.trunc() as i64)
+            })
+        })?;
+    let seconds = if epoch.unsigned_abs() >= 1_000_000_000_000 {
+        epoch / 1000
+    } else {
+        epoch
+    };
+    OffsetDateTime::from_unix_timestamp(seconds)
+        .ok()?
+        .format(&Rfc3339)
+        .ok()
+        .map(|value| compact_reset_label(&value))
+}
+
 fn compact_reset_label(value: &str) -> String {
+    let value = value.strip_suffix('Z').unwrap_or(value);
     value
-        .strip_suffix('Z')
-        .unwrap_or(value)
         .split_once('.')
         .map(|(prefix, _)| prefix)
         .unwrap_or(value)
@@ -2450,6 +2474,30 @@ mod tests {
         assert_eq!(
             s.token_usage.rate_limit.as_deref(),
             Some("allowed-warning tokens 85% retry 1m30s")
+        );
+    }
+
+    #[test]
+    fn usage_update_formats_numeric_claude_rate_limit_reset() {
+        let mut s = AppState::new();
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            CLAUDE_RATE_LIMIT_META_KEY.to_string(),
+            serde_json::json!({
+                "status": "allowed_warning",
+                "rateLimitType": "tokens",
+                "utilization": 85,
+                "resetsAt": 1_781_706_600,
+            }),
+        );
+
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
+            UsageUpdate::new(12_000, 128_000).meta(meta),
+        )));
+
+        assert_eq!(
+            s.token_usage.rate_limit.as_deref(),
+            Some("allowed-warning tokens 85% reset 2026-06-17 14:30:00")
         );
     }
 
