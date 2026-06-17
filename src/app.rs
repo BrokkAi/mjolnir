@@ -445,9 +445,8 @@ pub struct AppState {
     /// Saved input when history navigation starts. Restored when the user
     /// presses Down past the most recent history entry.
     history_saved_input: String,
-    /// Pasted attachments that exceeded the chip line threshold. Shown as
-    /// compact badges in the input box; their contents are concatenated
-    /// with `input` when the prompt is submitted.
+    /// Text attachments shown as compact badges in the input box; their
+    /// contents are concatenated with `input` when the prompt is submitted.
     pub attachments: Vec<PastedAttachment>,
     /// Pasted image attachments shown as compact badges and submitted as
     /// ACP image content blocks.
@@ -541,13 +540,12 @@ pub struct PendingPermission {
     pub repair_attempts: usize,
 }
 
-/// A pasted attachment that exceeded the chip threshold. Shown as a compact
-/// badge in the input box instead of inline text, so the user can keep
-/// scrolling the transcript and composing without being overwhelmed.
+/// A text attachment shown as a compact badge in the input box.
 #[derive(Debug, Clone)]
 pub struct PastedAttachment {
     #[allow(dead_code)]
     pub id: usize,
+    pub position: usize,
     pub content: String,
 }
 
@@ -556,6 +554,7 @@ pub struct PastedAttachment {
 pub struct PastedImageAttachment {
     #[allow(dead_code)]
     pub id: usize,
+    pub position: usize,
     pub data_base64: String,
     pub mime_type: String,
     pub width: u32,

@@ -1274,14 +1274,23 @@ fn handle_crossterm(
             move_input_cursor_word_right(state);
         }
         (_, KeyCode::Backspace) => {
-            if !delete_before_cursor(state) {
+            let mut handled = state.input.is_empty() && pop_last_attachment(state);
+            if !handled {
+                handled = pop_inline_attachment_at_cursor(state);
+            }
+            if !handled {
+                handled = delete_before_cursor(state);
+            }
+            if !handled {
                 // Remove the last attachment chip when the input buffer is empty.
                 pop_last_attachment(state);
             }
             state.update_autocomplete();
         }
         (_, KeyCode::Delete) => {
-            delete_at_cursor(state);
+            if !pop_inline_attachment_at_cursor(state) {
+                delete_at_cursor(state);
+            }
             state.update_autocomplete();
         }
         (_, KeyCode::Left) => {
@@ -1419,7 +1428,18 @@ fn insert_text_at_cursor(state: &mut AppState, text: &str) {
     let cursor = state.input_cursor.min(input_char_count(&state.input));
     let byte_index = input_byte_index_at_char(&state.input, cursor);
     state.input.insert_str(byte_index, text);
-    state.input_cursor = cursor + input_char_count(text);
+    let inserted = input_char_count(text);
+    for attachment in &mut state.attachments {
+        if attachment.position > cursor {
+            attachment.position = attachment.position.saturating_add(inserted);
+        }
+    }
+    for attachment in &mut state.image_attachments {
+        if attachment.position > cursor {
+            attachment.position = attachment.position.saturating_add(inserted);
+        }
+    }
+    state.input_cursor = cursor + inserted;
 }
 
 fn delete_input_range(state: &mut AppState, start: usize, end: usize, new_cursor: usize) -> bool {
@@ -1434,6 +1454,21 @@ fn delete_input_range(state: &mut AppState, start: usize, end: usize, new_cursor
     let byte_start = input_byte_index_at_char(&state.input, start);
     let byte_end = input_byte_index_at_char(&state.input, end);
     state.input.drain(byte_start..byte_end);
+    let removed = end - start;
+    for attachment in &mut state.attachments {
+        if attachment.position > end {
+            attachment.position = attachment.position.saturating_sub(removed);
+        } else if attachment.position > start {
+            attachment.position = start;
+        }
+    }
+    for attachment in &mut state.image_attachments {
+        if attachment.position > end {
+            attachment.position = attachment.position.saturating_sub(removed);
+        } else if attachment.position > start {
+            attachment.position = start;
+        }
+    }
     state.input_cursor = new_cursor.min(input_char_count(&state.input));
     true
 }
@@ -1452,6 +1487,28 @@ fn replace_input_range(
     let byte_end = input_byte_index_at_char(&state.input, end);
     state.input.replace_range(byte_start..byte_end, text);
     let next_end = start + input_char_count(text);
+    let removed = end - start;
+    let inserted = input_char_count(text);
+    for attachment in &mut state.attachments {
+        if attachment.position > end {
+            attachment.position = attachment
+                .position
+                .saturating_sub(removed)
+                .saturating_add(inserted);
+        } else if attachment.position > start {
+            attachment.position = start + inserted;
+        }
+    }
+    for attachment in &mut state.image_attachments {
+        if attachment.position > end {
+            attachment.position = attachment
+                .position
+                .saturating_sub(removed)
+                .saturating_add(inserted);
+        } else if attachment.position > start {
+            attachment.position = start + inserted;
+        }
+    }
     state.input_cursor = next_end;
     (start, next_end)
 }
@@ -1617,6 +1674,7 @@ fn delete_previous_word(state: &mut AppState) -> bool {
     delete_input_range(state, start, cursor, start)
 }
 
+#[cfg(test)]
 fn input_cursor_visual_position(
     text: &str,
     cursor_char_index: usize,
@@ -1709,6 +1767,44 @@ fn pop_last_attachment(state: &mut AppState) -> bool {
     }
 }
 
+fn pop_inline_attachment_at_cursor(state: &mut AppState) -> bool {
+    let cursor = state.input_cursor.min(input_char_count(&state.input));
+    let text = state
+        .attachments
+        .iter()
+        .enumerate()
+        .filter(|(_, attachment)| attachment.position.min(input_char_count(&state.input)) == cursor)
+        .max_by_key(|(_, attachment)| attachment.id)
+        .map(|(index, attachment)| (attachment.id, index));
+    let image = state
+        .image_attachments
+        .iter()
+        .enumerate()
+        .filter(|(_, attachment)| attachment.position.min(input_char_count(&state.input)) == cursor)
+        .max_by_key(|(_, attachment)| attachment.id)
+        .map(|(index, attachment)| (attachment.id, index));
+
+    match (text, image) {
+        (Some((text_id, text_index)), Some((image_id, _))) if text_id > image_id => {
+            state.attachments.remove(text_index);
+            true
+        }
+        (Some(_), Some((_, image_index))) => {
+            state.image_attachments.remove(image_index);
+            true
+        }
+        (Some((_, text_index)), None) => {
+            state.attachments.remove(text_index);
+            true
+        }
+        (None, Some((_, image_index))) => {
+            state.image_attachments.remove(image_index);
+            true
+        }
+        (None, None) => false,
+    }
+}
+
 fn is_plain_character_input(modifiers: KeyModifiers, code: KeyCode) -> bool {
     matches!(code, KeyCode::Char(_))
         && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -1771,11 +1867,9 @@ fn flush_input_paste_burst_if_due(state: &mut AppState, now: Instant, force: boo
     true
 }
 
-/// Translate a bracketed paste event into input buffer edits or a chip.
+/// Translate a bracketed paste event into input buffer edits or an anchored chip.
 /// Normalizes CRLF to LF and strips control characters (except tab and
 /// newline) so pasted text from browsers or terminals renders predictably.
-/// When the pasted text exceeds the chip threshold (>3 lines), it is
-/// stored as a compact attachment instead of inline text.
 fn handle_paste(state: &mut AppState, text: &str) {
     let cleaned = normalize_paste(text);
 
@@ -1787,17 +1881,15 @@ fn handle_paste(state: &mut AppState, text: &str) {
     }
 
     let line_count = cleaned.lines().count();
-
-    // If the paste is large (>3 lines), create a chip instead of inline text.
     if line_count > 3 {
         let id = state.next_attachment_id;
         state.next_attachment_id += 1;
         state.attachments.push(PastedAttachment {
             id,
+            position: state.input_cursor.min(input_char_count(&state.input)),
             content: cleaned,
         });
     } else {
-        // Small paste: append inline.
         insert_text_at_cursor(state, &cleaned);
     }
     state.scroll_input_to_bottom();
@@ -1921,6 +2013,7 @@ fn attach_clipboard_image(state: &mut AppState, image: ClipboardImage) {
     state.next_attachment_id += 1;
     state.image_attachments.push(PastedImageAttachment {
         id,
+        position: state.input_cursor.min(input_char_count(&state.input)),
         data_base64: image.data_base64,
         mime_type: image.mime_type,
         width: image.width,
@@ -2235,23 +2328,37 @@ fn should_open_help(modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty() && matches!(code, KeyCode::F(10))
 }
 
-fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
-    // Concatenate attachment contents (in order) with input text.
+fn input_text_with_attachments(input: &str, attachments: &[PastedAttachment]) -> String {
+    let input_len = input_char_count(input);
+    let mut ordered: Vec<&PastedAttachment> = attachments.iter().collect();
+    ordered.sort_by_key(|attachment| (attachment.position.min(input_len), attachment.id));
+
     let mut combined = String::new();
-    for attachment in &state.attachments {
-        if !combined.is_empty() {
+    let mut text_start = 0usize;
+    for attachment in ordered {
+        let position = attachment.position.min(input_len);
+        combined.push_str(input_char_slice(input, text_start, position));
+        if !combined.is_empty() && !combined.ends_with('\n') {
             combined.push('\n');
         }
         combined.push_str(&attachment.content);
+        if position < input_len && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        text_start = position;
     }
-    if !combined.is_empty() && !state.input.is_empty() {
-        combined.push('\n');
-    }
-    combined.push_str(&state.input);
+    combined.push_str(input_char_slice(input, text_start, input_len));
+    combined
+}
 
-    let images: Vec<PromptImage> = state
-        .image_attachments
-        .iter()
+fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
+    let combined = input_text_with_attachments(&state.input, &state.attachments);
+
+    let input_len = input_char_count(&state.input);
+    let mut ordered_images: Vec<&PastedImageAttachment> = state.image_attachments.iter().collect();
+    ordered_images.sort_by_key(|attachment| (attachment.position.min(input_len), attachment.id));
+    let images: Vec<PromptImage> = ordered_images
+        .into_iter()
         .map(|attachment| PromptImage {
             data_base64: attachment.data_base64.clone(),
             mime_type: attachment.mime_type.clone(),
@@ -4080,14 +4187,199 @@ fn input_append_wrapped_char(
     *row_width += ch_width;
 }
 
-fn input_wrapped_lines(text: &str, inner_w: usize) -> Vec<String> {
-    input_wrapped_layout(text, 0, inner_w).rows
+fn input_char_slice(text: &str, start: usize, end: usize) -> &str {
+    let start = start.min(input_char_count(text));
+    let end = end.min(input_char_count(text)).max(start);
+    let byte_start = input_byte_index_at_char(text, start);
+    let byte_end = input_byte_index_at_char(text, end);
+    &text[byte_start..byte_end]
 }
 
-/// Count how many visual rows a piece of prompt text occupies at
-/// `inner_w` columns. Must stay in sync with `input_wrapped_lines`.
-fn input_wrapped_row_count(text: &str, inner_w: usize) -> usize {
-    input_wrapped_lines(text, inner_w).len()
+fn text_attachment_label(attachment: &PastedAttachment) -> String {
+    let line_count = attachment.content.lines().count();
+    let char_count = attachment.content.chars().count();
+    format!(
+        "📎 {} line{} · {} char{}",
+        line_count,
+        if line_count == 1 { "" } else { "s" },
+        char_count,
+        if char_count == 1 { "" } else { "s" }
+    )
+}
+
+fn image_attachment_label(attachment: &PastedImageAttachment) -> String {
+    format!(
+        "🖼 image {}x{} · {}",
+        attachment.width,
+        attachment.height,
+        format_bytes(attachment.byte_len)
+    )
+}
+
+fn attachment_span(label: String) -> Span<'static> {
+    Span::styled(
+        label,
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+struct InlineAttachmentChip {
+    id: usize,
+    position: usize,
+    span: Span<'static>,
+}
+
+struct InputAttachmentLayout {
+    lines: Vec<Line<'static>>,
+    cursor_row: usize,
+    cursor_col: usize,
+}
+
+struct InputInlineBuilder {
+    width: usize,
+    cursor: usize,
+    cursor_row: usize,
+    cursor_col: usize,
+    cursor_set: bool,
+    rows: Vec<Line<'static>>,
+    row_spans: Vec<Span<'static>>,
+    row_width: usize,
+}
+
+impl InputInlineBuilder {
+    fn new(width: usize, cursor: usize) -> Self {
+        Self {
+            width: width.max(1),
+            cursor,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_set: false,
+            rows: Vec::new(),
+            row_spans: Vec::new(),
+            row_width: 0,
+        }
+    }
+
+    fn set_cursor_if_here(&mut self, char_index: usize) {
+        if self.cursor == char_index && !self.cursor_set {
+            self.cursor_row = self.rows.len();
+            self.cursor_col = self.row_width;
+            self.cursor_set = true;
+        }
+    }
+
+    fn push_row(&mut self) {
+        self.rows
+            .push(Line::from(std::mem::take(&mut self.row_spans)));
+        self.row_width = 0;
+    }
+
+    fn append_text(&mut self, text: &str, start: usize, end: usize) {
+        let mut char_index = start;
+        for ch in input_char_slice(text, start, end).chars() {
+            self.set_cursor_if_here(char_index);
+            if ch == '\n' {
+                self.push_row();
+                char_index += 1;
+                continue;
+            }
+
+            let ch_width = input_wrap_char_width(ch, self.width);
+            if ch_width > 0 && self.row_width > 0 && self.row_width + ch_width > self.width {
+                self.push_row();
+            }
+            self.row_spans.push(Span::raw(ch.to_string()));
+            self.row_width += ch_width;
+            char_index += 1;
+        }
+    }
+
+    fn append_attachment(&mut self, span: Span<'static>) {
+        let width = span.content.width().min(self.width);
+        if width > 0 && self.row_width > 0 && self.row_width + width > self.width {
+            self.push_row();
+        }
+        self.row_spans.push(span);
+        self.row_width += width;
+    }
+
+    fn finish(mut self) -> InputAttachmentLayout {
+        self.set_cursor_if_here(self.cursor);
+        if !self.row_spans.is_empty() || self.rows.is_empty() {
+            self.push_row();
+        }
+        InputAttachmentLayout {
+            lines: self.rows,
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+        }
+    }
+}
+
+fn input_layout_with_attachments(state: &AppState, inner_w: usize) -> InputAttachmentLayout {
+    let input_len = input_char_count(&state.input);
+    if state.attachments.is_empty() && state.image_attachments.is_empty() {
+        let layout = input_wrapped_layout(&state.input, state.input_cursor, inner_w);
+        return InputAttachmentLayout {
+            lines: layout.rows.into_iter().map(Line::from).collect(),
+            cursor_row: layout.cursor_row,
+            cursor_col: layout.cursor_col,
+        };
+    }
+
+    let mut attachments: Vec<InlineAttachmentChip> = state
+        .attachments
+        .iter()
+        .map(|attachment| InlineAttachmentChip {
+            id: attachment.id,
+            position: attachment.position.min(input_len),
+            span: attachment_span(text_attachment_label(attachment)),
+        })
+        .chain(
+            state
+                .image_attachments
+                .iter()
+                .map(|attachment| InlineAttachmentChip {
+                    id: attachment.id,
+                    position: attachment.position.min(input_len),
+                    span: attachment_span(image_attachment_label(attachment)),
+                }),
+        )
+        .collect();
+    attachments.sort_by_key(|attachment| (attachment.position, attachment.id));
+
+    let mut builder = InputInlineBuilder::new(inner_w, state.input_cursor.min(input_len));
+    let mut text_start = 0usize;
+    for attachment in attachments {
+        let position = attachment.position;
+        if position > text_start {
+            builder.append_text(&state.input, text_start, position);
+        }
+        builder.append_attachment(attachment.span);
+        text_start = position;
+    }
+
+    builder.append_text(&state.input, text_start, input_len);
+    builder.finish()
+}
+
+fn input_lines_with_attachments(state: &AppState, inner_w: usize) -> Vec<Line<'static>> {
+    input_layout_with_attachments(state, inner_w).lines
+}
+
+fn input_row_count_with_attachments(state: &AppState, inner_w: usize) -> usize {
+    input_layout_with_attachments(state, inner_w).lines.len()
+}
+
+fn input_cursor_visual_position_with_attachments(
+    state: &AppState,
+    inner_w: usize,
+) -> (usize, usize) {
+    let layout = input_layout_with_attachments(state, inner_w);
+    (layout.cursor_row, layout.cursor_col)
 }
 
 /// Compute the cursor position for a multi-line input buffer. Accounts
@@ -4095,6 +4387,7 @@ fn input_wrapped_row_count(text: &str, inner_w: usize) -> usize {
 /// the cursor lands on the correct visual row even when a single
 /// logical line spans multiple terminal columns. `chip_rows` is added
 /// as a prefix offset (paste-attachment badges rendered above the text).
+#[cfg(test)]
 fn input_cursor_position(
     area: Rect,
     text: &str,
@@ -4115,41 +4408,6 @@ fn input_cursor_position(
     let cursor_y = area.y + visible_row.min(inner_h.saturating_sub(1)) as u16;
 
     (cursor_x, cursor_y)
-}
-
-fn input_attachment_chips(state: &AppState) -> Vec<String> {
-    let mut chips: Vec<(usize, String)> =
-        Vec::with_capacity(state.attachments.len() + state.image_attachments.len());
-
-    for attachment in &state.attachments {
-        let line_count = attachment.content.lines().count();
-        let char_count = attachment.content.chars().count();
-        chips.push((
-            attachment.id,
-            format!(
-                "📎 {} line{} · {} char{}",
-                line_count,
-                if line_count == 1 { "" } else { "s" },
-                char_count,
-                if char_count == 1 { "" } else { "s" }
-            ),
-        ));
-    }
-
-    for attachment in &state.image_attachments {
-        chips.push((
-            attachment.id,
-            format!(
-                "🖼 image {}x{} · {}",
-                attachment.width,
-                attachment.height,
-                format_bytes(attachment.byte_len)
-            ),
-        ));
-    }
-
-    chips.sort_by_key(|(id, _)| *id);
-    chips.into_iter().map(|(_, label)| label).collect()
 }
 
 fn format_bytes(bytes: usize) -> String {
@@ -4286,19 +4544,8 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     };
     let block = Block::default().borders(Borders::ALL).title(title);
 
-    // Build lines: chip rows first, then input text rows.
+    // Build lines with attachment chips interleaved with input text.
     let mut lines: Vec<Line> = Vec::new();
-
-    // Render each attachment as a compact chip row.
-    for chip in input_attachment_chips(state) {
-        lines.push(Line::from(Span::styled(
-            chip,
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )));
-    }
 
     f.render_widget(block, area);
 
@@ -4319,9 +4566,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         .saturating_sub(side_padding * 2 + PROMPT_PREFIX_WIDTH)
         .max(1);
     let inner_h = inner.height as usize;
-    let chip_rows = attachment_count(state);
-    let text_rows = input_wrapped_row_count(&state.input, content_width as usize);
-    let total_visual_rows = chip_rows + text_rows;
+    let total_visual_rows = input_row_count_with_attachments(state, content_width as usize);
     let visible_rows = total_visual_rows.max(1).min(inner_h);
     let top_padding = if total_visual_rows < inner_h {
         ((inner_h - total_visual_rows) / 2) as u16
@@ -4335,17 +4580,13 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         visible_rows as u16,
     );
 
-    // Add input text rows after the content width is known so cursor
+    // Add input rows after the content width is known so cursor
     // placement and rendering use the same wrap boundaries.
-    for line in input_wrapped_lines(&state.input, content_width as usize) {
-        lines.push(Line::from(line));
-    }
+    lines.extend(input_lines_with_attachments(state, content_width as usize));
 
     let scroll = if total_visual_rows > visible_rows {
         let cursor_row =
-            input_cursor_visual_position(&state.input, state.input_cursor, content_width as usize)
-                .0
-                + chip_rows;
+            input_cursor_visual_position_with_attachments(state, content_width as usize).0;
         let desired = cursor_row.saturating_sub(visible_rows / 2);
         desired.min(total_visual_rows - visible_rows) as u16
     } else {
@@ -4378,13 +4619,14 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         && !state.help_overlay
         && (mode == UiMode::InlineChat || !state.text_selection_mode)
     {
-        let (cursor_x, cursor_y) = input_cursor_position(
-            content_area,
-            &state.input,
-            state.input_cursor,
-            chip_rows,
-            scroll,
-        );
+        let (cursor_row, cursor_col) =
+            input_cursor_visual_position_with_attachments(state, content_width as usize);
+        let total_cursor_row = cursor_row;
+        let visible_row = total_cursor_row.saturating_sub(scroll as usize);
+        let cursor_x =
+            content_area.x + cursor_col.min(content_width.saturating_sub(1) as usize) as u16;
+        let cursor_y =
+            content_area.y + visible_row.min(content_area.height.saturating_sub(1) as usize) as u16;
         f.set_cursor_position((cursor_x, cursor_y));
     }
 }
@@ -4876,7 +5118,7 @@ fn general_help_lines(voice_input_supported: bool) -> Vec<Line<'static>> {
         Line::from("  Esc              clear input, chips, and browsing history"),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "Pasted chips (>3 lines)",
+            "Attachment chips",
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from("  Backspace / Esc / Enter  remove chip / clear / send chips + input"),
@@ -5268,6 +5510,7 @@ mod tests {
         let image = test_clipboard_image();
         PastedImageAttachment {
             id,
+            position: 0,
             data_base64: image.data_base64,
             mime_type: image.mime_type,
             width: image.width,
@@ -8520,37 +8763,39 @@ mod tests {
     }
 
     #[test]
-    fn paste_over_three_lines_creates_attachment_chip() {
+    fn paste_over_three_lines_creates_attachment_chip_at_cursor() {
         let mut state = AppState::new();
         state.attachments = Vec::new();
+        state.input = "typed".to_string();
+        state.input_cursor = 0;
 
         handle_paste(&mut state, "a\nb\nc\nd");
 
-        assert!(
-            state.input.is_empty(),
-            "large paste must go to a chip, not inline"
-        );
+        assert_eq!(state.input, "typed");
         assert_eq!(state.attachments.len(), 1);
+        assert_eq!(state.attachments[0].position, 0);
         assert_eq!(state.attachments[0].content, "a\nb\nc\nd");
     }
 
     #[test]
-    fn paste_over_three_carriage_return_lines_creates_attachment_chip() {
+    fn paste_over_three_carriage_return_lines_creates_attachment_chip_at_cursor() {
         let mut state = AppState::new();
+        state.input = "before after".to_string();
+        state.input_cursor = "before ".chars().count();
 
         handle_paste(&mut state, "a\rb\rc\rd\re");
 
-        assert!(
-            state.input.is_empty(),
-            "large CR-separated paste must go to a chip, not inline"
-        );
+        assert_eq!(state.input, "before after");
         assert_eq!(state.attachments.len(), 1);
+        assert_eq!(state.attachments[0].position, "before ".chars().count());
         assert_eq!(state.attachments[0].content, "a\nb\nc\nd\ne");
     }
 
     #[test]
-    fn bracketed_paste_event_creates_attachment_chip() {
+    fn bracketed_paste_event_creates_attachment_chip_at_cursor() {
         let mut state = AppState::new();
+        state.input = "typed".to_string();
+        state.input_cursor = state.input.chars().count();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         handle_crossterm(
@@ -8559,9 +8804,84 @@ mod tests {
             CtEvent::Paste("a\rb\rc\rd\re".to_string()),
         );
 
-        assert!(state.input.is_empty());
+        assert_eq!(state.input, "typed");
         assert_eq!(state.attachments.len(), 1);
+        assert_eq!(state.attachments[0].position, "typed".chars().count());
         assert_eq!(state.attachments[0].content, "a\nb\nc\nd\ne");
+    }
+
+    #[test]
+    fn text_attachment_chip_renders_at_its_cursor_position() {
+        let mut state = AppState::new();
+        state.input = "this is me typing my text".to_string();
+        state.input_cursor = 0;
+
+        handle_paste(&mut state, "a\nb\nc\nd");
+
+        let rendered: Vec<String> = input_lines_with_attachments(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(
+            rendered[0].starts_with("📎 4 lines"),
+            "chip should render before text when pasted at cursor 0: {rendered:?}"
+        );
+        assert!(
+            rendered[0].ends_with("this is me typing my text"),
+            "text should stay on the chip line when it fits: {rendered:?}"
+        );
+
+        let mut state = AppState::new();
+        state.input = "this is me typing my text".to_string();
+        state.input_cursor = state.input.chars().count();
+
+        handle_paste(&mut state, "a\nb\nc\nd");
+
+        let rendered: Vec<String> = input_lines_with_attachments(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(
+            rendered[0].starts_with("this is me typing my text📎 4 lines"),
+            "chip should render inline after text when pasted at the end: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn image_attachment_chip_renders_at_its_cursor_position() {
+        let mut state = AppState::new();
+        state.input = "describe this".to_string();
+        state.input_cursor = 0;
+
+        attach_clipboard_image(&mut state, test_clipboard_image());
+
+        let rendered: Vec<String> = input_lines_with_attachments(&state, 120)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(
+            rendered[0].starts_with("🖼 image 640x480"),
+            "image chip should render before text when attached at cursor 0: {rendered:?}"
+        );
+        assert!(
+            rendered[0].ends_with("describe this"),
+            "text should stay on the image chip line when it fits: {rendered:?}"
+        );
+
+        let mut state = AppState::new();
+        state.input = "describe this".to_string();
+        state.input_cursor = state.input.chars().count();
+
+        attach_clipboard_image(&mut state, test_clipboard_image());
+
+        let rendered: Vec<String> = input_lines_with_attachments(&state, 120)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(
+            rendered[0].starts_with("describe this🖼 image 640x480"),
+            "image chip should render inline after text when attached at the end: {rendered:?}"
+        );
     }
 
     #[test]
@@ -8751,10 +9071,12 @@ mod tests {
         let mut state = AppState::new();
         state.attachments.push(crate::app::PastedAttachment {
             id: 1,
+            position: 0,
             content: "first".to_string(),
         });
         state.attachments.push(crate::app::PastedAttachment {
             id: 2,
+            position: 0,
             content: "second".to_string(),
         });
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
@@ -8770,10 +9092,47 @@ mod tests {
     }
 
     #[test]
+    fn backspace_at_text_attachment_position_removes_that_chip() {
+        let mut state = AppState::new();
+        state.input = "typed".to_string();
+        state.input_cursor = state.input.chars().count();
+        state.attachments.push(crate::app::PastedAttachment {
+            id: 1,
+            position: state.input_cursor,
+            content: "a\nb\nc\nd".to_string(),
+        });
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Backspace));
+
+        assert!(state.attachments.is_empty());
+        assert_eq!(state.input, "typed");
+        assert_eq!(state.input_cursor, "typed".chars().count());
+    }
+
+    #[test]
+    fn backspace_at_image_attachment_position_removes_that_chip() {
+        let mut state = AppState::new();
+        state.input = "typed".to_string();
+        state.input_cursor = state.input.chars().count();
+        let mut image = test_image_attachment_with_id(1);
+        image.position = state.input_cursor;
+        state.image_attachments.push(image);
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Backspace));
+
+        assert!(state.image_attachments.is_empty());
+        assert_eq!(state.input, "typed");
+        assert_eq!(state.input_cursor, "typed".chars().count());
+    }
+
+    #[test]
     fn backspace_on_empty_input_removes_last_image_attachment() {
         let mut state = AppState::new();
         state.attachments.push(crate::app::PastedAttachment {
             id: 1,
+            position: 0,
             content: "first".to_string(),
         });
         state
@@ -8793,10 +9152,12 @@ mod tests {
         state.session_id = Some("s-1".to_string());
         state.attachments.push(crate::app::PastedAttachment {
             id: 1,
+            position: 0,
             content: "pasted-1".to_string(),
         });
         state.attachments.push(crate::app::PastedAttachment {
             id: 2,
+            position: 0,
             content: "pasted-2".to_string(),
         });
         state.input = "typed".to_string();
@@ -8873,6 +9234,7 @@ mod tests {
         state.input = "draft".to_string();
         state.attachments.push(crate::app::PastedAttachment {
             id: 1,
+            position: 0,
             content: "x".to_string(),
         });
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
@@ -8888,6 +9250,7 @@ mod tests {
         let mut state = AppState::new();
         state.attachments.push(crate::app::PastedAttachment {
             id: 1,
+            position: 0,
             content: "x".to_string(),
         });
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
