@@ -3085,6 +3085,9 @@ fn token_usage_label(state: &AppState) -> String {
     if let Some(used) = usage.context_used {
         parts.push(format!("ctx: {}", compact_count(used)));
     }
+    if let Some(rate_limit) = usage.rate_limit.as_deref() {
+        parts.push(format!("rl: {rate_limit}"));
+    }
 
     if !parts.is_empty() {
         return parts.join(" · ");
@@ -5075,6 +5078,20 @@ mod tests {
         assert_eq!(
             header_token_usage_label(&state, 80),
             "in: 1233 · out: 1282 · ctx: 944"
+        );
+    }
+
+    #[test]
+    fn token_usage_label_includes_rate_limit_when_present() {
+        let mut state = AppState::new();
+        state.token_usage.input_tokens = Some(1233);
+        state.token_usage.output_tokens = Some(1282);
+        state.token_usage.context_used = Some(944);
+        state.token_usage.rate_limit = Some("allowed-warning tokens 85%".to_string());
+
+        assert_eq!(
+            token_usage_label(&state),
+            "in: 1233 · out: 1282 · ctx: 944 · rl: allowed-warning tokens 85%"
         );
     }
 
