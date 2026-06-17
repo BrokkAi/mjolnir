@@ -2,7 +2,7 @@
 //! stdio, and bridges UI commands/events through two mpsc channels.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -474,7 +474,7 @@ async fn drive_session(
 }
 
 pub(crate) fn spawn_agent(
-    command: &PathBuf,
+    command: &Path,
     args: &[String],
     env: &HashMap<String, String>,
     stderr_path: Option<&std::path::Path>,
@@ -486,7 +486,7 @@ pub(crate) fn spawn_agent(
     ),
     LaunchError,
 > {
-    let command = normalize_spawn_program(command.clone());
+    let command = normalize_spawn_program(command.to_path_buf());
     let mut cmd = Command::new(&command);
     cmd.args(args);
     for (k, v) in env {
