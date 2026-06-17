@@ -463,6 +463,7 @@ impl TrackerState {
             UiEvent::Connected { .. }
             | UiEvent::PermissionRequest(_)
             | UiEvent::RemotePermissionDecision { .. }
+            | UiEvent::Info(_)
             | UiEvent::Warning(_) => {}
         }
     }

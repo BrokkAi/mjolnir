@@ -2281,6 +2281,35 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
+    if images.is_empty() && text == "/fork" {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        if state.runtime_closed {
+            state.record_status_message(
+                StatusKind::Info,
+                "acp runtime closed; type /clear for the same agent, /new for the picker, or Ctrl-C to quit",
+            );
+        } else if state.session_id.is_none() {
+            state.record_status_message(StatusKind::Warning, "waiting for session...");
+        } else if !state.session_fork_supported {
+            state.record_status_message(
+                StatusKind::Warning,
+                "session fork is not supported by this agent",
+            );
+        } else if state.is_streaming() {
+            state.record_status_message(
+                StatusKind::Warning,
+                "session fork is only supported while idle",
+            );
+        } else {
+            state.record_status_message(StatusKind::Info, "forking session...");
+            let _ = cmd_tx.send(UiCommand::ForkSession);
+        }
+        return;
+    }
+
     if images.is_empty()
         && let Some(rest) = text.strip_prefix("/mj:")
     {
@@ -6317,6 +6346,40 @@ mod tests {
         assert_eq!(state.exit_reason, Some(UiExitReason::ClearSession));
         // Must not forward the command to the agent.
         assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn slash_fork_sends_fork_session_command() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.session_fork_supported = true;
+        state.input = "/fork".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.exit_reason.is_none());
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::ForkSession)));
+        assert!(state.input.is_empty());
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Info);
+        assert_eq!(status.text, "forking session...");
+    }
+
+    #[test]
+    fn slash_fork_warns_when_agent_does_not_support_fork() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "/fork".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.exit_reason.is_none());
+        assert!(cmd_rx.try_recv().is_err());
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Warning);
+        assert_eq!(status.text, "session fork is not supported by this agent");
     }
 
     #[test]

@@ -8,12 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::schema::{
     CancelNotification, ClientCapabilities, ContentBlock, ErrorCode, FileSystemCapabilities,
-    ImageContent, InitializeRequest, LoadSessionRequest, ModelInfo, NewSessionRequest,
-    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId, SessionId,
-    SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    SetSessionModelRequest, TextContent,
+    ForkSessionRequest, ImageContent, InitializeRequest, LoadSessionRequest, ModelInfo,
+    NewSessionRequest, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    SessionConfigValueId, SessionId, SessionModeState, SessionNotification,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, TextContent,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
@@ -384,13 +384,19 @@ async fn drive_session(
             return Err(anyhow::anyhow!(text));
         }
     };
+    let session_fork_supported = init_resp
+        .agent_capabilities
+        .session_capabilities
+        .fork
+        .is_some();
     let _ = ui_tx.send(UiEvent::Connected {
         agent_name: init_resp.agent_info.as_ref().map(|i| i.name.clone()),
         agent_version: init_resp.agent_info.as_ref().map(|i| i.version.clone()),
         prompt_images_supported: init_resp.agent_capabilities.prompt_capabilities.image,
+        session_fork_supported,
     });
 
-    let (session_id, initial_config, resumed) = match resume_session {
+    let (mut session_id, initial_config, resumed) = match resume_session {
         Some(existing_session_id) => {
             let session_id = SessionId::from(existing_session_id.clone());
             match conn
@@ -412,7 +418,7 @@ async fn drive_session(
             }
         }
         None => match conn
-            .send_request(NewSessionRequest::new(cwd))
+            .send_request(NewSessionRequest::new(cwd.clone()))
             .block_task()
             .await
         {
@@ -466,11 +472,55 @@ async fn drive_session(
                     break;
                 }
             }
+            UiCommand::ForkSession => {
+                if !session_fork_supported {
+                    let _ = ui_tx.send(UiEvent::Warning(
+                        "session fork is not supported by this agent".to_string(),
+                    ));
+                    continue;
+                }
+
+                match fork_session(&conn, &session_id, cwd.clone()).await {
+                    Ok((forked_session_id, forked_config)) => {
+                        session_id = forked_session_id;
+                        session_config = forked_config.unwrap_or_else(|| SessionConfigCache {
+                            options: Vec::new(),
+                            targets: Vec::new(),
+                        });
+                        let _ = ui_tx.send(UiEvent::SessionStarted {
+                            session_id: session_id.to_string(),
+                            resumed: false,
+                        });
+                        let _ = ui_tx.send(UiEvent::SessionConfigOptions {
+                            options: session_config.options.clone(),
+                            targets: session_config.targets.clone(),
+                        });
+                        let _ = ui_tx.send(UiEvent::Info("session forked".to_string()));
+                    }
+                    Err(e) => {
+                        let _ = ui_tx.send(UiEvent::Warning(format!("session fork failed: {e}")));
+                    }
+                }
+            }
             UiCommand::CancelPrompt => {}
             UiCommand::Shutdown => break,
         }
     }
     Ok(())
+}
+
+async fn fork_session(
+    conn: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    cwd: PathBuf,
+) -> std::result::Result<(SessionId, Option<SessionConfigCache>), agent_client_protocol::Error> {
+    let resp = conn
+        .send_request(ForkSessionRequest::new(session_id.clone(), cwd))
+        .block_task()
+        .await?;
+    let config = session_config_from_parts(resp.config_options, resp.models, resp.modes)
+        .map(|(options, targets)| SessionConfigCache { options, targets });
+    Ok((resp.session_id, config))
 }
 
 pub(crate) fn spawn_agent(
@@ -812,6 +862,11 @@ async fn drive_config_update(
                             "config update already in flight".to_string(),
                         ));
                     }
+                    Some(UiCommand::ForkSession) => {
+                        let _ = ui_tx.send(UiEvent::Warning(
+                            "session fork is only supported while idle".to_string(),
+                        ));
+                    }
                     Some(UiCommand::CancelPrompt) => {}
                 }
             }
@@ -898,6 +953,11 @@ async fn drive_prompt_turn(
                             "config updates are only supported while idle".to_string(),
                         ));
                     }
+                    Some(UiCommand::ForkSession) => {
+                        let _ = ui_tx.send(UiEvent::Warning(
+                            "session fork is only supported while idle".to_string(),
+                        ));
+                    }
                 }
             }
         }
@@ -922,9 +982,10 @@ mod tests {
     use super::*;
     use agent_client_protocol::Agent as AgentRole;
     use agent_client_protocol::schema::{
-        ContentBlock, ContentChunk, InitializeResponse, LoadSessionResponse, NewSessionResponse,
-        PromptResponse, SessionConfigId, SessionConfigValueId, SessionId, SessionNotification,
-        SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent,
+        AgentCapabilities, ContentBlock, ContentChunk, ForkSessionResponse, InitializeResponse,
+        LoadSessionResponse, NewSessionResponse, PromptResponse, SessionCapabilities,
+        SessionConfigId, SessionConfigValueId, SessionForkCapabilities, SessionId,
+        SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent,
     };
     use std::sync::{
         Arc,
@@ -1076,9 +1137,12 @@ mod tests {
                 async move |_req: agent_client_protocol::schema::InitializeRequest,
                             responder,
                             _cx| {
-                    responder.respond(InitializeResponse::new(
-                        agent_client_protocol::schema::ProtocolVersion::V1,
-                    ))
+                    responder.respond(
+                        InitializeResponse::new(agent_client_protocol::schema::ProtocolVersion::V1)
+                            .agent_capabilities(AgentCapabilities::new().session_capabilities(
+                                SessionCapabilities::new().fork(SessionForkCapabilities::new()),
+                            )),
+                    )
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -1094,6 +1158,12 @@ mod tests {
                 async move |_req: agent_client_protocol::schema::LoadSessionRequest,
                             responder,
                             _cx| { responder.respond(LoadSessionResponse::new()) },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: ForkSessionRequest, responder, _cx| {
+                    responder.respond(ForkSessionResponse::new(SessionId::new("forked-session")))
+                },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
@@ -1353,6 +1423,125 @@ mod tests {
                 UiEvent::Warning(_) | UiEvent::Fatal(_) => panic!("unexpected: {ev:?}"),
                 _ => {}
             }
+        }
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fork_session_switches_to_forked_session_id() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent(agent_side));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        let mut saw_initial_session = false;
+        while !saw_initial_session {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for handshake")
+                .expect("channel closed");
+            match ev {
+                UiEvent::SessionStarted { session_id, .. } => {
+                    assert_eq!(session_id, "test-session");
+                    saw_initial_session = true;
+                }
+                UiEvent::Warning(_) | UiEvent::Fatal(_) => panic!("unexpected: {ev:?}"),
+                _ => {}
+            }
+        }
+
+        cmd_tx.send(UiCommand::ForkSession).expect("send fork");
+
+        let mut saw_forked_session = false;
+        let mut saw_forked_info = false;
+        while !(saw_forked_session && saw_forked_info) {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for fork")
+                .expect("channel closed");
+            match ev {
+                UiEvent::SessionStarted { session_id, .. } => {
+                    assert_eq!(session_id, "forked-session");
+                    saw_forked_session = true;
+                }
+                UiEvent::Info(message) => {
+                    assert_eq!(message, "session forked");
+                    saw_forked_info = true;
+                }
+                UiEvent::SessionConfigOptions { .. } => {}
+                UiEvent::Warning(_) | UiEvent::Fatal(_) => panic!("unexpected: {ev:?}"),
+                _ => {}
+            }
+        }
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fork_session_without_capability_emits_warning() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_with_hanging_config(agent_side));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        let mut saw_session = false;
+        while !saw_session {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for handshake")
+                .expect("channel closed");
+            match ev {
+                UiEvent::SessionStarted { session_id, .. } => {
+                    assert_eq!(session_id, "test-session");
+                    saw_session = true;
+                }
+                UiEvent::Warning(_) | UiEvent::Fatal(_) => panic!("unexpected: {ev:?}"),
+                _ => {}
+            }
+        }
+
+        cmd_tx.send(UiCommand::ForkSession).expect("send fork");
+
+        let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            .await
+            .expect("timeout waiting for fork warning")
+            .expect("channel closed");
+        match ev {
+            UiEvent::Warning(message) => {
+                assert_eq!(message, "session fork is not supported by this agent");
+            }
+            other => panic!("unexpected: {other:?}"),
         }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");

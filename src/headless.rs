@@ -244,6 +244,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     eprintln!("warning: {message}");
                 }
             }
+            UiEvent::Info(_) => {}
             // Headless runs never receive remote decisions (no UI event
             // channel is registered with the tracker).
             UiEvent::RemotePermissionDecision { .. } => {}

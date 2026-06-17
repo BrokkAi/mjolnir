@@ -28,6 +28,7 @@ pub enum UiEvent {
         agent_name: Option<String>,
         agent_version: Option<String>,
         prompt_images_supported: bool,
+        session_fork_supported: bool,
     },
     /// A session has been opened or loaded; future updates carry this session id.
     SessionStarted { session_id: String, resumed: bool },
@@ -64,6 +65,8 @@ pub enum UiEvent {
     /// A non-fatal error from the runtime (e.g. transport hiccup we
     /// recovered from). Shown in the status line.
     Warning(String),
+    /// Informational runtime status. Shown in the status line and transcript.
+    Info(String),
     /// Fatal error; the runtime is shutting down. UI should display the
     /// message and exit.
     Fatal(String),
@@ -108,6 +111,8 @@ pub enum UiCommand {
         target: SessionConfigTarget,
         value: SessionConfigValueId,
     },
+    /// Fork the current ACP session and continue in the forked session.
+    ForkSession,
     /// Cancel the in-flight prompt turn (Ctrl-C while streaming).
     CancelPrompt,
     /// Tear down: kill the agent child and exit.

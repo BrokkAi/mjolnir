@@ -12,7 +12,7 @@ name = "mj"
 path = "src/main.rs"
 
 [dependencies]
-agent-client-protocol = { version = "0.12", features = ["unstable_session_model", "unstable_session_usage"] }
+agent-client-protocol = { version = "0.12", features = ["unstable_session_fork", "unstable_session_model", "unstable_session_usage"] }
 anyhow = "1"
 axum = "0.8"
 # Use the ring CryptoProvider (already pulled by reqwest/rcgen) instead of the

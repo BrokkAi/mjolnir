@@ -31,6 +31,7 @@ pub const QUEUED_PROMPT_PREVIEW_WIDTH: usize = 40;
 const BUILTIN_NEW_COMMAND: &str = "new";
 const BUILTIN_CLEAR_COMMAND: &str = "clear";
 const BUILTIN_LOAD_COMMAND: &str = "load";
+const BUILTIN_FORK_COMMAND: &str = "fork";
 const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
 
 fn builtin_new_command() -> AvailableCommand {
@@ -48,12 +49,20 @@ fn builtin_load_command() -> AvailableCommand {
     AvailableCommand::new(BUILTIN_LOAD_COMMAND, "load a previous session")
 }
 
-fn install_builtin_commands(commands: &mut Vec<AvailableCommand>) {
+fn builtin_fork_command() -> AvailableCommand {
+    AvailableCommand::new(BUILTIN_FORK_COMMAND, "fork the current session")
+}
+
+fn install_builtin_commands(commands: &mut Vec<AvailableCommand>, include_fork: bool) {
     commands.retain(|command| {
         command.name != BUILTIN_NEW_COMMAND
             && command.name != BUILTIN_CLEAR_COMMAND
             && command.name != BUILTIN_LOAD_COMMAND
+            && command.name != BUILTIN_FORK_COMMAND
     });
+    if include_fork {
+        commands.insert(0, builtin_fork_command());
+    }
     commands.insert(0, builtin_load_command());
     commands.insert(0, builtin_clear_command());
     commands.insert(0, builtin_new_command());
@@ -433,6 +442,7 @@ pub struct AppState {
     pub session_config_options: Vec<SessionConfigOption>,
     pub session_config_targets: Vec<SessionConfigTarget>,
     pub prompt_images_supported: bool,
+    pub session_fork_supported: bool,
     pub transcript: Vec<Entry>,
     pub tool_calls: HashMap<String, ToolCallView>,
     /// Bumped whenever `transcript` or `tool_calls` change in a way that
@@ -626,12 +636,13 @@ impl AppState {
             current_mode: None,
             available_commands: {
                 let mut commands = Vec::new();
-                install_builtin_commands(&mut commands);
+                install_builtin_commands(&mut commands, false);
                 commands
             },
             session_config_options: Vec::new(),
             session_config_targets: Vec::new(),
             prompt_images_supported: false,
+            session_fork_supported: false,
             transcript: Vec::new(),
             tool_calls: HashMap::new(),
             transcript_revision: 0,
@@ -1263,6 +1274,7 @@ impl AppState {
         match event {
             UiEvent::Connected {
                 prompt_images_supported,
+                session_fork_supported,
                 ..
             } => {
                 // Keep the pre-filled agent_label (the configured
@@ -1270,6 +1282,8 @@ impl AppState {
                 // name over ACP, but the user wants to see which
                 // binary they wired up in config.
                 self.prompt_images_supported = prompt_images_supported;
+                self.session_fork_supported = session_fork_supported;
+                install_builtin_commands(&mut self.available_commands, session_fork_supported);
                 self.connection_state = ConnectionState::Initializing;
             }
             UiEvent::SessionStarted { session_id, .. } => {
@@ -1334,6 +1348,9 @@ impl AppState {
             }
             UiEvent::Warning(msg) => {
                 self.record_status_message(StatusKind::Warning, msg);
+            }
+            UiEvent::Info(msg) => {
+                self.record_status_message(StatusKind::Info, msg);
             }
             UiEvent::Fatal(msg) => {
                 self.connection_state = ConnectionState::Fatal;
@@ -1458,7 +1475,7 @@ impl AppState {
             }
             SessionUpdate::AvailableCommandsUpdate(u) => {
                 self.available_commands = u.available_commands;
-                install_builtin_commands(&mut self.available_commands);
+                install_builtin_commands(&mut self.available_commands, self.session_fork_supported);
                 // The catalog changed mid-typing; rebuild the popover so
                 // a `/` already in the buffer reflects the new commands
                 // (and so a previously-empty filter can become non-empty).
@@ -2272,6 +2289,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: Some("0.1".into()),
             prompt_images_supported: false,
+            session_fork_supported: false,
         });
         assert_eq!(s.connection_state, ConnectionState::Initializing);
 
@@ -2302,6 +2320,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: None,
             prompt_images_supported: false,
+            session_fork_supported: false,
         });
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -2336,6 +2355,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: None,
             prompt_images_supported: false,
+            session_fork_supported: false,
         });
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -2374,6 +2394,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: None,
             prompt_images_supported: false,
+            session_fork_supported: false,
         });
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -2396,6 +2417,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: None,
             prompt_images_supported: false,
+            session_fork_supported: false,
         });
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -2600,6 +2622,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: None,
             prompt_images_supported: false,
+            session_fork_supported: false,
         });
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
@@ -2881,7 +2904,7 @@ mod tests {
     }
 
     #[test]
-    fn autocomplete_advertises_builtin_commands_by_default() {
+    fn autocomplete_advertises_supported_builtin_commands_by_default() {
         let mut s = AppState::new();
         s.input = "/".to_string();
         s.update_autocomplete();
@@ -2897,14 +2920,43 @@ mod tests {
     }
 
     #[test]
+    fn autocomplete_advertises_fork_after_agent_capability() {
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::Connected {
+            agent_name: Some("anvil".into()),
+            agent_version: None,
+            prompt_images_supported: false,
+            session_fork_supported: true,
+        });
+        s.input = "/".to_string();
+        s.update_autocomplete();
+
+        assert!(s.autocomplete.visible);
+        let names: Vec<&str> = s
+            .autocomplete
+            .matches
+            .iter()
+            .map(|&i| s.available_commands[i].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["new", "clear", "load", "fork"]);
+    }
+
+    #[test]
     fn available_command_updates_keep_builtin_commands_first() {
         let mut s = AppState::new();
+        s.apply_event(UiEvent::Connected {
+            agent_name: Some("anvil".into()),
+            agent_version: None,
+            prompt_images_supported: false,
+            session_fork_supported: true,
+        });
         s.apply_event(UiEvent::SessionUpdate(
             SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
                 cmd("review_pr"),
                 AvailableCommand::new("new", "agent-provided command"),
                 AvailableCommand::new("clear", "agent-provided command"),
                 AvailableCommand::new("load", "agent-provided command"),
+                AvailableCommand::new("fork", "agent-provided command"),
             ])),
         ));
 
@@ -2913,7 +2965,7 @@ mod tests {
             .iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "clear", "load", "review_pr"]);
+        assert_eq!(names, vec!["new", "clear", "load", "fork", "review_pr"]);
         assert_eq!(s.available_commands[0].description, "start a new session");
         assert_eq!(
             s.available_commands[1].description,
@@ -2923,6 +2975,28 @@ mod tests {
             s.available_commands[2].description,
             "load a previous session"
         );
+        assert_eq!(
+            s.available_commands[3].description,
+            "fork the current session"
+        );
+    }
+
+    #[test]
+    fn available_command_updates_do_not_add_fork_without_capability() {
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::SessionUpdate(
+            SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
+                cmd("review_pr"),
+                AvailableCommand::new("fork", "agent-provided command"),
+            ])),
+        ));
+
+        let names: Vec<&str> = s
+            .available_commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["new", "clear", "load", "review_pr"]);
     }
 
     #[test]
@@ -3093,6 +3167,7 @@ mod tests {
             agent_name: Some("anvil".into()),
             agent_version: None,
             prompt_images_supported: false,
+            session_fork_supported: false,
         });
         assert!(
             !s.is_streaming(),
