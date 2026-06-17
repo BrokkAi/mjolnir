@@ -23,7 +23,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::install::{self, Progress};
-use crate::paths::expand_home_shortcut;
+use crate::paths::{expand_home_shortcut, normalize_spawn_program};
 use crate::registry::{DistributionKind, Registry};
 use crate::version::mjolnir_version_label;
 
@@ -753,7 +753,7 @@ async fn start_item_action(
                     args.extend(pkg.args.iter().cloned());
                     let outcome = PickerOutcome {
                         source_id: agent.id.clone(),
-                        program: PathBuf::from("npx"),
+                        program: normalize_spawn_program(PathBuf::from("npx")),
                         args,
                         env: pkg.env.clone(),
                     };
@@ -794,7 +794,7 @@ fn parse_custom_command(s: &str) -> Result<PickerOutcome> {
     let program = iter.next().context("empty command")?;
     Ok(PickerOutcome {
         source_id: "custom".to_string(),
-        program: expand_home_shortcut(&program),
+        program: normalize_spawn_program(expand_home_shortcut(&program)),
         args: iter
             .map(|part| expand_home_shortcut(&part).to_string_lossy().into_owned())
             .collect(),
@@ -1357,6 +1357,36 @@ mod tests {
         assert_eq!(outcome.args, vec!["uvx-binary==2.0.0"]);
     }
 
+    #[tokio::test]
+    async fn selecting_npx_agent_uses_spawnable_program() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        let item = state
+            .items
+            .iter()
+            .find(|item| state.item_source_id(item) == "claude-acp")
+            .expect("claude")
+            .clone();
+
+        let outcome = start_item_action(&mut state, &item, ItemAction::Select)
+            .await
+            .expect("select")
+            .expect("outcome");
+
+        assert_eq!(outcome.source_id, "claude-acp");
+        if cfg!(windows) {
+            assert_eq!(outcome.program, PathBuf::from("npx.cmd"));
+        } else {
+            assert_eq!(outcome.program, PathBuf::from("npx"));
+        }
+        assert_eq!(outcome.args, vec!["-y", "@x/claude@0.36.1"]);
+    }
+
     #[test]
     fn picker_initial_selection_uses_default_agent() {
         let reg = fixture_registry();
@@ -1520,6 +1550,17 @@ mod tests {
         let outcome = parse_custom_command("agent ${HOME}/config.toml").expect("parse");
         assert_eq!(outcome.program, PathBuf::from("agent"));
         assert_eq!(outcome.args, vec!["${HOME}/config.toml"]);
+    }
+
+    #[test]
+    fn parse_custom_command_normalizes_npx_for_spawn() {
+        let outcome = parse_custom_command("npx -y @example/agent").expect("parse");
+        if cfg!(windows) {
+            assert_eq!(outcome.program, PathBuf::from("npx.cmd"));
+        } else {
+            assert_eq!(outcome.program, PathBuf::from("npx"));
+        }
+        assert_eq!(outcome.args, vec!["-y", "@example/agent"]);
     }
 
     #[test]

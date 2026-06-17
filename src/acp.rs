@@ -24,6 +24,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::event::{
     PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, UiCommand, UiEvent,
 };
+use crate::paths::normalize_spawn_program;
 
 pub struct AcpRuntimeConfig {
     pub command: PathBuf,
@@ -485,7 +486,8 @@ pub(crate) fn spawn_agent(
     ),
     LaunchError,
 > {
-    let mut cmd = Command::new(command);
+    let command = normalize_spawn_program(command.clone());
+    let mut cmd = Command::new(&command);
     cmd.args(args);
     for (k, v) in env {
         cmd.env(k, v);
@@ -527,7 +529,7 @@ pub(crate) fn spawn_agent(
             cmd.stderr(std::process::Stdio::null());
         }
     }
-    let mut child = cmd.spawn().map_err(|e| classify_spawn_error(command, e))?;
+    let mut child = cmd.spawn().map_err(|e| classify_spawn_error(&command, e))?;
     // `stdin` / `stdout` are always Some here because we requested
     // `piped()` above; the `?` is just defensive.
     let stdin = child.stdin.take().ok_or_else(|| LaunchError::SpawnFailed {

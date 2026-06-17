@@ -28,6 +28,24 @@ pub fn expand_home_shortcut(input: &str) -> PathBuf {
     PathBuf::from(input)
 }
 
+/// Normalize commands that are commonly entered by their shell name but need a
+/// concrete launcher when spawned directly.
+pub fn normalize_spawn_program(program: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if program.extension().is_none()
+            && program
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("npx"))
+        {
+            let mut normalized = program;
+            normalized.set_extension("cmd");
+            return normalized;
+        }
+    }
+    program
+}
+
 /// Render a path for the UI, replacing the user's home directory prefix with
 /// `~` when possible so long paths stay a bit shorter.
 pub fn display_path_with_tilde(path: &Path) -> String {
@@ -96,6 +114,28 @@ mod tests {
         assert_eq!(
             expand_home_shortcut("${HOME}/project"),
             PathBuf::from("${HOME}/project")
+        );
+    }
+
+    #[test]
+    fn normalize_spawn_program_uses_cmd_shim_for_windows_npx() {
+        let normalized = normalize_spawn_program(PathBuf::from("npx"));
+        if cfg!(windows) {
+            assert_eq!(normalized, PathBuf::from("npx.cmd"));
+        } else {
+            assert_eq!(normalized, PathBuf::from("npx"));
+        }
+    }
+
+    #[test]
+    fn normalize_spawn_program_keeps_explicit_extensions() {
+        assert_eq!(
+            normalize_spawn_program(PathBuf::from("npx.cmd")),
+            PathBuf::from("npx.cmd")
+        );
+        assert_eq!(
+            normalize_spawn_program(PathBuf::from("npx.ps1")),
+            PathBuf::from("npx.ps1")
         );
     }
 

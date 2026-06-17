@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::paths::expand_home_shortcut;
+use crate::paths::{expand_home_shortcut, normalize_spawn_program};
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Config {
@@ -101,9 +101,11 @@ impl Config {
                     .map(|arg| expand_home_shortcut(arg).to_string_lossy().into_owned())
                     .collect();
             }
+            agent.program = normalize_spawn_program(agent.program.clone());
         }
         for custom in self.custom_agents.iter_mut() {
             custom.program = expand_home_shortcut(&custom.program.to_string_lossy());
+            custom.program = normalize_spawn_program(custom.program.clone());
             custom.args = custom
                 .args
                 .iter()
@@ -376,6 +378,30 @@ args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
         assert_eq!(loaded.custom_agents[0].args, vec!["--debug"]);
         assert_eq!(loaded.custom_agents[1].name, "staging-agent");
         assert_eq!(loaded.custom_agents[1].description, "");
+    }
+
+    #[test]
+    fn load_normalizes_npx_agent_program_for_spawn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+source_id = "claude-acp"
+program = "npx"
+args = ["-y", "@example/agent"]
+"#,
+        )
+        .expect("write");
+
+        let cfg = Config::load(&path).expect("load");
+        let agent = cfg.agent.expect("agent");
+        if cfg!(windows) {
+            assert_eq!(agent.program, PathBuf::from("npx.cmd"));
+        } else {
+            assert_eq!(agent.program, PathBuf::from("npx"));
+        }
     }
 
     #[test]
