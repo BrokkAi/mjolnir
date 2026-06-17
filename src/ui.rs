@@ -268,10 +268,14 @@ const INLINE_STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(75);
 
 fn redraw_budget(mode: UiMode, state: &AppState) -> Duration {
     match (mode, state.connection_state) {
-        (UiMode::InlineChat, ConnectionState::Streaming | ConnectionState::Cancelling) => {
-            INLINE_STREAMING_FRAME_BUDGET
-        }
-        (_, ConnectionState::Streaming | ConnectionState::Cancelling) => STREAMING_FRAME_BUDGET,
+        (
+            UiMode::InlineChat,
+            ConnectionState::Streaming | ConnectionState::Cancelling | ConnectionState::Forking,
+        ) => INLINE_STREAMING_FRAME_BUDGET,
+        (
+            _,
+            ConnectionState::Streaming | ConnectionState::Cancelling | ConnectionState::Forking,
+        ) => STREAMING_FRAME_BUDGET,
         _ => FRAME_BUDGET,
     }
 }
@@ -793,7 +797,7 @@ fn repair_inline_viewport(
 }
 
 fn timer_driven_live_redraw(mode: UiMode, state: &AppState) -> bool {
-    if mode == UiMode::InlineChat && state.is_streaming() {
+    if mode == UiMode::InlineChat && state.is_busy() {
         return should_show_spinner(state);
     }
 
@@ -807,6 +811,7 @@ fn should_show_spinner(state: &AppState) -> bool {
             | ConnectionState::Initializing
             | ConnectionState::Streaming
             | ConnectionState::Cancelling
+            | ConnectionState::Forking
     )
 }
 
@@ -2298,12 +2303,13 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
                 StatusKind::Warning,
                 "session fork is not supported by this agent",
             );
-        } else if state.is_streaming() {
+        } else if state.is_busy() {
             state.record_status_message(
                 StatusKind::Warning,
                 "session fork is only supported while idle",
             );
         } else {
+            state.mark_forking();
             state.record_status_message(StatusKind::Info, "forking session...");
             let _ = cmd_tx.send(UiCommand::ForkSession);
         }
@@ -2339,7 +2345,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     state.input_cursor = 0;
     state.scroll_input_to_bottom();
 
-    if state.is_streaming() {
+    if state.is_busy() {
         // The previous turn is still running. Stash this submission and
         // keep it out of the transcript until it is actually sent.
         let preview = queued_prompt_preview(&display_text);
@@ -2365,7 +2371,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
 /// because the user typed another prompt between two `PromptDone`
 /// events — handled by the next drain).
 fn drain_queued_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
-    if state.is_streaming() || state.runtime_closed || state.session_id.is_none() {
+    if state.is_busy() || state.runtime_closed || state.session_id.is_none() {
         return;
     }
     let Some(queued) = state.take_queued_prompt() else {
@@ -3173,6 +3179,7 @@ pub(crate) fn connection_state_label(state: &AppState) -> String {
         ConnectionState::Ready => "ready".to_string(),
         ConnectionState::Streaming => "streaming".to_string(),
         ConnectionState::Cancelling => "cancelling".to_string(),
+        ConnectionState::Forking => "forking".to_string(),
         ConnectionState::Closed => "disconnected".to_string(),
         ConnectionState::Fatal => "fatal".to_string(),
     }
@@ -3184,6 +3191,7 @@ fn connection_state_color(state: ConnectionState) -> Color {
         ConnectionState::Ready => Color::Green,
         ConnectionState::Streaming => Color::Cyan,
         ConnectionState::Cancelling => Color::Yellow,
+        ConnectionState::Forking => Color::LightYellow,
         ConnectionState::Closed => Color::DarkGray,
         ConnectionState::Fatal => Color::Red,
     }
@@ -4241,6 +4249,13 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     };
     let title = if state.runtime_closed {
         " runtime closed (/clear same agent | /new picker | Ctrl-C quit) ".to_string()
+    } else if state.connection_state == ConnectionState::Forking {
+        let queued = state.queued_prompt_count();
+        if queued > 0 {
+            format!(" forking session... ({queued} queued | Enter queue next) ")
+        } else {
+            " forking session... (Enter queue next) ".to_string()
+        }
     } else if state.is_streaming() {
         let queued = state.queued_prompt_count();
         if queued > 0 {
@@ -6360,10 +6375,63 @@ mod tests {
 
         assert!(state.exit_reason.is_none());
         assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::ForkSession)));
+        assert_eq!(state.connection_state, ConnectionState::Forking);
+        assert!(state.is_busy());
         assert!(state.input.is_empty());
         let status = state.status_line.expect("status");
         assert_eq!(status.kind, StatusKind::Info);
         assert_eq!(status.text, "forking session...");
+    }
+
+    #[test]
+    fn prompt_submitted_during_fork_is_queued_until_fork_starts() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.session_fork_supported = true;
+        state.input = "/fork".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::ForkSession)));
+        assert_eq!(state.connection_state, ConnectionState::Forking);
+
+        state.input = "queued prompt".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert_eq!(state.queued_prompt_count(), 1);
+        assert!(
+            !state
+                .transcript
+                .iter()
+                .any(|entry| matches!(entry, Entry::UserPrompt(_))),
+            "queued prompt must not be echoed until it is sent"
+        );
+
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "forked-session".to_string(),
+            resumed: false,
+        });
+        drain_queued_prompt(&mut state, &cmd_tx);
+
+        match cmd_rx.try_recv() {
+            Ok(UiCommand::SendPrompt { text, images }) => {
+                assert_eq!(text, "queued prompt");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert_eq!(state.queued_prompt_count(), 0);
+        let user_prompts: Vec<_> = state
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::UserPrompt(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_prompts, vec!["queued prompt"]);
     }
 
     #[test]

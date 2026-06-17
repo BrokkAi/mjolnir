@@ -366,6 +366,7 @@ struct TrackerState {
     transcript: Vec<TranscriptEntry>,
     pending_permissions: Vec<PendingPermissionRecord>,
     session_config: Vec<SessionConfigOptionRecord>,
+    sessions_to_disconnect: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -415,6 +416,7 @@ impl TrackerState {
             transcript: Vec::new(),
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
+            sessions_to_disconnect: Vec::new(),
         }
     }
 
@@ -432,6 +434,11 @@ impl TrackerState {
         match event {
             UiEvent::SessionStarted { session_id, .. } => {
                 let now = now_rfc3339();
+                if let Some(previous) = self.session_id.as_ref()
+                    && previous != session_id
+                {
+                    self.sessions_to_disconnect.push(previous.clone());
+                }
                 self.session_id = Some(session_id.clone());
                 if self.name.is_none() {
                     self.name = Some(session_id.clone());
@@ -464,8 +471,13 @@ impl TrackerState {
             | UiEvent::PermissionRequest(_)
             | UiEvent::RemotePermissionDecision { .. }
             | UiEvent::Info(_)
+            | UiEvent::SessionForkFailed { .. }
             | UiEvent::Warning(_) => {}
         }
+    }
+
+    fn take_sessions_to_disconnect(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.sessions_to_disconnect)
     }
 
     fn observe_session_update(&mut self, update: &SessionUpdate) {
@@ -754,7 +766,10 @@ impl RemoteSessionTracker {
         let Some(client) = self.client.clone() else {
             return;
         };
-        let snapshot = self.state.lock().ok().and_then(|state| state.snapshot());
+        let (snapshot, mut sessions_to_disconnect) = match self.state.lock() {
+            Ok(mut state) => (state.snapshot(), state.take_sessions_to_disconnect()),
+            Err(_) => (None, Vec::new()),
+        };
         let session_id = snapshot
             .as_ref()
             .map(|snapshot| snapshot.session_id.clone());
@@ -762,6 +777,16 @@ impl RemoteSessionTracker {
             && let Err(error) = send_snapshot(client.clone(), self.token.clone(), snapshot).await
         {
             debug!("final remote-control flush failed: {error:#}");
+        }
+        if let Some(current) = session_id.as_ref() {
+            sessions_to_disconnect.retain(|id| id != current);
+        }
+        for old_session_id in sessions_to_disconnect {
+            if let Err(error) =
+                send_disconnect(client.clone(), self.token.clone(), &old_session_id).await
+            {
+                debug!("remote-control stale-session disconnect failed: {error:#}");
+            }
         }
         if let Some(session_id) = session_id
             && let Err(error) = send_disconnect(client, self.token.clone(), &session_id).await
@@ -807,12 +832,24 @@ impl RemoteSessionTracker {
                         }
                     }
                 }
-                let snapshot = state.lock().ok().and_then(|state| state.snapshot());
+                let (snapshot, sessions_to_disconnect) = {
+                    let Ok(mut state) = state.lock() else {
+                        continue;
+                    };
+                    (state.snapshot(), state.take_sessions_to_disconnect())
+                };
                 let Some(snapshot) = snapshot else {
                     continue;
                 };
                 if let Err(error) = send_snapshot(client.clone(), token.clone(), snapshot).await {
                     debug!("remote-control publish failed: {error:#}");
+                }
+                for old_session_id in sessions_to_disconnect {
+                    if let Err(error) =
+                        send_disconnect(client.clone(), token.clone(), &old_session_id).await
+                    {
+                        debug!("remote-control stale-session disconnect failed: {error:#}");
+                    }
                 }
             }
         }));
@@ -3151,6 +3188,30 @@ mod tests {
             .snapshot()
             .expect("snapshot");
         assert!(snapshot.session_config.is_empty());
+    }
+
+    #[test]
+    fn tracker_queues_previous_session_for_disconnect_on_session_change() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        assert!(state.take_sessions_to_disconnect().is_empty());
+
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: true,
+        });
+        assert!(state.take_sessions_to_disconnect().is_empty());
+
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-2".to_string(),
+            resumed: false,
+        });
+        assert_eq!(state.take_sessions_to_disconnect(), vec!["sess-1"]);
+        assert!(state.take_sessions_to_disconnect().is_empty());
     }
 
     #[test]

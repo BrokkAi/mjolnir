@@ -195,8 +195,9 @@ impl ToolCallView {
 /// is derived from this state, so it doubles as the externally visible
 /// connection indicator described in PLANS.md M1.
 ///
-/// "Turn in flight" is derived from this enum via `AppState::is_streaming`
-/// — `Streaming` and `Cancelling` both count.
+/// Prompt turn state is derived from this enum via `AppState::is_streaming`.
+/// Submission gating uses `AppState::is_busy`, which also includes lifecycle
+/// operations like session fork.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
     /// Agent process is being spawned and `initialize` is in flight.
@@ -209,6 +210,8 @@ pub enum ConnectionState {
     Streaming,
     /// Cancellation was requested; awaiting the final `PromptDone`.
     Cancelling,
+    /// A `session/fork` request is in flight.
+    Forking,
     /// Runtime shut down cleanly (UI quit or agent EOF).
     Closed,
     /// Runtime ended with a fatal error.
@@ -848,6 +851,13 @@ impl AppState {
         )
     }
 
+    pub fn is_busy(&self) -> bool {
+        matches!(
+            self.connection_state,
+            ConnectionState::Streaming | ConnectionState::Cancelling | ConnectionState::Forking
+        )
+    }
+
     pub fn active_turn_elapsed(&self) -> Option<Duration> {
         if self.is_streaming() {
             self.turn_started_at.map(|started| started.elapsed())
@@ -921,6 +931,13 @@ impl AppState {
         if self.connection_state == ConnectionState::Streaming {
             self.connection_state = ConnectionState::Cancelling;
         }
+    }
+
+    pub fn mark_forking(&mut self) {
+        self.connection_state = ConnectionState::Forking;
+        self.turn_started_at = Some(Instant::now());
+        self.last_turn_elapsed = None;
+        self.autocomplete = Autocomplete::default();
     }
 
     /// The permission prompt the UI should currently render, if any.
@@ -1287,6 +1304,9 @@ impl AppState {
                 self.connection_state = ConnectionState::Initializing;
             }
             UiEvent::SessionStarted { session_id, .. } => {
+                if self.connection_state == ConnectionState::Forking {
+                    self.finish_turn_timer();
+                }
                 self.session_id = Some(session_id);
                 self.connection_state = ConnectionState::Ready;
             }
@@ -1344,6 +1364,14 @@ impl AppState {
                     message
                 };
                 self.record_status_message(StatusKind::Warning, surfaced);
+                self.update_autocomplete();
+            }
+            UiEvent::SessionForkFailed { message } => {
+                if self.connection_state == ConnectionState::Forking {
+                    self.connection_state = ConnectionState::Ready;
+                    self.finish_turn_timer();
+                }
+                self.record_status_message(StatusKind::Warning, message);
                 self.update_autocomplete();
             }
             UiEvent::Warning(msg) => {
@@ -3152,17 +3180,15 @@ mod tests {
 
     #[test]
     fn is_streaming_tracks_connection_state_across_full_turn_lifecycle() {
-        // Pins the single-source-of-truth invariant: is_streaming must
-        // mirror `ConnectionState::Streaming | Cancelling` exactly across
-        // every transition the UI gates on (input enablement, Ctrl-C
-        // routing, autocomplete visibility). If a future change touches
-        // one without the other, this test catches the drift.
+        // Pins the state helpers: is_streaming mirrors prompt-turn states,
+        // while is_busy also covers lifecycle operations such as fork.
         let mut s = AppState::new();
         seed_commands(&mut s);
 
         // Launching / Initializing / Ready: input is editable, popover
         // shows, Ctrl-C quits rather than cancelling.
         assert!(!s.is_streaming(), "Launching must not count as streaming");
+        assert!(!s.is_busy(), "Launching must not count as busy");
         s.apply_event(UiEvent::Connected {
             agent_name: Some("anvil".into()),
             agent_version: None,
@@ -3173,20 +3199,35 @@ mod tests {
             !s.is_streaming(),
             "Initializing must not count as streaming"
         );
+        assert!(!s.is_busy(), "Initializing must not count as busy");
         s.apply_event(UiEvent::SessionStarted {
             session_id: "sess-1".into(),
             resumed: false,
         });
         assert!(!s.is_streaming(), "Ready must not count as streaming");
+        assert!(!s.is_busy(), "Ready must not count as busy");
         s.input = "/cre".to_string();
         s.update_autocomplete();
         assert!(s.autocomplete.visible, "Ready: popover must be visible");
+
+        // Forking is busy for submission gating but not a prompt stream.
+        s.mark_forking();
+        assert_eq!(s.connection_state, ConnectionState::Forking);
+        assert!(!s.is_streaming(), "Forking must not count as streaming");
+        assert!(s.is_busy(), "Forking must count as busy");
+        s.apply_event(UiEvent::SessionStarted {
+            session_id: "forked-sess".into(),
+            resumed: false,
+        });
+        assert_eq!(s.connection_state, ConnectionState::Ready);
+        assert!(!s.is_busy(), "Ready after fork must not count as busy");
 
         // Streaming: input stays editable, popover remains available, Ctrl-C cancels.
         s.input.clear();
         s.record_user_prompt("hi".to_string());
         assert_eq!(s.connection_state, ConnectionState::Streaming);
         assert!(s.is_streaming(), "Streaming must count as streaming");
+        assert!(s.is_busy(), "Streaming must count as busy");
         s.input = "/cre".to_string();
         s.update_autocomplete();
         assert!(s.autocomplete.visible, "Streaming: popover must be visible");
@@ -3196,6 +3237,7 @@ mod tests {
         s.mark_cancelling();
         assert_eq!(s.connection_state, ConnectionState::Cancelling);
         assert!(s.is_streaming(), "Cancelling must still count as streaming");
+        assert!(s.is_busy(), "Cancelling must count as busy");
         s.update_autocomplete();
         assert!(
             s.autocomplete.visible,
@@ -3213,6 +3255,7 @@ mod tests {
         });
         assert_eq!(s.connection_state, ConnectionState::Ready);
         assert!(!s.is_streaming(), "Ready (after turn) must not stream");
+        assert!(!s.is_busy(), "Ready (after turn) must not be busy");
         assert!(
             s.autocomplete.visible,
             "Ready (after turn): popover must reappear"
@@ -3222,10 +3265,12 @@ mod tests {
         // is_streaming itself must report false either way.
         s.apply_event(UiEvent::Fatal("kaboom".into()));
         assert!(!s.is_streaming(), "Fatal must not count as streaming");
+        assert!(!s.is_busy(), "Fatal must not count as busy");
 
         let mut s = AppState::new();
         s.mark_runtime_closed();
         assert!(!s.is_streaming(), "Closed must not count as streaming");
+        assert!(!s.is_busy(), "Closed must not count as busy");
     }
 
     // -- Prompt history tests -------------------------------------------------

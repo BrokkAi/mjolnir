@@ -55,6 +55,9 @@ pub enum UiEvent {
     /// The prompt request failed before returning a stop reason. UI can
     /// re-enable the input prompt and surface the error.
     PromptFailed { message: String },
+    /// `session/fork` failed before switching to the forked session. UI can
+    /// leave the forking state and surface the error.
+    SessionForkFailed { message: String },
     /// A permission decision made through the remote-control viewer
     /// (`mj server`). The UI resolves the matching queued permission
     /// prompt as if the user had selected the option locally.

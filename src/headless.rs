@@ -228,7 +228,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 let _ = cmd_tx.send(UiCommand::Shutdown);
                 break;
             }
-            UiEvent::PromptFailed { message } | UiEvent::Fatal(message) => {
+            UiEvent::PromptFailed { message }
+            | UiEvent::SessionForkFailed { message }
+            | UiEvent::Fatal(message) => {
                 if matches!(cfg.output_format, OutputFormat::StreamJson) {
                     emit_json(&StreamRecord::Error { message: &message })?;
                 }
