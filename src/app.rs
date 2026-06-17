@@ -14,8 +14,7 @@ use agent_client_protocol::schema::{
     SessionConfigValueId, SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
     ToolCallUpdate, ToolKind, Usage, UsageUpdate,
 };
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
+use chrono::{DateTime, FixedOffset, Local, TimeZone};
 
 use crate::clipboard::ClipboardLease;
 
@@ -254,7 +253,14 @@ pub struct TokenUsage {
     pub context_used: Option<u64>,
     pub context_size: Option<u64>,
     pub cost: Option<String>,
+    /// The most recently surfaced rate-limit line, kept so the header can
+    /// deliberately omit it (see `ui`) while the transcript shows it.
     pub rate_limit: Option<String>,
+    /// Last surfaced line per window (`Current session`, `Current week …`).
+    /// Claude emits one window per `_claude/rateLimit` event, so we dedup per
+    /// window rather than against a single value — otherwise an unchanged
+    /// window re-appears whenever a *different* window updates in between.
+    rate_limit_windows: HashMap<String, String>,
 }
 
 impl TokenUsage {
@@ -265,25 +271,28 @@ impl TokenUsage {
         self.thought_tokens = usage.thought_tokens;
     }
 
-    /// Apply a usage update and return a Claude rate-limit label when it is
-    /// newly observed (i.e. it differs from the last one seen). The caller
-    /// surfaces that label in the transcript; the header intentionally omits
-    /// it. Deduplicating against the stored value keeps the frequent usage
-    /// updates from spamming the transcript with the same status.
+    /// Apply a usage update and return a Claude rate-limit line when one is
+    /// newly observed for its window. The caller surfaces that line in the
+    /// transcript; the header intentionally omits it. Deduplicating per window
+    /// keeps the frequent usage updates from spamming the transcript with a
+    /// status that hasn't actually changed.
     fn apply_usage_update(&mut self, update: UsageUpdate) -> Option<String> {
-        let rate_limit = claude_rate_limit_label(update.meta.as_ref());
         self.context_used = Some(update.used);
         self.context_size = Some(update.size);
         self.cost = update
             .cost
             .map(|cost| format!("{:.4} {}", cost.amount, cost.currency));
-        match rate_limit {
-            Some(rate_limit) if self.rate_limit.as_deref() != Some(rate_limit.as_str()) => {
-                self.rate_limit = Some(rate_limit.clone());
-                Some(rate_limit)
-            }
-            _ => None,
+
+        let line = claude_rate_limit_label(update.meta.as_ref())?;
+        // The window label is the stable prefix before the first `:`
+        // (e.g. "Current session"); dedup against the last line for it.
+        let window = line.split(':').next().unwrap_or(line.as_str()).to_string();
+        if self.rate_limit_windows.get(&window).map(String::as_str) == Some(line.as_str()) {
+            return None;
         }
+        self.rate_limit_windows.insert(window, line.clone());
+        self.rate_limit = Some(line.clone());
+        Some(line)
     }
 }
 
@@ -294,38 +303,74 @@ fn claude_rate_limit_label(
     format_claude_rate_limit(value)
 }
 
+/// Render a Claude `_claude/rateLimit` payload (the SDK's `SDKRateLimitInfo`)
+/// as one human line, e.g.
+/// `Current session: 8% used · resets Jun 17 at 4:49pm (Europe/Paris)`.
+///
+/// The Claude Agent SDK emits one window per event (`rate_limit_event`), so
+/// each event maps to exactly one line. `utilization` is a 0..100 percentage
+/// and `resetsAt` is a unix timestamp.
 fn format_claude_rate_limit(value: &serde_json::Value) -> Option<String> {
     let object = value.as_object()?;
-    let mut parts = Vec::new();
+    let label = rate_limit_window_label(string_field(object, "rateLimitType", "rate_limit_type"));
 
-    if let Some(status) = string_field(object, "status", "status") {
-        parts.push(status.replace('_', "-"));
-    }
-    if let Some(kind) = string_field(object, "rateLimitType", "rate_limit_type") {
-        parts.push(kind.replace('_', "-"));
-    }
-    if let Some(utilization) = number_field(object, "utilization", "utilization") {
-        // Claude SDK does not document the unit, so accept both 0..1 and 0..100.
-        let percent = if utilization <= 1.0 {
-            utilization * 100.0
-        } else {
-            utilization
-        };
-        parts.push(format!("{percent:.0}%"));
-    }
-    if let Some(retry_ms) = number_field(object, "retryAfterMs", "retry_after_ms") {
-        parts.push(format!("retry {}", compact_millis(retry_ms)));
-    } else if let Some(reset) = reset_field(object) {
-        parts.push(format!("reset {reset}"));
-    }
-    if let Some(overage) = string_field(object, "overageStatus", "overage_status") {
-        parts.push(format!("overage {}", overage.replace('_', "-")));
-    }
+    let utilization = number_field(object, "utilization", "utilization")
+        .map(|util| format!("{}% used", util.round().clamp(0.0, 100.0) as u64));
+    let reset = number_field(object, "resetsAt", "resets_at")
+        .or_else(|| number_field(object, "overageResetsAt", "overage_resets_at"))
+        .and_then(format_reset_local)
+        .map(|reset| format!("resets {reset}"));
 
-    if parts.is_empty() {
-        Some("reported".to_string())
+    let detail = [utilization, reset]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+
+    Some(if detail.is_empty() {
+        label.to_string()
     } else {
-        Some(parts.join(" "))
+        format!("{label}: {detail}")
+    })
+}
+
+/// Map the SDK's `rateLimitType` discriminant to the wording Claude Code shows
+/// in `/usage`. Unknown or missing types fall back to a generic label.
+fn rate_limit_window_label(kind: Option<&str>) -> &'static str {
+    match kind {
+        Some("five_hour") => "Current session",
+        Some("seven_day") => "Current week (all models)",
+        Some("seven_day_opus") => "Current week (Opus)",
+        Some("seven_day_sonnet") => "Current week (Sonnet)",
+        Some("overage") => "Extra usage",
+        _ => "Usage limit",
+    }
+}
+
+/// Format a unix reset timestamp as wall-clock time in the machine's local
+/// time zone, e.g. `Jun 17 at 4:49pm (Europe/Paris)`. Accepts seconds or
+/// milliseconds; returns `None` if the timestamp is out of range.
+fn format_reset_local(epoch: f64) -> Option<String> {
+    if !epoch.is_finite() {
+        return None;
+    }
+    let seconds = if epoch.abs() >= 1_000_000_000_000.0 {
+        (epoch / 1000.0).trunc() as i64
+    } else {
+        epoch.trunc() as i64
+    };
+    let local = Local.timestamp_opt(seconds, 0).single()?;
+    let zone = iana_time_zone::get_timezone().ok();
+    Some(format_reset_label(local.fixed_offset(), zone.as_deref()))
+}
+
+/// Pure formatter for a reset instant, split out from the `Local` and
+/// `get_timezone` lookups so it can be unit-tested deterministically.
+fn format_reset_label(reset: DateTime<FixedOffset>, zone: Option<&str>) -> String {
+    let when = reset.format("%b %-d at %-I:%M%P").to_string();
+    match zone {
+        Some(zone) if !zone.is_empty() => format!("{when} ({zone})"),
+        _ => when,
     }
 }
 
@@ -350,76 +395,6 @@ fn number_field(
         .get(camel)
         .or_else(|| object.get(snake))
         .and_then(serde_json::Value::as_f64)
-}
-
-fn reset_field(object: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
-    [
-        ("resetsAt", "resets_at"),
-        ("requestsReset", "requests_reset"),
-        ("tokensReset", "tokens_reset"),
-        ("overageResetsAt", "overage_resets_at"),
-    ]
-    .into_iter()
-    .find_map(|(camel, snake)| value_field(object, camel, snake))
-}
-
-fn value_field(
-    object: &serde_json::Map<String, serde_json::Value>,
-    camel: &str,
-    snake: &str,
-) -> Option<String> {
-    object
-        .get(camel)
-        .or_else(|| object.get(snake))
-        .and_then(|value| {
-            if let Some(s) = value.as_str() {
-                (!s.is_empty()).then(|| compact_reset_label(s))
-            } else if value.is_number() {
-                numeric_reset_label(value).or_else(|| Some(value.to_string()))
-            } else {
-                None
-            }
-        })
-}
-
-fn numeric_reset_label(value: &serde_json::Value) -> Option<String> {
-    let epoch = value
-        .as_i64()
-        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
-        .or_else(|| {
-            value.as_f64().and_then(|value| {
-                (value.is_finite() && value >= i64::MIN as f64 && value <= i64::MAX as f64)
-                    .then(|| value.trunc() as i64)
-            })
-        })?;
-    let seconds = if epoch.unsigned_abs() >= 1_000_000_000_000 {
-        epoch / 1000
-    } else {
-        epoch
-    };
-    OffsetDateTime::from_unix_timestamp(seconds)
-        .ok()?
-        .format(&Rfc3339)
-        .ok()
-        .map(|value| compact_reset_label(&value))
-}
-
-fn compact_reset_label(value: &str) -> String {
-    let value = value.strip_suffix('Z').unwrap_or(value);
-    value
-        .split_once('.')
-        .map(|(prefix, _)| prefix)
-        .unwrap_or(value)
-        .replace('T', " ")
-}
-
-fn compact_millis(value: f64) -> String {
-    let seconds = (value / 1000.0).ceil().max(0.0) as u64;
-    if seconds >= 60 {
-        format!("{}m{}s", seconds / 60, seconds % 60)
-    } else {
-        format!("{seconds}s")
-    }
 }
 
 #[derive(Debug)]
@@ -1484,7 +1459,9 @@ impl AppState {
             }
             SessionUpdate::UsageUpdate(u) => {
                 if let Some(rate_limit) = self.token_usage.apply_usage_update(u) {
-                    self.push_system_message(format!("claude rate limit: {rate_limit}"));
+                    // The line is self-describing ("Current session: …"), so
+                    // surface it verbatim rather than wrapping it.
+                    self.push_system_message(rate_limit);
                 }
             }
             _ => {
@@ -2494,9 +2471,9 @@ mod tests {
             CLAUDE_RATE_LIMIT_META_KEY.to_string(),
             serde_json::json!({
                 "status": "allowed_warning",
-                "rateLimitType": "tokens",
-                "utilization": 0.85,
-                "retryAfterMs": 90_000,
+                "rateLimitType": "five_hour",
+                "utilization": 8,
+                "resetsAt": 1_781_706_600_i64,
             }),
         );
 
@@ -2504,33 +2481,37 @@ mod tests {
             UsageUpdate::new(12_000, 128_000).meta(meta),
         )));
 
-        assert_eq!(
-            s.token_usage.rate_limit.as_deref(),
-            Some("allowed-warning tokens 85% retry 1m30s")
+        // The reset suffix renders in the machine's local zone, so assert the
+        // stable prefix rather than a timezone-dependent wall-clock string.
+        let line = s.token_usage.rate_limit.clone().expect("rate limit line");
+        assert!(
+            line.starts_with("Current session: 8% used · resets "),
+            "unexpected line: {line}"
         );
     }
 
     #[test]
-    fn usage_update_formats_numeric_claude_rate_limit_reset() {
-        let mut s = AppState::new();
-        let mut meta = serde_json::Map::new();
-        meta.insert(
-            CLAUDE_RATE_LIMIT_META_KEY.to_string(),
-            serde_json::json!({
-                "status": "allowed_warning",
-                "rateLimitType": "tokens",
-                "utilization": 85,
-                "resetsAt": 1_781_706_600,
-            }),
-        );
-
-        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(12_000, 128_000).meta(meta),
-        )));
-
+    fn format_reset_label_renders_local_wall_clock() {
+        let paris = FixedOffset::east_opt(2 * 3600).expect("offset");
+        let reset = paris
+            .with_ymd_and_hms(2026, 6, 17, 16, 49, 0)
+            .single()
+            .expect("instant");
         assert_eq!(
-            s.token_usage.rate_limit.as_deref(),
-            Some("allowed-warning tokens 85% reset 2026-06-17 14:30:00")
+            format_reset_label(reset, Some("Europe/Paris")),
+            "Jun 17 at 4:49pm (Europe/Paris)"
+        );
+        // No zone name available → bare wall-clock time.
+        assert_eq!(format_reset_label(reset, None), "Jun 17 at 4:49pm");
+
+        // Past midnight exercises the 12-hour/am formatting (12:59am, not 0:59).
+        let midnight = paris
+            .with_ymd_and_hms(2026, 6, 18, 0, 59, 0)
+            .single()
+            .expect("instant");
+        assert_eq!(
+            format_reset_label(midnight, Some("Europe/Paris")),
+            "Jun 18 at 12:59am (Europe/Paris)"
         );
     }
 
@@ -2541,10 +2522,10 @@ mod tests {
         meta.insert(
             CLAUDE_RATE_LIMIT_META_KEY.to_string(),
             serde_json::json!({
-                "status": "rejected",
-                "rate_limit_type": "requests",
-                "requests_reset": "2026-06-16T12:30:00.000Z",
-                "overage_status": "disabled",
+                "status": "allowed",
+                "rate_limit_type": "seven_day",
+                "utilization": 34,
+                "resets_at": 1_781_706_600_i64,
             }),
         );
 
@@ -2552,9 +2533,10 @@ mod tests {
             UsageUpdate::new(12_000, 128_000).meta(meta),
         )));
 
-        assert_eq!(
-            s.token_usage.rate_limit.as_deref(),
-            Some("rejected requests reset 2026-06-16 12:30:00 overage disabled")
+        let line = s.token_usage.rate_limit.clone().expect("rate limit line");
+        assert!(
+            line.starts_with("Current week (all models): 34% used · resets "),
+            "unexpected line: {line}"
         );
     }
 
@@ -2563,12 +2545,13 @@ mod tests {
         let mut s = AppState::new();
         let make_update = || {
             let mut meta = serde_json::Map::new();
+            // No `resetsAt` keeps the line deterministic regardless of zone.
             meta.insert(
                 CLAUDE_RATE_LIMIT_META_KEY.to_string(),
                 serde_json::json!({
                     "status": "allowed_warning",
-                    "rateLimitType": "tokens",
-                    "utilization": 0.85,
+                    "rateLimitType": "five_hour",
+                    "utilization": 8,
                 }),
             );
             UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
@@ -2576,19 +2559,60 @@ mod tests {
             ))
         };
 
-        // First observation surfaces the status in the transcript.
+        // First observation surfaces the line in the transcript.
         s.apply_event(make_update());
         // An identical follow-up update must not duplicate the message.
         s.apply_event(make_update());
 
-        let rate_limit_entries = s
+        let entries = s
             .transcript
             .iter()
-            .filter(|entry| {
-                matches!(entry, Entry::System(text) if text == "claude rate limit: allowed-warning tokens 85%")
-            })
+            .filter(
+                |entry| matches!(entry, Entry::System(text) if text == "Current session: 8% used"),
+            )
             .count();
-        assert_eq!(rate_limit_entries, 1);
+        assert_eq!(entries, 1);
+    }
+
+    #[test]
+    fn usage_update_dedups_each_rate_limit_window_independently() {
+        let mut s = AppState::new();
+        let event = |kind: &str, utilization: u64| {
+            let mut meta = serde_json::Map::new();
+            meta.insert(
+                CLAUDE_RATE_LIMIT_META_KEY.to_string(),
+                serde_json::json!({
+                    "status": "allowed",
+                    "rateLimitType": kind,
+                    "utilization": utilization,
+                }),
+            );
+            UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
+                UsageUpdate::new(12_000, 128_000).meta(meta),
+            ))
+        };
+
+        s.apply_event(event("five_hour", 8));
+        s.apply_event(event("seven_day", 34));
+        // The session window is unchanged since its last update — it must not
+        // re-surface just because the week window updated in between.
+        s.apply_event(event("five_hour", 8));
+
+        let lines: Vec<&str> = s
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::System(text) if text.starts_with("Current ") => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "Current session: 8% used",
+                "Current week (all models): 34% used",
+            ]
+        );
     }
 
     #[test]

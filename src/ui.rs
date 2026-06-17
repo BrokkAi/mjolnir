@@ -5290,7 +5290,7 @@ mod tests {
         state.token_usage.input_tokens = Some(1233);
         state.token_usage.output_tokens = Some(1282);
         state.token_usage.context_used = Some(944);
-        state.token_usage.rate_limit = Some("allowed-warning tokens 85%".to_string());
+        state.token_usage.rate_limit = Some("Current session: 85% used".to_string());
 
         let label = token_usage_label(&state);
         assert_eq!(label, "in: 1233 · out: 1282 · ctx: 944");
