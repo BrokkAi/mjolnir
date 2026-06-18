@@ -8,12 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::schema::{
     CancelNotification, ClientCapabilities, ContentBlock, ErrorCode, FileSystemCapabilities,
-    ForkSessionRequest, ImageContent, InitializeRequest, LoadSessionRequest, ModelInfo,
-    NewSessionRequest, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
-    SessionConfigValueId, SessionId, SessionModeState, SessionNotification,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, TextContent,
+    ForkSessionRequest, ImageContent, InitializeRequest, LoadSessionRequest, NewSessionRequest,
+    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId, SessionId,
+    SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    TextContent,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
@@ -421,7 +421,7 @@ async fn drive_session(
             {
                 Ok(s) => (
                     session_id,
-                    session_config_from_parts(s.config_options, s.models, s.modes),
+                    session_config_from_parts(s.config_options, s.modes),
                     true,
                 ),
                 Err(source) => {
@@ -438,7 +438,7 @@ async fn drive_session(
             .await
         {
             Ok(s) => {
-                let config = session_config_from_parts(s.config_options, s.models, s.modes);
+                let config = session_config_from_parts(s.config_options, s.modes);
                 *active_session_id.lock().await = Some(s.session_id.clone());
                 (s.session_id, config, false)
             }
@@ -595,7 +595,7 @@ async fn fork_session(
         .send_request(ForkSessionRequest::new(session_id.clone(), cwd))
         .block_task()
         .await?;
-    let config = session_config_from_parts(resp.config_options, resp.models, resp.modes)
+    let config = session_config_from_parts(resp.config_options, resp.modes)
         .map(|(options, targets)| SessionConfigCache { options, targets });
     Ok((resp.session_id, config))
 }
@@ -753,7 +753,6 @@ async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) {
 
 fn session_config_from_parts(
     config_options: Option<Vec<SessionConfigOption>>,
-    models: Option<agent_client_protocol::schema::SessionModelState>,
     modes: Option<SessionModeState>,
 ) -> Option<(Vec<SessionConfigOption>, Vec<SessionConfigTarget>)> {
     if let Some(options) = config_options
@@ -765,13 +764,6 @@ fn session_config_from_parts(
 
     let mut options = Vec::new();
     let mut targets = Vec::new();
-
-    if let Some(models) = models
-        && let Some(option) = legacy_model_config_option(models)
-    {
-        options.push(option);
-        targets.push(SessionConfigTarget::LegacyModel);
-    }
 
     if let Some(modes) = modes
         && let Some(option) = legacy_mode_config_option(modes)
@@ -790,35 +782,6 @@ fn config_option_targets(options: &[SessionConfigOption]) -> Vec<SessionConfigTa
             config_id: option.id.clone(),
         })
         .collect()
-}
-
-fn legacy_model_config_option(
-    models: agent_client_protocol::schema::SessionModelState,
-) -> Option<SessionConfigOption> {
-    if models.available_models.is_empty() {
-        return None;
-    }
-
-    let options = models
-        .available_models
-        .into_iter()
-        .map(|model| model_to_select_option(&model))
-        .collect::<Vec<_>>();
-
-    Some(
-        SessionConfigOption::select(
-            "model",
-            "Model",
-            models.current_model_id.to_string(),
-            options,
-        )
-        .category(SessionConfigOptionCategory::Model),
-    )
-}
-
-fn model_to_select_option(model: &ModelInfo) -> SessionConfigSelectOption {
-    SessionConfigSelectOption::new(model.model_id.to_string(), model.name.clone())
-        .description(model.description.clone())
 }
 
 fn legacy_mode_config_option(modes: SessionModeState) -> Option<SessionConfigOption> {
@@ -966,8 +929,10 @@ async fn send_config_update(
                 .map(|resp| Some(resp.config_options))
         }
         SessionConfigTarget::LegacyModel => {
-            let req = SetSessionModelRequest::new(session_id.clone(), value.to_string());
-            conn.send_request(req).block_task().await.map(|_| None)
+            Err(agent_client_protocol::Error::invalid_params().data(serde_json::json!({
+                "target": "legacy_model",
+                "reason": "legacy session model updates are not supported by agent-client-protocol 0.14",
+            })))
         }
         SessionConfigTarget::LegacyMode => {
             let req = SetSessionModeRequest::new(session_id.clone(), value.to_string());
@@ -1098,14 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_session_models_and_modes_become_config_picker_options() {
-        let model_state = agent_client_protocol::schema::SessionModelState::new(
-            "openai/gpt-4.1",
-            vec![
-                ModelInfo::new("openai/gpt-4.1", "OpenAI GPT-4.1"),
-                ModelInfo::new("anthropic/claude-sonnet-4", "Anthropic Claude Sonnet 4"),
-            ],
-        );
+    fn legacy_session_modes_become_config_picker_options() {
         let mode_state = SessionModeState::new(
             "medium",
             vec![
@@ -1114,35 +1072,20 @@ mod tests {
             ],
         );
 
-        let (options, targets) =
-            session_config_from_parts(None, Some(model_state), Some(mode_state)).expect("config");
+        let (options, targets) = session_config_from_parts(None, Some(mode_state)).expect("config");
 
-        assert_eq!(options.len(), 2);
-        assert_eq!(
-            targets,
-            vec![
-                SessionConfigTarget::LegacyModel,
-                SessionConfigTarget::LegacyMode
-            ]
-        );
-        assert_eq!(options[0].name, "Model");
+        assert_eq!(options.len(), 1);
+        assert_eq!(targets, vec![SessionConfigTarget::LegacyMode]);
+        assert_eq!(options[0].name, "Thinking");
         assert_eq!(
             options[0].category,
-            Some(SessionConfigOptionCategory::Model)
-        );
-        assert_eq!(
-            options[1].category,
             Some(SessionConfigOptionCategory::ThoughtLevel)
         );
-        assert_eq!(
-            current_select_value(&options[0]).as_deref(),
-            Some("openai/gpt-4.1")
-        );
-        assert_eq!(current_select_value(&options[1]).as_deref(), Some("medium"));
+        assert_eq!(current_select_value(&options[0]).as_deref(), Some("medium"));
     }
 
     #[test]
-    fn explicit_config_options_take_precedence_over_legacy_models() {
+    fn explicit_config_options_take_precedence_over_legacy_modes() {
         let config_option = SessionConfigOption::select(
             "model",
             "Configured Model",
@@ -1150,18 +1093,26 @@ mod tests {
             vec![
                 agent_client_protocol::schema::SessionConfigSelectOption::new("model-a", "Model A"),
             ],
-        );
-        let legacy_model_state = agent_client_protocol::schema::SessionModelState::new(
-            "legacy/model",
-            vec![ModelInfo::new("legacy/model", "Legacy Model")],
+        )
+        .category(SessionConfigOptionCategory::Model);
+        let legacy_mode_state = SessionModeState::new(
+            "medium",
+            vec![agent_client_protocol::schema::SessionMode::new(
+                "medium",
+                "Thinking: medium",
+            )],
         );
 
         let (options, targets) =
-            session_config_from_parts(Some(vec![config_option]), Some(legacy_model_state), None)
+            session_config_from_parts(Some(vec![config_option]), Some(legacy_mode_state))
                 .expect("config");
 
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].name, "Configured Model");
+        assert_eq!(
+            options[0].category,
+            Some(SessionConfigOptionCategory::Model)
+        );
         assert_eq!(
             targets,
             vec![SessionConfigTarget::ConfigOption {
@@ -1172,27 +1123,24 @@ mod tests {
 
     #[test]
     fn legacy_config_updates_current_value_locally_after_success() {
-        let model_state = agent_client_protocol::schema::SessionModelState::new(
-            "openai/gpt-4.1",
+        let mode_state = SessionModeState::new(
+            "medium",
             vec![
-                ModelInfo::new("openai/gpt-4.1", "OpenAI GPT-4.1"),
-                ModelInfo::new("openai/gpt-5", "OpenAI GPT-5"),
+                agent_client_protocol::schema::SessionMode::new("low", "Thinking: low"),
+                agent_client_protocol::schema::SessionMode::new("medium", "Thinking: medium"),
             ],
         );
         let (mut options, targets) =
-            session_config_from_parts(None, Some(model_state), None).expect("config");
+            session_config_from_parts(None, Some(mode_state)).expect("config");
 
         set_current_config_value(
             &mut options,
             &targets,
-            &SessionConfigTarget::LegacyModel,
-            &"openai/gpt-5".into(),
+            &SessionConfigTarget::LegacyMode,
+            &"low".into(),
         );
 
-        assert_eq!(
-            current_select_value(&options[0]).as_deref(),
-            Some("openai/gpt-5")
-        );
+        assert_eq!(current_select_value(&options[0]).as_deref(), Some("low"));
     }
 
     fn current_select_value(option: &SessionConfigOption) -> Option<String> {
