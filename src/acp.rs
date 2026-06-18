@@ -928,17 +928,19 @@ async fn send_config_update(
                 .await
                 .map(|resp| Some(resp.config_options))
         }
-        SessionConfigTarget::LegacyModel => {
-            Err(agent_client_protocol::Error::invalid_params().data(serde_json::json!({
-                "target": "legacy_model",
-                "reason": "legacy session model updates are not supported by agent-client-protocol 0.14",
-            })))
-        }
+        SessionConfigTarget::LegacyModel => Err(legacy_model_config_update_error()),
         SessionConfigTarget::LegacyMode => {
             let req = SetSessionModeRequest::new(session_id.clone(), value.to_string());
             conn.send_request(req).block_task().await.map(|_| None)
         }
     }
+}
+
+fn legacy_model_config_update_error() -> agent_client_protocol::Error {
+    agent_client_protocol::Error::invalid_params().data(serde_json::json!({
+        "target": "legacy_model",
+        "reason": "legacy session model updates are not supported by agent-client-protocol 0.14",
+    }))
 }
 
 async fn drive_prompt_turn(
@@ -1141,6 +1143,20 @@ mod tests {
         );
 
         assert_eq!(current_select_value(&options[0]).as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn legacy_model_config_update_error_is_explicit() {
+        let error = legacy_model_config_update_error();
+
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "Invalid params");
+        let data = error.data.expect("error data");
+        assert_eq!(data["target"], "legacy_model");
+        assert_eq!(
+            data["reason"],
+            "legacy session model updates are not supported by agent-client-protocol 0.14"
+        );
     }
 
     fn current_select_value(option: &SessionConfigOption) -> Option<String> {

@@ -96,7 +96,11 @@ pub enum PermissionDecision {
 /// option.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionConfigTarget {
-    ConfigOption { config_id: SessionConfigId },
+    ConfigOption {
+        config_id: SessionConfigId,
+    },
+    /// Kept only for wire compatibility with stale remote clients and stored
+    /// config changes; ACP 0.14 removed the typed legacy model update path.
     LegacyModel,
     LegacyMode,
 }
