@@ -404,6 +404,7 @@ where
         })
         .await;
 
+    terminals.shutdown_all().await;
     result.map_err(|e| anyhow::anyhow!("acp client error: {e}"))?;
     Ok(())
 }
@@ -1023,13 +1024,32 @@ impl ManagedTerminals {
         terminal_id: &TerminalId,
     ) -> std::result::Result<Arc<ManagedTerminal>, agent_client_protocol::Error> {
         let key = terminal_id.to_string();
-        let Some(terminal) = self.terminals.lock().await.remove(&key) else {
+        let mut terminals = self.terminals.lock().await;
+        let Some(terminal) = terminals.get(&key).cloned() else {
             return Err(terminal_invalid_params(format!(
                 "unknown terminal id: {key}"
             )));
         };
         terminal.validate_session(session_id)?;
+        terminals.remove(&key);
         Ok(terminal)
+    }
+
+    async fn shutdown_all(&self) {
+        let terminals: Vec<Arc<ManagedTerminal>> = self
+            .terminals
+            .lock()
+            .await
+            .drain()
+            .map(|(_, t)| t)
+            .collect();
+        for terminal in terminals {
+            if terminal.exit_rx.borrow().is_none()
+                && let Err(e) = kill_terminal_process(terminal.pid).await
+            {
+                tracing::warn!("shutdown terminal {}: {e}", terminal.terminal_id);
+            }
+        }
     }
 }
 
@@ -1624,6 +1644,99 @@ mod tests {
             )),
             "expected at least one terminal output UI event"
         );
+    }
+
+    #[tokio::test]
+    async fn release_with_wrong_session_does_not_remove_terminal() {
+        let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
+        let terminals = ManagedTerminals::new(ui_tx);
+        let session_id = SessionId::new("session-1");
+        let wrong_session_id = SessionId::new("session-2");
+        #[cfg(windows)]
+        let script = "echo hello";
+        #[cfg(not(windows))]
+        let script = "printf hello";
+        let (command, args) = terminal_test_command(script);
+
+        let created = terminals
+            .create(
+                CreateTerminalRequest::new(session_id.clone(), command)
+                    .args(args)
+                    .output_byte_limit(1024),
+            )
+            .await
+            .expect("create terminal");
+        let terminal_id = created.terminal_id;
+
+        assert!(
+            terminals
+                .release(ReleaseTerminalRequest::new(
+                    wrong_session_id,
+                    terminal_id.clone(),
+                ))
+                .await
+                .is_err()
+        );
+
+        terminals
+            .wait_for_exit(WaitForTerminalExitRequest::new(
+                session_id.clone(),
+                terminal_id.clone(),
+            ))
+            .await
+            .expect("wait terminal");
+        let output = terminals
+            .output(TerminalOutputRequest::new(
+                session_id.clone(),
+                terminal_id.clone(),
+            ))
+            .await
+            .expect("terminal should remain available");
+        assert!(output.output.contains("hello"));
+        terminals
+            .release(ReleaseTerminalRequest::new(session_id, terminal_id))
+            .await
+            .expect("release with correct session");
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_kills_running_terminal_commands() {
+        let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
+        let terminals = ManagedTerminals::new(ui_tx);
+        let session_id = SessionId::new("session-1");
+        #[cfg(windows)]
+        let script = "ping -n 30 127.0.0.1 >NUL";
+        #[cfg(not(windows))]
+        let script = "sleep 30";
+        let (command, args) = terminal_test_command(script);
+
+        let created = terminals
+            .create(
+                CreateTerminalRequest::new(session_id.clone(), command)
+                    .args(args)
+                    .output_byte_limit(1024),
+            )
+            .await
+            .expect("create terminal");
+        let terminal_id = created.terminal_id;
+        let terminal = terminals
+            .get_terminal(&session_id, &terminal_id)
+            .await
+            .expect("terminal");
+
+        terminals.shutdown_all().await;
+
+        assert!(
+            terminals
+                .output(TerminalOutputRequest::new(session_id, terminal_id))
+                .await
+                .is_err(),
+            "shutdown must remove terminals from the active table"
+        );
+        tokio::time::timeout(Duration::from_secs(5), terminal.wait_for_exit())
+            .await
+            .expect("terminal process should exit after shutdown")
+            .expect("terminal wait should resolve");
     }
 
     #[test]

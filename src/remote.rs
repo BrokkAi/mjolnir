@@ -1,6 +1,6 @@
 //! Simple remote-control server and local session registration.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -40,7 +40,10 @@ use tracing::{debug, warn};
 
 use crate::acp::{self, AcpRuntimeConfig};
 use crate::config::{self, SelectedAgent};
-use crate::event::{PermissionDecision, PermissionPrompt, SessionConfigTarget, UiCommand, UiEvent};
+use crate::event::{
+    PermissionDecision, PermissionPrompt, SessionConfigTarget, TerminalOutputSnapshot, UiCommand,
+    UiEvent,
+};
 
 const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
 const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
@@ -364,9 +367,17 @@ struct TrackerState {
     agent_message_open: bool,
     prompt_in_flight: bool,
     transcript: Vec<TranscriptEntry>,
+    terminal_outputs: HashMap<String, TerminalOutputSnapshot>,
+    tool_transcript_entries: HashMap<usize, ToolTranscriptEntry>,
     pending_permissions: Vec<PendingPermissionRecord>,
     session_config: Vec<SessionConfigOptionRecord>,
     sessions_to_disconnect: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ToolTranscriptEntry {
+    title: String,
+    content: Vec<ToolCallContent>,
 }
 
 #[derive(Debug, Clone)]
@@ -414,6 +425,8 @@ impl TrackerState {
             agent_message_open: false,
             prompt_in_flight: false,
             transcript: Vec::new(),
+            terminal_outputs: HashMap::new(),
+            tool_transcript_entries: HashMap::new(),
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             sessions_to_disconnect: Vec::new(),
@@ -459,6 +472,9 @@ impl TrackerState {
             UiEvent::SessionUpdate(update) => {
                 self.observe_session_update(update);
             }
+            UiEvent::TerminalOutput(snapshot) => {
+                self.observe_terminal_output(snapshot);
+            }
             UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } | UiEvent::Fatal(_) => {
                 self.agent_message_open = false;
                 self.prompt_in_flight = false;
@@ -468,7 +484,6 @@ impl TrackerState {
                 self.touch();
             }
             UiEvent::Connected { .. }
-            | UiEvent::TerminalOutput(_)
             | UiEvent::PermissionRequest(_)
             | UiEvent::RemotePermissionDecision { .. }
             | UiEvent::Info(_)
@@ -498,18 +513,19 @@ impl TrackerState {
             }
             SessionUpdate::ToolCall(tool_call) => {
                 self.agent_message_open = false;
-                self.push_transcript_entry(
-                    "tool",
-                    format_tool_call(tool_call.title.as_str(), &tool_call.content),
-                );
+                self.push_tool_transcript_entry(tool_call.title.clone(), tool_call.content.clone());
                 self.touch();
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 self.agent_message_open = false;
                 if let Some(content) = &update.fields.content {
-                    self.push_transcript_entry(
-                        "tool",
-                        format_tool_call(update.fields.title.as_deref().unwrap_or("tool"), content),
+                    self.push_tool_transcript_entry(
+                        update
+                            .fields
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| "tool".to_string()),
+                        content.clone(),
                     );
                 }
                 self.touch();
@@ -528,6 +544,29 @@ impl TrackerState {
         }
     }
 
+    fn observe_terminal_output(&mut self, snapshot: &TerminalOutputSnapshot) {
+        self.terminal_outputs
+            .insert(snapshot.terminal_id.clone(), snapshot.clone());
+
+        let mut changed = false;
+        for (index, tool_entry) in &self.tool_transcript_entries {
+            if !tool_call_references_terminal(&tool_entry.content, &snapshot.terminal_id) {
+                continue;
+            }
+            if let Some(entry) = self.transcript.get_mut(*index) {
+                entry.text = format_tool_call(
+                    &tool_entry.title,
+                    &tool_entry.content,
+                    &self.terminal_outputs,
+                );
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch();
+        }
+    }
+
     fn append_transcript_text(&mut self, kind: &str, text: String) {
         if let Some(last) = self.transcript.last_mut()
             && last.kind == kind
@@ -538,12 +577,23 @@ impl TrackerState {
         self.push_transcript_entry(kind, text);
     }
 
-    fn push_transcript_entry(&mut self, kind: &str, text: String) {
+    fn push_transcript_entry(&mut self, kind: &str, text: String) -> usize {
+        let index = self.transcript.len();
         self.transcript.push(TranscriptEntry {
             kind: kind.to_string(),
             text,
             timestamp: now_rfc3339(),
         });
+        index
+    }
+
+    fn push_tool_transcript_entry(&mut self, title: String, content: Vec<ToolCallContent>) {
+        let index = self.push_transcript_entry(
+            "tool",
+            format_tool_call(&title, &content, &self.terminal_outputs),
+        );
+        self.tool_transcript_entries
+            .insert(index, ToolTranscriptEntry { title, content });
     }
 
     fn snapshot(&self) -> Option<SessionRecord> {
@@ -2610,14 +2660,27 @@ fn content_block_text(block: &ContentBlock) -> String {
     }
 }
 
-fn format_tool_call(title: &str, content: &[ToolCallContent]) -> String {
+fn format_tool_call(
+    title: &str,
+    content: &[ToolCallContent],
+    terminal_outputs: &HashMap<String, TerminalOutputSnapshot>,
+) -> String {
     let mut parts = Vec::new();
     for item in content {
         match item {
             ToolCallContent::Content(block) => parts.push(content_block_text(&block.content)),
             ToolCallContent::Diff(diff) => parts.push(format!("diff: {}", diff.path.display())),
             ToolCallContent::Terminal(terminal) => {
-                parts.push(format!("terminal: {}", terminal.terminal_id))
+                let terminal_id = terminal.terminal_id.to_string();
+                let mut text = format!("terminal: {terminal_id}");
+                if let Some(snapshot) = terminal_outputs.get(&terminal_id) {
+                    let snapshot = format_terminal_snapshot(snapshot);
+                    if !snapshot.is_empty() {
+                        text.push('\n');
+                        text.push_str(&snapshot);
+                    }
+                }
+                parts.push(text);
             }
             _ => parts.push("unsupported tool content".to_string()),
         }
@@ -2627,6 +2690,40 @@ fn format_tool_call(title: &str, content: &[ToolCallContent]) -> String {
         title.to_string()
     } else {
         format!("{}\n\n{}", title, parts.join("\n\n"))
+    }
+}
+
+fn tool_call_references_terminal(content: &[ToolCallContent], terminal_id: &str) -> bool {
+    content.iter().any(|item| {
+        matches!(
+            item,
+            ToolCallContent::Terminal(terminal) if terminal.terminal_id.to_string() == terminal_id
+        )
+    })
+}
+
+fn format_terminal_snapshot(snapshot: &TerminalOutputSnapshot) -> String {
+    let mut parts = Vec::new();
+    if snapshot.truncated {
+        parts.push("[output truncated]".to_string());
+    }
+    if !snapshot.output.is_empty() {
+        parts.push(snapshot.output.clone());
+    }
+    if let Some(status) = &snapshot.exit_status {
+        parts.push(format!("exit {}", terminal_exit_status_label(status)));
+    }
+    parts.join("\n")
+}
+
+fn terminal_exit_status_label(
+    status: &agent_client_protocol::schema::TerminalExitStatus,
+) -> String {
+    match (&status.exit_code, &status.signal) {
+        (Some(code), Some(signal)) => format!("code {code}, signal {signal}"),
+        (Some(code), None) => format!("code {code}"),
+        (None, Some(signal)) => format!("signal {signal}"),
+        (None, None) => "unknown".to_string(),
     }
 }
 
@@ -2650,7 +2747,8 @@ fn rfc3339_before(age: Duration) -> String {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        PermissionOption, SessionConfigSelectOption, ToolCallUpdate, ToolCallUpdateFields,
+        PermissionOption, SessionConfigSelectOption, Terminal, TerminalExitStatus, TerminalId,
+        ToolCall, ToolCallContent, ToolCallUpdate, ToolCallUpdateFields,
     };
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
@@ -2782,6 +2880,49 @@ mod tests {
         assert_eq!(snapshot.transcript[1].kind, "agent");
         assert_eq!(snapshot.transcript[1].text, "hi there");
         assert!(!snapshot.transcript[1].timestamp.is_empty());
+    }
+
+    #[test]
+    fn tracker_updates_terminal_tool_output_snapshots() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        state.observe_event(&UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "hello\n".to_string(),
+            truncated: true,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        }));
+
+        let mut tool_call = ToolCall::new("call-1", "running command");
+        tool_call.content = vec![ToolCallContent::Terminal(Terminal::new(TerminalId::new(
+            "term-1",
+        )))];
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript.len(), 1);
+        assert_eq!(snapshot.transcript[0].kind, "tool");
+        assert!(snapshot.transcript[0].text.contains("terminal: term-1"));
+        assert!(snapshot.transcript[0].text.contains("[output truncated]"));
+        assert!(snapshot.transcript[0].text.contains("hello\n"));
+        assert!(snapshot.transcript[0].text.contains("exit code 0"));
+
+        state.observe_event(&UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "done\n".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().signal("SIGTERM")),
+        }));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript.len(), 1);
+        assert!(!snapshot.transcript[0].text.contains("[output truncated]"));
+        assert!(snapshot.transcript[0].text.contains("done\n"));
+        assert!(snapshot.transcript[0].text.contains("exit signal SIGTERM"));
     }
 
     #[test]
