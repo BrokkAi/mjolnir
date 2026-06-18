@@ -3784,11 +3784,31 @@ fn push_tool_outputs(
                 width,
                 collapse_limit,
             ),
-            ToolCallOutput::Terminal { terminal_id } => {
+            ToolCallOutput::Terminal {
+                terminal_id,
+                output,
+                truncated,
+                exit_status,
+            } => {
                 out.push(Line::from(vec![
                     Span::styled("  terminal ", Style::default().fg(Color::DarkGray)),
                     Span::styled(terminal_id.clone(), Style::default().fg(Color::LightYellow)),
                 ]));
+                if *truncated {
+                    out.push(Line::from(Span::styled(
+                        "    [output truncated]",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                if !output.is_empty() {
+                    push_tool_text_lines(out, output.clone(), 4, collapse_limit);
+                }
+                if let Some(status) = exit_status {
+                    out.push(Line::from(Span::styled(
+                        format!("    exit {}", terminal_exit_status_label(status)),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
             }
             ToolCallOutput::Note(note) => {
                 out.push(Line::from(Span::styled(
@@ -3797,6 +3817,17 @@ fn push_tool_outputs(
                 )));
             }
         }
+    }
+}
+
+fn terminal_exit_status_label(
+    status: &agent_client_protocol::schema::TerminalExitStatus,
+) -> String {
+    match (&status.exit_code, &status.signal) {
+        (Some(code), Some(signal)) => format!("code {code}, signal {signal}"),
+        (Some(code), None) => format!("code {code}"),
+        (None, Some(signal)) => format!("signal {signal}"),
+        (None, None) => "unknown".to_string(),
     }
 }
 
@@ -7778,6 +7809,9 @@ mod tests {
                     },
                     ToolCallOutput::Terminal {
                         terminal_id: "term-1".to_string(),
+                        output: String::new(),
+                        truncated: false,
+                        exit_status: None,
                     },
                 ],
             },

@@ -4,25 +4,30 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use agent_client_protocol::schema::{
-    CancelNotification, ClientCapabilities, ContentBlock, ErrorCode, FileSystemCapabilities,
-    ForkSessionRequest, ImageContent, InitializeRequest, LoadSessionRequest, NewSessionRequest,
-    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
+    CancelNotification, ClientCapabilities, ContentBlock, CreateTerminalRequest,
+    CreateTerminalResponse, ErrorCode, FileSystemCapabilities, ForkSessionRequest, ImageContent,
+    InitializeRequest, KillTerminalRequest, KillTerminalResponse, LoadSessionRequest,
+    NewSessionRequest, PromptRequest, ProtocolVersion, ReleaseTerminalRequest,
+    ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId, SessionId,
     SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    TextContent,
+    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, UiCommand, UiEvent,
+    PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, TerminalOutputSnapshot,
+    UiCommand, UiEvent,
 };
 use crate::paths::normalize_spawn_program;
 
@@ -305,9 +310,15 @@ where
     // The on_receive_request closure forwards (req, responder) here and
     // returns immediately so the JSON-RPC dispatch loop stays unblocked.
     let active_session_id = Arc::new(Mutex::new(None::<SessionId>));
+    let terminals = Arc::new(ManagedTerminals::new(ui_tx.clone()));
     let perm_ui_tx = ui_tx.clone();
     let notif_ui_tx = ui_tx.clone();
     let notif_active_session_id = active_session_id.clone();
+    let create_terminals = terminals.clone();
+    let output_terminals = terminals.clone();
+    let release_terminals = terminals.clone();
+    let wait_terminals = terminals.clone();
+    let kill_terminals = terminals.clone();
     let result = Client
         .builder()
         .on_receive_notification(
@@ -340,6 +351,36 @@ where
                     _ => RequestPermissionOutcome::Cancelled,
                 };
                 responder.respond(RequestPermissionResponse::new(outcome))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: CreateTerminalRequest, responder, _cx| {
+                responder.respond_with_result(create_terminals.create(request).await)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: TerminalOutputRequest, responder, _cx| {
+                responder.respond_with_result(output_terminals.output(request).await)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: ReleaseTerminalRequest, responder, _cx| {
+                responder.respond_with_result(release_terminals.release(request).await)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: WaitForTerminalExitRequest, responder, _cx| {
+                responder.respond_with_result(wait_terminals.wait_for_exit(request).await)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: KillTerminalRequest, responder, _cx| {
+                responder.respond_with_result(kill_terminals.kill(request).await)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -381,13 +422,13 @@ async fn drive_session(
 ) -> Result<()> {
     // Advertise our client capabilities. We do not yet implement
     // `fs/read_text_file` or `fs/write_text_file`, so we declare both as
-    // false; same for terminals. Permission prompts always work.
+    // false. Terminal methods are backed by managed subprocesses below.
     let init_req = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
         ClientCapabilities::new()
             .fs(FileSystemCapabilities::new()
                 .read_text_file(false)
                 .write_text_file(false))
-            .terminal(false),
+            .terminal(true),
     );
     let init_resp = match conn.send_request(init_req).block_task().await {
         Ok(r) => r,
@@ -751,6 +792,446 @@ async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) {
     }
 }
 
+const DEFAULT_TERMINAL_OUTPUT_LIMIT: usize = 1024 * 1024;
+
+#[derive(Debug)]
+struct ManagedTerminals {
+    terminals: Mutex<HashMap<String, Arc<ManagedTerminal>>>,
+    next_id: AtomicU64,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+}
+
+#[derive(Debug)]
+struct ManagedTerminal {
+    session_id: SessionId,
+    terminal_id: String,
+    pid: Option<u32>,
+    output: Arc<Mutex<TerminalOutputBuffer>>,
+    exit_rx: watch::Receiver<Option<TerminalExitStatus>>,
+}
+
+#[derive(Debug)]
+struct TerminalOutputBuffer {
+    output: String,
+    truncated: bool,
+    limit: usize,
+}
+
+impl TerminalOutputBuffer {
+    fn new(limit: usize) -> Self {
+        Self {
+            output: String::new(),
+            truncated: false,
+            limit,
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) {
+        self.output.push_str(&String::from_utf8_lossy(bytes));
+        self.truncate_to_limit();
+    }
+
+    fn truncate_to_limit(&mut self) {
+        if self.output.len() <= self.limit {
+            return;
+        }
+        self.truncated = true;
+        if self.limit == 0 {
+            self.output.clear();
+            return;
+        }
+
+        let mut start = self.output.len().saturating_sub(self.limit);
+        while start < self.output.len() && !self.output.is_char_boundary(start) {
+            start += 1;
+        }
+        self.output.drain(..start);
+    }
+}
+
+impl ManagedTerminals {
+    fn new(ui_tx: mpsc::UnboundedSender<UiEvent>) -> Self {
+        Self {
+            terminals: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            ui_tx,
+        }
+    }
+
+    async fn create(
+        &self,
+        request: CreateTerminalRequest,
+    ) -> std::result::Result<CreateTerminalResponse, agent_client_protocol::Error> {
+        if request.command.trim().is_empty() {
+            return Err(terminal_invalid_params("terminal command cannot be empty"));
+        }
+
+        let terminal_id = format!("mj-term-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let output_limit = request
+            .output_byte_limit
+            .and_then(|limit| usize::try_from(limit).ok())
+            .unwrap_or(DEFAULT_TERMINAL_OUTPUT_LIMIT);
+        let output = Arc::new(Mutex::new(TerminalOutputBuffer::new(output_limit)));
+        let (exit_tx, exit_rx) = watch::channel(None);
+
+        let mut cmd = Command::new(&request.command);
+        cmd.args(&request.args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(cwd) = &request.cwd {
+            cmd.current_dir(cwd);
+        }
+        for env in &request.env {
+            cmd.env(&env.name, &env.value);
+        }
+        #[cfg(unix)]
+        {
+            cmd.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        }
+
+        let mut child = cmd.spawn().map_err(|e| {
+            terminal_invalid_params(format!("failed to spawn terminal command: {e}"))
+        })?;
+        let pid = child.id();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let terminal = Arc::new(ManagedTerminal {
+            session_id: request.session_id,
+            terminal_id: terminal_id.clone(),
+            pid,
+            output: output.clone(),
+            exit_rx,
+        });
+        self.terminals
+            .lock()
+            .await
+            .insert(terminal_id.clone(), terminal);
+
+        let mut reader_tasks = Vec::new();
+        if let Some(stdout) = stdout {
+            reader_tasks.push(tokio::spawn(read_terminal_stream(
+                stdout,
+                terminal_id.clone(),
+                output.clone(),
+                self.ui_tx.clone(),
+                None,
+            )));
+        }
+        if let Some(stderr) = stderr {
+            reader_tasks.push(tokio::spawn(read_terminal_stream(
+                stderr,
+                terminal_id.clone(),
+                output.clone(),
+                self.ui_tx.clone(),
+                None,
+            )));
+        }
+
+        tokio::spawn(wait_terminal_child(
+            child,
+            terminal_id.clone(),
+            output,
+            self.ui_tx.clone(),
+            exit_tx,
+            reader_tasks,
+        ));
+
+        Ok(CreateTerminalResponse::new(TerminalId::new(terminal_id)))
+    }
+
+    async fn output(
+        &self,
+        request: TerminalOutputRequest,
+    ) -> std::result::Result<TerminalOutputResponse, agent_client_protocol::Error> {
+        let terminal = self
+            .get_terminal(&request.session_id, &request.terminal_id)
+            .await?;
+        let snapshot = terminal.snapshot().await;
+        Ok(
+            TerminalOutputResponse::new(snapshot.output, snapshot.truncated)
+                .exit_status(snapshot.exit_status),
+        )
+    }
+
+    async fn release(
+        &self,
+        request: ReleaseTerminalRequest,
+    ) -> std::result::Result<ReleaseTerminalResponse, agent_client_protocol::Error> {
+        let terminal = self
+            .remove_terminal(&request.session_id, &request.terminal_id)
+            .await?;
+        if terminal.exit_rx.borrow().is_none() {
+            kill_terminal_process(terminal.pid).await.map_err(|e| {
+                agent_client_protocol::Error::internal_error().data(serde_json::Value::String(e))
+            })?;
+        }
+        Ok(ReleaseTerminalResponse::new())
+    }
+
+    async fn wait_for_exit(
+        &self,
+        request: WaitForTerminalExitRequest,
+    ) -> std::result::Result<WaitForTerminalExitResponse, agent_client_protocol::Error> {
+        let terminal = self
+            .get_terminal(&request.session_id, &request.terminal_id)
+            .await?;
+        let exit_status = terminal.wait_for_exit().await?;
+        Ok(WaitForTerminalExitResponse::new(exit_status))
+    }
+
+    async fn kill(
+        &self,
+        request: KillTerminalRequest,
+    ) -> std::result::Result<KillTerminalResponse, agent_client_protocol::Error> {
+        let terminal = self
+            .get_terminal(&request.session_id, &request.terminal_id)
+            .await?;
+        if terminal.exit_rx.borrow().is_none() {
+            kill_terminal_process(terminal.pid).await.map_err(|e| {
+                agent_client_protocol::Error::internal_error().data(serde_json::Value::String(e))
+            })?;
+        }
+        Ok(KillTerminalResponse::new())
+    }
+
+    async fn get_terminal(
+        &self,
+        session_id: &SessionId,
+        terminal_id: &TerminalId,
+    ) -> std::result::Result<Arc<ManagedTerminal>, agent_client_protocol::Error> {
+        let key = terminal_id.to_string();
+        let Some(terminal) = self.terminals.lock().await.get(&key).cloned() else {
+            return Err(terminal_invalid_params(format!(
+                "unknown terminal id: {key}"
+            )));
+        };
+        terminal.validate_session(session_id)?;
+        Ok(terminal)
+    }
+
+    async fn remove_terminal(
+        &self,
+        session_id: &SessionId,
+        terminal_id: &TerminalId,
+    ) -> std::result::Result<Arc<ManagedTerminal>, agent_client_protocol::Error> {
+        let key = terminal_id.to_string();
+        let Some(terminal) = self.terminals.lock().await.remove(&key) else {
+            return Err(terminal_invalid_params(format!(
+                "unknown terminal id: {key}"
+            )));
+        };
+        terminal.validate_session(session_id)?;
+        Ok(terminal)
+    }
+}
+
+impl ManagedTerminal {
+    fn validate_session(
+        &self,
+        session_id: &SessionId,
+    ) -> std::result::Result<(), agent_client_protocol::Error> {
+        if &self.session_id != session_id {
+            return Err(terminal_invalid_params(format!(
+                "terminal {} does not belong to session {}",
+                self.terminal_id, session_id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn snapshot(&self) -> TerminalOutputSnapshot {
+        let output = self.output.lock().await;
+        TerminalOutputSnapshot {
+            terminal_id: self.terminal_id.clone(),
+            output: output.output.clone(),
+            truncated: output.truncated,
+            exit_status: self.exit_rx.borrow().clone(),
+        }
+    }
+
+    async fn wait_for_exit(
+        &self,
+    ) -> std::result::Result<TerminalExitStatus, agent_client_protocol::Error> {
+        let mut rx = self.exit_rx.clone();
+        loop {
+            if let Some(status) = rx.borrow().clone() {
+                return Ok(status);
+            }
+            rx.changed().await.map_err(|_| {
+                agent_client_protocol::Error::internal_error().data(serde_json::Value::String(
+                    "terminal wait task ended".to_string(),
+                ))
+            })?;
+        }
+    }
+}
+
+async fn read_terminal_stream<R>(
+    mut stream: R,
+    terminal_id: String,
+    output: Arc<Mutex<TerminalOutputBuffer>>,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+    exit_status: Option<TerminalExitStatus>,
+) where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = [0_u8; 8192];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                let snapshot = {
+                    let mut output = output.lock().await;
+                    output.append(&buf[..n]);
+                    TerminalOutputSnapshot {
+                        terminal_id: terminal_id.clone(),
+                        output: output.output.clone(),
+                        truncated: output.truncated,
+                        exit_status: exit_status.clone(),
+                    }
+                };
+                let _ = ui_tx.send(UiEvent::TerminalOutput(snapshot));
+            }
+            Err(e) => {
+                tracing::warn!("read terminal {terminal_id} output: {e}");
+                break;
+            }
+        }
+    }
+}
+
+async fn wait_terminal_child(
+    mut child: Child,
+    terminal_id: String,
+    output: Arc<Mutex<TerminalOutputBuffer>>,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+    exit_tx: watch::Sender<Option<TerminalExitStatus>>,
+    reader_tasks: Vec<tokio::task::JoinHandle<()>>,
+) {
+    let status = match child.wait().await {
+        Ok(status) => terminal_exit_status(status),
+        Err(e) => {
+            tracing::warn!("wait terminal {terminal_id}: {e}");
+            TerminalExitStatus::new().signal("wait_error")
+        }
+    };
+    for task in reader_tasks {
+        if let Err(e) = task.await {
+            tracing::warn!("join terminal {terminal_id} reader: {e}");
+        }
+    }
+    let _ = exit_tx.send(Some(status.clone()));
+    let snapshot = {
+        let output = output.lock().await;
+        TerminalOutputSnapshot {
+            terminal_id,
+            output: output.output.clone(),
+            truncated: output.truncated,
+            exit_status: Some(status),
+        }
+    };
+    let _ = ui_tx.send(UiEvent::TerminalOutput(snapshot));
+}
+
+fn terminal_exit_status(status: std::process::ExitStatus) -> TerminalExitStatus {
+    let mut exit = TerminalExitStatus::new();
+    if let Some(code) = status.code().and_then(|code| u32::try_from(code).ok()) {
+        exit = exit.exit_code(code);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            exit = exit.signal(signal_name(signal));
+        }
+    }
+    exit
+}
+
+#[cfg(unix)]
+fn signal_name(signal: i32) -> String {
+    match signal {
+        libc::SIGTERM => "SIGTERM".to_string(),
+        libc::SIGKILL => "SIGKILL".to_string(),
+        libc::SIGINT => "SIGINT".to_string(),
+        libc::SIGHUP => "SIGHUP".to_string(),
+        _ => format!("SIG{signal}"),
+    }
+}
+
+async fn kill_terminal_process(pid: Option<u32>) -> std::result::Result<(), String> {
+    let Some(pid) = pid else {
+        return Ok(());
+    };
+
+    #[cfg(unix)]
+    {
+        unsafe {
+            if libc::killpg(pid as libc::pid_t, libc::SIGTERM) != 0 {
+                let errno = std::io::Error::last_os_error();
+                if errno.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(format!("kill terminal group {pid} with SIGTERM: {errno}"));
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        unsafe {
+            if libc::killpg(pid as libc::pid_t, libc::SIGKILL) != 0 {
+                let errno = std::io::Error::last_os_error();
+                if errno.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(format!("kill terminal group {pid} with SIGKILL: {errno}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    {
+        let status = tokio::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map_err(|e| format!("taskkill terminal pid {pid}: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("taskkill terminal pid {pid} exited with {status}"))
+        }
+    }
+}
+
+fn terminal_invalid_params(message: impl ToString) -> agent_client_protocol::Error {
+    agent_client_protocol::Error::invalid_params()
+        .data(serde_json::Value::String(message.to_string()))
+}
+
+#[cfg(test)]
+fn terminal_test_command(script: &str) -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "cmd".to_string(),
+            vec!["/C".to_string(), script.to_string()],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        ("sh".to_string(), vec!["-c".to_string(), script.to_string()])
+    }
+}
+
 fn session_config_from_parts(
     config_options: Option<Vec<SessionConfigOption>>,
     modes: Option<SessionModeState>,
@@ -1065,6 +1546,87 @@ mod tests {
     }
 
     #[test]
+    fn terminal_output_buffer_truncates_on_utf8_boundary() {
+        let mut buffer = TerminalOutputBuffer::new(5);
+        buffer.append("éabc".as_bytes());
+        assert_eq!(buffer.output, "éabc");
+        assert!(!buffer.truncated);
+
+        buffer.append("d".as_bytes());
+
+        assert_eq!(buffer.output, "abcd");
+        assert!(buffer.truncated);
+        assert!(buffer.output.is_char_boundary(0));
+    }
+
+    #[tokio::test]
+    async fn managed_terminal_runs_command_and_releases() {
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        let terminals = ManagedTerminals::new(ui_tx);
+        let session_id = SessionId::new("session-1");
+        #[cfg(windows)]
+        let script = "echo hello & exit /B 7";
+        #[cfg(not(windows))]
+        let script = "printf hello; exit 7";
+        let (command, args) = terminal_test_command(script);
+
+        let created = terminals
+            .create(
+                CreateTerminalRequest::new(session_id.clone(), command)
+                    .args(args)
+                    .output_byte_limit(1024),
+            )
+            .await
+            .expect("create terminal");
+        let terminal_id = created.terminal_id;
+
+        let waited = terminals
+            .wait_for_exit(WaitForTerminalExitRequest::new(
+                session_id.clone(),
+                terminal_id.clone(),
+            ))
+            .await
+            .expect("wait terminal");
+        assert_eq!(waited.exit_status.exit_code, Some(7));
+
+        let output = terminals
+            .output(TerminalOutputRequest::new(
+                session_id.clone(),
+                terminal_id.clone(),
+            ))
+            .await
+            .expect("terminal output");
+        assert!(
+            output.output.contains("hello"),
+            "output: {:?}",
+            output.output
+        );
+        assert_eq!(output.exit_status, Some(waited.exit_status));
+
+        terminals
+            .release(ReleaseTerminalRequest::new(
+                session_id.clone(),
+                terminal_id.clone(),
+            ))
+            .await
+            .expect("release terminal");
+        assert!(
+            terminals
+                .output(TerminalOutputRequest::new(session_id, terminal_id))
+                .await
+                .is_err()
+        );
+
+        assert!(
+            std::iter::from_fn(|| ui_rx.try_recv().ok()).any(|event| matches!(
+                event,
+                UiEvent::TerminalOutput(snapshot) if snapshot.output.contains("hello")
+            )),
+            "expected at least one terminal output UI event"
+        );
+    }
+
+    #[test]
     fn legacy_session_modes_become_config_picker_options() {
         let mode_state = SessionModeState::new(
             "medium",
@@ -1175,9 +1737,10 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |req: agent_client_protocol::schema::InitializeRequest,
                             responder,
                             _cx| {
+                    assert!(req.client_capabilities.terminal);
                     responder.respond(
                         InitializeResponse::new(agent_client_protocol::schema::ProtocolVersion::V1)
                             .agent_capabilities(AgentCapabilities::new().session_capabilities(

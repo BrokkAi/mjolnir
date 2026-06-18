@@ -11,16 +11,16 @@ use std::time::{Duration, Instant};
 use agent_client_protocol::schema::{
     AvailableCommand, Diff, Plan, PlanEntry, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
-    ToolCallUpdate, ToolKind, Usage, UsageUpdate,
+    SessionConfigValueId, SessionUpdate, StopReason, TerminalExitStatus, ToolCall, ToolCallContent,
+    ToolCallStatus, ToolCallUpdate, ToolKind, Usage, UsageUpdate,
 };
 use chrono::{DateTime, FixedOffset, Local, TimeZone};
 
 use crate::clipboard::ClipboardLease;
 
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, UiEvent,
-    content_block_text,
+    PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, TerminalOutputSnapshot,
+    UiEvent, content_block_text,
 };
 
 /// Maximum width of the queued-prompt preview shown above the input.
@@ -122,6 +122,9 @@ pub enum ToolCallOutput {
     },
     Terminal {
         terminal_id: String,
+        output: String,
+        truncated: bool,
+        exit_status: Option<TerminalExitStatus>,
     },
     Note(String),
 }
@@ -177,6 +180,9 @@ impl ToolCallView {
                 ToolCallContent::Terminal(t) => {
                     self.body.push(ToolCallOutput::Terminal {
                         terminal_id: t.terminal_id.to_string(),
+                        output: String::new(),
+                        truncated: false,
+                        exit_status: None,
                     });
                 }
                 _ => self
@@ -184,6 +190,29 @@ impl ToolCallView {
                     .push(ToolCallOutput::Note("unsupported tool content".to_string())),
             }
         }
+    }
+
+    fn apply_terminal_output(&mut self, snapshot: &TerminalOutputSnapshot) -> bool {
+        let mut changed = false;
+        for output in &mut self.body {
+            if let ToolCallOutput::Terminal {
+                terminal_id,
+                output,
+                truncated,
+                exit_status,
+            } = output
+                && terminal_id == &snapshot.terminal_id
+                && (output != &snapshot.output
+                    || *truncated != snapshot.truncated
+                    || *exit_status != snapshot.exit_status)
+            {
+                *output = snapshot.output.clone();
+                *truncated = snapshot.truncated;
+                *exit_status = snapshot.exit_status.clone();
+                changed = true;
+            }
+        }
+        changed
     }
 }
 
@@ -423,6 +452,7 @@ pub struct AppState {
     pub session_fork_supported: bool,
     pub transcript: Vec<Entry>,
     pub tool_calls: HashMap<String, ToolCallView>,
+    terminal_outputs: HashMap<String, TerminalOutputSnapshot>,
     /// Bumped whenever `transcript` or `tool_calls` change in a way that
     /// affects rendering. The UI layer uses this as a cache key so it can
     /// skip rebuilding `Vec<Line>` and re-running word-wrap when nothing
@@ -622,6 +652,7 @@ impl AppState {
             session_fork_supported: false,
             transcript: Vec::new(),
             tool_calls: HashMap::new(),
+            terminal_outputs: HashMap::new(),
             transcript_revision: 0,
             input: String::new(),
             input_cursor: 0,
@@ -775,6 +806,20 @@ impl AppState {
 
     fn bump_transcript_revision(&mut self) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
+    fn apply_known_terminal_outputs(&mut self) {
+        let snapshots: Vec<TerminalOutputSnapshot> =
+            self.terminal_outputs.values().cloned().collect();
+        let mut changed = false;
+        for snapshot in &snapshots {
+            for view in self.tool_calls.values_mut() {
+                changed |= view.apply_terminal_output(snapshot);
+            }
+        }
+        if changed {
+            self.bump_transcript_revision();
+        }
     }
 
     /// Flip the global tool-output collapse setting. Bumps the transcript
@@ -1284,7 +1329,15 @@ impl AppState {
                 self.session_id = Some(session_id);
                 self.connection_state = ConnectionState::Ready;
             }
-            UiEvent::SessionUpdate(u) => self.apply_session_update(u),
+            UiEvent::SessionUpdate(u) => {
+                self.apply_session_update(u);
+                self.apply_known_terminal_outputs();
+            }
+            UiEvent::TerminalOutput(snapshot) => {
+                self.terminal_outputs
+                    .insert(snapshot.terminal_id.clone(), snapshot);
+                self.apply_known_terminal_outputs();
+            }
             UiEvent::SessionConfigOptions { options, targets } => {
                 self.apply_session_config_options(options, targets);
             }
@@ -1944,6 +1997,87 @@ mod tests {
             view.body[2],
             ToolCallOutput::Terminal {
                 terminal_id: "term-1".to_string(),
+                output: String::new(),
+                truncated: false,
+                exit_status: None,
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_output_snapshot_updates_matching_tool_call() {
+        let mut s = AppState::new();
+        let mut fields = agent_client_protocol::schema::ToolCallUpdateFields::default();
+        fields.content = Some(vec![
+            ToolCallContent::Terminal(Terminal::new(
+                agent_client_protocol::schema::TerminalId::new("term-1"),
+            )),
+            ToolCallContent::Terminal(Terminal::new(
+                agent_client_protocol::schema::TerminalId::new("other"),
+            )),
+        ]);
+        let update = ToolCallUpdate::new("call-1", fields);
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            update,
+        )));
+        let before = s.transcript_revision();
+
+        s.apply_event(UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "hello\n".to_string(),
+            truncated: true,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        }));
+
+        assert_ne!(s.transcript_revision(), before);
+        let view = s.tool_calls.get("call-1").expect("view");
+        assert_eq!(
+            view.body[0],
+            ToolCallOutput::Terminal {
+                terminal_id: "term-1".to_string(),
+                output: "hello\n".to_string(),
+                truncated: true,
+                exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+            }
+        );
+        assert_eq!(
+            view.body[1],
+            ToolCallOutput::Terminal {
+                terminal_id: "other".to_string(),
+                output: String::new(),
+                truncated: false,
+                exit_status: None,
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_output_snapshot_is_applied_to_later_tool_call() {
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "already done".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        }));
+
+        let mut fields = agent_client_protocol::schema::ToolCallUpdateFields::default();
+        fields.content = Some(vec![ToolCallContent::Terminal(Terminal::new(
+            agent_client_protocol::schema::TerminalId::new("term-1"),
+        ))]);
+        let update = ToolCallUpdate::new("call-1", fields);
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            update,
+        )));
+
+        let view = s.tool_calls.get("call-1").expect("view");
+        assert_eq!(
+            view.body[0],
+            ToolCallOutput::Terminal {
+                terminal_id: "term-1".to_string(),
+                output: "already done".to_string(),
+                truncated: false,
+                exit_status: Some(TerminalExitStatus::new().exit_code(0)),
             }
         );
     }

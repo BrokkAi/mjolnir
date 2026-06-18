@@ -6,7 +6,7 @@
 
 use agent_client_protocol::schema::{
     ContentBlock, PermissionOption, SessionConfigId, SessionConfigOption, SessionConfigValueId,
-    SessionUpdate, StopReason, ToolCallUpdate, Usage,
+    SessionUpdate, StopReason, TerminalExitStatus, ToolCallUpdate, Usage,
 };
 use tokio::sync::oneshot;
 
@@ -36,6 +36,10 @@ pub enum UiEvent {
     /// `SessionUpdate` enum and let the UI state machine decide how to
     /// fold each variant into the transcript.
     SessionUpdate(SessionUpdate),
+    /// Snapshot for a managed ACP terminal. The runtime sends this whenever
+    /// captured output or exit status changes so embedded terminal tool-call
+    /// content can render live output.
+    TerminalOutput(TerminalOutputSnapshot),
     /// Session configuration options with the ACP method each option should
     /// use when changed. Real `configOptions` use `session/set_config_option`;
     /// legacy synthesized options use older model/mode methods.
@@ -73,6 +77,14 @@ pub enum UiEvent {
     /// Fatal error; the runtime is shutting down. UI should display the
     /// message and exit.
     Fatal(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalOutputSnapshot {
+    pub terminal_id: String,
+    pub output: String,
+    pub truncated: bool,
+    pub exit_status: Option<TerminalExitStatus>,
 }
 
 /// A pending permission request. The UI owns `responder` until the user

@@ -468,6 +468,7 @@ impl TrackerState {
                 self.touch();
             }
             UiEvent::Connected { .. }
+            | UiEvent::TerminalOutput(_)
             | UiEvent::PermissionRequest(_)
             | UiEvent::RemotePermissionDecision { .. }
             | UiEvent::Info(_)

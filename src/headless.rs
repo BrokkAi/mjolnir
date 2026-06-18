@@ -199,6 +199,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             UiEvent::SessionUpdate(update) => {
                 apply_session_update(&mut state, update, prompt_sent, &mut collecting_turn_output);
             }
+            UiEvent::TerminalOutput(_) => {}
             UiEvent::SessionConfigOptions { .. } => {}
             UiEvent::PermissionRequest(prompt) => {
                 let decision =
