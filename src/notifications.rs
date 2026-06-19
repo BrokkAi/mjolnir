@@ -99,7 +99,10 @@ fn is_supported_term_program(term_program: &str) -> bool {
         || term_program.eq_ignore_ascii_case("WezTerm")
 }
 
-fn sanitize_message(message: &str) -> String {
+/// Flatten control characters to spaces and collapse runs of whitespace.
+/// Used for any untrusted, terminal-bound string (OSC notifications and
+/// agent-supplied session titles).
+pub(crate) fn sanitize_message(message: &str) -> String {
     let normalized = message
         .chars()
         .map(|ch| match ch {

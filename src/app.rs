@@ -443,7 +443,10 @@ pub struct AppState {
     pub agent_label: String,
     pub session_id: Option<String>,
     pub session_title: Option<String>,
-    pub connection_state: ConnectionState,
+    /// Current connection lifecycle state. Private to enforce the invariant
+    /// that it and `connection_state_started_at` change together: mutate only
+    /// via `set_connection_state`, read via `connection_state()`.
+    connection_state: ConnectionState,
     pub current_mode: Option<String>,
     pub available_commands: Vec<AvailableCommand>,
     pub session_config_options: Vec<SessionConfigOption>,
@@ -882,7 +885,7 @@ impl AppState {
     }
 
     pub fn active_turn_elapsed(&self) -> Option<Duration> {
-        if self.is_streaming() {
+        if self.is_busy() {
             self.turn_started_at.map(|started| started.elapsed())
         } else {
             None
@@ -897,7 +900,25 @@ impl AppState {
         self.connection_state_started_at.elapsed()
     }
 
-    fn set_connection_state(&mut self, state: ConnectionState) {
+    pub fn connection_state(&self) -> ConnectionState {
+        self.connection_state
+    }
+
+    /// Sanitize an agent-supplied session title (stripping control characters
+    /// and collapsing whitespace) and store it. Returns `true` when a
+    /// non-empty title was set; empty/whitespace-only titles are ignored so
+    /// "no title" stays representable and a single guard lives here rather
+    /// than at every call site.
+    pub fn set_session_title(&mut self, raw: &str) -> bool {
+        let sanitized = crate::notifications::sanitize_message(raw);
+        if sanitized.is_empty() {
+            return false;
+        }
+        self.session_title = Some(sanitized);
+        true
+    }
+
+    pub(crate) fn set_connection_state(&mut self, state: ConnectionState) {
         if self.connection_state != state {
             self.connection_state = state;
             self.connection_state_started_at = Instant::now();
@@ -1562,10 +1583,12 @@ impl AppState {
                 self.apply_session_config_options(u.config_options, targets);
             }
             SessionUpdate::SessionInfoUpdate(info) => {
-                if let Some(title) = info.title.value() {
-                    self.session_title = Some(title.clone());
+                if let Some(title) = info.title.value()
+                    && self.set_session_title(title)
+                {
+                    let shown = self.session_title.clone().unwrap_or_default();
                     self.transcript
-                        .push(Entry::System(format!("session title: {title}")));
+                        .push(Entry::System(format!("session title: {shown}")));
                     self.bump_transcript_revision();
                 }
             }

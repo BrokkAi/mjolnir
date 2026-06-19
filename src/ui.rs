@@ -271,9 +271,9 @@ pub async fn run(
     initial_agent_label: Option<String>,
     history_path: Option<&Path>,
     mode: UiMode,
-) -> Result<(UiExitReason, Option<String>)> {
+) -> Result<(UiExitReason, Option<String>, Option<String>)> {
     let initial_history = history_path.map(config::load_history).unwrap_or_default();
-    let (reason, session_id, history) = ui_loop(
+    let (reason, session_id, session_title, history) = ui_loop(
         terminal,
         &cmd_tx,
         &mut event_rx,
@@ -288,7 +288,7 @@ pub async fn run(
     {
         tracing::warn!("save_history {path:?}: {e:#}");
     }
-    Ok((reason, session_id))
+    Ok((reason, session_id, session_title))
 }
 
 /// Maximum redraw rate for interactive local UI work such as typing,
@@ -306,7 +306,7 @@ const STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(120);
 const INLINE_STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(75);
 
 fn redraw_budget(mode: UiMode, state: &AppState) -> Duration {
-    match (mode, state.connection_state) {
+    match (mode, state.connection_state()) {
         (
             UiMode::InlineChat,
             ConnectionState::Streaming | ConnectionState::Cancelling | ConnectionState::Forking,
@@ -346,15 +346,13 @@ async fn ui_loop(
     initial_agent_label: Option<String>,
     initial_history: Vec<String>,
     mode: UiMode,
-) -> Result<(UiExitReason, Option<String>, Vec<String>)> {
+) -> Result<(UiExitReason, Option<String>, Option<String>, Vec<String>)> {
     let mut state = AppState::new();
     state.set_prompt_history(initial_history);
     state.project_label = header_labels.project;
     state.worktree_label = header_labels.worktree;
-    if let Some(title) = header_labels.session_title
-        && !title.trim().is_empty()
-    {
-        state.session_title = Some(title);
+    if let Some(title) = header_labels.session_title {
+        state.set_session_title(&title);
     }
     if let Some(label) = initial_agent_label {
         state.agent_label = label;
@@ -569,7 +567,12 @@ async fn ui_loop(
                     set_mouse_capture(terminal, enabled)
                 })?;
             }
-            return Ok((reason, state.session_id.clone(), state.prompt_history()));
+            return Ok((
+                reason,
+                state.session_id.clone(),
+                state.session_title.clone(),
+                state.prompt_history(),
+            ));
         }
 
         if force_soft_inline_repair && !inline_resize_reflow.is_pending() {
@@ -639,7 +642,7 @@ async fn ui_loop(
             set_mouse_capture(terminal, enabled)
         })?;
     }
-    Ok((UiExitReason::Quit, None, state.prompt_history()))
+    Ok((UiExitReason::Quit, None, None, state.prompt_history()))
 }
 
 fn notification_message_for_event(
@@ -828,7 +831,7 @@ fn inline_repair_heartbeat_active(state: &AppState) -> bool {
         || state.has_pending_permission()
         || state.config_picker.is_some()
         || matches!(
-            state.connection_state,
+            state.connection_state(),
             ConnectionState::Launching | ConnectionState::Initializing
         )
 }
@@ -898,7 +901,7 @@ fn timer_driven_live_redraw(mode: UiMode, state: &AppState) -> bool {
 
 fn should_show_spinner(state: &AppState) -> bool {
     matches!(
-        state.connection_state,
+        state.connection_state(),
         ConnectionState::Launching
             | ConnectionState::Initializing
             | ConnectionState::Streaming
@@ -3395,10 +3398,13 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if let Some(title) = state.session_title.as_deref() {
         let title = title.trim();
         if !title.is_empty() {
+            // The session title is appended LAST and consumes whatever width
+            // remains after the preceding spans (version/agent/project/token
+            // usage) plus a 3-cell separator. This relies on every other
+            // width-consuming span having already been pushed above.
             let separator_width = 3;
-            let max_width = width
-                .saturating_sub(spans_display_width(&spans))
-                .saturating_sub(separator_width);
+            let used: usize = spans.iter().map(|span| span.content.width()).sum();
+            let max_width = width.saturating_sub(used).saturating_sub(separator_width);
             if max_width > 0 {
                 spans.push(Span::raw("   "));
                 spans.push(Span::styled(
@@ -3412,10 +3418,6 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     }
     let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, inner);
-}
-
-fn spans_display_width(spans: &[Span<'_>]) -> usize {
-    spans.iter().map(|span| span.content.width()).sum()
 }
 
 fn compact_middle_display(text: &str, max_width: usize) -> String {
@@ -3462,7 +3464,7 @@ fn take_display_suffix(text: &str, max_width: usize) -> String {
 }
 
 pub(crate) fn connection_state_label(state: &AppState) -> String {
-    match state.connection_state {
+    match state.connection_state() {
         ConnectionState::Launching => "launching".to_string(),
         ConnectionState::Initializing => "initializing".to_string(),
         ConnectionState::Ready => "ready".to_string(),
@@ -3485,7 +3487,7 @@ fn spinner_frame() -> &'static str {
 }
 
 fn turn_elapsed_value_label(state: &AppState) -> Option<String> {
-    match state.connection_state {
+    match state.connection_state() {
         ConnectionState::Launching | ConnectionState::Initializing => {
             Some(format_duration(state.connection_state_elapsed()))
         }
@@ -4628,13 +4630,16 @@ fn voice_level_meter(level: Option<f32>) -> String {
 }
 
 fn prompt_status_text(state: &AppState) -> String {
-    if state.connection_state == ConnectionState::Ready {
+    if state.connection_state() == ConnectionState::Ready {
         "prompt".to_string()
     } else {
         connection_state_label(state)
     }
 }
 
+/// Spinner glyph for the prompt title, or a `"-"` placeholder when no spinner
+/// is active. The placeholder keeps the title a fixed shape so it does not jump
+/// horizontally as the spinner toggles between busy and idle states.
 fn prompt_spinner_slot(state: &AppState) -> &'static str {
     if should_show_spinner(state) {
         spinner_frame()
@@ -4673,7 +4678,11 @@ fn idle_prompt_title(
 fn busy_prompt_title(state: &AppState) -> Option<String> {
     let queued = state.queued_prompt_count();
     let label = prompt_title_label(state);
-    let hint = match state.connection_state {
+    // Matched exhaustively (no `_` arm) on purpose: this and the other
+    // ConnectionState matches in the prompt-title helpers (prompt_status_text,
+    // turn_elapsed_value_label) must all be revisited when a variant is added,
+    // and the missing-arm compile error is what forces that.
+    let hint = match state.connection_state() {
         ConnectionState::Streaming | ConnectionState::Cancelling => {
             if queued > 0 {
                 format!("{queued} queued | Enter queue next | Ctrl-C cancel current")
@@ -6034,7 +6043,7 @@ mod tests {
     fn inline_permission_close_requests_one_repair() {
         let pending = permission_pending_with_options("run shell command", &["Allow once"], 0);
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         state.apply_event(UiEvent::PermissionRequest(pending.prompt));
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
@@ -6095,7 +6104,7 @@ mod tests {
     #[test]
     fn inline_streaming_uses_slow_spinner_timer_without_repair_heartbeat() {
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Streaming;
+        state.set_connection_state(ConnectionState::Streaming);
 
         assert!(needs_live_redraw(&state));
         assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
@@ -6117,7 +6126,7 @@ mod tests {
     fn permission_open_repairs_before_inline_flush() {
         let pending = permission_pending_with_options("run shell command", &["Allow once"], 0);
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         state.apply_event(UiEvent::PermissionRequest(pending.prompt));
 
         assert!(should_attempt_inline_repair_before_flush(
@@ -6137,7 +6146,7 @@ mod tests {
         ));
 
         let mut ready = AppState::new();
-        ready.connection_state = ConnectionState::Ready;
+        ready.set_connection_state(ConnectionState::Ready);
         assert!(!should_attempt_inline_repair_before_flush(
             true,
             UiMode::InlineChat,
@@ -6149,18 +6158,18 @@ mod tests {
     fn inline_streaming_keeps_timer_redraws_but_disables_repair_heartbeat() {
         let mut state = AppState::new();
 
-        state.connection_state = ConnectionState::Launching;
+        state.set_connection_state(ConnectionState::Launching);
         assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
         assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
 
-        state.connection_state = ConnectionState::Streaming;
+        state.set_connection_state(ConnectionState::Streaming);
         assert!(needs_live_redraw(&state));
         assert!(should_show_spinner(&state));
         assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
         assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
 
-        state.connection_state = ConnectionState::Cancelling;
+        state.set_connection_state(ConnectionState::Cancelling);
         assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
         assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
@@ -6173,7 +6182,7 @@ mod tests {
         assert_eq!(redraw_budget(UiMode::FullscreenTui, &state), FRAME_BUDGET);
         assert_eq!(redraw_budget(UiMode::InlineChat, &state), FRAME_BUDGET);
 
-        state.connection_state = ConnectionState::Streaming;
+        state.set_connection_state(ConnectionState::Streaming);
         assert_eq!(
             redraw_budget(UiMode::FullscreenTui, &state),
             STREAMING_FRAME_BUDGET
@@ -6183,7 +6192,7 @@ mod tests {
             INLINE_STREAMING_FRAME_BUDGET
         );
 
-        state.connection_state = ConnectionState::Cancelling;
+        state.set_connection_state(ConnectionState::Cancelling);
         assert_eq!(
             redraw_budget(UiMode::FullscreenTui, &state),
             STREAMING_FRAME_BUDGET
@@ -6193,7 +6202,7 @@ mod tests {
             INLINE_STREAMING_FRAME_BUDGET
         );
 
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         assert_eq!(redraw_budget(UiMode::FullscreenTui, &state), FRAME_BUDGET);
         assert_eq!(redraw_budget(UiMode::InlineChat, &state), FRAME_BUDGET);
     }
@@ -6202,15 +6211,15 @@ mod tests {
     fn streaming_uses_timer_redraws_but_not_inline_repair_during_streaming() {
         let mut state = AppState::new();
 
-        state.connection_state = ConnectionState::Launching;
+        state.set_connection_state(ConnectionState::Launching);
         assert!(needs_live_redraw(&state));
         assert!(should_repair_inline_view(UiMode::InlineChat, &state));
 
-        state.connection_state = ConnectionState::Initializing;
+        state.set_connection_state(ConnectionState::Initializing);
         assert!(needs_live_redraw(&state));
         assert!(should_repair_inline_view(UiMode::InlineChat, &state));
 
-        state.connection_state = ConnectionState::Streaming;
+        state.set_connection_state(ConnectionState::Streaming);
         assert!(state.is_streaming());
         assert!(should_show_spinner(&state));
         assert_eq!(
@@ -6225,7 +6234,7 @@ mod tests {
         assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
 
-        state.connection_state = ConnectionState::Cancelling;
+        state.set_connection_state(ConnectionState::Cancelling);
         assert!(state.is_streaming());
         assert!(should_show_spinner(&state));
         assert!(needs_live_redraw(&state));
@@ -6237,17 +6246,17 @@ mod tests {
     fn inline_repair_is_limited_to_live_inline_states() {
         let mut state = AppState::new();
 
-        state.connection_state = ConnectionState::Launching;
+        state.set_connection_state(ConnectionState::Launching);
         assert!(should_repair_inline_view(UiMode::InlineChat, &state));
 
-        state.connection_state = ConnectionState::Streaming;
+        state.set_connection_state(ConnectionState::Streaming);
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
         assert!(!should_repair_inline_view(UiMode::FullscreenTui, &state));
 
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
 
-        state.connection_state = ConnectionState::Cancelling;
+        state.set_connection_state(ConnectionState::Cancelling);
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
     }
 
@@ -6256,7 +6265,7 @@ mod tests {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         state.apply_event(UiEvent::PermissionRequest(pending.prompt));
 
         assert!(state.has_pending_permission());
@@ -6270,7 +6279,7 @@ mod tests {
     #[test]
     fn inline_focus_gain_forces_repair_even_without_live_redraw_state() {
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
 
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
         assert!(should_force_inline_repair_for_event(
@@ -6323,7 +6332,7 @@ mod tests {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         state.apply_event(UiEvent::PermissionRequest(pending.prompt));
 
         assert!(should_force_inline_repair_for_event(
@@ -6348,7 +6357,7 @@ mod tests {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         state.apply_event(UiEvent::PermissionRequest(pending.prompt));
 
         assert!(!should_force_inline_repair_for_event(
@@ -6386,7 +6395,7 @@ mod tests {
     #[test]
     fn forced_inline_repair_bypasses_live_redraw_gate_once() {
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
 
         assert!(should_attempt_inline_repair(
             true,
@@ -6449,7 +6458,7 @@ mod tests {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
 
         assert_eq!(inline_repair_interval(&state), INLINE_REPAIR_INTERVAL);
         assert!(permission_repair_budget_allows_attempt(&state));
@@ -6918,7 +6927,7 @@ mod tests {
 
         assert!(state.exit_reason.is_none());
         assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::ForkSession)));
-        assert_eq!(state.connection_state, ConnectionState::Forking);
+        assert_eq!(state.connection_state(), ConnectionState::Forking);
         assert!(state.is_busy());
         assert!(state.input.is_empty());
         let status = state.status_line.expect("status");
@@ -6937,7 +6946,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
 
         assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::ForkSession)));
-        assert_eq!(state.connection_state, ConnectionState::Forking);
+        assert_eq!(state.connection_state(), ConnectionState::Forking);
 
         state.input = "queued prompt".to_string();
         submit_prompt(&mut state, &cmd_tx);
@@ -7753,7 +7762,7 @@ mod tests {
     #[test]
     fn input_title_includes_text_selection_shortcut() {
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         let backend = TestBackend::new(180, 5);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
@@ -7789,7 +7798,7 @@ mod tests {
     #[test]
     fn inline_input_title_omits_text_selection_shortcut() {
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         let backend = TestBackend::new(140, 5);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
@@ -7864,7 +7873,7 @@ mod tests {
         let backend = TestBackend::new(140, 1);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         terminal
             .draw(|frame| draw_header(frame, frame.area(), &state))
             .expect("draw");
@@ -7877,7 +7886,7 @@ mod tests {
             "rendered:\n{rendered}"
         );
 
-        state.connection_state = ConnectionState::Streaming;
+        state.set_connection_state(ConnectionState::Streaming);
         terminal
             .draw(|frame| draw_header(frame, frame.area(), &state))
             .expect("draw");
@@ -8876,7 +8885,7 @@ mod tests {
     #[test]
     fn android_prompt_title_hides_voice_shortcut() {
         let mut state = AppState::new();
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         let title = idle_prompt_title(&state, false, "");
 
         assert!(!title.contains("Ctrl-R"));
@@ -9760,7 +9769,7 @@ mod tests {
     fn ready_state_with_session() -> AppState {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
-        state.connection_state = ConnectionState::Ready;
+        state.set_connection_state(ConnectionState::Ready);
         state
     }
 
@@ -9785,7 +9794,7 @@ mod tests {
             "queued prompt must not be sent until the active turn finishes"
         );
         assert_eq!(
-            state.connection_state,
+            state.connection_state(),
             ConnectionState::Streaming,
             "submitting while streaming must not cancel the active turn"
         );
@@ -9934,7 +9943,7 @@ mod tests {
             UiCommand::CancelPrompt => {}
             other => panic!("unexpected command: {other:?}"),
         }
-        assert_eq!(state.connection_state, ConnectionState::Cancelling);
+        assert_eq!(state.connection_state(), ConnectionState::Cancelling);
 
         state.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::Cancelled,
@@ -10057,7 +10066,7 @@ mod tests {
             state.queued_prompts().next().expect("queued prompt").text,
             "keep me"
         );
-        assert_eq!(state.connection_state, ConnectionState::Cancelling);
+        assert_eq!(state.connection_state(), ConnectionState::Cancelling);
         match cmd_rx.try_recv().expect("cancel dispatched") {
             UiCommand::CancelPrompt => {}
             other => panic!("unexpected command: {other:?}"),

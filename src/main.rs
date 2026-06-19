@@ -368,6 +368,21 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
 
     // Direct ID: launch the TUI with the chosen agent and session.
     if let Some(session_id) = args.session_id.clone() {
+        // Look up the chosen session's title so the resumed header shows it
+        // immediately rather than waiting for the agent's first
+        // SessionInfoUpdate. A failed lookup is non-fatal — resume proceeds
+        // with no title and the agent fills it in shortly after.
+        let title =
+            match session::list_sessions(&agent, cwd.clone(), args.agent_stderr.as_deref()).await {
+                Ok(sessions) => sessions
+                    .into_iter()
+                    .find(|entry| entry.session_id == session_id)
+                    .and_then(|entry| entry.title),
+                Err(e) => {
+                    tracing::warn!("list sessions for title lookup failed: {e:#}");
+                    None
+                }
+            };
         let result = run_app(
             cwd,
             args.agent_stderr.clone(),
@@ -375,7 +390,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
             worktree_label.clone(),
             Some(ResumeTarget {
                 session_id: session_id.clone(),
-                title: None,
+                title,
             }),
             Some(agent),
             mode,
@@ -624,7 +639,7 @@ async fn run_app(
             })?
         };
 
-        let (reason, session_id) = run_session(
+        let (reason, session_id, session_title) = run_session(
             &agent,
             cwd.clone(),
             agent_stderr.clone(),
@@ -651,7 +666,11 @@ async fn run_app(
                 let sessions =
                     session::list_sessions(&agent, cwd.clone(), agent_stderr.as_deref()).await?;
 
-                match session_picker_action(run_session_picker_once(sessions).await?, session_id) {
+                match session_picker_action(
+                    run_session_picker_once(sessions).await?,
+                    session_id,
+                    session_title,
+                ) {
                     SessionPickerAction::Resume { session_id, title } => {
                         initial_resume = Some(ResumeTarget { session_id, title });
                         initial_agent = Some(agent);
@@ -682,16 +701,20 @@ struct ResumeTarget {
 fn session_picker_action(
     outcome: session::ResumeOutcome,
     current_session_id: Option<String>,
+    current_session_title: Option<String>,
 ) -> SessionPickerAction {
     match outcome {
         session::ResumeOutcome::Selected(entry) => SessionPickerAction::Resume {
             session_id: entry.session_id,
             title: entry.title,
         },
+        // Cancelling the picker keeps the current session running, so carry
+        // its known title forward instead of dropping it — otherwise the
+        // header title would blank out until the agent's next SessionInfoUpdate.
         session::ResumeOutcome::Cancelled => match current_session_id {
             Some(session_id) => SessionPickerAction::Resume {
                 session_id,
-                title: None,
+                title: current_session_title,
             },
             None => SessionPickerAction::Exit(None),
         },
@@ -824,7 +847,7 @@ async fn run_session(
     header_labels: HeaderLabels,
     resume_session: Option<String>,
     mode: UiMode,
-) -> Result<(UiExitReason, Option<String>)> {
+) -> Result<(UiExitReason, Option<String>, Option<String>)> {
     let mut terminal = match mode {
         UiMode::InlineChat => {
             ui::setup_inline_chat_terminal(ui::INLINE_CHAT_HEIGHT).context("setup terminal")?
@@ -1423,24 +1446,25 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_session_picker_resumes_current_session() {
+    fn cancelling_session_picker_resumes_current_session_preserving_title() {
         let action = session_picker_action(
             session::ResumeOutcome::Cancelled,
             Some("current-session".to_string()),
+            Some("Current title".to_string()),
         );
 
         assert_eq!(
             action,
             SessionPickerAction::Resume {
                 session_id: "current-session".to_string(),
-                title: None,
+                title: Some("Current title".to_string()),
             }
         );
     }
 
     #[test]
     fn cancelling_session_picker_without_current_session_exits() {
-        let action = session_picker_action(session::ResumeOutcome::Cancelled, None);
+        let action = session_picker_action(session::ResumeOutcome::Cancelled, None, None);
 
         assert_eq!(action, SessionPickerAction::Exit(None));
     }
@@ -1455,6 +1479,7 @@ mod tests {
                 updated_at: None,
             }),
             Some("current-session".to_string()),
+            Some("ignored current title".to_string()),
         );
 
         assert_eq!(
