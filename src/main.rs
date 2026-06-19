@@ -373,7 +373,10 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
             args.agent_stderr.clone(),
             project_label,
             worktree_label.clone(),
-            Some(session_id.clone()),
+            Some(ResumeTarget {
+                session_id: session_id.clone(),
+                title: None,
+            }),
             Some(agent),
             mode,
         )
@@ -409,12 +412,16 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
         }
         session::ResumeOutcome::Selected(entry) => {
             eprintln!("Resuming session: {}", entry.session_id);
+            let session_title = entry.title.clone();
             let result = run_app(
                 cwd,
                 args.agent_stderr,
                 project_label,
                 worktree_label.clone(),
-                Some(entry.session_id),
+                Some(ResumeTarget {
+                    session_id: entry.session_id,
+                    title: session_title,
+                }),
                 Some(agent),
                 mode,
             )
@@ -574,7 +581,7 @@ async fn run_app(
     agent_stderr: Option<PathBuf>,
     project_label: String,
     worktree_label: Option<String>,
-    resume_session: Option<String>,
+    resume_target: Option<ResumeTarget>,
     initial_agent: Option<SelectedAgent>,
     mode: UiMode,
 ) -> Result<Option<String>> {
@@ -586,7 +593,7 @@ async fn run_app(
     // new-session requests (`/new` / Ctrl-N), while resumed sessions may provide
     // the agent chosen by `mj resume` or fall back to the configured default.
     // Consume resume_session and initial_agent on the first iteration only.
-    let mut initial_resume = resume_session;
+    let mut initial_resume = resume_target;
     let mut initial_agent = initial_agent;
     let mut pick_agent = should_open_initial_agent_picker(&cfg, initial_agent.as_ref());
     loop {
@@ -624,8 +631,9 @@ async fn run_app(
             HeaderLabels {
                 project: project_label.clone(),
                 worktree: worktree_label.clone(),
+                session_title: resume.as_ref().and_then(|target| target.title.clone()),
             },
-            resume,
+            resume.as_ref().map(|target| target.session_id.clone()),
             mode,
         )
         .await?;
@@ -644,8 +652,8 @@ async fn run_app(
                     session::list_sessions(&agent, cwd.clone(), agent_stderr.as_deref()).await?;
 
                 match session_picker_action(run_session_picker_once(sessions).await?, session_id) {
-                    SessionPickerAction::Resume(session_id) => {
-                        initial_resume = Some(session_id);
+                    SessionPickerAction::Resume { session_id, title } => {
+                        initial_resume = Some(ResumeTarget { session_id, title });
                         initial_agent = Some(agent);
                         continue;
                     }
@@ -658,8 +666,17 @@ async fn run_app(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionPickerAction {
-    Resume(String),
+    Resume {
+        session_id: String,
+        title: Option<String>,
+    },
     Exit(Option<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResumeTarget {
+    session_id: String,
+    title: Option<String>,
 }
 
 fn session_picker_action(
@@ -667,9 +684,15 @@ fn session_picker_action(
     current_session_id: Option<String>,
 ) -> SessionPickerAction {
     match outcome {
-        session::ResumeOutcome::Selected(entry) => SessionPickerAction::Resume(entry.session_id),
+        session::ResumeOutcome::Selected(entry) => SessionPickerAction::Resume {
+            session_id: entry.session_id,
+            title: entry.title,
+        },
         session::ResumeOutcome::Cancelled => match current_session_id {
-            Some(session_id) => SessionPickerAction::Resume(session_id),
+            Some(session_id) => SessionPickerAction::Resume {
+                session_id,
+                title: None,
+            },
             None => SessionPickerAction::Exit(None),
         },
     }
@@ -1408,7 +1431,10 @@ mod tests {
 
         assert_eq!(
             action,
-            SessionPickerAction::Resume("current-session".to_string())
+            SessionPickerAction::Resume {
+                session_id: "current-session".to_string(),
+                title: None,
+            }
         );
     }
 
@@ -1425,7 +1451,7 @@ mod tests {
             session::ResumeOutcome::Selected(session::SessionEntry {
                 session_id: "selected-session".into(),
                 cwd: PathBuf::from("/tmp/project"),
-                title: None,
+                title: Some("My selected session".to_string()),
                 updated_at: None,
             }),
             Some("current-session".to_string()),
@@ -1433,7 +1459,10 @@ mod tests {
 
         assert_eq!(
             action,
-            SessionPickerAction::Resume("selected-session".to_string())
+            SessionPickerAction::Resume {
+                session_id: "selected-session".to_string(),
+                title: Some("My selected session".to_string()),
+            }
         );
     }
 

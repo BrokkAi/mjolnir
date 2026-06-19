@@ -78,6 +78,7 @@ pub enum UiMode {
 pub struct HeaderLabels {
     pub project: String,
     pub worktree: Option<String>,
+    pub session_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,6 +351,11 @@ async fn ui_loop(
     state.set_prompt_history(initial_history);
     state.project_label = header_labels.project;
     state.worktree_label = header_labels.worktree;
+    if let Some(title) = header_labels.session_title
+        && !title.trim().is_empty()
+    {
+        state.session_title = Some(title);
+    }
     if let Some(label) = initial_agent_label {
         state.agent_label = label;
     }
@@ -3389,23 +3395,27 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if let Some(title) = state.session_title.as_deref() {
         let title = title.trim();
         if !title.is_empty() {
-            let max_width = match width {
-                0..=89 => 18,
-                90..=139 => 30,
-                140..=179 => 42,
-                _ => 56,
-            };
-            spans.push(Span::raw("   "));
-            spans.push(Span::styled(
-                compact_middle_display(title, max_width),
-                Style::default()
-                    .fg(Color::LightYellow)
-                    .add_modifier(Modifier::ITALIC),
-            ));
+            let separator_width = 3;
+            let max_width = width
+                .saturating_sub(spans_display_width(&spans))
+                .saturating_sub(separator_width);
+            if max_width > 0 {
+                spans.push(Span::raw("   "));
+                spans.push(Span::styled(
+                    compact_middle_display(title, max_width),
+                    Style::default()
+                        .fg(Color::LightYellow)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+            }
         }
     }
     let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, inner);
+}
+
+fn spans_display_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| span.content.width()).sum()
 }
 
 fn compact_middle_display(text: &str, max_width: usize) -> String {
@@ -5911,6 +5921,27 @@ mod tests {
         assert!(
             rendered.contains("Review payment flow"),
             "rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn header_uses_remaining_width_for_long_session_title() {
+        let mut state = AppState::new();
+        state.agent_label = "codex-acp".to_string();
+        state.project_label = "~/code/mjolnir".to_string();
+        let title = "Investigate inline prompt title spacing and streaming status rendering";
+        state.session_title = Some(title.to_string());
+        let backend = TestBackend::new(180, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains(title),
+            "wide headers should render the full session title:\n{rendered}"
         );
     }
 
