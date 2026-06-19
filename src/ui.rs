@@ -458,18 +458,26 @@ async fn ui_loop(
                         drain_queued_prompt(&mut state, cmd_tx);
                         if force_repair_for_event {
                             force_inline_repair = true;
-                            sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
-                            let repaired = repair_inline_viewport(
-                                terminal,
-                                &mut state,
-                                &mut transcript_scroll,
-                                InlineRepairMode::Hard,
-                            );
-                            let now = Instant::now();
-                            last_inline_repair = now;
-                            if repaired {
-                                last_draw = now;
-                                force_inline_repair = false;
+                            // Defer the repair while a resize reflow is pending:
+                            // the reflow rebuilds the viewport from transcript
+                            // state, and the deferred repair path picks up
+                            // `force_inline_repair` afterward. Repairing now
+                            // would paint at mid-resize geometry that the reflow
+                            // immediately discards.
+                            if !inline_resize_reflow.is_pending() {
+                                sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
+                                let repaired = repair_inline_viewport(
+                                    terminal,
+                                    &mut state,
+                                    &mut transcript_scroll,
+                                    InlineRepairMode::Hard,
+                                );
+                                let now = Instant::now();
+                                last_inline_repair = now;
+                                if repaired {
+                                    last_draw = now;
+                                    force_inline_repair = false;
+                                }
                             }
                         }
                         post_terminal_notification(
@@ -984,6 +992,14 @@ fn reset_inline_terminal_for_reflow(
         .backend_mut()
         .write_all(b"\x1b[r\x1b[0m")
         .context("reset terminal state for resize reflow")?;
+    // Purge (`\x1b[3J`) drops the scrollback, not just the visible screen.
+    // This deliberately discards the inline transcript rows we previously
+    // pushed up with `insert_before`: the terminal hard-wrapped them at the
+    // old width and would otherwise reflow them into garbled rows. We rebuild
+    // them from transcript state at the new width below. Tradeoff: any
+    // pre-existing terminal content above the inline viewport (shell history,
+    // earlier command output) is purged too and is not restored — only
+    // Mjolnir's transcript is replayed. Tracked in BrokkAi/mjolnir#195.
     execute!(
         terminal.backend_mut(),
         CrosstermClear(CrosstermClearType::All),
