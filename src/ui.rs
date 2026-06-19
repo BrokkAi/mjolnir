@@ -20,11 +20,12 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    Clear as CrosstermClear, ClearType as CrosstermClearType, EnterAlternateScreen,
+    LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
 use ratatui::backend::{Backend, ClearType};
-use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
@@ -65,6 +66,7 @@ const PASTE_BURST_IDLE_TIMEOUT: Duration = Duration::from_millis(16);
 const PASTE_BURST_MIN_CHARS: usize = 3;
 const NOTIFICATION_PREVIEW_CHARS: usize = 80;
 const VOICE_INPUT_SUPPORTED: bool = cfg!(not(target_os = "android"));
+const INLINE_RESIZE_REFLOW_DEBOUNCE: Duration = Duration::from_millis(75);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {
@@ -165,6 +167,42 @@ impl TranscriptSink {
         );
         self.emitted_entries = stable_entries;
         lines
+    }
+
+    fn mark_emitted(&mut self, entries: usize) {
+        self.emitted_entries = entries;
+    }
+}
+
+#[derive(Debug, Default)]
+struct InlineResizeReflow {
+    last_observed_size: Option<Size>,
+    pending_until: Option<Instant>,
+}
+
+impl InlineResizeReflow {
+    fn note_resize(&mut self, size: Size, now: Instant) {
+        if self.last_observed_size == Some(size) {
+            return;
+        }
+        self.last_observed_size = Some(size);
+        self.pending_until = Some(now + INLINE_RESIZE_REFLOW_DEBOUNCE);
+    }
+
+    fn is_pending(&self) -> bool {
+        self.pending_until.is_some()
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        self.pending_until.is_some_and(|deadline| now >= deadline)
+    }
+
+    fn waiting(&self, now: Instant) -> bool {
+        self.pending_until.is_some_and(|deadline| now < deadline)
+    }
+
+    fn clear(&mut self) {
+        self.pending_until = None;
     }
 }
 
@@ -317,6 +355,7 @@ async fn ui_loop(
     }
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut transcript_sink = TranscriptSink::default();
+    let mut inline_resize_reflow = InlineResizeReflow::default();
     let mut notification_backend = TerminalNotificationBackend::detect();
     let mut crossterm_events = EventStream::new();
     let (dictation_tx, mut dictation_rx) = mpsc::unbounded_channel::<DictationEvent>();
@@ -344,6 +383,17 @@ async fn ui_loop(
             maybe_ct = crossterm_events.next() => {
                 match maybe_ct {
                     Some(Ok(ev)) => {
+                        if mode == UiMode::InlineChat
+                            && let CtEvent::Resize(width, height) = &ev
+                        {
+                            inline_resize_reflow.note_resize(
+                                Size {
+                                    width: *width,
+                                    height: *height,
+                                },
+                                Instant::now(),
+                            );
+                        }
                         if should_force_inline_repair_for_event(mode, &state, &ev) {
                             force_inline_repair = true;
                         }
@@ -451,7 +501,9 @@ async fn ui_loop(
             frame_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         }
 
-        if should_attempt_inline_repair_before_flush(force_inline_repair, mode, &state) {
+        if !inline_resize_reflow.is_pending()
+            && should_attempt_inline_repair_before_flush(force_inline_repair, mode, &state)
+        {
             force_inline_repair = false;
             sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
             let repaired = repair_inline_viewport(
@@ -470,10 +522,23 @@ async fn ui_loop(
             }
         }
 
+        if maybe_run_inline_resize_reflow(
+            terminal,
+            &mut inline_resize_reflow,
+            &mut transcript_sink,
+            &state,
+            &mut inline_height,
+        )? {
+            dirty = true;
+        }
+
         // Pause scrollback flushing while the full-transcript reader owns the
         // viewport: `insert_before` would scroll the terminal under the user
         // mid-read. Entries that go stable meanwhile are flushed on close.
-        if mode == UiMode::InlineChat && !state.transcript_viewer {
+        if mode == UiMode::InlineChat
+            && !state.transcript_viewer
+            && !inline_resize_reflow.is_pending()
+        {
             flush_transcript_to_scrollback(terminal, &mut transcript_sink, &state)?;
         }
 
@@ -493,7 +558,7 @@ async fn ui_loop(
             return Ok((reason, state.session_id.clone(), state.prompt_history()));
         }
 
-        if force_soft_inline_repair {
+        if force_soft_inline_repair && !inline_resize_reflow.is_pending() {
             force_soft_inline_repair = false;
             sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
             let repaired = repair_inline_viewport(
@@ -512,12 +577,14 @@ async fn ui_loop(
             }
         }
 
-        if should_attempt_inline_repair(
-            force_inline_repair,
-            mode,
-            &state,
-            last_inline_repair.elapsed(),
-        ) {
+        if !inline_resize_reflow.is_pending()
+            && should_attempt_inline_repair(
+                force_inline_repair,
+                mode,
+                &state,
+                last_inline_repair.elapsed(),
+            )
+        {
             force_inline_repair = false;
             sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
             let repaired = repair_inline_viewport(
@@ -542,6 +609,9 @@ async fn ui_loop(
         // actually paces the redraws; the timer arm is the wake-up
         // source when idle.
         if dirty && last_draw.elapsed() >= frame_budget {
+            if mode == UiMode::InlineChat && inline_resize_reflow.waiting(Instant::now()) {
+                continue;
+            }
             if mode == UiMode::InlineChat {
                 sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
             }
@@ -851,6 +921,101 @@ fn flush_transcript_to_scrollback(
     if lines.is_empty() {
         return Ok(());
     }
+    insert_lines_before_inline_viewport(terminal, lines, width)
+}
+
+fn maybe_run_inline_resize_reflow(
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
+    reflow: &mut InlineResizeReflow,
+    sink: &mut TranscriptSink,
+    state: &AppState,
+    inline_height: &mut u16,
+) -> Result<bool> {
+    if !reflow.is_due(Instant::now()) {
+        return Ok(false);
+    }
+    reflow.clear();
+    rebuild_inline_scrollback(terminal, sink, state, inline_height)?;
+    Ok(true)
+}
+
+fn rebuild_inline_scrollback(
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
+    sink: &mut TranscriptSink,
+    state: &AppState,
+    inline_height: &mut u16,
+) -> Result<()> {
+    let size = match terminal.size() {
+        Ok(size) => size,
+        Err(e) if is_cursor_position_timeout_io(&e) => {
+            trace_inline_cursor_position_timeout("resize reflow size query", &e);
+            return Ok(());
+        }
+        Err(e) => return Err(e).context("query terminal size for resize reflow"),
+    };
+    if size.width == 0 || size.height == 0 {
+        return Ok(());
+    }
+
+    let desired_height = desired_inline_height(state, size);
+    let stable_entries = stable_transcript_entry_count(state);
+    let lines = render_transcript_entry_range(
+        state,
+        size.width,
+        0..stable_entries,
+        transcript_collapse_limit(state),
+    );
+
+    reset_inline_terminal_for_reflow(terminal, desired_height, size)?;
+    *inline_height = desired_height;
+    sink.mark_emitted(stable_entries);
+    insert_lines_before_inline_viewport(terminal, lines, size.width)
+}
+
+fn reset_inline_terminal_for_reflow(
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
+    desired_height: u16,
+    size: Size,
+) -> Result<()> {
+    let height = desired_height.min(size.height).max(1);
+    let origin = Position::new(0, size.height.saturating_sub(height));
+
+    terminal
+        .backend_mut()
+        .write_all(b"\x1b[r\x1b[0m")
+        .context("reset terminal state for resize reflow")?;
+    execute!(
+        terminal.backend_mut(),
+        CrosstermClear(CrosstermClearType::All),
+        CrosstermClear(CrosstermClearType::Purge)
+    )
+    .context("clear terminal for resize reflow")?;
+    terminal
+        .backend_mut()
+        .set_cursor_position(origin)
+        .context("position inline viewport for resize reflow")?;
+    Write::flush(terminal.backend_mut()).context("flush resize reflow clear")?;
+
+    let backend = TrackedBackend::with_cursor_position(io::stdout(), origin);
+    let next = Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Inline(height),
+        },
+    )
+    .context("recreate inline terminal for resize reflow")?;
+    *terminal = next;
+    Ok(())
+}
+
+fn insert_lines_before_inline_viewport(
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
+    lines: Vec<Line<'static>>,
+    width: u16,
+) -> Result<()> {
+    if lines.is_empty() || width == 0 {
+        return Ok(());
+    }
     let height = Paragraph::new(lines.clone())
         .wrap(Wrap { trim: false })
         .line_count(width)
@@ -869,7 +1034,7 @@ fn flush_transcript_to_scrollback(
                 trace_inline_cursor_position_timeout("transcript flush", &e);
                 Ok(())
             } else {
-                Err(e).context("flush transcript to scrollback")
+                Err(e).context("insert transcript lines into scrollback")
             }
         })?;
     Ok(())
@@ -6887,6 +7052,55 @@ mod tests {
             .map(line_text)
             .collect();
         assert_eq!(second, vec!["second", ""]);
+    }
+
+    #[test]
+    fn transcript_sink_can_resync_after_resize_replay() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        state.push_system_message("first");
+        state.push_system_message("second");
+        sink.mark_emitted(stable_transcript_entry_count(&state));
+
+        assert!(sink.pending_lines(&state, 80).is_empty());
+
+        state.push_system_message("third");
+        let pending: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(pending, vec!["third", ""]);
+    }
+
+    #[test]
+    fn inline_resize_reflow_debounces_until_terminal_size_settles() {
+        let mut reflow = InlineResizeReflow::default();
+        let start = Instant::now();
+
+        reflow.note_resize(
+            Size {
+                width: 120,
+                height: 40,
+            },
+            start,
+        );
+        assert!(reflow.is_pending());
+        assert!(reflow.waiting(start + INLINE_RESIZE_REFLOW_DEBOUNCE / 2));
+
+        reflow.note_resize(
+            Size {
+                width: 100,
+                height: 40,
+            },
+            start + INLINE_RESIZE_REFLOW_DEBOUNCE / 2,
+        );
+        assert!(!reflow.is_due(start + INLINE_RESIZE_REFLOW_DEBOUNCE));
+        assert!(reflow.is_due(start + INLINE_RESIZE_REFLOW_DEBOUNCE * 2));
+
+        reflow.clear();
+        assert!(!reflow.is_pending());
     }
 
     #[test]
