@@ -3,8 +3,7 @@
 //! A worktree session clones the current project checkout into a linked
 //! Git worktree below `<project>/.mjolnir/worktrees/` and points the ACP
 //! session at the corresponding directory there. The directory should be
-//! ignored by the main checkout so the nested worktree does not show up
-//! as untracked content.
+//! ignored so the nested worktree does not show up as untracked content.
 
 use std::ffi::OsStr;
 use std::io::{BufRead, Write};
@@ -55,8 +54,9 @@ pub fn create_for_cwd_prompting(
     output: &mut impl Write,
 ) -> Result<CreatedWorktree> {
     let project_root = git_toplevel(cwd)?;
-    prompt_to_ignore_worktrees(&project_root, input, output)?;
-    create_for_project_cwd(&project_root, cwd)
+    let created = create_for_project_cwd(&project_root, cwd)?;
+    prompt_to_ignore_worktrees(&created.worktree_root, input, output)?;
+    Ok(created)
 }
 
 fn create_for_project_cwd(project_root: &Path, cwd: &Path) -> Result<CreatedWorktree> {
@@ -101,7 +101,6 @@ pub fn open_existing_for_cwd_prompting(
     output: &mut impl Write,
 ) -> Result<CreatedWorktree> {
     let project_root = git_toplevel(cwd)?;
-    prompt_to_ignore_worktrees(&project_root, input, output)?;
 
     let wdir = worktrees_dir(&project_root);
     // Try short name first (most common), then treat as a cwd-relative
@@ -152,6 +151,8 @@ pub fn open_existing_for_cwd_prompting(
         std::fs::create_dir_all(&session_cwd)
             .with_context(|| format!("create session cwd {}", session_cwd.display()))?;
     }
+
+    prompt_to_ignore_worktrees(&worktree_root, input, output)?;
 
     Ok(CreatedWorktree {
         project_root,
@@ -233,11 +234,11 @@ fn remove_worktree(project_root: &Path, worktree_root: &Path) -> Result<()> {
 }
 
 fn prompt_to_ignore_worktrees(
-    project_root: &Path,
+    checkout_root: &Path,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<()> {
-    if git_check_ignores_worktrees(project_root)? {
+    if git_check_ignores_worktrees(checkout_root)? {
         return Ok(());
     }
 
@@ -252,8 +253,8 @@ fn prompt_to_ignore_worktrees(
     let mut answer = String::new();
     input.read_line(&mut answer)?;
     if is_yes(answer.trim()) {
-        append_gitignore_entry(project_root)?;
-        if !git_check_ignores_worktrees(project_root)? {
+        append_gitignore_entry(checkout_root)?;
+        if !git_check_ignores_worktrees(checkout_root)? {
             bail!("added {WORKTREE_IGNORE_ENTRY} to .gitignore, but Git still does not ignore it");
         }
         writeln!(output, "Added {WORKTREE_IGNORE_ENTRY} to .gitignore.")?;
@@ -308,8 +309,8 @@ fn git_check_ignores_worktrees(project_root: &Path) -> Result<bool> {
     }
 }
 
-fn append_gitignore_entry(project_root: &Path) -> Result<()> {
-    let path = project_root.join(".gitignore");
+fn append_gitignore_entry(checkout_root: &Path) -> Result<()> {
+    let path = checkout_root.join(".gitignore");
     let existing = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -527,6 +528,30 @@ mod tests {
         assert!(git_check_ignores_worktrees(dir.path()).expect("check final ignore"));
         let text = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
         assert!(text.ends_with("# Mjolnir linked worktrees\n.mjolnir/worktrees/\n"));
+    }
+
+    #[test]
+    fn create_prompt_appends_gitignore_in_created_worktree_not_parent_checkout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+        std::fs::write(dir.path().join("file.txt"), "hello").expect("write file");
+        run_git(dir.path(), [OsStr::new("add"), OsStr::new(".")]).expect("git add");
+        commit_all(dir.path());
+
+        let mut input = Cursor::new(b"yes\n".to_vec());
+        let mut output = Vec::new();
+        let created =
+            create_for_cwd_prompting(dir.path(), &mut input, &mut output).expect("create worktree");
+
+        assert!(
+            !dir.path().join(".gitignore").exists(),
+            "parent checkout should not be dirtied by the ignore prompt"
+        );
+        let worktree_gitignore =
+            std::fs::read_to_string(created.worktree_root.join(".gitignore")).expect("gitignore");
+        assert!(worktree_gitignore.contains(".mjolnir/worktrees/"));
+        assert!(git_check_ignores_worktrees(&created.worktree_root).expect("check worktree"));
+        assert!(!git_check_ignores_worktrees(dir.path()).expect("check parent"));
     }
 
     #[test]
