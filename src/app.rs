@@ -523,6 +523,8 @@ pub struct AppState {
     /// Timing for the active or most recently completed prompt turn.
     turn_started_at: Option<Instant>,
     last_turn_elapsed: Option<Duration>,
+    /// Time since the current connection lifecycle state was entered.
+    connection_state_started_at: Instant,
     /// Last token/context usage reported by the agent.
     pub token_usage: TokenUsage,
     /// Slash-command autocomplete state, recomputed on every input edit.
@@ -635,6 +637,7 @@ pub struct Autocomplete {
 
 impl AppState {
     pub fn new() -> Self {
+        let now = Instant::now();
         Self {
             agent_label: String::new(),
             session_id: None,
@@ -677,6 +680,7 @@ impl AppState {
             voice_input_level: None,
             turn_started_at: None,
             last_turn_elapsed: None,
+            connection_state_started_at: now,
             token_usage: TokenUsage::default(),
             autocomplete: Autocomplete::default(),
             help_overlay: false,
@@ -889,6 +893,17 @@ impl AppState {
         self.last_turn_elapsed
     }
 
+    pub fn connection_state_elapsed(&self) -> Duration {
+        self.connection_state_started_at.elapsed()
+    }
+
+    fn set_connection_state(&mut self, state: ConnectionState) {
+        if self.connection_state != state {
+            self.connection_state = state;
+            self.connection_state_started_at = Instant::now();
+        }
+    }
+
     fn set_status_line(&mut self, kind: StatusKind, text: impl Into<String>) {
         let text = text.into();
         self.status_line = Some(match kind {
@@ -926,7 +941,7 @@ impl AppState {
         // since the channel-drop that triggers this method follows the
         // Fatal event by design.
         if self.connection_state != ConnectionState::Fatal {
-            self.connection_state = ConnectionState::Closed;
+            self.set_connection_state(ConnectionState::Closed);
         }
 
         let is_fatal = matches!(
@@ -948,12 +963,12 @@ impl AppState {
     /// prompt. Idempotent and only meaningful while `Streaming`.
     pub fn mark_cancelling(&mut self) {
         if self.connection_state == ConnectionState::Streaming {
-            self.connection_state = ConnectionState::Cancelling;
+            self.set_connection_state(ConnectionState::Cancelling);
         }
     }
 
     pub fn mark_forking(&mut self) {
-        self.connection_state = ConnectionState::Forking;
+        self.set_connection_state(ConnectionState::Forking);
         self.turn_started_at = Some(Instant::now());
         self.last_turn_elapsed = None;
         self.autocomplete = Autocomplete::default();
@@ -1045,7 +1060,7 @@ impl AppState {
         }
         self.reset_history_navigation();
         self.bump_transcript_revision();
-        self.connection_state = ConnectionState::Streaming;
+        self.set_connection_state(ConnectionState::Streaming);
         self.turn_started_at = Some(Instant::now());
         self.last_turn_elapsed = None;
         self.input_cursor = 0;
@@ -1320,14 +1335,14 @@ impl AppState {
                 self.prompt_images_supported = prompt_images_supported;
                 self.session_fork_supported = session_fork_supported;
                 install_builtin_commands(&mut self.available_commands, session_fork_supported);
-                self.connection_state = ConnectionState::Initializing;
+                self.set_connection_state(ConnectionState::Initializing);
             }
             UiEvent::SessionStarted { session_id, .. } => {
                 if self.connection_state == ConnectionState::Forking {
                     self.finish_turn_timer();
                 }
                 self.session_id = Some(session_id);
-                self.connection_state = ConnectionState::Ready;
+                self.set_connection_state(ConnectionState::Ready);
             }
             UiEvent::SessionUpdate(u) => {
                 self.apply_session_update(u);
@@ -1395,8 +1410,8 @@ impl AppState {
             }
             UiEvent::SessionForkFailed { message } => {
                 if self.connection_state == ConnectionState::Forking {
-                    self.connection_state = ConnectionState::Ready;
                     self.finish_turn_timer();
+                    self.set_connection_state(ConnectionState::Ready);
                 }
                 self.record_status_message(StatusKind::Warning, message);
                 self.update_autocomplete();
@@ -1408,7 +1423,7 @@ impl AppState {
                 self.record_status_message(StatusKind::Info, msg);
             }
             UiEvent::Fatal(msg) => {
-                self.connection_state = ConnectionState::Fatal;
+                self.set_connection_state(ConnectionState::Fatal);
                 self.record_status_message(StatusKind::Fatal, msg);
                 self.mark_runtime_closed();
             }
@@ -1427,7 +1442,7 @@ impl AppState {
             self.connection_state,
             ConnectionState::Streaming | ConnectionState::Cancelling
         ) {
-            self.connection_state = ConnectionState::Ready;
+            self.set_connection_state(ConnectionState::Ready);
         }
     }
 

@@ -3352,7 +3352,6 @@ fn inline_config_view_line_count(state: &AppState, width: u16) -> usize {
 fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let inner = area;
 
-    let conn_color = connection_state_color(state.connection_state);
     let width = area.width as usize;
     let mut spans = vec![
         Span::styled(
@@ -3383,26 +3382,10 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ));
         spans.push(Span::raw("   "));
     }
-    if should_show_spinner(state) {
-        spans.push(Span::styled(
-            spinner_frame(),
-            Style::default().fg(conn_color),
-        ));
-        spans.push(Span::raw(" "));
-    }
     spans.push(Span::styled(
-        connection_state_label(state),
-        Style::default().fg(conn_color),
+        header_token_usage_label(state, width),
+        Style::default().fg(Color::Magenta),
     ));
-    spans.extend([
-        Span::raw("   "),
-        Span::styled(turn_elapsed_label(state), Style::default().fg(Color::Green)),
-        Span::raw("   "),
-        Span::styled(
-            header_token_usage_label(state, width),
-            Style::default().fg(Color::Magenta),
-        ),
-    ]);
     if let Some(title) = state.session_title.as_deref() {
         let title = title.trim();
         if !title.is_empty() {
@@ -3470,7 +3453,7 @@ fn take_display_suffix(text: &str, max_width: usize) -> String {
 
 pub(crate) fn connection_state_label(state: &AppState) -> String {
     match state.connection_state {
-        ConnectionState::Launching => "launching...".to_string(),
+        ConnectionState::Launching => "launching".to_string(),
         ConnectionState::Initializing => "initializing".to_string(),
         ConnectionState::Ready => "ready".to_string(),
         ConnectionState::Streaming => "streaming".to_string(),
@@ -3478,18 +3461,6 @@ pub(crate) fn connection_state_label(state: &AppState) -> String {
         ConnectionState::Forking => "forking".to_string(),
         ConnectionState::Closed => "disconnected".to_string(),
         ConnectionState::Fatal => "fatal".to_string(),
-    }
-}
-
-fn connection_state_color(state: ConnectionState) -> Color {
-    match state {
-        ConnectionState::Launching | ConnectionState::Initializing => Color::LightYellow,
-        ConnectionState::Ready => Color::Green,
-        ConnectionState::Streaming => Color::Cyan,
-        ConnectionState::Cancelling => Color::Yellow,
-        ConnectionState::Forking => Color::LightYellow,
-        ConnectionState::Closed => Color::DarkGray,
-        ConnectionState::Fatal => Color::Red,
     }
 }
 
@@ -3503,13 +3474,16 @@ fn spinner_frame() -> &'static str {
     FRAMES[idx]
 }
 
-fn turn_elapsed_label(state: &AppState) -> String {
-    if let Some(elapsed) = state.active_turn_elapsed() {
-        format!("elapsed {}", format_duration(elapsed))
-    } else if let Some(elapsed) = state.last_turn_elapsed() {
-        format!("last {}", format_duration(elapsed))
-    } else {
-        "elapsed -".to_string()
+fn turn_elapsed_value_label(state: &AppState) -> Option<String> {
+    match state.connection_state {
+        ConnectionState::Launching | ConnectionState::Initializing => {
+            Some(format_duration(state.connection_state_elapsed()))
+        }
+        ConnectionState::Ready => state.last_turn_elapsed().map(format_duration),
+        ConnectionState::Streaming | ConnectionState::Cancelling | ConnectionState::Forking => {
+            state.active_turn_elapsed().map(format_duration)
+        }
+        ConnectionState::Closed | ConnectionState::Fatal => None,
     }
 }
 
@@ -4643,16 +4617,75 @@ fn voice_level_meter(level: Option<f32>) -> String {
     )
 }
 
-fn idle_prompt_title(voice_input_supported: bool, text_selection_hint: &str) -> String {
+fn prompt_status_text(state: &AppState) -> String {
+    if state.connection_state == ConnectionState::Ready {
+        "prompt".to_string()
+    } else {
+        connection_state_label(state)
+    }
+}
+
+fn prompt_spinner_slot(state: &AppState) -> &'static str {
+    if should_show_spinner(state) {
+        spinner_frame()
+    } else {
+        "-"
+    }
+}
+
+fn prompt_title_label(state: &AppState) -> String {
+    let status = prompt_status_text(state);
+    let spinner = prompt_spinner_slot(state);
+    if let Some(elapsed) = turn_elapsed_value_label(state) {
+        format!("{status} {spinner} {elapsed}")
+    } else {
+        format!("{status} {spinner}")
+    }
+}
+
+fn idle_prompt_title(
+    state: &AppState,
+    voice_input_supported: bool,
+    text_selection_hint: &str,
+) -> String {
+    let label = prompt_title_label(state);
     if voice_input_supported {
         format!(
-            " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " {label} (Enter send | {PROMPT_NEWLINE_HINT} newline | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     } else {
         format!(
-            " prompt (Enter send | {PROMPT_NEWLINE_HINT} newline | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " {label} (Enter send | {PROMPT_NEWLINE_HINT} newline | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     }
+}
+
+fn busy_prompt_title(state: &AppState) -> Option<String> {
+    let queued = state.queued_prompt_count();
+    let label = prompt_title_label(state);
+    let hint = match state.connection_state {
+        ConnectionState::Streaming | ConnectionState::Cancelling => {
+            if queued > 0 {
+                format!("{queued} queued | Enter queue next | Ctrl-C cancel current")
+            } else {
+                "Enter queue next | Ctrl-C cancel current".to_string()
+            }
+        }
+        ConnectionState::Forking => {
+            if queued > 0 {
+                format!("{queued} queued | Enter queue next")
+            } else {
+                "Enter queue next".to_string()
+            }
+        }
+        ConnectionState::Launching
+        | ConnectionState::Initializing
+        | ConnectionState::Ready
+        | ConnectionState::Closed
+        | ConnectionState::Fatal => return None,
+    };
+
+    Some(format!(" {label} ({hint}) "))
 }
 
 fn queued_prompt_row_count(state: &AppState) -> u16 {
@@ -4727,27 +4760,15 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     };
     let title = if state.runtime_closed {
         " runtime closed (/clear same agent | /new picker | Ctrl-C quit) ".to_string()
-    } else if state.connection_state == ConnectionState::Forking {
-        let queued = state.queued_prompt_count();
-        if queued > 0 {
-            format!(" forking session... ({queued} queued | Enter queue next) ")
-        } else {
-            " forking session... (Enter queue next) ".to_string()
-        }
-    } else if state.is_streaming() {
-        let queued = state.queued_prompt_count();
-        if queued > 0 {
-            format!(" streaming... ({queued} queued | Enter queue next | Ctrl-C cancel current) ")
-        } else {
-            " streaming... (Enter queue next | Ctrl-C cancel current) ".to_string()
-        }
+    } else if let Some(title) = busy_prompt_title(state) {
+        title
     } else if state.voice_input_active {
         format!(
             " 🎙 {} Ctrl-R stop ",
             voice_level_meter(state.voice_input_level)
         )
     } else {
-        idle_prompt_title(VOICE_INPUT_SUPPORTED, &text_selection_hint)
+        idle_prompt_title(state, VOICE_INPUT_SUPPORTED, &text_selection_hint)
     };
     let style = if state.runtime_closed {
         Style::default().fg(Color::DarkGray)
@@ -7701,6 +7722,7 @@ mod tests {
     #[test]
     fn input_title_includes_text_selection_shortcut() {
         let mut state = AppState::new();
+        state.connection_state = ConnectionState::Ready;
         let backend = TestBackend::new(180, 5);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
@@ -7709,11 +7731,17 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("prompt - (Enter send"),
+            "rendered:\n{rendered}"
+        );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
         assert!(
             rendered.contains("F12 select text"),
             "rendered:\n{rendered}"
         );
+        assert!(!rendered.contains("ready"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("elapsed"), "rendered:\n{rendered}");
 
         state.text_selection_mode = true;
         terminal
@@ -7729,7 +7757,8 @@ mod tests {
 
     #[test]
     fn inline_input_title_omits_text_selection_shortcut() {
-        let state = AppState::new();
+        let mut state = AppState::new();
+        state.connection_state = ConnectionState::Ready;
         let backend = TestBackend::new(140, 5);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
@@ -7738,9 +7767,97 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("prompt - (Enter send"),
+            "rendered:\n{rendered}"
+        );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
         assert!(rendered.contains("F10 help"), "rendered:\n{rendered}");
         assert!(!rendered.contains("F12"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("ready"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("elapsed"), "rendered:\n{rendered}");
+
+        state.record_user_prompt("hello".to_string());
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        terminal
+            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::InlineChat))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("prompt - 0s (Enter send"),
+            "rendered:\n{rendered}"
+        );
+        assert!(!rendered.contains("ready"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("elapsed"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn busy_input_title_replaces_prompt_label_with_spinner_status() {
+        let mut state = AppState::new();
+        let backend = TestBackend::new(120, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::InlineChat))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("launching"), "rendered:\n{rendered}");
+        assert!(rendered.contains("0s"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("prompt ("), "rendered:\n{rendered}");
+        assert!(!rendered.contains("elapsed"), "rendered:\n{rendered}");
+
+        state.record_user_prompt("hello".to_string());
+        terminal
+            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::InlineChat))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("streaming"), "rendered:\n{rendered}");
+        assert!(rendered.contains("0s"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("Ctrl-C cancel current"),
+            "rendered:\n{rendered}"
+        );
+        assert!(!rendered.contains("prompt ("), "rendered:\n{rendered}");
+        assert!(!rendered.contains("elapsed"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn header_omits_connection_status() {
+        let mut state = AppState::new();
+        let backend = TestBackend::new(140, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        state.connection_state = ConnectionState::Ready;
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(!rendered.contains("ready"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("elapsed"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains(&mjolnir_version_label()),
+            "rendered:\n{rendered}"
+        );
+
+        state.connection_state = ConnectionState::Streaming;
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(!rendered.contains("streaming"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("elapsed"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains(&mjolnir_version_label()),
+            "rendered:\n{rendered}"
+        );
     }
 
     #[test]
@@ -8727,7 +8844,9 @@ mod tests {
 
     #[test]
     fn android_prompt_title_hides_voice_shortcut() {
-        let title = idle_prompt_title(false, "");
+        let mut state = AppState::new();
+        state.connection_state = ConnectionState::Ready;
+        let title = idle_prompt_title(&state, false, "");
 
         assert!(!title.contains("Ctrl-R"));
         assert!(!title.contains("voice"));
