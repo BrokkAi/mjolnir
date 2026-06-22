@@ -555,17 +555,14 @@ fn embedded_node_root() -> PathBuf {
         .join("24")
 }
 
+#[cfg(windows)]
 fn embedded_node_bin_dir() -> Option<PathBuf> {
-    embedded_node_dir().map(|dir| {
-        #[cfg(windows)]
-        {
-            dir
-        }
-        #[cfg(not(windows))]
-        {
-            dir.join("bin")
-        }
-    })
+    embedded_node_dir()
+}
+
+#[cfg(not(windows))]
+fn embedded_node_bin_dir() -> Option<PathBuf> {
+    embedded_node_dir().map(|dir| dir.join("bin"))
 }
 
 fn embedded_node_dir() -> Option<PathBuf> {
