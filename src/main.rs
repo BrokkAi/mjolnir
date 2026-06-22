@@ -507,7 +507,10 @@ fn worktree_label(worktree: Option<&CreatedWorktree>) -> Option<String> {
 }
 
 fn project_label(cwd: &std::path::Path) -> String {
-    paths::display_path_with_tilde(cwd)
+    if let Ok(root) = paths::git_toplevel(cwd) {
+        return format!("mj:{}", paths::folder_label(&root));
+    }
+    format!("mj:{}", paths::folder_label(cwd))
 }
 
 fn handle_worktree_after_tui(worktree: Option<&CreatedWorktree>, mode: Option<UiMode>) -> bool {
@@ -1053,33 +1056,27 @@ mod tests {
     }
 
     #[test]
-    fn project_label_uses_full_worktree_session_path_with_tilde() {
-        let worktree = CreatedWorktree {
-            project_root: PathBuf::from("/Users/ryan/code/mjolnir"),
-            worktree_root: PathBuf::from("/Users/ryan/code/mjolnir/.mjolnir/worktrees/bold-willow"),
-            session_cwd: PathBuf::from(
-                "/Users/ryan/code/mjolnir/.mjolnir/worktrees/bold-willow/src",
-            ),
-            was_created: false,
-        };
+    fn project_label_uses_mj_prefix_and_directory_name_without_git() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let cwd = temp.path().join("src");
+        std::fs::create_dir(&cwd).expect("create cwd");
 
-        assert_eq!(
-            project_label(&worktree.session_cwd),
-            paths::display_path_with_tilde(&worktree.session_cwd)
-        );
+        assert_eq!(project_label(&cwd), "mj:src");
     }
 
     #[test]
-    fn project_label_uses_full_directory_path_inside_mjolnir_worktree() {
-        let cwd =
-            std::path::Path::new("/Users/ryan/code/mjolnir/.mjolnir/worktrees/bold-willow/src");
-        assert_eq!(project_label(cwd), paths::display_path_with_tilde(cwd));
-    }
+    fn project_label_uses_git_root_name_when_available() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("repo");
+        let cwd = root.join("nested");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(&root)
+            .output()
+            .expect("git init");
 
-    #[test]
-    fn project_label_uses_full_directory_path_without_worktree() {
-        let cwd = std::path::Path::new("/Users/ryan/code/mjolnir/src");
-        assert_eq!(project_label(cwd), paths::display_path_with_tilde(cwd));
+        assert_eq!(project_label(&cwd), "mj:repo");
     }
 
     #[test]

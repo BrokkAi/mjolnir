@@ -1,6 +1,9 @@
 //! Shared helpers for deriving human-readable labels from filesystem paths.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result, bail};
 
 /// Last path component as a display string, falling back to the full path when
 /// the path has no file name (e.g. the filesystem root).
@@ -46,17 +49,27 @@ pub fn normalize_spawn_program(program: PathBuf) -> PathBuf {
     program
 }
 
-/// Render a path for the UI, replacing the user's home directory prefix with
-/// `~` when possible so long paths stay a bit shorter.
-pub fn display_path_with_tilde(path: &Path) -> String {
-    let Some(home) = dirs::home_dir() else {
-        return path.display().to_string();
-    };
-    match path.strip_prefix(&home) {
-        Ok(relative) if relative.as_os_str().is_empty() => "~".to_string(),
-        Ok(relative) => format!("~/{}", relative.display()),
-        Err(_) => path.display().to_string(),
+/// The top-level directory of the Git worktree containing `cwd`.
+pub fn git_toplevel(cwd: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .with_context(|| format!("run git rev-parse in {}", cwd.display()))?;
+    if !output.status.success() {
+        bail!(
+            "git rev-parse failed in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
+    let stdout = String::from_utf8(output.stdout).context("git rev-parse output was not UTF-8")?;
+    let root = stdout.trim_end_matches(['\r', '\n']);
+    if root.is_empty() {
+        bail!("git rev-parse returned an empty project root");
+    }
+    Ok(PathBuf::from(root))
 }
 
 /// The directory containing a `.mjolnir` marker dir on the way up from `path`,
@@ -136,17 +149,6 @@ mod tests {
         assert_eq!(
             normalize_spawn_program(PathBuf::from("npx.ps1")),
             PathBuf::from("npx.ps1")
-        );
-    }
-
-    #[test]
-    fn display_path_with_tilde_shortens_home_prefix() {
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        assert_eq!(
-            display_path_with_tilde(&home.join("project/src")),
-            "~/project/src"
         );
     }
 

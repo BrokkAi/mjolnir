@@ -67,6 +67,7 @@ const PASTE_BURST_MIN_CHARS: usize = 3;
 const NOTIFICATION_PREVIEW_CHARS: usize = 80;
 const VOICE_INPUT_SUPPORTED: bool = cfg!(not(target_os = "android"));
 const INLINE_RESIZE_REFLOW_DEBOUNCE: Duration = Duration::from_millis(75);
+const SPINNER_FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {
@@ -3362,13 +3363,11 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let inner = area;
 
     let width = area.width as usize;
-    let mut spans = vec![
-        Span::styled(
-            mjolnir_version_label(),
-            Style::default().fg(Color::LightBlue),
-        ),
-        Span::raw("   "),
-    ];
+    let mut spans = vec![Span::styled(
+        header_brand_label(state),
+        Style::default().fg(Color::LightBlue),
+    )];
+    spans.push(Span::raw("   "));
     let agent_label = state.agent_label.trim();
     if !agent_label.is_empty() {
         spans.push(Span::styled(
@@ -3418,6 +3417,15 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     }
     let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, inner);
+}
+
+fn header_brand_label(state: &AppState) -> String {
+    let label = mjolnir_version_label();
+    if should_show_spinner(state) {
+        format!("{label} {}", spinner_frame())
+    } else {
+        label
+    }
 }
 
 fn compact_middle_display(text: &str, max_width: usize) -> String {
@@ -3477,13 +3485,12 @@ pub(crate) fn connection_state_label(state: &AppState) -> String {
 }
 
 fn spinner_frame() -> &'static str {
-    const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
     let idx = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| (duration.as_millis() / 100) as usize)
         .unwrap_or(0)
-        % FRAMES.len();
-    FRAMES[idx]
+        % SPINNER_FRAMES.len();
+    SPINNER_FRAMES[idx]
 }
 
 fn turn_elapsed_value_label(state: &AppState) -> Option<String> {
@@ -7868,7 +7875,7 @@ mod tests {
     }
 
     #[test]
-    fn header_omits_connection_status() {
+    fn header_omits_connection_status_but_shows_busy_spinner() {
         let mut state = AppState::new();
         let backend = TestBackend::new(140, 1);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -7885,6 +7892,10 @@ mod tests {
             rendered.contains(&mjolnir_version_label()),
             "rendered:\n{rendered}"
         );
+        assert!(
+            SPINNER_FRAMES.iter().all(|frame| !rendered.contains(frame)),
+            "idle header should not include a spinner:\n{rendered}"
+        );
 
         state.set_connection_state(ConnectionState::Streaming);
         terminal
@@ -7897,6 +7908,10 @@ mod tests {
         assert!(
             rendered.contains(&mjolnir_version_label()),
             "rendered:\n{rendered}"
+        );
+        assert!(
+            SPINNER_FRAMES.iter().any(|frame| rendered.contains(frame)),
+            "busy header should include a spinner:\n{rendered}"
         );
     }
 

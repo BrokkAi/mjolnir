@@ -13,6 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::paths;
+
 const WORKTREE_IGNORE_ENTRY: &str = ".mjolnir/worktrees/";
 
 /// Adjectives for random worktree names (adjective-noun style, like
@@ -269,25 +271,12 @@ fn prompt_to_ignore_worktrees(
 }
 
 fn git_toplevel(cwd: &Path) -> Result<PathBuf> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .with_context(|| format!("run git rev-parse in {}", cwd.display()))?;
-    if !output.status.success() {
-        bail!(
-            "--worktree requires a Git worktree; git rev-parse failed in {}: {}",
-            cwd.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let stdout = String::from_utf8(output.stdout).context("git rev-parse output was not UTF-8")?;
-    let root = stdout.trim_end_matches(['\r', '\n']);
-    if root.is_empty() {
-        bail!("git rev-parse returned an empty project root");
-    }
-    Ok(PathBuf::from(root))
+    paths::git_toplevel(cwd).map_err(|e| {
+        anyhow!(
+            "--worktree requires a Git worktree; git rev-parse failed in {}: {e:#}",
+            cwd.display()
+        )
+    })
 }
 
 fn git_check_ignores_worktrees(project_root: &Path) -> Result<bool> {
@@ -739,6 +728,8 @@ mod tests {
                 OsStr::new("user.name=Mjolnir Test"),
                 OsStr::new("-c"),
                 OsStr::new("user.email=mjolnir@example.invalid"),
+                OsStr::new("-c"),
+                OsStr::new("commit.gpgsign=false"),
                 OsStr::new("commit"),
                 OsStr::new("-am"),
                 OsStr::new("initial"),
