@@ -1354,16 +1354,18 @@ fn remote_qr_login_url(host: &str, token: &str) -> String {
 }
 
 fn render_login_qr(url: &str) -> Result<String> {
+    const QUIET_ZONE_MODULES: usize = 4;
+
     let qr = QrCode::new(url.as_bytes()).context("encode remote viewer QR code")?;
     let mut output = String::new();
-    for y in (0..qr.width()).step_by(2) {
-        for x in 0..qr.width() {
-            let top = qr[(x, y)] == Color::Dark;
-            let bottom = if y + 1 < qr.width() {
-                qr[(x, y + 1)] == Color::Dark
-            } else {
-                false
-            };
+    let qr_width = qr.width();
+    let total_width = qr_width + QUIET_ZONE_MODULES * 2;
+    let total_height = qr_width + QUIET_ZONE_MODULES * 2;
+
+    for y in (0..total_height).step_by(2) {
+        for x in 0..total_width {
+            let top = qr_module_is_dark(&qr, x, y, QUIET_ZONE_MODULES);
+            let bottom = qr_module_is_dark(&qr, x, y + 1, QUIET_ZONE_MODULES);
             let ch = match (top, bottom) {
                 (true, true) => '█',
                 (true, false) => '▀',
@@ -1375,6 +1377,16 @@ fn render_login_qr(url: &str) -> Result<String> {
         output.push('\n');
     }
     Ok(output)
+}
+
+fn qr_module_is_dark(qr: &QrCode, x: usize, y: usize, quiet_zone: usize) -> bool {
+    let Some(qr_x) = x.checked_sub(quiet_zone) else {
+        return false;
+    };
+    let Some(qr_y) = y.checked_sub(quiet_zone) else {
+        return false;
+    };
+    qr_x < qr.width() && qr_y < qr.width() && qr[(qr_x, qr_y)] == Color::Dark
 }
 
 /// Install the ring CryptoProvider so we do not depend on aws-lc-rs (which needs
@@ -4149,6 +4161,21 @@ mod tests {
         let rendered = render_login_qr("https://localhost:11921/#token=test").expect("qr");
         assert!(rendered.contains('█') || rendered.contains('▀') || rendered.contains('▄'));
         assert!(rendered.contains('\n'));
+    }
+
+    #[test]
+    fn render_login_qr_includes_quiet_zone() {
+        let rendered =
+            render_login_qr("https://localhost:11921/auth/login?code=123456").expect("qr");
+        let lines = rendered.lines().collect::<Vec<_>>();
+
+        assert!(lines.len() > 4);
+        assert!(lines[0].chars().all(|ch| ch == ' '));
+        assert!(lines[1].chars().all(|ch| ch == ' '));
+        for line in &lines {
+            assert!(line.starts_with("    "));
+            assert!(line.ends_with("    "));
+        }
     }
 
     #[cfg(unix)]
