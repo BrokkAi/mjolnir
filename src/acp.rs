@@ -30,6 +30,7 @@ use crate::event::{
     PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, TerminalOutputSnapshot,
     UiCommand, UiEvent,
 };
+use crate::install;
 use crate::paths::normalize_spawn_program;
 
 pub struct AcpRuntimeConfig {
@@ -83,6 +84,8 @@ pub enum LaunchError {
     },
     /// uvx was requested but uv could not be installed automatically.
     UvInstallFailed { source: String },
+    /// npx was requested but embedded Node could not be installed automatically.
+    NodeInstallFailed { source: String },
 }
 
 impl std::fmt::Display for LaunchError {
@@ -126,6 +129,11 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "uvx is required for this agent, but mj could not install uv automatically: {source}\n\
                  hint: install uv from https://docs.astral.sh/uv/getting-started/installation/ and relaunch mj"
+            ),
+            LaunchError::NodeInstallFailed { source } => write!(
+                f,
+                "npx is required for this agent, but mj could not install embedded Node 24 automatically: {source}\n\
+                 hint: install Node.js 24 from https://nodejs.org/en/download and relaunch mj"
             ),
         }
     }
@@ -321,12 +329,22 @@ async fn prepare_agent_command(
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
 ) -> std::result::Result<PreparedAgentCommand, LaunchError> {
     let command = normalize_spawn_program(command.to_path_buf());
-    if !is_program_name(&command, "uvx") {
-        return Ok(PreparedAgentCommand {
-            command,
-            env: HashMap::new(),
-        });
+    if is_program_name(&command, "uvx") {
+        return prepare_uvx_command(command, ui_tx).await;
     }
+    if is_program_name(&command, "npx") {
+        return prepare_npx_command(command, ui_tx).await;
+    }
+    Ok(PreparedAgentCommand {
+        command,
+        env: HashMap::new(),
+    })
+}
+
+async fn prepare_uvx_command(
+    command: PathBuf,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) -> std::result::Result<PreparedAgentCommand, LaunchError> {
     if let Some(path) = find_on_path(&command) {
         return Ok(PreparedAgentCommand {
             command: path,
@@ -351,6 +369,38 @@ async fn prepare_agent_command(
             "installer completed but uvx was not found at {}",
             embedded_uvx_path().display()
         ),
+    })
+}
+
+async fn prepare_npx_command(
+    command: PathBuf,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) -> std::result::Result<PreparedAgentCommand, LaunchError> {
+    if let Some(path) = find_on_path(&command) {
+        return Ok(PreparedAgentCommand {
+            command: path,
+            env: HashMap::new(),
+        });
+    }
+
+    let _ = ui_tx.send(UiEvent::Info(
+        "npx not found; installing embedded Node 24 for npx-based agents".to_string(),
+    ));
+    install_node24().await?;
+    let Some(npx_path) = embedded_npx_path() else {
+        return Err(LaunchError::NodeInstallFailed {
+            source: format!(
+                "installer completed but npx was not found under {}",
+                embedded_node_root().display()
+            ),
+        });
+    };
+    let _ = ui_tx.send(UiEvent::Info(
+        "embedded Node 24 installed; launching agent".to_string(),
+    ));
+    Ok(PreparedAgentCommand {
+        command: npx_path,
+        env: embedded_node_env(),
     })
 }
 
@@ -493,6 +543,157 @@ fn uv_install_command(bin_dir: &Path) -> Command {
         cmd.args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"]);
         cmd.env("UV_UNMANAGED_INSTALL", bin_dir);
         cmd
+    }
+}
+
+fn embedded_node_root() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("mj")
+        .join("runners")
+        .join("node")
+        .join("24")
+}
+
+fn embedded_node_bin_dir() -> Option<PathBuf> {
+    embedded_node_dir().map(|dir| {
+        #[cfg(windows)]
+        {
+            dir
+        }
+        #[cfg(not(windows))]
+        {
+            dir.join("bin")
+        }
+    })
+}
+
+fn embedded_node_dir() -> Option<PathBuf> {
+    let root = embedded_node_root();
+    let entries = std::fs::read_dir(root).ok()?;
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir() && embedded_npx_path_in_dir(path).is_some())
+}
+
+fn embedded_npx_path() -> Option<PathBuf> {
+    embedded_node_dir().and_then(|dir| embedded_npx_path_in_dir(&dir))
+}
+
+fn embedded_npx_path_in_dir(dir: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let path = dir.join("npx.cmd");
+        is_executable_file(&path).then_some(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let path = dir.join("bin").join("npx");
+        is_executable_file(&path).then_some(path)
+    }
+}
+
+fn embedded_node_env() -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    if let Some(bin_dir) = embedded_node_bin_dir() {
+        env.insert("PATH".to_string(), prepend_to_path(&bin_dir));
+    }
+    env
+}
+
+fn prepend_to_path(dir: &Path) -> String {
+    let mut paths = vec![dir.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(paths)
+        .unwrap_or_else(|_| dir.as_os_str().to_owned())
+        .to_string_lossy()
+        .into_owned()
+}
+
+async fn install_node24() -> std::result::Result<(), LaunchError> {
+    let root = embedded_node_root();
+    let sentinel = root.join(".installed");
+    if sentinel.exists() && embedded_npx_path().is_some() {
+        return Ok(());
+    }
+    tokio::fs::create_dir_all(&root)
+        .await
+        .map_err(|e| LaunchError::NodeInstallFailed {
+            source: format!("failed to create {}: {e}", root.display()),
+        })?;
+    let archive_url = node24_archive_url().await?;
+    let (tx, _rx) = mpsc::unbounded_channel::<install::Progress>();
+    install::download_and_extract(&archive_url, &root, &tx)
+        .await
+        .map_err(|e| LaunchError::NodeInstallFailed {
+            source: e.to_string(),
+        })?;
+    if embedded_npx_path().is_none() {
+        return Err(LaunchError::NodeInstallFailed {
+            source: format!("npx not found after extracting {archive_url}"),
+        });
+    }
+    tokio::fs::write(&sentinel, archive_url)
+        .await
+        .map_err(|e| LaunchError::NodeInstallFailed {
+            source: format!("failed to write {}: {e}", sentinel.display()),
+        })?;
+    Ok(())
+}
+
+async fn node24_archive_url() -> std::result::Result<String, LaunchError> {
+    let suffix = node24_archive_suffix().ok_or_else(|| LaunchError::NodeInstallFailed {
+        source: format!(
+            "unsupported platform for embedded Node 24: {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ),
+    })?;
+    let shasums_url = "https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt";
+    let body = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| LaunchError::NodeInstallFailed {
+            source: format!("build http client: {e}"),
+        })?
+        .get(shasums_url)
+        .send()
+        .await
+        .map_err(|e| LaunchError::NodeInstallFailed {
+            source: format!("GET {shasums_url}: {e}"),
+        })?
+        .error_for_status()
+        .map_err(|e| LaunchError::NodeInstallFailed {
+            source: format!("GET {shasums_url}: {e}"),
+        })?
+        .text()
+        .await
+        .map_err(|e| LaunchError::NodeInstallFailed {
+            source: format!("read {shasums_url}: {e}"),
+        })?;
+    let file = body
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .find(|file| file.ends_with(suffix))
+        .ok_or_else(|| LaunchError::NodeInstallFailed {
+            source: format!("Node 24 archive matching {suffix} not listed in SHASUMS256.txt"),
+        })?;
+    Ok(format!("https://nodejs.org/dist/latest-v24.x/{file}"))
+}
+
+fn node24_archive_suffix() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("linux-x64.tar.gz"),
+        ("linux", "aarch64") => Some("linux-arm64.tar.gz"),
+        ("macos", "x86_64") => Some("darwin-x64.tar.gz"),
+        ("macos", "aarch64") => Some("darwin-arm64.tar.gz"),
+        ("windows", "x86_64") => Some("win-x64.zip"),
+        ("windows", "aarch64") => Some("win-arm64.zip"),
+        _ => None,
     }
 }
 
@@ -3229,6 +3430,39 @@ mod tests {
             agent_stderr: None,
         };
         assert_run_reports_agent_exited(cfg).await;
+    }
+
+    #[test]
+    fn npx_program_detection_accepts_bare_npx_and_windows_extension() {
+        assert!(is_program_name(std::path::Path::new("npx"), "npx"));
+        assert!(is_program_name(std::path::Path::new("npx.cmd"), "npx"));
+        assert!(!is_program_name(
+            std::path::Path::new("/usr/bin/npx"),
+            "npx"
+        ));
+        assert!(!is_program_name(std::path::Path::new("uvx"), "npx"));
+    }
+
+    #[test]
+    fn node24_archive_suffix_matches_supported_platforms() {
+        let suffix = node24_archive_suffix();
+        match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64" | "aarch64")
+            | ("macos", "x86_64" | "aarch64")
+            | ("windows", "x86_64" | "aarch64") => assert!(suffix.is_some()),
+            _ => assert!(suffix.is_none()),
+        }
+    }
+
+    #[test]
+    fn node_install_failure_message_points_to_manual_install_docs() {
+        let text = LaunchError::NodeInstallFailed {
+            source: "network unavailable".to_string(),
+        }
+        .to_string();
+        assert!(text.contains("npx is required"));
+        assert!(text.contains("Node.js 24"));
+        assert!(text.contains("https://nodejs.org/en/download"));
     }
 
     #[test]

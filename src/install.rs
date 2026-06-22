@@ -87,7 +87,7 @@ fn resolve_cmd_path(dir: &Path, cmd: &str) -> Result<PathBuf> {
     Ok(canon_cmd)
 }
 
-async fn download_and_extract(
+pub(crate) async fn download_and_extract(
     url: &str,
     dest: &Path,
     progress_tx: &mpsc::UnboundedSender<Progress>,

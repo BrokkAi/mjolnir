@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
