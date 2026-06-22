@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use agent_client_protocol::schema::{
     CancelNotification, ClientCapabilities, ContentBlock, CreateTerminalRequest,
@@ -80,6 +81,8 @@ pub enum LaunchError {
     SessionCreateFailed {
         source: agent_client_protocol::Error,
     },
+    /// uvx was requested but uv could not be installed automatically.
+    UvInstallFailed { source: String },
 }
 
 impl std::fmt::Display for LaunchError {
@@ -118,6 +121,11 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "agent rejected session/new: {source}\n\
                  hint: verify --cwd is accessible to the agent"
+            ),
+            LaunchError::UvInstallFailed { source } => write!(
+                f,
+                "uvx is required for this agent, but mj could not install uv automatically: {source}\n\
+                 hint: install uv from https://docs.astral.sh/uv/getting-started/installation/ and relaunch mj"
             ),
         }
     }
@@ -205,19 +213,24 @@ pub async fn run(
 ) -> Result<()> {
     let fatal_emitted = Arc::new(AtomicBool::new(false));
 
-    let (mut child, child_stdin, child_stdout) = match spawn_agent(
-        &cfg.command,
-        &cfg.args,
-        &cfg.env,
-        cfg.agent_stderr.as_deref(),
-    ) {
-        Ok(spawned) => spawned,
+    let command = match prepare_agent_command(&cfg.command, &ui_tx).await {
+        Ok(command) => command,
         Err(launch_err) => {
             let text = launch_err.to_string();
             emit_fatal(&ui_tx, &fatal_emitted, text.clone());
             return Err(anyhow::anyhow!(text));
         }
     };
+
+    let (mut child, child_stdin, child_stdout) =
+        match spawn_agent(&command, &cfg.args, &cfg.env, cfg.agent_stderr.as_deref()) {
+            Ok(spawned) => spawned,
+            Err(launch_err) => {
+                let text = launch_err.to_string();
+                emit_fatal(&ui_tx, &fatal_emitted, text.clone());
+                return Err(anyhow::anyhow!(text));
+            }
+        };
     // Snapshot the agent PID up front. It doubles as the process-group
     // id (Unix) / Windows process-group root, so we can still target
     // the entire descendant tree later even if `child.wait()` or
@@ -290,6 +303,145 @@ pub async fn run(
         emit_fatal(&ui_tx, &fatal_emitted, msg);
     }
     result
+}
+
+async fn prepare_agent_command(
+    command: &Path,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) -> std::result::Result<PathBuf, LaunchError> {
+    let command = normalize_spawn_program(command.to_path_buf());
+    if !is_program_name(&command, "uvx") {
+        return Ok(command);
+    }
+    if let Some(path) = find_on_path(&command) {
+        return Ok(path);
+    }
+
+    let _ = ui_tx.send(UiEvent::Info(
+        "uvx not found; installing uv for uvx-based agents".to_string(),
+    ));
+    install_uv().await?;
+    if let Some(path) = find_on_path(&command).or_else(default_uvx_path) {
+        let _ = ui_tx.send(UiEvent::Info("uv installed; launching agent".to_string()));
+        return Ok(path);
+    }
+    Err(LaunchError::UvInstallFailed {
+        source: "installer completed but uvx was not found".to_string(),
+    })
+}
+
+fn is_program_name(command: &Path, expected: &str) -> bool {
+    command.components().count() == 1 && command.file_stem().is_some_and(|name| name == expected)
+}
+
+fn find_on_path(command: &Path) -> Option<PathBuf> {
+    if command.components().count() != 1 {
+        return command.exists().then(|| command.to_path_buf());
+    }
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var).find_map(|dir| {
+        let candidate = dir.join(command);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            let extensions = std::env::var_os("PATHEXT")
+                .map(|v| {
+                    v.to_string_lossy()
+                        .split(';')
+                        .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| {
+                    ["com", "exe", "bat", "cmd"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                });
+            for ext in extensions {
+                let mut with_ext = candidate.clone();
+                with_ext.set_extension(ext);
+                if is_executable_file(&with_ext) {
+                    return Some(with_ext);
+                }
+            }
+        }
+        None
+    })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn default_uvx_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    #[cfg(windows)]
+    {
+        Some(home.join(".local").join("bin").join("uvx.exe"))
+            .filter(|path| is_executable_file(path))
+    }
+    #[cfg(not(windows))]
+    {
+        Some(home.join(".local").join("bin").join("uvx")).filter(|path| is_executable_file(path))
+    }
+}
+
+async fn install_uv() -> std::result::Result<(), LaunchError> {
+    let mut cmd = uv_install_command();
+    let output = tokio::time::timeout(Duration::from_secs(180), cmd.output())
+        .await
+        .map_err(|_| LaunchError::UvInstallFailed {
+            source: "installer timed out after 180 seconds".to_string(),
+        })?
+        .map_err(|e| LaunchError::UvInstallFailed {
+            source: format!("failed to start installer: {e}"),
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(LaunchError::UvInstallFailed {
+        source: command_failure_summary(&output),
+    })
+}
+
+fn uv_install_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "ByPass",
+            "-Command",
+            "irm https://astral.sh/uv/install.ps1 | iex",
+        ]);
+        cmd.env("UV_NO_MODIFY_PATH", "1");
+        cmd
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "curl -LsSf https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh",
+        ]);
+        cmd
+    }
+}
+
+fn command_failure_summary(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = stderr
+        .trim()
+        .lines()
+        .last()
+        .or_else(|| stdout.trim().lines().last())
+        .unwrap_or("no installer output");
+    format!("installer exited with {}; {detail}", output.status)
 }
 
 /// Run the full ACP client state machine over an arbitrary transport.
@@ -3013,6 +3165,27 @@ mod tests {
             agent_stderr: None,
         };
         assert_run_reports_agent_exited(cfg).await;
+    }
+
+    #[test]
+    fn uvx_program_detection_accepts_bare_uvx_and_windows_extension() {
+        assert!(is_program_name(std::path::Path::new("uvx"), "uvx"));
+        assert!(is_program_name(std::path::Path::new("uvx.exe"), "uvx"));
+        assert!(!is_program_name(
+            std::path::Path::new("/usr/bin/uvx"),
+            "uvx"
+        ));
+        assert!(!is_program_name(std::path::Path::new("npx"), "uvx"));
+    }
+
+    #[test]
+    fn uv_install_failure_message_points_to_manual_install_docs() {
+        let text = LaunchError::UvInstallFailed {
+            source: "network unavailable".to_string(),
+        }
+        .to_string();
+        assert!(text.contains("uvx is required"));
+        assert!(text.contains("https://docs.astral.sh/uv/getting-started/installation/"));
     }
 
     #[test]
