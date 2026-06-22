@@ -213,24 +213,30 @@ pub async fn run(
 ) -> Result<()> {
     let fatal_emitted = Arc::new(AtomicBool::new(false));
 
-    let command = match prepare_agent_command(&cfg.command, &ui_tx).await {
-        Ok(command) => command,
+    let prepared = match prepare_agent_command(&cfg.command, &ui_tx).await {
+        Ok(prepared) => prepared,
         Err(launch_err) => {
             let text = launch_err.to_string();
             emit_fatal(&ui_tx, &fatal_emitted, text.clone());
             return Err(anyhow::anyhow!(text));
         }
     };
+    let mut env = prepared.env;
+    env.extend(cfg.env.clone());
 
-    let (mut child, child_stdin, child_stdout) =
-        match spawn_agent(&command, &cfg.args, &cfg.env, cfg.agent_stderr.as_deref()) {
-            Ok(spawned) => spawned,
-            Err(launch_err) => {
-                let text = launch_err.to_string();
-                emit_fatal(&ui_tx, &fatal_emitted, text.clone());
-                return Err(anyhow::anyhow!(text));
-            }
-        };
+    let (mut child, child_stdin, child_stdout) = match spawn_agent(
+        &prepared.command,
+        &cfg.args,
+        &env,
+        cfg.agent_stderr.as_deref(),
+    ) {
+        Ok(spawned) => spawned,
+        Err(launch_err) => {
+            let text = launch_err.to_string();
+            emit_fatal(&ui_tx, &fatal_emitted, text.clone());
+            return Err(anyhow::anyhow!(text));
+        }
+    };
     // Snapshot the agent PID up front. It doubles as the process-group
     // id (Unix) / Windows process-group root, so we can still target
     // the entire descendant tree later even if `child.wait()` or
@@ -305,28 +311,46 @@ pub async fn run(
     result
 }
 
+struct PreparedAgentCommand {
+    command: PathBuf,
+    env: HashMap<String, String>,
+}
+
 async fn prepare_agent_command(
     command: &Path,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
-) -> std::result::Result<PathBuf, LaunchError> {
+) -> std::result::Result<PreparedAgentCommand, LaunchError> {
     let command = normalize_spawn_program(command.to_path_buf());
     if !is_program_name(&command, "uvx") {
-        return Ok(command);
+        return Ok(PreparedAgentCommand {
+            command,
+            env: HashMap::new(),
+        });
     }
     if let Some(path) = find_on_path(&command) {
-        return Ok(path);
+        return Ok(PreparedAgentCommand {
+            command: path,
+            env: embedded_uv_env(),
+        });
     }
 
     let _ = ui_tx.send(UiEvent::Info(
         "uvx not found; installing uv for uvx-based agents".to_string(),
     ));
     install_uv().await?;
-    if let Some(path) = find_on_path(&command).or_else(default_uvx_path) {
+    let uvx_path = embedded_uvx_path();
+    if is_executable_file(&uvx_path) {
         let _ = ui_tx.send(UiEvent::Info("uv installed; launching agent".to_string()));
-        return Ok(path);
+        return Ok(PreparedAgentCommand {
+            command: uvx_path,
+            env: embedded_uv_env(),
+        });
     }
     Err(LaunchError::UvInstallFailed {
-        source: "installer completed but uvx was not found".to_string(),
+        source: format!(
+            "installer completed but uvx was not found at {}",
+            embedded_uvx_path().display()
+        ),
     })
 }
 
@@ -376,21 +400,63 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-fn default_uvx_path() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn embedded_uv_root() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("mj")
+        .join("runners")
+        .join("uv")
+}
+
+fn embedded_uv_bin_dir() -> PathBuf {
+    embedded_uv_root().join("bin")
+}
+
+fn embedded_uvx_path() -> PathBuf {
     #[cfg(windows)]
     {
-        Some(home.join(".local").join("bin").join("uvx.exe"))
-            .filter(|path| is_executable_file(path))
+        embedded_uv_bin_dir().join("uvx.exe")
     }
     #[cfg(not(windows))]
     {
-        Some(home.join(".local").join("bin").join("uvx")).filter(|path| is_executable_file(path))
+        embedded_uv_bin_dir().join("uvx")
     }
 }
 
+fn embedded_uv_env() -> HashMap<String, String> {
+    let root = embedded_uv_root();
+    HashMap::from([
+        (
+            "UV_CACHE_DIR".to_string(),
+            root.join("cache").display().to_string(),
+        ),
+        (
+            "UV_TOOL_DIR".to_string(),
+            root.join("tools").display().to_string(),
+        ),
+        (
+            "UV_TOOL_BIN_DIR".to_string(),
+            root.join("tool-bin").display().to_string(),
+        ),
+        (
+            "UV_PYTHON_INSTALL_DIR".to_string(),
+            root.join("python").display().to_string(),
+        ),
+        (
+            "UV_PYTHON_BIN_DIR".to_string(),
+            root.join("python-bin").display().to_string(),
+        ),
+    ])
+}
+
 async fn install_uv() -> std::result::Result<(), LaunchError> {
-    let mut cmd = uv_install_command();
+    let bin_dir = embedded_uv_bin_dir();
+    tokio::fs::create_dir_all(&bin_dir)
+        .await
+        .map_err(|e| LaunchError::UvInstallFailed {
+            source: format!("failed to create {}: {e}", bin_dir.display()),
+        })?;
+    let mut cmd = uv_install_command(&bin_dir);
     let output = tokio::time::timeout(Duration::from_secs(180), cmd.output())
         .await
         .map_err(|_| LaunchError::UvInstallFailed {
@@ -407,7 +473,7 @@ async fn install_uv() -> std::result::Result<(), LaunchError> {
     })
 }
 
-fn uv_install_command() -> Command {
+fn uv_install_command(bin_dir: &Path) -> Command {
     #[cfg(windows)]
     {
         let mut cmd = Command::new("powershell");
@@ -418,16 +484,14 @@ fn uv_install_command() -> Command {
             "-Command",
             "irm https://astral.sh/uv/install.ps1 | iex",
         ]);
-        cmd.env("UV_NO_MODIFY_PATH", "1");
+        cmd.env("UV_UNMANAGED_INSTALL", bin_dir);
         cmd
     }
     #[cfg(not(windows))]
     {
         let mut cmd = Command::new("sh");
-        cmd.args([
-            "-c",
-            "curl -LsSf https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh",
-        ]);
+        cmd.args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"]);
+        cmd.env("UV_UNMANAGED_INSTALL", bin_dir);
         cmd
     }
 }
