@@ -221,7 +221,7 @@ pub async fn run(
 ) -> Result<()> {
     let fatal_emitted = Arc::new(AtomicBool::new(false));
 
-    let prepared = match prepare_agent_command(&cfg.command, &ui_tx).await {
+    let prepared = match prepare_agent_command_for_spawn(&cfg.command, &cfg.env, &ui_tx).await {
         Ok(prepared) => prepared,
         Err(launch_err) => {
             let text = launch_err.to_string();
@@ -229,13 +229,11 @@ pub async fn run(
             return Err(anyhow::anyhow!(text));
         }
     };
-    let mut env = prepared.env;
-    env.extend(cfg.env.clone());
 
     let (mut child, child_stdin, child_stdout) = match spawn_agent(
         &prepared.command,
         &cfg.args,
-        &env,
+        &prepared.env,
         cfg.agent_stderr.as_deref(),
     ) {
         Ok(spawned) => spawned,
@@ -319,9 +317,23 @@ pub async fn run(
     result
 }
 
-struct PreparedAgentCommand {
-    command: PathBuf,
-    env: HashMap<String, String>,
+pub(crate) struct PreparedAgentCommand {
+    pub(crate) command: PathBuf,
+    pub(crate) env: HashMap<String, String>,
+}
+
+pub(crate) async fn prepare_agent_command_for_spawn(
+    command: &Path,
+    env: &HashMap<String, String>,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) -> std::result::Result<PreparedAgentCommand, LaunchError> {
+    let prepared = prepare_agent_command(command, ui_tx).await?;
+    let mut merged_env = prepared.env;
+    merged_env.extend(env.clone());
+    Ok(PreparedAgentCommand {
+        command: prepared.command,
+        env: merged_env,
+    })
 }
 
 async fn prepare_agent_command(

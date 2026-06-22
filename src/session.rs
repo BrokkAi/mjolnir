@@ -85,8 +85,14 @@ pub async fn list_sessions(
     cwd: PathBuf,
     agent_stderr: Option<&Path>,
 ) -> Result<Vec<SessionEntry>> {
+    let (ui_tx, _ui_rx) = tokio::sync::mpsc::unbounded_channel();
+    let prepared = acp::prepare_agent_command_for_spawn(&agent.program, &agent.env, &ui_tx)
+        .await
+        .map_err(|launch_err| anyhow::anyhow!("{launch_err}"))
+        .context("prepare agent for session listing")?;
+
     let (mut child, child_stdin, child_stdout) =
-        acp::spawn_agent(&agent.program, &agent.args, &agent.env, agent_stderr)
+        acp::spawn_agent(&prepared.command, &agent.args, &prepared.env, agent_stderr)
             .map_err(|launch_err| anyhow::anyhow!("{launch_err}"))
             .context("spawn agent for session listing")?;
 
