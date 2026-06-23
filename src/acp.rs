@@ -1,7 +1,7 @@
 //! ACP client runtime: spawns the agent subprocess, wires JSON-RPC over
 //! stdio, and bridges UI commands/events through two mpsc channels.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -46,6 +46,74 @@ pub struct AcpRuntimeConfig {
     /// Windows) so the agent's logs don't bleed into the TUI. Pass a
     /// path to capture for debugging.
     pub agent_stderr: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+struct RuntimeSessionState {
+    active_session_id: Arc<Mutex<Option<SessionId>>>,
+    cancelled_permission_sessions: Arc<Mutex<HashSet<SessionId>>>,
+    permission_cancel_generation: watch::Sender<u64>,
+}
+
+impl RuntimeSessionState {
+    fn new() -> Self {
+        let (permission_cancel_generation, _) = watch::channel(0);
+        Self {
+            active_session_id: Arc::new(Mutex::new(None)),
+            cancelled_permission_sessions: Arc::new(Mutex::new(HashSet::new())),
+            permission_cancel_generation,
+        }
+    }
+
+    async fn active_session_id(&self) -> Option<SessionId> {
+        self.active_session_id.lock().await.clone()
+    }
+
+    async fn set_active_session_id(&self, session_id: SessionId) {
+        *self.active_session_id.lock().await = Some(session_id);
+    }
+
+    async fn permission_cancelled(&self, session_id: &SessionId) -> bool {
+        self.cancelled_permission_sessions
+            .lock()
+            .await
+            .contains(session_id)
+    }
+
+    async fn mark_permissions_cancelled(&self, session_id: &SessionId) {
+        self.cancelled_permission_sessions
+            .lock()
+            .await
+            .insert(session_id.clone());
+        let next = self.permission_cancel_generation.borrow().wrapping_add(1);
+        let _ = self.permission_cancel_generation.send(next);
+    }
+
+    async fn clear_permissions_cancelled(&self, session_id: &SessionId) {
+        self.cancelled_permission_sessions
+            .lock()
+            .await
+            .remove(session_id);
+    }
+
+    fn subscribe_permission_cancellations(&self) -> watch::Receiver<u64> {
+        self.permission_cancel_generation.subscribe()
+    }
+
+    async fn wait_until_permission_cancelled(
+        &self,
+        session_id: &SessionId,
+        cancel_rx: &mut watch::Receiver<u64>,
+    ) {
+        loop {
+            if self.permission_cancelled(session_id).await {
+                return;
+            }
+            if cancel_rx.changed().await.is_err() {
+                return;
+            }
+        }
+    }
 }
 
 /// User-facing classification of launch-phase failures. Each variant
@@ -768,11 +836,12 @@ where
     // Channel for permission prompts that the UI needs to answer.
     // The on_receive_request closure forwards (req, responder) here and
     // returns immediately so the JSON-RPC dispatch loop stays unblocked.
-    let active_session_id = Arc::new(Mutex::new(None::<SessionId>));
+    let session_state = RuntimeSessionState::new();
     let terminals = Arc::new(ManagedTerminals::new(ui_tx.clone()));
     let perm_ui_tx = ui_tx.clone();
+    let perm_session_state = session_state.clone();
     let notif_ui_tx = ui_tx.clone();
-    let notif_active_session_id = active_session_id.clone();
+    let notif_session_state = session_state.clone();
     let create_terminals = terminals.clone();
     let output_terminals = terminals.clone();
     let release_terminals = terminals.clone();
@@ -782,7 +851,7 @@ where
         .builder()
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
-                let active = notif_active_session_id.lock().await.clone();
+                let active = notif_session_state.active_session_id().await;
                 if active.as_ref() == Some(&notification.session_id) {
                     let _ = notif_ui_tx.send(UiEvent::SessionUpdate(notification.update));
                 }
@@ -792,6 +861,16 @@ where
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
+                let session_id = request.session_id.clone();
+                if perm_session_state
+                    .permission_cancelled(&session_id)
+                    .await
+                {
+                    return responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    ));
+                }
+                let mut cancel_rx = perm_session_state.subscribe_permission_cancellations();
                 let (tx, rx) = oneshot::channel::<PermissionDecision>();
                 let prompt = PermissionPrompt {
                     tool_call: request.tool_call,
@@ -803,11 +882,19 @@ where
                         RequestPermissionOutcome::Cancelled,
                     ));
                 }
-                let outcome = match rx.await {
-                    Ok(PermissionDecision::Selected(id)) => {
-                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id))
+                let outcome = tokio::select! {
+                    decision = rx => {
+                        match decision {
+                            Ok(PermissionDecision::Selected(id)) => {
+                                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id))
+                            }
+                            _ => RequestPermissionOutcome::Cancelled,
+                        }
                     }
-                    _ => RequestPermissionOutcome::Cancelled,
+                    () = perm_session_state.wait_until_permission_cancelled(&session_id, &mut cancel_rx) => {
+                        let _ = perm_ui_tx.send(UiEvent::CancelPendingPermissions);
+                        RequestPermissionOutcome::Cancelled
+                    }
                 };
                 responder.respond(RequestPermissionResponse::new(outcome))
             },
@@ -851,7 +938,7 @@ where
                 &ui_tx,
                 &mut ui_rx,
                 fatal_emitted,
-                active_session_id,
+                session_state,
             )
             .await
             {
@@ -878,7 +965,7 @@ async fn drive_session(
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     fatal_emitted: Arc<AtomicBool>,
-    active_session_id: Arc<Mutex<Option<SessionId>>>,
+    session_state: RuntimeSessionState,
 ) -> Result<()> {
     // Advertise our client capabilities. We do not yet implement
     // `fs/read_text_file` or `fs/write_text_file`, so we declare both as
@@ -919,7 +1006,9 @@ async fn drive_session(
     let (mut session_id, initial_config, resumed) = match resume_session {
         Some(existing_session_id) => {
             let session_id = SessionId::from(existing_session_id.clone());
-            *active_session_id.lock().await = Some(session_id.clone());
+            session_state
+                .set_active_session_id(session_id.clone())
+                .await;
             if let Err(launch_err) = require_load_session(&init_resp.agent_capabilities) {
                 let text = launch_err.to_string();
                 emit_fatal(ui_tx, &fatal_emitted, text.clone());
@@ -950,7 +1039,9 @@ async fn drive_session(
         {
             Ok(s) => {
                 let config = session_config_from_parts(s.config_options, s.modes);
-                *active_session_id.lock().await = Some(s.session_id.clone());
+                session_state
+                    .set_active_session_id(s.session_id.clone())
+                    .await;
                 (s.session_id, config, false)
             }
             Err(source) => {
@@ -980,7 +1071,18 @@ async fn drive_session(
     while let Some(cmd) = ui_rx.recv().await {
         match cmd {
             UiCommand::SendPrompt { text, images } => {
-                if !drive_prompt_turn(&conn, &session_id, text, images, ui_tx, ui_rx).await? {
+                session_state.clear_permissions_cancelled(&session_id).await;
+                if !drive_prompt_turn(
+                    &conn,
+                    &session_id,
+                    text,
+                    images,
+                    ui_tx,
+                    ui_rx,
+                    &session_state,
+                )
+                .await?
+                {
                     break;
                 }
             }
@@ -1012,7 +1114,7 @@ async fn drive_session(
                     cwd.clone(),
                     &mut session_id,
                     &mut session_config,
-                    &active_session_id,
+                    &session_state.active_session_id,
                     ui_tx,
                     ui_rx,
                 )
@@ -1920,6 +2022,7 @@ async fn drive_prompt_turn(
     images: Vec<PromptImage>,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
+    session_state: &RuntimeSessionState,
 ) -> Result<bool> {
     let req = PromptRequest::new(session_id.clone(), prompt_content_blocks(text, images));
     let prompt = conn.send_request(req).block_task();
@@ -1948,6 +2051,8 @@ async fn drive_prompt_turn(
                 match maybe_cmd {
                     Some(UiCommand::CancelPrompt) => {
                         if !cancel_sent {
+                            session_state.mark_permissions_cancelled(session_id).await;
+                            let _ = ui_tx.send(UiEvent::CancelPendingPermissions);
                             if let Err(e) = conn.send_notification(CancelNotification::new(session_id.clone())) {
                                 let _ = ui_tx.send(UiEvent::Warning(format!("cancel failed: {e}")));
                             }
@@ -1994,16 +2099,18 @@ fn prompt_content_blocks(text: String, images: Vec<PromptImage>) -> Vec<ContentB
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::AppState;
     use agent_client_protocol::Agent as AgentRole;
     use agent_client_protocol::schema::{
         ContentBlock, ContentChunk, ForkSessionResponse, InitializeResponse, LoadSessionResponse,
-        NewSessionResponse, PromptResponse, SessionCapabilities, SessionConfigId,
-        SessionConfigValueId, SessionForkCapabilities, SessionId, SessionNotification,
-        SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent,
+        NewSessionResponse, PermissionOption, PermissionOptionKind, PromptResponse,
+        SessionCapabilities, SessionConfigId, SessionConfigValueId, SessionForkCapabilities,
+        SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason,
+        TextContent, ToolCallUpdateFields,
     };
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool as StdAtomicBool, AtomicUsize, Ordering},
     };
     use std::time::Duration;
     use tokio::io::split;
@@ -2533,6 +2640,73 @@ mod tests {
             .await;
     }
 
+    async fn run_mock_agent_with_pending_permission(
+        stream: tokio::io::DuplexStream,
+        permission_cancelled: Arc<StdAtomicBool>,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(InitializeResponse::new(
+                        agent_client_protocol::schema::ProtocolVersion::V1,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::PromptRequest, responder, cx| {
+                    let permission_cancelled = permission_cancelled.clone();
+                    tokio::spawn(async move {
+                        let response = cx
+                            .send_request(RequestPermissionRequest::new(
+                                SessionId::new("test-session"),
+                                agent_client_protocol::schema::ToolCallUpdate::new(
+                                    "call-1",
+                                    ToolCallUpdateFields::default(),
+                                ),
+                                vec![PermissionOption::new(
+                                    "allow",
+                                    "Allow",
+                                    PermissionOptionKind::AllowOnce,
+                                )],
+                            ))
+                            .block_task()
+                            .await;
+                        let stop_reason = match response {
+                            Ok(resp)
+                                if matches!(resp.outcome, RequestPermissionOutcome::Cancelled) =>
+                            {
+                                permission_cancelled.store(true, Ordering::SeqCst);
+                                StopReason::Cancelled
+                            }
+                            _ => StopReason::EndTurn,
+                        };
+                        let _ = responder.respond(PromptResponse::new(stop_reason));
+                    });
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
     async fn run_mock_agent_with_prompt_error(stream: tokio::io::DuplexStream) {
         let (r, w) = split(stream);
         let transport = ByteStreams::new(w.compat_write(), r.compat());
@@ -3017,6 +3191,106 @@ mod tests {
         }
 
         assert_eq!(cancel_hits.load(Ordering::SeqCst), 1);
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        let join = tokio::time::timeout(Duration::from_secs(2), client_task)
+            .await
+            .expect("drive_client did not return after shutdown");
+        join.expect("client task panicked")
+            .expect("drive_client returned error");
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prompt_cancel_resolves_pending_permission_as_cancelled() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let permission_cancelled = Arc::new(StdAtomicBool::new(false));
+        let agent_task = tokio::spawn(run_mock_agent_with_pending_permission(
+            agent_side,
+            permission_cancelled.clone(),
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        let mut saw_connected = false;
+        let mut saw_session = false;
+        while !(saw_connected && saw_session) {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for handshake")
+                .expect("channel closed");
+            match ev {
+                UiEvent::Connected { .. } => saw_connected = true,
+                UiEvent::SessionStarted { .. } => saw_session = true,
+                UiEvent::Warning(_) | UiEvent::Fatal(_) => panic!("unexpected: {ev:?}"),
+                _ => {}
+            }
+        }
+
+        cmd_tx
+            .send(UiCommand::SendPrompt {
+                text: "needs permission".to_string(),
+                images: Vec::new(),
+            })
+            .expect("send prompt");
+
+        let mut state = AppState::new();
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for permission request")
+                .expect("channel closed");
+            match ev {
+                UiEvent::PermissionRequest(_) => {
+                    state.apply_event(ev);
+                    assert!(state.has_pending_permission());
+                    break;
+                }
+                UiEvent::Warning(_) | UiEvent::Fatal(_) | UiEvent::PromptDone { .. } => {
+                    panic!("unexpected before permission: {ev:?}")
+                }
+                _ => {}
+            }
+        }
+
+        cmd_tx.send(UiCommand::CancelPrompt).expect("send cancel");
+
+        let mut saw_cancel_event = false;
+        let mut saw_cancelled_prompt = false;
+        while !(saw_cancel_event && saw_cancelled_prompt) {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for permission cancellation")
+                .expect("channel closed");
+            match ev {
+                UiEvent::CancelPendingPermissions => {
+                    state.apply_event(ev);
+                    assert!(!state.has_pending_permission());
+                    saw_cancel_event = true;
+                }
+                UiEvent::PromptDone { stop_reason, .. } => {
+                    assert!(matches!(stop_reason, StopReason::Cancelled));
+                    saw_cancelled_prompt = true;
+                }
+                UiEvent::Warning(_) | UiEvent::Fatal(_) => panic!("unexpected: {ev:?}"),
+                _ => {}
+            }
+        }
+
+        assert!(permission_cancelled.load(Ordering::SeqCst));
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         let join = tokio::time::timeout(Duration::from_secs(2), client_task)

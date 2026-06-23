@@ -771,7 +771,9 @@ fn should_force_inline_repair_for_ui_event(mode: UiMode, ev: &UiEvent) -> bool {
     mode == UiMode::InlineChat
         && matches!(
             ev,
-            UiEvent::PermissionRequest(_) | UiEvent::RemotePermissionDecision { .. }
+            UiEvent::PermissionRequest(_)
+                | UiEvent::CancelPendingPermissions
+                | UiEvent::RemotePermissionDecision { .. }
         )
 }
 

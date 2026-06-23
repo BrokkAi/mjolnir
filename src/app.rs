@@ -1392,6 +1392,10 @@ impl AppState {
                 });
                 self.update_autocomplete();
             }
+            UiEvent::CancelPendingPermissions => {
+                self.cancel_all_pending_permissions();
+                self.update_autocomplete();
+            }
             UiEvent::RemotePermissionDecision {
                 request_id,
                 option_id,
@@ -3011,6 +3015,27 @@ mod tests {
         s.apply_event(UiEvent::PermissionRequest(prompt_b));
 
         s.mark_runtime_closed();
+
+        assert!(!s.has_pending_permission());
+        assert!(matches!(
+            rx_a.blocking_recv(),
+            Ok(PermissionDecision::Cancelled)
+        ));
+        assert!(matches!(
+            rx_b.blocking_recv(),
+            Ok(PermissionDecision::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn cancel_pending_permissions_event_cancels_all_queued_permissions() {
+        let mut s = AppState::new();
+        let (prompt_a, rx_a) = permission_prompt_with_id("call-a");
+        let (prompt_b, rx_b) = permission_prompt_with_id("call-b");
+
+        s.apply_event(UiEvent::PermissionRequest(prompt_a));
+        s.apply_event(UiEvent::PermissionRequest(prompt_b));
+        s.apply_event(UiEvent::CancelPendingPermissions);
 
         assert!(!s.has_pending_permission());
         assert!(matches!(

@@ -50,6 +50,9 @@ pub enum UiEvent {
     /// `session/request_permission` from the agent. The UI is expected to
     /// render a modal and answer through `responder` exactly once.
     PermissionRequest(PermissionPrompt),
+    /// The runtime sent `session/cancel`; queued permission prompts for the
+    /// cancelled turn must answer with `cancelled` and disappear.
+    CancelPendingPermissions,
     /// The prompt turn completed (PromptRequest returned). UI can re-enable
     /// the input prompt.
     PromptDone {

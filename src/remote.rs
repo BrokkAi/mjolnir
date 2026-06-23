@@ -483,6 +483,10 @@ impl TrackerState {
                 self.pending_permissions.clear();
                 self.touch();
             }
+            UiEvent::CancelPendingPermissions => {
+                self.pending_permissions.clear();
+                self.touch();
+            }
             UiEvent::Connected { .. }
             | UiEvent::PermissionRequest(_)
             | UiEvent::RemotePermissionDecision { .. }
