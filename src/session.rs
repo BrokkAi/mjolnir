@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::term::TrackedBackend;
 use agent_client_protocol::schema::{
-    InitializeRequest, ListSessionsRequest, ProtocolVersion, SessionInfo,
+    AgentCapabilities, InitializeRequest, ListSessionsRequest, ProtocolVersion, SessionInfo,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::{Context, Result};
@@ -119,10 +119,13 @@ where
         .connect_with(transport, |conn: ConnectionTo<Agent>| async move {
             // Initialize handshake.
             let init_req = InitializeRequest::new(ProtocolVersion::V1);
-            conn.send_request(init_req)
+            let init_resp = conn
+                .send_request(init_req)
                 .block_task()
                 .await
                 .context("initialize for session listing")?;
+            validate_protocol_version(init_resp.protocol_version)?;
+            require_session_list(&init_resp.agent_capabilities)?;
 
             // Collect all pages of sessions.
             let mut all_sessions: Vec<SessionEntry> = Vec::new();
@@ -147,6 +150,25 @@ where
         .await;
 
     result.context("ACP client error during session listing")
+}
+
+fn validate_protocol_version(negotiated: ProtocolVersion) -> Result<()> {
+    if negotiated == ProtocolVersion::LATEST {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "agent negotiated unsupported ACP protocol version {negotiated}; mjolnir supports ACP {}",
+            ProtocolVersion::LATEST
+        )
+    }
+}
+
+fn require_session_list(capabilities: &AgentCapabilities) -> Result<()> {
+    if capabilities.session_capabilities.list.is_some() {
+        Ok(())
+    } else {
+        anyhow::bail!("agent does not advertise ACP capability sessionCapabilities.list")
+    }
 }
 
 /// Interactive session picker state.
@@ -379,6 +401,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::{SessionCapabilities, SessionListCapabilities};
 
     fn sample_sessions() -> Vec<SessionEntry> {
         vec![
@@ -485,5 +508,22 @@ mod tests {
         assert!(serialized.contains("sess-abc"));
         assert!(serialized.contains("My session"));
         assert!(!serialized.contains("updated_at"));
+    }
+
+    #[test]
+    fn session_listing_rejects_unsupported_protocol_version() {
+        let err = validate_protocol_version(ProtocolVersion::V0).expect_err("unsupported");
+        assert!(err.to_string().contains("unsupported ACP protocol version"));
+        assert!(validate_protocol_version(ProtocolVersion::LATEST).is_ok());
+    }
+
+    #[test]
+    fn session_listing_requires_list_capability() {
+        let err = require_session_list(&AgentCapabilities::new()).expect_err("missing");
+        assert!(err.to_string().contains("sessionCapabilities.list"));
+
+        let supported = AgentCapabilities::new()
+            .session_capabilities(SessionCapabilities::new().list(SessionListCapabilities::new()));
+        assert!(require_session_list(&supported).is_ok());
     }
 }

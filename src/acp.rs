@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
-    CancelNotification, ClientCapabilities, ContentBlock, CreateTerminalRequest,
+    AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock, CreateTerminalRequest,
     CreateTerminalResponse, ErrorCode, FileSystemCapabilities, ForkSessionRequest, ImageContent,
     InitializeRequest, KillTerminalRequest, KillTerminalResponse, LoadSessionRequest,
     NewSessionRequest, PromptRequest, ProtocolVersion, ReleaseTerminalRequest,
@@ -77,6 +77,10 @@ pub enum LaunchError {
     /// or `session/new`. The agent is healthy; the user just needs to
     /// authenticate first.
     AuthRequired { detail: Option<String> },
+    /// The agent negotiated an ACP protocol version this client does not support.
+    UnsupportedProtocolVersion { negotiated: ProtocolVersion },
+    /// The user requested a lifecycle method the agent did not advertise.
+    UnsupportedCapability { capability: &'static str },
     /// `session/new` failed for some other reason (bad cwd, agent-side
     /// crash, ...).
     SessionCreateFailed {
@@ -120,6 +124,17 @@ impl std::fmt::Display for LaunchError {
                      hint: see the agent's docs to authenticate, then relaunch mj"
                 )
             }
+            LaunchError::UnsupportedProtocolVersion { negotiated } => write!(
+                f,
+                "agent negotiated unsupported ACP protocol version {negotiated}\n\
+                 hint: update mjolnir or choose an agent that supports ACP {}",
+                ProtocolVersion::LATEST
+            ),
+            LaunchError::UnsupportedCapability { capability } => write!(
+                f,
+                "agent does not advertise ACP capability {capability}\n\
+                 hint: choose an agent that supports {capability}, or avoid the command that requires it"
+            ),
             LaunchError::SessionCreateFailed { source } => write!(
                 f,
                 "agent rejected session/new: {source}\n\
@@ -194,6 +209,24 @@ fn classify_session_error(source: agent_client_protocol::Error) -> LaunchError {
     match auth_required_detail(&source) {
         Some(detail) => LaunchError::AuthRequired { detail },
         None => LaunchError::SessionCreateFailed { source },
+    }
+}
+
+fn validate_protocol_version(negotiated: ProtocolVersion) -> std::result::Result<(), LaunchError> {
+    if negotiated == ProtocolVersion::LATEST {
+        Ok(())
+    } else {
+        Err(LaunchError::UnsupportedProtocolVersion { negotiated })
+    }
+}
+
+fn require_load_session(capabilities: &AgentCapabilities) -> std::result::Result<(), LaunchError> {
+    if capabilities.load_session {
+        Ok(())
+    } else {
+        Err(LaunchError::UnsupportedCapability {
+            capability: "loadSession",
+        })
     }
 }
 
@@ -866,6 +899,11 @@ async fn drive_session(
             return Err(anyhow::anyhow!(text));
         }
     };
+    if let Err(launch_err) = validate_protocol_version(init_resp.protocol_version) {
+        let text = launch_err.to_string();
+        emit_fatal(ui_tx, &fatal_emitted, text.clone());
+        return Err(anyhow::anyhow!(text));
+    }
     let session_fork_supported = init_resp
         .agent_capabilities
         .session_capabilities
@@ -882,6 +920,11 @@ async fn drive_session(
         Some(existing_session_id) => {
             let session_id = SessionId::from(existing_session_id.clone());
             *active_session_id.lock().await = Some(session_id.clone());
+            if let Err(launch_err) = require_load_session(&init_resp.agent_capabilities) {
+                let text = launch_err.to_string();
+                emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                return Err(anyhow::anyhow!(text));
+            }
             match conn
                 .send_request(LoadSessionRequest::new(session_id.clone(), cwd.clone()))
                 .block_task()
@@ -1953,10 +1996,10 @@ mod tests {
     use super::*;
     use agent_client_protocol::Agent as AgentRole;
     use agent_client_protocol::schema::{
-        AgentCapabilities, ContentBlock, ContentChunk, ForkSessionResponse, InitializeResponse,
-        LoadSessionResponse, NewSessionResponse, PromptResponse, SessionCapabilities,
-        SessionConfigId, SessionConfigValueId, SessionForkCapabilities, SessionId,
-        SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent,
+        ContentBlock, ContentChunk, ForkSessionResponse, InitializeResponse, LoadSessionResponse,
+        NewSessionResponse, PromptResponse, SessionCapabilities, SessionConfigId,
+        SessionConfigValueId, SessionForkCapabilities, SessionId, SessionNotification,
+        SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent,
     };
     use std::sync::{
         Arc,
@@ -2282,9 +2325,14 @@ mod tests {
                     assert!(req.client_capabilities.terminal);
                     responder.respond(
                         InitializeResponse::new(agent_client_protocol::schema::ProtocolVersion::V1)
-                            .agent_capabilities(AgentCapabilities::new().session_capabilities(
-                                SessionCapabilities::new().fork(SessionForkCapabilities::new()),
-                            )),
+                            .agent_capabilities(
+                                AgentCapabilities::new()
+                                    .load_session(true)
+                                    .session_capabilities(
+                                        SessionCapabilities::new()
+                                            .fork(SessionForkCapabilities::new()),
+                                    ),
+                            ),
                     )
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -2546,6 +2594,28 @@ mod tests {
                         agent_client_protocol::Error::auth_required()
                             .data(serde_json::Value::String("login required".to_string())),
                     )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_unsupported_protocol(stream: tokio::io::DuplexStream) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(InitializeResponse::new(
+                        agent_client_protocol::schema::ProtocolVersion::V0,
+                    ))
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -3537,6 +3607,32 @@ mod tests {
     }
 
     #[test]
+    fn protocol_version_validation_rejects_unsupported_versions() {
+        assert!(validate_protocol_version(ProtocolVersion::LATEST).is_ok());
+        let err = validate_protocol_version(ProtocolVersion::V0).expect_err("unsupported version");
+        match err {
+            LaunchError::UnsupportedProtocolVersion { negotiated } => {
+                assert_eq!(negotiated, ProtocolVersion::V0);
+            }
+            other => panic!("expected UnsupportedProtocolVersion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_session_requires_advertised_capability() {
+        let missing = require_load_session(&AgentCapabilities::new()).expect_err("missing");
+        assert!(matches!(
+            missing,
+            LaunchError::UnsupportedCapability {
+                capability: "loadSession"
+            }
+        ));
+
+        let supported = AgentCapabilities::new().load_session(true);
+        assert!(require_load_session(&supported).is_ok());
+    }
+
+    #[test]
     fn launch_error_display_includes_action_hint() {
         // Every launch error must carry an actionable next step so users
         // do not just see "acp: ..." with no remediation.
@@ -3557,6 +3653,12 @@ mod tests {
             },
             LaunchError::AuthRequired {
                 detail: Some("login".into()),
+            },
+            LaunchError::UnsupportedProtocolVersion {
+                negotiated: ProtocolVersion::V0,
+            },
+            LaunchError::UnsupportedCapability {
+                capability: "loadSession",
             },
             LaunchError::SessionCreateFailed {
                 source: agent_client_protocol::Error::invalid_params(),
@@ -3696,6 +3798,43 @@ mod tests {
             "expected agent detail surfaced in fatal: {msg}"
         );
         assert!(fatal_emitted.load(Ordering::SeqCst));
+
+        let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_client_rejects_unsupported_protocol_version() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_unsupported_protocol(agent_side));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let fatal_emitted = Arc::new(AtomicBool::new(false));
+
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            fatal_emitted.clone(),
+        ));
+
+        let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            .await
+            .expect("timeout waiting for fatal")
+            .expect("channel closed");
+        match ev {
+            UiEvent::Fatal(msg) => {
+                assert!(msg.contains("unsupported ACP protocol version"), "{msg}");
+                assert!(msg.contains("hint:"), "{msg}");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
 
         let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
         agent_task.abort();

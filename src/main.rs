@@ -240,7 +240,7 @@ async fn main() -> Result<()> {
     }
 
     let cwd = match cli.cwd.clone() {
-        Some(p) => p,
+        Some(p) => absolutize_cwd(p)?,
         None => std::env::current_dir().context("current dir")?,
     };
 
@@ -315,7 +315,7 @@ fn print_resume_hint(session_id: &str, worktree_label: Option<&str>) {
 async fn run_resume(args: ResumeArgs) -> Result<()> {
     let mode = ui_mode(args.fullscreen_tui);
     let cwd = match args.cwd.clone() {
-        Some(p) => p,
+        Some(p) => absolutize_cwd(p)?,
         None => std::env::current_dir().context("current dir")?,
     };
     let (cwd, worktree) = prepare_worktree_for_arg(cwd, args.worktree.as_deref())?;
@@ -499,6 +499,14 @@ fn prepare_worktree_for_arg(
             let opened = prepare_existing_worktree(&cwd, name_or_path)?;
             Ok((opened.session_cwd.clone(), Some(opened)))
         }
+    }
+}
+
+fn absolutize_cwd(cwd: PathBuf) -> Result<PathBuf> {
+    if cwd.is_absolute() {
+        Ok(cwd)
+    } else {
+        Ok(std::env::current_dir().context("current dir")?.join(cwd))
     }
 }
 
@@ -1488,6 +1496,21 @@ mod tests {
                 session_id: "selected-session".to_string(),
                 title: Some("My selected session".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn absolutize_cwd_resolves_relative_paths() {
+        let cwd = absolutize_cwd(PathBuf::from("relative/project")).expect("absolutize");
+        assert!(cwd.is_absolute());
+        assert!(cwd.ends_with("relative/project"));
+
+        let absolute = std::env::current_dir()
+            .expect("current dir")
+            .join("already");
+        assert_eq!(
+            absolutize_cwd(absolute.clone()).expect("absolute"),
+            absolute
         );
     }
 
