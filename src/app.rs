@@ -1394,6 +1394,7 @@ impl AppState {
             }
             UiEvent::CancelPendingPermissions => {
                 self.cancel_all_pending_permissions();
+                self.mark_unfinished_tool_calls_failed("tool call cancelled");
                 self.update_autocomplete();
             }
             UiEvent::RemotePermissionDecision {
@@ -1472,6 +1473,10 @@ impl AppState {
     }
 
     fn fail_unfinished_tool_calls(&mut self) {
+        self.mark_unfinished_tool_calls_failed("tool call ended before completion");
+    }
+
+    fn mark_unfinished_tool_calls_failed(&mut self, note: &str) {
         let mut changed = false;
         for view in self.tool_calls.values_mut() {
             if matches!(
@@ -1479,10 +1484,9 @@ impl AppState {
                 ToolCallStatus::Pending | ToolCallStatus::InProgress
             ) {
                 view.status = ToolCallStatus::Failed;
-                let note = "tool call ended before completion".to_string();
-                if !matches!(view.body.last(), Some(ToolCallOutput::Note(existing)) if existing == &note)
+                if !matches!(view.body.last(), Some(ToolCallOutput::Note(existing)) if existing == note)
                 {
-                    view.body.push(ToolCallOutput::Note(note));
+                    view.body.push(ToolCallOutput::Note(note.to_string()));
                 }
                 changed = true;
             }
@@ -3045,6 +3049,30 @@ mod tests {
         assert!(matches!(
             rx_b.blocking_recv(),
             Ok(PermissionDecision::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn cancel_pending_permissions_event_marks_unfinished_tool_calls_failed() {
+        let mut s = AppState::new();
+        s.record_user_prompt("run command".to_string());
+        s.tool_calls.insert(
+            "call-1".to_string(),
+            ToolCallView {
+                title: "cargo test".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::InProgress,
+                body: vec![ToolCallOutput::Text("running".to_string())],
+            },
+        );
+        s.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        s.apply_event(UiEvent::CancelPendingPermissions);
+
+        let view = s.tool_calls.get("call-1").expect("tool call");
+        assert_eq!(view.status, ToolCallStatus::Failed);
+        assert!(view.body.iter().any(
+            |output| matches!(output, ToolCallOutput::Note(note) if note == "tool call cancelled")
         ));
     }
 

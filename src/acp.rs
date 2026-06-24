@@ -10,13 +10,14 @@ use std::time::Duration;
 use agent_client_protocol::schema::{
     AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, ClientCapabilities,
     ContentBlock, CreateTerminalRequest, CreateTerminalResponse, ErrorCode, FileSystemCapabilities,
-    ForkSessionRequest, ImageContent, InitializeRequest, KillTerminalRequest, KillTerminalResponse,
-    LoadSessionRequest, NewSessionRequest, PromptRequest, ProtocolVersion, ReleaseTerminalRequest,
-    ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId, SessionId,
-    SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent,
+    ForkSessionRequest, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
+    KillTerminalResponse, LoadSessionRequest, NewSessionRequest, PromptRequest, ProtocolVersion,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionModeState,
+    SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus,
+    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent,
     WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
@@ -296,6 +297,56 @@ fn require_load_session(capabilities: &AgentCapabilities) -> std::result::Result
             capability: "loadSession",
         })
     }
+}
+
+async fn resume_existing_session(
+    conn: &ConnectionTo<Agent>,
+    session_id: SessionId,
+    cwd: PathBuf,
+    capabilities: &AgentCapabilities,
+    auth_methods: &[AuthMethod],
+) -> std::result::Result<Option<(Vec<SessionConfigOption>, Vec<SessionConfigTarget>)>, LaunchError>
+{
+    if capabilities.session_capabilities.resume.is_some() {
+        let resume_req = ResumeSessionRequest::new(session_id, cwd);
+        let resumed = match conn.send_request(resume_req.clone()).block_task().await {
+            Ok(s) => s,
+            Err(source) => match auth_required_detail(&source) {
+                Some(detail) => {
+                    authenticate_after_auth_required(conn, auth_methods, detail).await?;
+                    conn.send_request(resume_req)
+                        .block_task()
+                        .await
+                        .map_err(classify_session_error)?
+                }
+                None => return Err(classify_session_error(source)),
+            },
+        };
+        return Ok(session_config_from_parts(
+            resumed.config_options,
+            resumed.modes,
+        ));
+    }
+
+    require_load_session(capabilities)?;
+    let load_req = LoadSessionRequest::new(session_id, cwd);
+    let loaded = match conn.send_request(load_req.clone()).block_task().await {
+        Ok(s) => s,
+        Err(source) => match auth_required_detail(&source) {
+            Some(detail) => {
+                authenticate_after_auth_required(conn, auth_methods, detail).await?;
+                conn.send_request(load_req)
+                    .block_task()
+                    .await
+                    .map_err(classify_session_error)?
+            }
+            None => return Err(classify_session_error(source)),
+        },
+    };
+    Ok(session_config_from_parts(
+        loaded.config_options,
+        loaded.modes,
+    ))
 }
 
 async fn authenticate_after_auth_required(
@@ -823,6 +874,10 @@ fn node24_archive_suffix() -> Option<&'static str> {
     }
 }
 
+fn client_implementation() -> Implementation {
+    Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).title("Mjolnir")
+}
+
 fn command_failure_summary(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -986,13 +1041,15 @@ async fn drive_session(
     // Advertise our client capabilities. We do not yet implement
     // `fs/read_text_file` or `fs/write_text_file`, so we declare both as
     // false. Terminal methods are backed by managed subprocesses below.
-    let init_req = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
-        ClientCapabilities::new()
-            .fs(FileSystemCapabilities::new()
-                .read_text_file(false)
-                .write_text_file(false))
-            .terminal(true),
-    );
+    let init_req = InitializeRequest::new(ProtocolVersion::V1)
+        .client_info(client_implementation())
+        .client_capabilities(
+            ClientCapabilities::new()
+                .fs(FileSystemCapabilities::new()
+                    .read_text_file(false)
+                    .write_text_file(false))
+                .terminal(true),
+        );
     let init_resp = match conn.send_request(init_req).block_task().await {
         Ok(r) => r,
         Err(source) => {
@@ -1025,47 +1082,23 @@ async fn drive_session(
             session_state
                 .set_active_session_id(session_id.clone())
                 .await;
-            if let Err(launch_err) = require_load_session(&init_resp.agent_capabilities) {
-                let text = launch_err.to_string();
-                emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                return Err(anyhow::anyhow!(text));
-            }
-            let load_req = LoadSessionRequest::new(session_id.clone(), cwd.clone());
-            let loaded = match conn.send_request(load_req.clone()).block_task().await {
-                Ok(s) => s,
-                Err(source) => match auth_required_detail(&source) {
-                    Some(detail) => {
-                        if let Err(launch_err) =
-                            authenticate_after_auth_required(&conn, &init_resp.auth_methods, detail)
-                                .await
-                        {
-                            let text = launch_err.to_string();
-                            emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                            return Err(anyhow::anyhow!(text));
-                        }
-                        match conn.send_request(load_req).block_task().await {
-                            Ok(s) => s,
-                            Err(source) => {
-                                let launch_err = classify_session_error(source);
-                                let text = launch_err.to_string();
-                                emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                                return Err(anyhow::anyhow!(text));
-                            }
-                        }
-                    }
-                    None => {
-                        let launch_err = classify_session_error(source);
-                        let text = launch_err.to_string();
-                        emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                        return Err(anyhow::anyhow!(text));
-                    }
-                },
-            };
-            (
-                session_id,
-                session_config_from_parts(loaded.config_options, loaded.modes),
-                true,
+            let initial_config = match resume_existing_session(
+                &conn,
+                session_id.clone(),
+                cwd.clone(),
+                &init_resp.agent_capabilities,
+                &init_resp.auth_methods,
             )
+            .await
+            {
+                Ok(initial_config) => initial_config,
+                Err(launch_err) => {
+                    let text = launch_err.to_string();
+                    emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                    return Err(anyhow::anyhow!(text));
+                }
+            };
+            (session_id, initial_config, true)
         }
         None => match conn
             .send_request(NewSessionRequest::new(cwd.clone()))
@@ -1519,6 +1552,11 @@ impl ManagedTerminals {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         if let Some(cwd) = &request.cwd {
+            if !cwd.is_absolute() {
+                return Err(terminal_invalid_params(
+                    "terminal cwd must be an absolute path",
+                ));
+            }
             cmd.current_dir(cwd);
         }
         for env in &request.env {
@@ -2170,10 +2208,10 @@ mod tests {
     use agent_client_protocol::schema::{
         AuthMethodAgent, AuthenticateResponse, ContentBlock, ContentChunk, ForkSessionResponse,
         InitializeResponse, LoadSessionResponse, NewSessionResponse, PermissionOption,
-        PermissionOptionKind, PromptResponse, SessionCapabilities, SessionConfigId,
-        SessionConfigValueId, SessionForkCapabilities, SessionId, SessionNotification,
-        SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent,
-        ToolCallUpdateFields,
+        PermissionOptionKind, PromptResponse, ResumeSessionResponse, SessionCapabilities,
+        SessionConfigId, SessionConfigValueId, SessionForkCapabilities, SessionId,
+        SessionNotification, SessionResumeCapabilities, SessionUpdate,
+        SetSessionConfigOptionRequest, StopReason, TextContent, ToolCallUpdateFields,
     };
     use std::sync::{
         Arc,
@@ -2497,6 +2535,9 @@ mod tests {
                             responder,
                             _cx| {
                     assert!(req.client_capabilities.terminal);
+                    let client_info = req.client_info.expect("clientInfo");
+                    assert_eq!(client_info.name, env!("CARGO_PKG_NAME"));
+                    assert_eq!(client_info.version, env!("CARGO_PKG_VERSION"));
                     responder.respond(
                         InitializeResponse::new(agent_client_protocol::schema::ProtocolVersion::V1)
                             .agent_capabilities(
@@ -2504,7 +2545,8 @@ mod tests {
                                     .load_session(true)
                                     .session_capabilities(
                                         SessionCapabilities::new()
-                                            .fork(SessionForkCapabilities::new()),
+                                            .fork(SessionForkCapabilities::new())
+                                            .resume(SessionResumeCapabilities::new()),
                                     ),
                             ),
                     )
@@ -2523,6 +2565,12 @@ mod tests {
                 async move |_req: agent_client_protocol::schema::LoadSessionRequest,
                             responder,
                             _cx| { responder.respond(LoadSessionResponse::new()) },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: ResumeSessionRequest, responder, _cx| {
+                    responder.respond(ResumeSessionResponse::new())
+                },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(

@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use crate::term::TrackedBackend;
 use agent_client_protocol::schema::{
-    AgentCapabilities, AuthMethod, AuthenticateRequest, ErrorCode, InitializeRequest,
-    ListSessionsRequest, ProtocolVersion, SessionInfo,
+    AgentCapabilities, AuthMethod, AuthenticateRequest, ErrorCode, Implementation,
+    InitializeRequest, ListSessionsRequest, ProtocolVersion, SessionInfo,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::{Context, Result};
@@ -119,7 +119,8 @@ where
         .builder()
         .connect_with(transport, |conn: ConnectionTo<Agent>| async move {
             // Initialize handshake.
-            let init_req = InitializeRequest::new(ProtocolVersion::V1);
+            let init_req =
+                InitializeRequest::new(ProtocolVersion::V1).client_info(client_implementation());
             let init_resp = conn
                 .send_request(init_req)
                 .block_task()
@@ -146,8 +147,8 @@ where
                 };
                 all_sessions.extend(resp.sessions.into_iter().map(SessionEntry::from));
                 match resp.next_cursor {
-                    Some(next) if !next.is_empty() => cursor = Some(next),
-                    _ => break,
+                    Some(next) => cursor = Some(next),
+                    None => break,
                 }
             }
 
@@ -174,6 +175,10 @@ async fn authenticate_with_first_method(
         .block_task()
         .await?;
     Ok(())
+}
+
+fn client_implementation() -> Implementation {
+    Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).title("Mjolnir")
 }
 
 fn is_auth_required(err: &agent_client_protocol::Error) -> bool {
@@ -573,7 +578,10 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: InitializeRequest, responder, _cx| {
+                async move |req: InitializeRequest, responder, _cx| {
+                    let client_info = req.client_info.expect("clientInfo");
+                    assert_eq!(client_info.name, env!("CARGO_PKG_NAME"));
+                    assert_eq!(client_info.version, env!("CARGO_PKG_VERSION"));
                     responder.respond(
                         InitializeResponse::new(ProtocolVersion::V1)
                             .agent_capabilities(AgentCapabilities::new().session_capabilities(
@@ -618,6 +626,54 @@ mod tests {
             .await;
     }
 
+    async fn run_mock_agent_list_empty_cursor_then_second_page(
+        stream: tokio::io::DuplexStream,
+        seen_empty_cursor: Arc<AtomicBool>,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: InitializeRequest, responder, _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                            AgentCapabilities::new().session_capabilities(
+                                SessionCapabilities::new().list(SessionListCapabilities::new()),
+                            ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: ListSessionsRequest, responder, _cx| {
+                    if req.cursor.is_none() {
+                        responder.respond(
+                            ListSessionsResponse::new(vec![SessionInfo::new(
+                                SessionId::new("first-page"),
+                                PathBuf::from("/tmp"),
+                            )])
+                            .next_cursor("".to_string()),
+                        )
+                    } else {
+                        assert_eq!(req.cursor.as_deref(), Some(""));
+                        seen_empty_cursor.store(true, Ordering::SeqCst);
+                        responder.respond(ListSessionsResponse::new(vec![SessionInfo::new(
+                            SessionId::new("second-page"),
+                            PathBuf::from("/tmp"),
+                        )]))
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn session_listing_authenticates_and_retries_list() {
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
@@ -633,6 +689,29 @@ mod tests {
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "listed-session");
+
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_listing_treats_empty_cursor_as_opaque() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let seen_empty_cursor = Arc::new(AtomicBool::new(false));
+        let agent_task = tokio::spawn(run_mock_agent_list_empty_cursor_then_second_page(
+            agent_side,
+            seen_empty_cursor.clone(),
+        ));
+
+        let sessions = list_sessions_via_transport(client_transport, PathBuf::from("/tmp"))
+            .await
+            .expect("session listing should request the empty cursor page");
+
+        assert!(seen_empty_cursor.load(Ordering::SeqCst));
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, "first-page");
+        assert_eq!(sessions[1].session_id, "second-page");
 
         agent_task.abort();
     }
