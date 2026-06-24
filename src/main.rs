@@ -936,7 +936,7 @@ async fn run_session(
         agent_display_name,
         ui::UiPersistencePaths {
             history_path: Some(&hist_path),
-            transcript_export_dir: Some(&export_dir),
+            transcript_export_dir: export_dir.as_deref(),
         },
         mode,
     )

@@ -126,11 +126,8 @@ pub fn default_config_path() -> PathBuf {
 
 /// Directory for exported conversation transcripts:
 /// `$XDG_CONFIG_HOME/mj/transcripts`.
-pub fn transcript_export_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from(".config"))
-        .join("mj")
-        .join("transcripts")
+pub fn transcript_export_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("mj").join("transcripts"))
 }
 
 /// Path for the persisted prompt-history file (NUL-delimited format to

@@ -8,6 +8,8 @@
 use std::error::Error;
 use std::io::{self, Stdout, Write};
 use std::ops::Range;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -2751,22 +2753,237 @@ fn export_transcript(state: &AppState) -> Result<PathBuf> {
     let Some(dir) = &state.transcript_export_dir else {
         anyhow::bail!("transcript export directory is not configured");
     };
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("create transcript export directory {}", dir.display()))?;
-    let path = dir.join(format!(
-        "mjolnir-transcript-{}.md",
-        export_timestamp_seconds()
-    ));
-    std::fs::write(&path, state.transcript_export_markdown())
-        .with_context(|| format!("write transcript export {}", path.display()))?;
-    Ok(path)
+    create_private_export_dir(dir)?;
+    let body = transcript_export_markdown(state);
+    for suffix in 0..1000 {
+        let path = export_path(dir, export_timestamp_millis(), suffix);
+        match write_private_new_file(&path, body.as_bytes()) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("write transcript export {}", path.display()));
+            }
+        }
+    }
+    anyhow::bail!("could not allocate unique transcript export filename")
 }
 
-fn export_timestamp_seconds() -> u64 {
+fn export_path(dir: &Path, timestamp_millis: u128, suffix: u16) -> PathBuf {
+    let suffix = if suffix == 0 {
+        String::new()
+    } else {
+        format!("-{suffix}")
+    };
+    dir.join(format!("mjolnir-transcript-{timestamp_millis}{suffix}.md"))
+}
+
+fn export_timestamp_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_millis()
+}
+
+fn create_private_export_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("create transcript export directory {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).with_context(
+            || {
+                format!(
+                    "set transcript export directory permissions {}",
+                    dir.display()
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn write_private_new_file(path: &Path, body: &[u8]) -> io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(body)
+}
+
+fn transcript_export_markdown(state: &AppState) -> String {
+    let mut out = String::from("# Mjolnir Transcript\n\n");
+    if let Some(title) = &state.session_title {
+        out.push_str(&format!("- Session: {}\n", escape_markdown_text(title)));
+    }
+    if let Some(id) = &state.session_id {
+        out.push_str(&format!("- Session ID: {}\n", escape_markdown_text(id)));
+    }
+    if !state.agent_label.is_empty() {
+        out.push_str(&format!(
+            "- Agent: {}\n",
+            escape_markdown_text(&state.agent_label)
+        ));
+    }
+    out.push('\n');
+
+    for entry in &state.transcript {
+        match entry {
+            Entry::UserPrompt(text) => push_export_text(&mut out, "You", text),
+            Entry::AgentMessage(text) => push_export_text(&mut out, "Agent", text),
+            Entry::AgentThought(text) => push_export_text(&mut out, "Thought", text),
+            Entry::System(text) => push_export_text(&mut out, "System", text),
+            Entry::Plan(entries) => {
+                out.push_str("## Plan\n\n");
+                for entry in entries {
+                    out.push_str(&format!(
+                        "- {} / {}: {}\n",
+                        plan_priority_label(&entry.priority),
+                        plan_status_label(&entry.status),
+                        escape_markdown_text(&entry.content)
+                    ));
+                }
+                out.push('\n');
+            }
+            Entry::ToolCall(id) => {
+                if let Some(view) = state.tool_calls.get(id) {
+                    out.push_str(&format!(
+                        "## Tool: {}\n\n- Kind: {}\n- Status: {}\n\n",
+                        escape_markdown_text(&view.title),
+                        tool_kind_label(view.kind),
+                        tool_status_label(view.status)
+                    ));
+                    for output in &view.body {
+                        push_export_tool_output(&mut out, output);
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn push_export_text(out: &mut String, heading: &str, text: &str) {
+    out.push_str(&format!("## {heading}\n\n"));
+    out.push_str(&escape_markdown_text(text));
+    out.push_str("\n\n");
+}
+
+fn push_export_tool_output(out: &mut String, output: &ToolCallOutput) {
+    match output {
+        ToolCallOutput::Text(text) => push_export_fence(out, text),
+        ToolCallOutput::Diff {
+            path,
+            old_text: _,
+            new_text,
+        } => {
+            out.push_str(&format!("### Diff: {}\n\n", escape_markdown_text(path)));
+            // Exports the post-edit content for compact before/after review.
+            push_export_fence(out, new_text);
+        }
+        ToolCallOutput::Terminal {
+            terminal_id,
+            output,
+            truncated,
+            exit_status,
+        } => {
+            out.push_str(&format!(
+                "### Terminal: {}\n\n",
+                escape_markdown_text(terminal_id)
+            ));
+            if *truncated {
+                out.push_str("_Output truncated._\n\n");
+            }
+            if let Some(status) = exit_status {
+                out.push_str(&format!(
+                    "Exit status: {}\n\n",
+                    terminal_exit_status_label(status)
+                ));
+            }
+            push_export_fence(out, output);
+        }
+        ToolCallOutput::Note(note) => {
+            out.push_str(&format!("_Note: {}_\n\n", escape_markdown_text(note)));
+        }
+    }
+}
+
+fn push_export_fence(out: &mut String, text: &str) {
+    let fence = "`".repeat(longest_backtick_run(text).saturating_add(1).max(3));
+    out.push_str(&fence);
+    out.push_str("text\n");
+    out.push_str(text);
+    if !text.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&fence);
+    out.push_str("\n\n");
+}
+
+fn longest_backtick_run(text: &str) -> usize {
+    let mut best = 0;
+    let mut current = 0;
+    for ch in text.chars() {
+        if ch == '`' {
+            current += 1;
+            best = best.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    best
+}
+
+fn escape_markdown_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(
+            ch,
+            '\\' | '`'
+                | '*'
+                | '_'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '#'
+                | '+'
+                | '-'
+                | '.'
+                | '!'
+                | '|'
+                | '>'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn plan_priority_label(
+    priority: &agent_client_protocol::schema::PlanEntryPriority,
+) -> &'static str {
+    match priority {
+        agent_client_protocol::schema::PlanEntryPriority::High => "high",
+        agent_client_protocol::schema::PlanEntryPriority::Medium => "medium",
+        agent_client_protocol::schema::PlanEntryPriority::Low => "low",
+        _ => "unknown",
+    }
+}
+
+fn plan_status_label(status: &agent_client_protocol::schema::PlanEntryStatus) -> &'static str {
+    match status {
+        agent_client_protocol::schema::PlanEntryStatus::Pending => "pending",
+        agent_client_protocol::schema::PlanEntryStatus::InProgress => "running",
+        agent_client_protocol::schema::PlanEntryStatus::Completed => "done",
+        _ => "unknown",
+    }
 }
 
 /// Re-issue a previously queued prompt now that the in-flight turn has
@@ -7025,6 +7242,35 @@ mod tests {
         assert_eq!(state.exit_reason, Some(UiExitReason::ClearSession));
         // Must not forward the command to the agent.
         assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn transcript_export_markdown_escapes_markdown_and_sizes_fences() {
+        let mut state = AppState::new();
+        state.agent_label = "agent [x]".to_string();
+        state.session_id = Some("session-1".to_string());
+        state
+            .transcript
+            .push(Entry::UserPrompt("# hello".to_string()));
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "cargo `test`".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Text("```\nnot markdown".to_string())],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let markdown = transcript_export_markdown(&state);
+
+        assert!(markdown.contains("- Agent: agent \\[x\\]"));
+        assert!(markdown.contains("## You\n\n\\# hello"));
+        assert!(markdown.contains("## Tool: cargo \\`test\\`"));
+        assert!(markdown.contains("- Kind: exec"));
+        assert!(markdown.contains("- Status: done"));
+        assert!(markdown.contains("````text\n```\nnot markdown\n````"));
     }
 
     #[test]
