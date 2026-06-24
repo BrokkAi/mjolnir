@@ -264,27 +264,46 @@ impl TranscriptScrollState {
 /// on exit. `initial_agent_label` pre-populates the agent section of
 /// the header so we show the configured agent name immediately instead
 /// of waiting for the agent to report its own name during handshake.
+#[derive(Clone, Copy, Default)]
+pub struct UiPersistencePaths<'a> {
+    pub history_path: Option<&'a Path>,
+    pub transcript_export_dir: Option<&'a Path>,
+}
+
+struct UiInitialState {
+    header_labels: HeaderLabels,
+    agent_label: Option<String>,
+    history: Vec<String>,
+    transcript_export_dir: Option<PathBuf>,
+}
+
 pub async fn run(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     mut event_rx: mpsc::UnboundedReceiver<UiEvent>,
     header_labels: HeaderLabels,
     initial_agent_label: Option<String>,
-    history_path: Option<&Path>,
+    persistence: UiPersistencePaths<'_>,
     mode: UiMode,
 ) -> Result<(UiExitReason, Option<String>, Option<String>)> {
-    let initial_history = history_path.map(config::load_history).unwrap_or_default();
+    let initial_history = persistence
+        .history_path
+        .map(config::load_history)
+        .unwrap_or_default();
     let (reason, session_id, session_title, history) = ui_loop(
         terminal,
         &cmd_tx,
         &mut event_rx,
-        header_labels,
-        initial_agent_label,
-        initial_history,
+        UiInitialState {
+            header_labels,
+            agent_label: initial_agent_label,
+            history: initial_history,
+            transcript_export_dir: persistence.transcript_export_dir.map(Path::to_path_buf),
+        },
         mode,
     )
     .await?;
-    if let Some(path) = history_path
+    if let Some(path) = persistence.history_path
         && let Err(e) = config::save_history(path, &history)
     {
         tracing::warn!("save_history {path:?}: {e:#}");
@@ -343,21 +362,20 @@ async fn ui_loop(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
-    header_labels: HeaderLabels,
-    initial_agent_label: Option<String>,
-    initial_history: Vec<String>,
+    initial: UiInitialState,
     mode: UiMode,
 ) -> Result<(UiExitReason, Option<String>, Option<String>, Vec<String>)> {
     let mut state = AppState::new();
-    state.set_prompt_history(initial_history);
-    state.project_label = header_labels.project;
-    state.worktree_label = header_labels.worktree;
-    if let Some(title) = header_labels.session_title {
+    state.set_prompt_history(initial.history);
+    state.project_label = initial.header_labels.project;
+    state.worktree_label = initial.header_labels.worktree;
+    if let Some(title) = initial.header_labels.session_title {
         state.set_session_title(&title);
     }
-    if let Some(label) = initial_agent_label {
+    if let Some(label) = initial.agent_label {
         state.agent_label = label;
     }
+    state.transcript_export_dir = initial.transcript_export_dir;
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut transcript_sink = TranscriptSink::default();
     let mut inline_resize_reflow = InlineResizeReflow::default();
@@ -2634,6 +2652,24 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
+    if images.is_empty() && text == "/export" {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        match export_transcript(state) {
+            Ok(path) => state.record_status_message(
+                StatusKind::Info,
+                format!("transcript exported to {}", path.display()),
+            ),
+            Err(e) => state.record_status_message(
+                StatusKind::Warning,
+                format!("transcript export failed: {e:#}"),
+            ),
+        }
+        return;
+    }
+
     if images.is_empty() && text == "/fork" {
         state.input.clear();
         clear_attachments(state);
@@ -2709,6 +2745,28 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
 
     state.record_user_prompt(display_text);
     let _ = cmd_tx.send(UiCommand::SendPrompt { text, images });
+}
+
+fn export_transcript(state: &AppState) -> Result<PathBuf> {
+    let Some(dir) = &state.transcript_export_dir else {
+        anyhow::bail!("transcript export directory is not configured");
+    };
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("create transcript export directory {}", dir.display()))?;
+    let path = dir.join(format!(
+        "mjolnir-transcript-{}.md",
+        export_timestamp_seconds()
+    ));
+    std::fs::write(&path, state.transcript_export_markdown())
+        .with_context(|| format!("write transcript export {}", path.display()))?;
+    Ok(path)
+}
+
+fn export_timestamp_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Re-issue a previously queued prompt now that the in-flight turn has
@@ -6967,6 +7025,32 @@ mod tests {
         assert_eq!(state.exit_reason, Some(UiExitReason::ClearSession));
         // Must not forward the command to the agent.
         assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn slash_export_writes_transcript_without_runtime_command() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = AppState::new();
+        state.transcript_export_dir = Some(dir.path().to_path_buf());
+        state
+            .transcript
+            .push(Entry::UserPrompt("hello".to_string()));
+        state.input = "/export".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Info);
+        assert!(status.text.contains("transcript exported to"));
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read export dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("dir entries");
+        assert_eq!(files.len(), 1);
+        let body = std::fs::read_to_string(files[0].path()).expect("export body");
+        assert!(body.contains("## You\n\nhello"));
     }
 
     #[test]

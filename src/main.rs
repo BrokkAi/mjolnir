@@ -34,7 +34,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::app::UiExitReason;
-use crate::config::{Config, CustomAgent as ConfigCustomAgent, SelectedAgent, history_path};
+use crate::config::{
+    Config, CustomAgent as ConfigCustomAgent, SelectedAgent, history_path, transcript_export_dir,
+};
 use crate::picker::{
     CustomAgent as PickerCustomAgent, PickerOutcome, PickerPreferences, PickerResult,
 };
@@ -888,6 +890,7 @@ async fn run_session(
     });
 
     let hist_path = history_path();
+    let export_dir = transcript_export_dir();
     // Pre-fill the UI header with the configured agent identity. Registry
     // agents use their source id so the header matches the picker/config,
     // while custom agents show the exact command line being launched.
@@ -931,7 +934,10 @@ async fn run_session(
         ui_event_rx,
         header_labels,
         agent_display_name,
-        Some(&hist_path),
+        ui::UiPersistencePaths {
+            history_path: Some(&hist_path),
+            transcript_export_dir: Some(&export_dir),
+        },
         mode,
     )
     .await;

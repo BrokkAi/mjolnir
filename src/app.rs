@@ -6,6 +6,7 @@
 //! this state.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::{
@@ -31,6 +32,7 @@ const BUILTIN_NEW_COMMAND: &str = "new";
 const BUILTIN_CLEAR_COMMAND: &str = "clear";
 const BUILTIN_LOAD_COMMAND: &str = "load";
 const BUILTIN_FORK_COMMAND: &str = "fork";
+const BUILTIN_EXPORT_COMMAND: &str = "export";
 const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
 
 fn builtin_new_command() -> AvailableCommand {
@@ -55,16 +57,22 @@ fn builtin_fork_command() -> AvailableCommand {
     )
 }
 
+fn builtin_export_command() -> AvailableCommand {
+    AvailableCommand::new(BUILTIN_EXPORT_COMMAND, "export transcript to markdown")
+}
+
 fn install_builtin_commands(commands: &mut Vec<AvailableCommand>, include_fork: bool) {
     commands.retain(|command| {
         command.name != BUILTIN_NEW_COMMAND
             && command.name != BUILTIN_CLEAR_COMMAND
             && command.name != BUILTIN_LOAD_COMMAND
             && command.name != BUILTIN_FORK_COMMAND
+            && command.name != BUILTIN_EXPORT_COMMAND
     });
     if include_fork {
         commands.insert(0, builtin_fork_command());
     }
+    commands.insert(0, builtin_export_command());
     commands.insert(0, builtin_load_command());
     commands.insert(0, builtin_clear_command());
     commands.insert(0, builtin_new_command());
@@ -96,6 +104,105 @@ pub enum Entry {
     Plan(Vec<PlanEntry>),
     /// System-level note (errors, warnings, mode changes).
     System(String),
+}
+
+impl AppState {
+    /// Render the current transcript as a Markdown document suitable for export.
+    pub fn transcript_export_markdown(&self) -> String {
+        let mut out = String::from("# Mjolnir Transcript\n\n");
+        if let Some(title) = &self.session_title {
+            out.push_str(&format!("- Session: {title}\n"));
+        }
+        if let Some(id) = &self.session_id {
+            out.push_str(&format!("- Session ID: {id}\n"));
+        }
+        if !self.agent_label.is_empty() {
+            out.push_str(&format!("- Agent: {}\n", self.agent_label));
+        }
+        out.push('\n');
+
+        for entry in &self.transcript {
+            match entry {
+                Entry::UserPrompt(text) => push_export_text(&mut out, "You", text),
+                Entry::AgentMessage(text) => push_export_text(&mut out, "Agent", text),
+                Entry::AgentThought(text) => push_export_text(&mut out, "Thought", text),
+                Entry::System(text) => push_export_text(&mut out, "System", text),
+                Entry::Plan(entries) => {
+                    out.push_str("## Plan\n\n");
+                    for entry in entries {
+                        out.push_str(&format!(
+                            "- {:?} / {:?}: {}\n",
+                            entry.priority, entry.status, entry.content
+                        ));
+                    }
+                    out.push('\n');
+                }
+                Entry::ToolCall(id) => {
+                    if let Some(view) = self.tool_calls.get(id) {
+                        out.push_str(&format!(
+                            "## Tool: {}\n\n- Kind: {:?}\n- Status: {:?}\n\n",
+                            view.title, view.kind, view.status
+                        ));
+                        for output in &view.body {
+                            push_export_tool_output(&mut out, output);
+                        }
+                    }
+                }
+            }
+        }
+
+        out
+    }
+}
+
+fn push_export_text(out: &mut String, heading: &str, text: &str) {
+    out.push_str(&format!("## {heading}\n\n"));
+    out.push_str(text);
+    if !text.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push('\n');
+}
+
+fn push_export_tool_output(out: &mut String, output: &ToolCallOutput) {
+    match output {
+        ToolCallOutput::Text(text) => push_export_fence(out, text),
+        ToolCallOutput::Diff {
+            path,
+            old_text: _,
+            new_text,
+        } => {
+            out.push_str(&format!("### Diff: {path}\n\n"));
+            push_export_fence(out, new_text);
+        }
+        ToolCallOutput::Terminal {
+            terminal_id,
+            output,
+            truncated,
+            exit_status,
+        } => {
+            out.push_str(&format!("### Terminal: {terminal_id}\n\n"));
+            if *truncated {
+                out.push_str("_Output truncated._\n\n");
+            }
+            if let Some(status) = exit_status {
+                out.push_str(&format!("Exit status: {status:?}\n\n"));
+            }
+            push_export_fence(out, output);
+        }
+        ToolCallOutput::Note(note) => {
+            out.push_str(&format!("_Note: {note}_\n\n"));
+        }
+    }
+}
+
+fn push_export_fence(out: &mut String, text: &str) {
+    out.push_str("```text\n");
+    out.push_str(text);
+    if !text.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("```\n\n");
 }
 
 /// One displayed value for a select-style session config option.
@@ -545,6 +652,8 @@ pub struct AppState {
     /// Short linked-worktree name shown separately from the project when
     /// the session runs under `.mjolnir/worktrees/`.
     pub worktree_label: Option<String>,
+    /// Directory where `/export` writes Markdown transcript files.
+    pub transcript_export_dir: Option<PathBuf>,
     /// Holds the platform clipboard lease so copied text remains available
     /// on Linux/X11 where the owning process must stay alive.
     #[allow(dead_code)]
@@ -693,6 +802,7 @@ impl AppState {
             text_selection_mode: false,
             project_label: String::new(),
             worktree_label: None,
+            transcript_export_dir: None,
             clipboard_lease: None,
             queued_prompts: VecDeque::new(),
         }
@@ -1863,6 +1973,37 @@ mod tests {
             Entry::AgentMessage(s) => assert_eq!(s, "hello world"),
             other => panic!("unexpected entry: {other:?}"),
         }
+    }
+
+    #[test]
+    fn transcript_export_markdown_includes_messages_and_tool_output() {
+        let mut s = AppState::new();
+        s.agent_label = "test-agent".to_string();
+        s.session_id = Some("session-1".to_string());
+        s.record_user_prompt("hello".to_string());
+        s.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("world"),
+        )));
+        s.tool_calls.insert(
+            "call-1".to_string(),
+            ToolCallView {
+                title: "cargo test".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Text("ok".to_string())],
+            },
+        );
+        s.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let markdown = s.transcript_export_markdown();
+
+        assert!(markdown.contains("# Mjolnir Transcript"));
+        assert!(markdown.contains("- Session ID: session-1"));
+        assert!(markdown.contains("- Agent: test-agent"));
+        assert!(markdown.contains("## You\n\nhello"));
+        assert!(markdown.contains("## Agent\n\nworld"));
+        assert!(markdown.contains("## Tool: cargo test"));
+        assert!(markdown.contains("```text\nok\n```"));
     }
 
     #[test]
@@ -3195,7 +3336,7 @@ mod tests {
             .iter()
             .map(|&i| s.available_commands[i].name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "clear", "load"]);
+        assert_eq!(names, vec!["new", "clear", "load", "export"]);
     }
 
     #[test]
@@ -3217,7 +3358,7 @@ mod tests {
             .iter()
             .map(|&i| s.available_commands[i].name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "clear", "load", "fork"]);
+        assert_eq!(names, vec!["new", "clear", "load", "export", "fork"]);
     }
 
     #[test]
@@ -3244,7 +3385,10 @@ mod tests {
             .iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "clear", "load", "fork", "review_pr"]);
+        assert_eq!(
+            names,
+            vec!["new", "clear", "load", "export", "fork", "review_pr"]
+        );
         assert_eq!(s.available_commands[0].description, "start a new session");
         assert_eq!(
             s.available_commands[1].description,
@@ -3256,6 +3400,10 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[3].description,
+            "export transcript to markdown"
+        );
+        assert_eq!(
+            s.available_commands[4].description,
             "fork the current session (unstable ACP extension)"
         );
     }
@@ -3275,7 +3423,7 @@ mod tests {
             .iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "clear", "load", "review_pr"]);
+        assert_eq!(names, vec!["new", "clear", "load", "export", "review_pr"]);
     }
 
     #[test]

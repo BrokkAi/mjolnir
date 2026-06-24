@@ -124,6 +124,15 @@ pub fn default_config_path() -> PathBuf {
         .join("config.toml")
 }
 
+/// Directory for exported conversation transcripts:
+/// `$XDG_CONFIG_HOME/mj/transcripts`.
+pub fn transcript_export_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from(".config"))
+        .join("mj")
+        .join("transcripts")
+}
+
 /// Path for the persisted prompt-history file (NUL-delimited format to
 /// support multiline prompts): `$XDG_CONFIG_HOME/mj/history.txt`.
 pub fn history_path() -> PathBuf {
