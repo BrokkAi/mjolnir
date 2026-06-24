@@ -951,12 +951,20 @@ fn maybe_run_inline_resize_reflow(
     state: &AppState,
     inline_height: &mut u16,
 ) -> Result<bool> {
-    if !reflow.is_due(Instant::now()) {
+    if !should_run_inline_resize_reflow(reflow, state, Instant::now()) {
         return Ok(false);
     }
     reflow.clear();
     rebuild_inline_scrollback(terminal, sink, state, inline_height)?;
     Ok(true)
+}
+
+fn should_run_inline_resize_reflow(
+    reflow: &InlineResizeReflow,
+    state: &AppState,
+    now: Instant,
+) -> bool {
+    reflow.is_due(now) && !state.transcript_viewer
 }
 
 fn rebuild_inline_scrollback(
@@ -986,8 +994,8 @@ fn rebuild_inline_scrollback(
         transcript_collapse_limit(state),
     );
 
-    reset_inline_terminal_for_reflow(terminal, desired_height, size)?;
-    *inline_height = desired_height;
+    let actual_height = reset_inline_terminal_for_reflow(terminal, desired_height, size)?;
+    *inline_height = actual_height;
     sink.mark_emitted(stable_entries);
     insert_lines_before_inline_viewport(terminal, lines, size.width)
 }
@@ -996,8 +1004,8 @@ fn reset_inline_terminal_for_reflow(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     desired_height: u16,
     size: Size,
-) -> Result<()> {
-    let height = desired_height.min(size.height).max(1);
+) -> Result<u16> {
+    let height = clamped_inline_height(desired_height, size);
     let origin = Position::new(0, size.height.saturating_sub(height));
 
     terminal
@@ -1011,7 +1019,9 @@ fn reset_inline_terminal_for_reflow(
     // them from transcript state at the new width below. Tradeoff: any
     // pre-existing terminal content above the inline viewport (shell history,
     // earlier command output) is purged too and is not restored — only
-    // Mjolnir's transcript is replayed. Tracked in BrokkAi/mjolnir#195.
+    // Mjolnir's transcript is replayed. We keep this deliberate tradeoff
+    // because there is no portable terminal primitive for deleting only the
+    // stale Mjolnir-owned scrollback rows while preserving foreign scrollback.
     execute!(
         terminal.backend_mut(),
         CrosstermClear(CrosstermClearType::All),
@@ -1033,7 +1043,11 @@ fn reset_inline_terminal_for_reflow(
     )
     .context("recreate inline terminal for resize reflow")?;
     *terminal = next;
-    Ok(())
+    Ok(height)
+}
+
+fn clamped_inline_height(desired_height: u16, size: Size) -> u16 {
+    desired_height.min(size.height).max(1)
 }
 
 fn insert_lines_before_inline_viewport(
@@ -7195,6 +7209,41 @@ mod tests {
 
         reflow.clear();
         assert!(!reflow.is_pending());
+    }
+
+    #[test]
+    fn inline_resize_reflow_records_clamped_inline_height() {
+        let size = Size {
+            width: 80,
+            height: 4,
+        };
+
+        assert_eq!(clamped_inline_height(INLINE_CHAT_HEIGHT, size), 4);
+        assert_eq!(clamped_inline_height(2, size), 2);
+        assert_eq!(clamped_inline_height(0, size), 1);
+    }
+
+    #[test]
+    fn inline_resize_reflow_waits_while_transcript_viewer_is_open() {
+        let mut reflow = InlineResizeReflow::default();
+        let start = Instant::now();
+        reflow.note_resize(
+            Size {
+                width: 120,
+                height: 40,
+            },
+            start,
+        );
+        let due = start + INLINE_RESIZE_REFLOW_DEBOUNCE;
+        let mut state = AppState::new();
+
+        assert!(should_run_inline_resize_reflow(&reflow, &state, due));
+
+        state.open_transcript_viewer();
+        assert!(!should_run_inline_resize_reflow(&reflow, &state, due));
+
+        state.close_transcript_viewer();
+        assert!(should_run_inline_resize_reflow(&reflow, &state, due));
     }
 
     #[test]
