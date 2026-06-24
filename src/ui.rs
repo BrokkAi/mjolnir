@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::{AvailableCommandInput, StopReason, ToolCallStatus};
 use anyhow::{Context, Result};
+use crossterm::cursor::MoveTo;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
@@ -2945,6 +2946,17 @@ pub fn restore_fullscreen_terminal(terminal: &mut Terminal<TrackedBackend<Stdout
         DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
+    Ok(())
+}
+
+pub fn clear_terminal_screen(terminal: &mut Terminal<TrackedBackend<Stdout>>) -> Result<()> {
+    execute!(
+        terminal.backend_mut(),
+        CrosstermClear(CrosstermClearType::All),
+        CrosstermClear(CrosstermClearType::Purge),
+        MoveTo(0, 0)
+    )?;
+    Write::flush(terminal.backend_mut())?;
     Ok(())
 }
 

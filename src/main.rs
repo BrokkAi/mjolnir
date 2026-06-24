@@ -943,6 +943,13 @@ async fn run_session(
     if let Err(e) = restore_result {
         tracing::warn!("restore terminal failed: {e}");
     }
+    if matches!(
+        ui_result.as_ref().map(|(reason, _, _)| reason),
+        Ok(UiExitReason::ClearSession)
+    ) && let Err(e) = ui::clear_terminal_screen(&mut terminal)
+    {
+        tracing::warn!("clear terminal for /clear failed: {e}");
+    }
 
     // Shutdown paths reaching this point:
     //
