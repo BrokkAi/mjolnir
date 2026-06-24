@@ -49,7 +49,10 @@ fn builtin_load_command() -> AvailableCommand {
 }
 
 fn builtin_fork_command() -> AvailableCommand {
-    AvailableCommand::new(BUILTIN_FORK_COMMAND, "fork the current session")
+    AvailableCommand::new(
+        BUILTIN_FORK_COMMAND,
+        "fork the current session (unstable ACP extension)",
+    )
 }
 
 fn install_builtin_commands(commands: &mut Vec<AvailableCommand>, include_fork: bool) {
@@ -3253,7 +3256,7 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[3].description,
-            "fork the current session"
+            "fork the current session (unstable ACP extension)"
         );
     }
 

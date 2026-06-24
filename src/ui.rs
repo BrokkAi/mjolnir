@@ -2609,7 +2609,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         } else if !state.session_fork_supported {
             state.record_status_message(
                 StatusKind::Warning,
-                "session fork is not supported by this agent",
+                "session fork is not supported by this agent (unstable ACP extension not advertised)",
             );
         } else if state.is_busy() {
             state.record_status_message(
@@ -7013,7 +7013,10 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err());
         let status = state.status_line.expect("status");
         assert_eq!(status.kind, StatusKind::Warning);
-        assert_eq!(status.text, "session fork is not supported by this agent");
+        assert_eq!(
+            status.text,
+            "session fork is not supported by this agent (unstable ACP extension not advertised)"
+        );
     }
 
     #[test]

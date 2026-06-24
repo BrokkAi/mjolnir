@@ -1064,6 +1064,8 @@ async fn drive_session(
         emit_fatal(ui_tx, &fatal_emitted, text.clone());
         return Err(anyhow::anyhow!(text));
     }
+    // `session/fork` is exposed by the ACP crate as an unstable extension;
+    // only surface the built-in command when the agent explicitly advertises it.
     let session_fork_supported = init_resp
         .agent_capabilities
         .session_capabilities
@@ -1203,7 +1205,8 @@ async fn drive_session(
             UiCommand::ForkSession => {
                 if !session_fork_supported {
                     let _ = ui_tx.send(UiEvent::Warning(
-                        "session fork is not supported by this agent".to_string(),
+                        "session fork is not supported by this agent (unstable ACP extension not advertised)"
+                            .to_string(),
                     ));
                     continue;
                 }
@@ -3216,7 +3219,10 @@ mod tests {
             .expect("channel closed");
         match ev {
             UiEvent::Warning(message) => {
-                assert_eq!(message, "session fork is not supported by this agent");
+                assert_eq!(
+                    message,
+                    "session fork is not supported by this agent (unstable ACP extension not advertised)"
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }
