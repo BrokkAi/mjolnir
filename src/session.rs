@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use crate::term::TrackedBackend;
 use agent_client_protocol::schema::{
-    AgentCapabilities, InitializeRequest, ListSessionsRequest, ProtocolVersion, SessionInfo,
+    AgentCapabilities, AuthMethod, AuthenticateRequest, ErrorCode, InitializeRequest,
+    ListSessionsRequest, ProtocolVersion, SessionInfo,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::{Context, Result};
@@ -130,14 +131,19 @@ where
             // Collect all pages of sessions.
             let mut all_sessions: Vec<SessionEntry> = Vec::new();
             let mut cursor: Option<String> = None;
+            let mut attempted_auth = false;
             loop {
                 let mut list_req = ListSessionsRequest::new().cwd(cwd.clone());
                 list_req.cursor = cursor.clone();
-                let resp = conn
-                    .send_request(list_req)
-                    .block_task()
-                    .await
-                    .context("list sessions")?;
+                let resp = match conn.send_request(list_req.clone()).block_task().await {
+                    Ok(resp) => resp,
+                    Err(err) if is_auth_required(&err) && !attempted_auth => {
+                        authenticate_with_first_method(&conn, &init_resp.auth_methods).await?;
+                        attempted_auth = true;
+                        conn.send_request(list_req).block_task().await?
+                    }
+                    Err(err) => return Err(err),
+                };
                 all_sessions.extend(resp.sessions.into_iter().map(SessionEntry::from));
                 match resp.next_cursor {
                     Some(next) if !next.is_empty() => cursor = Some(next),
@@ -150,6 +156,28 @@ where
         .await;
 
     result.context("ACP client error during session listing")
+}
+
+async fn authenticate_with_first_method(
+    conn: &ConnectionTo<Agent>,
+    auth_methods: &[AuthMethod],
+) -> std::result::Result<(), agent_client_protocol::Error> {
+    let Some(method) = auth_methods.first() else {
+        return Err(
+            agent_client_protocol::Error::auth_required().data(serde_json::Value::String(
+                "agent requires authentication but did not advertise any ACP auth methods"
+                    .to_string(),
+            )),
+        );
+    };
+    conn.send_request(AuthenticateRequest::new(method.id().clone()))
+        .block_task()
+        .await?;
+    Ok(())
+}
+
+fn is_auth_required(err: &agent_client_protocol::Error) -> bool {
+    err.code == ErrorCode::AuthRequired
 }
 
 fn validate_protocol_version(negotiated: ProtocolVersion) -> Result<()> {
@@ -401,7 +429,16 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{SessionCapabilities, SessionListCapabilities};
+    use agent_client_protocol::Agent as AgentRole;
+    use agent_client_protocol::schema::{
+        AuthMethod, AuthMethodAgent, AuthenticateResponse, InitializeResponse,
+        ListSessionsResponse, SessionCapabilities, SessionId, SessionListCapabilities,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tokio::io::split;
 
     fn sample_sessions() -> Vec<SessionEntry> {
         vec![
@@ -525,5 +562,78 @@ mod tests {
         let supported = AgentCapabilities::new()
             .session_capabilities(SessionCapabilities::new().list(SessionListCapabilities::new()));
         assert!(require_session_list(&supported).is_ok());
+    }
+
+    async fn run_mock_agent_list_auth_required_then_authenticates(stream: tokio::io::DuplexStream) {
+        let authenticated = Arc::new(AtomicBool::new(false));
+        let authenticate_seen = authenticated.clone();
+        let list_authenticated = authenticated.clone();
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: InitializeRequest, responder, _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1)
+                            .agent_capabilities(AgentCapabilities::new().session_capabilities(
+                                SessionCapabilities::new().list(SessionListCapabilities::new()),
+                            ))
+                            .auth_methods(vec![AuthMethod::Agent(AuthMethodAgent::new(
+                                "agent-auth",
+                                "Agent Auth",
+                            ))]),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: AuthenticateRequest, responder, _cx| {
+                    assert_eq!(req.method_id.to_string(), "agent-auth");
+                    authenticate_seen.store(true, Ordering::SeqCst);
+                    responder.respond(AuthenticateResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: ListSessionsRequest, responder, _cx| {
+                    if list_authenticated.load(Ordering::SeqCst) {
+                        responder.respond(ListSessionsResponse::new(vec![SessionInfo::new(
+                            SessionId::new("listed-session"),
+                            PathBuf::from("/tmp"),
+                        )]))
+                    } else {
+                        responder.respond_with_error(
+                            agent_client_protocol::Error::auth_required()
+                                .data(serde_json::Value::String("login required".to_string())),
+                        )
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_listing_authenticates_and_retries_list() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let agent_task = tokio::spawn(run_mock_agent_list_auth_required_then_authenticates(
+            agent_side,
+        ));
+
+        let sessions = list_sessions_via_transport(client_transport, PathBuf::from("/tmp"))
+            .await
+            .expect("session listing should authenticate and retry");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "listed-session");
+
+        agent_task.abort();
     }
 }

@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
-    AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock, CreateTerminalRequest,
-    CreateTerminalResponse, ErrorCode, FileSystemCapabilities, ForkSessionRequest, ImageContent,
-    InitializeRequest, KillTerminalRequest, KillTerminalResponse, LoadSessionRequest,
-    NewSessionRequest, PromptRequest, ProtocolVersion, ReleaseTerminalRequest,
+    AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, ClientCapabilities,
+    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, ErrorCode, FileSystemCapabilities,
+    ForkSessionRequest, ImageContent, InitializeRequest, KillTerminalRequest, KillTerminalResponse,
+    LoadSessionRequest, NewSessionRequest, PromptRequest, ProtocolVersion, ReleaseTerminalRequest,
     ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId, SessionId,
@@ -141,9 +141,9 @@ pub enum LaunchError {
     InitializeFailed {
         source: agent_client_protocol::Error,
     },
-    /// The agent returned `auth_required` (-32000) at either `initialize`
-    /// or `session/new`. The agent is healthy; the user just needs to
-    /// authenticate first.
+    /// The agent returned `auth_required` (-32000) during initialize or
+    /// session lifecycle setup. The agent is healthy; the user just needs
+    /// to authenticate first.
     AuthRequired { detail: Option<String> },
     /// The agent negotiated an ACP protocol version this client does not support.
     UnsupportedProtocolVersion { negotiated: ProtocolVersion },
@@ -271,8 +271,8 @@ fn classify_initialize_error(source: agent_client_protocol::Error) -> LaunchErro
     }
 }
 
-/// Classify a `session/new` ACP error. Auth-required is split out because
-/// it has a different remediation than a generic failure.
+/// Classify a session lifecycle ACP error. Auth-required is split out
+/// because it has a different remediation than a generic failure.
 fn classify_session_error(source: agent_client_protocol::Error) -> LaunchError {
     match auth_required_detail(&source) {
         Some(detail) => LaunchError::AuthRequired { detail },
@@ -296,6 +296,22 @@ fn require_load_session(capabilities: &AgentCapabilities) -> std::result::Result
             capability: "loadSession",
         })
     }
+}
+
+async fn authenticate_after_auth_required(
+    conn: &ConnectionTo<Agent>,
+    auth_methods: &[AuthMethod],
+    detail: Option<String>,
+) -> std::result::Result<(), LaunchError> {
+    let Some(method) = auth_methods.first() else {
+        return Err(LaunchError::AuthRequired { detail });
+    };
+
+    conn.send_request(AuthenticateRequest::new(method.id().clone()))
+        .block_task()
+        .await
+        .map(|_| ())
+        .map_err(classify_session_error)
 }
 
 /// User-facing message for an agent process that exited without us
@@ -1014,23 +1030,42 @@ async fn drive_session(
                 emit_fatal(ui_tx, &fatal_emitted, text.clone());
                 return Err(anyhow::anyhow!(text));
             }
-            match conn
-                .send_request(LoadSessionRequest::new(session_id.clone(), cwd.clone()))
-                .block_task()
-                .await
-            {
-                Ok(s) => (
-                    session_id,
-                    session_config_from_parts(s.config_options, s.modes),
-                    true,
-                ),
-                Err(source) => {
-                    let launch_err = classify_session_error(source);
-                    let text = launch_err.to_string();
-                    emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                    return Err(anyhow::anyhow!(text));
-                }
-            }
+            let load_req = LoadSessionRequest::new(session_id.clone(), cwd.clone());
+            let loaded = match conn.send_request(load_req.clone()).block_task().await {
+                Ok(s) => s,
+                Err(source) => match auth_required_detail(&source) {
+                    Some(detail) => {
+                        if let Err(launch_err) =
+                            authenticate_after_auth_required(&conn, &init_resp.auth_methods, detail)
+                                .await
+                        {
+                            let text = launch_err.to_string();
+                            emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                            return Err(anyhow::anyhow!(text));
+                        }
+                        match conn.send_request(load_req).block_task().await {
+                            Ok(s) => s,
+                            Err(source) => {
+                                let launch_err = classify_session_error(source);
+                                let text = launch_err.to_string();
+                                emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                                return Err(anyhow::anyhow!(text));
+                            }
+                        }
+                    }
+                    None => {
+                        let launch_err = classify_session_error(source);
+                        let text = launch_err.to_string();
+                        emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                        return Err(anyhow::anyhow!(text));
+                    }
+                },
+            };
+            (
+                session_id,
+                session_config_from_parts(loaded.config_options, loaded.modes),
+                true,
+            )
         }
         None => match conn
             .send_request(NewSessionRequest::new(cwd.clone()))
@@ -1044,12 +1079,43 @@ async fn drive_session(
                     .await;
                 (s.session_id, config, false)
             }
-            Err(source) => {
-                let launch_err = classify_session_error(source);
-                let text = launch_err.to_string();
-                emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                return Err(anyhow::anyhow!(text));
-            }
+            Err(source) => match auth_required_detail(&source) {
+                Some(detail) => {
+                    if let Err(launch_err) =
+                        authenticate_after_auth_required(&conn, &init_resp.auth_methods, detail)
+                            .await
+                    {
+                        let text = launch_err.to_string();
+                        emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                        return Err(anyhow::anyhow!(text));
+                    }
+                    match conn
+                        .send_request(NewSessionRequest::new(cwd.clone()))
+                        .block_task()
+                        .await
+                    {
+                        Ok(s) => {
+                            let config = session_config_from_parts(s.config_options, s.modes);
+                            session_state
+                                .set_active_session_id(s.session_id.clone())
+                                .await;
+                            (s.session_id, config, false)
+                        }
+                        Err(source) => {
+                            let launch_err = classify_session_error(source);
+                            let text = launch_err.to_string();
+                            emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                            return Err(anyhow::anyhow!(text));
+                        }
+                    }
+                }
+                None => {
+                    let launch_err = classify_session_error(source);
+                    let text = launch_err.to_string();
+                    emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                    return Err(anyhow::anyhow!(text));
+                }
+            },
         },
     };
     let (session_config_options, session_config_targets) = initial_config.unwrap_or_default();
@@ -2102,11 +2168,12 @@ mod tests {
     use crate::app::AppState;
     use agent_client_protocol::Agent as AgentRole;
     use agent_client_protocol::schema::{
-        ContentBlock, ContentChunk, ForkSessionResponse, InitializeResponse, LoadSessionResponse,
-        NewSessionResponse, PermissionOption, PermissionOptionKind, PromptResponse,
-        SessionCapabilities, SessionConfigId, SessionConfigValueId, SessionForkCapabilities,
-        SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason,
-        TextContent, ToolCallUpdateFields,
+        AuthMethodAgent, AuthenticateResponse, ContentBlock, ContentChunk, ForkSessionResponse,
+        InitializeResponse, LoadSessionResponse, NewSessionResponse, PermissionOption,
+        PermissionOptionKind, PromptResponse, SessionCapabilities, SessionConfigId,
+        SessionConfigValueId, SessionForkCapabilities, SessionId, SessionNotification,
+        SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent,
+        ToolCallUpdateFields,
     };
     use std::sync::{
         Arc,
@@ -2768,6 +2835,122 @@ mod tests {
                         agent_client_protocol::Error::auth_required()
                             .data(serde_json::Value::String("login required".to_string())),
                     )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_auth_required_then_authenticates(stream: tokio::io::DuplexStream) {
+        let authenticated = Arc::new(StdAtomicBool::new(false));
+        let new_session_attempts = Arc::new(AtomicUsize::new(0));
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let authenticate_seen = authenticated.clone();
+        let session_authenticated = authenticated.clone();
+        let session_attempts = new_session_attempts.clone();
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(agent_client_protocol::schema::ProtocolVersion::V1)
+                            .auth_methods(vec![AuthMethod::Agent(AuthMethodAgent::new(
+                                "agent-auth",
+                                "Agent Auth",
+                            ))]),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: agent_client_protocol::schema::AuthenticateRequest,
+                            responder,
+                            _cx| {
+                    assert_eq!(req.method_id.to_string(), "agent-auth");
+                    authenticate_seen.store(true, Ordering::SeqCst);
+                    responder.respond(AuthenticateResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    session_attempts.fetch_add(1, Ordering::SeqCst);
+                    if session_authenticated.load(Ordering::SeqCst) {
+                        responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
+                    } else {
+                        responder.respond_with_error(
+                            agent_client_protocol::Error::auth_required()
+                                .data(serde_json::Value::String("login required".to_string())),
+                        )
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_load_auth_required_then_authenticates(stream: tokio::io::DuplexStream) {
+        let authenticated = Arc::new(StdAtomicBool::new(false));
+        let load_session_attempts = Arc::new(AtomicUsize::new(0));
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let authenticate_seen = authenticated.clone();
+        let session_authenticated = authenticated.clone();
+        let session_attempts = load_session_attempts.clone();
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(agent_client_protocol::schema::ProtocolVersion::V1)
+                            .agent_capabilities(AgentCapabilities::new().load_session(true))
+                            .auth_methods(vec![AuthMethod::Agent(AuthMethodAgent::new(
+                                "agent-auth",
+                                "Agent Auth",
+                            ))]),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: agent_client_protocol::schema::AuthenticateRequest,
+                            responder,
+                            _cx| {
+                    assert_eq!(req.method_id.to_string(), "agent-auth");
+                    authenticate_seen.store(true, Ordering::SeqCst);
+                    responder.respond(AuthenticateResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: agent_client_protocol::schema::LoadSessionRequest,
+                            responder,
+                            _cx| {
+                    assert_eq!(req.session_id.to_string(), "existing-session");
+                    session_attempts.fetch_add(1, Ordering::SeqCst);
+                    if session_authenticated.load(Ordering::SeqCst) {
+                        responder.respond(LoadSessionResponse::new())
+                    } else {
+                        responder.respond_with_error(
+                            agent_client_protocol::Error::auth_required()
+                                .data(serde_json::Value::String("login required".to_string())),
+                        )
+                    }
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -4074,6 +4257,100 @@ mod tests {
         assert!(fatal_emitted.load(Ordering::SeqCst));
 
         let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_client_authenticates_and_retries_session_new() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_auth_required_then_authenticates(agent_side));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let fatal_emitted = Arc::new(AtomicBool::new(false));
+
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            fatal_emitted.clone(),
+        ));
+
+        let mut got_started = None;
+        for _ in 0..6 {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for session start")
+                .expect("channel closed");
+            if let UiEvent::SessionStarted {
+                session_id,
+                resumed,
+            } = ev
+            {
+                got_started = Some((session_id, resumed));
+                break;
+            }
+        }
+
+        let (session_id, resumed) = got_started.expect("did not receive SessionStarted");
+        assert_eq!(session_id, "test-session");
+        assert!(!resumed);
+        assert!(!fatal_emitted.load(Ordering::SeqCst));
+
+        client_task.abort();
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_client_authenticates_and_retries_session_load() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_load_auth_required_then_authenticates(
+            agent_side,
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let fatal_emitted = Arc::new(AtomicBool::new(false));
+
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            Some("existing-session".to_string()),
+            ui_tx,
+            cmd_rx,
+            fatal_emitted.clone(),
+        ));
+
+        let mut got_started = None;
+        for _ in 0..6 {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for session start")
+                .expect("channel closed");
+            if let UiEvent::SessionStarted {
+                session_id,
+                resumed,
+            } = ev
+            {
+                got_started = Some((session_id, resumed));
+                break;
+            }
+        }
+
+        let (session_id, resumed) = got_started.expect("did not receive SessionStarted");
+        assert_eq!(session_id, "existing-session");
+        assert!(resumed);
+        assert!(!fatal_emitted.load(Ordering::SeqCst));
+
+        client_task.abort();
         agent_task.abort();
     }
 
