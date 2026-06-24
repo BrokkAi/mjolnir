@@ -109,6 +109,9 @@ enum Mode {
         focus: AddCustomFocus,
         action: ItemAction,
         error: Option<String>,
+        /// `Some(idx)` when editing the existing custom agent at that index
+        /// in `preferences.custom_agents`; `None` when adding a new one.
+        edit_index: Option<usize>,
     },
     Installing {
         label: String,
@@ -365,6 +368,53 @@ impl<'a> PickerState<'a> {
         self.notice = Some(format!("default set to {label}"));
         self.rebuild_items(Some(&source_id));
     }
+
+    /// Replace the custom agent at `idx` with an edited name/program/args,
+    /// preserving its description. When the rename changes the agent's
+    /// `source_id`, any favorite or default reference is migrated so it keeps
+    /// pointing at the same row.
+    fn update_custom_agent(
+        &mut self,
+        idx: usize,
+        name: String,
+        program: PathBuf,
+        args: Vec<String>,
+    ) {
+        let old_source_id = self.preferences.custom_agents[idx].source_id();
+        let description = self.preferences.custom_agents[idx].description.clone();
+        let updated = CustomAgent {
+            name,
+            program,
+            args,
+            description,
+        };
+        let new_source_id = updated.source_id();
+        let label = updated.name.clone();
+        let outcome = updated.to_outcome();
+        self.preferences.custom_agents[idx] = updated;
+
+        if old_source_id != new_source_id
+            && let Some(pos) = self
+                .preferences
+                .favorite_source_ids
+                .iter()
+                .position(|id| id == &old_source_id)
+        {
+            self.preferences.favorite_source_ids[pos] = new_source_id.clone();
+        }
+        if self
+            .preferences
+            .default_agent
+            .as_ref()
+            .is_some_and(|d| d.source_id == old_source_id)
+        {
+            self.preferences.default_agent = Some(outcome);
+        }
+
+        self.rebuild_items(Some(&new_source_id));
+        self.notice = Some(format!("updated custom agent: {label}"));
+        self.mode = Mode::Browse;
+    }
 }
 
 /// Run the picker until the user selects an agent or cancels with Esc.
@@ -519,6 +569,7 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
             focus,
             action,
             error,
+            edit_index,
         } => match (key.modifiers, key.code) {
             (_, KeyCode::Esc) => {
                 state.mode = Mode::Browse;
@@ -546,7 +597,8 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
                         .preferences
                         .custom_agents
                         .iter()
-                        .any(|a| a.name == trimmed_name)
+                        .enumerate()
+                        .any(|(i, a)| Some(i) != *edit_index && a.name == trimmed_name)
                     {
                         *error = Some(format!(
                             "a custom agent named '{trimmed_name}' already exists"
@@ -555,24 +607,33 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
                     } else {
                         match parse_custom_command(&trimmed_command) {
                             Ok(parsed) => {
-                                let custom = CustomAgent {
-                                    name: trimmed_name.clone(),
-                                    program: parsed.program,
-                                    args: parsed.args,
-                                    description: String::new(),
-                                };
-                                let outcome = custom.to_outcome();
-                                let label = custom.name.clone();
-                                state.preferences.custom_agents.push(custom);
-                                let act = *action;
-                                let source_id = outcome.source_id.clone();
-                                state.rebuild_items(Some(&source_id));
-                                state.notice = Some(format!("added custom agent: {label}"));
-                                state.mode = Mode::Browse;
-                                match act {
-                                    ItemAction::Select => return Ok(Some(outcome)),
-                                    ItemAction::SetDefault => {
-                                        state.set_default_outcome(outcome, label);
+                                if let Some(idx) = *edit_index {
+                                    state.update_custom_agent(
+                                        idx,
+                                        trimmed_name.clone(),
+                                        parsed.program,
+                                        parsed.args,
+                                    );
+                                } else {
+                                    let custom = CustomAgent {
+                                        name: trimmed_name.clone(),
+                                        program: parsed.program,
+                                        args: parsed.args,
+                                        description: String::new(),
+                                    };
+                                    let outcome = custom.to_outcome();
+                                    let label = custom.name.clone();
+                                    state.preferences.custom_agents.push(custom);
+                                    let act = *action;
+                                    let source_id = outcome.source_id.clone();
+                                    state.rebuild_items(Some(&source_id));
+                                    state.notice = Some(format!("added custom agent: {label}"));
+                                    state.mode = Mode::Browse;
+                                    match act {
+                                        ItemAction::Select => return Ok(Some(outcome)),
+                                        ItemAction::SetDefault => {
+                                            state.set_default_outcome(outcome, label);
+                                        }
                                     }
                                 }
                             }
@@ -635,6 +696,26 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
                     return start_item_action(state, &item, ItemAction::SetDefault).await;
                 }
             }
+            (KeyModifiers::NONE, KeyCode::Char('e')) if !state.search_focused => {
+                match state.focused_item() {
+                    Some(Item::CustomAgent(idx)) => {
+                        let idx = *idx;
+                        let agent = &state.preferences.custom_agents[idx];
+                        state.mode = Mode::AddCustomAgent {
+                            name: agent.name.clone(),
+                            command: custom_agent_command_string(agent),
+                            focus: AddCustomFocus::Name,
+                            action: ItemAction::Select,
+                            error: None,
+                            edit_index: Some(idx),
+                        };
+                        state.notice = None;
+                    }
+                    _ => {
+                        state.notice = Some("only custom agents can be edited".to_string());
+                    }
+                }
+            }
             (_, KeyCode::Char(c)) if state.search_focused => {
                 state.filter.push(c);
                 state.recompute_filter();
@@ -673,6 +754,7 @@ async fn start_item_action(
                 focus: AddCustomFocus::Name,
                 action,
                 error: None,
+                edit_index: None,
             };
             Ok(None)
         }
@@ -788,6 +870,16 @@ async fn start_item_action(
     }
 }
 
+/// Render a custom agent's stored program + args back into a single editable
+/// command string, shell-quoting parts that need it. Inverse of
+/// `parse_custom_command` (modulo the home-shortcut/program-normalization that
+/// the parse step applies).
+fn custom_agent_command_string(agent: &CustomAgent) -> String {
+    let mut parts = vec![agent.program.to_string_lossy().into_owned()];
+    parts.extend(agent.args.iter().cloned());
+    shell_words::join(&parts)
+}
+
 fn parse_custom_command(s: &str) -> Result<PickerOutcome> {
     let parts = shell_words::split(s).context("split command")?;
     let mut iter = parts.into_iter();
@@ -824,8 +916,17 @@ fn draw(f: &mut ratatui::Frame, state: &PickerState<'_>) {
             command,
             focus,
             error,
+            edit_index,
             ..
-        } => draw_add_custom_agent_modal(f, f.area(), name, command, *focus, error.as_deref()),
+        } => draw_add_custom_agent_modal(
+            f,
+            f.area(),
+            name,
+            command,
+            *focus,
+            error.as_deref(),
+            edit_index.is_some(),
+        ),
         Mode::Installing {
             label,
             total_bytes,
@@ -969,7 +1070,7 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
     } else if state.search_focused {
         "typing filters | Up/Down navigate | Enter select | Esc stop search"
     } else {
-        "Up/Down navigate | Enter select | / search | f favorite | d default | Esc cancel"
+        "Up/Down navigate | Enter select | / search | f favorite | d default | e edit | Esc cancel"
     };
     let p = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
     f.render_widget(p, area);
@@ -982,6 +1083,7 @@ fn draw_add_custom_agent_modal(
     command: &str,
     focus: AddCustomFocus,
     error: Option<&str>,
+    editing: bool,
 ) {
     let width = area.width.saturating_sub(8).min(80);
     let height = 11.min(area.height.saturating_sub(4));
@@ -990,9 +1092,14 @@ fn draw_add_custom_agent_modal(
     let rect = Rect::new(x, y, width, height);
 
     f.render_widget(Clear, rect);
+    let title = if editing {
+        " edit custom agent "
+    } else {
+        " add custom agent "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" add custom agent ")
+        .title(title)
         .style(Style::default().fg(Color::Cyan));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -1807,6 +1914,7 @@ mod tests {
             focus: AddCustomFocus::Command,
             action: ItemAction::Select,
             error: None,
+            edit_index: None,
         };
 
         let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -1839,6 +1947,7 @@ mod tests {
             focus: AddCustomFocus::Command,
             action: ItemAction::Select,
             error: None,
+            edit_index: None,
         };
 
         let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -1849,6 +1958,197 @@ mod tests {
         };
         assert!(error.as_ref().unwrap().contains("name"));
         assert!(matches!(focus, AddCustomFocus::Name));
+    }
+
+    #[tokio::test]
+    async fn pressing_e_on_custom_agent_opens_prefilled_edit_modal() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        state.select_source_id("custom:local-claude");
+
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(key)).await.unwrap();
+
+        let Mode::AddCustomAgent {
+            name,
+            command,
+            edit_index,
+            ..
+        } = &state.mode
+        else {
+            panic!("expected edit modal");
+        };
+        assert_eq!(name, "local-claude");
+        assert_eq!(command, "/usr/local/bin/claude-acp --debug");
+        let idx = edit_index.expect("editing an existing agent");
+        assert_eq!(state.preferences.custom_agents[idx].name, "local-claude");
+    }
+
+    #[tokio::test]
+    async fn editing_custom_agent_updates_in_place_without_adding() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        // Edit the second agent's command, keeping its name.
+        state.mode = Mode::AddCustomAgent {
+            name: "experiment".to_string(),
+            command: "/tmp/agent --verbose".to_string(),
+            focus: AddCustomFocus::Command,
+            action: ItemAction::Select,
+            error: None,
+            edit_index: Some(1),
+        };
+
+        let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let result = handle_event(&mut state, CtEvent::Key(enter)).await.unwrap();
+        assert!(result.is_none(), "editing returns to browse, not a launch");
+        assert!(matches!(state.mode, Mode::Browse));
+
+        assert_eq!(state.preferences.custom_agents.len(), 2, "no new agent");
+        let edited = &state.preferences.custom_agents[1];
+        assert_eq!(edited.name, "experiment");
+        assert_eq!(edited.program, PathBuf::from("/tmp/agent"));
+        assert_eq!(edited.args, vec!["--verbose"]);
+    }
+
+    #[tokio::test]
+    async fn editing_keeps_same_name_without_duplicate_error() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        state.mode = Mode::AddCustomAgent {
+            name: "local-claude".to_string(),
+            command: "/usr/local/bin/claude-acp --debug --extra".to_string(),
+            focus: AddCustomFocus::Command,
+            action: ItemAction::Select,
+            error: None,
+            edit_index: Some(0),
+        };
+
+        let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(enter)).await.unwrap();
+
+        assert!(
+            matches!(state.mode, Mode::Browse),
+            "keeping the same name must not be treated as a duplicate"
+        );
+        assert_eq!(state.preferences.custom_agents[0].args, vec!["--debug", "--extra"]);
+    }
+
+    #[tokio::test]
+    async fn editing_rejects_name_colliding_with_other_agent() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        // Try to rename agent 1 ("experiment") to "local-claude" (agent 0).
+        state.mode = Mode::AddCustomAgent {
+            name: "local-claude".to_string(),
+            command: "/tmp/agent".to_string(),
+            focus: AddCustomFocus::Command,
+            action: ItemAction::Select,
+            error: None,
+            edit_index: Some(1),
+        };
+
+        let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(enter)).await.unwrap();
+
+        let Mode::AddCustomAgent { error, .. } = &state.mode else {
+            panic!("expected modal to stay open on collision");
+        };
+        assert!(error.as_ref().unwrap().contains("already exists"));
+        // Original name preserved.
+        assert_eq!(state.preferences.custom_agents[1].name, "experiment");
+    }
+
+    #[tokio::test]
+    async fn renaming_custom_agent_migrates_favorite_and_default() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                favorite_source_ids: vec!["custom:experiment".to_string()],
+                default_agent: Some(PickerOutcome {
+                    source_id: "custom:experiment".to_string(),
+                    program: PathBuf::from("/tmp/agent"),
+                    args: vec![],
+                    env: HashMap::new(),
+                }),
+            },
+        );
+        state.mode = Mode::AddCustomAgent {
+            name: "renamed".to_string(),
+            command: "/tmp/agent --new".to_string(),
+            focus: AddCustomFocus::Command,
+            action: ItemAction::Select,
+            error: None,
+            edit_index: Some(1),
+        };
+
+        let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(enter)).await.unwrap();
+
+        assert_eq!(
+            state.preferences.favorite_source_ids,
+            vec!["custom:renamed".to_string()],
+            "favorite reference follows the rename"
+        );
+        let default = state.preferences.default_agent.as_ref().expect("default");
+        assert_eq!(default.source_id, "custom:renamed");
+        assert_eq!(default.args, vec!["--new"], "default command also updated");
+    }
+
+    #[tokio::test]
+    async fn pressing_e_on_non_custom_row_sets_notice() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        state.select_source_id("anvil");
+
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(key)).await.unwrap();
+
+        assert!(matches!(state.mode, Mode::Browse));
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("only custom agents can be edited")
+        );
     }
 
     #[test]
