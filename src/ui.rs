@@ -4038,7 +4038,7 @@ fn render_transcript_entry_range(
             Entry::System(text) => {
                 out.push(Line::from(Span::styled(
                     text.clone(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::LightBlue),
                 )));
                 out.push(Line::from(""));
             }
@@ -8128,6 +8128,23 @@ mod tests {
         );
         assert_eq!(desired, 39, "reader takes the whole terminal minus one row");
         assert!(desired > INLINE_EXPANDED_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn system_status_messages_use_visible_transcript_color() {
+        let mut state = AppState::new();
+        state.record_status_message(
+            StatusKind::Info,
+            "transcript exported to /tmp/mjolnir/transcript.md",
+        );
+
+        let rendered = render_transcript_lines(&state, 80);
+        let system_line = rendered
+            .iter()
+            .find(|line| line_text(line).contains("transcript exported to"))
+            .expect("export status line rendered");
+
+        assert_eq!(system_line.spans[0].style.fg, Some(Color::LightBlue));
     }
 
     #[test]
