@@ -2054,7 +2054,10 @@ mod tests {
             matches!(state.mode, Mode::Browse),
             "keeping the same name must not be treated as a duplicate"
         );
-        assert_eq!(state.preferences.custom_agents[0].args, vec!["--debug", "--extra"]);
+        assert_eq!(
+            state.preferences.custom_agents[0].args,
+            vec!["--debug", "--extra"]
+        );
     }
 
     #[tokio::test]
