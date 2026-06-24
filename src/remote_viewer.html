@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <title>Mjolnir Remote Sessions</title>
+    <title>Mjolnir Web</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -1074,15 +1074,15 @@
   <body>
     <section id="auth-screen" class="auth-screen">
       <div class="auth-card">
-        <h1>Unlock Remote Sessions</h1>
+        <h1>Mjolnir Web</h1>
         <p>
           Enter the six-digit viewer code printed by <code>mj server</code>. QR login still uses the
-          full embedded URL token on the server side, but manual browser unlock only needs this code.
+          full embedded URL token on the server side, but manual browser sign-in only needs this code.
         </p>
         <form id="auth-form">
           <label for="auth-token">Viewer code</label>
           <input id="auth-token" name="code" type="password" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" maxlength="6" pattern="[0-9]{6}">
-          <button id="auth-submit" class="primary" type="submit">Unlock</button>
+          <button id="auth-submit" class="primary" type="submit">Sign In</button>
         </form>
         <div id="auth-error" class="auth-error" role="alert"></div>
       </div>
@@ -1092,7 +1092,7 @@
       <aside class="sidebar">
         <div class="panel-header">
           <div class="sidebar-title-row">
-            <h1>Remote Sessions</h1>
+            <h1>Sessions</h1>
             <button id="logout-button" class="ghost-danger" type="button">Log out</button>
           </div>
           <p id="status">Loading…</p>
@@ -1534,7 +1534,7 @@
       function renderSessions() {
         if (!sessions.length) {
           sessionCardById.clear();
-          sessionsEl.replaceChildren(emptyNote("No remote sessions are currently connected."));
+          sessionsEl.replaceChildren(emptyNote("No sessions have been published yet."));
           return;
         }
         if (sessionsEl.querySelector(".empty")) {
@@ -2373,7 +2373,7 @@
           applyRoute();
           await refreshQueuedPrompts();
         } catch (error) {
-          showAuth(`Unlock check failed: ${error.message}`);
+          showAuth(`Sign-in check failed: ${error.message}`);
           authTokenEl.focus();
         }
       }
@@ -2495,7 +2495,7 @@
           await refreshSessions();
           applyRoute();
         } catch (error) {
-          authErrorEl.textContent = `Unlock failed: ${error.message}`;
+          authErrorEl.textContent = `Sign-in failed: ${error.message}`;
         } finally {
           authSubmitEl.disabled = false;
         }

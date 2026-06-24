@@ -4316,7 +4316,9 @@ mod tests {
                 .to_vec(),
         )
         .expect("viewer utf8");
-        assert!(viewer.contains("Unlock Remote Sessions"));
+        assert!(viewer.contains("Mjolnir Web"));
+        assert!(viewer.contains("Sign In"));
+        assert!(!viewer.contains("Unlock Remote Sessions"));
         assert!(!viewer.contains(&token));
 
         let live_listed_via_query = app
