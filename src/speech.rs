@@ -7,10 +7,10 @@
 //! network call during dictation.
 
 use anyhow::Result;
-#[cfg(target_os = "android")]
+#[cfg(any(not(feature = "voice"), target_os = "android"))]
 use anyhow::bail;
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(feature = "voice", not(target_os = "android")))]
 mod backend {
     use anyhow::{Context, Result, bail};
     use cpal::SampleFormat;
@@ -534,7 +534,7 @@ mod backend {
 /// receives normalized microphone levels for the input meter, and `on_status`
 /// receives transient progress messages (model download, loading). Sending on
 /// `cancel_rx` stops capture and returns whatever was recognized so far.
-#[cfg(not(target_os = "android"))]
+#[cfg(all(feature = "voice", not(target_os = "android")))]
 pub fn run_dictation<F, G, H>(
     on_partial: F,
     on_level: G,
@@ -549,7 +549,7 @@ where
     backend::run(on_partial, on_level, on_status, cancel_rx)
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(not(feature = "voice"), target_os = "android"))]
 pub fn run_dictation<F, G, H>(
     _on_partial: F,
     _on_level: G,
@@ -579,13 +579,13 @@ pub fn dictation_error_message(error: &anyhow::Error) -> String {
 mod tests {
     use super::*;
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(feature = "voice", not(target_os = "android")))]
     use std::path::PathBuf;
 
     /// End-to-end check of the local model pipeline: downloads the real models
     /// into the user cache, loads the recognizer and VAD, and decodes a test
     /// wav shipped with the model archive.
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(feature = "voice", not(target_os = "android")))]
     #[test]
     #[ignore = "downloads ~0.7 GB of models; run with: cargo test -- --ignored"]
     fn dictation_models_install_and_decode_test_wav() {
@@ -611,7 +611,7 @@ mod tests {
         assert!(!text.is_empty(), "expected a non-empty transcript");
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(feature = "voice", not(target_os = "android")))]
     #[test]
     fn model_paths_are_under_voice_cache() {
         let paths = backend::ModelPaths::in_cache(PathBuf::from("/cache/mj"));
@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(paths.vad, voice.join("silero_vad.onnx"));
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(feature = "voice", not(target_os = "android")))]
     #[test]
     fn compose_transcript_joins_finalized_and_interim() {
         let finalized = vec!["Hello there.".to_string(), "How are you?".to_string()];
@@ -642,7 +642,7 @@ mod tests {
         assert_eq!(backend::compose_transcript(&[], ""), "");
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(feature = "voice", not(target_os = "android")))]
     #[test]
     fn safe_archive_path_rejects_escapes() {
         assert!(backend::safe_archive_path(std::path::Path::new("a/b.onnx")).is_ok());
@@ -651,7 +651,7 @@ mod tests {
         assert!(backend::safe_archive_path(std::path::Path::new("")).is_err());
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(feature = "voice", not(target_os = "android")))]
     #[test]
     fn normalized_level_clamps_to_meter_range() {
         assert_eq!(backend::normalized_level(0.0), 0.0);

@@ -49,6 +49,7 @@ const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
 const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
 const REMOTE_CONTROL_UPSERT_URL: &str = "https://localhost:11921/api/sessions";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+const REMOTE_CONNECTION_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECTED_SESSION_TTL: Duration = Duration::from_secs(75);
 /// How often `mj server` sweeps dead queue entries out of sqlite.
 const QUEUE_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
@@ -338,8 +339,7 @@ struct ClaimConfigChangeRequest {
 
 #[derive(Debug, Clone)]
 pub struct RemoteSessionTracker {
-    client: Option<reqwest::Client>,
-    token: Option<Arc<String>>,
+    connection: Arc<Mutex<RemoteConnectionState>>,
     state: Arc<Mutex<TrackerState>>,
     /// Single task that owns every snapshot upload (including heartbeats),
     /// with at most one request in flight. Serializing here means a newer
@@ -353,6 +353,27 @@ pub struct RemoteSessionTracker {
     /// be advertised to viewers at all.
     publish_permissions: bool,
     shutting_down: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteConnection {
+    client: reqwest::Client,
+    token: Option<Arc<String>>,
+}
+
+#[derive(Debug)]
+struct RemoteConnectionState {
+    connection: Option<RemoteConnection>,
+    last_attempt: Option<Instant>,
+}
+
+impl RemoteConnectionState {
+    fn new(connection: Option<RemoteConnection>) -> Self {
+        Self {
+            connection,
+            last_attempt: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -676,12 +697,10 @@ impl RemoteSessionTracker {
         command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
         ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
     ) -> Self {
-        let dir = remote_control_dir();
-        let token = read_token(&dir.join("token")).map(Arc::new);
-        let client = build_client(&dir.join("cert.pem"));
         let tracker = Self {
-            client,
-            token,
+            connection: Arc::new(Mutex::new(RemoteConnectionState::new(
+                build_remote_connection(),
+            ))),
             state: Arc::new(Mutex::new(TrackerState::new(project, agent))),
             publisher: Arc::new(Mutex::new(None)),
             publish_signal: Arc::new(tokio::sync::Notify::new()),
@@ -698,8 +717,7 @@ impl RemoteSessionTracker {
     #[cfg(test)]
     fn new_disconnected(project: String, agent: String) -> Self {
         Self {
-            client: None,
-            token: None,
+            connection: Arc::new(Mutex::new(RemoteConnectionState::new(None))),
             state: Arc::new(Mutex::new(TrackerState::new(project, agent))),
             publisher: Arc::new(Mutex::new(None)),
             publish_signal: Arc::new(tokio::sync::Notify::new()),
@@ -818,7 +836,7 @@ impl RemoteSessionTracker {
             handle.abort();
             let _ = handle.await;
         }
-        let Some(client) = self.client.clone() else {
+        let Some(connection) = current_remote_connection(&self.connection) else {
             return;
         };
         let (snapshot, mut sessions_to_disconnect) = match self.state.lock() {
@@ -829,7 +847,12 @@ impl RemoteSessionTracker {
             .as_ref()
             .map(|snapshot| snapshot.session_id.clone());
         if let Some(snapshot) = snapshot
-            && let Err(error) = send_snapshot(client.clone(), self.token.clone(), snapshot).await
+            && let Err(error) = send_snapshot(
+                connection.client.clone(),
+                connection.token.clone(),
+                snapshot,
+            )
+            .await
         {
             debug!("final remote-control flush failed: {error:#}");
         }
@@ -837,14 +860,19 @@ impl RemoteSessionTracker {
             sessions_to_disconnect.retain(|id| id != current);
         }
         for old_session_id in sessions_to_disconnect {
-            if let Err(error) =
-                send_disconnect(client.clone(), self.token.clone(), &old_session_id).await
+            if let Err(error) = send_disconnect(
+                connection.client.clone(),
+                connection.token.clone(),
+                &old_session_id,
+            )
+            .await
             {
                 debug!("remote-control stale-session disconnect failed: {error:#}");
             }
         }
         if let Some(session_id) = session_id
-            && let Err(error) = send_disconnect(client, self.token.clone(), &session_id).await
+            && let Err(error) =
+                send_disconnect(connection.client, connection.token, &session_id).await
         {
             debug!("remote-control disconnect failed: {error:#}");
         }
@@ -863,17 +891,17 @@ impl RemoteSessionTracker {
     }
 
     fn ensure_publisher(&self) {
-        let Some(client) = self.client.clone() else {
+        if tokio::runtime::Handle::try_current().is_err() {
             return;
-        };
+        }
         let Ok(mut slot) = self.publisher.lock() else {
             return;
         };
         if slot.is_some() {
             return;
         }
+        let connection = Arc::clone(&self.connection);
         let state = Arc::clone(&self.state);
-        let token = self.token.clone();
         let signal = Arc::clone(&self.publish_signal);
         *slot = Some(tokio::spawn(async move {
             loop {
@@ -887,6 +915,9 @@ impl RemoteSessionTracker {
                         }
                     }
                 }
+                let Some(remote) = refresh_remote_connection(&connection).await else {
+                    continue;
+                };
                 let (snapshot, sessions_to_disconnect) = {
                     let Ok(mut state) = state.lock() else {
                         continue;
@@ -896,12 +927,18 @@ impl RemoteSessionTracker {
                 let Some(snapshot) = snapshot else {
                     continue;
                 };
-                if let Err(error) = send_snapshot(client.clone(), token.clone(), snapshot).await {
+                if let Err(error) =
+                    send_snapshot(remote.client.clone(), remote.token.clone(), snapshot).await
+                {
                     debug!("remote-control publish failed: {error:#}");
                 }
                 for old_session_id in sessions_to_disconnect {
-                    if let Err(error) =
-                        send_disconnect(client.clone(), token.clone(), &old_session_id).await
+                    if let Err(error) = send_disconnect(
+                        remote.client.clone(),
+                        remote.token.clone(),
+                        &old_session_id,
+                    )
+                    .await
                     {
                         debug!("remote-control stale-session disconnect failed: {error:#}");
                     }
@@ -915,9 +952,6 @@ impl RemoteSessionTracker {
         command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
         ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
     ) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
         let Some(command_tx) = command_tx else {
             return;
         };
@@ -927,11 +961,14 @@ impl RemoteSessionTracker {
         if slot.is_some() {
             return;
         }
-        let token = self.token.clone();
+        let connection = Arc::clone(&self.connection);
         let state = Arc::clone(&self.state);
         *slot = Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
+                let Some(remote) = refresh_remote_connection(&connection).await else {
+                    continue;
+                };
 
                 // Permission decisions first: while a permission prompt is
                 // pending the turn is blocked, so the prompt-claim path
@@ -945,8 +982,8 @@ impl RemoteSessionTracker {
                         .and_then(|guard| guard.permission_claim_session());
                     if let Some(session_id) = claim_session {
                         match claim_remote_permission_decision(
-                            client.clone(),
-                            token.clone(),
+                            remote.client.clone(),
+                            remote.token.clone(),
                             &session_id,
                         )
                         .await
@@ -975,8 +1012,12 @@ impl RemoteSessionTracker {
                     .ok()
                     .and_then(|guard| guard.config_claim_session());
                 if let Some(session_id) = config_session {
-                    match claim_remote_config_change(client.clone(), token.clone(), &session_id)
-                        .await
+                    match claim_remote_config_change(
+                        remote.client.clone(),
+                        remote.token.clone(),
+                        &session_id,
+                    )
+                    .await
                     {
                         Ok(Some(change)) => {
                             match config_target_from_parts(
@@ -1020,7 +1061,9 @@ impl RemoteSessionTracker {
                     continue;
                 };
 
-                let queued = claim_remote_prompt(client.clone(), token.clone(), &session_id).await;
+                let queued =
+                    claim_remote_prompt(remote.client.clone(), remote.token.clone(), &session_id)
+                        .await;
                 match queued {
                     Ok(Some(prompt)) => {
                         let command = UiCommand::SendPrompt {
@@ -1058,6 +1101,57 @@ impl RemoteSessionTracker {
 /// (the server has never run) we leave the client disabled: there is nothing
 /// trustworthy to talk to, and reporting anyway would risk leaking the bearer
 /// token to whatever is squatting the port.
+fn build_remote_connection() -> Option<RemoteConnection> {
+    let dir = remote_control_dir();
+    let token = read_token(&dir.join("token")).map(Arc::new);
+    let client = build_client(&dir.join("cert.pem"))?;
+    Some(RemoteConnection { client, token })
+}
+
+fn current_remote_connection(
+    connection: &Arc<Mutex<RemoteConnectionState>>,
+) -> Option<RemoteConnection> {
+    connection.lock().ok()?.connection.clone()
+}
+
+async fn refresh_remote_connection(
+    connection: &Arc<Mutex<RemoteConnectionState>>,
+) -> Option<RemoteConnection> {
+    if let Some(remote) = current_remote_connection(connection) {
+        return Some(remote);
+    }
+
+    let should_retry = {
+        let Ok(mut state) = connection.lock() else {
+            return None;
+        };
+        let now = Instant::now();
+        if state
+            .last_attempt
+            .is_some_and(|last| now.duration_since(last) < REMOTE_CONNECTION_RETRY_INTERVAL)
+        {
+            return None;
+        }
+        state.last_attempt = Some(now);
+        true
+    };
+
+    if !should_retry {
+        return None;
+    }
+
+    let rebuilt = tokio::task::spawn_blocking(build_remote_connection)
+        .await
+        .ok()
+        .flatten();
+    if let Some(remote) = rebuilt.clone()
+        && let Ok(mut state) = connection.lock()
+    {
+        state.connection = Some(remote);
+    }
+    rebuilt
+}
+
 fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
     let pem = match std::fs::read(cert_path) {
         Ok(pem) => pem,

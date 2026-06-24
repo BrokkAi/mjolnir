@@ -66,7 +66,7 @@ const PASTE_BURST_CHAR_INTERVAL: Duration = Duration::from_millis(8);
 const PASTE_BURST_IDLE_TIMEOUT: Duration = Duration::from_millis(16);
 const PASTE_BURST_MIN_CHARS: usize = 3;
 const NOTIFICATION_PREVIEW_CHARS: usize = 80;
-const VOICE_INPUT_SUPPORTED: bool = cfg!(not(target_os = "android"));
+const VOICE_INPUT_SUPPORTED: bool = cfg!(all(feature = "voice", not(target_os = "android")));
 const INLINE_RESIZE_REFLOW_DEBOUNCE: Duration = Duration::from_millis(75);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8963,7 +8963,10 @@ mod tests {
         );
 
         assert!(state.input.is_empty());
-        assert_eq!(request, TerminalRequest::StartDictation);
+        assert_eq!(
+            request,
+            dictation_request_for_state(&state, VOICE_INPUT_SUPPORTED)
+        );
     }
 
     #[test]
@@ -8978,7 +8981,10 @@ mod tests {
             key_with_modifiers(KeyCode::Char('r'), KeyModifiers::CONTROL),
         );
 
-        assert_eq!(request, TerminalRequest::StopDictation);
+        assert_eq!(
+            request,
+            dictation_request_for_state(&state, VOICE_INPUT_SUPPORTED)
+        );
     }
 
     #[test]
