@@ -967,6 +967,41 @@ fn should_run_inline_resize_reflow(
     reflow.is_due(now) && !state.transcript_viewer
 }
 
+struct InlineResizeReflowSnapshot {
+    width: u16,
+    desired_height: u16,
+    actual_height: u16,
+    stable_entries: usize,
+    lines: Vec<Line<'static>>,
+}
+
+fn inline_resize_reflow_snapshot(
+    state: &AppState,
+    size: Size,
+) -> Option<InlineResizeReflowSnapshot> {
+    if size.width == 0 || size.height == 0 {
+        return None;
+    }
+
+    let desired_height = desired_inline_height(state, size);
+    let actual_height = clamped_inline_height(desired_height, size);
+    let stable_entries = stable_transcript_entry_count(state);
+    let lines = render_transcript_entry_range(
+        state,
+        size.width,
+        0..stable_entries,
+        transcript_collapse_limit(state),
+    );
+
+    Some(InlineResizeReflowSnapshot {
+        width: size.width,
+        desired_height,
+        actual_height,
+        stable_entries,
+        lines,
+    })
+}
+
 fn rebuild_inline_scrollback(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     sink: &mut TranscriptSink,
@@ -981,23 +1016,14 @@ fn rebuild_inline_scrollback(
         }
         Err(e) => return Err(e).context("query terminal size for resize reflow"),
     };
-    if size.width == 0 || size.height == 0 {
+    let Some(snapshot) = inline_resize_reflow_snapshot(state, size) else {
         return Ok(());
-    }
+    };
 
-    let desired_height = desired_inline_height(state, size);
-    let stable_entries = stable_transcript_entry_count(state);
-    let lines = render_transcript_entry_range(
-        state,
-        size.width,
-        0..stable_entries,
-        transcript_collapse_limit(state),
-    );
-
-    let actual_height = reset_inline_terminal_for_reflow(terminal, desired_height, size)?;
-    *inline_height = actual_height;
-    sink.mark_emitted(stable_entries);
-    insert_lines_before_inline_viewport(terminal, lines, size.width)
+    reset_inline_terminal_for_reflow(terminal, snapshot.desired_height, size)?;
+    *inline_height = snapshot.actual_height;
+    sink.mark_emitted(snapshot.stable_entries);
+    insert_lines_before_inline_viewport(terminal, snapshot.lines, snapshot.width)
 }
 
 fn reset_inline_terminal_for_reflow(
@@ -7221,6 +7247,29 @@ mod tests {
         assert_eq!(clamped_inline_height(INLINE_CHAT_HEIGHT, size), 4);
         assert_eq!(clamped_inline_height(2, size), 2);
         assert_eq!(clamped_inline_height(0, size), 1);
+    }
+
+    #[test]
+    fn inline_resize_reflow_snapshot_replays_stable_entries_at_new_width() {
+        let mut state = AppState::new();
+        state.record_user_prompt("hello from the resize test".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("streaming is not stable yet"),
+        )));
+
+        let snapshot = inline_resize_reflow_snapshot(
+            &state,
+            Size {
+                width: 12,
+                height: 4,
+            },
+        )
+        .expect("snapshot");
+
+        assert_eq!(snapshot.actual_height, 4);
+        assert_eq!(snapshot.stable_entries, 1);
+        let replayed: Vec<String> = snapshot.lines.iter().map(line_text).collect();
+        assert_eq!(replayed, vec!["you:", "hello from the resize test", ""]);
     }
 
     #[test]
