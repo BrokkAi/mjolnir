@@ -1226,6 +1226,7 @@ pub async fn run_server(
     hostname: Option<String>,
     history_days: u32,
     cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
     fs_max_text_bytes: u64,
 ) -> Result<()> {
     clear_terminal_screen()?;
@@ -1275,7 +1276,8 @@ pub async fn run_server(
     let server_task = tokio::spawn(server);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let agent_session = start_server_agent_session(agent, cwd, fs_max_text_bytes);
+    let agent_session =
+        start_server_agent_session(agent, cwd, additional_directories, fs_max_text_bytes);
     let mut agent_session = Some(agent_session);
     let mut server_task = server_task;
     let result = tokio::select! {
@@ -1300,6 +1302,7 @@ pub async fn run_server(
 fn start_server_agent_session(
     agent: SelectedAgent,
     cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
     fs_max_text_bytes: u64,
 ) -> ServerAgentSession {
     let (runtime_event_tx, mut runtime_event_rx) = mpsc::unbounded_channel();
@@ -1317,7 +1320,7 @@ fn start_server_agent_session(
         command: agent.program,
         args: agent.args,
         cwd,
-        additional_directories: Vec::new(),
+        additional_directories,
         resume_session: None,
         env: agent.env,
         agent_stderr: None,

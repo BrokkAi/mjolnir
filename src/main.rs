@@ -307,20 +307,27 @@ async fn main() -> Result<()> {
                 run_resume(args, fs_max_text_bytes, top_level_additional_directories).await
             }
             Commands::Server(args) => {
-                remote::run_server(args.hostname, args.history_days, cwd, fs_max_text_bytes).await
+                let workspace_roots =
+                    validate_workspace_roots(&cwd, &top_level_additional_directories)?;
+                remote::run_server(
+                    args.hostname,
+                    args.history_days,
+                    cwd,
+                    workspace_roots.additional_directories().to_vec(),
+                    fs_max_text_bytes,
+                )
+                .await
             }
         };
     }
 
-    let additional_directories =
-        validate_additional_directories(&top_level_additional_directories)?;
-
     if let Some(prompt_arg) = cli.print {
+        let workspace_roots = validate_workspace_roots(&cwd, &top_level_additional_directories)?;
         let prompt = read_headless_prompt(prompt_arg)?;
         return headless::run(headless::RunConfig {
             prompt,
             cwd,
-            additional_directories,
+            additional_directories: workspace_roots.additional_directories().to_vec(),
             resume_session: cli.resume_session,
             agent_stderr: cli.agent_stderr,
             fs_max_text_bytes,
@@ -331,6 +338,7 @@ async fn main() -> Result<()> {
     }
 
     let (cwd, worktree) = prepare_worktree_for_arg(cwd, cli.worktree.as_deref())?;
+    let workspace_roots = validate_workspace_roots(&cwd, &top_level_additional_directories)?;
     let worktree_label = worktree_label(worktree.as_ref());
     let project_label = project_label(&cwd);
 
@@ -338,7 +346,7 @@ async fn main() -> Result<()> {
         cwd,
         RuntimeOptions {
             agent_stderr: cli.agent_stderr,
-            additional_directories,
+            additional_directories: workspace_roots.additional_directories().to_vec(),
             fs_max_text_bytes,
         },
         project_label,
@@ -355,7 +363,11 @@ async fn main() -> Result<()> {
     match &result {
         Ok(Some(session_id)) => {
             if worktree_kept {
-                print_resume_hint(session_id, worktree_label.as_deref());
+                print_resume_hint(
+                    session_id,
+                    worktree_label.as_deref(),
+                    workspace_roots.additional_directories(),
+                );
             }
         }
         Ok(None) => {}
@@ -366,12 +378,38 @@ async fn main() -> Result<()> {
 }
 
 /// Print a hint showing how to resume the session.
-fn print_resume_hint(session_id: &str, worktree_label: Option<&str>) {
+fn print_resume_hint(session_id: &str, worktree_label: Option<&str>, additional_roots: &[PathBuf]) {
+    println!(
+        "To resume: {}",
+        resume_hint_command(session_id, worktree_label, additional_roots)
+    );
+}
+
+fn resume_hint_command(
+    session_id: &str,
+    worktree_label: Option<&str>,
+    additional_roots: &[PathBuf],
+) -> String {
+    let mut command = format!("mj resume {}", shell_quote(session_id));
     if let Some(label) = worktree_label {
-        println!("To resume: mj resume {session_id} --worktree {label}");
-    } else {
-        println!("To resume: mj resume {session_id}");
+        command.push_str(" --worktree ");
+        command.push_str(&shell_quote(label));
     }
+    for root in additional_roots {
+        command.push_str(" --additional-directory ");
+        command.push_str(&shell_quote(&root.display().to_string()));
+    }
+    command
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Handle the `mj resume` subcommand: pick the agent to resume from, list
@@ -388,9 +426,9 @@ async fn run_resume(
     };
     let mut requested_additional_directories = top_level_additional_directories;
     requested_additional_directories.extend(args.additional_directories.iter().cloned());
-    let additional_directories =
-        validate_additional_directories(&requested_additional_directories)?;
     let (cwd, worktree) = prepare_worktree_for_arg(cwd, args.worktree.as_deref())?;
+    let workspace_roots = validate_workspace_roots(&cwd, &requested_additional_directories)?;
+    let additional_directories = workspace_roots.additional_directories().to_vec();
     let worktree_label = worktree_label(worktree.as_ref());
     let project_label = project_label(&cwd);
 
@@ -477,7 +515,11 @@ async fn run_resume(
         if let Ok(Some(resumed_id)) = &result
             && worktree_kept
         {
-            print_resume_hint(resumed_id, worktree_label.as_deref());
+            print_resume_hint(
+                resumed_id,
+                worktree_label.as_deref(),
+                workspace_roots.additional_directories(),
+            );
         }
         return result.map(|_| ());
     }
@@ -544,7 +586,11 @@ async fn run_resume(
                 if let Ok(Some(resumed_id)) = &result
                     && worktree_kept
                 {
-                    print_resume_hint(resumed_id, worktree_label.as_deref());
+                    print_resume_hint(
+                        resumed_id,
+                        worktree_label.as_deref(),
+                        workspace_roots.additional_directories(),
+                    );
                 }
                 return result.map(|_| ());
             }
@@ -609,35 +655,11 @@ fn absolutize_cwd(cwd: PathBuf) -> Result<PathBuf> {
     }
 }
 
-fn validate_additional_directories(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let mut roots = Vec::new();
-    for path in paths {
-        if !path.is_absolute() {
-            anyhow::bail!(
-                "additional workspace directory must be absolute: {}",
-                path.display()
-            );
-        }
-        let canonical = std::fs::canonicalize(path).with_context(|| {
-            format!("resolve additional workspace directory {}", path.display())
-        })?;
-        let metadata = std::fs::metadata(&canonical).with_context(|| {
-            format!(
-                "inspect additional workspace directory {}",
-                canonical.display()
-            )
-        })?;
-        if !metadata.is_dir() {
-            anyhow::bail!(
-                "additional workspace directory is not a directory: {}",
-                path.display()
-            );
-        }
-        if !roots.iter().any(|existing| existing == &canonical) {
-            roots.push(canonical);
-        }
-    }
-    Ok(roots)
+fn validate_workspace_roots(
+    cwd: &Path,
+    additional_directories: &[PathBuf],
+) -> Result<paths::WorkspaceRoots> {
+    paths::WorkspaceRoots::new(cwd, additional_directories)
 }
 
 fn worktree_label(worktree: Option<&CreatedWorktree>) -> Option<String> {
@@ -2021,26 +2043,56 @@ mod tests {
     }
 
     #[test]
-    fn validate_additional_directories_canonicalizes_and_deduplicates() {
+    fn validate_workspace_roots_canonicalizes_and_deduplicates() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let primary = tempfile::tempdir().expect("primary");
         let canonical = std::fs::canonicalize(temp.path()).expect("canonical");
 
-        let validated =
-            validate_additional_directories(&[temp.path().to_path_buf(), canonical.clone()])
-                .expect("validated");
+        let validated = validate_workspace_roots(
+            primary.path(),
+            &[temp.path().to_path_buf(), canonical.clone()],
+        )
+        .expect("validated");
 
-        assert_eq!(validated, vec![canonical]);
+        assert_eq!(validated.additional_directories(), &[canonical]);
     }
 
     #[test]
-    fn validate_additional_directories_rejects_relative_missing_and_files() {
+    fn validate_workspace_roots_deduplicates_additional_roots_against_cwd() {
+        let primary = tempfile::tempdir().expect("primary");
+        let validated = validate_workspace_roots(primary.path(), &[primary.path().to_path_buf()])
+            .expect("validated");
+
+        assert!(validated.additional_directories().is_empty());
+    }
+
+    #[test]
+    fn validate_workspace_roots_rejects_relative_missing_and_files() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let primary = tempfile::tempdir().expect("primary");
         let file = temp.path().join("file.txt");
         std::fs::write(&file, "not a directory").expect("write file");
 
-        assert!(validate_additional_directories(&[PathBuf::from("relative")]).is_err());
-        assert!(validate_additional_directories(&[temp.path().join("missing")]).is_err());
-        assert!(validate_additional_directories(&[file]).is_err());
+        assert!(validate_workspace_roots(primary.path(), &[PathBuf::from("relative")]).is_err());
+        assert!(validate_workspace_roots(primary.path(), &[temp.path().join("missing")]).is_err());
+        assert!(validate_workspace_roots(primary.path(), &[file]).is_err());
+    }
+
+    #[test]
+    fn resume_hint_includes_worktree_and_shell_quoted_additional_roots() {
+        let command = resume_hint_command(
+            "sess-123",
+            Some("named tree"),
+            &[
+                PathBuf::from("/tmp/extra root"),
+                PathBuf::from("/tmp/quote'root"),
+            ],
+        );
+
+        assert_eq!(
+            command,
+            "mj resume sess-123 --worktree 'named tree' --additional-directory '/tmp/extra root' --additional-directory '/tmp/quote'\\''root'"
+        );
     }
 
     #[test]

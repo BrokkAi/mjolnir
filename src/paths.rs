@@ -1,6 +1,65 @@
-//! Shared helpers for deriving human-readable labels from filesystem paths.
+//! Shared helpers for deriving human-readable labels and normalized workspace
+//! roots from filesystem paths.
 
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+
+/// Canonical workspace scope for an ACP session.
+///
+/// `additional` excludes the primary root even when the user supplies it
+/// directly or through a symlink, so capability checks, ACP payloads, and UI
+/// labels all agree on whether there are real extra roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceRoots {
+    primary: PathBuf,
+    additional: Vec<PathBuf>,
+}
+
+impl WorkspaceRoots {
+    pub(crate) fn new(primary: &Path, additional: &[PathBuf]) -> Result<Self> {
+        let primary = canonical_existing_directory("workspace root", primary)?;
+        let mut canonical_additional = Vec::new();
+        for path in additional {
+            let canonical = canonical_existing_directory("additional workspace directory", path)?;
+            if canonical != primary && !canonical_additional.iter().any(|root| root == &canonical) {
+                canonical_additional.push(canonical);
+            }
+        }
+        Ok(Self {
+            primary,
+            additional: canonical_additional,
+        })
+    }
+
+    pub(crate) fn additional_directories(&self) -> &[PathBuf] {
+        &self.additional
+    }
+
+    pub(crate) fn active_roots(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::with_capacity(1 + self.additional.len());
+        roots.push(self.primary.clone());
+        roots.extend(self.additional.iter().cloned());
+        roots
+    }
+}
+
+fn canonical_existing_directory(label: &str, path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        anyhow::bail!("{label} must be absolute: {}", path.display());
+    }
+    let canonical = std::fs::canonicalize(path)
+        .with_context(|| format!("resolve {label} {}", path.display()))?;
+    let metadata = std::fs::metadata(&canonical)
+        .with_context(|| format!("inspect {label} {}", canonical.display()))?;
+    if !metadata.is_dir() {
+        anyhow::bail!("{label} is not a directory: {}", path.display());
+    }
+    Ok(canonical)
+}
+
+pub(crate) fn path_is_under_any_root(roots: &[PathBuf], path: &Path) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
 
 /// Last path component as a display string, falling back to the full path when
 /// the path has no file name (e.g. the filesystem root).
@@ -168,5 +227,49 @@ mod tests {
     #[test]
     fn project_label_falls_back_to_cwd() {
         assert_eq!(project_label_from_cwd(Path::new("/home/me/plain")), "plain");
+    }
+
+    #[test]
+    fn workspace_roots_deduplicate_additional_directories_against_primary() {
+        let primary = tempfile::tempdir().expect("primary");
+        let additional = tempfile::tempdir().expect("additional");
+        let roots = WorkspaceRoots::new(
+            primary.path(),
+            &[
+                primary.path().to_path_buf(),
+                additional.path().to_path_buf(),
+                std::fs::canonicalize(additional.path()).expect("canonical additional"),
+            ],
+        )
+        .expect("workspace roots");
+
+        let active_roots = roots.active_roots();
+        assert_eq!(
+            active_roots[0],
+            std::fs::canonicalize(primary.path()).expect("canonical primary")
+        );
+        assert_eq!(
+            roots.additional_directories(),
+            &[std::fs::canonicalize(additional.path()).expect("canonical additional")]
+        );
+        assert_eq!(roots.additional_directories().len(), 1);
+        assert_eq!(active_roots.len(), 2);
+    }
+
+    #[test]
+    fn path_is_under_any_workspace_root() {
+        let primary = tempfile::tempdir().expect("primary");
+        let additional = tempfile::tempdir().expect("additional");
+        let outside = tempfile::tempdir().expect("outside");
+        let roots = WorkspaceRoots::new(primary.path(), &[additional.path().to_path_buf()])
+            .expect("workspace roots")
+            .active_roots();
+        let primary = std::fs::canonicalize(primary.path()).expect("canonical primary");
+        let additional = std::fs::canonicalize(additional.path()).expect("canonical additional");
+        let outside = std::fs::canonicalize(outside.path()).expect("canonical outside");
+
+        assert!(path_is_under_any_root(&roots, &primary.join("file.txt")));
+        assert!(path_is_under_any_root(&roots, &additional.join("file.txt")));
+        assert!(!path_is_under_any_root(&roots, &outside.join("file.txt")));
     }
 }

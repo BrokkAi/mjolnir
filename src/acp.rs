@@ -38,7 +38,7 @@ use crate::event::{
     TerminalOutputSnapshot, UiCommand, UiEvent,
 };
 use crate::install;
-use crate::paths::normalize_spawn_program;
+use crate::paths::{WorkspaceRoots, normalize_spawn_program, path_is_under_any_root};
 
 pub struct AcpRuntimeConfig {
     pub command: PathBuf,
@@ -108,22 +108,12 @@ impl RuntimeSessionState {
         fs_root: &Path,
         additional_roots: &[PathBuf],
     ) -> std::result::Result<(), agent_client_protocol::Error> {
-        let fs_root = std::fs::canonicalize(fs_root).map_err(|_| {
-            agent_client_protocol::Error::invalid_params().data(serde_json::Value::String(
-                "invalid session filesystem root".to_string(),
-            ))
-        })?;
-        let mut roots = vec![fs_root];
-        for root in additional_roots {
-            let canonical = std::fs::canonicalize(root).map_err(|_| {
-                agent_client_protocol::Error::invalid_params().data(serde_json::Value::String(
-                    format!("invalid additional workspace root: {}", root.display()),
-                ))
-            })?;
-            if !roots.iter().any(|existing| existing == &canonical) {
-                roots.push(canonical);
-            }
-        }
+        let roots = WorkspaceRoots::new(fs_root, additional_roots)
+            .map_err(|e| {
+                agent_client_protocol::Error::invalid_params()
+                    .data(serde_json::Value::String(e.to_string()))
+            })?
+            .active_roots();
         *self.active_session_id.lock().await = Some(session_id);
         *self.active_roots.lock().await = roots;
         Ok(())
@@ -2107,7 +2097,7 @@ impl LocalFileSystem {
         roots: &[PathBuf],
         path: &Path,
     ) -> std::result::Result<(), agent_client_protocol::Error> {
-        if roots.iter().any(|root| path.starts_with(root)) {
+        if path_is_under_any_root(roots, path) {
             Ok(())
         } else {
             Err(fs_invalid_params(
@@ -2516,7 +2506,7 @@ impl ManagedTerminals {
             }
             None => roots[0].clone(),
         };
-        if roots.iter().any(|root| cwd.starts_with(root)) {
+        if path_is_under_any_root(&roots, &cwd) {
             Ok(Some(cwd))
         } else {
             Err(terminal_invalid_params(
@@ -4023,23 +4013,122 @@ mod tests {
                             _cx| {
                     responder.respond(
                         InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
-                            AgentCapabilities::new().session_capabilities(
-                                SessionCapabilities::new().additional_directories(
-                                    SessionAdditionalDirectoriesCapabilities::new(),
+                            AgentCapabilities::new()
+                                .load_session(true)
+                                .session_capabilities(
+                                    SessionCapabilities::new()
+                                        .additional_directories(
+                                            SessionAdditionalDirectoriesCapabilities::new(),
+                                        )
+                                        .close(SessionCloseCapabilities::new())
+                                        .fork(SessionForkCapabilities::new())
+                                        .resume(SessionResumeCapabilities::new()),
                                 ),
-                            ),
                         ),
                     )
                 },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |req: NewSessionRequest, responder, _cx| {
+                {
+                    let expected_additional_directories = expected_additional_directories.clone();
+                    async move |req: NewSessionRequest, responder, _cx| {
+                        assert_eq!(
+                            req.additional_directories, expected_additional_directories,
+                            "session/new should receive requested additional directories"
+                        );
+                        responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let expected_additional_directories = expected_additional_directories.clone();
+                    async move |req: ResumeSessionRequest, responder, _cx| {
+                        assert_eq!(
+                            req.additional_directories, expected_additional_directories,
+                            "session/resume should receive requested additional directories"
+                        );
+                        responder.respond(ResumeSessionResponse::new())
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let expected_additional_directories = expected_additional_directories.clone();
+                    async move |req: ForkSessionRequest, responder, _cx| {
+                        assert_eq!(
+                            req.additional_directories, expected_additional_directories,
+                            "session/fork should receive requested additional directories"
+                        );
+                        responder
+                            .respond(ForkSessionResponse::new(SessionId::new("forked-session")))
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: CloseSessionRequest, responder, _cx| {
+                    responder.respond(CloseSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_with_load_additional_directories(
+        stream: tokio::io::DuplexStream,
+        expected_additional_directories: Vec<PathBuf>,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                            AgentCapabilities::new()
+                                .load_session(true)
+                                .session_capabilities(
+                                    SessionCapabilities::new()
+                                        .additional_directories(
+                                            SessionAdditionalDirectoriesCapabilities::new(),
+                                        )
+                                        .close(SessionCloseCapabilities::new()),
+                                ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: NewSessionRequest, responder, _cx| {
+                    responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: CloseSessionRequest, responder, _cx| {
+                    responder.respond(CloseSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: LoadSessionRequest, responder, _cx| {
                     assert_eq!(
                         req.additional_directories, expected_additional_directories,
-                        "session/new should receive requested additional directories"
+                        "session/load should receive requested additional directories"
                     );
-                    responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
+                    responder.respond(LoadSessionResponse::new())
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -4858,6 +4947,127 @@ mod tests {
         ));
 
         wait_for_session_started(&mut ui_rx, "test-session").await;
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(5), client_task)
+            .await
+            .expect("drive_client did not finish")
+            .expect("client task")
+            .expect("drive_client");
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_client_sends_additional_directories_on_resume_session() {
+        let root = tempfile::tempdir().expect("root");
+        let additional = tempfile::tempdir().expect("additional");
+        let additional_path = std::fs::canonicalize(additional.path()).expect("canonical");
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_with_additional_directories(
+            agent_side,
+            vec![additional_path.clone()],
+        ));
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client_with_additional_directories(
+            client_transport,
+            root.path().to_path_buf(),
+            vec![additional_path],
+            Some("existing-session".to_string()),
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "existing-session").await;
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(5), client_task)
+            .await
+            .expect("drive_client did not finish")
+            .expect("client task")
+            .expect("drive_client");
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_client_sends_additional_directories_on_load_session() {
+        let root = tempfile::tempdir().expect("root");
+        let additional = tempfile::tempdir().expect("additional");
+        let additional_path = std::fs::canonicalize(additional.path()).expect("canonical");
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_with_load_additional_directories(
+            agent_side,
+            vec![additional_path.clone()],
+        ));
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client_with_additional_directories(
+            client_transport,
+            root.path().to_path_buf(),
+            vec![additional_path],
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "test-session").await;
+        let (responder, result_rx) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::LoadSession {
+                session_id: "loaded-session".to_string(),
+                cwd: root.path().to_path_buf(),
+                title: None,
+                responder,
+            })
+            .expect("send load");
+        assert!(matches!(
+            result_rx.await.expect("load result"),
+            LoadSessionResult::Switched
+        ));
+        wait_for_session_started(&mut ui_rx, "loaded-session").await;
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(5), client_task)
+            .await
+            .expect("drive_client did not finish")
+            .expect("client task")
+            .expect("drive_client");
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_client_sends_additional_directories_on_fork_session() {
+        let root = tempfile::tempdir().expect("root");
+        let additional = tempfile::tempdir().expect("additional");
+        let additional_path = std::fs::canonicalize(additional.path()).expect("canonical");
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_with_additional_directories(
+            agent_side,
+            vec![additional_path.clone()],
+        ));
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client_with_additional_directories(
+            client_transport,
+            root.path().to_path_buf(),
+            vec![additional_path],
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "test-session").await;
+        cmd_tx.send(UiCommand::ForkSession).expect("send fork");
+        wait_for_session_started(&mut ui_rx, "forked-session").await;
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         tokio::time::timeout(Duration::from_secs(5), client_task)
             .await
