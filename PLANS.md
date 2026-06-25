@@ -105,9 +105,8 @@ Key constraints:
 - UI and ACP runtime communicate over channels.
 - Permission requests cross into the UI through a oneshot responder so the ACP
   dispatch loop is not blocked by terminal input.
-- The client currently advertises no ACP filesystem or terminal capabilities.
-  That keeps the MVP simple, but it limits agents that expect client-provided
-  file or terminal operations.
+- The client advertises ACP filesystem and terminal capabilities backed by the
+  local runtime. Filesystem access is scoped to the configured session root.
 
 ## Milestones
 

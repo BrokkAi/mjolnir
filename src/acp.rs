@@ -12,14 +12,15 @@ use agent_client_protocol::schema::{
     CloseSessionRequest, ContentBlock, CreateTerminalRequest, CreateTerminalResponse, ErrorCode,
     FileSystemCapabilities, ForkSessionRequest, ImageContent, Implementation, InitializeRequest,
     KillTerminalRequest, KillTerminalResponse, LoadSessionRequest, NewSessionRequest,
-    PromptRequest, ProtocolVersion, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId, SessionId,
-    SessionInfoUpdate, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, TextContent, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse,
+    PromptRequest, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionInfoUpdate,
+    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionModeRequest, TerminalExitStatus, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, TextContent, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
@@ -933,10 +934,16 @@ where
         ui_tx.clone(),
         session_state.active_session_id.clone(),
     ));
+    let filesystem = Arc::new(LocalFileSystem::with_active_session(
+        cwd.clone(),
+        session_state.active_session_id.clone(),
+    )?);
     let perm_ui_tx = ui_tx.clone();
     let perm_session_state = session_state.clone();
     let notif_ui_tx = ui_tx.clone();
     let notif_session_state = session_state.clone();
+    let read_filesystem = filesystem.clone();
+    let write_filesystem = filesystem.clone();
     let create_terminals = terminals.clone();
     let output_terminals = terminals.clone();
     let release_terminals = terminals.clone();
@@ -998,6 +1005,18 @@ where
                     }
                 };
                 responder.respond(RequestPermissionResponse::new(outcome))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: ReadTextFileRequest, responder, _cx| {
+                responder.respond_with_result(read_filesystem.read_text_file(request).await)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: WriteTextFileRequest, responder, _cx| {
+                responder.respond_with_result(write_filesystem.write_text_file(request).await)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -1071,16 +1090,15 @@ async fn drive_session(
     session_state: RuntimeSessionState,
     terminals: Arc<ManagedTerminals>,
 ) -> Result<()> {
-    // Advertise our client capabilities. We do not yet implement
-    // `fs/read_text_file` or `fs/write_text_file`, so we declare both as
-    // false. Terminal methods are backed by managed subprocesses below.
+    // Advertise the client capabilities backed by handlers registered in
+    // `drive_client` above.
     let init_req = InitializeRequest::new(ProtocolVersion::V1)
         .client_info(client_implementation())
         .client_capabilities(
             ClientCapabilities::new()
                 .fs(FileSystemCapabilities::new()
-                    .read_text_file(false)
-                    .write_text_file(false))
+                    .read_text_file(true)
+                    .write_text_file(true))
                 .terminal(true),
         );
     let init_resp = match conn.send_request(init_req).block_task().await {
@@ -1659,6 +1677,219 @@ pub(crate) async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) {
 }
 
 const DEFAULT_TERMINAL_OUTPUT_LIMIT: usize = 1024 * 1024;
+
+#[derive(Debug)]
+struct LocalFileSystem {
+    root: PathBuf,
+    active_session_id: Option<Arc<Mutex<Option<SessionId>>>>,
+}
+
+impl LocalFileSystem {
+    fn with_active_session(
+        root: PathBuf,
+        active_session_id: Arc<Mutex<Option<SessionId>>>,
+    ) -> Result<Self> {
+        let root = std::fs::canonicalize(&root)
+            .map_err(|e| anyhow::anyhow!("canonicalize filesystem root {}: {e}", root.display()))?;
+        Ok(Self {
+            root,
+            active_session_id: Some(active_session_id),
+        })
+    }
+
+    #[cfg(test)]
+    fn new(root: PathBuf) -> Result<Self> {
+        let root = std::fs::canonicalize(&root)
+            .map_err(|e| anyhow::anyhow!("canonicalize filesystem root {}: {e}", root.display()))?;
+        Ok(Self {
+            root,
+            active_session_id: None,
+        })
+    }
+
+    async fn read_text_file(
+        &self,
+        request: ReadTextFileRequest,
+    ) -> std::result::Result<ReadTextFileResponse, agent_client_protocol::Error> {
+        self.validate_active_session(&request.session_id).await?;
+        let path = self.resolve_existing_file(&request.path).await?;
+        let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
+            fs_io_error(
+                "read text file",
+                &path,
+                e,
+                "file must exist and contain valid UTF-8",
+            )
+        })?;
+        let content = read_text_line_range(&content, request.line, request.limit)?;
+        Ok(ReadTextFileResponse::new(content))
+    }
+
+    async fn write_text_file(
+        &self,
+        request: WriteTextFileRequest,
+    ) -> std::result::Result<WriteTextFileResponse, agent_client_protocol::Error> {
+        self.validate_active_session(&request.session_id).await?;
+        let path = self.resolve_write_path(&request.path).await?;
+        tokio::fs::write(&path, request.content)
+            .await
+            .map_err(|e| fs_io_error("write text file", &path, e, "file must be writable"))?;
+        Ok(WriteTextFileResponse::new())
+    }
+
+    async fn resolve_existing_file(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<PathBuf, agent_client_protocol::Error> {
+        self.validate_absolute(path)?;
+        let path = tokio::fs::canonicalize(path)
+            .await
+            .map_err(|e| fs_io_error("resolve text file", path, e, "file must exist"))?;
+        self.validate_under_root(&path)?;
+        let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
+            fs_io_error(
+                "inspect text file",
+                &path,
+                e,
+                "file metadata must be readable",
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(fs_invalid_params(format!(
+                "filesystem path is not a regular file: {}",
+                path.display()
+            )));
+        }
+        Ok(path)
+    }
+
+    async fn resolve_write_path(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<PathBuf, agent_client_protocol::Error> {
+        self.validate_absolute(path)?;
+        if path.file_name().is_none() {
+            return Err(fs_invalid_params("filesystem write path must name a file"));
+        }
+
+        match tokio::fs::canonicalize(path).await {
+            Ok(existing) => {
+                self.validate_under_root(&existing)?;
+                let metadata = tokio::fs::metadata(&existing).await.map_err(|e| {
+                    fs_io_error(
+                        "inspect text file",
+                        &existing,
+                        e,
+                        "file metadata must be readable",
+                    )
+                })?;
+                if !metadata.is_file() {
+                    return Err(fs_invalid_params(format!(
+                        "filesystem path is not a regular file: {}",
+                        existing.display()
+                    )));
+                }
+                Ok(existing)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let parent = path.parent().ok_or_else(|| {
+                    fs_invalid_params("filesystem write path must have a parent directory")
+                })?;
+                let parent = tokio::fs::canonicalize(parent).await.map_err(|e| {
+                    fs_io_error("resolve parent directory", parent, e, "parent must exist")
+                })?;
+                self.validate_under_root(&parent)?;
+                Ok(parent.join(path.file_name().expect("checked above")))
+            }
+            Err(e) => Err(fs_io_error(
+                "resolve text file",
+                path,
+                e,
+                "file path must be resolvable",
+            )),
+        }
+    }
+
+    fn validate_absolute(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<(), agent_client_protocol::Error> {
+        if path.is_absolute() {
+            Ok(())
+        } else {
+            Err(fs_invalid_params(format!(
+                "filesystem path must be absolute: {}",
+                path.display()
+            )))
+        }
+    }
+
+    fn validate_under_root(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<(), agent_client_protocol::Error> {
+        if path.starts_with(&self.root) {
+            Ok(())
+        } else {
+            Err(fs_invalid_params(format!(
+                "filesystem path is outside session root {}: {}",
+                self.root.display(),
+                path.display()
+            )))
+        }
+    }
+
+    async fn validate_active_session(
+        &self,
+        session_id: &SessionId,
+    ) -> std::result::Result<(), agent_client_protocol::Error> {
+        let Some(active_session_id) = &self.active_session_id else {
+            return Ok(());
+        };
+        if active_session_id.lock().await.as_ref() == Some(session_id) {
+            return Ok(());
+        }
+        Err(fs_invalid_params(format!(
+            "filesystem request for inactive session {session_id}"
+        )))
+    }
+}
+
+fn read_text_line_range(
+    content: &str,
+    line: Option<u32>,
+    limit: Option<u32>,
+) -> std::result::Result<String, agent_client_protocol::Error> {
+    let start = match line {
+        Some(0) => return Err(fs_invalid_params("filesystem read line must be 1-based")),
+        Some(line) => line.saturating_sub(1) as usize,
+        None => 0,
+    };
+    let limit = limit.map(|limit| limit as usize);
+    let lines = content.split_inclusive('\n').skip(start);
+    let selected = match limit {
+        Some(limit) => lines.take(limit).collect(),
+        None => lines.collect(),
+    };
+    Ok(selected)
+}
+
+fn fs_invalid_params(message: impl ToString) -> agent_client_protocol::Error {
+    agent_client_protocol::Error::invalid_params()
+        .data(serde_json::Value::String(message.to_string()))
+}
+
+fn fs_io_error(
+    action: &str,
+    path: &Path,
+    error: std::io::Error,
+    hint: &str,
+) -> agent_client_protocol::Error {
+    fs_invalid_params(format!(
+        "{action} failed for {}: {error}; {hint}",
+        path.display()
+    ))
+}
 
 #[derive(Debug)]
 struct ManagedTerminals {
@@ -2507,6 +2738,118 @@ mod tests {
     }
 
     #[test]
+    fn read_text_line_range_uses_one_based_lines_and_preserves_newlines() {
+        let content = "alpha\nbeta\ngamma\n";
+
+        assert_eq!(
+            read_text_line_range(content, Some(2), Some(2)).expect("slice"),
+            "beta\ngamma\n"
+        );
+        assert_eq!(
+            read_text_line_range(content, Some(4), None).expect("past end"),
+            ""
+        );
+        assert!(read_text_line_range(content, Some(0), Some(1)).is_err());
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_reads_and_writes_inside_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = SessionId::new("session-1");
+        let path = temp.path().join("notes.txt");
+        tokio::fs::write(&path, "one\ntwo\nthree\n")
+            .await
+            .expect("seed file");
+        let filesystem = LocalFileSystem::new(temp.path().to_path_buf()).expect("filesystem");
+
+        let read = filesystem
+            .read_text_file(
+                ReadTextFileRequest::new(session_id.clone(), path.clone())
+                    .line(2)
+                    .limit(1),
+            )
+            .await
+            .expect("read");
+        assert_eq!(read.content, "two\n");
+
+        let write_path = temp.path().join("created.txt");
+        filesystem
+            .write_text_file(WriteTextFileRequest::new(
+                session_id,
+                write_path.clone(),
+                "created",
+            ))
+            .await
+            .expect("write");
+        assert_eq!(
+            tokio::fs::read_to_string(write_path)
+                .await
+                .expect("written"),
+            "created"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_rejects_paths_outside_root() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_file = outside.path().join("outside.txt");
+        tokio::fs::write(&outside_file, "secret")
+            .await
+            .expect("outside file");
+        let filesystem = LocalFileSystem::new(root.path().to_path_buf()).expect("filesystem");
+        let session_id = SessionId::new("session-1");
+
+        assert!(
+            filesystem
+                .read_text_file(ReadTextFileRequest::new(
+                    session_id.clone(),
+                    outside_file.clone()
+                ))
+                .await
+                .is_err()
+        );
+        assert!(
+            filesystem
+                .write_text_file(WriteTextFileRequest::new(
+                    session_id,
+                    outside_file,
+                    "overwrite"
+                ))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_rejects_inactive_sessions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let active_session_id = Arc::new(Mutex::new(Some(SessionId::new("active"))));
+        let filesystem = LocalFileSystem::with_active_session(
+            temp.path().to_path_buf(),
+            active_session_id.clone(),
+        )
+        .expect("filesystem");
+        let path = temp.path().join("notes.txt");
+        tokio::fs::write(&path, "hello").await.expect("seed file");
+
+        assert!(
+            filesystem
+                .read_text_file(ReadTextFileRequest::new(SessionId::new("stale"), &path))
+                .await
+                .is_err()
+        );
+
+        *active_session_id.lock().await = Some(SessionId::new("stale"));
+        assert!(
+            filesystem
+                .read_text_file(ReadTextFileRequest::new(SessionId::new("stale"), path))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn terminal_output_buffer_truncates_on_utf8_boundary() {
         let mut buffer = TerminalOutputBuffer::new(5);
         buffer.append("éabc".as_bytes());
@@ -2838,6 +3181,8 @@ mod tests {
                             responder,
                             _cx| {
                     assert!(req.client_capabilities.terminal);
+                    assert!(req.client_capabilities.fs.read_text_file);
+                    assert!(req.client_capabilities.fs.write_text_file);
                     let client_info = req.client_info.expect("clientInfo");
                     assert_eq!(client_info.name, env!("CARGO_PKG_NAME"));
                     assert_eq!(client_info.version, env!("CARGO_PKG_VERSION"));
@@ -2915,6 +3260,66 @@ mod tests {
             )
             .connect_with(transport, |_cx| async move {
                 // Keep the agent alive until the client side closes.
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_with_filesystem_requests(
+        stream: tokio::io::DuplexStream,
+        read_path: PathBuf,
+        write_path: PathBuf,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |req: agent_client_protocol::schema::InitializeRequest,
+                            responder,
+                            _cx| {
+                    assert!(req.client_capabilities.fs.read_text_file);
+                    assert!(req.client_capabilities.fs.write_text_file);
+                    responder.respond(InitializeResponse::new(ProtocolVersion::V1))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                            responder,
+                            cx: ConnectionTo<agent_client_protocol::Client>| {
+                    let response =
+                        responder.respond(NewSessionResponse::new(SessionId::new("test-session")));
+                    let read_path = read_path.clone();
+                    let write_path = write_path.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        let read = cx
+                            .send_request(
+                                ReadTextFileRequest::new(SessionId::new("test-session"), read_path)
+                                    .line(2)
+                                    .limit(1),
+                            )
+                            .block_task()
+                            .await
+                            .expect("read text file");
+                        assert_eq!(read.content, "two\n");
+
+                        cx.send_request(WriteTextFileRequest::new(
+                            SessionId::new("test-session"),
+                            write_path,
+                            "written by agent",
+                        ))
+                        .block_task()
+                        .await
+                        .expect("write text file");
+                    });
+                    response
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
                 futures::future::pending::<()>().await;
                 Ok(())
             })
@@ -3614,6 +4019,53 @@ mod tests {
                 UiEvent::Warning(_) | UiEvent::Fatal(_) => panic!("unexpected: {ev:?}"),
                 _ => {}
             }
+        }
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mock_agent_can_read_and_write_text_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let read_path = temp.path().join("read.txt");
+        let write_path = temp.path().join("write.txt");
+        tokio::fs::write(&read_path, "one\ntwo\nthree\n")
+            .await
+            .expect("seed file");
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_with_filesystem_requests(
+            agent_side,
+            read_path,
+            write_path.clone(),
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            temp.path().to_path_buf(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "test-session").await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(content) = tokio::fs::read_to_string(&write_path).await {
+                assert_eq!(content, "written by agent");
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("timed out waiting for filesystem write");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
