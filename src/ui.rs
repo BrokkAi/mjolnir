@@ -41,7 +41,6 @@ use crate::app::{
     AppState, ConfigValueChoice, ConnectionState, Entry, PastedAttachment, PastedImageAttachment,
     PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, StatusKind, StatusMessage,
     ToolCallOutput, UiExitReason, config_option_choices, config_option_current_value_label,
-    permission_kind_label,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -5261,10 +5260,7 @@ fn draw_permission_modal(
         .prompt
         .options
         .iter()
-        .map(|opt| {
-            let kind = permission_kind_label(opt.kind);
-            format!("> {} ({kind})", opt.name).width()
-        })
+        .map(|opt| format!("> {}", opt.name).width())
         .max()
         .unwrap_or(0);
     let desired_content_width = longest_option_width
@@ -5346,8 +5342,7 @@ fn permission_option_lines(
         .iter()
         .enumerate()
         .map(|(i, opt)| {
-            let kind = permission_kind_label(opt.kind);
-            let label = format!("{} ({kind})", opt.name);
+            let label = opt.name.clone();
             let marker = if i == selected { "> " } else { "  " };
             let style = if i == selected {
                 Style::default()
@@ -5451,8 +5446,7 @@ fn selected_permission_content_row(pending: &PendingPermission, width: u16) -> u
         .iter()
         .take(selected)
         .map(|opt| {
-            let kind = permission_kind_label(opt.kind);
-            wrap_prefixed_text_to_width(&format!("{} ({kind})", opt.name), width, "> ", "  ")
+            wrap_prefixed_text_to_width(&opt.name, width, "> ", "  ")
                 .len()
                 .max(1)
         })
@@ -8474,17 +8468,16 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        for expected in [
-            "Allow once (allow once)",
-            "Allow always (allow once)",
-            "Reject (allow once)",
-            "Enter to confirm",
-        ] {
+        for expected in ["Allow once", "Allow always", "Reject", "Enter to confirm"] {
             assert!(
                 rendered.contains(expected),
                 "missing {expected:?}; rendered:\n{rendered}"
             );
         }
+        assert!(
+            !rendered.contains("(allow once)"),
+            "permission options should not duplicate ACP kind labels; rendered:\n{rendered}"
+        );
     }
 
     #[test]
@@ -8590,7 +8583,7 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("> Reject (allow once)"),
+            rendered.contains("> Reject"),
             "clamped selection should be rendered; rendered:\n{rendered}"
         );
     }

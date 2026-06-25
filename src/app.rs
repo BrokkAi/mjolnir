@@ -1830,21 +1830,6 @@ fn status_transcript_text(kind: StatusKind, text: &str) -> String {
     }
 }
 
-/// Format a permission option label for the modal. Returned strings are
-/// printable without further processing.
-pub fn permission_kind_label(
-    kind: agent_client_protocol::schema::PermissionOptionKind,
-) -> &'static str {
-    use agent_client_protocol::schema::PermissionOptionKind as K;
-    match kind {
-        K::AllowOnce => "allow once",
-        K::AllowAlways => "allow always",
-        K::RejectOnce => "reject once",
-        K::RejectAlways => "reject always",
-        _ => "other",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
