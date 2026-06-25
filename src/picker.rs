@@ -25,8 +25,10 @@ use tokio::sync::mpsc;
 use crate::install::{self, Progress};
 use crate::palette::TerminalTheme;
 use crate::paths::{expand_home_shortcut, normalize_spawn_program};
-use crate::registry::{DistributionKind, Registry};
+use crate::registry::{Agent, DistributionKind, Registry};
 use crate::version::mjolnir_version_label;
+
+const CURATED_AGENT_IDS: &[&str] = &["claude-acp", "codex-acp", "opencode-acp", "pi-acp"];
 
 /// Resolved launch command for the chosen agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +89,7 @@ enum Item {
     Anvil,
     Agent(usize),
     CustomAgent(usize),
+    Other,
     Custom,
 }
 
@@ -137,6 +140,7 @@ struct PickerState<'a> {
     selected: usize,
     mode: Mode,
     search_focused: bool,
+    expanded: bool,
     notice: Option<String>,
     preferences: PickerPreferences,
 }
@@ -158,6 +162,7 @@ impl<'a> PickerState<'a> {
             selected: 0,
             mode: Mode::Browse,
             search_focused: false,
+            expanded: false,
             notice: None,
             preferences,
         };
@@ -167,6 +172,10 @@ impl<'a> PickerState<'a> {
     }
 
     fn rebuild_items(&mut self, preferred_source_id: Option<&str>) {
+        let previous_source_id = preferred_source_id
+            .map(str::to_string)
+            .or_else(|| self.focused_item().map(|item| self.item_source_id(item)));
+        let fallback_selected = self.selected;
         let mut items = vec![Item::Anvil];
         let mut indices: Vec<usize> = (0..self.registry.agents.len()).collect();
         indices.sort_by(|&a, &b| {
@@ -188,6 +197,7 @@ impl<'a> PickerState<'a> {
         for i in custom_indices {
             items.push(Item::CustomAgent(i));
         }
+        items.push(Item::Other);
         items.push(Item::Custom);
 
         items.sort_by(|a, b| {
@@ -201,15 +211,13 @@ impl<'a> PickerState<'a> {
         });
 
         self.items = items;
-        self.recompute_filter();
-        if let Some(source_id) = preferred_source_id {
-            self.select_source_id(source_id);
-        }
+        self.recompute_filter_preserving(previous_source_id, fallback_selected);
     }
 
     fn item_label(&self, item: &Item) -> String {
         match item {
             Item::Anvil => "anvil".to_string(),
+            Item::Other => "Other...".to_string(),
             Item::Custom => "Add custom agent...".to_string(),
             Item::Agent(idx) => self.registry.agents[*idx].name.clone(),
             Item::CustomAgent(idx) => self.preferences.custom_agents[*idx].name.clone(),
@@ -219,6 +227,7 @@ impl<'a> PickerState<'a> {
     fn item_search_key(&self, item: &Item) -> String {
         match item {
             Item::Anvil => "anvil brokk acp uvx".to_string(),
+            Item::Other => "other agents browse all".to_string(),
             Item::Custom => "add custom agent command".to_string(),
             Item::Agent(idx) => {
                 let a = &self.registry.agents[*idx];
@@ -240,6 +249,7 @@ impl<'a> PickerState<'a> {
     fn item_source_id(&self, item: &Item) -> String {
         match item {
             Item::Anvil => "anvil".to_string(),
+            Item::Other => "other".to_string(),
             Item::Custom => "custom".to_string(),
             Item::Agent(idx) => self.registry.agents[*idx].id.clone(),
             Item::CustomAgent(idx) => self.preferences.custom_agents[*idx].source_id(),
@@ -249,6 +259,7 @@ impl<'a> PickerState<'a> {
     fn item_hint(&self, item: &Item) -> String {
         match item {
             Item::Anvil => "uvx brokk acp".to_string(),
+            Item::Other => "show all agents".to_string(),
             Item::Custom => "save a named command for next time".to_string(),
             Item::Agent(idx) => {
                 let a = &self.registry.agents[*idx];
@@ -278,6 +289,9 @@ impl<'a> PickerState<'a> {
     }
 
     fn item_is_default(&self, item: &Item) -> bool {
+        if matches!(item, Item::Other) {
+            return false;
+        }
         let Some(cur) = self.default_source_id() else {
             return false;
         };
@@ -285,6 +299,9 @@ impl<'a> PickerState<'a> {
     }
 
     fn item_is_favorite(&self, item: &Item) -> bool {
+        if matches!(item, Item::Other) {
+            return false;
+        }
         let source_id = self.item_source_id(item);
         self.preferences
             .favorite_source_ids
@@ -292,33 +309,99 @@ impl<'a> PickerState<'a> {
             .any(|id| id == &source_id)
     }
 
+    fn item_is_curated(&self, item: &Item) -> bool {
+        match item {
+            Item::Anvil | Item::Custom => true,
+            Item::Agent(idx) => registry_agent_initially_visible(&self.registry.agents[*idx]),
+            Item::CustomAgent(_) | Item::Other => false,
+        }
+    }
+
+    fn item_is_visible_when_collapsed(&self, item: &Item) -> bool {
+        matches!(item, Item::Custom)
+            || self.item_is_curated(item)
+            || self.item_is_favorite(item)
+            || self.item_is_default(item)
+    }
+
     fn recompute_filter(&mut self) {
+        let prev_selected_source_id = self.focused_item().map(|item| self.item_source_id(item));
+        self.recompute_filter_preserving(prev_selected_source_id, 0);
+    }
+
+    fn recompute_filter_preserving(
+        &mut self,
+        prev_selected_source_id: Option<String>,
+        fallback_selected: usize,
+    ) {
         let q = self.filter.to_lowercase();
-        let prev_selected_source_id = self
-            .filtered
-            .get(self.selected)
-            .map(|&i| self.item_source_id(&self.items[i]));
 
         if q.is_empty() {
-            self.filtered = (0..self.items.len()).collect();
+            if self.expanded {
+                self.filtered = self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| !matches!(item, Item::Other))
+                    .map(|(i, _)| i)
+                    .collect();
+            } else {
+                let hidden_count = self
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        !matches!(item, Item::Other) && !self.item_is_visible_when_collapsed(item)
+                    })
+                    .count();
+                let other_idx = self
+                    .items
+                    .iter()
+                    .position(|item| matches!(item, Item::Other));
+                let custom_idx = self
+                    .items
+                    .iter()
+                    .position(|item| matches!(item, Item::Custom));
+                self.filtered = self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| {
+                        !matches!(item, Item::Other | Item::Custom)
+                            && self.item_is_visible_when_collapsed(item)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if hidden_count > 0
+                    && let Some(other_idx) = other_idx
+                {
+                    self.filtered.push(other_idx);
+                }
+                if let Some(custom_idx) = custom_idx {
+                    self.filtered.push(custom_idx);
+                }
+            }
         } else {
             self.filtered = self
                 .items
                 .iter()
                 .enumerate()
-                .filter(|(_, item)| self.item_search_key(item).contains(&q))
+                .filter(|(_, item)| {
+                    !matches!(item, Item::Other) && self.item_search_key(item).contains(&q)
+                })
                 .map(|(i, _)| i)
                 .collect();
         }
 
-        // Preserve selection on the same row when possible; otherwise top.
+        // Preserve selection on the same row when possible; otherwise keep the
+        // closest stable position chosen by the caller.
         self.selected = prev_selected_source_id
+            .as_deref()
             .and_then(|source_id| {
                 self.filtered
                     .iter()
                     .position(|&i| self.item_source_id(&self.items[i]) == source_id)
             })
-            .unwrap_or(0);
+            .unwrap_or_else(|| fallback_selected.min(self.filtered.len().saturating_sub(1)));
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -335,6 +418,7 @@ impl<'a> PickerState<'a> {
         self.filtered.get(self.selected).map(|&i| &self.items[i])
     }
 
+    #[cfg(test)]
     fn select_source_id(&mut self, source_id: &str) {
         if let Some(pos) = self
             .filtered
@@ -346,6 +430,10 @@ impl<'a> PickerState<'a> {
     }
 
     fn toggle_favorite(&mut self, item: &Item) {
+        if matches!(item, Item::Other) {
+            self.notice = Some("Other expands the full agent list".to_string());
+            return;
+        }
         let source_id = self.item_source_id(item);
         let label = self.item_label(item);
         if let Some(pos) = self
@@ -760,6 +848,14 @@ async fn start_item_action(
             };
             Ok(None)
         }
+        Item::Other => {
+            state.expanded = true;
+            state.notice = Some("showing all agents".to_string());
+            let previous = state.selected;
+            state.recompute_filter();
+            state.selected = previous.min(state.filtered.len().saturating_sub(1));
+            Ok(None)
+        }
         Item::CustomAgent(idx) => {
             let custom = state.preferences.custom_agents[*idx].clone();
             let outcome = custom.to_outcome();
@@ -870,6 +966,10 @@ async fn start_item_action(
             }
         }
     }
+}
+
+fn registry_agent_initially_visible(agent: &Agent) -> bool {
+    CURATED_AGENT_IDS.contains(&agent.id.as_str())
 }
 
 /// Render a custom agent's stored program + args back into a single editable
@@ -1338,6 +1438,14 @@ mod tests {
         Registry::from_json(json).expect("parse")
     }
 
+    fn visible_labels(state: &PickerState<'_>) -> Vec<String> {
+        state
+            .filtered
+            .iter()
+            .map(|&i| state.item_label(&state.items[i]))
+            .collect()
+    }
+
     #[test]
     fn picker_lists_anvil_registry_and_custom() {
         let reg = fixture_registry();
@@ -1347,10 +1455,218 @@ mod tests {
             PathBuf::from("/tmp"),
             PickerPreferences::default(),
         );
-        // 1 anvil + 3 registry + 1 custom-add = 5 items
-        assert_eq!(state.items.len(), 5);
+        // 1 anvil + 3 registry + 1 Other + 1 custom-add = 6 items.
+        assert_eq!(state.items.len(), 6);
         assert!(state.items.iter().any(|item| matches!(item, Item::Anvil)));
+        assert!(state.items.iter().any(|item| matches!(item, Item::Other)));
         assert!(state.items.iter().any(|item| matches!(item, Item::Custom)));
+    }
+
+    #[test]
+    fn picker_collapses_empty_view_to_curated_agents_and_other() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+
+        assert_eq!(
+            visible_labels(&state),
+            vec!["anvil", "Claude", "Other...", "Add custom agent..."]
+        );
+    }
+
+    #[test]
+    fn picker_collapsed_view_includes_curated_registry_agents() {
+        let reg = Registry::from_json(
+            r#"{
+                "version": "1.0.0",
+                "agents": [
+                    {
+                        "id": "claude-acp",
+                        "name": "Claude",
+                        "version": "1.0.0",
+                        "distribution": {"npx": {"package": "@x/claude"}}
+                    },
+                    {
+                        "id": "codex-acp",
+                        "name": "Codex",
+                        "version": "1.0.0",
+                        "distribution": {"npx": {"package": "@x/codex"}}
+                    },
+                    {
+                        "id": "opencode-acp",
+                        "name": "opencode",
+                        "version": "1.0.0",
+                        "distribution": {"npx": {"package": "@x/opencode"}}
+                    },
+                    {
+                        "id": "pi-acp",
+                        "name": "pi",
+                        "version": "1.0.0",
+                        "distribution": {"npx": {"package": "@x/pi"}}
+                    },
+                    {
+                        "id": "zebra",
+                        "name": "Zebra",
+                        "version": "1.0.0",
+                        "distribution": {"npx": {"package": "@x/zebra"}}
+                    }
+                ]
+            }"#,
+        )
+        .expect("parse registry");
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+
+        assert_eq!(
+            visible_labels(&state),
+            vec![
+                "anvil",
+                "Claude",
+                "Codex",
+                "opencode",
+                "pi",
+                "Other...",
+                "Add custom agent..."
+            ]
+        );
+    }
+
+    #[test]
+    fn picker_collapsed_view_uses_stable_ids_not_spoofable_names() {
+        let reg = Registry::from_json(
+            r#"{
+                "version": "1.0.0",
+                "agents": [
+                    {
+                        "id": "evil-acp",
+                        "name": "Claude",
+                        "version": "1.0.0",
+                        "distribution": {"npx": {"package": "@attacker/acp"}}
+                    },
+                    {
+                        "id": "codex-acp",
+                        "name": "Renamed Codex",
+                        "version": "1.0.0",
+                        "distribution": {"npx": {"package": "@x/codex"}}
+                    }
+                ]
+            }"#,
+        )
+        .expect("parse registry");
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+
+        assert_eq!(
+            visible_labels(&state),
+            vec!["anvil", "Renamed Codex", "Other...", "Add custom agent..."]
+        );
+    }
+
+    #[test]
+    fn picker_collapsed_view_keeps_favorites_visible() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                favorite_source_ids: vec!["uvx-binary".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let labels = visible_labels(&state);
+        assert!(labels.contains(&"UvxBinary".to_string()));
+        assert_eq!(
+            state.item_source_id(state.focused_item().expect("focused")),
+            "uvx-binary"
+        );
+    }
+
+    #[test]
+    fn picker_unfavoriting_hidden_agent_keeps_focus_on_visible_row() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                favorite_source_ids: vec!["uvx-binary".to_string()],
+                ..Default::default()
+            },
+        );
+        let focused = state.focused_item().expect("focused").clone();
+
+        state.toggle_favorite(&focused);
+
+        assert!(!visible_labels(&state).contains(&"UvxBinary".to_string()));
+        assert_eq!(
+            state.item_source_id(state.focused_item().expect("focused")),
+            "anvil"
+        );
+    }
+
+    #[test]
+    fn picker_collapsed_view_keeps_saved_default_visible_and_selected() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                default_agent: Some(PickerOutcome {
+                    source_id: "binary-only".to_string(),
+                    program: PathBuf::from("/tmp/bin"),
+                    args: Vec::new(),
+                    env: HashMap::new(),
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert!(visible_labels(&state).contains(&"BinaryOnly".to_string()));
+        assert_eq!(
+            state.item_source_id(state.focused_item().expect("focused")),
+            "binary-only"
+        );
+    }
+
+    #[test]
+    fn picker_other_row_is_never_default() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                default_agent: Some(PickerOutcome {
+                    source_id: "other".to_string(),
+                    program: PathBuf::from("/tmp/other"),
+                    args: Vec::new(),
+                    env: HashMap::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let other = state
+            .items
+            .iter()
+            .find(|item| matches!(item, Item::Other))
+            .expect("other row");
+
+        assert!(!state.item_is_default(other));
     }
 
     #[test]
@@ -1382,12 +1698,53 @@ mod tests {
         );
         state.filter = "binary-only".to_string();
         state.recompute_filter();
-        let visible: Vec<String> = state
-            .filtered
+        assert_eq!(visible_labels(&state), vec!["BinaryOnly".to_string()]);
+    }
+
+    #[test]
+    fn picker_search_matches_hidden_custom_agents() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        state.filter = "experiment".to_string();
+        state.recompute_filter();
+
+        assert_eq!(visible_labels(&state), vec!["experiment".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn selecting_other_expands_full_list_in_place() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        let other = state
+            .items
             .iter()
-            .map(|&i| state.item_label(&state.items[i]))
-            .collect();
-        assert_eq!(visible, vec!["BinaryOnly".to_string()]);
+            .find(|item| matches!(item, Item::Other))
+            .expect("other row")
+            .clone();
+
+        let result = start_item_action(&mut state, &other, ItemAction::Select)
+            .await
+            .expect("expand");
+
+        assert!(result.is_none());
+        assert!(state.expanded);
+        let labels = visible_labels(&state);
+        assert!(labels.contains(&"BinaryOnly".to_string()));
+        assert!(labels.contains(&"UvxBinary".to_string()));
+        assert!(!labels.contains(&"Other...".to_string()));
     }
 
     #[test]
@@ -1758,8 +2115,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        // 1 anvil + 3 registry + 2 custom-agent + 1 "Add custom" = 7.
-        assert_eq!(state.items.len(), 7);
+        // 1 anvil + 3 registry + 2 custom-agent + 1 Other + 1 "Add custom" = 8.
+        assert_eq!(state.items.len(), 8);
         let sources: Vec<String> = state
             .items
             .iter()
@@ -1978,6 +2335,8 @@ mod tests {
                 ..Default::default()
             },
         );
+        state.expanded = true;
+        state.recompute_filter();
         state.select_source_id("custom:local-claude");
 
         let key = crossterm::event::KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
