@@ -9,16 +9,17 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{
     AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, ClientCapabilities,
-    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, ErrorCode, FileSystemCapabilities,
-    ForkSessionRequest, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, NewSessionRequest, PromptRequest, ProtocolVersion,
-    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionModeState,
-    SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus,
-    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    CloseSessionRequest, ContentBlock, CreateTerminalRequest, CreateTerminalResponse, ErrorCode,
+    FileSystemCapabilities, ForkSessionRequest, ImageContent, Implementation, InitializeRequest,
+    KillTerminalRequest, KillTerminalResponse, LoadSessionRequest, NewSessionRequest,
+    PromptRequest, ProtocolVersion, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId, SessionId,
+    SessionInfoUpdate, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus, TerminalId,
+    TerminalOutputRequest, TerminalOutputResponse, TextContent, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
@@ -28,8 +29,8 @@ use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, TerminalOutputSnapshot,
-    UiCommand, UiEvent,
+    LoadSessionResult, PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget,
+    TerminalOutputSnapshot, UiCommand, UiEvent,
 };
 use crate::install;
 use crate::paths::normalize_spawn_program;
@@ -54,6 +55,14 @@ struct RuntimeSessionState {
     active_session_id: Arc<Mutex<Option<SessionId>>>,
     cancelled_permission_sessions: Arc<Mutex<HashSet<SessionId>>>,
     permission_cancel_generation: watch::Sender<u64>,
+}
+
+#[derive(Clone)]
+struct ConnectedEventFields {
+    agent_name: Option<String>,
+    agent_version: Option<String>,
+    prompt_images_supported: bool,
+    session_fork_supported: bool,
 }
 
 impl RuntimeSessionState {
@@ -1064,19 +1073,19 @@ async fn drive_session(
         emit_fatal(ui_tx, &fatal_emitted, text.clone());
         return Err(anyhow::anyhow!(text));
     }
-    // `session/fork` is exposed by the ACP crate as an unstable extension;
-    // only surface the built-in command when the agent explicitly advertises it.
-    let session_fork_supported = init_resp
-        .agent_capabilities
-        .session_capabilities
-        .fork
-        .is_some();
-    let _ = ui_tx.send(UiEvent::Connected {
+    let connected_fields = ConnectedEventFields {
         agent_name: init_resp.agent_info.as_ref().map(|i| i.name.clone()),
         agent_version: init_resp.agent_info.as_ref().map(|i| i.version.clone()),
         prompt_images_supported: init_resp.agent_capabilities.prompt_capabilities.image,
-        session_fork_supported,
-    });
+        // `session/fork` is exposed by the ACP crate as an unstable extension;
+        // only surface the built-in command when the agent explicitly advertises it.
+        session_fork_supported: init_resp
+            .agent_capabilities
+            .session_capabilities
+            .fork
+            .is_some(),
+    };
+    emit_connected(ui_tx, &connected_fields);
 
     let (mut session_id, initial_config, resumed) = match resume_session {
         Some(existing_session_id) => {
@@ -1203,7 +1212,7 @@ async fn drive_session(
                 }
             }
             UiCommand::ForkSession => {
-                if !session_fork_supported {
+                if !connected_fields.session_fork_supported {
                     let _ = ui_tx.send(UiEvent::Warning(
                         "session fork is not supported by this agent (unstable ACP extension not advertised)"
                             .to_string(),
@@ -1225,11 +1234,156 @@ async fn drive_session(
                     break;
                 }
             }
+            UiCommand::LoadSession {
+                session_id: requested_session_id,
+                cwd: requested_cwd,
+                title,
+                responder,
+            } => {
+                let target_session_id = SessionId::from(requested_session_id);
+                if target_session_id == session_id {
+                    emit_connected(ui_tx, &connected_fields);
+                    let _ = ui_tx.send(UiEvent::SessionStarted {
+                        session_id: session_id.to_string(),
+                        resumed: true,
+                    });
+                    let _ = ui_tx.send(UiEvent::SessionConfigOptions {
+                        options: session_config.options.clone(),
+                        targets: session_config.targets.clone(),
+                    });
+                    if let Some(title) = title {
+                        let _ = ui_tx.send(UiEvent::SessionUpdate(
+                            SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title(title)),
+                        ));
+                    }
+                    let _ = responder.send(LoadSessionResult::Switched);
+                    continue;
+                }
+                if init_resp
+                    .agent_capabilities
+                    .session_capabilities
+                    .close
+                    .is_none()
+                {
+                    let _ = responder.send(LoadSessionResult::Fallback {
+                        message:
+                            "agent does not advertise ACP capability sessionCapabilities.close"
+                                .to_string(),
+                    });
+                    continue;
+                }
+
+                match switch_existing_session(
+                    &conn,
+                    &session_id,
+                    target_session_id,
+                    requested_cwd,
+                    title,
+                    &init_resp.agent_capabilities,
+                    &init_resp.auth_methods,
+                    &mut session_config,
+                    &session_state.active_session_id,
+                    &connected_fields,
+                    ui_tx,
+                )
+                .await
+                {
+                    Ok(switched_session_id) => {
+                        session_id = switched_session_id;
+                        let _ = responder.send(LoadSessionResult::Switched);
+                    }
+                    Err(launch_err) => {
+                        let _ = responder.send(LoadSessionResult::Fallback {
+                            message: launch_err.to_string(),
+                        });
+                    }
+                }
+            }
             UiCommand::CancelPrompt => {}
             UiCommand::Shutdown => break,
         }
     }
     Ok(())
+}
+
+fn emit_connected(ui_tx: &mpsc::UnboundedSender<UiEvent>, fields: &ConnectedEventFields) {
+    let _ = ui_tx.send(UiEvent::Connected {
+        agent_name: fields.agent_name.clone(),
+        agent_version: fields.agent_version.clone(),
+        prompt_images_supported: fields.prompt_images_supported,
+        session_fork_supported: fields.session_fork_supported,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn switch_existing_session(
+    conn: &ConnectionTo<Agent>,
+    current_session_id: &SessionId,
+    target_session_id: SessionId,
+    cwd: PathBuf,
+    title: Option<String>,
+    capabilities: &AgentCapabilities,
+    auth_methods: &[AuthMethod],
+    session_config: &mut SessionConfigCache,
+    active_session_id: &Arc<Mutex<Option<SessionId>>>,
+    connected_fields: &ConnectedEventFields,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) -> std::result::Result<SessionId, LaunchError> {
+    close_session(conn, current_session_id.clone(), auth_methods).await?;
+    *active_session_id.lock().await = Some(target_session_id.clone());
+    let loaded_config = resume_existing_session(
+        conn,
+        target_session_id.clone(),
+        cwd,
+        capabilities,
+        auth_methods,
+    )
+    .await?;
+
+    *session_config = loaded_config
+        .map(|(options, targets)| SessionConfigCache { options, targets })
+        .unwrap_or_else(|| SessionConfigCache {
+            options: Vec::new(),
+            targets: Vec::new(),
+        });
+    emit_connected(ui_tx, connected_fields);
+    let _ = ui_tx.send(UiEvent::SessionStarted {
+        session_id: target_session_id.to_string(),
+        resumed: true,
+    });
+    let _ = ui_tx.send(UiEvent::SessionConfigOptions {
+        options: session_config.options.clone(),
+        targets: session_config.targets.clone(),
+    });
+    if let Some(title) = title {
+        let _ = ui_tx.send(UiEvent::SessionUpdate(SessionUpdate::SessionInfoUpdate(
+            SessionInfoUpdate::new().title(title),
+        )));
+    }
+    let _ = ui_tx.send(UiEvent::Info("session loaded".to_string()));
+    Ok(target_session_id)
+}
+
+async fn close_session(
+    conn: &ConnectionTo<Agent>,
+    session_id: SessionId,
+    auth_methods: &[AuthMethod],
+) -> std::result::Result<(), LaunchError> {
+    let close_req = CloseSessionRequest::new(session_id);
+    match conn.send_request(close_req.clone()).block_task().await {
+        Ok(_) => Ok(()),
+        Err(source) => match auth_required_detail(&source) {
+            Some(detail) => {
+                authenticate_after_auth_required(conn, auth_methods, detail).await?;
+                conn.send_request(close_req)
+                    .block_task()
+                    .await
+                    .map(|_| ())
+                    .map_err(classify_session_error)
+            }
+            None => Err(classify_session_error(source)),
+        },
+    }
 }
 
 async fn drive_fork_session(
@@ -1293,6 +1447,11 @@ async fn drive_fork_session(
                         let _ = ui_tx.send(UiEvent::Warning(
                             "session fork already in flight".to_string(),
                         ));
+                    }
+                    Some(UiCommand::LoadSession { responder, .. }) => {
+                        let _ = responder.send(LoadSessionResult::Fallback {
+                            message: "session fork already in flight".to_string(),
+                        });
                     }
                     Some(UiCommand::CancelPrompt) => {}
                 }
@@ -2086,6 +2245,11 @@ async fn drive_config_update(
                             "session fork is only supported while idle".to_string(),
                         ));
                     }
+                    Some(UiCommand::LoadSession { responder, .. }) => {
+                        let _ = responder.send(LoadSessionResult::Fallback {
+                            message: "config update already in flight".to_string(),
+                        });
+                    }
                     Some(UiCommand::CancelPrompt) => {}
                 }
             }
@@ -2184,6 +2348,11 @@ async fn drive_prompt_turn(
                             "session fork is only supported while idle".to_string(),
                         ));
                     }
+                    Some(UiCommand::LoadSession { responder, .. }) => {
+                        let _ = responder.send(LoadSessionResult::Fallback {
+                            message: "prompt already in flight".to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -2209,12 +2378,13 @@ mod tests {
     use crate::app::AppState;
     use agent_client_protocol::Agent as AgentRole;
     use agent_client_protocol::schema::{
-        AuthMethodAgent, AuthenticateResponse, ContentBlock, ContentChunk, ForkSessionResponse,
-        InitializeResponse, LoadSessionResponse, NewSessionResponse, PermissionOption,
-        PermissionOptionKind, PromptResponse, ResumeSessionResponse, SessionCapabilities,
-        SessionConfigId, SessionConfigValueId, SessionForkCapabilities, SessionId,
-        SessionNotification, SessionResumeCapabilities, SessionUpdate,
-        SetSessionConfigOptionRequest, StopReason, TextContent, ToolCallUpdateFields,
+        AuthMethodAgent, AuthenticateResponse, CloseSessionResponse, ContentBlock, ContentChunk,
+        ForkSessionResponse, InitializeResponse, LoadSessionResponse, NewSessionResponse,
+        PermissionOption, PermissionOptionKind, PromptResponse, ResumeSessionResponse,
+        SessionCapabilities, SessionCloseCapabilities, SessionConfigId, SessionConfigValueId,
+        SessionForkCapabilities, SessionId, SessionNotification, SessionResumeCapabilities,
+        SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent,
+        ToolCallUpdateFields,
     };
     use std::sync::{
         Arc,
@@ -3032,6 +3202,140 @@ mod tests {
                 Ok(())
             })
             .await;
+    }
+
+    async fn run_mock_agent_inline_session_switch(
+        stream: tokio::io::DuplexStream,
+        close_seen: Arc<StdAtomicBool>,
+        resume_seen: Arc<StdAtomicBool>,
+    ) {
+        let close_seen_for_req = close_seen.clone();
+        let resume_seen_for_req = resume_seen.clone();
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                            AgentCapabilities::new().session_capabilities(
+                                SessionCapabilities::new()
+                                    .close(SessionCloseCapabilities::new())
+                                    .resume(SessionResumeCapabilities::new()),
+                            ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(NewSessionResponse::new(SessionId::new("old-session")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: CloseSessionRequest, responder, _cx| {
+                    assert_eq!(req.session_id.to_string(), "old-session");
+                    close_seen_for_req.store(true, Ordering::SeqCst);
+                    responder.respond(CloseSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: ResumeSessionRequest,
+                            responder,
+                            cx: ConnectionTo<agent_client_protocol::Client>| {
+                    assert_eq!(req.session_id.to_string(), "target-session");
+                    resume_seen_for_req.store(true, Ordering::SeqCst);
+                    let _ = cx.send_notification(SessionNotification::new(
+                        req.session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("target resume update"),
+                        ))),
+                    ));
+                    responder.respond(ResumeSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_without_close_capability(stream: tokio::io::DuplexStream) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                            AgentCapabilities::new().session_capabilities(
+                                SessionCapabilities::new().resume(SessionResumeCapabilities::new()),
+                            ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(NewSessionResponse::new(SessionId::new("old-session")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn wait_for_session_started(
+        ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
+        expected_session_id: &str,
+    ) {
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timed out waiting for SessionStarted")
+                .expect("ui event channel closed");
+            if let UiEvent::SessionStarted { session_id, .. } = ev {
+                assert_eq!(session_id, expected_session_id);
+                return;
+            }
+        }
+    }
+
+    async fn wait_for_agent_message_chunk(
+        ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
+        expected_text: &str,
+    ) {
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timed out waiting for SessionUpdate")
+                .expect("ui event channel closed");
+            if let UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(chunk)) = ev
+                && let ContentBlock::Text(text) = &chunk.content
+                && text.text == expected_text
+            {
+                return;
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4356,6 +4660,101 @@ mod tests {
         assert!(!resumed);
         assert!(!fatal_emitted.load(Ordering::SeqCst));
 
+        client_task.abort();
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_session_command_switches_on_existing_connection() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let close_seen = Arc::new(StdAtomicBool::new(false));
+        let resume_seen = Arc::new(StdAtomicBool::new(false));
+
+        let agent_task = tokio::spawn(run_mock_agent_inline_session_switch(
+            agent_side,
+            close_seen.clone(),
+            resume_seen.clone(),
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "old-session").await;
+
+        let (responder, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::LoadSession {
+                session_id: "target-session".to_string(),
+                cwd: std::env::temp_dir(),
+                title: Some("Target title".to_string()),
+                responder,
+            })
+            .expect("send load session");
+
+        assert_eq!(
+            response.await.expect("load response"),
+            LoadSessionResult::Switched
+        );
+        wait_for_agent_message_chunk(&mut ui_rx, "target resume update").await;
+        wait_for_session_started(&mut ui_rx, "target-session").await;
+
+        assert!(close_seen.load(Ordering::SeqCst));
+        assert!(resume_seen.load(Ordering::SeqCst));
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        client_task.abort();
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_session_command_falls_back_without_close_capability() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_without_close_capability(agent_side));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "old-session").await;
+
+        let (responder, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::LoadSession {
+                session_id: "target-session".to_string(),
+                cwd: std::env::temp_dir(),
+                title: None,
+                responder,
+            })
+            .expect("send load session");
+
+        match response.await.expect("load response") {
+            LoadSessionResult::Fallback { message } => {
+                assert!(message.contains("sessionCapabilities.close"));
+            }
+            other => panic!("expected fallback, got {other:?}"),
+        }
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         client_task.abort();
         agent_task.abort();
     }

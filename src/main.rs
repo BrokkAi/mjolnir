@@ -37,6 +37,7 @@ use crate::app::UiExitReason;
 use crate::config::{
     Config, CustomAgent as ConfigCustomAgent, SelectedAgent, history_path, transcript_export_dir,
 };
+use crate::event::{LoadSessionResult, UiCommand};
 use crate::picker::{
     CustomAgent as PickerCustomAgent, PickerOutcome, PickerPreferences, PickerResult,
 };
@@ -685,6 +686,17 @@ async fn run_app(
                 initial_agent = Some(agent);
                 continue;
             }
+            UiExitReason::SwitchSession => {
+                if let Some(session_id) = session_id {
+                    initial_resume = Some(ResumeTarget {
+                        session_id,
+                        title: session_title,
+                    });
+                    initial_agent = Some(agent);
+                    continue;
+                }
+                return Ok(None);
+            }
             UiExitReason::LoadSession => {
                 match run_session_picker_action_for_agent(
                     &agent,
@@ -954,25 +966,21 @@ async fn run_session(
     resume_session: Option<String>,
     mode: UiMode,
 ) -> Result<(UiExitReason, Option<String>, Option<String>)> {
-    let mut terminal = match mode {
-        UiMode::InlineChat => {
-            ui::setup_inline_chat_terminal(ui::INLINE_CHAT_HEIGHT).context("setup terminal")?
-        }
-        UiMode::FullscreenTui => ui::setup_fullscreen_terminal().context("setup terminal")?,
-    };
+    let mut terminal = setup_session_terminal(mode)?;
 
     let (event_tx, runtime_event_rx) = mpsc::unbounded_channel();
     let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
     let (runtime_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (cmd_tx, mut ui_cmd_rx) = mpsc::unbounded_channel();
+    let mut ui_event_rx = ui_event_rx;
 
     let runtime_cfg = acp::AcpRuntimeConfig {
         command: agent.program.clone(),
         args: agent.args.clone(),
-        cwd,
+        cwd: cwd.clone(),
         resume_session,
         env: agent.env.clone(),
-        agent_stderr,
+        agent_stderr: agent_stderr.clone(),
     };
 
     // Drive the ACP runtime on its own task so the UI can own the
@@ -1024,34 +1032,84 @@ async fn run_session(
         }
     });
 
-    let ui_result = ui::run(
-        &mut terminal,
-        cmd_tx,
-        ui_event_rx,
-        header_labels,
-        agent_display_name,
-        ui::UiPersistencePaths {
-            history_path: Some(&hist_path),
-            transcript_export_dir: export_dir.as_deref(),
-        },
-        mode,
-    )
-    .await;
+    let mut header_labels = header_labels;
+    let ui_result = loop {
+        let ui_result = ui::run(
+            &mut terminal,
+            &cmd_tx,
+            &mut ui_event_rx,
+            header_labels.clone(),
+            agent_display_name.clone(),
+            ui::UiPersistencePaths {
+                history_path: Some(&hist_path),
+                transcript_export_dir: export_dir.as_deref(),
+            },
+            mode,
+        )
+        .await;
 
-    let restore_result = match mode {
-        UiMode::InlineChat => ui::restore_inline_chat_terminal(&mut terminal),
-        UiMode::FullscreenTui => ui::restore_fullscreen_terminal(&mut terminal),
+        let restore_result = restore_session_terminal(&mut terminal, mode);
+        if let Err(e) = restore_result {
+            tracing::warn!("restore terminal failed: {e}");
+        }
+        if matches!(
+            ui_result.as_ref().map(|(reason, _, _)| reason),
+            Ok(UiExitReason::ClearSession)
+        ) && let Err(e) = ui::clear_terminal_screen(&mut terminal)
+        {
+            tracing::warn!("clear terminal for /clear failed: {e}");
+        }
+
+        let Ok((UiExitReason::LoadSession, current_session_id, current_session_title)) = ui_result
+        else {
+            break ui_result;
+        };
+
+        let action = run_session_picker_action_for_agent(
+            agent,
+            cwd.clone(),
+            agent_stderr.as_deref(),
+            current_session_id.clone(),
+            current_session_title.clone(),
+        )
+        .await?;
+        let SessionPickerAction::Resume {
+            session_id: target_session_id,
+            title: target_title,
+        } = action
+        else {
+            let _ = cmd_tx.send(UiCommand::Shutdown);
+            break Ok((
+                UiExitReason::Quit,
+                current_session_id,
+                current_session_title,
+            ));
+        };
+
+        match request_inline_session_load(
+            &cmd_tx,
+            target_session_id.clone(),
+            cwd.clone(),
+            target_title.clone(),
+        )
+        .await
+        {
+            LoadSessionResult::Switched => {
+                header_labels.session_title = target_title;
+                terminal = setup_session_terminal(mode)?;
+                continue;
+            }
+            LoadSessionResult::Fallback { message } => {
+                tracing::info!("falling back to restart-based session load: {message}");
+                let _ = cmd_tx.send(UiCommand::Shutdown);
+                break Ok((
+                    UiExitReason::SwitchSession,
+                    Some(target_session_id),
+                    target_title,
+                ));
+            }
+        }
     };
-    if let Err(e) = restore_result {
-        tracing::warn!("restore terminal failed: {e}");
-    }
-    if matches!(
-        ui_result.as_ref().map(|(reason, _, _)| reason),
-        Ok(UiExitReason::ClearSession)
-    ) && let Err(e) = ui::clear_terminal_screen(&mut terminal)
-    {
-        tracing::warn!("clear terminal for /clear failed: {e}");
-    }
 
     // Shutdown paths reaching this point:
     //
@@ -1096,6 +1154,54 @@ async fn run_session(
     wait_for_task("remote-control command proxy", cmd_proxy).await;
 
     ui_result
+}
+
+fn setup_session_terminal(
+    mode: UiMode,
+) -> Result<ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>> {
+    match mode {
+        UiMode::InlineChat => {
+            ui::setup_inline_chat_terminal(ui::INLINE_CHAT_HEIGHT).context("setup terminal")
+        }
+        UiMode::FullscreenTui => ui::setup_fullscreen_terminal().context("setup terminal"),
+    }
+}
+
+fn restore_session_terminal(
+    terminal: &mut ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>,
+    mode: UiMode,
+) -> Result<()> {
+    match mode {
+        UiMode::InlineChat => ui::restore_inline_chat_terminal(terminal),
+        UiMode::FullscreenTui => ui::restore_fullscreen_terminal(terminal),
+    }
+}
+
+async fn request_inline_session_load(
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    session_id: String,
+    cwd: PathBuf,
+    title: Option<String>,
+) -> LoadSessionResult {
+    let (responder, response) = tokio::sync::oneshot::channel();
+    if cmd_tx
+        .send(UiCommand::LoadSession {
+            session_id,
+            cwd,
+            title,
+            responder,
+        })
+        .is_err()
+    {
+        return LoadSessionResult::Fallback {
+            message: "ACP runtime command channel closed".to_string(),
+        };
+    }
+    response
+        .await
+        .unwrap_or_else(|_| LoadSessionResult::Fallback {
+            message: "ACP runtime closed before session switch completed".to_string(),
+        })
 }
 
 async fn wait_for_task(label: &str, handle: tokio::task::JoinHandle<()>) {

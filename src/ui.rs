@@ -280,8 +280,8 @@ struct UiInitialState {
 
 pub async fn run(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    cmd_tx: mpsc::UnboundedSender<UiCommand>,
-    mut event_rx: mpsc::UnboundedReceiver<UiEvent>,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
     header_labels: HeaderLabels,
     initial_agent_label: Option<String>,
     persistence: UiPersistencePaths<'_>,
@@ -293,8 +293,8 @@ pub async fn run(
         .unwrap_or_default();
     let (reason, session_id, session_title, history) = ui_loop(
         terminal,
-        &cmd_tx,
-        &mut event_rx,
+        cmd_tx,
+        event_rx,
         UiInitialState {
             header_labels,
             agent_label: initial_agent_label,
@@ -575,7 +575,9 @@ async fn ui_loop(
         }
 
         if let Some(reason) = state.exit_reason {
-            let _ = cmd_tx.send(UiCommand::Shutdown);
+            if reason != UiExitReason::LoadSession {
+                let _ = cmd_tx.send(UiCommand::Shutdown);
+            }
             cancel_dictation_for_exit(&mut state, &mut dictation_cancel_tx);
             if mode == UiMode::InlineChat {
                 flush_transcript_to_scrollback(terminal, &mut transcript_sink, &state)?;

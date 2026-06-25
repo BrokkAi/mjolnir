@@ -86,6 +86,7 @@ pub enum UiExitReason {
     NewSession,
     ClearSession,
     LoadSession,
+    SwitchSession,
 }
 
 /// One entry in the scrolling transcript.

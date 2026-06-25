@@ -8,6 +8,7 @@ use agent_client_protocol::schema::{
     ContentBlock, PermissionOption, SessionConfigId, SessionConfigOption, SessionConfigValueId,
     SessionUpdate, StopReason, TerminalExitStatus, ToolCallUpdate, Usage,
 };
+use std::path::PathBuf;
 use tokio::sync::oneshot;
 
 /// Image block submitted by the UI with a prompt.
@@ -135,10 +136,23 @@ pub enum UiCommand {
     },
     /// Fork the current ACP session and continue in the forked session.
     ForkSession,
+    /// Load another session on the existing ACP connection when supported.
+    LoadSession {
+        session_id: String,
+        cwd: PathBuf,
+        title: Option<String>,
+        responder: oneshot::Sender<LoadSessionResult>,
+    },
     /// Cancel the in-flight prompt turn (Ctrl-C while streaming).
     CancelPrompt,
     /// Tear down: kill the agent child and exit.
     Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadSessionResult {
+    Switched,
+    Fallback { message: String },
 }
 
 /// Convenience: pull plain text out of a content block for rendering.
