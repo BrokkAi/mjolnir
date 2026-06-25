@@ -385,7 +385,19 @@ const STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(125);
 /// alive but update it on a calm cadence.
 const INLINE_STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(125);
 
+/// Redraw cadence while the `/mjconfig` overlay is open. The only thing that
+/// animates there is its spinner previews, which advance on the spinner
+/// interval, so repainting faster than that is wasted work. Tied to
+/// `SPINNER_FRAME_INTERVAL_MS` so the two can't drift.
+const MJCONFIG_FRAME_BUDGET: Duration =
+    Duration::from_millis(crate::spinner::SPINNER_FRAME_INTERVAL_MS as u64);
+
 fn redraw_budget(mode: UiMode, state: &AppState) -> Duration {
+    // The /mjconfig overlay's previews animate on the spinner cadence; keypress
+    // redraws are event-driven, so this only throttles the idle animation tick.
+    if state.mjconfig_menu.is_some() {
+        return MJCONFIG_FRAME_BUDGET;
+    }
     match (mode, state.connection_state()) {
         (
             UiMode::InlineChat,
@@ -6817,6 +6829,33 @@ mod tests {
         state.set_connection_state(ConnectionState::Ready);
         assert_eq!(redraw_budget(UiMode::FullscreenTui, &state), FRAME_BUDGET);
         assert_eq!(redraw_budget(UiMode::InlineChat, &state), FRAME_BUDGET);
+    }
+
+    #[test]
+    fn redraw_budget_uses_spinner_cadence_while_mjconfig_open() {
+        let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Ready);
+        state.open_mjconfig_menu();
+
+        // Idle would normally use the fast interactive budget; the open menu
+        // throttles to the spinner cadence so previews animate without
+        // repainting several times per visible frame change.
+        assert_ne!(MJCONFIG_FRAME_BUDGET, FRAME_BUDGET);
+        assert_eq!(
+            redraw_budget(UiMode::FullscreenTui, &state),
+            MJCONFIG_FRAME_BUDGET
+        );
+        assert_eq!(
+            redraw_budget(UiMode::InlineChat, &state),
+            MJCONFIG_FRAME_BUDGET
+        );
+
+        // Applies regardless of connection state while the menu is up.
+        state.set_connection_state(ConnectionState::Streaming);
+        assert_eq!(
+            redraw_budget(UiMode::FullscreenTui, &state),
+            MJCONFIG_FRAME_BUDGET
+        );
     }
 
     #[test]
