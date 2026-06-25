@@ -52,6 +52,9 @@ pub struct AcpRuntimeConfig {
     /// Windows) so the agent's logs don't bleed into the TUI. Pass a
     /// path to capture for debugging.
     pub agent_stderr: Option<PathBuf>,
+    /// Maximum text bytes returned by ACP filesystem reads or accepted by
+    /// ACP filesystem writes.
+    pub fs_max_text_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -501,13 +504,14 @@ pub async fn run(
     // outcome, not a spurious "agent exited unexpectedly" Fatal. The wait
     // branch only wins when drive is still pending.
     let result: Result<()> = {
-        let drive = drive_client(
+        let drive = drive_client_with_fs_limit(
             transport,
             cfg.cwd.clone(),
             cfg.resume_session.clone(),
             ui_tx.clone(),
             ui_rx,
             fatal_emitted.clone(),
+            cfg.fs_max_text_bytes,
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -960,16 +964,42 @@ fn command_failure_summary(output: &std::process::Output) -> String {
     format!("installer exited with {}; {detail}", output.status)
 }
 
-/// Run the full ACP client state machine over an arbitrary transport.
-/// Factored out of `run` so integration tests can plug in an in-process
-/// duplex stream and drive a mock agent without spawning a subprocess.
+/// Run the full ACP client state machine over an arbitrary transport with
+/// default filesystem text limits. Factored out of `run` so integration tests
+/// can plug in an in-process duplex stream and drive a mock agent without
+/// spawning a subprocess.
+#[cfg(test)]
 pub async fn drive_client<T>(
+    transport: T,
+    cwd: PathBuf,
+    resume_session: Option<String>,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+    ui_rx: mpsc::UnboundedReceiver<UiCommand>,
+    fatal_emitted: Arc<AtomicBool>,
+) -> Result<()>
+where
+    T: ConnectTo<Client>,
+{
+    drive_client_with_fs_limit(
+        transport,
+        cwd,
+        resume_session,
+        ui_tx,
+        ui_rx,
+        fatal_emitted,
+        DEFAULT_FS_TEXT_BYTES,
+    )
+    .await
+}
+
+async fn drive_client_with_fs_limit<T>(
     transport: T,
     cwd: PathBuf,
     resume_session: Option<String>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     mut ui_rx: mpsc::UnboundedReceiver<UiCommand>,
     fatal_emitted: Arc<AtomicBool>,
+    fs_max_text_bytes: u64,
 ) -> Result<()>
 where
     T: ConnectTo<Client>,
@@ -982,7 +1012,11 @@ where
         ui_tx.clone(),
         session_state.clone(),
     ));
-    let filesystem = Arc::new(LocalFileSystem::new(session_state.clone(), ui_tx.clone()));
+    let filesystem = Arc::new(LocalFileSystem::new(
+        session_state.clone(),
+        ui_tx.clone(),
+        fs_max_text_bytes,
+    ));
     let perm_ui_tx = ui_tx.clone();
     let perm_session_state = session_state.clone();
     let notif_ui_tx = ui_tx.clone();
@@ -1741,20 +1775,26 @@ pub(crate) async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) {
 }
 
 const DEFAULT_TERMINAL_OUTPUT_LIMIT: usize = 1024 * 1024;
-const MAX_FS_TEXT_BYTES: u64 = 1024 * 1024;
+pub const DEFAULT_FS_TEXT_BYTES: u64 = 1024 * 1024;
 
 struct LocalFileSystem {
     session_state: RuntimeSessionState,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     next_permission_id: AtomicU64,
+    max_text_bytes: u64,
 }
 
 impl LocalFileSystem {
-    fn new(session_state: RuntimeSessionState, ui_tx: mpsc::UnboundedSender<UiEvent>) -> Self {
+    fn new(
+        session_state: RuntimeSessionState,
+        ui_tx: mpsc::UnboundedSender<UiEvent>,
+        max_text_bytes: u64,
+    ) -> Self {
         Self {
             session_state,
             ui_tx,
             next_permission_id: AtomicU64::new(1),
+            max_text_bytes,
         }
     }
 
@@ -1766,8 +1806,13 @@ impl LocalFileSystem {
             .session_state
             .active_fs_root(&request.session_id)
             .await?;
-        let path = self.resolve_existing_file(&root, &request.path).await?;
-        let content = read_text_line_range_from_file(&path, request.line, request.limit).await?;
+        let allow_large_file = request.limit.is_some();
+        let path = self
+            .resolve_existing_file(&root, &request.path, allow_large_file)
+            .await?;
+        let content =
+            read_text_line_range_from_file(&path, request.line, request.limit, self.max_text_bytes)
+                .await?;
         Ok(ReadTextFileResponse::new(content))
     }
 
@@ -1780,7 +1825,7 @@ impl LocalFileSystem {
             .active_fs_root(&request.session_id)
             .await?;
         let content = request.content;
-        if content.len() as u64 > MAX_FS_TEXT_BYTES {
+        if content.len() as u64 > self.max_text_bytes {
             return Err(fs_invalid_params(
                 "filesystem write content exceeds client limit",
             ));
@@ -1802,6 +1847,7 @@ impl LocalFileSystem {
         &self,
         root: &Path,
         path: &Path,
+        allow_large_file: bool,
     ) -> std::result::Result<PathBuf, agent_client_protocol::Error> {
         self.validate_absolute(path)?;
         let path = tokio::fs::canonicalize(path)
@@ -1819,7 +1865,7 @@ impl LocalFileSystem {
         if !metadata.is_file() {
             return Err(fs_invalid_params("filesystem path is not a regular file"));
         }
-        if metadata.len() > MAX_FS_TEXT_BYTES {
+        if !allow_large_file && metadata.len() > self.max_text_bytes {
             return Err(fs_invalid_params(
                 "filesystem read file exceeds client limit",
             ));
@@ -1966,6 +2012,7 @@ async fn read_text_line_range_from_file(
     path: &Path,
     line: Option<u32>,
     limit: Option<u32>,
+    max_text_bytes: u64,
 ) -> std::result::Result<String, agent_client_protocol::Error> {
     let start = match line {
         Some(0) => return Err(fs_invalid_params("filesystem read line must be 1-based")),
@@ -1973,6 +2020,9 @@ async fn read_text_line_range_from_file(
         None => 0,
     };
     let limit = limit.map(|limit| limit as usize);
+    if limit == Some(0) {
+        return Ok(String::new());
+    }
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|e| fs_io_error("read text file", path, e, "file must exist"))?;
@@ -1991,7 +2041,7 @@ async fn read_text_line_range_from_file(
             break;
         }
         if index >= start && limit.is_none_or(|limit| index - start < limit) {
-            if (content.len() + line_buf.len()) as u64 > MAX_FS_TEXT_BYTES {
+            if (content.len() + line_buf.len()) as u64 > max_text_bytes {
                 return Err(fs_invalid_params(
                     "filesystem read response exceeds client limit",
                 ));
@@ -2918,7 +2968,33 @@ mod tests {
             .await
             .expect("active session");
         let (ui_tx, ui_rx) = mpsc::unbounded_channel();
-        (LocalFileSystem::new(state.clone(), ui_tx), ui_rx, state)
+        (
+            LocalFileSystem::new(state.clone(), ui_tx, DEFAULT_FS_TEXT_BYTES),
+            ui_rx,
+            state,
+        )
+    }
+
+    async fn test_filesystem_with_limit(
+        root: &Path,
+        session_id: &SessionId,
+        max_text_bytes: u64,
+    ) -> (
+        LocalFileSystem,
+        mpsc::UnboundedReceiver<UiEvent>,
+        RuntimeSessionState,
+    ) {
+        let state = RuntimeSessionState::new();
+        state
+            .set_active_session(session_id.clone(), root)
+            .await
+            .expect("active session");
+        let (ui_tx, ui_rx) = mpsc::unbounded_channel();
+        (
+            LocalFileSystem::new(state.clone(), ui_tx, max_text_bytes),
+            ui_rx,
+            state,
+        )
     }
 
     async fn allow_next_permission(ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>) {
@@ -3080,18 +3156,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_filesystem_rejects_oversized_reads_and_writes() {
+    async fn local_filesystem_uses_configured_text_limit_for_reads_and_writes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let session_id = SessionId::new("session-1");
-        let (filesystem, mut ui_rx, _state) = test_filesystem(temp.path(), &session_id).await;
+        let (filesystem, mut ui_rx, _state) =
+            test_filesystem_with_limit(temp.path(), &session_id, 4).await;
         let path = temp.path().join("large.txt");
-        tokio::fs::write(&path, vec![b'a'; (MAX_FS_TEXT_BYTES + 1) as usize])
-            .await
-            .expect("large file");
+        tokio::fs::write(&path, "12345").await.expect("large file");
 
         assert!(
             filesystem
-                .read_text_file(ReadTextFileRequest::new(session_id.clone(), &path).limit(1))
+                .read_text_file(ReadTextFileRequest::new(session_id.clone(), &path))
                 .await
                 .is_err()
         );
@@ -3100,12 +3175,50 @@ mod tests {
                 .write_text_file(WriteTextFileRequest::new(
                     session_id,
                     temp.path().join("new.txt"),
-                    "x".repeat((MAX_FS_TEXT_BYTES + 1) as usize),
+                    "12345",
                 ))
                 .await
                 .is_err()
         );
         assert!(ui_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_reads_bounded_line_range_from_large_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = SessionId::new("session-1");
+        let (filesystem, _ui_rx, _state) =
+            test_filesystem_with_limit(temp.path(), &session_id, 4).await;
+        let path = temp.path().join("large.txt");
+        tokio::fs::write(&path, "long-first-line\nok\n")
+            .await
+            .expect("large file");
+
+        let read = filesystem
+            .read_text_file(ReadTextFileRequest::new(session_id, &path).line(2).limit(1))
+            .await
+            .expect("bounded read");
+
+        assert_eq!(read.content, "ok\n");
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_zero_line_limit_returns_empty_for_large_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = SessionId::new("session-1");
+        let (filesystem, _ui_rx, _state) =
+            test_filesystem_with_limit(temp.path(), &session_id, 4).await;
+        let path = temp.path().join("large.txt");
+        tokio::fs::write(&path, "long-first-line\n")
+            .await
+            .expect("large file");
+
+        let read = filesystem
+            .read_text_file(ReadTextFileRequest::new(session_id, &path).limit(0))
+            .await
+            .expect("zero line read");
+
+        assert_eq!(read.content, "");
     }
 
     #[test]
@@ -5074,6 +5187,7 @@ mod tests {
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,
+            fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
         };
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
@@ -5124,6 +5238,7 @@ mod tests {
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: Some(bad_stderr),
+            fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
         };
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
@@ -5253,6 +5368,7 @@ mod tests {
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,
+            fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
         };
         assert_run_reports_agent_exited(cfg).await;
     }
@@ -5272,6 +5388,7 @@ mod tests {
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,
+            fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
         };
         assert_run_reports_agent_exited(cfg).await;
     }

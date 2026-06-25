@@ -1221,7 +1221,12 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
     }
 }
 
-pub async fn run_server(hostname: Option<String>, history_days: u32, cwd: PathBuf) -> Result<()> {
+pub async fn run_server(
+    hostname: Option<String>,
+    history_days: u32,
+    cwd: PathBuf,
+    fs_max_text_bytes: u64,
+) -> Result<()> {
     clear_terminal_screen()?;
     install_crypto_provider();
 
@@ -1269,7 +1274,7 @@ pub async fn run_server(hostname: Option<String>, history_days: u32, cwd: PathBu
     let server_task = tokio::spawn(server);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let agent_session = start_server_agent_session(agent, cwd);
+    let agent_session = start_server_agent_session(agent, cwd, fs_max_text_bytes);
     let mut agent_session = Some(agent_session);
     let mut server_task = server_task;
     let result = tokio::select! {
@@ -1291,7 +1296,11 @@ pub async fn run_server(hostname: Option<String>, history_days: u32, cwd: PathBu
     result.with_context(|| format!("serve remote-control API on {}", listen.bind_addr))
 }
 
-fn start_server_agent_session(agent: SelectedAgent, cwd: PathBuf) -> ServerAgentSession {
+fn start_server_agent_session(
+    agent: SelectedAgent,
+    cwd: PathBuf,
+    fs_max_text_bytes: u64,
+) -> ServerAgentSession {
     let (runtime_event_tx, mut runtime_event_rx) = mpsc::unbounded_channel();
     let (runtime_cmd_tx, runtime_cmd_rx) = mpsc::unbounded_channel();
     let (remote_event_tx, mut remote_event_rx) = mpsc::unbounded_channel();
@@ -1310,6 +1319,7 @@ fn start_server_agent_session(agent: SelectedAgent, cwd: PathBuf) -> ServerAgent
         resume_session: None,
         env: agent.env,
         agent_stderr: None,
+        fs_max_text_bytes,
     };
     let command_tx = runtime_cmd_tx.clone();
     let shutdown_tx = runtime_cmd_tx;

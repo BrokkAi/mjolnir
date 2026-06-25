@@ -39,6 +39,7 @@ pub struct RunConfig {
     pub cwd: PathBuf,
     pub resume_session: Option<String>,
     pub agent_stderr: Option<PathBuf>,
+    pub fs_max_text_bytes: u64,
     pub output_format: OutputFormat,
     pub permission_mode: PermissionMode,
 }
@@ -134,6 +135,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         resume_session: cfg.resume_session.clone(),
         env: agent.env,
         agent_stderr: cfg.agent_stderr,
+        fs_max_text_bytes: cfg.fs_max_text_bytes,
     };
 
     let runtime = tokio::spawn(async move { acp::run(runtime_cfg, event_tx, cmd_rx).await });
