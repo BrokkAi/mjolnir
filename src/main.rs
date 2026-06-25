@@ -1227,6 +1227,7 @@ fn agent_header_label(agent: &SelectedAgent) -> String {
     remote::agent_display_label(agent)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     agent: &SelectedAgent,
     cwd: PathBuf,

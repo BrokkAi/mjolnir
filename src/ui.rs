@@ -7598,7 +7598,6 @@ mod tests {
         state.mjconfig_menu_move(1);
         let previewed_theme = state.theme_kind;
 
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
         handle_mjconfig_menu_key(
             &mut state,
             KeyModifiers::NONE,
