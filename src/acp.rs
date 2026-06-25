@@ -1775,7 +1775,21 @@ pub(crate) async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) {
 }
 
 const DEFAULT_TERMINAL_OUTPUT_LIMIT: usize = 1024 * 1024;
-pub const DEFAULT_FS_TEXT_BYTES: u64 = 1024 * 1024;
+pub(crate) const DEFAULT_FS_TEXT_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_CONFIGURABLE_FS_TEXT_BYTES: u64 = 64 * 1024 * 1024;
+const FS_TEXT_SCAN_MULTIPLIER: u64 = 16;
+
+#[derive(Clone, Copy)]
+enum ReadSizePolicy {
+    EnforceFileCap,
+    AllowLargeFileForRange,
+}
+
+impl ReadSizePolicy {
+    fn allows_large_file(self) -> bool {
+        matches!(self, Self::AllowLargeFileForRange)
+    }
+}
 
 struct LocalFileSystem {
     session_state: RuntimeSessionState,
@@ -1806,9 +1820,13 @@ impl LocalFileSystem {
             .session_state
             .active_fs_root(&request.session_id)
             .await?;
-        let allow_large_file = request.limit.is_some();
+        let size_policy = if request.limit.is_some() {
+            ReadSizePolicy::AllowLargeFileForRange
+        } else {
+            ReadSizePolicy::EnforceFileCap
+        };
         let path = self
-            .resolve_existing_file(&root, &request.path, allow_large_file)
+            .resolve_existing_file(&root, &request.path, size_policy)
             .await?;
         let content =
             read_text_line_range_from_file(&path, request.line, request.limit, self.max_text_bytes)
@@ -1847,7 +1865,7 @@ impl LocalFileSystem {
         &self,
         root: &Path,
         path: &Path,
-        allow_large_file: bool,
+        size_policy: ReadSizePolicy,
     ) -> std::result::Result<PathBuf, agent_client_protocol::Error> {
         self.validate_absolute(path)?;
         let path = tokio::fs::canonicalize(path)
@@ -1865,7 +1883,7 @@ impl LocalFileSystem {
         if !metadata.is_file() {
             return Err(fs_invalid_params("filesystem path is not a regular file"));
         }
-        if !allow_large_file && metadata.len() > self.max_text_bytes {
+        if !size_policy.allows_large_file() && metadata.len() > self.max_text_bytes {
             return Err(fs_invalid_params(
                 "filesystem read file exceeds client limit",
             ));
@@ -2014,12 +2032,7 @@ async fn read_text_line_range_from_file(
     limit: Option<u32>,
     max_text_bytes: u64,
 ) -> std::result::Result<String, agent_client_protocol::Error> {
-    let start = match line {
-        Some(0) => return Err(fs_invalid_params("filesystem read line must be 1-based")),
-        Some(line) => line.saturating_sub(1) as usize,
-        None => 0,
-    };
-    let limit = limit.map(|limit| limit as usize);
+    let (start, limit) = line_range_window(line, limit)?;
     if limit == Some(0) {
         return Ok(String::new());
     }
@@ -2027,34 +2040,91 @@ async fn read_text_line_range_from_file(
         .await
         .map_err(|e| fs_io_error("read text file", path, e, "file must exist"))?;
     let mut reader = BufReader::new(file);
-    let mut content = String::new();
-    let mut line_buf = String::new();
+    let mut content = Vec::new();
     let mut index = 0_usize;
+    let mut scanned_bytes = 0_u64;
+    let max_scan_bytes = fs_text_scan_byte_limit(max_text_bytes);
 
     loop {
-        line_buf.clear();
-        let bytes = reader
-            .read_line(&mut line_buf)
-            .await
-            .map_err(|e| fs_io_error("read text file", path, e, "file must contain valid UTF-8"))?;
-        if bytes == 0 {
-            break;
-        }
-        if index >= start && limit.is_none_or(|limit| index - start < limit) {
-            if (content.len() + line_buf.len()) as u64 > max_text_bytes {
-                return Err(fs_invalid_params(
-                    "filesystem read response exceeds client limit",
-                ));
+        let mut done = false;
+        let consumed = {
+            let buffer = reader
+                .fill_buf()
+                .await
+                .map_err(|e| fs_io_error("read text file", path, e, "file must be readable"))?;
+            if buffer.is_empty() {
+                break;
             }
-            content.push_str(&line_buf);
-        }
-        index += 1;
-        if limit.is_some_and(|limit| index >= start.saturating_add(limit)) {
+
+            let mut consumed = 0_usize;
+            while consumed < buffer.len() {
+                let remaining = &buffer[consumed..];
+                let segment_len = remaining
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(remaining.len(), |newline| newline + 1);
+                let segment = &remaining[..segment_len];
+
+                scanned_bytes = scanned_bytes.saturating_add(segment.len() as u64);
+                if scanned_bytes > max_scan_bytes {
+                    return Err(fs_invalid_params(
+                        "filesystem read scan exceeds client limit",
+                    ));
+                }
+
+                let in_range = index >= start && limit.is_none_or(|limit| index - start < limit);
+                if in_range {
+                    if (content.len() + segment.len()) as u64 > max_text_bytes {
+                        return Err(fs_invalid_params(
+                            "filesystem read response exceeds client limit",
+                        ));
+                    }
+                    content.extend_from_slice(segment);
+                }
+
+                consumed += segment_len;
+                if segment.ends_with(b"\n") {
+                    index += 1;
+                    if limit.is_some_and(|limit| index >= start.saturating_add(limit)) {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            consumed
+        };
+        reader.consume(consumed);
+        if done {
             break;
         }
     }
 
-    Ok(content)
+    String::from_utf8(content).map_err(|e| {
+        fs_io_error(
+            "read text file",
+            path,
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+            "file must contain valid UTF-8",
+        )
+    })
+}
+
+fn fs_text_scan_byte_limit(max_text_bytes: u64) -> u64 {
+    max_text_bytes
+        .saturating_mul(FS_TEXT_SCAN_MULTIPLIER)
+        .clamp(DEFAULT_FS_TEXT_BYTES, MAX_CONFIGURABLE_FS_TEXT_BYTES)
+}
+
+fn line_range_window(
+    line: Option<u32>,
+    limit: Option<u32>,
+) -> std::result::Result<(usize, Option<usize>), agent_client_protocol::Error> {
+    let start = match line {
+        Some(0) => return Err(fs_invalid_params("filesystem read line must be 1-based")),
+        Some(line) => line.saturating_sub(1) as usize,
+        None => 0,
+    };
+    Ok((start, limit.map(|limit| limit as usize)))
 }
 
 #[cfg(test)]
@@ -2063,12 +2133,7 @@ fn read_text_line_range(
     line: Option<u32>,
     limit: Option<u32>,
 ) -> std::result::Result<String, agent_client_protocol::Error> {
-    let start = match line {
-        Some(0) => return Err(fs_invalid_params("filesystem read line must be 1-based")),
-        Some(line) => line.saturating_sub(1) as usize,
-        None => 0,
-    };
-    let limit = limit.map(|limit| limit as usize);
+    let (start, limit) = line_range_window(line, limit)?;
     let lines = content.split_inclusive('\n').skip(start);
     let selected = match limit {
         Some(limit) => lines.take(limit).collect(),
@@ -2962,17 +3027,7 @@ mod tests {
         mpsc::UnboundedReceiver<UiEvent>,
         RuntimeSessionState,
     ) {
-        let state = RuntimeSessionState::new();
-        state
-            .set_active_session(session_id.clone(), root)
-            .await
-            .expect("active session");
-        let (ui_tx, ui_rx) = mpsc::unbounded_channel();
-        (
-            LocalFileSystem::new(state.clone(), ui_tx, DEFAULT_FS_TEXT_BYTES),
-            ui_rx,
-            state,
-        )
+        test_filesystem_with_limit(root, session_id, DEFAULT_FS_TEXT_BYTES).await
     }
 
     async fn test_filesystem_with_limit(
@@ -3200,6 +3255,24 @@ mod tests {
             .expect("bounded read");
 
         assert_eq!(read.content, "ok\n");
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_rejects_bounded_read_after_scan_limit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = SessionId::new("session-1");
+        let (filesystem, _ui_rx, _state) =
+            test_filesystem_with_limit(temp.path(), &session_id, 4).await;
+        let path = temp.path().join("huge-first-line.txt");
+        let mut content = vec![b'a'; DEFAULT_FS_TEXT_BYTES as usize + 1];
+        content.extend_from_slice(b"\nok\n");
+        tokio::fs::write(&path, content).await.expect("large file");
+
+        let read = filesystem
+            .read_text_file(ReadTextFileRequest::new(session_id, &path).line(2).limit(1))
+            .await;
+
+        assert!(read.is_err());
     }
 
     #[tokio::test]

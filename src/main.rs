@@ -111,7 +111,8 @@ struct Cli {
         long,
         global = true,
         env = "MJOLNIR_FS_MAX_TEXT_BYTES",
-        default_value_t = acp::DEFAULT_FS_TEXT_BYTES
+        default_value_t = acp::DEFAULT_FS_TEXT_BYTES,
+        value_parser = parse_fs_max_text_bytes
     )]
     fs_max_text_bytes: u64,
 
@@ -133,6 +134,19 @@ enum Commands {
     Resume(ResumeArgs),
     /// Start the local remote-control server.
     Server(ServerArgs),
+}
+
+fn parse_fs_max_text_bytes(value: &str) -> std::result::Result<u64, String> {
+    let bytes = value
+        .parse::<u64>()
+        .map_err(|e| format!("invalid filesystem text byte limit: {e}"))?;
+    if !(1..=acp::MAX_CONFIGURABLE_FS_TEXT_BYTES).contains(&bytes) {
+        return Err(format!(
+            "filesystem text byte limit must be between 1 and {}",
+            acp::MAX_CONFIGURABLE_FS_TEXT_BYTES
+        ));
+    }
+    Ok(bytes)
 }
 
 #[derive(Debug, clap::Args, Default)]
@@ -1464,9 +1478,34 @@ mod tests {
         let cli = Cli::try_parse_from(["mj", "--fs-max-text-bytes", "4096"]).expect("parse");
         assert_eq!(cli.fs_max_text_bytes, 4096);
 
+        let cli = Cli::try_parse_from([
+            "mj",
+            "--fs-max-text-bytes",
+            &acp::MAX_CONFIGURABLE_FS_TEXT_BYTES.to_string(),
+        ])
+        .expect("parse max");
+        assert_eq!(cli.fs_max_text_bytes, acp::MAX_CONFIGURABLE_FS_TEXT_BYTES);
+
         let cli = Cli::try_parse_from(["mj", "server", "--fs-max-text-bytes", "8192"])
             .expect("parse server");
         assert_eq!(cli.fs_max_text_bytes, 8192);
+    }
+
+    #[test]
+    fn parse_rejects_unsafe_filesystem_text_limit() {
+        let err = Cli::try_parse_from(["mj", "--fs-max-text-bytes", "0"]).expect_err("reject 0");
+        assert!(
+            err.to_string()
+                .contains("filesystem text byte limit must be between 1")
+        );
+
+        let too_large = (acp::MAX_CONFIGURABLE_FS_TEXT_BYTES + 1).to_string();
+        let err = Cli::try_parse_from(["mj", "--fs-max-text-bytes", &too_large])
+            .expect_err("reject too large");
+        assert!(
+            err.to_string()
+                .contains("filesystem text byte limit must be between 1")
+        );
     }
 
     #[test]
