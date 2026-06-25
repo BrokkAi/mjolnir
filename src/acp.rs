@@ -1409,7 +1409,7 @@ pub(crate) fn spawn_agent(
 /// is a no-op (ESRCH / "process not found") when it didn't. Failures
 /// are logged but not propagated — by the time we reach shutdown the
 /// caller has no meaningful recovery action.
-async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) {
+pub(crate) async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) {
     if let Some(pid) = agent_pid {
         #[cfg(unix)]
         {

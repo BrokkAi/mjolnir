@@ -29,7 +29,7 @@ mod worktree;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -408,49 +408,62 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
         return result.map(|_| ());
     }
 
-    // Interactive picker: fetch sessions from the chosen agent first (agent is
-    // killed after listing), then set up the TUI to show the session picker,
-    // then launch the chosen session with a fresh process for the same agent.
-    eprintln!("Fetching sessions from agent...");
-    let sessions =
-        session::list_sessions(&agent, cwd.clone(), args.agent_stderr.as_deref()).await?;
-    if sessions.is_empty() {
-        eprintln!("No sessions available.");
-        let _ = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
-        return Ok(());
-    }
-
-    let outcome = run_session_picker_once(sessions).await?;
-    match outcome {
-        session::ResumeOutcome::Cancelled => {
-            eprintln!("Cancelled.");
+    let mut notice = None;
+    loop {
+        // Interactive picker: fetch sessions from the chosen agent first (agent is
+        // killed after listing), then set up the TUI to show the session picker,
+        // then launch the chosen session with a fresh process for the same agent.
+        eprintln!("Fetching sessions from agent...");
+        let listing = session::list_sessions_with_capabilities(
+            &agent,
+            cwd.clone(),
+            args.agent_stderr.as_deref(),
+        )
+        .await?;
+        if listing.sessions.is_empty() {
+            eprintln!("No sessions available.");
             let _ = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
-            Ok(())
+            return Ok(());
         }
-        session::ResumeOutcome::Selected(entry) => {
-            eprintln!("Resuming session: {}", entry.session_id);
-            let session_title = entry.title.clone();
-            let result = run_app(
-                cwd,
-                args.agent_stderr,
-                project_label,
-                worktree_label.clone(),
-                Some(ResumeTarget {
-                    session_id: entry.session_id,
-                    title: session_title,
-                }),
-                Some(agent),
-                mode,
-            )
-            .await;
-            let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
-            // Show resume hint for the session we just ran
-            if let Ok(Some(resumed_id)) = &result
-                && worktree_kept
-            {
-                print_resume_hint(resumed_id, worktree_label.as_deref());
+
+        let outcome =
+            run_session_picker_once(listing.sessions, listing.delete_supported, notice.take())
+                .await?;
+        match outcome {
+            session::ResumeOutcome::Cancelled => {
+                eprintln!("Cancelled.");
+                let _ = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
+                return Ok(());
             }
-            result.map(|_| ())
+            session::ResumeOutcome::DeleteRequested(entry) => {
+                notice =
+                    Some(delete_session_notice(&agent, entry, args.agent_stderr.as_deref()).await);
+            }
+            session::ResumeOutcome::Selected(entry) => {
+                eprintln!("Resuming session: {}", entry.session_id);
+                let session_title = entry.title.clone();
+                let result = run_app(
+                    cwd,
+                    args.agent_stderr,
+                    project_label,
+                    worktree_label.clone(),
+                    Some(ResumeTarget {
+                        session_id: entry.session_id,
+                        title: session_title,
+                    }),
+                    Some(agent),
+                    mode,
+                )
+                .await;
+                let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
+                // Show resume hint for the session we just ran
+                if let Ok(Some(resumed_id)) = &result
+                    && worktree_kept
+                {
+                    print_resume_hint(resumed_id, worktree_label.as_deref());
+                }
+                return result.map(|_| ());
+            }
         }
     }
 }
@@ -673,14 +686,15 @@ async fn run_app(
                 continue;
             }
             UiExitReason::LoadSession => {
-                let sessions =
-                    session::list_sessions(&agent, cwd.clone(), agent_stderr.as_deref()).await?;
-
-                match session_picker_action(
-                    run_session_picker_once(sessions).await?,
+                match run_session_picker_action_for_agent(
+                    &agent,
+                    cwd.clone(),
+                    agent_stderr.as_deref(),
                     session_id,
                     session_title,
-                ) {
+                )
+                .await?
+                {
                     SessionPickerAction::Resume { session_id, title } => {
                         initial_resume = Some(ResumeTarget { session_id, title });
                         initial_agent = Some(agent);
@@ -690,6 +704,82 @@ async fn run_app(
                 }
             }
         }
+    }
+}
+
+async fn run_session_picker_action_for_agent(
+    agent: &SelectedAgent,
+    cwd: PathBuf,
+    agent_stderr: Option<&Path>,
+    current_session_id: Option<String>,
+    current_session_title: Option<String>,
+) -> Result<SessionPickerAction> {
+    let mut notice = None;
+    loop {
+        let listing =
+            session::list_sessions_with_capabilities(agent, cwd.clone(), agent_stderr).await?;
+        if listing.sessions.is_empty() {
+            return Ok(session_picker_empty_action(
+                current_session_id,
+                current_session_title,
+            ));
+        }
+
+        let delete_supported = in_app_session_delete_supported(
+            listing.delete_supported,
+            current_session_id.as_deref(),
+        );
+        let outcome =
+            run_session_picker_once(listing.sessions, delete_supported, notice.take()).await?;
+        if let session::ResumeOutcome::DeleteRequested(entry) = outcome {
+            if current_session_id.as_deref() == Some(entry.session_id.as_str()) {
+                notice = Some(
+                    "Cannot delete the active session from the session picker. Close it first."
+                        .to_string(),
+                );
+            } else {
+                notice = Some(delete_session_notice(agent, entry, agent_stderr).await);
+            }
+            continue;
+        }
+
+        return session_picker_action(outcome, current_session_id, current_session_title);
+    }
+}
+
+fn in_app_session_delete_supported(
+    agent_delete_supported: bool,
+    current_session_id: Option<&str>,
+) -> bool {
+    agent_delete_supported && current_session_id.is_some()
+}
+
+fn session_picker_empty_action(
+    current_session_id: Option<String>,
+    current_session_title: Option<String>,
+) -> SessionPickerAction {
+    match current_session_id {
+        Some(session_id) => SessionPickerAction::Resume {
+            session_id,
+            title: current_session_title,
+        },
+        None => SessionPickerAction::Exit(None),
+    }
+}
+
+async fn delete_session_notice(
+    agent: &SelectedAgent,
+    entry: session::SessionEntry,
+    agent_stderr: Option<&Path>,
+) -> String {
+    let label = entry
+        .title
+        .as_deref()
+        .unwrap_or(entry.session_id.as_str())
+        .to_string();
+    match session::delete_session(agent, entry.session_id, agent_stderr).await {
+        Ok(()) => format!("Deleted session: {label}"),
+        Err(err) => format!("Delete failed for {label}: {err:#}"),
     }
 }
 
@@ -712,22 +802,25 @@ fn session_picker_action(
     outcome: session::ResumeOutcome,
     current_session_id: Option<String>,
     current_session_title: Option<String>,
-) -> SessionPickerAction {
+) -> Result<SessionPickerAction> {
     match outcome {
-        session::ResumeOutcome::Selected(entry) => SessionPickerAction::Resume {
+        session::ResumeOutcome::Selected(entry) => Ok(SessionPickerAction::Resume {
             session_id: entry.session_id,
             title: entry.title,
-        },
+        }),
+        session::ResumeOutcome::DeleteRequested(_) => {
+            anyhow::bail!("session delete request was not handled by picker flow")
+        }
         // Cancelling the picker keeps the current session running, so carry
         // its known title forward instead of dropping it — otherwise the
         // header title would blank out until the agent's next SessionInfoUpdate.
-        session::ResumeOutcome::Cancelled => match current_session_id {
+        session::ResumeOutcome::Cancelled => Ok(match current_session_id {
             Some(session_id) => SessionPickerAction::Resume {
                 session_id,
                 title: current_session_title,
             },
             None => SessionPickerAction::Exit(None),
-        },
+        }),
     }
 }
 
@@ -743,9 +836,12 @@ async fn run_agent_picker_once(cfg: &Config) -> Result<PickerResult> {
 
 async fn run_session_picker_once(
     sessions: Vec<session::SessionEntry>,
+    delete_supported: bool,
+    notice: Option<String>,
 ) -> Result<session::ResumeOutcome> {
     let mut terminal = ui::setup_fullscreen_terminal().context("setup terminal")?;
-    let outcome = session::run_session_picker(&mut terminal, sessions).await;
+    let outcome =
+        session::run_session_picker(&mut terminal, sessions, delete_supported, notice).await;
     if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
         tracing::warn!("restore terminal (session picker) failed: {e}");
     }
@@ -1473,7 +1569,8 @@ mod tests {
             session::ResumeOutcome::Cancelled,
             Some("current-session".to_string()),
             Some("Current title".to_string()),
-        );
+        )
+        .expect("cancel should resume current session");
 
         assert_eq!(
             action,
@@ -1486,7 +1583,61 @@ mod tests {
 
     #[test]
     fn cancelling_session_picker_without_current_session_exits() {
-        let action = session_picker_action(session::ResumeOutcome::Cancelled, None, None);
+        let action = session_picker_action(session::ResumeOutcome::Cancelled, None, None)
+            .expect("cancel without current session should exit");
+
+        assert_eq!(action, SessionPickerAction::Exit(None));
+    }
+
+    #[test]
+    fn in_app_session_delete_requires_known_current_session_id() {
+        assert!(!in_app_session_delete_supported(true, None));
+        assert!(!in_app_session_delete_supported(
+            false,
+            Some("current-session")
+        ));
+        assert!(in_app_session_delete_supported(
+            true,
+            Some("current-session")
+        ));
+    }
+
+    #[test]
+    fn unhandled_delete_request_is_an_error() {
+        let err = session_picker_action(
+            session::ResumeOutcome::DeleteRequested(session::SessionEntry {
+                session_id: "delete-me".into(),
+                cwd: PathBuf::from("/tmp/project"),
+                title: None,
+                updated_at: None,
+            }),
+            Some("current-session".to_string()),
+            Some("Current title".to_string()),
+        )
+        .expect_err("delete outcomes must be handled before action conversion");
+
+        assert!(err.to_string().contains("delete request was not handled"));
+    }
+
+    #[test]
+    fn empty_session_picker_resumes_current_session_preserving_title() {
+        let action = session_picker_empty_action(
+            Some("current-session".to_string()),
+            Some("Current title".to_string()),
+        );
+
+        assert_eq!(
+            action,
+            SessionPickerAction::Resume {
+                session_id: "current-session".to_string(),
+                title: Some("Current title".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn empty_session_picker_without_current_session_exits() {
+        let action = session_picker_empty_action(None, None);
 
         assert_eq!(action, SessionPickerAction::Exit(None));
     }
@@ -1502,7 +1653,8 @@ mod tests {
             }),
             Some("current-session".to_string()),
             Some("ignored current title".to_string()),
-        );
+        )
+        .expect("select should resume selected session");
 
         assert_eq!(
             action,
