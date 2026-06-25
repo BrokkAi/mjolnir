@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     PermissionOptionKind, SessionUpdate, StopReason, ToolCall, ToolCallStatus, ToolCallUpdate,
     ToolKind, Usage,
 };
@@ -402,7 +402,7 @@ fn emit_stream_event(event: &UiEvent, state: &HeadlessState) -> Result<()> {
 fn permission_decision(
     mode: PermissionMode,
     tool_call: &ToolCallUpdate,
-    options: &[agent_client_protocol::schema::PermissionOption],
+    options: &[agent_client_protocol::schema::v1::PermissionOption],
 ) -> Option<String> {
     let allow = match mode {
         PermissionMode::Default => false,
@@ -419,7 +419,7 @@ fn permission_decision(
 }
 
 fn choose_allow_option(
-    options: &[agent_client_protocol::schema::PermissionOption],
+    options: &[agent_client_protocol::schema::v1::PermissionOption],
 ) -> Option<String> {
     options
         .iter()

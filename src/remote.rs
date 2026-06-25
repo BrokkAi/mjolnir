@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ContentBlock, PermissionOptionKind, SessionConfigId, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate,
     ToolCallContent,
@@ -196,6 +196,7 @@ fn config_category_label(category: &SessionConfigOptionCategory) -> String {
     match category {
         C::Mode => "mode".to_string(),
         C::Model => "model".to_string(),
+        C::ModelConfig => "model_config".to_string(),
         C::ThoughtLevel => "thought_level".to_string(),
         C::Other(other) => other.clone(),
         _ => "other".to_string(),
@@ -2889,7 +2890,7 @@ fn format_terminal_snapshot(snapshot: &TerminalOutputSnapshot) -> String {
 }
 
 fn terminal_exit_status_label(
-    status: &agent_client_protocol::schema::TerminalExitStatus,
+    status: &agent_client_protocol::schema::v1::TerminalExitStatus,
 ) -> String {
     match (&status.exit_code, &status.signal) {
         (Some(code), Some(signal)) => format!("code {code}, signal {signal}"),
@@ -2918,7 +2919,7 @@ fn rfc3339_before(age: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         PermissionOption, SessionConfigSelect, SessionConfigSelectOption, Terminal,
         TerminalExitStatus, TerminalId, ToolCall, ToolCallContent, ToolCallUpdate,
         ToolCallUpdateFields,
@@ -3002,16 +3003,16 @@ mod tests {
             images: Vec::new(),
         });
         state.observe_session_update(&SessionUpdate::AgentMessageChunk(
-            agent_client_protocol::schema::ContentChunk::new(
-                agent_client_protocol::schema::ContentBlock::Text(
-                    agent_client_protocol::schema::TextContent::new("hi"),
+            agent_client_protocol::schema::v1::ContentChunk::new(
+                agent_client_protocol::schema::v1::ContentBlock::Text(
+                    agent_client_protocol::schema::v1::TextContent::new("hi"),
                 ),
             ),
         ));
         state.observe_session_update(&SessionUpdate::AgentMessageChunk(
-            agent_client_protocol::schema::ContentChunk::new(
-                agent_client_protocol::schema::ContentBlock::Text(
-                    agent_client_protocol::schema::TextContent::new(" again"),
+            agent_client_protocol::schema::v1::ContentChunk::new(
+                agent_client_protocol::schema::v1::ContentBlock::Text(
+                    agent_client_protocol::schema::v1::TextContent::new(" again"),
                 ),
             ),
         ));
@@ -3031,16 +3032,16 @@ mod tests {
             images: Vec::new(),
         });
         state.observe_session_update(&SessionUpdate::AgentMessageChunk(
-            agent_client_protocol::schema::ContentChunk::new(
-                agent_client_protocol::schema::ContentBlock::Text(
-                    agent_client_protocol::schema::TextContent::new("hi"),
+            agent_client_protocol::schema::v1::ContentChunk::new(
+                agent_client_protocol::schema::v1::ContentBlock::Text(
+                    agent_client_protocol::schema::v1::TextContent::new("hi"),
                 ),
             ),
         ));
         state.observe_session_update(&SessionUpdate::AgentMessageChunk(
-            agent_client_protocol::schema::ContentChunk::new(
-                agent_client_protocol::schema::ContentBlock::Text(
-                    agent_client_protocol::schema::TextContent::new(" there"),
+            agent_client_protocol::schema::v1::ContentChunk::new(
+                agent_client_protocol::schema::v1::ContentBlock::Text(
+                    agent_client_protocol::schema::v1::TextContent::new(" there"),
                 ),
             ),
         ));
@@ -3137,9 +3138,9 @@ mod tests {
             resumed: true,
         });
         state.observe_event(&UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            agent_client_protocol::schema::ContentChunk::new(
-                agent_client_protocol::schema::ContentBlock::Text(
-                    agent_client_protocol::schema::TextContent::new("new reply"),
+            agent_client_protocol::schema::v1::ContentChunk::new(
+                agent_client_protocol::schema::v1::ContentBlock::Text(
+                    agent_client_protocol::schema::v1::TextContent::new("new reply"),
                 ),
             ),
         )));

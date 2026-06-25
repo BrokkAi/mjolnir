@@ -7,12 +7,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{
     AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, ClientCapabilities,
     CloseSessionRequest, ContentBlock, CreateTerminalRequest, CreateTerminalResponse, ErrorCode,
     FileSystemCapabilities, ForkSessionRequest, ImageContent, Implementation, InitializeRequest,
     KillTerminalRequest, KillTerminalResponse, LoadSessionRequest, NewSessionRequest,
-    PermissionOption, PermissionOptionKind, PromptRequest, ProtocolVersion, ReadTextFileRequest,
+    PermissionOption, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
     ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
@@ -2770,7 +2771,7 @@ async fn drive_config_update(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
     target: SessionConfigTarget,
-    value: agent_client_protocol::schema::SessionConfigValueId,
+    value: agent_client_protocol::schema::v1::SessionConfigValueId,
     session_config: &mut SessionConfigCache,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
@@ -2962,7 +2963,7 @@ mod tests {
     use super::*;
     use crate::app::AppState;
     use agent_client_protocol::Agent as AgentRole;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         AuthMethodAgent, AuthenticateResponse, CloseSessionResponse, ContentBlock, ContentChunk,
         ForkSessionResponse, InitializeResponse, LoadSessionResponse, NewSessionResponse,
         PermissionOption, PermissionOptionKind, PromptResponse, ResumeSessionResponse,
@@ -3524,8 +3525,8 @@ mod tests {
         let mode_state = SessionModeState::new(
             "medium",
             vec![
-                agent_client_protocol::schema::SessionMode::new("low", "Thinking: low"),
-                agent_client_protocol::schema::SessionMode::new("medium", "Thinking: medium"),
+                agent_client_protocol::schema::v1::SessionMode::new("low", "Thinking: low"),
+                agent_client_protocol::schema::v1::SessionMode::new("medium", "Thinking: medium"),
             ],
         );
 
@@ -3548,13 +3549,15 @@ mod tests {
             "Configured Model",
             "model-a",
             vec![
-                agent_client_protocol::schema::SessionConfigSelectOption::new("model-a", "Model A"),
+                agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
+                    "model-a", "Model A",
+                ),
             ],
         )
         .category(SessionConfigOptionCategory::Model);
         let legacy_mode_state = SessionModeState::new(
             "medium",
-            vec![agent_client_protocol::schema::SessionMode::new(
+            vec![agent_client_protocol::schema::v1::SessionMode::new(
                 "medium",
                 "Thinking: medium",
             )],
@@ -3583,8 +3586,8 @@ mod tests {
         let mode_state = SessionModeState::new(
             "medium",
             vec![
-                agent_client_protocol::schema::SessionMode::new("low", "Thinking: low"),
-                agent_client_protocol::schema::SessionMode::new("medium", "Thinking: medium"),
+                agent_client_protocol::schema::v1::SessionMode::new("low", "Thinking: low"),
+                agent_client_protocol::schema::v1::SessionMode::new("medium", "Thinking: medium"),
             ],
         );
         let (mut options, targets) =
@@ -3630,7 +3633,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |req: agent_client_protocol::schema::InitializeRequest,
+                async move |req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     assert!(req.client_capabilities.terminal);
@@ -3655,7 +3658,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
                     responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
@@ -3663,7 +3666,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::LoadSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::LoadSessionRequest,
                             responder,
                             _cx| { responder.respond(LoadSessionResponse::new()) },
                 agent_client_protocol::on_receive_request!(),
@@ -3695,7 +3698,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |req: agent_client_protocol::schema::PromptRequest,
+                async move |req: agent_client_protocol::schema::v1::PromptRequest,
                             responder,
                             cx: ConnectionTo<agent_client_protocol::Client>| {
                     let session_id = req.session_id.clone();
@@ -3729,7 +3732,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |req: agent_client_protocol::schema::InitializeRequest,
+                async move |req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     assert!(req.client_capabilities.fs.read_text_file);
@@ -3739,7 +3742,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             cx: ConnectionTo<agent_client_protocol::Client>| {
                     let response =
@@ -3797,7 +3800,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(InitializeResponse::new(
@@ -3807,7 +3810,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
                     responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
@@ -3834,7 +3837,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(
@@ -3847,7 +3850,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
                     responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
@@ -3881,7 +3884,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(InitializeResponse::new(
@@ -3891,7 +3894,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
                     responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
@@ -3899,7 +3902,9 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::PromptRequest, responder, _cx| {
+                async move |_req: agent_client_protocol::schema::v1::PromptRequest,
+                            responder,
+                            _cx| {
                     let mut cancel_rx = cancel_rx_for_prompt.clone();
                     tokio::spawn(async move {
                         while !*cancel_rx.borrow() {
@@ -3914,7 +3919,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_notification(
-                async move |_notif: agent_client_protocol::schema::CancelNotification, _cx| {
+                async move |_notif: agent_client_protocol::schema::v1::CancelNotification, _cx| {
                     cancel_hits_for_notification.fetch_add(1, Ordering::SeqCst);
                     let _ = cancel_tx_for_notification.send(true);
                     Ok(())
@@ -3937,7 +3942,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(InitializeResponse::new(
@@ -3947,7 +3952,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
                     responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
@@ -3955,13 +3960,15 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::PromptRequest, responder, cx| {
+                async move |_req: agent_client_protocol::schema::v1::PromptRequest,
+                            responder,
+                            cx| {
                     let permission_cancelled = permission_cancelled.clone();
                     tokio::spawn(async move {
                         let response = cx
                             .send_request(RequestPermissionRequest::new(
                                 SessionId::new("test-session"),
-                                agent_client_protocol::schema::ToolCallUpdate::new(
+                                agent_client_protocol::schema::v1::ToolCallUpdate::new(
                                     "call-1",
                                     ToolCallUpdateFields::default(),
                                 ),
@@ -4001,7 +4008,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(InitializeResponse::new(
@@ -4011,7 +4018,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
                     responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
@@ -4019,9 +4026,9 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::PromptRequest, responder, _cx| {
-                    responder.respond_with_internal_error("boom")
-                },
+                async move |_req: agent_client_protocol::schema::v1::PromptRequest,
+                            responder,
+                            _cx| { responder.respond_with_internal_error("boom") },
                 agent_client_protocol::on_receive_request!(),
             )
             .connect_with(transport, |_cx| async move {
@@ -4039,7 +4046,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(InitializeResponse::new(
@@ -4049,7 +4056,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
                     responder.respond_with_error(
@@ -4077,7 +4084,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(
@@ -4091,7 +4098,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |req: agent_client_protocol::schema::AuthenticateRequest,
+                async move |req: agent_client_protocol::schema::v1::AuthenticateRequest,
                             responder,
                             _cx| {
                     assert_eq!(req.method_id.to_string(), "agent-auth");
@@ -4101,7 +4108,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
                     session_attempts.fetch_add(1, Ordering::SeqCst);
@@ -4134,7 +4141,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(
@@ -4149,7 +4156,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |req: agent_client_protocol::schema::AuthenticateRequest,
+                async move |req: agent_client_protocol::schema::v1::AuthenticateRequest,
                             responder,
                             _cx| {
                     assert_eq!(req.method_id.to_string(), "agent-auth");
@@ -4159,7 +4166,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |req: agent_client_protocol::schema::LoadSessionRequest,
+                async move |req: agent_client_protocol::schema::v1::LoadSessionRequest,
                             responder,
                             _cx| {
                     assert_eq!(req.session_id.to_string(), "existing-session");
@@ -4188,7 +4195,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(InitializeResponse::new(
@@ -4218,7 +4225,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(
@@ -4234,7 +4241,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
                     responder.respond(NewSessionResponse::new(SessionId::new("old-session")))
@@ -4309,7 +4316,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(
@@ -4323,7 +4330,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
                     responder.respond(NewSessionResponse::new(SessionId::new("old-session")))
@@ -4346,7 +4353,7 @@ mod tests {
         let _ = AgentRole
             .builder()
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
                             responder,
                             _cx| {
                     responder.respond(
@@ -4360,7 +4367,7 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
                     responder.respond(NewSessionResponse::new(SessionId::new("old-session")))

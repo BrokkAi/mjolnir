@@ -9,7 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     AvailableCommand, Diff, Plan, PlanEntry, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOptions,
     SessionConfigValueId, SessionUpdate, StopReason, TerminalExitStatus, ToolCall, ToolCallContent,
@@ -1862,7 +1862,7 @@ fn status_transcript_text(kind: StatusKind, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         AudioContent, AvailableCommand, AvailableCommandsUpdate, ConfigOptionUpdate, Content,
         ContentBlock, ContentChunk, Cost, Diff, EmbeddedResource, EmbeddedResourceResource,
         ImageContent, PermissionOption, PermissionOptionKind, ResourceLink, SessionConfigOption,
@@ -1895,7 +1895,7 @@ mod tests {
         let mut s = AppState::new();
         let tc = ToolCall::new("call-1", "running ls");
         s.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(tc)));
-        let mut fields = agent_client_protocol::schema::ToolCallUpdateFields::default();
+        let mut fields = agent_client_protocol::schema::v1::ToolCallUpdateFields::default();
         fields.status = Some(ToolCallStatus::Completed);
         let update = ToolCallUpdate::new("call-1", fields);
         s.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
@@ -2038,7 +2038,7 @@ mod tests {
     #[test]
     fn tool_call_content_diff_and_terminal_are_kept_structured() {
         let mut s = AppState::new();
-        let mut fields = agent_client_protocol::schema::ToolCallUpdateFields::default();
+        let mut fields = agent_client_protocol::schema::v1::ToolCallUpdateFields::default();
         fields.content = Some(vec![
             ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
                 "stdout: ok",
@@ -2048,7 +2048,7 @@ mod tests {
                     .old_text(Some("old contents".to_string())),
             ),
             ToolCallContent::Terminal(Terminal::new(
-                agent_client_protocol::schema::TerminalId::new("term-1"),
+                agent_client_protocol::schema::v1::TerminalId::new("term-1"),
             )),
         ]);
         let update = ToolCallUpdate::new("call-1", fields);
@@ -2081,13 +2081,13 @@ mod tests {
     #[test]
     fn terminal_output_snapshot_updates_matching_tool_call() {
         let mut s = AppState::new();
-        let mut fields = agent_client_protocol::schema::ToolCallUpdateFields::default();
+        let mut fields = agent_client_protocol::schema::v1::ToolCallUpdateFields::default();
         fields.content = Some(vec![
             ToolCallContent::Terminal(Terminal::new(
-                agent_client_protocol::schema::TerminalId::new("term-1"),
+                agent_client_protocol::schema::v1::TerminalId::new("term-1"),
             )),
             ToolCallContent::Terminal(Terminal::new(
-                agent_client_protocol::schema::TerminalId::new("other"),
+                agent_client_protocol::schema::v1::TerminalId::new("other"),
             )),
         ]);
         let update = ToolCallUpdate::new("call-1", fields);
@@ -2135,9 +2135,9 @@ mod tests {
             exit_status: Some(TerminalExitStatus::new().exit_code(0)),
         }));
 
-        let mut fields = agent_client_protocol::schema::ToolCallUpdateFields::default();
+        let mut fields = agent_client_protocol::schema::v1::ToolCallUpdateFields::default();
         fields.content = Some(vec![ToolCallContent::Terminal(Terminal::new(
-            agent_client_protocol::schema::TerminalId::new("term-1"),
+            agent_client_protocol::schema::v1::TerminalId::new("term-1"),
         ))]);
         let update = ToolCallUpdate::new("call-1", fields);
         s.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
@@ -3185,7 +3185,7 @@ mod tests {
             // lifetime, so go through `String`.
             tool_call: ToolCallUpdate::new(
                 call_id.to_string(),
-                agent_client_protocol::schema::ToolCallUpdateFields::default(),
+                agent_client_protocol::schema::v1::ToolCallUpdateFields::default(),
             ),
             options: vec![PermissionOption::new(
                 "allow",

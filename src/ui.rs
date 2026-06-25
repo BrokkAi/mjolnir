@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agent_client_protocol::schema::{AvailableCommandInput, StopReason, ToolCallStatus};
+use agent_client_protocol::schema::v1::{AvailableCommandInput, StopReason, ToolCallStatus};
 use anyhow::{Context, Result};
 use crossterm::cursor::MoveTo;
 use crossterm::event::{
@@ -3079,21 +3079,21 @@ fn escape_markdown_text(text: &str) -> String {
 }
 
 fn plan_priority_label(
-    priority: &agent_client_protocol::schema::PlanEntryPriority,
+    priority: &agent_client_protocol::schema::v1::PlanEntryPriority,
 ) -> &'static str {
     match priority {
-        agent_client_protocol::schema::PlanEntryPriority::High => "high",
-        agent_client_protocol::schema::PlanEntryPriority::Medium => "medium",
-        agent_client_protocol::schema::PlanEntryPriority::Low => "low",
+        agent_client_protocol::schema::v1::PlanEntryPriority::High => "high",
+        agent_client_protocol::schema::v1::PlanEntryPriority::Medium => "medium",
+        agent_client_protocol::schema::v1::PlanEntryPriority::Low => "low",
         _ => "unknown",
     }
 }
 
-fn plan_status_label(status: &agent_client_protocol::schema::PlanEntryStatus) -> &'static str {
+fn plan_status_label(status: &agent_client_protocol::schema::v1::PlanEntryStatus) -> &'static str {
     match status {
-        agent_client_protocol::schema::PlanEntryStatus::Pending => "pending",
-        agent_client_protocol::schema::PlanEntryStatus::InProgress => "running",
-        agent_client_protocol::schema::PlanEntryStatus::Completed => "done",
+        agent_client_protocol::schema::v1::PlanEntryStatus::Pending => "pending",
+        agent_client_protocol::schema::v1::PlanEntryStatus::InProgress => "running",
+        agent_client_protocol::schema::v1::PlanEntryStatus::Completed => "done",
         _ => "unknown",
     }
 }
@@ -4126,15 +4126,15 @@ fn render_transcript_entry_range(
                 )));
                 for e in entries {
                     let bullet = match e.priority {
-                        agent_client_protocol::schema::PlanEntryPriority::High => "[!]",
-                        agent_client_protocol::schema::PlanEntryPriority::Medium => "[*]",
-                        agent_client_protocol::schema::PlanEntryPriority::Low => "[ ]",
+                        agent_client_protocol::schema::v1::PlanEntryPriority::High => "[!]",
+                        agent_client_protocol::schema::v1::PlanEntryPriority::Medium => "[*]",
+                        agent_client_protocol::schema::v1::PlanEntryPriority::Low => "[ ]",
                         _ => "[?]",
                     };
                     let status = match e.status {
-                        agent_client_protocol::schema::PlanEntryStatus::Pending => " ",
-                        agent_client_protocol::schema::PlanEntryStatus::InProgress => "~",
-                        agent_client_protocol::schema::PlanEntryStatus::Completed => "x",
+                        agent_client_protocol::schema::v1::PlanEntryStatus::Pending => " ",
+                        agent_client_protocol::schema::v1::PlanEntryStatus::InProgress => "~",
+                        agent_client_protocol::schema::v1::PlanEntryStatus::Completed => "x",
                         _ => "?",
                     };
                     out.push(Line::from(format!("  {bullet}{status} {}", e.content)));
@@ -4453,7 +4453,7 @@ fn push_tool_outputs(
 }
 
 fn terminal_exit_status_label(
-    status: &agent_client_protocol::schema::TerminalExitStatus,
+    status: &agent_client_protocol::schema::v1::TerminalExitStatus,
 ) -> String {
     match (&status.exit_code, &status.signal) {
         (Some(code), Some(signal)) => format!("code {code}, signal {signal}"),
@@ -4695,40 +4695,40 @@ fn truncate_display_line(text: &str, width: usize) -> String {
     text.chars().take(width - 3).collect::<String>() + "..."
 }
 
-fn tool_kind_label(kind: agent_client_protocol::schema::ToolKind) -> &'static str {
+fn tool_kind_label(kind: agent_client_protocol::schema::v1::ToolKind) -> &'static str {
     match kind {
-        agent_client_protocol::schema::ToolKind::Read => "read",
-        agent_client_protocol::schema::ToolKind::Edit => "edit",
-        agent_client_protocol::schema::ToolKind::Delete => "delete",
-        agent_client_protocol::schema::ToolKind::Move => "move",
-        agent_client_protocol::schema::ToolKind::Search => "search",
-        agent_client_protocol::schema::ToolKind::Execute => "exec",
-        agent_client_protocol::schema::ToolKind::Think => "think",
-        agent_client_protocol::schema::ToolKind::Fetch => "fetch",
-        agent_client_protocol::schema::ToolKind::SwitchMode => "mode",
+        agent_client_protocol::schema::v1::ToolKind::Read => "read",
+        agent_client_protocol::schema::v1::ToolKind::Edit => "edit",
+        agent_client_protocol::schema::v1::ToolKind::Delete => "delete",
+        agent_client_protocol::schema::v1::ToolKind::Move => "move",
+        agent_client_protocol::schema::v1::ToolKind::Search => "search",
+        agent_client_protocol::schema::v1::ToolKind::Execute => "exec",
+        agent_client_protocol::schema::v1::ToolKind::Think => "think",
+        agent_client_protocol::schema::v1::ToolKind::Fetch => "fetch",
+        agent_client_protocol::schema::v1::ToolKind::SwitchMode => "mode",
         _ => "other",
     }
 }
 
-fn tool_status_label(status: agent_client_protocol::schema::ToolCallStatus) -> &'static str {
+fn tool_status_label(status: agent_client_protocol::schema::v1::ToolCallStatus) -> &'static str {
     match status {
-        agent_client_protocol::schema::ToolCallStatus::Pending => "pending",
-        agent_client_protocol::schema::ToolCallStatus::InProgress => "running",
-        agent_client_protocol::schema::ToolCallStatus::Completed => "done",
-        agent_client_protocol::schema::ToolCallStatus::Failed => "failed",
+        agent_client_protocol::schema::v1::ToolCallStatus::Pending => "pending",
+        agent_client_protocol::schema::v1::ToolCallStatus::InProgress => "running",
+        agent_client_protocol::schema::v1::ToolCallStatus::Completed => "done",
+        agent_client_protocol::schema::v1::ToolCallStatus::Failed => "failed",
         _ => "?",
     }
 }
 
 fn tool_status_color(
-    status: agent_client_protocol::schema::ToolCallStatus,
+    status: agent_client_protocol::schema::v1::ToolCallStatus,
     theme: TerminalTheme,
 ) -> Color {
     match status {
-        agent_client_protocol::schema::ToolCallStatus::Failed => theme.error,
-        agent_client_protocol::schema::ToolCallStatus::Completed => theme.success,
-        agent_client_protocol::schema::ToolCallStatus::InProgress => theme.primary,
-        agent_client_protocol::schema::ToolCallStatus::Pending => theme.muted,
+        agent_client_protocol::schema::v1::ToolCallStatus::Failed => theme.error,
+        agent_client_protocol::schema::v1::ToolCallStatus::Completed => theme.success,
+        agent_client_protocol::schema::v1::ToolCallStatus::InProgress => theme.primary,
+        agent_client_protocol::schema::v1::ToolCallStatus::Pending => theme.muted,
         _ => theme.warning,
     }
 }
@@ -6187,7 +6187,7 @@ mod tests {
     use crate::event::SessionConfigTarget;
 
     use super::*;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         AvailableCommand, ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind,
         SessionConfigOption, SessionConfigSelectOption, SessionUpdate, StopReason, TextContent,
         ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
@@ -10429,9 +10429,9 @@ mod tests {
     fn permission_request_notification_uses_tool_title() {
         let (responder, _rx) = tokio::sync::oneshot::channel();
         let prompt = PermissionPrompt {
-            tool_call: agent_client_protocol::schema::ToolCallUpdate::new(
+            tool_call: agent_client_protocol::schema::v1::ToolCallUpdate::new(
                 "call-1".to_string(),
-                agent_client_protocol::schema::ToolCallUpdateFields::default()
+                agent_client_protocol::schema::v1::ToolCallUpdateFields::default()
                     .title("run dangerous command"),
             ),
             options: vec![],

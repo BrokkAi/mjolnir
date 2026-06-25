@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::term::TrackedBackend;
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{
     AgentCapabilities, AuthMethod, AuthenticateRequest, DeleteSessionRequest, ErrorCode,
-    Implementation, InitializeRequest, ListSessionsRequest, ProtocolVersion, SessionInfo,
+    Implementation, InitializeRequest, ListSessionsRequest, SessionInfo,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::{Context, Result};
@@ -682,7 +683,7 @@ fn wrapped_line_count(text: &str, width: u16) -> usize {
 mod tests {
     use super::*;
     use agent_client_protocol::Agent as AgentRole;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         AuthMethod, AuthMethodAgent, AuthenticateResponse, DeleteSessionResponse,
         InitializeResponse, ListSessionsResponse, SessionCapabilities, SessionDeleteCapabilities,
         SessionId, SessionListCapabilities,

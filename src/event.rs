@@ -4,7 +4,7 @@
 //! terminal I/O; the UI task owns the terminal and must never block on
 //! network I/O. They communicate over two unbounded mpsc channels.
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ContentBlock, PermissionOption, SessionConfigId, SessionConfigOption, SessionConfigValueId,
     SessionUpdate, StopReason, TerminalExitStatus, ToolCallUpdate, Usage,
 };
