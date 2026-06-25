@@ -23,6 +23,7 @@ mod self_update;
 mod session;
 mod speech;
 mod term;
+mod text;
 mod theme;
 mod theme_picker;
 mod ui;

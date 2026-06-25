@@ -21,12 +21,15 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+#[cfg(test)]
+use unicode_width::UnicodeWidthStr;
 
 use crate::install::{self, Progress};
 use crate::palette::TerminalTheme;
 use crate::paths::{expand_home_shortcut, normalize_spawn_program};
 use crate::registry::{Agent, DistributionKind, Registry};
+use crate::text::{normalize_single_line_text, truncate_text_to_width};
 use crate::version::mjolnir_version_label;
 
 const CURATED_AGENT_IDS: &[&str] = &["claude-acp", "codex-acp", "opencode-acp", "pi-acp"];
@@ -1161,34 +1164,10 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
 }
 
 fn picker_row_line(marker: &str, label: &str, badge: &str, hint: &str, width: u16) -> String {
-    truncate_text_to_width(format!("{marker} {label}{badge}  -- {hint}"), width)
-}
-
-fn truncate_text_to_width(line: String, width: u16) -> String {
-    let cap = width as usize;
-    if line.width() <= cap {
-        return line;
-    }
-    if cap == 0 {
-        return String::new();
-    }
-    if cap <= 3 {
-        return ".".repeat(cap);
-    }
-
-    let target = cap - 3;
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in line.chars() {
-        let w = ch.width().unwrap_or(0);
-        if used + w > target {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out.push_str("...");
-    out
+    truncate_text_to_width(
+        normalize_single_line_text(&format!("{marker} {label}{badge}  -- {hint}")),
+        width,
+    )
 }
 
 fn draw_filter(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme: TerminalTheme) {
@@ -2076,6 +2055,27 @@ mod tests {
         assert!(line.ends_with("..."), "line: {line}");
         assert!(
             UnicodeWidthStr::width(line.as_str()) <= 38,
+            "line should fit: {line}"
+        );
+    }
+
+    #[test]
+    fn picker_row_line_normalizes_multiline_registry_descriptions() {
+        let line = picker_row_line(
+            ">",
+            "Claude",
+            "",
+            "first\nsecond\rthird\tfourth\u{0007}",
+            80,
+        );
+
+        assert!(!line.contains('\n'), "line: {line:?}");
+        assert!(!line.contains('\r'), "line: {line:?}");
+        assert!(!line.contains('\t'), "line: {line:?}");
+        assert!(!line.contains('\u{0007}'), "line: {line:?}");
+        assert!(line.contains("first second third fourth"), "line: {line}");
+        assert!(
+            UnicodeWidthStr::width(line.as_str()) <= 80,
             "line should fit: {line}"
         );
     }
