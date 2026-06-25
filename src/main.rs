@@ -24,6 +24,7 @@ mod session;
 mod speech;
 mod term;
 mod theme;
+mod theme_picker;
 mod ui;
 mod version;
 mod worktree;
@@ -658,6 +659,14 @@ fn should_open_initial_agent_picker(cfg: &Config, initial_agent: Option<&Selecte
     cfg.agent.is_none() && initial_agent.is_none()
 }
 
+fn should_open_first_run_setup(
+    config_exists: bool,
+    cfg: &Config,
+    initial_agent: Option<&SelectedAgent>,
+) -> bool {
+    !config_exists && cfg.agent.is_none() && initial_agent.is_none()
+}
+
 #[derive(Debug, Clone)]
 struct RuntimeOptions {
     agent_stderr: Option<PathBuf>,
@@ -696,6 +705,7 @@ async fn run_app(
     mode: UiMode,
 ) -> Result<Option<String>> {
     let config_path = config::default_config_path();
+    let config_exists = config_path.exists();
     let mut cfg = Config::load(&config_path)?;
 
     // Supervisor loop. Initial sessions use the configured default agent when
@@ -705,27 +715,30 @@ async fn run_app(
     // Consume resume_session and initial_agent on the first iteration only.
     let mut initial_resume = resume_target;
     let mut initial_agent = initial_agent;
+    let mut first_run_setup =
+        should_open_first_run_setup(config_exists, &cfg, initial_agent.as_ref());
     let mut pick_agent = should_open_initial_agent_picker(&cfg, initial_agent.as_ref());
     loop {
         let resume = initial_resume.take();
         let agent = if let Some(agent) = initial_agent.take() {
             agent
+        } else if first_run_setup {
+            first_run_setup = false;
+            pick_agent = false;
+            match run_first_run_setup(&mut cfg, &config_path).await? {
+                Some(agent) => agent,
+                None => return Ok(None),
+            }
         } else if pick_agent {
             pick_agent = false;
-            let picker_result = run_agent_picker_once(&cfg).await?;
-            apply_picker_preferences(&mut cfg, picker_result.preferences);
-            let Some(outcome) = picker_result.outcome else {
-                cfg.save(&config_path)
-                    .with_context(|| format!("save {}", config_path.display()))?;
-                return Ok(None);
-            };
-            let selected = picker_outcome_to_selected(outcome);
-            if cfg.agent.is_none() {
-                cfg.agent = Some(selected.clone());
+            match run_agent_picker_and_update_config(&mut cfg, &config_path).await? {
+                Some(agent) => agent,
+                None => {
+                    cfg.save(&config_path)
+                        .with_context(|| format!("save {}", config_path.display()))?;
+                    return Ok(None);
+                }
             }
-            cfg.save(&config_path)
-                .with_context(|| format!("save {}", config_path.display()))?;
-            selected
         } else {
             cfg.agent.clone().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -791,6 +804,51 @@ async fn run_app(
             }
         }
     }
+}
+
+async fn run_first_run_setup(
+    cfg: &mut Config,
+    config_path: &Path,
+) -> Result<Option<SelectedAgent>> {
+    let Some(theme_kind) = run_theme_picker_once(cfg.theme).await? else {
+        return Ok(None);
+    };
+    cfg.theme = theme_kind;
+    cfg.save(config_path)
+        .with_context(|| format!("save {}", config_path.display()))?;
+
+    let agent = run_agent_picker_and_update_config(cfg, config_path).await?;
+    if agent.is_none() {
+        cfg.save(config_path)
+            .with_context(|| format!("save {}", config_path.display()))?;
+    }
+    Ok(agent)
+}
+
+async fn run_agent_picker_and_update_config(
+    cfg: &mut Config,
+    config_path: &Path,
+) -> Result<Option<SelectedAgent>> {
+    let picker_result = run_agent_picker_once(cfg).await?;
+    let selected = apply_picker_result_to_config(cfg, picker_result);
+    if selected.is_some() {
+        cfg.save(config_path)
+            .with_context(|| format!("save {}", config_path.display()))?;
+    }
+    Ok(selected)
+}
+
+fn apply_picker_result_to_config(
+    cfg: &mut Config,
+    picker_result: PickerResult,
+) -> Option<SelectedAgent> {
+    apply_picker_preferences(cfg, picker_result.preferences);
+    let outcome = picker_result.outcome?;
+    let selected = picker_outcome_to_selected(outcome);
+    if cfg.agent.is_none() {
+        cfg.agent = Some(selected.clone());
+    }
+    Some(selected)
 }
 
 async fn run_session_picker_action_for_agent(
@@ -917,6 +975,18 @@ async fn run_agent_picker_once(cfg: &Config) -> Result<PickerResult> {
     let result = run_picker_with_registry(&mut terminal, cfg).await;
     if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
         tracing::warn!("restore terminal (agent picker) failed: {e}");
+    }
+    settle_after_fullscreen_picker_restore().await;
+    result
+}
+
+async fn run_theme_picker_once(
+    initial: theme::TerminalThemeKind,
+) -> Result<Option<theme::TerminalThemeKind>> {
+    let mut terminal = ui::setup_fullscreen_terminal().context("setup terminal")?;
+    let result = theme_picker::run_theme_picker(&mut terminal, initial).await;
+    if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
+        tracing::warn!("restore terminal (theme picker) failed: {e}");
     }
     settle_after_fullscreen_picker_restore().await;
     result
@@ -1492,6 +1562,76 @@ mod tests {
             },
             None
         ));
+    }
+
+    #[test]
+    fn first_run_setup_opens_only_for_missing_config_without_agent() {
+        let configured = SelectedAgent {
+            source_id: "claude-acp".to_string(),
+            program: PathBuf::from("npx"),
+            args: vec!["-y".to_string(), "@x/claude".to_string()],
+            env: Default::default(),
+        };
+        let initial = SelectedAgent {
+            source_id: "anvil".to_string(),
+            program: PathBuf::from("uvx"),
+            args: vec!["brokk".to_string(), "acp".to_string()],
+            env: Default::default(),
+        };
+
+        assert!(should_open_first_run_setup(false, &Config::default(), None));
+        assert!(!should_open_first_run_setup(true, &Config::default(), None));
+        assert!(!should_open_first_run_setup(
+            false,
+            &Config {
+                theme: Default::default(),
+                agent: Some(configured),
+                favorite_agents: Vec::new(),
+                custom_agents: Vec::new(),
+            },
+            None
+        ));
+        assert!(!should_open_first_run_setup(
+            false,
+            &Config::default(),
+            Some(&initial)
+        ));
+    }
+
+    #[test]
+    fn picker_result_keeps_explicit_default_while_launching_selection() {
+        let explicit_default = PickerOutcome {
+            source_id: "claude-acp".to_string(),
+            program: PathBuf::from("npx"),
+            args: vec!["-y".to_string(), "@x/claude".to_string()],
+            env: Default::default(),
+        };
+        let selected = PickerOutcome {
+            source_id: "anvil".to_string(),
+            program: PathBuf::from("uvx"),
+            args: vec!["brokk".to_string(), "acp".to_string()],
+            env: Default::default(),
+        };
+        let mut cfg = Config::default();
+
+        let launch_agent = apply_picker_result_to_config(
+            &mut cfg,
+            PickerResult {
+                outcome: Some(selected.clone()),
+                preferences: PickerPreferences {
+                    default_agent: Some(explicit_default.clone()),
+                    favorite_source_ids: Vec::new(),
+                    custom_agents: Vec::new(),
+                },
+            },
+        )
+        .expect("launch selection");
+
+        assert_eq!(launch_agent, picker_outcome_to_selected(selected));
+        assert_eq!(
+            cfg.agent.as_ref(),
+            Some(&picker_outcome_to_selected(explicit_default))
+        );
     }
 
     #[test]
