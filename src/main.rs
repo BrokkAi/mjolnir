@@ -22,6 +22,7 @@ mod self_update;
 mod session;
 mod speech;
 mod term;
+mod theme;
 mod ui;
 mod version;
 mod worktree;
@@ -459,9 +460,15 @@ async fn run_resume(args: ResumeArgs, fs_max_text_bytes: u64) -> Result<()> {
             return Ok(());
         }
 
-        let outcome =
-            run_session_picker_once(listing.sessions, listing.delete_supported, notice.take())
-                .await?;
+        let outcome = run_session_picker_once(
+            listing.sessions,
+            listing.delete_supported,
+            notice.take(),
+            Config::load(&config::default_config_path())
+                .map(|cfg| cfg.theme.palette())
+                .unwrap_or_else(|_| theme::TerminalThemeKind::default().palette()),
+        )
+        .await?;
         match outcome {
             session::ResumeOutcome::Cancelled => {
                 eprintln!("Cancelled.");
@@ -707,7 +714,7 @@ async fn run_app(
         let (reason, session_id, session_title) = run_session(
             &agent,
             cwd.clone(),
-            runtime_options.agent_stderr.clone(),
+            runtime_options.clone(),
             HeaderLabels {
                 project: project_label.clone(),
                 worktree: worktree_label.clone(),
@@ -715,7 +722,7 @@ async fn run_app(
             },
             resume.as_ref().map(|target| target.session_id.clone()),
             mode,
-            runtime_options.fs_max_text_bytes,
+            cfg.theme,
         )
         .await?;
         match reason {
@@ -746,6 +753,7 @@ async fn run_app(
                     runtime_options.agent_stderr.as_deref(),
                     session_id,
                     session_title,
+                    cfg.theme.palette(),
                 )
                 .await?
                 {
@@ -767,6 +775,7 @@ async fn run_session_picker_action_for_agent(
     agent_stderr: Option<&Path>,
     current_session_id: Option<String>,
     current_session_title: Option<String>,
+    theme: theme::TerminalTheme,
 ) -> Result<SessionPickerAction> {
     let mut notice = None;
     loop {
@@ -784,7 +793,8 @@ async fn run_session_picker_action_for_agent(
             current_session_id.as_deref(),
         );
         let outcome =
-            run_session_picker_once(listing.sessions, delete_supported, notice.take()).await?;
+            run_session_picker_once(listing.sessions, delete_supported, notice.take(), theme)
+                .await?;
         if let session::ResumeOutcome::DeleteRequested(entry) = outcome {
             if current_session_id.as_deref() == Some(entry.session_id.as_str()) {
                 notice = Some(
@@ -892,10 +902,11 @@ async fn run_session_picker_once(
     sessions: Vec<session::SessionEntry>,
     delete_supported: bool,
     notice: Option<String>,
+    theme: theme::TerminalTheme,
 ) -> Result<session::ResumeOutcome> {
     let mut terminal = ui::setup_fullscreen_terminal().context("setup terminal")?;
     let outcome =
-        session::run_session_picker(&mut terminal, sessions, delete_supported, notice).await;
+        session::run_session_picker(&mut terminal, sessions, delete_supported, notice, theme).await;
     if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
         tracing::warn!("restore terminal (session picker) failed: {e}");
     }
@@ -934,6 +945,7 @@ async fn run_picker_with_registry(
         &install::default_install_root(),
         &registry::current_platform(),
         picker_preferences_from_config(cfg),
+        cfg.theme.palette(),
     )
     .await
 }
@@ -1003,11 +1015,11 @@ fn agent_header_label(agent: &SelectedAgent) -> String {
 async fn run_session(
     agent: &SelectedAgent,
     cwd: PathBuf,
-    agent_stderr: Option<PathBuf>,
+    runtime_options: RuntimeOptions,
     header_labels: HeaderLabels,
     resume_session: Option<String>,
     mode: UiMode,
-    fs_max_text_bytes: u64,
+    theme_kind: theme::TerminalThemeKind,
 ) -> Result<(UiExitReason, Option<String>, Option<String>)> {
     let mut terminal = setup_session_terminal(mode)?;
 
@@ -1023,8 +1035,8 @@ async fn run_session(
         cwd: cwd.clone(),
         resume_session,
         env: agent.env.clone(),
-        agent_stderr: agent_stderr.clone(),
-        fs_max_text_bytes,
+        agent_stderr: runtime_options.agent_stderr.clone(),
+        fs_max_text_bytes: runtime_options.fs_max_text_bytes,
     };
 
     // Drive the ACP runtime on its own task so the UI can own the
@@ -1039,6 +1051,7 @@ async fn run_session(
 
     let hist_path = history_path();
     let export_dir = transcript_export_dir();
+    let config_path = config::default_config_path();
     // Pre-fill the UI header with the configured agent identity. Registry
     // agents use their source id so the header matches the picker/config,
     // while custom agents show the exact command line being launched.
@@ -1084,11 +1097,15 @@ async fn run_session(
             &mut ui_event_rx,
             header_labels.clone(),
             agent_display_name.clone(),
-            ui::UiPersistencePaths {
-                history_path: Some(&hist_path),
-                transcript_export_dir: export_dir.as_deref(),
+            ui::UiRunOptions {
+                persistence: ui::UiPersistencePaths {
+                    history_path: Some(&hist_path),
+                    transcript_export_dir: export_dir.as_deref(),
+                    config_path: Some(&config_path),
+                },
+                mode,
+                theme_kind,
             },
-            mode,
         )
         .await;
 
@@ -1112,9 +1129,10 @@ async fn run_session(
         let action = match run_session_picker_action_for_agent(
             agent,
             cwd.clone(),
-            agent_stderr.as_deref(),
+            runtime_options.agent_stderr.as_deref(),
             current_session_id.clone(),
             current_session_title.clone(),
+            theme_kind.palette(),
         )
         .await
         {
@@ -1412,6 +1430,7 @@ mod tests {
         assert!(should_open_initial_agent_picker(&Config::default(), None));
         assert!(!should_open_initial_agent_picker(
             &Config {
+                theme: Default::default(),
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
@@ -1433,6 +1452,7 @@ mod tests {
         };
         assert!(!should_open_initial_agent_picker(
             &Config {
+                theme: Default::default(),
                 agent: Some(custom_default),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
@@ -1444,6 +1464,7 @@ mod tests {
     #[test]
     fn picker_preferences_round_trip_custom_agents() {
         let cfg = Config {
+            theme: Default::default(),
             agent: None,
             favorite_agents: Vec::new(),
             custom_agents: vec![ConfigCustomAgent {

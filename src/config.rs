@@ -10,9 +10,12 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::paths::{expand_home_shortcut, normalize_spawn_program};
+use crate::theme::TerminalThemeKind;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "TerminalThemeKind::is_default")]
+    pub theme: TerminalThemeKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SelectedAgent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -248,6 +251,7 @@ mod tests {
         let path = dir.path().join("nope.toml");
         let cfg = Config::load(&path).expect("load");
         assert!(cfg.agent.is_none());
+        assert_eq!(cfg.theme, TerminalThemeKind::Dark);
     }
 
     #[test]
@@ -255,6 +259,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let cfg = Config {
+            theme: TerminalThemeKind::Light,
             agent: Some(SelectedAgent {
                 source_id: "claude-acp".to_string(),
                 program: PathBuf::from("/usr/local/bin/claude-acp"),
@@ -266,6 +271,7 @@ mod tests {
         };
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
+        assert_eq!(loaded.theme, TerminalThemeKind::Light);
         assert_eq!(loaded.favorite_agents, vec!["claude-acp", "anvil"]);
         let agent = loaded.agent.expect("agent");
         assert_eq!(agent.source_id, "claude-acp");
@@ -279,6 +285,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nested").join("deep").join("config.toml");
         let cfg = Config {
+            theme: TerminalThemeKind::Dark,
             agent: Some(SelectedAgent {
                 source_id: "anvil".to_string(),
                 program: PathBuf::from("uvx"),
@@ -360,6 +367,7 @@ args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let cfg = Config {
+            theme: TerminalThemeKind::AnsiDark,
             agent: None,
             favorite_agents: Vec::new(),
             custom_agents: vec![
@@ -379,6 +387,7 @@ args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
         };
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
+        assert_eq!(loaded.theme, TerminalThemeKind::AnsiDark);
         assert_eq!(loaded.custom_agents.len(), 2);
         assert_eq!(loaded.custom_agents[0].name, "local-claude");
         assert_eq!(loaded.custom_agents[0].args, vec!["--debug"]);
@@ -484,5 +493,29 @@ args = ["--flag", "$HOME/data"]
             !body.contains("agent"),
             "blank config should not write agent: {body:?}"
         );
+        assert!(
+            !body.contains("theme"),
+            "default theme should not be serialized: {body:?}"
+        );
+    }
+
+    #[test]
+    fn theme_config_defaulting_and_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").expect("write");
+        let cfg = Config::load(&path).expect("load default");
+        assert_eq!(cfg.theme, TerminalThemeKind::Dark);
+
+        let cfg = Config {
+            theme: TerminalThemeKind::AnsiLight,
+            ..Config::default()
+        };
+        cfg.save(&path).expect("save");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(body.contains("theme = \"ansi-light\""));
+
+        let loaded = Config::load(&path).expect("load saved");
+        assert_eq!(loaded.theme, TerminalThemeKind::AnsiLight);
     }
 }

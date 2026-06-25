@@ -17,7 +17,7 @@ use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, Key
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use crate::install::{self, Progress};
 use crate::paths::{expand_home_shortcut, normalize_spawn_program};
 use crate::registry::{DistributionKind, Registry};
+use crate::theme::TerminalTheme;
 use crate::version::mjolnir_version_label;
 
 /// Resolved launch command for the chosen agent.
@@ -425,6 +426,7 @@ pub async fn run_picker(
     install_root: &Path,
     platform: &str,
     preferences: PickerPreferences,
+    theme: TerminalTheme,
 ) -> Result<PickerResult> {
     let mut state = PickerState::new(
         registry,
@@ -436,7 +438,7 @@ pub async fn run_picker(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
 
-    terminal.draw(|f| draw(f, &state))?;
+    terminal.draw(|f| draw(f, &state, theme))?;
 
     loop {
         tokio::select! {
@@ -465,7 +467,7 @@ pub async fn run_picker(
                 }
             }
         }
-        terminal.draw(|f| draw(f, &state))?;
+        terminal.draw(|f| draw(f, &state, theme))?;
         if matches!(state.mode, Mode::Cancelled) {
             return Ok(PickerResult {
                 outcome: None,
@@ -894,7 +896,7 @@ fn parse_custom_command(s: &str) -> Result<PickerOutcome> {
     })
 }
 
-fn draw(f: &mut ratatui::Frame, state: &PickerState<'_>) {
+fn draw(f: &mut ratatui::Frame, state: &PickerState<'_>, theme: TerminalTheme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -906,9 +908,9 @@ fn draw(f: &mut ratatui::Frame, state: &PickerState<'_>) {
         .split(f.area());
 
     draw_header(f, chunks[0]);
-    draw_list(f, chunks[1], state);
-    draw_filter(f, chunks[2], state);
-    draw_footer(f, chunks[3], state);
+    draw_list(f, chunks[1], state, theme);
+    draw_filter(f, chunks[2], state, theme);
+    draw_footer(f, chunks[3], state, theme);
 
     match &state.mode {
         Mode::AddCustomAgent {
@@ -926,6 +928,7 @@ fn draw(f: &mut ratatui::Frame, state: &PickerState<'_>) {
             *focus,
             error.as_deref(),
             edit_index.is_some(),
+            theme,
         ),
         Mode::Installing {
             label,
@@ -940,8 +943,9 @@ fn draw(f: &mut ratatui::Frame, state: &PickerState<'_>) {
             *total_bytes,
             *downloaded_bytes,
             *extracting,
+            theme,
         ),
-        Mode::Error(msg) => draw_error_modal(f, f.area(), msg),
+        Mode::Error(msg) => draw_error_modal(f, f.area(), msg, theme),
         Mode::Browse | Mode::Cancelled => {}
     }
 }
@@ -952,13 +956,13 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect) {
     f.render_widget(p, area);
 }
 
-fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
+fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme: TerminalTheme) {
     let block = Block::default().borders(Borders::ALL).title(" agents ");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if state.filtered.is_empty() {
-        let p = Paragraph::new("no matches").style(Style::default().fg(Color::DarkGray));
+        let p = Paragraph::new("no matches").style(Style::default().fg(theme.muted));
         f.render_widget(p, inner);
         return;
     }
@@ -1006,7 +1010,7 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
                 } else {
                     "─ other ─".to_string()
                 };
-                return ListItem::new(sep_line).style(Style::default().fg(Color::DarkGray));
+                return ListItem::new(sep_line).style(Style::default().fg(theme.muted));
             }
 
             let i = slot.unwrap();
@@ -1031,8 +1035,8 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
             let line = format!("{marker} {label}{badge}  -- {hint}");
             let style = if is_selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -1045,7 +1049,7 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
     f.render_widget(list, inner);
 }
 
-fn draw_filter(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
+fn draw_filter(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme: TerminalTheme) {
     let title = if state.search_focused {
         " search (typing) "
     } else {
@@ -1055,7 +1059,7 @@ fn draw_filter(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
     let text = if state.filter.is_empty() && !state.search_focused {
         Line::from(vec![Span::styled(
             "press / to filter agents",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )])
     } else {
         Line::from(state.filter.clone())
@@ -1064,7 +1068,7 @@ fn draw_filter(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
     f.render_widget(p, area);
 }
 
-fn draw_footer(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
+fn draw_footer(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme: TerminalTheme) {
     let text = if let Some(notice) = state.notice.as_ref() {
         notice.as_str()
     } else if state.search_focused {
@@ -1072,10 +1076,11 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>) {
     } else {
         "Up/Down navigate | Enter select | / search | f favorite | d default | e edit | Esc cancel"
     };
-    let p = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
+    let p = Paragraph::new(text).style(Style::default().fg(theme.muted));
     f.render_widget(p, area);
 }
 
+#[expect(clippy::too_many_arguments)]
 fn draw_add_custom_agent_modal(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -1084,6 +1089,7 @@ fn draw_add_custom_agent_modal(
     focus: AddCustomFocus,
     error: Option<&str>,
     editing: bool,
+    theme: TerminalTheme,
 ) {
     let width = area.width.saturating_sub(8).min(80);
     let height = 11.min(area.height.saturating_sub(4));
@@ -1100,7 +1106,7 @@ fn draw_add_custom_agent_modal(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(Style::default().fg(Color::Cyan));
+        .style(Style::default().fg(theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -1121,11 +1127,11 @@ fn draw_add_custom_agent_modal(
         Span::styled(
             "name (focused)",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.primary)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled("name", Style::default().fg(Color::DarkGray))
+        Span::styled("name", Style::default().fg(theme.muted))
     };
     f.render_widget(Paragraph::new(Line::from(vec![name_label])), layout[0]);
 
@@ -1145,11 +1151,11 @@ fn draw_add_custom_agent_modal(
         Span::styled(
             "command (focused)",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.primary)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled("command", Style::default().fg(Color::DarkGray))
+        Span::styled("command", Style::default().fg(theme.muted))
     };
     f.render_widget(Paragraph::new(Line::from(vec![cmd_label])), layout[2]);
 
@@ -1166,19 +1172,19 @@ fn draw_add_custom_agent_modal(
     f.render_widget(cmd_body, layout[3]);
 
     let help = Paragraph::new("e.g. `/path/to/agent --flag` — saved for next time")
-        .style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().fg(theme.muted))
         .wrap(Wrap { trim: false });
     f.render_widget(help, layout[4]);
 
     if let Some(err) = error {
         let err_p = Paragraph::new(err)
-            .style(Style::default().fg(Color::Red))
+            .style(Style::default().fg(theme.error))
             .wrap(Wrap { trim: false });
         f.render_widget(err_p, layout[5]);
     }
 
     let footer = Paragraph::new("Tab switches fields | Enter confirms | Esc cancels")
-        .style(Style::default().fg(Color::DarkGray));
+        .style(Style::default().fg(theme.muted));
     f.render_widget(footer, layout[6]);
 }
 
@@ -1189,6 +1195,7 @@ fn draw_install_modal(
     total_bytes: Option<u64>,
     downloaded_bytes: u64,
     extracting: bool,
+    theme: TerminalTheme,
 ) {
     let width = area.width.saturating_sub(8).min(70);
     let height = 7.min(area.height.saturating_sub(4));
@@ -1200,7 +1207,7 @@ fn draw_install_modal(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" installing {label} "))
-        .style(Style::default().fg(Color::Yellow));
+        .style(Style::default().fg(theme.warning));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -1244,11 +1251,11 @@ fn draw_install_modal(
     };
     f.render_widget(Paragraph::new(bar), layout[1]);
 
-    let footer = Paragraph::new("Esc to cancel").style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new("Esc to cancel").style(Style::default().fg(theme.muted));
     f.render_widget(footer, layout[2]);
 }
 
-fn draw_error_modal(f: &mut ratatui::Frame, area: Rect, msg: &str) {
+fn draw_error_modal(f: &mut ratatui::Frame, area: Rect, msg: &str, theme: TerminalTheme) {
     let width = area.width.saturating_sub(8).min(80);
     let height = 7.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
@@ -1259,7 +1266,7 @@ fn draw_error_modal(f: &mut ratatui::Frame, area: Rect, msg: &str) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" error ")
-        .style(Style::default().fg(Color::Red));
+        .style(Style::default().fg(theme.error));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -1271,8 +1278,7 @@ fn draw_error_modal(f: &mut ratatui::Frame, area: Rect, msg: &str) {
     let body = Paragraph::new(msg).wrap(Wrap { trim: false });
     f.render_widget(body, layout[0]);
 
-    let footer =
-        Paragraph::new("Enter or Esc to dismiss").style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new("Enter or Esc to dismiss").style(Style::default().fg(theme.muted));
     f.render_widget(footer, layout[1]);
 }
 

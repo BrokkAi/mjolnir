@@ -23,6 +23,7 @@ use crate::event::{
     PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, TerminalOutputSnapshot,
     UiEvent, content_block_text,
 };
+use crate::theme::{TerminalTheme, TerminalThemeKind};
 
 /// Maximum width of the queued-prompt preview shown above the input.
 /// Beyond this we truncate with an ellipsis.
@@ -33,6 +34,7 @@ const BUILTIN_CLEAR_COMMAND: &str = "clear";
 const BUILTIN_LOAD_COMMAND: &str = "load";
 const BUILTIN_FORK_COMMAND: &str = "fork";
 const BUILTIN_EXPORT_COMMAND: &str = "export";
+const BUILTIN_THEME_COMMAND: &str = "theme";
 const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
 
 fn builtin_new_command() -> AvailableCommand {
@@ -61,6 +63,13 @@ fn builtin_export_command() -> AvailableCommand {
     AvailableCommand::new(BUILTIN_EXPORT_COMMAND, "export transcript to markdown")
 }
 
+fn builtin_theme_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_THEME_COMMAND,
+        "change terminal theme: light, dark, ansi-light, ansi-dark",
+    )
+}
+
 fn install_builtin_commands(commands: &mut Vec<AvailableCommand>, include_fork: bool) {
     commands.retain(|command| {
         command.name != BUILTIN_NEW_COMMAND
@@ -68,10 +77,12 @@ fn install_builtin_commands(commands: &mut Vec<AvailableCommand>, include_fork: 
             && command.name != BUILTIN_LOAD_COMMAND
             && command.name != BUILTIN_FORK_COMMAND
             && command.name != BUILTIN_EXPORT_COMMAND
+            && command.name != BUILTIN_THEME_COMMAND
     });
     if include_fork {
         commands.insert(0, builtin_fork_command());
     }
+    commands.insert(0, builtin_theme_command());
     commands.insert(0, builtin_export_command());
     commands.insert(0, builtin_load_command());
     commands.insert(0, builtin_clear_command());
@@ -452,6 +463,8 @@ fn number_field(
 
 #[derive(Debug)]
 pub struct AppState {
+    pub theme_kind: TerminalThemeKind,
+    pub theme: TerminalTheme,
     pub agent_label: String,
     pub session_id: Option<String>,
     pub session_title: Option<String>,
@@ -556,6 +569,8 @@ pub struct AppState {
     pub worktree_label: Option<String>,
     /// Directory where `/export` writes Markdown transcript files.
     pub transcript_export_dir: Option<PathBuf>,
+    /// Config file used by local UI-only settings such as `/theme`.
+    pub config_path: Option<PathBuf>,
     /// Holds the platform clipboard lease so copied text remains available
     /// on Linux/X11 where the owning process must stay alive.
     #[allow(dead_code)]
@@ -655,7 +670,10 @@ pub struct Autocomplete {
 impl AppState {
     pub fn new() -> Self {
         let now = Instant::now();
+        let theme_kind = TerminalThemeKind::default();
         Self {
+            theme_kind,
+            theme: theme_kind.palette(),
             agent_label: String::new(),
             session_id: None,
             session_title: None,
@@ -705,9 +723,18 @@ impl AppState {
             project_label: String::new(),
             worktree_label: None,
             transcript_export_dir: None,
+            config_path: None,
             clipboard_lease: None,
             queued_prompts: VecDeque::new(),
         }
+    }
+
+    pub fn set_theme(&mut self, theme_kind: TerminalThemeKind) {
+        if self.theme_kind != theme_kind {
+            self.bump_transcript_revision();
+        }
+        self.theme_kind = theme_kind;
+        self.theme = theme_kind.palette();
     }
 
     /// Stage a prompt to fire when the current turn completes.
@@ -3192,7 +3219,7 @@ mod tests {
             .iter()
             .map(|&i| s.available_commands[i].name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "clear", "load", "export"]);
+        assert_eq!(names, vec!["new", "clear", "load", "export", "theme"]);
     }
 
     #[test]
@@ -3214,7 +3241,10 @@ mod tests {
             .iter()
             .map(|&i| s.available_commands[i].name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "clear", "load", "export", "fork"]);
+        assert_eq!(
+            names,
+            vec!["new", "clear", "load", "export", "theme", "fork"]
+        );
     }
 
     #[test]
@@ -3243,7 +3273,15 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["new", "clear", "load", "export", "fork", "review_pr"]
+            vec![
+                "new",
+                "clear",
+                "load",
+                "export",
+                "theme",
+                "fork",
+                "review_pr"
+            ]
         );
         assert_eq!(s.available_commands[0].description, "start a new session");
         assert_eq!(
@@ -3260,6 +3298,10 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[4].description,
+            "change terminal theme: light, dark, ansi-light, ansi-dark"
+        );
+        assert_eq!(
+            s.available_commands[5].description,
             "fork the current session (unstable ACP extension)"
         );
     }
@@ -3279,7 +3321,10 @@ mod tests {
             .iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "clear", "load", "export", "review_pr"]);
+        assert_eq!(
+            names,
+            vec!["new", "clear", "load", "export", "theme", "review_pr"]
+        );
     }
 
     #[test]

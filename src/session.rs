@@ -20,7 +20,7 @@ use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, Key
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use serde::Serialize;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -28,6 +28,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::acp;
 use crate::config::SelectedAgent;
+use crate::theme::TerminalTheme;
 use crate::version::mjolnir_version_label;
 
 /// One row in the session picker.
@@ -418,13 +419,14 @@ pub async fn run_session_picker(
     sessions: Vec<SessionEntry>,
     delete_supported: bool,
     notice: Option<String>,
+    theme: TerminalTheme,
 ) -> Result<ResumeOutcome> {
     let mut state = SessionPickerState::new(sessions, delete_supported, notice);
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
 
-    terminal.draw(|f| draw_session_picker(f, &state))?;
+    terminal.draw(|f| draw_session_picker(f, &state, theme))?;
 
     loop {
         tokio::select! {
@@ -440,7 +442,7 @@ pub async fn run_session_picker(
             }
             _ = tick.tick() => {}
         }
-        terminal.draw(|f| draw_session_picker(f, &state))?;
+        terminal.draw(|f| draw_session_picker(f, &state, theme))?;
     }
 }
 
@@ -522,7 +524,7 @@ fn handle_session_picker_event(
     }
 }
 
-fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState) {
+fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState, theme: TerminalTheme) {
     let notice_text = session_picker_notice_text(state);
     let notice_height = session_picker_notice_height(f.area(), notice_text.as_deref());
     let notice_scrollable = notice_needs_scroll(f.area(), notice_text.as_deref(), notice_height);
@@ -548,7 +550,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState) {
     f.render_widget(block, chunks[1]);
 
     if state.filtered.is_empty() {
-        let p = Paragraph::new("no sessions found").style(Style::default().fg(Color::DarkGray));
+        let p = Paragraph::new("no sessions found").style(Style::default().fg(theme.muted));
         f.render_widget(p, inner);
     } else {
         let visible = inner.height as usize;
@@ -582,8 +584,8 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState) {
                 let line = format!("{marker} {label}  -- {hint}");
                 let style = if absolute == state.selected {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(theme.selection_fg)
+                        .bg(theme.selection_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -599,7 +601,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState) {
     // Notice / confirmation
     if let Some(notice_text) = notice_text {
         let notice = Paragraph::new(notice_text)
-            .style(Style::default().fg(Color::Yellow))
+            .style(Style::default().fg(theme.warning))
             .scroll((state.notice_scroll, 0))
             .wrap(Wrap { trim: false });
         f.render_widget(notice, chunks[2]);
@@ -628,7 +630,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState) {
     } else {
         "Up/Down navigate | Enter select | Esc cancel"
     };
-    let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new(footer_text).style(Style::default().fg(theme.muted));
     f.render_widget(footer, chunks[4]);
 }
 

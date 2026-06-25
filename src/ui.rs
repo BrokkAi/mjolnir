@@ -50,6 +50,7 @@ use crate::event::{PermissionDecision, PermissionPrompt, PromptImage, UiCommand,
 use crate::notifications::TerminalNotificationBackend;
 use crate::speech::{dictation_error_message, run_dictation};
 use crate::term::TrackedBackend;
+use crate::theme::{TerminalTheme, TerminalThemeKind};
 use crate::version::mjolnir_version_label;
 
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
@@ -167,6 +168,7 @@ impl TranscriptSink {
             width,
             self.emitted_entries..stable_entries,
             transcript_collapse_limit(state),
+            state.theme,
         );
         self.emitted_entries = stable_entries;
         lines
@@ -269,6 +271,14 @@ impl TranscriptScrollState {
 pub struct UiPersistencePaths<'a> {
     pub history_path: Option<&'a Path>,
     pub transcript_export_dir: Option<&'a Path>,
+    pub config_path: Option<&'a Path>,
+}
+
+#[derive(Clone, Copy)]
+pub struct UiRunOptions<'a> {
+    pub persistence: UiPersistencePaths<'a>,
+    pub mode: UiMode,
+    pub theme_kind: TerminalThemeKind,
 }
 
 struct UiInitialState {
@@ -276,6 +286,8 @@ struct UiInitialState {
     agent_label: Option<String>,
     history: Vec<String>,
     transcript_export_dir: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+    theme_kind: TerminalThemeKind,
 }
 
 pub async fn run(
@@ -284,10 +296,10 @@ pub async fn run(
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
     header_labels: HeaderLabels,
     initial_agent_label: Option<String>,
-    persistence: UiPersistencePaths<'_>,
-    mode: UiMode,
+    options: UiRunOptions<'_>,
 ) -> Result<(UiExitReason, Option<String>, Option<String>)> {
-    let initial_history = persistence
+    let initial_history = options
+        .persistence
         .history_path
         .map(config::load_history)
         .unwrap_or_default();
@@ -299,12 +311,17 @@ pub async fn run(
             header_labels,
             agent_label: initial_agent_label,
             history: initial_history,
-            transcript_export_dir: persistence.transcript_export_dir.map(Path::to_path_buf),
+            transcript_export_dir: options
+                .persistence
+                .transcript_export_dir
+                .map(Path::to_path_buf),
+            config_path: options.persistence.config_path.map(Path::to_path_buf),
+            theme_kind: options.theme_kind,
         },
-        mode,
+        options.mode,
     )
     .await?;
-    if let Some(path) = persistence.history_path
+    if let Some(path) = options.persistence.history_path
         && let Err(e) = config::save_history(path, &history)
     {
         tracing::warn!("save_history {path:?}: {e:#}");
@@ -377,6 +394,8 @@ async fn ui_loop(
         state.agent_label = label;
     }
     state.transcript_export_dir = initial.transcript_export_dir;
+    state.set_theme(initial.theme_kind);
+    state.config_path = initial.config_path;
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut transcript_sink = TranscriptSink::default();
     let mut inline_resize_reflow = InlineResizeReflow::default();
@@ -1012,6 +1031,7 @@ fn inline_resize_reflow_snapshot(
         size.width,
         0..stable_entries,
         transcript_collapse_limit(state),
+        state.theme,
     );
 
     Some(InlineResizeReflowSnapshot {
@@ -1211,7 +1231,14 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
     let desired = if state.help_overlay {
         usize::from(INLINE_HELP_HEIGHT)
     } else if let Some(pending) = state.pending_permission() {
-        permission_view_lines(pending, state.pending_permission_count(), width).len() + 1
+        permission_view_lines(
+            pending,
+            state.pending_permission_count(),
+            width,
+            state.theme,
+        )
+        .len()
+            + 1
     } else if state.config_picker.is_some() {
         inline_config_view_line_count(state, width)
     } else {
@@ -2655,6 +2682,18 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
+    if images.is_empty() && (text == "/theme" || text.starts_with("/theme ")) {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        apply_theme_command(
+            state,
+            text.strip_prefix("/theme").unwrap_or_default().trim(),
+        );
+        return;
+    }
+
     if images.is_empty() && text == "/export" {
         state.input.clear();
         clear_attachments(state);
@@ -2748,6 +2787,52 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
 
     state.record_user_prompt(display_text);
     let _ = cmd_tx.send(UiCommand::SendPrompt { text, images });
+}
+
+fn apply_theme_command(state: &mut AppState, theme_name: &str) {
+    if theme_name.is_empty() {
+        let names = TerminalThemeKind::ALL
+            .iter()
+            .map(|kind| {
+                if *kind == state.theme_kind {
+                    format!("{kind} (current)")
+                } else {
+                    kind.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        state.record_status_message(StatusKind::Info, format!("themes: {names}"));
+        return;
+    }
+
+    let theme_kind = match theme_name.parse::<TerminalThemeKind>() {
+        Ok(theme_kind) => theme_kind,
+        Err(e) => {
+            state.record_status_message(StatusKind::Warning, e);
+            return;
+        }
+    };
+
+    state.set_theme(theme_kind);
+    if let Some(path) = state.config_path.clone() {
+        match config::Config::load(&path).and_then(|mut cfg| {
+            cfg.theme = theme_kind;
+            cfg.save(&path)
+        }) {
+            Ok(()) => {
+                state.record_status_message(StatusKind::Info, format!("theme set to {theme_kind}"));
+            }
+            Err(e) => {
+                state.record_status_message(
+                    StatusKind::Warning,
+                    format!("theme changed but save failed: {e:#}"),
+                );
+            }
+        }
+    } else {
+        state.record_status_message(StatusKind::Info, format!("theme set to {theme_kind}"));
+    }
 }
 
 fn export_transcript(state: &AppState) -> Result<PathBuf> {
@@ -3441,17 +3526,29 @@ fn draw(
     }
 
     if state.help_overlay {
-        draw_help_modal(f, f.area(), mode);
+        draw_help_modal(f, f.area(), mode, state.theme);
     }
 
     if let Some(pending) = state.pending_permission() {
-        draw_permission_modal(f, f.area(), pending, state.pending_permission_count());
+        draw_permission_modal(
+            f,
+            f.area(),
+            pending,
+            state.pending_permission_count(),
+            state.theme,
+        );
     }
 }
 
 fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     if let Some(pending) = state.pending_permission() {
-        draw_inline_permission_view(f, f.area(), pending, state.pending_permission_count());
+        draw_inline_permission_view(
+            f,
+            f.area(),
+            pending,
+            state.pending_permission_count(),
+            state.theme,
+        );
         return;
     }
 
@@ -3488,7 +3585,7 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     }
 
     if state.help_overlay {
-        draw_help_modal(f, f.area(), UiMode::InlineChat);
+        draw_help_modal(f, f.area(), UiMode::InlineChat, state.theme);
     }
 }
 
@@ -3506,6 +3603,7 @@ fn draw_inline_permission_view(
     area: Rect,
     pending: &PendingPermission,
     queue_len: usize,
+    theme: crate::theme::TerminalTheme,
 ) {
     f.render_widget(Clear, area);
     let content = inline_content_rect(area);
@@ -3518,14 +3616,14 @@ fn draw_inline_permission_view(
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(content);
 
-    let lines = permission_view_lines(pending, queue_len, content.width);
+    let lines = permission_view_lines(pending, queue_len, content.width, theme);
     let visible_lines =
         visible_permission_content_lines(pending, &lines, content.width, layout[0].height);
     f.render_widget(Paragraph::new(visible_lines), layout[0]);
 
     f.render_widget(
         Paragraph::new("Up/Down choose | PgUp/PgDn read | Enter to confirm | Esc cancel")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(theme.muted)),
         layout[1],
     );
 }
@@ -3574,7 +3672,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
         Paragraph::new(Line::from(Span::styled(
             title,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(state.theme.primary)
                 .add_modifier(Modifier::BOLD),
         ))),
         layout[0],
@@ -3587,14 +3685,14 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
         format!("filter: {}", picker.search_query)
     };
     f.render_widget(
-        Paragraph::new(search_text).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(search_text).style(Style::default().fg(state.theme.muted)),
         layout[2],
     );
 
     let total = picker.filtered_indices.len();
     if total == 0 {
         f.render_widget(
-            Paragraph::new("No matches").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new("No matches").style(Style::default().fg(state.theme.muted)),
             layout[3],
         );
     } else {
@@ -3615,7 +3713,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
                 let marker = if absolute == selected { ">" } else { " " };
                 let choice = &choices[full_idx];
                 let line = config_value_row_text(choice);
-                truncate_line(line, layout[3].width, marker == ">")
+                truncate_line(line, layout[3].width, marker == ">", state.theme)
             })
             .collect::<Vec<ListItem>>();
         f.render_widget(List::new(items), layout[3]);
@@ -3627,7 +3725,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
         "Up/Down choose | Backspace clear | Enter apply | Esc cancel"
     };
     f.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(footer).style(Style::default().fg(state.theme.muted)),
         layout[4],
     );
 }
@@ -3645,7 +3743,7 @@ fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" transcript — full history ")
-        .style(Style::default().fg(Color::Green));
+        .style(Style::default().fg(state.theme.agent));
     let inner = block.inner(layout[0]);
     f.render_widget(block, layout[0]);
 
@@ -3667,7 +3765,7 @@ fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut
 
     f.render_widget(
         Paragraph::new("Up/Down PgUp/PgDn scroll · Home/End top/bottom · Esc or Ctrl-T to close")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(state.theme.muted)),
         layout[1],
     );
 }
@@ -3695,7 +3793,7 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let mut spans = vec![
         Span::styled(
             mjolnir_version_label(),
-            Style::default().fg(Color::LightBlue),
+            Style::default().fg(state.theme.accent),
         ),
         Span::raw("   "),
     ];
@@ -3703,7 +3801,7 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if !agent_label.is_empty() {
         spans.push(Span::styled(
             agent_label.to_string(),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(state.theme.primary),
         ));
         spans.push(Span::raw("   "));
     }
@@ -3717,13 +3815,13 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         };
         spans.push(Span::styled(
             compact_middle_display(project_label, max_width),
-            Style::default().fg(Color::LightMagenta),
+            Style::default().fg(state.theme.secondary),
         ));
         spans.push(Span::raw("   "));
     }
     spans.push(Span::styled(
         header_token_usage_label(state, width),
-        Style::default().fg(Color::Magenta),
+        Style::default().fg(state.theme.tool),
     ));
     if let Some(title) = state.session_title.as_deref() {
         let title = title.trim();
@@ -3740,7 +3838,7 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
                 spans.push(Span::styled(
                     compact_middle_display(title, max_width),
                     Style::default()
-                        .fg(Color::LightYellow)
+                        .fg(state.theme.terminal)
                         .add_modifier(Modifier::ITALIC),
                 ));
             }
@@ -3956,6 +4054,7 @@ fn render_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
         width,
         0..state.transcript.len(),
         transcript_collapse_limit(state),
+        state.theme,
     )
 }
 
@@ -3963,7 +4062,7 @@ fn render_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
 /// regardless of the session collapse setting. Used by the inline
 /// full-transcript reader so users can re-read truncated output in full.
 fn render_full_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
-    render_transcript_entry_range(state, width, 0..state.transcript.len(), None)
+    render_transcript_entry_range(state, width, 0..state.transcript.len(), None, state.theme)
 }
 
 /// Line budget per tool-output entry for the streaming transcript: `None`
@@ -3982,23 +4081,22 @@ fn render_transcript_entry_range(
     width: u16,
     entry_range: Range<usize>,
     collapse_limit: Option<usize>,
+    theme: crate::theme::TerminalTheme,
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     for entry in state.transcript[entry_range].iter() {
         match entry {
-            Entry::UserPrompt(text) => push_plain_block(&mut out, "you", Color::Cyan, text.clone()),
+            Entry::UserPrompt(text) => push_plain_block(&mut out, "you", theme.user, text.clone()),
             Entry::AgentMessage(text) => {
-                push_markdown_block(&mut out, "agent", Color::Green, text.clone())
+                push_markdown_block(&mut out, "agent", theme.agent, text.clone(), theme)
             }
             Entry::AgentThought(text) => {
-                push_markdown_block(&mut out, "thought", Color::DarkGray, text.clone())
+                push_markdown_block(&mut out, "thought", theme.thought, text.clone(), theme)
             }
             Entry::Plan(entries) => {
                 out.push(Line::from(Span::styled(
                     "plan",
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.tool).add_modifier(Modifier::BOLD),
                 )));
                 for e in entries {
                     let bullet = match e.priority {
@@ -4020,7 +4118,7 @@ fn render_transcript_entry_range(
             Entry::ToolCall(id) => {
                 if let Some(view) = state.tool_calls.get(id) {
                     let status_label = tool_status_label(view.status);
-                    let color = tool_status_color(view.status);
+                    let color = tool_status_color(view.status, theme);
                     out.push(Line::from(vec![
                         Span::styled(
                             format!("tool [{}] ", status_label),
@@ -4028,18 +4126,18 @@ fn render_transcript_entry_range(
                         ),
                         Span::styled(
                             format!("{} ", tool_kind_label(view.kind)),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(theme.muted),
                         ),
                         Span::raw(view.title.clone()),
                     ]));
-                    push_tool_outputs(&mut out, &view.body, width, collapse_limit);
+                    push_tool_outputs(&mut out, &view.body, width, collapse_limit, theme);
                     out.push(Line::from(""));
                 }
             }
             Entry::System(text) => {
                 out.push(Line::from(Span::styled(
                     text.clone(),
-                    Style::default().fg(Color::LightBlue),
+                    Style::default().fg(theme.accent),
                 )));
                 out.push(Line::from(""));
             }
@@ -4048,12 +4146,18 @@ fn render_transcript_entry_range(
     out
 }
 
-fn push_markdown_block(out: &mut Vec<Line<'static>>, label: &str, color: Color, text: String) {
+fn push_markdown_block(
+    out: &mut Vec<Line<'static>>,
+    label: &str,
+    color: Color,
+    text: String,
+    theme: crate::theme::TerminalTheme,
+) {
     out.push(Line::from(Span::styled(
         format!("{label}:"),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )));
-    push_markdown_lines(out, text, 0);
+    push_markdown_lines(out, text, 0, theme);
     out.push(Line::from(""));
 }
 
@@ -4073,7 +4177,12 @@ fn push_plain_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize) {
     }
 }
 
-fn push_markdown_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize) {
+fn push_markdown_lines(
+    out: &mut Vec<Line<'static>>,
+    text: String,
+    indent: usize,
+    theme: crate::theme::TerminalTheme,
+) {
     let prefix = " ".repeat(indent);
     let mut in_code_block = false;
     let mut code_lang = String::new();
@@ -4091,7 +4200,7 @@ fn push_markdown_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize
                 out.push(Line::from(Span::styled(
                     format!("{prefix}{title}"),
                     Style::default()
-                        .fg(Color::DarkGray)
+                        .fg(theme.muted)
                         .add_modifier(Modifier::BOLD),
                 )));
             } else {
@@ -4103,7 +4212,7 @@ fn push_markdown_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize
         if in_code_block {
             out.push(Line::from(Span::styled(
                 format!("{prefix}  {raw}"),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(theme.quote),
             )));
             continue;
         }
@@ -4118,13 +4227,11 @@ fn push_markdown_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize
             out.push(Line::from(vec![
                 Span::styled(
                     format!("{prefix}{marker} "),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.muted),
                 ),
                 Span::styled(
                     heading.to_string(),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                 ),
             ]));
             continue;
@@ -4133,15 +4240,15 @@ fn push_markdown_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize
         if markdown_rule(raw) {
             out.push(Line::from(Span::styled(
                 format!("{prefix}--------"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
             continue;
         }
 
         if let Some(quoted) = trimmed.strip_prefix("> ") {
             out.push(Line::from(vec![
-                Span::styled(format!("{prefix}> "), Style::default().fg(Color::DarkGray)),
-                Span::styled(quoted.to_string(), Style::default().fg(Color::Gray)),
+                Span::styled(format!("{prefix}> "), Style::default().fg(theme.muted)),
+                Span::styled(quoted.to_string(), Style::default().fg(theme.quote)),
             ]));
             continue;
         }
@@ -4149,9 +4256,9 @@ fn push_markdown_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize
         if let Some(item) = markdown_unordered_item(raw) {
             let mut spans = vec![Span::styled(
                 format!("{prefix}- "),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )];
-            spans.extend(inline_markdown_spans(item));
+            spans.extend(inline_markdown_spans(item, theme));
             out.push(Line::from(spans));
             continue;
         }
@@ -4159,15 +4266,15 @@ fn push_markdown_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize
         if let Some((number, item)) = markdown_ordered_item(raw) {
             let mut spans = vec![Span::styled(
                 format!("{prefix}{number}. "),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )];
-            spans.extend(inline_markdown_spans(item));
+            spans.extend(inline_markdown_spans(item, theme));
             out.push(Line::from(spans));
             continue;
         }
 
         let mut spans = vec![Span::raw(prefix.clone())];
-        spans.extend(inline_markdown_spans(raw));
+        spans.extend(inline_markdown_spans(raw, theme));
         out.push(Line::from(spans));
     }
 }
@@ -4208,7 +4315,7 @@ fn markdown_ordered_item(raw: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn inline_markdown_spans(raw: &str) -> Vec<Span<'static>> {
+fn inline_markdown_spans(raw: &str, theme: crate::theme::TerminalTheme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = raw;
     while !rest.is_empty() {
@@ -4218,7 +4325,7 @@ fn inline_markdown_spans(raw: &str) -> Vec<Span<'static>> {
             let (code, tail) = after.split_at(end);
             spans.push(Span::styled(
                 code.to_string(),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.code),
             ));
             rest = &tail[1..];
             continue;
@@ -4263,11 +4370,12 @@ fn push_tool_outputs(
     outputs: &[ToolCallOutput],
     width: u16,
     collapse_limit: Option<usize>,
+    theme: crate::theme::TerminalTheme,
 ) {
     for output in outputs {
         match output {
             ToolCallOutput::Text(text) => {
-                push_tool_text_lines(out, text.clone(), 2, collapse_limit)
+                push_tool_text_lines(out, text.clone(), 2, collapse_limit, theme)
             }
             ToolCallOutput::Diff {
                 path,
@@ -4280,6 +4388,7 @@ fn push_tool_outputs(
                 new_text,
                 width,
                 collapse_limit,
+                theme,
             ),
             ToolCallOutput::Terminal {
                 terminal_id,
@@ -4288,29 +4397,29 @@ fn push_tool_outputs(
                 exit_status,
             } => {
                 out.push(Line::from(vec![
-                    Span::styled("  terminal ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(terminal_id.clone(), Style::default().fg(Color::LightYellow)),
+                    Span::styled("  terminal ", Style::default().fg(theme.muted)),
+                    Span::styled(terminal_id.clone(), Style::default().fg(theme.terminal)),
                 ]));
                 if *truncated {
                     out.push(Line::from(Span::styled(
                         "    [output truncated]",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme.muted),
                     )));
                 }
                 if !output.is_empty() {
-                    push_tool_text_lines(out, output.clone(), 4, collapse_limit);
+                    push_tool_text_lines(out, output.clone(), 4, collapse_limit, theme);
                 }
                 if let Some(status) = exit_status {
                     out.push(Line::from(Span::styled(
                         format!("    exit {}", terminal_exit_status_label(status)),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme.muted),
                     )));
                 }
             }
             ToolCallOutput::Note(note) => {
                 out.push(Line::from(Span::styled(
                     format!("  [{note}]"),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.muted),
                 )));
             }
         }
@@ -4333,6 +4442,7 @@ fn push_tool_text_lines(
     text: String,
     indent: usize,
     collapse_limit: Option<usize>,
+    theme: crate::theme::TerminalTheme,
 ) {
     let prefix = " ".repeat(indent);
     let lines: Vec<&str> = text.split('\n').collect();
@@ -4342,46 +4452,56 @@ fn push_tool_text_lines(
     };
     for raw in &lines[..visible_count] {
         let line = format!("{prefix}{raw}");
-        out.push(Line::from(Span::styled(line, tool_output_line_style(raw))));
+        out.push(Line::from(Span::styled(
+            line,
+            tool_output_line_style(raw, theme),
+        )));
     }
     if hidden > 0 {
-        push_collapse_hint(out, indent, hidden);
+        push_collapse_hint(out, indent, hidden, theme);
     }
 }
 
 /// Trailing "K more lines hidden" hint shown under collapsed tool outputs
 /// so the user can tell something was elided rather than assuming the
 /// output just ended.
-fn push_collapse_hint(out: &mut Vec<Line<'static>>, indent: usize, hidden: usize) {
+fn push_collapse_hint(
+    out: &mut Vec<Line<'static>>,
+    indent: usize,
+    hidden: usize,
+    theme: crate::theme::TerminalTheme,
+) {
     let prefix = " ".repeat(indent);
     out.push(Line::from(Span::styled(
         format!("{prefix}... {hidden} more lines hidden (Ctrl-T to expand)"),
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(theme.muted)
             .add_modifier(Modifier::ITALIC),
     )));
 }
 
-fn tool_output_line_style(raw: &str) -> Style {
+fn tool_output_line_style(raw: &str, theme: crate::theme::TerminalTheme) -> Style {
     let lower = raw.to_ascii_lowercase();
     if lower.contains("error")
         || lower.contains("failed")
         || lower.contains("panic")
         || lower.contains("denied")
     {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD)
     } else if lower.contains("warning") || lower.contains("warn") {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(theme.warning)
     } else if lower.contains("success")
         || lower.contains("passed")
         || lower == "ok"
         || lower.ends_with(" ok")
     {
-        Style::default().fg(Color::Green)
+        Style::default().fg(theme.success)
     } else if raw.trim_start().starts_with('$') {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.primary)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(theme.subtle)
     }
 }
 
@@ -4392,10 +4512,11 @@ fn push_diff_output(
     new_text: &str,
     width: u16,
     collapse_limit: Option<usize>,
+    theme: crate::theme::TerminalTheme,
 ) {
     out.push(Line::from(vec![
-        Span::styled("  diff ", Style::default().fg(Color::DarkGray)),
-        Span::styled(path.to_string(), Style::default().fg(Color::Cyan)),
+        Span::styled("  diff ", Style::default().fg(theme.muted)),
+        Span::styled(path.to_string(), Style::default().fg(theme.primary)),
     ]));
 
     let old_lines: Vec<&str> = old_text.unwrap_or("").lines().collect();
@@ -4403,10 +4524,10 @@ fn push_diff_output(
     let diff_budget = collapse_limit.unwrap_or(80);
     for diff_line in compact_line_diff(&old_lines, &new_lines, diff_budget) {
         let (prefix, color) = match diff_line.kind {
-            DiffLineKind::Added => ("+ ", Color::Green),
-            DiffLineKind::Removed => ("- ", Color::Red),
-            DiffLineKind::Context => ("  ", Color::DarkGray),
-            DiffLineKind::Omitted => ("... ", Color::DarkGray),
+            DiffLineKind::Added => ("+ ", theme.diff_added),
+            DiffLineKind::Removed => ("- ", theme.diff_removed),
+            DiffLineKind::Context => ("  ", theme.diff_context),
+            DiffLineKind::Omitted => ("... ", theme.diff_context),
         };
         let text = truncate_display_line(&diff_line.text, width.saturating_sub(6) as usize);
         out.push(Line::from(Span::styled(
@@ -4573,13 +4694,16 @@ fn tool_status_label(status: agent_client_protocol::schema::ToolCallStatus) -> &
     }
 }
 
-fn tool_status_color(status: agent_client_protocol::schema::ToolCallStatus) -> Color {
+fn tool_status_color(
+    status: agent_client_protocol::schema::ToolCallStatus,
+    theme: crate::theme::TerminalTheme,
+) -> Color {
     match status {
-        agent_client_protocol::schema::ToolCallStatus::Failed => Color::Red,
-        agent_client_protocol::schema::ToolCallStatus::Completed => Color::Green,
-        agent_client_protocol::schema::ToolCallStatus::InProgress => Color::Cyan,
-        agent_client_protocol::schema::ToolCallStatus::Pending => Color::DarkGray,
-        _ => Color::LightYellow,
+        agent_client_protocol::schema::ToolCallStatus::Failed => theme.error,
+        agent_client_protocol::schema::ToolCallStatus::Completed => theme.success,
+        agent_client_protocol::schema::ToolCallStatus::InProgress => theme.primary,
+        agent_client_protocol::schema::ToolCallStatus::Pending => theme.muted,
+        _ => theme.warning,
     }
 }
 
@@ -4744,12 +4868,12 @@ fn image_attachment_label(attachment: &PastedImageAttachment) -> String {
     )
 }
 
-fn attachment_span(label: String) -> Span<'static> {
+fn attachment_span(label: String, theme: TerminalTheme) -> Span<'static> {
     Span::styled(
         label,
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(theme.selection_fg)
+            .bg(theme.selection_bg)
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -4864,7 +4988,7 @@ fn input_layout_with_attachments(state: &AppState, inner_w: usize) -> InputAttac
         .map(|attachment| InlineAttachmentChip {
             id: attachment.id,
             position: attachment.position.min(input_len),
-            span: attachment_span(text_attachment_label(attachment)),
+            span: attachment_span(text_attachment_label(attachment), state.theme),
         })
         .chain(
             state
@@ -4873,7 +4997,7 @@ fn input_layout_with_attachments(state: &AppState, inner_w: usize) -> InputAttac
                 .map(|attachment| InlineAttachmentChip {
                     id: attachment.id,
                     position: attachment.position.min(input_len),
-                    span: attachment_span(image_attachment_label(attachment)),
+                    span: attachment_span(image_attachment_label(attachment), state.theme),
                 }),
         )
         .collect();
@@ -5076,11 +5200,11 @@ fn draw_queued_prompt_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) 
             Line::from(Span::styled(
                 label,
                 Style::default()
-                    .fg(Color::Black)
+                    .fg(state.theme.selection_fg)
                     .bg(if idx == 0 {
-                        Color::Yellow
+                        state.theme.warning
                     } else {
-                        Color::LightYellow
+                        state.theme.permission
                     })
                     .add_modifier(Modifier::BOLD),
             ))
@@ -5089,7 +5213,7 @@ fn draw_queued_prompt_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) 
     if total > visible && lines.len() < usize::from(area.height) {
         lines.push(Line::from(Span::styled(
             format!(" ↳ ... {} more queued ", total - visible),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(state.theme.warning),
         )));
     }
     let chip = Paragraph::new(lines);
@@ -5120,7 +5244,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         idle_prompt_title(state, VOICE_INPUT_SUPPORTED, &text_selection_hint)
     };
     let style = if state.runtime_closed {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(state.theme.muted)
     } else {
         Style::default()
     };
@@ -5186,10 +5310,10 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         content_area.height,
     );
     let gutter_style = if state.runtime_closed {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(state.theme.muted)
     } else {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(state.theme.primary)
             .add_modifier(Modifier::BOLD)
     };
     let gutter = Paragraph::new(">").style(gutter_style);
@@ -5233,7 +5357,7 @@ fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppStat
         chips.push(chip);
     }
 
-    let paragraph = Paragraph::new(chips.join(" ")).style(Style::default().fg(Color::Cyan));
+    let paragraph = Paragraph::new(chips.join(" ")).style(Style::default().fg(state.theme.primary));
     f.render_widget(paragraph, area);
 }
 
@@ -5242,6 +5366,7 @@ fn draw_permission_modal(
     area: Rect,
     pending: &PendingPermission,
     queue_len: usize,
+    theme: TerminalTheme,
 ) {
     const HORIZONTAL_PADDING: u16 = 2;
     const VERTICAL_PADDING: u16 = 1;
@@ -5275,7 +5400,7 @@ fn draw_permission_modal(
         .saturating_add(HORIZONTAL_PADDING * 2)
         .min(max_width);
 
-    let view_lines = permission_view_lines(pending, queue_len, desired_content_width);
+    let view_lines = permission_view_lines(pending, queue_len, desired_content_width, theme);
     let view_rows = view_lines.len().min(u16::MAX as usize) as u16;
 
     let max_height = area.height.saturating_sub(2);
@@ -5302,7 +5427,7 @@ fn draw_permission_modal(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(Style::default().fg(Color::Yellow));
+        .style(Style::default().fg(theme.permission));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -5329,7 +5454,7 @@ fn draw_permission_modal(
     );
     f.render_widget(Paragraph::new(visible_lines), layout[0]);
 
-    let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new(footer_text).style(Style::default().fg(theme.muted));
     f.render_widget(footer, layout[1]);
 }
 
@@ -5337,6 +5462,7 @@ fn permission_option_lines(
     pending: &PendingPermission,
     selected: usize,
     width: u16,
+    theme: TerminalTheme,
 ) -> Vec<(usize, Vec<Line<'static>>)> {
     pending
         .prompt
@@ -5348,8 +5474,8 @@ fn permission_option_lines(
             let marker = if i == selected { "> " } else { "  " };
             let style = if i == selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .fg(theme.selection_fg)
+                    .bg(theme.permission)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -5385,6 +5511,7 @@ fn permission_view_lines(
     pending: &PendingPermission,
     queue_len: usize,
     width: u16,
+    theme: TerminalTheme,
 ) -> Vec<Line<'static>> {
     let selected = clamp_permission_selected(pending.selected, pending.prompt.options.len());
     let title = if queue_len > 1 {
@@ -5395,18 +5522,18 @@ fn permission_view_lines(
     let mut lines = vec![Line::from(Span::styled(
         title,
         Style::default()
-            .fg(Color::Yellow)
+            .fg(theme.permission)
             .add_modifier(Modifier::BOLD),
     ))];
 
     lines.extend(
         wrap_text_to_width(&permission_detail_text(pending), width)
             .into_iter()
-            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White)))),
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(theme.text)))),
     );
     lines.push(Line::from(""));
     lines.extend(
-        permission_option_lines(pending, selected, width)
+        permission_option_lines(pending, selected, width, theme)
             .into_iter()
             .flat_map(|(_, option_lines)| option_lines),
     );
@@ -5599,7 +5726,7 @@ fn pad_text_to_width(mut line: String, width: u16) -> String {
     line
 }
 
-fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
+fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode, theme: TerminalTheme) {
     let width = area.width.saturating_sub(8).min(82);
     let height = 23.min(area.height.saturating_sub(4));
     if width < 40 || height < 10 {
@@ -5613,7 +5740,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" help ")
-        .style(Style::default().fg(Color::Green));
+        .style(Style::default().fg(theme.success));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -5747,7 +5874,7 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(Style::default().fg(Color::Cyan));
+        .style(Style::default().fg(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -5772,11 +5899,11 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     let search_text = if picker.search_query.is_empty() {
         Line::from(Span::styled(
             "🔍 type to filter...",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(state.theme.muted),
         ))
     } else {
         Line::from(vec![
-            Span::styled("🔍 ", Style::default().fg(Color::DarkGray)),
+            Span::styled("🔍 ", Style::default().fg(state.theme.muted)),
             Span::raw(picker.search_query.clone()),
         ])
     };
@@ -5784,11 +5911,11 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     f.render_widget(search, layout[1]);
 
     if total == 0 {
-        let no_matches = Paragraph::new("No matches").style(Style::default().fg(Color::DarkGray));
+        let no_matches = Paragraph::new("No matches").style(Style::default().fg(state.theme.muted));
         f.render_widget(no_matches, layout[2]);
 
         let footer = Paragraph::new("Backspace to clear | Esc cancel")
-            .style(Style::default().fg(Color::DarkGray));
+            .style(Style::default().fg(state.theme.muted));
         f.render_widget(footer, layout[3]);
         return;
     }
@@ -5809,7 +5936,7 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
             let marker = if absolute == selected { ">" } else { " " };
             let choice = &choices[full_idx];
             let line = config_value_row_text(choice);
-            truncate_line(line, layout[2].width, marker == ">")
+            truncate_line(line, layout[2].width, marker == ">", state.theme)
         })
         .collect::<Vec<ListItem>>();
     let list = List::new(items);
@@ -5820,7 +5947,7 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     } else {
         "Up/Down to choose | Backspace to clear | Enter to apply | Esc cancel"
     };
-    let footer = Paragraph::new(filter_hint).style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new(filter_hint).style(Style::default().fg(state.theme.muted));
     f.render_widget(footer, layout[3]);
 }
 
@@ -5853,7 +5980,7 @@ fn draw_autocomplete_popover(f: &mut ratatui::Frame, input_area: Rect, state: &A
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" commands (Tab/Enter accept, Esc cancel) ")
-        .style(Style::default().fg(Color::Cyan));
+        .style(Style::default().fg(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -5903,8 +6030,8 @@ fn draw_autocomplete_popover(f: &mut ratatui::Frame, input_area: Rect, state: &A
             }
             let style = if absolute == selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(state.theme.selection_fg)
+                    .bg(state.theme.selection_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -5933,7 +6060,7 @@ fn draw_inline_autocomplete_popover(f: &mut ratatui::Frame, area: Rect, state: &
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" commands (Tab/Enter accept, Esc cancel) ")
-        .style(Style::default().fg(Color::Cyan));
+        .style(Style::default().fg(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -5969,21 +6096,26 @@ fn draw_inline_autocomplete_popover(f: &mut ratatui::Frame, area: Rect, state: &
                 line.push_str("  -- ");
                 line.push_str(description);
             }
-            truncate_line(line, inner.width, marker == ">")
+            truncate_line(line, inner.width, marker == ">", state.theme)
         })
         .collect();
     f.render_widget(List::new(items), inner);
 }
 
-fn truncate_line(line: String, width: u16, selected: bool) -> ListItem<'static> {
+fn truncate_line(
+    line: String,
+    width: u16,
+    selected: bool,
+    theme: TerminalTheme,
+) -> ListItem<'static> {
     let mut line = truncate_text_to_width(line, width);
     if line.is_empty() {
         line.push(' ');
     }
     let style = if selected {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(theme.selection_fg)
+            .bg(theme.selection_bg)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -7241,6 +7373,62 @@ mod tests {
     }
 
     #[test]
+    fn slash_theme_changes_theme_and_persists_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut state = AppState::new();
+        state.config_path = Some(path.clone());
+        state.input = "/theme ansi-light".to_string();
+        let starting_revision = state.transcript_revision();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert_eq!(state.theme_kind, TerminalThemeKind::AnsiLight);
+        assert_eq!(state.theme.kind, TerminalThemeKind::AnsiLight);
+        assert_ne!(state.transcript_revision(), starting_revision);
+        let saved = config::Config::load(&path).expect("load saved config");
+        assert_eq!(saved.theme, TerminalThemeKind::AnsiLight);
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Info);
+        assert_eq!(status.text, "theme set to ansi-light");
+    }
+
+    #[test]
+    fn slash_theme_lists_available_themes_without_runtime_command() {
+        let mut state = AppState::new();
+        state.input = "/theme".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert_eq!(state.theme_kind, TerminalThemeKind::Dark);
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Info);
+        assert!(status.text.contains("light"));
+        assert!(status.text.contains("dark (current)"));
+        assert!(status.text.contains("ansi-light"));
+        assert!(status.text.contains("ansi-dark"));
+    }
+
+    #[test]
+    fn slash_theme_rejects_unknown_theme_without_runtime_command() {
+        let mut state = AppState::new();
+        state.input = "/theme solarized".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert_eq!(state.theme_kind, TerminalThemeKind::Dark);
+        let status = state.status_line.expect("status");
+        assert_eq!(status.kind, StatusKind::Warning);
+        assert!(status.text.contains("unknown theme"));
+    }
+
+    #[test]
     fn transcript_export_markdown_escapes_markdown_and_sizes_fences() {
         let mut state = AppState::new();
         state.agent_label = "agent [x]".to_string();
@@ -8466,7 +8654,15 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw_permission_modal(frame, frame.area(), &pending, 1))
+            .draw(|frame| {
+                draw_permission_modal(
+                    frame,
+                    frame.area(),
+                    &pending,
+                    1,
+                    TerminalThemeKind::default().palette(),
+                )
+            })
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -8517,7 +8713,15 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw_permission_modal(frame, frame.area(), &pending, 1))
+            .draw(|frame| {
+                draw_permission_modal(
+                    frame,
+                    frame.area(),
+                    &pending,
+                    1,
+                    TerminalThemeKind::default().palette(),
+                )
+            })
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -8546,7 +8750,15 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw_permission_modal(frame, frame.area(), &pending, 1))
+            .draw(|frame| {
+                draw_permission_modal(
+                    frame,
+                    frame.area(),
+                    &pending,
+                    1,
+                    TerminalThemeKind::default().palette(),
+                )
+            })
             .expect("draw");
 
         let lines = buffer_lines(terminal.backend().buffer());
@@ -8580,7 +8792,15 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw_permission_modal(frame, frame.area(), &pending, 1))
+            .draw(|frame| {
+                draw_permission_modal(
+                    frame,
+                    frame.area(),
+                    &pending,
+                    1,
+                    TerminalThemeKind::default().palette(),
+                )
+            })
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -8758,6 +8978,7 @@ mod tests {
             "abcdefghijklmnopqrstuvwxyz",
             12,
             None,
+            TerminalThemeKind::default().palette(),
         );
         let rendered: Vec<String> = out.iter().map(line_text).collect();
 
