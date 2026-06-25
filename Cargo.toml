@@ -31,6 +31,9 @@ dirs = "6"
 flate2 = "1"
 futures = "0.3"
 getrandom = "0.3"
+# HMAC-SHA256 signs the stateless remote-viewer session cookie (keyed on a
+# persisted signing key); pairs with the existing `sha2`.
+hmac = "0.12"
 # Resolves the IANA zone name (e.g. "Europe/Paris") to append to reset times.
 iana-time-zone = "0.1"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }

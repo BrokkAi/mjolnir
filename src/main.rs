@@ -174,6 +174,15 @@ struct ServerArgs {
     /// periodic sweeper. Pass 0 to keep history forever.
     #[arg(long, default_value_t = 30)]
     history_days: u32,
+    /// Days a remote-viewer browser/PWA stays signed in before it must
+    /// re-authenticate. Pass 0 for an ephemeral session that ends when the
+    /// browser/PWA closes.
+    #[arg(long, default_value_t = remote::DEFAULT_SESSION_TTL_DAYS)]
+    session_ttl_days: u32,
+    /// Sign every device out by rotating the cookie signing key on startup. The
+    /// QR/bearer token is preserved, so devices can re-authenticate as usual.
+    #[arg(long)]
+    logout_all: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -312,6 +321,8 @@ async fn main() -> Result<()> {
                 remote::run_server(
                     args.hostname,
                     args.history_days,
+                    args.session_ttl_days,
+                    args.logout_all,
                     cwd,
                     workspace_roots.additional_directories().to_vec(),
                     fs_max_text_bytes,
@@ -1937,7 +1948,24 @@ mod tests {
     fn parse_server_subcommand() {
         let cli = Cli::try_parse_from(["mj", "server"]).expect("parse");
         match cli.command {
-            Some(Commands::Server(args)) => assert!(args.hostname.is_none()),
+            Some(Commands::Server(args)) => {
+                assert!(args.hostname.is_none());
+                assert_eq!(args.session_ttl_days, 30);
+                assert!(!args.logout_all);
+            }
+            _ => panic!("expected Server subcommand"),
+        }
+    }
+
+    #[test]
+    fn parse_server_subcommand_with_session_flags() {
+        let cli = Cli::try_parse_from(["mj", "server", "--session-ttl-days", "7", "--logout-all"])
+            .expect("parse");
+        match cli.command {
+            Some(Commands::Server(args)) => {
+                assert_eq!(args.session_ttl_days, 7);
+                assert!(args.logout_all);
+            }
             _ => panic!("expected Server subcommand"),
         }
     }

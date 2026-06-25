@@ -1,12 +1,12 @@
 //! Simple remote-control server and local session registration.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::v1::{
     ContentBlock, PermissionOptionKind, SessionConfigId, SessionConfigKind, SessionConfigOption,
@@ -27,11 +27,13 @@ use crossterm::{
     execute,
     terminal::{Clear, ClearType},
 };
+use hmac::{Hmac, Mac};
 use qrcode::QrCode;
 use qrcode::types::Color;
 use rcgen::generate_simple_self_signed;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::mpsc;
@@ -64,6 +66,15 @@ const QUEUED_PROMPT_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// old unclaimed decision is unambiguously dead.
 const PERMISSION_DECISION_TTL: Duration = Duration::from_secs(60 * 60);
 const SESSION_COOKIE_NAME: &str = "mj_remote_session";
+/// Default lifetime of a viewer session cookie, in days. Long enough that an
+/// installed phone PWA stays signed in across app evictions for weeks, short
+/// enough to bound the exposure window if a device is lost. This is the default
+/// for `mj server --session-ttl-days`.
+pub const DEFAULT_SESSION_TTL_DAYS: u32 = 30;
+/// Server-side validity baked into an *ephemeral* cookie (`--session-ttl-days 0`).
+/// The cookie carries no `Max-Age`, so the browser drops it on close; this bound
+/// only caps how long a still-open tab's cookie keeps working.
+const EPHEMERAL_SESSION_VALIDITY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The six-digit viewer code is only ~20 bits of entropy, so the manual-unlock
 /// endpoint must be throttled or it can be brute-forced — especially once the
 /// server is bound publicly via `--hostname`. After this many consecutive
@@ -397,6 +408,7 @@ struct ServerPaths {
     cert_path: PathBuf,
     key_path: PathBuf,
     token_path: PathBuf,
+    cookie_key_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,10 +422,15 @@ struct ServerState {
     db_path: Arc<PathBuf>,
     token: Arc<String>,
     viewer_code: Arc<String>,
-    /// Active viewer session cookie values. Each successful unlock mints a fresh
-    /// random id so logout can revoke exactly that browser's session, and a lost
-    /// cookie does not stay valid forever like a single shared secret would.
-    sessions: Arc<Mutex<HashSet<String>>>,
+    /// HMAC key that signs viewer session cookies. Cookies are stateless: each
+    /// carries its own expiry signed with this key, so they survive server
+    /// restarts (no in-memory set to lose) and self-expire. Persisted separately
+    /// from `token` so `--logout-all` can rotate it — invalidating every cookie —
+    /// without changing the QR/bearer token used to re-authenticate.
+    cookie_key: Arc<String>,
+    /// Lifetime of an issued session cookie. `Duration::ZERO` means ephemeral:
+    /// no cookie `Max-Age`, so it dies when the browser/PWA closes.
+    session_ttl: Duration,
     code_guard: Arc<Mutex<CodeAuthGuard>>,
 }
 
@@ -1225,6 +1242,8 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
 pub async fn run_server(
     hostname: Option<String>,
     history_days: u32,
+    session_ttl_days: u32,
+    logout_all: bool,
     cwd: PathBuf,
     additional_directories: Vec<PathBuf>,
     fs_max_text_bytes: u64,
@@ -1246,10 +1265,22 @@ pub async fn run_server(
     let paths = ensure_server_paths(requested_hostname.as_deref())?;
     init_db(&paths.db_path)?;
     let token = ensure_token(&paths.token_path)?;
+    let cookie_key = if logout_all {
+        rotate_cookie_key(&paths.cookie_key_path)?
+    } else {
+        ensure_cookie_key(&paths.cookie_key_path)?
+    };
+    let session_ttl = Duration::from_secs(u64::from(session_ttl_days) * 24 * 60 * 60);
     let viewer_code = generate_viewer_code()?;
     let viewer_url = remote_qr_login_url(&listen.viewer_host, &token);
 
-    let app = build_router(paths.db_path.clone(), token, viewer_code.clone());
+    let app = build_router(
+        paths.db_path.clone(),
+        token,
+        viewer_code.clone(),
+        cookie_key,
+        session_ttl,
+    );
 
     let tls_config =
         axum_server::tls_rustls::RustlsConfig::from_pem_file(&paths.cert_path, &paths.key_path)
@@ -1268,6 +1299,14 @@ pub async fn run_server(
     );
     println!("{}", render_login_qr(&viewer_url)?);
     println!("viewer code: {viewer_code}");
+    if logout_all {
+        println!("logged out all devices (rotated cookie signing key)");
+    }
+    if session_ttl_days == 0 {
+        println!("session lifetime: ephemeral (signs out when the browser/PWA closes)");
+    } else {
+        println!("session lifetime: {session_ttl_days} days");
+    }
 
     let server_handle = axum_server::Handle::new();
     let server = axum_server::from_tcp_rustls(listener, tls_config)
@@ -1549,12 +1588,19 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-fn build_router(db_path: PathBuf, token: String, viewer_code: String) -> Router {
+fn build_router(
+    db_path: PathBuf,
+    token: String,
+    viewer_code: String,
+    cookie_key: String,
+    session_ttl: Duration,
+) -> Router {
     let state = ServerState {
         db_path: Arc::new(db_path),
         token: Arc::new(token),
         viewer_code: Arc::new(viewer_code),
-        sessions: Arc::new(Mutex::new(HashSet::new())),
+        cookie_key: Arc::new(cookie_key),
+        session_ttl,
         code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
     };
 
@@ -1585,6 +1631,15 @@ fn build_router(db_path: PathBuf, token: String, viewer_code: String) -> Router 
 
     Router::new()
         .route("/", get(remote_viewer))
+        // PWA shell assets are public, like `/`: they carry no secrets and must
+        // load before sign-in so the app is installable and can launch offline.
+        .route("/manifest.webmanifest", get(remote_manifest))
+        .route("/service-worker.js", get(remote_service_worker))
+        .route("/icons/icon.svg", get(remote_icon_svg))
+        .route("/icons/icon-192.png", get(remote_icon_192))
+        .route("/icons/icon-512.png", get(remote_icon_512))
+        .route("/icons/maskable-512.png", get(remote_icon_maskable))
+        .route("/icons/apple-touch-icon.png", get(remote_icon_apple_touch))
         .route("/auth/login", get(create_viewer_session_from_query))
         .route(
             "/auth/session",
@@ -1626,10 +1681,8 @@ fn request_is_authorized(state: &ServerState, request: &Request) -> bool {
         .headers()
         .get(COOKIE)
         .and_then(|value| value.to_str().ok());
-    let sessions = state.sessions.lock().expect("viewer sessions poisoned");
-    sessions
-        .iter()
-        .any(|session| cookie_matches(cookie_header, SESSION_COOKIE_NAME, session))
+    cookie_value(cookie_header, SESSION_COOKIE_NAME)
+        .is_some_and(|value| session_cookie_valid(&state.cookie_key, value, now_unix()))
 }
 
 fn query_token_value(query: &str) -> Option<String> {
@@ -1644,11 +1697,6 @@ fn cookie_value<'a>(header: Option<&'a str>, name: &str) -> Option<&'a str> {
         .filter_map(|cookie| cookie.trim().split_once('='))
         .find(|(cookie_name, _)| *cookie_name == name)
         .map(|(_, value)| value)
-}
-
-fn cookie_matches(header: Option<&str>, name: &str, expected: &str) -> bool {
-    cookie_value(header, name)
-        .is_some_and(|value| constant_time_eq(expected.as_bytes(), value.as_bytes()))
 }
 
 fn token_matches(expected: &str, provided: Option<&str>) -> bool {
@@ -1671,8 +1719,96 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Current wall-clock time as unix seconds. Falls back to 0 only if the clock is
+/// before the epoch, which would simply make every cookie look expired.
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// Sign a cookie value for an exact expiry. The value is `{exp}.{sig}` where
+/// `sig` is base64url-nopad HMAC-SHA256 over the decimal `exp`, keyed on the
+/// persisted cookie key. The expiry is authenticated, so a client cannot extend
+/// its own session.
+fn session_cookie_value(cookie_key: &str, exp: u64) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(cookie_key.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(exp.to_string().as_bytes());
+    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    format!("{exp}.{sig}")
+}
+
+/// Build the signed value for a session cookie that expires `validity` after
+/// `now_unix`.
+fn sign_session_cookie(cookie_key: &str, validity: Duration, now_unix: u64) -> String {
+    let exp = now_unix.saturating_add(validity.as_secs());
+    session_cookie_value(cookie_key, exp)
+}
+
+/// Validate a session cookie value: it must be unexpired and carry a signature
+/// that matches a fresh HMAC over its own expiry. Stateless — no server-side
+/// session set — so a valid cookie keeps working across server restarts, while a
+/// cookie key rotation (`--logout-all`) invalidates every outstanding cookie.
+fn session_cookie_valid(cookie_key: &str, value: &str, now_unix: u64) -> bool {
+    let Some((exp_str, _sig)) = value.split_once('.') else {
+        return false;
+    };
+    let Ok(exp) = exp_str.parse::<u64>() else {
+        return false;
+    };
+    if now_unix >= exp {
+        return false;
+    }
+    // Re-sign the parsed expiry and compare the whole canonical value in
+    // constant time; this also rejects non-canonical expiries (e.g. "0123").
+    let expected = session_cookie_value(cookie_key, exp);
+    constant_time_eq(expected.as_bytes(), value.as_bytes())
+}
+
 async fn remote_viewer() -> Html<&'static str> {
     Html(include_str!("remote_viewer.html"))
+}
+
+/// Serve a compiled-in static asset with an explicit content type. Used for the
+/// PWA manifest, service worker, and icons.
+fn static_asset(content_type: &'static str, body: &'static [u8]) -> Response {
+    ([(axum::http::header::CONTENT_TYPE, content_type)], body).into_response()
+}
+
+async fn remote_manifest() -> Response {
+    static_asset(
+        "application/manifest+json",
+        include_bytes!("remote_manifest.json"),
+    )
+}
+
+async fn remote_service_worker() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_bytes!("remote_service_worker.js"),
+    )
+}
+
+async fn remote_icon_svg() -> Response {
+    static_asset("image/svg+xml", include_bytes!("icons/icon.svg"))
+}
+
+async fn remote_icon_192() -> Response {
+    static_asset("image/png", include_bytes!("icons/icon-192.png"))
+}
+
+async fn remote_icon_512() -> Response {
+    static_asset("image/png", include_bytes!("icons/icon-512.png"))
+}
+
+async fn remote_icon_maskable() -> Response {
+    static_asset("image/png", include_bytes!("icons/maskable-512.png"))
+}
+
+async fn remote_icon_apple_touch() -> Response {
+    static_asset("image/png", include_bytes!("icons/apple-touch-icon.png"))
 }
 
 async fn create_viewer_session(
@@ -1763,37 +1899,27 @@ fn issue_session_cookie(
     state: &ServerState,
     status: StatusCode,
 ) -> std::result::Result<Response, (StatusCode, String)> {
-    let session_id = generate_token().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to mint viewer session".to_string(),
-        )
-    })?;
-    let header = session_cookie_header(&session_id)?;
-    state
-        .sessions
-        .lock()
-        .expect("viewer sessions poisoned")
-        .insert(session_id);
+    // Ephemeral sessions (`--session-ttl-days 0`) still need a server-side expiry
+    // for the signature, but omit `Max-Age` so the browser drops them on close.
+    let ephemeral = state.session_ttl.is_zero();
+    let validity = if ephemeral {
+        EPHEMERAL_SESSION_VALIDITY
+    } else {
+        state.session_ttl
+    };
+    let value = sign_session_cookie(&state.cookie_key, validity, now_unix());
+    let max_age = (!ephemeral).then_some(validity.as_secs());
+    let header = session_cookie_header(&value, max_age)?;
 
     let mut response = status.into_response();
     response.headers_mut().insert(SET_COOKIE, header);
     Ok(response)
 }
 
-async fn clear_viewer_session(
-    State(state): State<ServerState>,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    let cookie_header = headers.get(COOKIE).and_then(|value| value.to_str().ok());
-    if let Some(session_id) = cookie_value(cookie_header, SESSION_COOKIE_NAME) {
-        state
-            .sessions
-            .lock()
-            .expect("viewer sessions poisoned")
-            .remove(session_id);
-    }
-
+async fn clear_viewer_session() -> Response {
+    // Cookies are stateless, so logout is purely a client-side clear: there is no
+    // server-side session to revoke. Rotate the cookie key (`--logout-all`) to
+    // invalidate cookies that are already out on other devices.
     let mut response = StatusCode::NO_CONTENT.into_response();
     response
         .headers_mut()
@@ -1801,11 +1927,16 @@ async fn clear_viewer_session(
     response
 }
 
-fn session_cookie_header(value: &str) -> std::result::Result<HeaderValue, (StatusCode, String)> {
-    HeaderValue::from_str(&format!(
-        "{SESSION_COOKIE_NAME}={value}; Path=/; HttpOnly; Secure; SameSite=Strict"
-    ))
-    .map_err(|_| {
+fn session_cookie_header(
+    value: &str,
+    max_age: Option<u64>,
+) -> std::result::Result<HeaderValue, (StatusCode, String)> {
+    let mut cookie =
+        format!("{SESSION_COOKIE_NAME}={value}; Path=/; HttpOnly; Secure; SameSite=Strict");
+    if let Some(seconds) = max_age {
+        cookie.push_str(&format!("; Max-Age={seconds}"));
+    }
+    HeaderValue::from_str(&cookie).map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to build session cookie".to_string(),
@@ -2090,6 +2221,7 @@ fn ensure_server_paths_in(root: &Path, hostname: Option<&str>) -> Result<ServerP
         cert_path,
         key_path,
         token_path: root.join("token"),
+        cookie_key_path: root.join("cookie-key"),
     })
 }
 
@@ -2101,6 +2233,25 @@ fn ensure_token(token_path: &Path) -> Result<String> {
     let token = generate_token()?;
     write_token_atomically(token_path, &token)?;
     Ok(token)
+}
+
+/// Load the cookie signing key, generating and persisting one on first run. It
+/// shares the bearer token's format (`valid_remote_token`) and on-disk locking,
+/// but is a distinct secret so it can be rotated independently.
+fn ensure_cookie_key(cookie_key_path: &Path) -> Result<String> {
+    if let Some(existing) = read_token(cookie_key_path) {
+        return Ok(existing);
+    }
+    rotate_cookie_key(cookie_key_path)
+}
+
+/// Mint a fresh cookie signing key, replacing any existing one. Every session
+/// cookie signed with the previous key stops validating immediately, which is
+/// how `mj server --logout-all` signs every device out.
+fn rotate_cookie_key(cookie_key_path: &Path) -> Result<String> {
+    let key = generate_token()?;
+    write_token_atomically(cookie_key_path, &key)?;
+    Ok(key)
 }
 
 fn read_token(token_path: &Path) -> Option<String> {
@@ -2932,6 +3083,11 @@ mod tests {
     use tower::util::ServiceExt;
 
     use crate::event::PermissionDecision;
+
+    /// The default cookie lifetime as a `Duration`, derived from the public
+    /// day-granularity default so tests stay in lockstep with the CLI default.
+    const DEFAULT_SESSION_TTL: Duration =
+        Duration::from_secs(DEFAULT_SESSION_TTL_DAYS as u64 * 24 * 60 * 60);
 
     /// Build a `PermissionPrompt` and keep the original responder receiver
     /// so tests can assert what decision was forwarded to the runtime.
@@ -3815,7 +3971,13 @@ mod tests {
         let db_path = dir.path().join("sessions.sqlite3");
         init_db(&db_path).expect("init db");
         let token = "integration-token".to_string();
-        let app = build_router(db_path, token.clone(), "123456".to_string());
+        let app = build_router(
+            db_path,
+            token.clone(),
+            "123456".to_string(),
+            "test-cookie-key".to_string(),
+            DEFAULT_SESSION_TTL,
+        );
 
         let decision_body = |request_id: &str, option_id: &str| {
             serde_json::to_vec(&QueuePermissionDecisionRequest {
@@ -4024,7 +4186,13 @@ mod tests {
         let db_path = dir.path().join("sessions.sqlite3");
         init_db(&db_path).expect("init db");
         let token = "integration-token".to_string();
-        let app = build_router(db_path, token.clone(), "123456".to_string());
+        let app = build_router(
+            db_path,
+            token.clone(),
+            "123456".to_string(),
+            "test-cookie-key".to_string(),
+            DEFAULT_SESSION_TTL,
+        );
 
         let change_body = |target_kind: &str, config_id: Option<&str>, value: &str| {
             serde_json::to_vec(&QueueConfigChangeRequest {
@@ -4181,23 +4349,61 @@ mod tests {
     }
 
     #[test]
-    fn cookie_matches_requires_exact_session_cookie() {
-        assert!(cookie_matches(
-            Some("foo=bar; mj_remote_session=secret; theme=dark"),
-            SESSION_COOKIE_NAME,
-            "secret"
-        ));
-        assert!(!cookie_matches(
-            Some("foo=bar; mj_remote_session=wrong"),
-            SESSION_COOKIE_NAME,
-            "secret"
-        ));
-        assert!(!cookie_matches(
-            Some("foo=bar; other=secret"),
-            SESSION_COOKIE_NAME,
-            "secret"
-        ));
-        assert!(!cookie_matches(None, SESSION_COOKIE_NAME, "secret"));
+    fn cookie_value_extracts_named_cookie() {
+        assert_eq!(
+            cookie_value(
+                Some("foo=bar; mj_remote_session=abc; theme=dark"),
+                SESSION_COOKIE_NAME
+            ),
+            Some("abc")
+        );
+        assert_eq!(
+            cookie_value(Some("foo=bar; other=abc"), SESSION_COOKIE_NAME),
+            None
+        );
+        assert_eq!(cookie_value(None, SESSION_COOKIE_NAME), None);
+    }
+
+    #[test]
+    fn session_cookie_round_trips_and_rejects_tampering() {
+        let key = "test-cookie-signing-key";
+        let now = 1_000_000;
+        let value = sign_session_cookie(key, Duration::from_secs(3600), now);
+
+        // A freshly signed cookie validates until its expiry.
+        assert!(session_cookie_valid(key, &value, now));
+        assert!(session_cookie_valid(key, &value, now + 3599));
+        // Expired exactly at and after `exp`.
+        assert!(!session_cookie_valid(key, &value, now + 3600));
+        assert!(!session_cookie_valid(key, &value, now + 10_000));
+        // A rotated key (i.e. `--logout-all`) rejects every prior cookie.
+        assert!(!session_cookie_valid("other-key", &value, now));
+
+        let (exp, sig) = value.split_once('.').expect("exp.sig");
+        // Tampered signature and forged (later) expiry are both rejected.
+        assert!(!session_cookie_valid(key, &format!("{exp}.{sig}x"), now));
+        let bumped = exp.parse::<u64>().expect("exp") + 100_000;
+        assert!(!session_cookie_valid(key, &format!("{bumped}.{sig}"), now));
+        // Malformed values are rejected, never panic.
+        assert!(!session_cookie_valid(key, "not-a-cookie", now));
+        assert!(!session_cookie_valid(key, "abc.def", now));
+    }
+
+    #[test]
+    fn cookie_key_is_stable_until_rotated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cookie-key");
+        let first = ensure_cookie_key(&path).expect("ensure");
+        assert_eq!(first, ensure_cookie_key(&path).expect("ensure again"));
+
+        let rotated = rotate_cookie_key(&path).expect("rotate");
+        assert_ne!(first, rotated, "rotation mints a new key");
+        assert_eq!(rotated, ensure_cookie_key(&path).expect("reload rotated"));
+
+        // A cookie signed with the pre-rotation key no longer validates.
+        let value = sign_session_cookie(&first, Duration::from_secs(3600), 1000);
+        assert!(session_cookie_valid(&first, &value, 1000));
+        assert!(!session_cookie_valid(&rotated, &value, 1000));
     }
 
     #[test]
@@ -4266,7 +4472,8 @@ mod tests {
             db_path: Arc::new(PathBuf::from("unused.sqlite3")),
             token: Arc::new("integration-token".to_string()),
             viewer_code: Arc::new("123456".to_string()),
-            sessions: Arc::new(Mutex::new(HashSet::new())),
+            cookie_key: Arc::new("test-cookie-signing-key".to_string()),
+            session_ttl: DEFAULT_SESSION_TTL,
             code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
         }
     }
@@ -4304,7 +4511,7 @@ mod tests {
     }
 
     #[test]
-    fn issuing_and_clearing_a_session_revokes_the_cookie() {
+    fn issued_session_cookie_is_signed_and_carries_max_age() {
         let state = test_state();
         let response =
             issue_session_cookie(&state, StatusCode::NO_CONTENT).expect("issue session cookie");
@@ -4314,25 +4521,94 @@ mod tests {
             .expect("set-cookie")
             .to_str()
             .expect("set-cookie str");
-        let value = cookie_value(Some(set_cookie), SESSION_COOKIE_NAME)
-            .expect("session cookie value")
-            .to_string();
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("Secure"));
+        assert!(set_cookie.contains("SameSite=Strict"));
+        assert!(set_cookie.contains(&format!("Max-Age={}", DEFAULT_SESSION_TTL.as_secs())));
 
-        // The freshly minted id is a tracked, valid session.
-        assert!(state.sessions.lock().expect("sessions").contains(&value));
-
-        // Logout removes exactly that id, so the cookie no longer authorizes.
-        state.sessions.lock().expect("sessions").remove(&value);
-        assert!(!state.sessions.lock().expect("sessions").contains(&value));
+        let value = cookie_value(Some(set_cookie), SESSION_COOKIE_NAME).expect("cookie value");
+        // The issued cookie validates now, and a key rotation invalidates it.
+        assert!(session_cookie_valid(&state.cookie_key, value, now_unix()));
+        assert!(!session_cookie_valid("rotated-key", value, now_unix()));
     }
 
     #[test]
-    fn issued_session_ids_are_unique_per_unlock() {
-        let state = test_state();
-        for _ in 0..3 {
-            issue_session_cookie(&state, StatusCode::NO_CONTENT).expect("issue");
+    fn ephemeral_session_cookie_has_no_max_age() {
+        let mut state = test_state();
+        state.session_ttl = Duration::ZERO;
+        let response =
+            issue_session_cookie(&state, StatusCode::NO_CONTENT).expect("issue session cookie");
+        let set_cookie = response
+            .headers()
+            .get(SET_COOKIE)
+            .expect("set-cookie")
+            .to_str()
+            .expect("set-cookie str");
+        // No Max-Age: the browser drops it on close, restoring the old ephemeral
+        // behavior, while the value is still a valid signed cookie meanwhile.
+        assert!(!set_cookie.contains("Max-Age"));
+        let value = cookie_value(Some(set_cookie), SESSION_COOKIE_NAME).expect("cookie value");
+        assert!(session_cookie_valid(&state.cookie_key, value, now_unix()));
+    }
+
+    #[test]
+    fn clearing_session_cookie_expires_it_immediately() {
+        let header = clear_session_cookie_header();
+        let value = header.to_str().expect("header str");
+        assert!(value.contains("Max-Age=0"));
+        assert!(value.contains("HttpOnly"));
+        assert!(value.contains("Secure"));
+        assert!(value.contains("SameSite=Strict"));
+    }
+
+    #[tokio::test]
+    async fn pwa_assets_are_served_publicly() {
+        let app = build_router(
+            PathBuf::from("unused.sqlite3"),
+            "integration-token".to_string(),
+            "123456".to_string(),
+            "integration-cookie-key".to_string(),
+            DEFAULT_SESSION_TTL,
+        );
+
+        // (path, expected content-type prefix). The shell assets must be reachable
+        // without any auth so the PWA can install and launch before sign-in.
+        let cases = [
+            ("/manifest.webmanifest", "application/manifest+json"),
+            ("/service-worker.js", "text/javascript"),
+            ("/icons/icon.svg", "image/svg+xml"),
+            ("/icons/icon-192.png", "image/png"),
+            ("/icons/apple-touch-icon.png", "image/png"),
+        ];
+
+        for (path, content_type) in cases {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("GET")
+                        .uri(path)
+                        .body(axum::body::Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("asset request");
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::OK,
+                "unexpected status for {path}"
+            );
+            let actual = response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .expect("content-type")
+                .to_str()
+                .expect("content-type str");
+            assert!(
+                actual.starts_with(content_type),
+                "content-type for {path}: {actual}"
+            );
         }
-        assert_eq!(state.sessions.lock().expect("sessions").len(), 3);
     }
 
     #[test]
@@ -4485,7 +4761,13 @@ mod tests {
         init_db(&db_path).expect("init db");
         let token = "integration-token".to_string();
         let viewer_code = "123456".to_string();
-        let app = build_router(db_path, token.clone(), viewer_code.clone());
+        let app = build_router(
+            db_path,
+            token.clone(),
+            viewer_code.clone(),
+            "integration-cookie-key".to_string(),
+            DEFAULT_SESSION_TTL,
+        );
 
         let _client = build_client(&cert_path).expect("pinned client");
         let base = "https://127.0.0.1:11921";
@@ -4686,9 +4968,11 @@ mod tests {
         assert!(session_cookie.contains("HttpOnly"));
         assert!(session_cookie.contains("Secure"));
         assert!(session_cookie.contains("SameSite=Strict"));
+        // The 30-day default lifetime rides on the cookie so it survives the
+        // browser/PWA closing instead of dying as a session cookie.
+        assert!(session_cookie.contains(&format!("Max-Age={}", DEFAULT_SESSION_TTL.as_secs())));
         assert!(session_cookie.contains(SESSION_COOKIE_NAME));
-        // Only the cookie value is needed to replay the session; keep it so the
-        // logout step below can prove the same cookie is revoked server-side.
+        // Keep the raw value to replay the session below.
         let session_cookie_value = cookie_value(Some(&session_cookie), SESSION_COOKIE_NAME)
             .expect("session cookie value")
             .to_string();
@@ -4731,10 +5015,19 @@ mod tests {
             .await
             .expect("logout request");
         assert_eq!(logout.status(), reqwest::StatusCode::NO_CONTENT);
+        // Logout clears the cookie client-side (cookies are stateless; there is
+        // no server-side session to delete). Revoking already-issued cookies on
+        // other devices is done by rotating the cookie key (`--logout-all`).
+        let logout_cookie = logout
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("logout set-cookie header")
+            .to_str()
+            .expect("logout set-cookie str");
+        assert!(logout_cookie.contains("Max-Age=0"));
 
-        // The cookie is revoked server-side: replaying the very same cookie now
-        // fails, so logout is not merely cosmetic client-side cookie clearing.
-        let live_after_logout = app
+        // A forged cookie value (valid name, bogus signature) is rejected.
+        let live_with_forged_cookie = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
@@ -4742,15 +5035,15 @@ mod tests {
                     .uri(format!("{base}/live/sessions"))
                     .header(
                         axum::http::header::COOKIE,
-                        format!("{SESSION_COOKIE_NAME}={session_cookie_value}"),
+                        format!("{SESSION_COOKIE_NAME}={session_cookie_value}-tampered"),
                     )
                     .body(axum::body::Body::empty())
                     .expect("request"),
             )
             .await
-            .expect("live after logout request");
+            .expect("live with forged cookie request");
         assert_eq!(
-            live_after_logout.status(),
+            live_with_forged_cookie.status(),
             reqwest::StatusCode::UNAUTHORIZED
         );
 

@@ -4,6 +4,17 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Mjolnir Web</title>
+    <!-- PWA: installable app shell. Status bar / theme color follow the SPA's
+         light-dark palette; Apple meta tags enable standalone home-screen launch. -->
+    <meta name="theme-color" content="#eef2f7" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Mjolnir">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
     <style>
       :root {
         color-scheme: light dark;
@@ -2568,6 +2579,20 @@
       syncKeyboardInset();
       applyRoute();
       void tryResumeViewerSession();
+    </script>
+    <script>
+      // Register the service worker so the app is installable and can launch
+      // offline. Registration requires a trusted TLS certificate; if it fails
+      // (e.g. a click-through self-signed cert) the app keeps working normally —
+      // it just isn't installable. Kept out of the main module so a failure here
+      // can never break the app.
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker.register("/service-worker.js").catch((error) => {
+            console.warn("Service worker registration failed:", error);
+          });
+        });
+      }
     </script>
   </body>
 </html>
