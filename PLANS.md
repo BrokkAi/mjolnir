@@ -182,6 +182,10 @@ Deliverables:
 - Track compatibility quirks discovered with at least two non-Brokk ACP
   agents — partial: `@agentclientprotocol/claude-agent-acp` 0.36.1 done
   (see Compatibility section below), one more (Gemini or Goose) to go.
+- Explore session rewind as an ACP extension paired with Anvil. The current
+  proposal is documented in [docs/session-rewind-extension.md](docs/session-rewind-extension.md):
+  model rewind as fork-from-checkpoint using `session/fork` `_meta`, not as
+  in-place mutation of the active session.
 
 Exit criteria:
 
