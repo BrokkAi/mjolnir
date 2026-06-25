@@ -252,9 +252,14 @@ impl<'a> PickerState<'a> {
             Item::Custom => "save a named command for next time".to_string(),
             Item::Agent(idx) => {
                 let a = &self.registry.agents[*idx];
-                match a.preferred_kind(&self.platform) {
+                let install_hint = match a.preferred_kind(&self.platform) {
                     Some(kind) => format!("{} v{}", kind.label(), a.version),
                     None => "no compatible distribution".to_string(),
+                };
+                if a.description.trim().is_empty() {
+                    install_hint
+                } else {
+                    format!("{} · {}", a.description.trim(), install_hint)
                 }
             }
             Item::CustomAgent(idx) => {
@@ -1578,7 +1583,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_hint_describes_distribution_choice() {
+    fn picker_hint_shows_description_and_distribution_choice() {
         let reg = fixture_registry();
         let state = PickerState::new(
             &reg,
@@ -1596,17 +1601,28 @@ mod tests {
             .iter()
             .find(|(l, _)| l == "Claude")
             .expect("claude");
-        assert!(claude.1.starts_with("npx"), "hint: {}", claude.1);
+        assert!(claude.1.starts_with("Claude ACP"), "hint: {}", claude.1);
+        assert!(claude.1.contains("npx v"), "hint: {}", claude.1);
         let bin = labels_and_hints
             .iter()
             .find(|(l, _)| l == "BinaryOnly")
             .expect("binonly");
-        assert!(bin.1.starts_with("binary"), "hint: {}", bin.1);
+        assert!(
+            bin.1.starts_with("binary distribution only"),
+            "hint: {}",
+            bin.1
+        );
+        assert!(bin.1.contains("binary v"), "hint: {}", bin.1);
         let uvx = labels_and_hints
             .iter()
             .find(|(l, _)| l == "UvxBinary")
             .expect("uvx");
-        assert!(uvx.1.starts_with("uvx"), "hint: {}", uvx.1);
+        assert!(
+            uvx.1.starts_with("uvx and binary distributions"),
+            "hint: {}",
+            uvx.1
+        );
+        assert!(uvx.1.contains("uvx v"), "hint: {}", uvx.1);
     }
 
     #[test]

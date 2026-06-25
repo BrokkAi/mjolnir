@@ -3917,21 +3917,19 @@ fn take_display_suffix(text: &str, max_width: usize) -> String {
     chars.into_iter().rev().collect()
 }
 
-pub(crate) fn connection_state_label(state: &AppState) -> String {
-    match state.connection_state() {
-        ConnectionState::Launching => "launching".to_string(),
-        ConnectionState::Initializing => "initializing".to_string(),
-        ConnectionState::Ready => "ready".to_string(),
-        ConnectionState::Streaming => "streaming".to_string(),
-        ConnectionState::Cancelling => "cancelling".to_string(),
-        ConnectionState::Forking => "forking".to_string(),
-        ConnectionState::Closed => "disconnected".to_string(),
-        ConnectionState::Fatal => "fatal".to_string(),
-    }
-}
-
 fn spinner_frame() -> &'static str {
-    const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+    const FRAMES: [&str; 10] = [
+        "▰▱▱▱▱",
+        "▰▰▱▱▱",
+        "▱▰▰▱▱",
+        "▱▱▰▰▱",
+        "▱▱▱▰▰",
+        "▱▱▱▱▰",
+        "▱▱▱▰▰",
+        "▱▱▰▰▱",
+        "▱▰▰▱▱",
+        "▰▰▱▱▱",
+    ];
     let idx = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| (duration.as_millis() / 100) as usize)
@@ -5109,32 +5107,23 @@ fn voice_level_meter(level: Option<f32>) -> String {
     )
 }
 
-fn prompt_status_text(state: &AppState) -> String {
-    if state.connection_state() == ConnectionState::Ready {
-        "prompt".to_string()
-    } else {
-        connection_state_label(state)
-    }
-}
-
-/// Spinner glyph for the prompt title, or a `"-"` placeholder when no spinner
-/// is active. The placeholder keeps the title a fixed shape so it does not jump
+/// Spinner glyph for the prompt title, or a quiet placeholder when no spinner
+/// is active. Every frame has the same display width so the title does not jump
 /// horizontally as the spinner toggles between busy and idle states.
 fn prompt_spinner_slot(state: &AppState) -> &'static str {
     if should_show_spinner(state) {
         spinner_frame()
     } else {
-        "-"
+        "▱▱▱▱▱"
     }
 }
 
 fn prompt_title_label(state: &AppState) -> String {
-    let status = prompt_status_text(state);
     let spinner = prompt_spinner_slot(state);
     if let Some(elapsed) = turn_elapsed_value_label(state) {
-        format!("{status} {spinner} {elapsed}")
+        format!("{spinner} {elapsed}")
     } else {
-        format!("{status} {spinner}")
+        spinner.to_string()
     }
 }
 
@@ -5159,9 +5148,9 @@ fn busy_prompt_title(state: &AppState) -> Option<String> {
     let queued = state.queued_prompt_count();
     let label = prompt_title_label(state);
     // Matched exhaustively (no `_` arm) on purpose: this and the other
-    // ConnectionState matches in the prompt-title helpers (prompt_status_text,
-    // turn_elapsed_value_label) must all be revisited when a variant is added,
-    // and the missing-arm compile error is what forces that.
+    // ConnectionState matches in the prompt-title helpers must all be revisited
+    // when a variant is added, and the missing-arm compile error is what forces
+    // that.
     let hint = match state.connection_state() {
         ConnectionState::Streaming | ConnectionState::Cancelling => {
             if queued > 0 {
@@ -8426,7 +8415,7 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("prompt - (Enter send"),
+            rendered.contains("▱▱▱▱▱ (Enter send"),
             "rendered:\n{rendered}"
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
@@ -8462,7 +8451,7 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("prompt - (Enter send"),
+            rendered.contains("▱▱▱▱▱ (Enter send"),
             "rendered:\n{rendered}"
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
@@ -8482,7 +8471,7 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("prompt - 0s (Enter send"),
+            rendered.contains("▱▱▱▱▱ 0s (Enter send"),
             "rendered:\n{rendered}"
         );
         assert!(!rendered.contains("ready"), "rendered:\n{rendered}");
@@ -8490,7 +8479,7 @@ mod tests {
     }
 
     #[test]
-    fn busy_input_title_replaces_prompt_label_with_spinner_status() {
+    fn busy_input_title_uses_spinner_without_status_words() {
         let mut state = AppState::new();
         let backend = TestBackend::new(120, 5);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -8500,7 +8489,8 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("launching"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("launching"), "rendered:\n{rendered}");
+        assert!(rendered.contains("▰"), "rendered:\n{rendered}");
         assert!(rendered.contains("0s"), "rendered:\n{rendered}");
         assert!(!rendered.contains("prompt ("), "rendered:\n{rendered}");
         assert!(!rendered.contains("elapsed"), "rendered:\n{rendered}");
@@ -8511,7 +8501,8 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("streaming"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("streaming"), "rendered:\n{rendered}");
+        assert!(rendered.contains("▰"), "rendered:\n{rendered}");
         assert!(rendered.contains("0s"), "rendered:\n{rendered}");
         assert!(
             rendered.contains("Ctrl-C cancel current"),
