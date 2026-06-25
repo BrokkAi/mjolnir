@@ -49,7 +49,10 @@ const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
 const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
 const REMOTE_CONTROL_UPSERT_URL: &str = "https://localhost:11921/api/sessions";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+const REMOTE_INITIAL_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const REMOTE_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const CONNECTED_SESSION_TTL: Duration = Duration::from_secs(75);
+const REMOTE_TOKEN_LEN: usize = 43;
 /// How often `mj server` sweeps dead queue entries out of sqlite.
 const QUEUE_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 /// Queued prompts survive disconnects on purpose: `mj resume <session-id>`
@@ -337,9 +340,15 @@ struct ClaimConfigChangeRequest {
 }
 
 #[derive(Debug, Clone)]
+struct RemoteConnection {
+    client: reqwest::Client,
+    token: Arc<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RemoteSessionTracker {
-    client: Option<reqwest::Client>,
-    token: Option<Arc<String>>,
+    remote_dir: Arc<PathBuf>,
+    connection: Arc<Mutex<Option<RemoteConnection>>>,
     state: Arc<Mutex<TrackerState>>,
     /// Single task that owns every snapshot upload (including heartbeats),
     /// with at most one request in flight. Serializing here means a newer
@@ -348,6 +357,7 @@ pub struct RemoteSessionTracker {
     publisher: Arc<Mutex<Option<JoinHandle<()>>>>,
     publish_signal: Arc<tokio::sync::Notify>,
     queue_poller: Arc<Mutex<Option<JoinHandle<()>>>>,
+    connector: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// False when no UI event channel exists (headless): remote permission
     /// decisions could never be applied, so pending permissions must not
     /// be advertised to viewers at all.
@@ -677,19 +687,20 @@ impl RemoteSessionTracker {
         ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
     ) -> Self {
         let dir = remote_control_dir();
-        let token = read_token(&dir.join("token")).map(Arc::new);
-        let client = build_client(&dir.join("cert.pem"));
+        let connection = build_connection(&dir);
         let tracker = Self {
-            client,
-            token,
+            remote_dir: Arc::new(dir),
+            connection: Arc::new(Mutex::new(connection)),
             state: Arc::new(Mutex::new(TrackerState::new(project, agent))),
             publisher: Arc::new(Mutex::new(None)),
             publish_signal: Arc::new(tokio::sync::Notify::new()),
             queue_poller: Arc::new(Mutex::new(None)),
+            connector: Arc::new(Mutex::new(None)),
             publish_permissions: ui_event_tx.is_some(),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
-        tracker.ensure_queue_poller(command_tx, ui_event_tx);
+        tracker.ensure_queue_poller(command_tx.clone(), ui_event_tx.clone());
+        tracker.ensure_connector(command_tx, ui_event_tx);
         tracker
     }
 
@@ -698,12 +709,16 @@ impl RemoteSessionTracker {
     #[cfg(test)]
     fn new_disconnected(project: String, agent: String) -> Self {
         Self {
-            client: None,
-            token: None,
+            remote_dir: Arc::new(std::env::temp_dir().join(format!(
+                "mjolnir-test-no-remote-control-{}",
+                std::process::id()
+            ))),
+            connection: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(TrackerState::new(project, agent))),
             publisher: Arc::new(Mutex::new(None)),
             publish_signal: Arc::new(tokio::sync::Notify::new()),
             queue_poller: Arc::new(Mutex::new(None)),
+            connector: Arc::new(Mutex::new(None)),
             publish_permissions: true,
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
@@ -804,6 +819,11 @@ impl RemoteSessionTracker {
 
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
+        let connector = self.connector.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(handle) = connector {
+            handle.abort();
+            let _ = handle.await;
+        }
         let handle = self.publisher.lock().ok().and_then(|mut slot| slot.take());
         if let Some(handle) = handle {
             handle.abort();
@@ -818,7 +838,7 @@ impl RemoteSessionTracker {
             handle.abort();
             let _ = handle.await;
         }
-        let Some(client) = self.client.clone() else {
+        let Some(connection) = self.connection() else {
             return;
         };
         let (snapshot, mut sessions_to_disconnect) = match self.state.lock() {
@@ -829,7 +849,7 @@ impl RemoteSessionTracker {
             .as_ref()
             .map(|snapshot| snapshot.session_id.clone());
         if let Some(snapshot) = snapshot
-            && let Err(error) = send_snapshot(client.clone(), self.token.clone(), snapshot).await
+            && let Err(error) = send_snapshot(connection.clone(), snapshot).await
         {
             debug!("final remote-control flush failed: {error:#}");
         }
@@ -837,14 +857,12 @@ impl RemoteSessionTracker {
             sessions_to_disconnect.retain(|id| id != current);
         }
         for old_session_id in sessions_to_disconnect {
-            if let Err(error) =
-                send_disconnect(client.clone(), self.token.clone(), &old_session_id).await
-            {
+            if let Err(error) = send_disconnect(connection.clone(), &old_session_id).await {
                 debug!("remote-control stale-session disconnect failed: {error:#}");
             }
         }
         if let Some(session_id) = session_id
-            && let Err(error) = send_disconnect(client, self.token.clone(), &session_id).await
+            && let Err(error) = send_disconnect(connection, &session_id).await
         {
             debug!("remote-control disconnect failed: {error:#}");
         }
@@ -862,18 +880,89 @@ impl RemoteSessionTracker {
         self.publish_signal.notify_one();
     }
 
-    fn ensure_publisher(&self) {
-        let Some(client) = self.client.clone() else {
+    fn connection(&self) -> Option<RemoteConnection> {
+        self.connection.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    fn reload_connection(&self) -> Option<RemoteConnection> {
+        let connection = build_connection(&self.remote_dir);
+        if let Ok(mut guard) = self.connection.lock() {
+            *guard = connection.clone();
+        }
+        connection
+    }
+
+    fn set_connection_once(&self, connection: RemoteConnection) -> bool {
+        let Ok(mut guard) = self.connection.lock() else {
+            return false;
+        };
+        if guard.is_some() {
+            return false;
+        }
+        *guard = Some(connection);
+        true
+    }
+
+    fn ensure_connector(
+        &self,
+        command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
+        ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
+    ) {
+        if self.connection().is_some() {
+            return;
+        }
+        let Ok(mut slot) = self.connector.lock() else {
             return;
         };
+        if slot.is_some() {
+            return;
+        }
+        let tracker = self.clone();
+        *slot = Some(tokio::spawn(async move {
+            let mut retry_interval = REMOTE_INITIAL_CONNECT_RETRY_INTERVAL;
+            loop {
+                if tracker.shutting_down.load(Ordering::Relaxed) || tracker.connection().is_some() {
+                    break;
+                }
+                let Some(connection) = build_connection(&tracker.remote_dir) else {
+                    tokio::time::sleep(retry_interval).await;
+                    retry_interval = REMOTE_CONNECT_RETRY_INTERVAL;
+                    continue;
+                };
+                if tracker.shutting_down.load(Ordering::Relaxed) {
+                    break;
+                }
+                if tracker.set_connection_once(connection)
+                    && !tracker.shutting_down.load(Ordering::Relaxed)
+                {
+                    tracker.ensure_publisher();
+                    tracker.ensure_queue_poller(command_tx.clone(), ui_event_tx.clone());
+                    tracker.request_flush();
+                }
+                break;
+            }
+        }));
+    }
+
+    fn ensure_publisher(&self) {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
+        if self
+            .connection()
+            .or_else(|| self.reload_connection())
+            .is_none()
+        {
+            return;
+        }
         let Ok(mut slot) = self.publisher.lock() else {
             return;
         };
         if slot.is_some() {
             return;
         }
+        let tracker = self.clone();
         let state = Arc::clone(&self.state);
-        let token = self.token.clone();
         let signal = Arc::clone(&self.publish_signal);
         *slot = Some(tokio::spawn(async move {
             loop {
@@ -896,14 +985,24 @@ impl RemoteSessionTracker {
                 let Some(snapshot) = snapshot else {
                     continue;
                 };
-                if let Err(error) = send_snapshot(client.clone(), token.clone(), snapshot).await {
+                let Some(connection) = tracker.connection().or_else(|| tracker.reload_connection())
+                else {
+                    continue;
+                };
+                if let Err(error) = send_snapshot(connection.clone(), snapshot).await {
                     debug!("remote-control publish failed: {error:#}");
+                    tracker.reload_connection();
+                    continue;
                 }
                 for old_session_id in sessions_to_disconnect {
-                    if let Err(error) =
-                        send_disconnect(client.clone(), token.clone(), &old_session_id).await
-                    {
+                    let Some(connection) =
+                        tracker.connection().or_else(|| tracker.reload_connection())
+                    else {
+                        break;
+                    };
+                    if let Err(error) = send_disconnect(connection.clone(), &old_session_id).await {
                         debug!("remote-control stale-session disconnect failed: {error:#}");
+                        tracker.reload_connection();
                     }
                 }
             }
@@ -915,7 +1014,7 @@ impl RemoteSessionTracker {
         command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
         ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
     ) {
-        let Some(client) = self.client.clone() else {
+        if self.shutting_down.load(Ordering::Relaxed) || self.connection().is_none() {
             return;
         };
         let Some(command_tx) = command_tx else {
@@ -927,7 +1026,7 @@ impl RemoteSessionTracker {
         if slot.is_some() {
             return;
         }
-        let token = self.token.clone();
+        let tracker = self.clone();
         let state = Arc::clone(&self.state);
         *slot = Some(tokio::spawn(async move {
             loop {
@@ -944,12 +1043,13 @@ impl RemoteSessionTracker {
                         .ok()
                         .and_then(|guard| guard.permission_claim_session());
                     if let Some(session_id) = claim_session {
-                        match claim_remote_permission_decision(
-                            client.clone(),
-                            token.clone(),
-                            &session_id,
-                        )
-                        .await
+                        let Some(connection) =
+                            tracker.connection().or_else(|| tracker.reload_connection())
+                        else {
+                            continue;
+                        };
+                        match claim_remote_permission_decision(connection.clone(), &session_id)
+                            .await
                         {
                             Ok(Some(decision)) => {
                                 let _ = ui_event_tx.send(UiEvent::RemotePermissionDecision {
@@ -960,6 +1060,7 @@ impl RemoteSessionTracker {
                             Ok(None) => {}
                             Err(error) => {
                                 debug!("remote permission-decision poll failed: {error:#}");
+                                tracker.reload_connection();
                             }
                         }
                     }
@@ -975,9 +1076,12 @@ impl RemoteSessionTracker {
                     .ok()
                     .and_then(|guard| guard.config_claim_session());
                 if let Some(session_id) = config_session {
-                    match claim_remote_config_change(client.clone(), token.clone(), &session_id)
-                        .await
-                    {
+                    let Some(connection) =
+                        tracker.connection().or_else(|| tracker.reload_connection())
+                    else {
+                        continue;
+                    };
+                    match claim_remote_config_change(connection.clone(), &session_id).await {
                         Ok(Some(change)) => {
                             match config_target_from_parts(
                                 &change.target_kind,
@@ -1006,6 +1110,7 @@ impl RemoteSessionTracker {
                         Ok(None) => {}
                         Err(error) => {
                             debug!("remote config-change poll failed: {error:#}");
+                            tracker.reload_connection();
                         }
                     }
                 }
@@ -1020,7 +1125,14 @@ impl RemoteSessionTracker {
                     continue;
                 };
 
-                let queued = claim_remote_prompt(client.clone(), token.clone(), &session_id).await;
+                let Some(connection) = tracker.connection().or_else(|| tracker.reload_connection())
+                else {
+                    if let Ok(mut guard) = state.lock() {
+                        guard.release_remote_prompt_slot();
+                    }
+                    continue;
+                };
+                let queued = claim_remote_prompt(connection.clone(), &session_id).await;
                 match queued {
                     Ok(Some(prompt)) => {
                         let command = UiCommand::SendPrompt {
@@ -1041,6 +1153,7 @@ impl RemoteSessionTracker {
                     }
                     Err(error) => {
                         debug!("remote queued-prompt poll failed: {error:#}");
+                        tracker.reload_connection();
                         if let Ok(mut guard) = state.lock() {
                             guard.release_remote_prompt_slot();
                         }
@@ -1054,10 +1167,15 @@ impl RemoteSessionTracker {
 /// Build the HTTP client used to report sessions to the local server.
 ///
 /// The server uses a self-signed certificate, so rather than disabling
-/// certificate validation we pin that exact certificate. When it is missing
-/// (the server has never run) we leave the client disabled: there is nothing
-/// trustworthy to talk to, and reporting anyway would risk leaking the bearer
-/// token to whatever is squatting the port.
+/// certificate validation we pin that exact certificate. A connection is only
+/// enabled once both the pinned certificate and bearer token exist; otherwise
+/// the tracker keeps retrying so sessions can attach to a server started later.
+fn build_connection(dir: &Path) -> Option<RemoteConnection> {
+    let token = read_token(&dir.join("token")).map(Arc::new)?;
+    let client = build_client(&dir.join("cert.pem"))?;
+    Some(RemoteConnection { client, token })
+}
+
 fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
     let pem = match std::fs::read(cert_path) {
         Ok(pem) => pem,
@@ -1913,7 +2031,7 @@ fn ensure_server_paths_in(root: &Path, hostname: Option<&str>) -> Result<ServerP
     let cert_path = root.join("cert.pem");
     let key_path = root.join("key.pem");
     let cert_hostname_path = root.join("cert-hostname");
-    let existing_hostname = read_token(&cert_hostname_path).unwrap_or_default();
+    let existing_hostname = read_trimmed_file(&cert_hostname_path).unwrap_or_default();
     let hostname_changed = existing_hostname != normalized_hostname;
     if hostname_changed || !cert_path.exists() || !key_path.exists() {
         let mut names = vec![
@@ -1950,17 +2068,42 @@ fn ensure_token(token_path: &Path) -> Result<String> {
         return Ok(existing);
     }
     let token = generate_token()?;
-    std::fs::write(token_path, &token)
-        .with_context(|| format!("write {}", token_path.display()))?;
-    restrict_permissions(token_path)?;
+    write_token_atomically(token_path, &token)?;
     Ok(token)
 }
 
 fn read_token(token_path: &Path) -> Option<String> {
-    std::fs::read_to_string(token_path)
+    read_trimmed_file(token_path).filter(|token| valid_remote_token(token))
+}
+
+fn read_trimmed_file(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
         .ok()
         .map(|contents| contents.trim().to_string())
-        .filter(|token| !token.is_empty())
+        .filter(|contents| !contents.is_empty())
+}
+
+fn valid_remote_token(token: &str) -> bool {
+    token.len() == REMOTE_TOKEN_LEN
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn write_token_atomically(token_path: &Path, token: &str) -> Result<()> {
+    let tmp_path = token_path.with_file_name(format!(
+        ".{}.{}.tmp",
+        token_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("token"),
+        std::process::id()
+    ));
+    std::fs::write(&tmp_path, token).with_context(|| format!("write {}", tmp_path.display()))?;
+    restrict_permissions(&tmp_path)?;
+    std::fs::rename(&tmp_path, token_path)
+        .with_context(|| format!("rename {} to {}", tmp_path.display(), token_path.display()))?;
+    Ok(())
 }
 
 fn generate_token() -> Result<String> {
@@ -2539,15 +2682,12 @@ fn claim_config_change_record(
     }
 }
 
-async fn send_snapshot(
-    client: reqwest::Client,
-    token: Option<Arc<String>>,
-    snapshot: SessionRecord,
-) -> Result<()> {
-    let mut request = client.post(REMOTE_CONTROL_UPSERT_URL).json(&snapshot);
-    if let Some(token) = token {
-        request = request.bearer_auth(token.as_str());
-    }
+async fn send_snapshot(connection: RemoteConnection, snapshot: SessionRecord) -> Result<()> {
+    let request = connection
+        .client
+        .post(REMOTE_CONTROL_UPSERT_URL)
+        .bearer_auth(connection.token.as_str())
+        .json(&snapshot);
     request
         .send()
         .await
@@ -2557,17 +2697,13 @@ async fn send_snapshot(
     Ok(())
 }
 
-async fn send_disconnect(
-    client: reqwest::Client,
-    token: Option<Arc<String>>,
-    session_id: &str,
-) -> Result<()> {
+async fn send_disconnect(connection: RemoteConnection, session_id: &str) -> Result<()> {
     let encoded_session_id =
         url::form_urlencoded::byte_serialize(session_id.as_bytes()).collect::<String>();
-    let mut request = client.delete(format!("{REMOTE_CONTROL_UPSERT_URL}/{encoded_session_id}"));
-    if let Some(token) = token {
-        request = request.bearer_auth(token.as_str());
-    }
+    let request = connection
+        .client
+        .delete(format!("{REMOTE_CONTROL_UPSERT_URL}/{encoded_session_id}"))
+        .bearer_auth(connection.token.as_str());
     request
         .send()
         .await
@@ -2578,18 +2714,16 @@ async fn send_disconnect(
 }
 
 async fn claim_remote_prompt(
-    client: reqwest::Client,
-    token: Option<Arc<String>>,
+    connection: RemoteConnection,
     session_id: &str,
 ) -> Result<Option<QueuedPrompt>> {
-    let mut request = client
+    let request = connection
+        .client
         .post("https://localhost:11921/api/queued-prompts/claim")
+        .bearer_auth(connection.token.as_str())
         .json(&ClaimQueuedPromptRequest {
             session_id: session_id.to_string(),
         });
-    if let Some(token) = token {
-        request = request.bearer_auth(token.as_str());
-    }
     let response = request
         .send()
         .await
@@ -2603,18 +2737,16 @@ async fn claim_remote_prompt(
 }
 
 async fn claim_remote_permission_decision(
-    client: reqwest::Client,
-    token: Option<Arc<String>>,
+    connection: RemoteConnection,
     session_id: &str,
 ) -> Result<Option<PermissionDecisionRecord>> {
-    let mut request = client
+    let request = connection
+        .client
         .post("https://localhost:11921/api/permission-decisions/claim")
+        .bearer_auth(connection.token.as_str())
         .json(&ClaimPermissionDecisionRequest {
             session_id: session_id.to_string(),
         });
-    if let Some(token) = token {
-        request = request.bearer_auth(token.as_str());
-    }
     let response = request
         .send()
         .await
@@ -2628,18 +2760,16 @@ async fn claim_remote_permission_decision(
 }
 
 async fn claim_remote_config_change(
-    client: reqwest::Client,
-    token: Option<Arc<String>>,
+    connection: RemoteConnection,
     session_id: &str,
 ) -> Result<Option<ConfigChangeRecord>> {
-    let mut request = client
+    let request = connection
+        .client
         .post("https://localhost:11921/api/config-changes/claim")
+        .bearer_auth(connection.token.as_str())
         .json(&ClaimConfigChangeRequest {
             session_id: session_id.to_string(),
         });
-    if let Some(token) = token {
-        request = request.bearer_auth(token.as_str());
-    }
     let response = request
         .send()
         .await
@@ -4124,6 +4254,56 @@ mod tests {
         assert!(!first.is_empty());
         let second = ensure_token(&token_path).expect("reload");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn read_token_rejects_partial_or_malformed_tokens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_path = dir.path().join("token");
+
+        std::fs::write(&token_path, "short").expect("write short token");
+        assert!(read_token(&token_path).is_none());
+
+        std::fs::write(&token_path, "a".repeat(REMOTE_TOKEN_LEN - 1)).expect("write partial token");
+        assert!(read_token(&token_path).is_none());
+
+        std::fs::write(
+            &token_path,
+            format!("{}!", "a".repeat(REMOTE_TOKEN_LEN - 1)),
+        )
+        .expect("write malformed token");
+        assert!(read_token(&token_path).is_none());
+
+        std::fs::write(&token_path, "a".repeat(REMOTE_TOKEN_LEN)).expect("write valid token");
+        assert!(read_token(&token_path).is_some());
+    }
+
+    #[test]
+    fn build_connection_waits_for_cert_and_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(build_connection(dir.path()).is_none());
+
+        let paths = ensure_server_paths_in(dir.path(), None).expect("paths");
+        assert!(build_connection(dir.path()).is_none());
+
+        ensure_token(&paths.token_path).expect("token");
+        assert!(build_connection(dir.path()).is_some());
+    }
+
+    #[test]
+    fn tracker_accepts_connection_after_starting_disconnected() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
+        assert!(tracker.connection().is_none());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = ensure_server_paths_in(dir.path(), None).expect("paths");
+        ensure_token(&paths.token_path).expect("token");
+
+        let connection = build_connection(dir.path()).expect("connection");
+        assert!(tracker.set_connection_once(connection.clone()));
+        assert!(tracker.connection().is_some());
+        assert!(!tracker.set_connection_once(connection));
     }
 
     #[test]

@@ -979,6 +979,8 @@ async fn run_session(
     //    open): the 2s `timeout` below trips and we `abort()` the
     //    task. `kill_on_drop(true)` on the `Command` then signals the
     //    child when the `Child` value is dropped during unwind.
+    remote_tracker.shutdown().await;
+
     let abort_handle = acp_handle.abort_handle();
     match tokio::time::timeout(Duration::from_secs(2), acp_handle).await {
         Ok(join_res) => {
@@ -996,7 +998,6 @@ async fn run_session(
 
     wait_for_task("remote-control event proxy", event_proxy).await;
     wait_for_task("remote-control command proxy", cmd_proxy).await;
-    remote_tracker.shutdown().await;
 
     ui_result
 }
