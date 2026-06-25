@@ -83,6 +83,7 @@ pub enum UiMode {
 pub struct HeaderLabels {
     pub project: String,
     pub worktree: Option<String>,
+    pub additional_roots: usize,
     pub session_title: Option<String>,
 }
 
@@ -407,6 +408,7 @@ async fn ui_loop(
     state.set_prompt_history(initial.history);
     state.project_label = initial.header_labels.project;
     state.worktree_label = initial.header_labels.worktree;
+    state.additional_roots = initial.header_labels.additional_roots;
     if let Some(title) = initial.header_labels.session_title {
         state.set_session_title(&title);
     }
@@ -3846,6 +3848,18 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ));
         spans.push(Span::raw("   "));
     }
+    if state.additional_roots > 0 {
+        let label = if state.additional_roots == 1 {
+            "+1 root".to_string()
+        } else {
+            format!("+{} roots", state.additional_roots)
+        };
+        spans.push(Span::styled(
+            label,
+            Style::default().fg(state.theme.warning),
+        ));
+        spans.push(Span::raw("   "));
+    }
     spans.push(Span::styled(
         header_token_usage_label(state, width),
         Style::default().fg(state.theme.tool),
@@ -6346,6 +6360,23 @@ mod tests {
             rendered.contains("Review payment flow"),
             "rendered:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn header_shows_additional_workspace_root_count() {
+        let mut state = AppState::new();
+        state.agent_label = "codex-acp".to_string();
+        state.project_label = "~/code/mjolnir".to_string();
+        state.additional_roots = 2;
+        let backend = TestBackend::new(120, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("+2 roots"), "rendered:\n{rendered}");
     }
 
     #[test]

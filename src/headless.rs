@@ -37,6 +37,7 @@ pub enum PermissionMode {
 pub struct RunConfig {
     pub prompt: String,
     pub cwd: PathBuf,
+    pub additional_directories: Vec<PathBuf>,
     pub resume_session: Option<String>,
     pub agent_stderr: Option<PathBuf>,
     pub fs_max_text_bytes: u64,
@@ -132,6 +133,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         command: agent.program,
         args: agent.args,
         cwd: cfg.cwd,
+        additional_directories: cfg.additional_directories,
         resume_session: cfg.resume_session.clone(),
         env: agent.env,
         agent_stderr: cfg.agent_stderr,

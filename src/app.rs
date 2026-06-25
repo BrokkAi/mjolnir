@@ -568,6 +568,8 @@ pub struct AppState {
     /// Short linked-worktree name shown separately from the project when
     /// the session runs under `.mjolnir/worktrees/`.
     pub worktree_label: Option<String>,
+    /// Number of extra ACP workspace roots active for this session.
+    pub additional_roots: usize,
     /// Directory where `/export` writes Markdown transcript files.
     pub transcript_export_dir: Option<PathBuf>,
     /// Config file used by local UI-only settings such as `/theme`.
@@ -723,6 +725,7 @@ impl AppState {
             text_selection_mode: false,
             project_label: String::new(),
             worktree_label: None,
+            additional_roots: 0,
             transcript_export_dir: None,
             config_path: None,
             clipboard_lease: None,

@@ -19,7 +19,7 @@ Mjolnir should instead:
 - pass workspace scope to agents through ACP session fields;
 - render agent-provided permission requests and session config options;
 - avoid persisting a Mjolnir-local trust store that agents may ignore;
-- add client support for ACP additional workspace roots as a separate feature.
+- treat ACP additional workspace roots as workspace scope, not local trust.
 
 If ACP later standardizes a trust or safety-policy field, Mjolnir should surface
 that field as protocol state and send the user's choice back to the agent. Until
@@ -32,19 +32,26 @@ general tool policy, but it does host some ACP client capabilities.
 
 Current session setup:
 
-- `src/acp.rs` opens new sessions with `NewSessionRequest::new(cwd.clone())`.
-- `src/acp.rs` resumes or loads sessions with `ResumeSessionRequest::new(session_id, cwd)`
-  or `LoadSessionRequest::new(session_id, cwd)`.
-- `RuntimeSessionState::set_active_session` remembers the active session and
-  `cwd`.
+- `src/main.rs` accepts repeatable `--additional-directory <PATH>` / `--add-dir <PATH>`.
+- Additional directories must be absolute, existing, accessible directories.
+  Mjolnir canonicalizes and de-duplicates them before launching the agent.
+- `src/acp.rs` opens, resumes, loads, and forks sessions with `cwd` plus
+  `additional_directories` when any are configured.
+- Requested additional directories require ACP
+  `sessionCapabilities.additionalDirectories`; if the agent does not advertise
+  it, Mjolnir fails before opening the session with a clear capability error.
+- `RuntimeSessionState` remembers the active session root set: `cwd` plus any
+  accepted additional directories.
 
 Current Mjolnir-hosted client capabilities:
 
-- ACP filesystem reads and writes are checked against the active session root.
+- ACP filesystem reads and writes are checked against the active session root
+  set.
 - ACP filesystem writes also ask for permission through Mjolnir's permission UI.
 - ACP terminal requests are tied to the active session, require a non-empty
   command, and require an absolute `cwd` when one is supplied.
-- ACP terminal `cwd` is not currently constrained to the active session root.
+- ACP terminal `cwd` is constrained to the active session root set. When no
+  terminal `cwd` is supplied, Mjolnir uses the primary session `cwd`.
 
 Current permissions:
 
@@ -111,18 +118,24 @@ commands, load project files, or read agent-specific configuration through their
 own runtimes. Mjolnir-hosted terminal execution is also a separate enforcement
 surface because it directly spawns the requested command.
 
-## Implementation Follow-Up
+## Additional Workspace Roots
 
-Track ACP additional workspace roots in
-https://github.com/BrokkAi/mjolnir/issues/236. The invariant for that work is
-that additional roots expand workspace scope, not trust.
+Issue: https://github.com/BrokkAi/mjolnir/issues/236
 
-That follow-up must also define:
+Additional workspace roots expand the ACP workspace scope that Mjolnir passes to
+the agent. They do not create a local trust decision and are not stored in a
+Mjolnir trust database.
 
-- how to gate the feature on ACP `sessionCapabilities.additionalDirectories`;
-- how additional roots affect Mjolnir's ACP filesystem root validation;
-- whether Mjolnir-hosted terminal `cwd` remains unbounded agent-trusted state or
-  becomes constrained to `cwd` plus additional roots.
+The implemented invariant is:
+
+- agents must advertise `sessionCapabilities.additionalDirectories`;
+- `session/new`, `session/resume`, `session/load`, and `session/fork` receive the
+  validated additional directories;
+- Mjolnir-hosted ACP filesystem reads and writes may access only `cwd` plus the
+  additional directories;
+- Mjolnir-hosted terminal `cwd` may be only `cwd` plus the additional
+  directories;
+- the UI header shows a compact `+N roots` indicator when extra roots are active.
 
 Do not add a Mjolnir-owned folder trust prompt or persisted trust list unless ACP
 standardizes enforceable trust semantics or a specific agent integration can

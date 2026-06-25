@@ -44,6 +44,9 @@ pub struct AcpRuntimeConfig {
     pub command: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    /// Additional absolute workspace roots to pass to ACP session lifecycle
+    /// requests. These expand workspace scope but do not imply trust.
+    pub additional_directories: Vec<PathBuf>,
     pub resume_session: Option<String>,
     /// Environment variables to inject into the spawned agent process.
     /// Used for agents that require knobs like `AUGMENT_DISABLE_AUTO_UPDATE=1`.
@@ -61,7 +64,7 @@ pub struct AcpRuntimeConfig {
 #[derive(Clone)]
 struct RuntimeSessionState {
     active_session_id: Arc<Mutex<Option<SessionId>>>,
-    active_fs_root: Arc<Mutex<Option<PathBuf>>>,
+    active_roots: Arc<Mutex<Vec<PathBuf>>>,
     cancelled_permission_sessions: Arc<Mutex<HashSet<SessionId>>>,
     permission_cancel_generation: watch::Sender<u64>,
 }
@@ -79,7 +82,7 @@ impl RuntimeSessionState {
         let (permission_cancel_generation, _) = watch::channel(0);
         Self {
             active_session_id: Arc::new(Mutex::new(None)),
-            active_fs_root: Arc::new(Mutex::new(None)),
+            active_roots: Arc::new(Mutex::new(Vec::new())),
             cancelled_permission_sessions: Arc::new(Mutex::new(HashSet::new())),
             permission_cancel_generation,
         }
@@ -89,24 +92,46 @@ impl RuntimeSessionState {
         self.active_session_id.lock().await.as_ref() == Some(session_id)
     }
 
+    #[cfg(test)]
     async fn set_active_session(
         &self,
         session_id: SessionId,
         fs_root: &Path,
+    ) -> std::result::Result<(), agent_client_protocol::Error> {
+        self.set_active_session_with_roots(session_id, fs_root, &[])
+            .await
+    }
+
+    async fn set_active_session_with_roots(
+        &self,
+        session_id: SessionId,
+        fs_root: &Path,
+        additional_roots: &[PathBuf],
     ) -> std::result::Result<(), agent_client_protocol::Error> {
         let fs_root = std::fs::canonicalize(fs_root).map_err(|_| {
             agent_client_protocol::Error::invalid_params().data(serde_json::Value::String(
                 "invalid session filesystem root".to_string(),
             ))
         })?;
+        let mut roots = vec![fs_root];
+        for root in additional_roots {
+            let canonical = std::fs::canonicalize(root).map_err(|_| {
+                agent_client_protocol::Error::invalid_params().data(serde_json::Value::String(
+                    format!("invalid additional workspace root: {}", root.display()),
+                ))
+            })?;
+            if !roots.iter().any(|existing| existing == &canonical) {
+                roots.push(canonical);
+            }
+        }
         *self.active_session_id.lock().await = Some(session_id);
-        *self.active_fs_root.lock().await = Some(fs_root);
+        *self.active_roots.lock().await = roots;
         Ok(())
     }
 
     async fn clear_active_session(&self) {
         *self.active_session_id.lock().await = None;
-        *self.active_fs_root.lock().await = None;
+        self.active_roots.lock().await.clear();
     }
 
     async fn ensure_active_session(
@@ -124,16 +149,22 @@ impl RuntimeSessionState {
         )
     }
 
-    async fn active_fs_root(
+    async fn active_root_set(
         &self,
         session_id: &SessionId,
-    ) -> std::result::Result<PathBuf, agent_client_protocol::Error> {
-        self.ensure_active_session(session_id, "filesystem").await?;
-        self.active_fs_root.lock().await.clone().ok_or_else(|| {
-            agent_client_protocol::Error::invalid_params().data(serde_json::Value::String(
-                "filesystem root is not active".to_string(),
-            ))
-        })
+        capability: &str,
+    ) -> std::result::Result<Vec<PathBuf>, agent_client_protocol::Error> {
+        self.ensure_active_session(session_id, capability).await?;
+        let roots = self.active_roots.lock().await.clone();
+        if roots.is_empty() {
+            Err(
+                agent_client_protocol::Error::invalid_params().data(serde_json::Value::String(
+                    format!("{capability} root is not active"),
+                )),
+            )
+        } else {
+            Ok(roots)
+        }
     }
 
     async fn permission_cancelled(&self, session_id: &SessionId) -> bool {
@@ -373,16 +404,64 @@ fn require_resume_or_load_session(
     }
 }
 
+fn require_additional_directories(
+    capabilities: &AgentCapabilities,
+    additional_directories: &[PathBuf],
+) -> std::result::Result<(), LaunchError> {
+    if additional_directories.is_empty()
+        || capabilities
+            .session_capabilities
+            .additional_directories
+            .is_some()
+    {
+        Ok(())
+    } else {
+        Err(LaunchError::UnsupportedCapability {
+            capability: "sessionCapabilities.additionalDirectories",
+        })
+    }
+}
+
+fn new_session_request(cwd: PathBuf, additional_directories: &[PathBuf]) -> NewSessionRequest {
+    NewSessionRequest::new(cwd).additional_directories(additional_directories.to_vec())
+}
+
+fn resume_session_request(
+    session_id: SessionId,
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+) -> ResumeSessionRequest {
+    ResumeSessionRequest::new(session_id, cwd)
+        .additional_directories(additional_directories.to_vec())
+}
+
+fn load_session_request(
+    session_id: SessionId,
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+) -> LoadSessionRequest {
+    LoadSessionRequest::new(session_id, cwd).additional_directories(additional_directories.to_vec())
+}
+
+fn fork_session_request(
+    session_id: SessionId,
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+) -> ForkSessionRequest {
+    ForkSessionRequest::new(session_id, cwd).additional_directories(additional_directories.to_vec())
+}
+
 async fn resume_existing_session(
     conn: &ConnectionTo<Agent>,
     session_id: SessionId,
     cwd: PathBuf,
+    additional_directories: &[PathBuf],
     capabilities: &AgentCapabilities,
     auth_methods: &[AuthMethod],
 ) -> std::result::Result<Option<(Vec<SessionConfigOption>, Vec<SessionConfigTarget>)>, LaunchError>
 {
     if capabilities.session_capabilities.resume.is_some() {
-        let resume_req = ResumeSessionRequest::new(session_id, cwd);
+        let resume_req = resume_session_request(session_id, cwd, additional_directories);
         let resumed = match conn.send_request(resume_req.clone()).block_task().await {
             Ok(s) => s,
             Err(source) => match auth_required_detail(&source) {
@@ -403,7 +482,7 @@ async fn resume_existing_session(
     }
 
     require_load_session(capabilities)?;
-    let load_req = LoadSessionRequest::new(session_id, cwd);
+    let load_req = load_session_request(session_id, cwd, additional_directories);
     let loaded = match conn.send_request(load_req.clone()).block_task().await {
         Ok(s) => s,
         Err(source) => match auth_required_detail(&source) {
@@ -508,6 +587,7 @@ pub async fn run(
         let drive = drive_client_with_fs_limit(
             transport,
             cfg.cwd.clone(),
+            cfg.additional_directories.clone(),
             cfg.resume_session.clone(),
             ui_tx.clone(),
             ui_rx,
@@ -984,6 +1064,7 @@ where
     drive_client_with_fs_limit(
         transport,
         cwd,
+        Vec::new(),
         resume_session,
         ui_tx,
         ui_rx,
@@ -993,9 +1074,37 @@ where
     .await
 }
 
+#[cfg(test)]
+pub async fn drive_client_with_additional_directories<T>(
+    transport: T,
+    cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
+    resume_session: Option<String>,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+    ui_rx: mpsc::UnboundedReceiver<UiCommand>,
+    fatal_emitted: Arc<AtomicBool>,
+) -> Result<()>
+where
+    T: ConnectTo<Client>,
+{
+    drive_client_with_fs_limit(
+        transport,
+        cwd,
+        additional_directories,
+        resume_session,
+        ui_tx,
+        ui_rx,
+        fatal_emitted,
+        DEFAULT_FS_TEXT_BYTES,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn drive_client_with_fs_limit<T>(
     transport: T,
     cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
     resume_session: Option<String>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     mut ui_rx: mpsc::UnboundedReceiver<UiCommand>,
@@ -1136,6 +1245,7 @@ where
             if let Err(e) = drive_session(
                 conn,
                 cwd,
+                additional_directories,
                 resume_session,
                 &ui_tx,
                 &mut ui_rx,
@@ -1165,6 +1275,7 @@ where
 async fn drive_session(
     conn: ConnectionTo<Agent>,
     cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
     resume_session: Option<String>,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
@@ -1197,6 +1308,13 @@ async fn drive_session(
         emit_fatal(ui_tx, &fatal_emitted, text.clone());
         return Err(anyhow::anyhow!(text));
     }
+    if let Err(launch_err) =
+        require_additional_directories(&init_resp.agent_capabilities, &additional_directories)
+    {
+        let text = launch_err.to_string();
+        emit_fatal(ui_tx, &fatal_emitted, text.clone());
+        return Err(anyhow::anyhow!(text));
+    }
     let connected_fields = ConnectedEventFields {
         agent_name: init_resp.agent_info.as_ref().map(|i| i.name.clone()),
         agent_version: init_resp.agent_info.as_ref().map(|i| i.version.clone()),
@@ -1218,6 +1336,7 @@ async fn drive_session(
                 &conn,
                 session_id.clone(),
                 cwd.clone(),
+                &additional_directories,
                 &init_resp.agent_capabilities,
                 &init_resp.auth_methods,
             )
@@ -1231,20 +1350,24 @@ async fn drive_session(
                 }
             };
             session_state
-                .set_active_session(session_id.clone(), &cwd)
+                .set_active_session_with_roots(session_id.clone(), &cwd, &additional_directories)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             (session_id, initial_config, true)
         }
         None => match conn
-            .send_request(NewSessionRequest::new(cwd.clone()))
+            .send_request(new_session_request(cwd.clone(), &additional_directories))
             .block_task()
             .await
         {
             Ok(s) => {
                 let config = session_config_from_parts(s.config_options, s.modes);
                 session_state
-                    .set_active_session(s.session_id.clone(), &cwd)
+                    .set_active_session_with_roots(
+                        s.session_id.clone(),
+                        &cwd,
+                        &additional_directories,
+                    )
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 (s.session_id, config, false)
@@ -1260,14 +1383,18 @@ async fn drive_session(
                         return Err(anyhow::anyhow!(text));
                     }
                     match conn
-                        .send_request(NewSessionRequest::new(cwd.clone()))
+                        .send_request(new_session_request(cwd.clone(), &additional_directories))
                         .block_task()
                         .await
                     {
                         Ok(s) => {
                             let config = session_config_from_parts(s.config_options, s.modes);
                             session_state
-                                .set_active_session(s.session_id.clone(), &cwd)
+                                .set_active_session_with_roots(
+                                    s.session_id.clone(),
+                                    &cwd,
+                                    &additional_directories,
+                                )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{e}"))?;
                             (s.session_id, config, false)
@@ -1350,6 +1477,7 @@ async fn drive_session(
                 if !drive_fork_session(
                     &conn,
                     cwd.clone(),
+                    &additional_directories,
                     &mut session_id,
                     &mut session_config,
                     &session_state,
@@ -1370,7 +1498,11 @@ async fn drive_session(
                 let target_session_id = SessionId::from(requested_session_id);
                 if target_session_id == session_id {
                     if let Err(e) = session_state
-                        .set_active_session(session_id.clone(), &requested_cwd)
+                        .set_active_session_with_roots(
+                            session_id.clone(),
+                            &requested_cwd,
+                            &additional_directories,
+                        )
                         .await
                     {
                         let _ = responder.send(LoadSessionResult::Fallback {
@@ -1414,6 +1546,7 @@ async fn drive_session(
                     &session_id,
                     target_session_id,
                     requested_cwd,
+                    &additional_directories,
                     title,
                     &init_resp.agent_capabilities,
                     &init_resp.auth_methods,
@@ -1458,6 +1591,7 @@ async fn switch_existing_session(
     current_session_id: &SessionId,
     target_session_id: SessionId,
     cwd: PathBuf,
+    additional_directories: &[PathBuf],
     title: Option<String>,
     capabilities: &AgentCapabilities,
     auth_methods: &[AuthMethod],
@@ -1478,12 +1612,13 @@ async fn switch_existing_session(
         conn,
         target_session_id.clone(),
         cwd.clone(),
+        additional_directories,
         capabilities,
         auth_methods,
     )
     .await?;
     session_state
-        .set_active_session(target_session_id.clone(), &cwd)
+        .set_active_session_with_roots(target_session_id.clone(), &cwd, additional_directories)
         .await
         .map_err(|source| LaunchError::SessionCreateFailed { source })?;
 
@@ -1533,9 +1668,11 @@ async fn close_session(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive_fork_session(
     conn: &ConnectionTo<Agent>,
     cwd: PathBuf,
+    additional_directories: &[PathBuf],
     session_id: &mut SessionId,
     session_config: &mut SessionConfigCache,
     session_state: &RuntimeSessionState,
@@ -1543,7 +1680,12 @@ async fn drive_fork_session(
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
 ) -> Result<bool> {
     let source_session_id = session_id.clone();
-    let fork = fork_session(conn, &source_session_id, cwd.clone());
+    let fork = fork_session(
+        conn,
+        &source_session_id,
+        cwd.clone(),
+        additional_directories,
+    );
     tokio::pin!(fork);
 
     loop {
@@ -1552,7 +1694,11 @@ async fn drive_fork_session(
                 match result {
                     Ok((forked_session_id, forked_config)) => {
                         session_state
-                            .set_active_session(forked_session_id.clone(), &cwd)
+                            .set_active_session_with_roots(
+                                forked_session_id.clone(),
+                                &cwd,
+                                additional_directories,
+                            )
                             .await
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
                         *session_id = forked_session_id;
@@ -1614,9 +1760,14 @@ async fn fork_session(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
     cwd: PathBuf,
+    additional_directories: &[PathBuf],
 ) -> std::result::Result<(SessionId, Option<SessionConfigCache>), agent_client_protocol::Error> {
     let resp = conn
-        .send_request(ForkSessionRequest::new(session_id.clone(), cwd))
+        .send_request(fork_session_request(
+            session_id.clone(),
+            cwd,
+            additional_directories,
+        ))
         .block_task()
         .await?;
     let config = session_config_from_parts(resp.config_options, resp.modes)
@@ -1817,9 +1968,9 @@ impl LocalFileSystem {
         &self,
         request: ReadTextFileRequest,
     ) -> std::result::Result<ReadTextFileResponse, agent_client_protocol::Error> {
-        let root = self
+        let roots = self
             .session_state
-            .active_fs_root(&request.session_id)
+            .active_root_set(&request.session_id, "filesystem")
             .await?;
         let size_policy = if request.limit.is_some() {
             ReadSizePolicy::AllowLargeFileForRange
@@ -1827,7 +1978,7 @@ impl LocalFileSystem {
             ReadSizePolicy::EnforceFileCap
         };
         let path = self
-            .resolve_existing_file(&root, &request.path, size_policy)
+            .resolve_existing_file(&roots, &request.path, size_policy)
             .await?;
         let content =
             read_text_line_range_from_file(&path, request.line, request.limit, self.max_text_bytes)
@@ -1839,9 +1990,9 @@ impl LocalFileSystem {
         &self,
         request: WriteTextFileRequest,
     ) -> std::result::Result<WriteTextFileResponse, agent_client_protocol::Error> {
-        let root = self
+        let roots = self
             .session_state
-            .active_fs_root(&request.session_id)
+            .active_root_set(&request.session_id, "filesystem")
             .await?;
         let content = request.content;
         if content.len() as u64 > self.max_text_bytes {
@@ -1849,13 +2000,13 @@ impl LocalFileSystem {
                 "filesystem write content exceeds client limit",
             ));
         }
-        let path = self.resolve_write_path(&root, &request.path).await?;
+        let path = self.resolve_write_path(&roots, &request.path).await?;
         self.confirm_write_permission(&request.session_id, &path, content.len())
             .await?;
         self.session_state
             .ensure_active_session(&request.session_id, "filesystem")
             .await?;
-        let path = self.resolve_write_path(&root, &path).await?;
+        let path = self.resolve_write_path(&roots, &path).await?;
         write_text_file_no_follow(&path, content)
             .await
             .map_err(|e| fs_io_error("write text file", &path, e, "file must be writable"))?;
@@ -1864,7 +2015,7 @@ impl LocalFileSystem {
 
     async fn resolve_existing_file(
         &self,
-        root: &Path,
+        roots: &[PathBuf],
         path: &Path,
         size_policy: ReadSizePolicy,
     ) -> std::result::Result<PathBuf, agent_client_protocol::Error> {
@@ -1872,7 +2023,7 @@ impl LocalFileSystem {
         let path = tokio::fs::canonicalize(path)
             .await
             .map_err(|e| fs_io_error("resolve text file", path, e, "file must exist"))?;
-        self.validate_under_root(root, &path)?;
+        self.validate_under_any_root(roots, &path)?;
         let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
             fs_io_error(
                 "inspect text file",
@@ -1894,7 +2045,7 @@ impl LocalFileSystem {
 
     async fn resolve_write_path(
         &self,
-        root: &Path,
+        roots: &[PathBuf],
         path: &Path,
     ) -> std::result::Result<PathBuf, agent_client_protocol::Error> {
         self.validate_absolute(path)?;
@@ -1904,7 +2055,7 @@ impl LocalFileSystem {
 
         match tokio::fs::canonicalize(path).await {
             Ok(existing) => {
-                self.validate_under_root(root, &existing)?;
+                self.validate_under_any_root(roots, &existing)?;
                 let metadata = tokio::fs::metadata(&existing).await.map_err(|e| {
                     fs_io_error(
                         "inspect text file",
@@ -1925,7 +2076,7 @@ impl LocalFileSystem {
                 let parent = tokio::fs::canonicalize(parent).await.map_err(|e| {
                     fs_io_error("resolve parent directory", parent, e, "parent must exist")
                 })?;
-                self.validate_under_root(root, &parent)?;
+                self.validate_under_any_root(roots, &parent)?;
                 Ok(parent.join(path.file_name().expect("checked above")))
             }
             Err(e) => Err(fs_io_error(
@@ -1951,15 +2102,17 @@ impl LocalFileSystem {
         }
     }
 
-    fn validate_under_root(
+    fn validate_under_any_root(
         &self,
-        root: &Path,
+        roots: &[PathBuf],
         path: &Path,
     ) -> std::result::Result<(), agent_client_protocol::Error> {
-        if path.starts_with(root) {
+        if roots.iter().any(|root| path.starts_with(root)) {
             Ok(())
         } else {
-            Err(fs_invalid_params("filesystem path is outside session root"))
+            Err(fs_invalid_params(
+                "filesystem path is outside active workspace roots",
+            ))
         }
     }
 
@@ -2264,12 +2417,7 @@ impl ManagedTerminals {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        if let Some(cwd) = &request.cwd {
-            if !cwd.is_absolute() {
-                return Err(terminal_invalid_params(
-                    "terminal cwd must be an absolute path",
-                ));
-            }
+        if let Some(cwd) = self.resolve_terminal_cwd(&request).await? {
             cmd.current_dir(cwd);
         }
         for env in &request.env {
@@ -2334,6 +2482,47 @@ impl ManagedTerminals {
         ));
 
         Ok(CreateTerminalResponse::new(TerminalId::new(terminal_id)))
+    }
+
+    async fn resolve_terminal_cwd(
+        &self,
+        request: &CreateTerminalRequest,
+    ) -> std::result::Result<Option<PathBuf>, agent_client_protocol::Error> {
+        let Some(session_state) = &self.session_state else {
+            if let Some(cwd) = &request.cwd
+                && !cwd.is_absolute()
+            {
+                return Err(terminal_invalid_params(
+                    "terminal cwd must be an absolute path",
+                ));
+            }
+            return Ok(request.cwd.clone());
+        };
+        let roots = session_state
+            .active_root_set(&request.session_id, "terminal")
+            .await?;
+        let cwd = match &request.cwd {
+            Some(cwd) => {
+                if !cwd.is_absolute() {
+                    return Err(terminal_invalid_params(
+                        "terminal cwd must be an absolute path",
+                    ));
+                }
+                tokio::fs::canonicalize(cwd).await.map_err(|e| {
+                    terminal_invalid_params(format!(
+                        "terminal cwd must exist and be accessible: {e}"
+                    ))
+                })?
+            }
+            None => roots[0].clone(),
+        };
+        if roots.iter().any(|root| cwd.starts_with(root)) {
+            Ok(Some(cwd))
+        } else {
+            Err(terminal_invalid_params(
+                "terminal cwd is outside active workspace roots",
+            ))
+        }
     }
 
     async fn output(
@@ -2967,9 +3156,10 @@ mod tests {
         AuthMethodAgent, AuthenticateResponse, CloseSessionResponse, ContentBlock, ContentChunk,
         ForkSessionResponse, InitializeResponse, LoadSessionResponse, NewSessionResponse,
         PermissionOption, PermissionOptionKind, PromptResponse, ResumeSessionResponse,
-        SessionCapabilities, SessionCloseCapabilities, SessionConfigId, SessionConfigValueId,
-        SessionForkCapabilities, SessionId, SessionNotification, SessionResumeCapabilities,
-        SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent, ToolCallUpdate,
+        SessionAdditionalDirectoriesCapabilities, SessionCapabilities, SessionCloseCapabilities,
+        SessionConfigId, SessionConfigValueId, SessionForkCapabilities, SessionId,
+        SessionNotification, SessionResumeCapabilities, SessionUpdate,
+        SetSessionConfigOptionRequest, StopReason, TextContent, ToolCallUpdate,
         ToolCallUpdateFields,
     };
     use std::sync::{
@@ -3099,6 +3289,51 @@ mod tests {
             result = &mut write => panic!("write completed before permission: {result:?}"),
         }
         write.await.expect("write");
+        assert_eq!(
+            tokio::fs::read_to_string(write_path)
+                .await
+                .expect("written"),
+            "created"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_allows_additional_workspace_roots() {
+        let primary = tempfile::tempdir().expect("primary");
+        let additional = tempfile::tempdir().expect("additional");
+        let session_id = SessionId::new("session-1");
+        let state = RuntimeSessionState::new();
+        state
+            .set_active_session_with_roots(
+                session_id.clone(),
+                primary.path(),
+                &[additional.path().to_path_buf()],
+            )
+            .await
+            .expect("active roots");
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        let filesystem = LocalFileSystem::new(state, ui_tx, DEFAULT_FS_TEXT_BYTES);
+        let read_path = additional.path().join("notes.txt");
+        tokio::fs::write(&read_path, "extra").await.expect("seed");
+
+        let read = filesystem
+            .read_text_file(ReadTextFileRequest::new(session_id.clone(), &read_path))
+            .await
+            .expect("read additional root");
+        assert_eq!(read.content, "extra");
+
+        let write_path = additional.path().join("created.txt");
+        let write = filesystem.write_text_file(WriteTextFileRequest::new(
+            session_id,
+            write_path.clone(),
+            "created",
+        ));
+        tokio::pin!(write);
+        tokio::select! {
+            _ = allow_next_permission(&mut ui_rx) => {}
+            result = &mut write => panic!("write completed before permission: {result:?}"),
+        }
+        write.await.expect("write additional root");
         assert_eq!(
             tokio::fs::read_to_string(write_path)
                 .await
@@ -3373,6 +3608,58 @@ mod tests {
                 UiEvent::TerminalOutput(snapshot) if snapshot.output.contains("hello")
             )),
             "expected at least one terminal output UI event"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_terminal_cwd_is_limited_to_active_workspace_roots() {
+        let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
+        let session_id = SessionId::new("session-1");
+        let primary = tempfile::tempdir().expect("primary");
+        let additional = tempfile::tempdir().expect("additional");
+        let outside = tempfile::tempdir().expect("outside");
+        let session_state = RuntimeSessionState::new();
+        session_state
+            .set_active_session_with_roots(
+                session_id.clone(),
+                primary.path(),
+                &[additional.path().to_path_buf()],
+            )
+            .await
+            .expect("active roots");
+        let terminals = ManagedTerminals::with_session_state(ui_tx, session_state);
+
+        let default_cwd = terminals
+            .resolve_terminal_cwd(&CreateTerminalRequest::new(session_id.clone(), "pwd"))
+            .await
+            .expect("default cwd")
+            .expect("cwd");
+        assert_eq!(
+            default_cwd,
+            std::fs::canonicalize(primary.path()).expect("primary")
+        );
+
+        let additional_cwd = terminals
+            .resolve_terminal_cwd(
+                &CreateTerminalRequest::new(session_id.clone(), "pwd")
+                    .cwd(additional.path().to_path_buf()),
+            )
+            .await
+            .expect("additional cwd")
+            .expect("cwd");
+        assert_eq!(
+            additional_cwd,
+            std::fs::canonicalize(additional.path()).expect("additional")
+        );
+
+        assert!(
+            terminals
+                .resolve_terminal_cwd(
+                    &CreateTerminalRequest::new(session_id, "pwd")
+                        .cwd(outside.path().to_path_buf()),
+                )
+                .await
+                .is_err()
         );
     }
 
@@ -3716,6 +4003,47 @@ mod tests {
             )
             .connect_with(transport, |_cx| async move {
                 // Keep the agent alive until the client side closes.
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_with_additional_directories(
+        stream: tokio::io::DuplexStream,
+        expected_additional_directories: Vec<PathBuf>,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                            AgentCapabilities::new().session_capabilities(
+                                SessionCapabilities::new().additional_directories(
+                                    SessionAdditionalDirectoriesCapabilities::new(),
+                                ),
+                            ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: NewSessionRequest, responder, _cx| {
+                    assert_eq!(
+                        req.additional_directories, expected_additional_directories,
+                        "session/new should receive requested additional directories"
+                    );
+                    responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
                 futures::future::pending::<()>().await;
                 Ok(())
             })
@@ -4505,6 +4833,83 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_client_sends_additional_directories_on_new_session() {
+        let root = tempfile::tempdir().expect("root");
+        let additional = tempfile::tempdir().expect("additional");
+        let additional_path = std::fs::canonicalize(additional.path()).expect("canonical");
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_with_additional_directories(
+            agent_side,
+            vec![additional_path.clone()],
+        ));
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client_with_additional_directories(
+            client_transport,
+            root.path().to_path_buf(),
+            vec![additional_path],
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "test-session").await;
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(5), client_task)
+            .await
+            .expect("drive_client did not finish")
+            .expect("client task")
+            .expect("drive_client");
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_client_rejects_additional_directories_without_agent_capability() {
+        let root = tempfile::tempdir().expect("root");
+        let additional = tempfile::tempdir().expect("additional");
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent(agent_side));
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client_with_additional_directories(
+            client_transport,
+            root.path().to_path_buf(),
+            vec![additional.path().to_path_buf()],
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            .await
+            .expect("timeout waiting for fatal")
+            .expect("event");
+        match ev {
+            UiEvent::Fatal(msg) => assert!(
+                msg.contains("sessionCapabilities.additionalDirectories"),
+                "unexpected fatal: {msg}"
+            ),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), client_task)
+                .await
+                .expect("drive_client did not finish")
+                .expect("client task")
+                .is_err()
+        );
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mock_agent_can_read_and_write_text_files() {
         let temp = tempfile::tempdir().expect("tempdir");
         let read_path = temp.path().join("read.txt");
@@ -5264,6 +5669,7 @@ mod tests {
             command: PathBuf::from("definitely-not-a-real-mjolnir-command"),
             args: Vec::new(),
             cwd: std::env::temp_dir(),
+            additional_directories: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,
@@ -5315,6 +5721,7 @@ mod tests {
             command: PathBuf::from("does-not-need-to-exist"),
             args: Vec::new(),
             cwd: std::env::temp_dir(),
+            additional_directories: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: Some(bad_stderr),
@@ -5445,6 +5852,7 @@ mod tests {
             command,
             args,
             cwd: std::env::temp_dir(),
+            additional_directories: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,
@@ -5465,6 +5873,7 @@ mod tests {
             command,
             args,
             cwd: std::env::temp_dir(),
+            additional_directories: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,

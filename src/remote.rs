@@ -1317,6 +1317,7 @@ fn start_server_agent_session(
         command: agent.program,
         args: agent.args,
         cwd,
+        additional_directories: Vec::new(),
         resume_session: None,
         env: agent.env,
         agent_stderr: None,
