@@ -75,6 +75,12 @@ pub const DEFAULT_SESSION_TTL_DAYS: u32 = 30;
 /// The cookie carries no `Max-Age`, so the browser drops it on close; this bound
 /// only caps how long a still-open tab's cookie keeps working.
 const EPHEMERAL_SESSION_VALIDITY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Convert a day-granularity session TTL (as accepted on the CLI) into a
+/// `Duration`. `0` yields `Duration::ZERO`, i.e. an ephemeral session.
+const fn session_ttl_from_days(days: u32) -> Duration {
+    Duration::from_secs(days as u64 * 24 * 60 * 60)
+}
 /// The six-digit viewer code is only ~20 bits of entropy, so the manual-unlock
 /// endpoint must be throttled or it can be brute-forced — especially once the
 /// server is bound publicly via `--hostname`. After this many consecutive
@@ -1270,17 +1276,17 @@ pub async fn run_server(
     } else {
         ensure_cookie_key(&paths.cookie_key_path)?
     };
-    let session_ttl = Duration::from_secs(u64::from(session_ttl_days) * 24 * 60 * 60);
+    let session_ttl = session_ttl_from_days(session_ttl_days);
     let viewer_code = generate_viewer_code()?;
     let viewer_url = remote_qr_login_url(&listen.viewer_host, &token);
 
-    let app = build_router(
-        paths.db_path.clone(),
+    let app = build_router(RouterConfig {
+        db_path: paths.db_path.clone(),
         token,
-        viewer_code.clone(),
+        viewer_code: viewer_code.clone(),
         cookie_key,
         session_ttl,
-    );
+    });
 
     let tls_config =
         axum_server::tls_rustls::RustlsConfig::from_pem_file(&paths.cert_path, &paths.key_path)
@@ -1588,19 +1594,25 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-fn build_router(
+/// Inputs needed to build the remote-control router. Grouping these into named
+/// fields (rather than four bare positional `String`s) prevents transposing the
+/// bearer `token` and the cookie signing `cookie_key` — a swap that would
+/// otherwise compile and silently sign cookies with the wrong secret.
+struct RouterConfig {
     db_path: PathBuf,
     token: String,
     viewer_code: String,
     cookie_key: String,
     session_ttl: Duration,
-) -> Router {
+}
+
+fn build_router(config: RouterConfig) -> Router {
     let state = ServerState {
-        db_path: Arc::new(db_path),
-        token: Arc::new(token),
-        viewer_code: Arc::new(viewer_code),
-        cookie_key: Arc::new(cookie_key),
-        session_ttl,
+        db_path: Arc::new(config.db_path),
+        token: Arc::new(config.token),
+        viewer_code: Arc::new(config.viewer_code),
+        cookie_key: Arc::new(config.cookie_key),
+        session_ttl: config.session_ttl,
         code_guard: Arc::new(Mutex::new(CodeAuthGuard::default())),
     };
 
@@ -1719,13 +1731,14 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Current wall-clock time as unix seconds. Falls back to 0 only if the clock is
-/// before the epoch, which would simply make every cookie look expired.
+/// Current wall-clock time as unix seconds. If the clock is somehow before the
+/// epoch we fall back to `u64::MAX` so every cookie reads as expired — failing
+/// closed (rejecting sessions) rather than open (honoring stale cookies).
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
+        .unwrap_or(u64::MAX)
 }
 
 /// Sign a cookie value for an exact expiry. The value is `{exp}.{sig}` where
@@ -3086,8 +3099,7 @@ mod tests {
 
     /// The default cookie lifetime as a `Duration`, derived from the public
     /// day-granularity default so tests stay in lockstep with the CLI default.
-    const DEFAULT_SESSION_TTL: Duration =
-        Duration::from_secs(DEFAULT_SESSION_TTL_DAYS as u64 * 24 * 60 * 60);
+    const DEFAULT_SESSION_TTL: Duration = session_ttl_from_days(DEFAULT_SESSION_TTL_DAYS);
 
     /// Build a `PermissionPrompt` and keep the original responder receiver
     /// so tests can assert what decision was forwarded to the runtime.
@@ -3971,13 +3983,13 @@ mod tests {
         let db_path = dir.path().join("sessions.sqlite3");
         init_db(&db_path).expect("init db");
         let token = "integration-token".to_string();
-        let app = build_router(
+        let app = build_router(RouterConfig {
             db_path,
-            token.clone(),
-            "123456".to_string(),
-            "test-cookie-key".to_string(),
-            DEFAULT_SESSION_TTL,
-        );
+            token: token.clone(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "test-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+        });
 
         let decision_body = |request_id: &str, option_id: &str| {
             serde_json::to_vec(&QueuePermissionDecisionRequest {
@@ -4186,13 +4198,13 @@ mod tests {
         let db_path = dir.path().join("sessions.sqlite3");
         init_db(&db_path).expect("init db");
         let token = "integration-token".to_string();
-        let app = build_router(
+        let app = build_router(RouterConfig {
             db_path,
-            token.clone(),
-            "123456".to_string(),
-            "test-cookie-key".to_string(),
-            DEFAULT_SESSION_TTL,
-        );
+            token: token.clone(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "test-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+        });
 
         let change_body = |target_kind: &str, config_id: Option<&str>, value: &str| {
             serde_json::to_vec(&QueueConfigChangeRequest {
@@ -4563,13 +4575,13 @@ mod tests {
 
     #[tokio::test]
     async fn pwa_assets_are_served_publicly() {
-        let app = build_router(
-            PathBuf::from("unused.sqlite3"),
-            "integration-token".to_string(),
-            "123456".to_string(),
-            "integration-cookie-key".to_string(),
-            DEFAULT_SESSION_TTL,
-        );
+        let app = build_router(RouterConfig {
+            db_path: PathBuf::from("unused.sqlite3"),
+            token: "integration-token".to_string(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "integration-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+        });
 
         // (path, expected content-type prefix). The shell assets must be reachable
         // without any auth so the PWA can install and launch before sign-in.
@@ -4578,6 +4590,8 @@ mod tests {
             ("/service-worker.js", "text/javascript"),
             ("/icons/icon.svg", "image/svg+xml"),
             ("/icons/icon-192.png", "image/png"),
+            ("/icons/icon-512.png", "image/png"),
+            ("/icons/maskable-512.png", "image/png"),
             ("/icons/apple-touch-icon.png", "image/png"),
         ];
 
@@ -4761,13 +4775,13 @@ mod tests {
         init_db(&db_path).expect("init db");
         let token = "integration-token".to_string();
         let viewer_code = "123456".to_string();
-        let app = build_router(
+        let app = build_router(RouterConfig {
             db_path,
-            token.clone(),
-            viewer_code.clone(),
-            "integration-cookie-key".to_string(),
-            DEFAULT_SESSION_TTL,
-        );
+            token: token.clone(),
+            viewer_code: viewer_code.clone(),
+            cookie_key: "integration-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+        });
 
         let _client = build_client(&cert_path).expect("pinned client");
         let base = "https://127.0.0.1:11921";
