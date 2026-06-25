@@ -3,8 +3,10 @@
 Issue #213 asked whether `mjolnir` should support rewinding an ACP session to an
 earlier point in time. ACP 0.14 has no standard `session/rewind` method, but the
 Rust SDK exposes `_meta` on `session/fork`, `session/load`, and `session/resume`.
-This note records the proposed experiment so `mjolnir` and Anvil can evolve the
-same behavior without inventing a client-only UX.
+This note records the proposed experiment so `mjolnir` and Anvil, as the first
+reference implementation, can evolve the same behavior without inventing a
+client-only UX. `mjolnir` support must be gated only on advertised protocol
+metadata, never on the agent binary name.
 
 ## Recommendation
 
@@ -13,27 +15,29 @@ session.
 
 The first experimental path should be:
 
-1. Agent advertises a namespaced rewind capability in `InitializeResponse`
-   metadata.
+1. Agent advertises a namespaced rewind capability in
+   `InitializeResponse.agentCapabilities._meta.symposium`.
 2. Client asks the agent to fork the current session with a rewind target in the
    `session/fork` request `_meta`.
 3. Agent returns a new session id whose transcript and execution context start
    at the selected checkpoint.
-4. `mjolnir` switches to the forked session using the same state transition path
-   as ordinary `session/fork`.
+4. `mjolnir` switches to the forked session using a rewind-specific
+   fork-plus-cleanup transition.
 
 This keeps the original session intact, matches the existing user mental model
 for `/fork`, and avoids pretending tool side effects can be undone in-place.
 
 ## Extension Shape
 
-Use a Brokk-owned key while the behavior is experimental:
+Use a Brokk-owned key while the behavior is experimental. A `session/fork`
+request should carry the extension payload directly in request `_meta`:
 
 ```json
 {
   "_meta": {
     "ai.brokk.sessionRewind": {
       "version": 1,
+      "expectedSourceSessionId": "current-session-id",
       "target": {
         "kind": "checkpoint",
         "id": "agent-checkpoint-id"
@@ -43,26 +47,75 @@ Use a Brokk-owned key while the behavior is experimental:
 }
 ```
 
-The same object can be carried by `ForkSessionRequest::meta(...)`. Avoid
-metadata on `session/load` or `session/resume` for the first experiment because
-those methods imply returning to an existing session, not creating a new branch.
+With the Rust SDK, `ForkSessionRequest::meta(...)` receives the metadata map that
+serializes as `_meta`; do not wrap that argument in another `_meta` object. The
+agent must reject the request if `expectedSourceSessionId`, the fork request's
+source `sessionId`, the checkpoint owner, workspace, cwd, or current user context
+do not match. Checkpoint ids should be opaque, unforgeable, and session-scoped.
 
-The capability advertisement can use initialize metadata:
+Avoid metadata on `session/load` or `session/resume` for the first experiment
+because those methods imply returning to an existing session, not creating a new
+branch.
+
+The capability advertisement should use the existing ACP meta-capability
+location, and must also require ordinary `session/fork` support:
 
 ```json
 {
-  "_meta": {
-    "ai.brokk.sessionRewind": {
-      "version": 1,
-      "supportsFork": true,
-      "targetKinds": ["checkpoint"]
+  "agentCapabilities": {
+    "sessionCapabilities": {
+      "fork": {}
+    },
+    "_meta": {
+      "symposium": {
+        "version": "1.0",
+        "ai.brokk.sessionRewind": {
+          "version": 1,
+          "supportsFork": true,
+          "targetKinds": ["checkpoint"],
+          "checkpointListing": {
+            "method": "ai.brokk/sessionRewindCheckpoints",
+            "pageSizeLimit": 50
+          },
+          "guarantees": {
+            "filesystem": "agentSnapshot | currentDisk | worktreeRequired",
+            "terminals": "notRestored",
+            "externalSideEffects": "notUndone",
+            "permissions": "freshApprovalRequired"
+          }
+        }
+      }
     }
   }
 }
 ```
 
+`mjolnir` should enable `/rewind` only when `sessionCapabilities.fork` is
+present, `version == 1`, `supportsFork == true`, `targetKinds` includes
+`checkpoint`, and `checkpointListing.method` is supported. Unknown versions,
+malformed metadata, or partial advertisements must disable the command and emit
+debug logs explaining the decision.
+
 If the extension graduates into ACP proper, the key can move to a standard
 capability and method name.
+
+## Checkpoint Discovery
+
+Checkpoint discovery should use the advertised
+`ai.brokk/sessionRewindCheckpoints` method until ACP standardizes this surface.
+The UI must not issue ad hoc JSON-RPC calls directly; it should request typed
+checkpoint data through an ACP-runtime command such as
+`UiCommand::ListRewindCheckpoints { responder }`.
+
+The listing contract should be bounded:
+
+- Request includes the active `sessionId`, optional cursor, and page size.
+- Response returns checkpoint id, label, creation time, optional warning text,
+  guarantee overrides, and next cursor.
+- Agent enforces `pageSizeLimit`; client uses timeout and cancellation behavior
+  matching other session operations.
+- Picker labels and warnings must wrap or scroll rather than truncate critical
+  content.
 
 ## Target Identity
 
@@ -101,31 +154,44 @@ remote or stale UI paths.
 The extension must not promise impossible undo behavior.
 
 - Filesystem effects: agent must describe whether it restores files, starts from
-  current disk, or requires a worktree/snapshot integration.
+  current disk, or requires a worktree/snapshot integration. If stronger
+  isolation is needed, prefer the existing `mj --worktree` parallel-workspace
+  flow documented in the README before adding a separate client-side snapshot
+  mechanism.
 - Tool side effects: external side effects are not undone by the client.
 - Terminal state: existing terminal processes should not be inherited into the
-  rewound fork.
+  rewound fork. Rewind must either shut down source-session terminals or keep
+  them visibly attached to the source session with a warning that they continue
+  running.
 - Permissions: permission history should not be replayed as approvals for new
-  tool calls.
+  tool calls. While a rewind fork is in flight, permission requests for the
+  source session should be cancelled or queued so the user cannot approve a
+  destructive action while believing the session is rewinding.
 - Config: the fork should return session config options and current values in
   the `ForkSessionResponse`, as ordinary `session/fork` does.
 
 ## Implementation Stages
 
-1. Add Anvil-side checkpoint listing and `session/fork` `_meta` handling.
+1. Add Anvil-side `ai.brokk/sessionRewindCheckpoints` listing and `session/fork`
+   `_meta` handling as the first reference implementation.
 2. Add a small `mjolnir` parser for `ai.brokk.sessionRewind` initialize metadata.
-3. Add `UiCommand::RewindSession { checkpoint_id }` and wire it to a fork
+3. Add `UiCommand::ListRewindCheckpoints { responder }` and keep all agent I/O
+   in the ACP runtime.
+4. Add `UiCommand::RewindSession { checkpoint_id }` and wire it to a fork
    request with the rewind metadata.
-4. Reuse the existing fork transition, including stale-session permission and
-   terminal cleanup behavior.
-5. Add tests covering unsupported agents, successful fork-from-checkpoint, fork
-   failure, and checkpoint picker cancellation.
+5. Add a fork-plus-cleanup transition for rewind: cancel or guard source-session
+   permission prompts, handle source-session terminals explicitly, log cleanup
+   failures, then switch to the forked session.
+6. Add tests covering unsupported agents, malformed/unknown metadata, mock-agent
+   checkpoint listing, successful fork-from-checkpoint, fork failure, permission
+   requests racing with rewind, live terminal cleanup, and checkpoint picker
+   cancellation.
 
 ## Open Questions
 
-- Whether checkpoint listing should be a new extension method or another
-  metadata payload on existing session listing.
+- Whether the experimental checkpoint listing method should eventually move into
+  ACP proper or become metadata on existing session listing.
 - Whether Anvil can provide filesystem snapshots, or whether rewind should
-  require `mj --worktree` for stronger isolation.
+  require the existing `mj --worktree` flow for stronger isolation.
 - Whether ACP should standardize checkpoint ids and labels before standardizing
   a rewind method.

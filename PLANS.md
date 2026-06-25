@@ -244,7 +244,8 @@ Candidate capabilities:
   by local disk.
 - ACP terminal operations backed by a managed subprocess view.
 - ACP registry lookup and agent launch presets.
-- Session persistence or `session/load` UI.
+- Deeper session persistence UX beyond the current session history, `/load`,
+  and `/fork` support, including checkpoint/rewind flows.
 
 These are intentionally later because they can expand the blast radius quickly.
 Each should start with a separate design note before implementation.
@@ -270,7 +271,8 @@ Medium-term:
 - Export transcript.
 - Rich diff rendering.
 - Config option picker.
-- Session list/load/fork support if agents expose it usefully.
+- Session checkpoint/rewind support if agents expose it through the experimental
+  `_meta` extension.
 
 Later:
 
@@ -329,14 +331,14 @@ in a smoke test):
 | `session/new` with `cwd` | works; returns `sessionId`, `models`, `modes`, `configOptions` |
 | `configOptions` categories | `mode`, `model`, `thought_level` — all map to our existing `SessionConfigOptionCategory` variants and render via the inline shortcut row |
 | `available_commands_update` notification | streams immediately after `session/new`; populates the slash autocomplete |
-| `loadSession`, `sessionCapabilities` (resume/fork/list/close/delete) | advertised by the agent; mjolnir does not yet drive any of these (M5 territory) |
+| `loadSession`, `sessionCapabilities` (resume/fork/list/close/delete) | advertised by the agent; mjolnir now drives load/fork where implemented, with broader list/resume/delete UX still M5 territory |
 | `promptCapabilities.image`, `embeddedContext` | accepted by the agent; mjolnir still renders these `ContentBlock` variants as `[image]` / `[resource]` placeholders pending M2 |
 | `mcpCapabilities.http`, `sse` | advertised; mjolnir does not currently let the user specify `mcpServers` at `session/new` (sends none) |
 
 Known gaps to file as follow-ups when the matrix expands:
 
-- We do not surface the agent's `sessionCapabilities` to the user, so
-  there's no UI hint that this agent supports resume/fork/list.
+- Session capability surfacing is partial: fork gates `/fork`, load powers the
+  session picker, while resume/list/delete still need broader UX.
 - We send `session/new` without `mcpServers`. If users want to plug in
   MCP servers via `mj`, that requires a CLI flag or config-file entry.
 - Effort levels (`low/medium/high/xhigh/max`) come through the
@@ -363,7 +365,7 @@ Before turning this into an implementation roadmap, decide:
 - Is `mjolnir` primarily a Brokk companion, or a general ACP terminal client?
 - Should v1 include named launch presets?
 - Should v1 include persisted prompt history?
-- Should v1 include session list/load, or only `session/new`?
+- How far should v1 go beyond current session load/fork support?
 - Which agents must be in the compatibility matrix?
 - What install channel should be first: GitHub releases, Homebrew, shell
   installer, or `cargo install` only?
