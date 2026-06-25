@@ -28,7 +28,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::acp;
 use crate::config::SelectedAgent;
-use crate::theme::TerminalTheme;
+use crate::palette::TerminalTheme;
 use crate::version::mjolnir_version_label;
 
 /// One row in the session picker.

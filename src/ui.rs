@@ -48,9 +48,10 @@ use crate::clipboard::{
 use crate::config;
 use crate::event::{PermissionDecision, PermissionPrompt, PromptImage, UiCommand, UiEvent};
 use crate::notifications::TerminalNotificationBackend;
+use crate::palette::TerminalTheme;
 use crate::speech::{dictation_error_message, run_dictation};
 use crate::term::TrackedBackend;
-use crate::theme::{TerminalTheme, TerminalThemeKind};
+use crate::theme::TerminalThemeKind;
 use crate::version::mjolnir_version_label;
 
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
@@ -281,6 +282,13 @@ pub struct UiRunOptions<'a> {
     pub theme_kind: TerminalThemeKind,
 }
 
+pub struct UiRunResult {
+    pub reason: UiExitReason,
+    pub session_id: Option<String>,
+    pub session_title: Option<String>,
+    pub theme_kind: TerminalThemeKind,
+}
+
 struct UiInitialState {
     header_labels: HeaderLabels,
     agent_label: Option<String>,
@@ -297,13 +305,13 @@ pub async fn run(
     header_labels: HeaderLabels,
     initial_agent_label: Option<String>,
     options: UiRunOptions<'_>,
-) -> Result<(UiExitReason, Option<String>, Option<String>)> {
+) -> Result<UiRunResult> {
     let initial_history = options
         .persistence
         .history_path
         .map(config::load_history)
         .unwrap_or_default();
-    let (reason, session_id, session_title, history) = ui_loop(
+    let (reason, session_id, session_title, theme_kind, history) = ui_loop(
         terminal,
         cmd_tx,
         event_rx,
@@ -326,7 +334,12 @@ pub async fn run(
     {
         tracing::warn!("save_history {path:?}: {e:#}");
     }
-    Ok((reason, session_id, session_title))
+    Ok(UiRunResult {
+        reason,
+        session_id,
+        session_title,
+        theme_kind,
+    })
 }
 
 /// Maximum redraw rate for interactive local UI work such as typing,
@@ -382,7 +395,13 @@ async fn ui_loop(
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
     initial: UiInitialState,
     mode: UiMode,
-) -> Result<(UiExitReason, Option<String>, Option<String>, Vec<String>)> {
+) -> Result<(
+    UiExitReason,
+    Option<String>,
+    Option<String>,
+    TerminalThemeKind,
+    Vec<String>,
+)> {
     let mut state = AppState::new();
     state.set_prompt_history(initial.history);
     state.project_label = initial.header_labels.project;
@@ -612,6 +631,7 @@ async fn ui_loop(
                 reason,
                 state.session_id.clone(),
                 state.session_title.clone(),
+                state.theme_kind,
                 state.prompt_history(),
             ));
         }
@@ -683,7 +703,13 @@ async fn ui_loop(
             set_mouse_capture(terminal, enabled)
         })?;
     }
-    Ok((UiExitReason::Quit, None, None, state.prompt_history()))
+    Ok((
+        UiExitReason::Quit,
+        None,
+        None,
+        state.theme_kind,
+        state.prompt_history(),
+    ))
 }
 
 fn notification_message_for_event(
@@ -3603,7 +3629,7 @@ fn draw_inline_permission_view(
     area: Rect,
     pending: &PendingPermission,
     queue_len: usize,
-    theme: crate::theme::TerminalTheme,
+    theme: TerminalTheme,
 ) {
     f.render_widget(Clear, area);
     let content = inline_content_rect(area);
@@ -4081,7 +4107,7 @@ fn render_transcript_entry_range(
     width: u16,
     entry_range: Range<usize>,
     collapse_limit: Option<usize>,
-    theme: crate::theme::TerminalTheme,
+    theme: TerminalTheme,
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     for entry in state.transcript[entry_range].iter() {
@@ -4151,7 +4177,7 @@ fn push_markdown_block(
     label: &str,
     color: Color,
     text: String,
-    theme: crate::theme::TerminalTheme,
+    theme: TerminalTheme,
 ) {
     out.push(Line::from(Span::styled(
         format!("{label}:"),
@@ -4181,7 +4207,7 @@ fn push_markdown_lines(
     out: &mut Vec<Line<'static>>,
     text: String,
     indent: usize,
-    theme: crate::theme::TerminalTheme,
+    theme: TerminalTheme,
 ) {
     let prefix = " ".repeat(indent);
     let mut in_code_block = false;
@@ -4315,7 +4341,7 @@ fn markdown_ordered_item(raw: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn inline_markdown_spans(raw: &str, theme: crate::theme::TerminalTheme) -> Vec<Span<'static>> {
+fn inline_markdown_spans(raw: &str, theme: TerminalTheme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = raw;
     while !rest.is_empty() {
@@ -4370,7 +4396,7 @@ fn push_tool_outputs(
     outputs: &[ToolCallOutput],
     width: u16,
     collapse_limit: Option<usize>,
-    theme: crate::theme::TerminalTheme,
+    theme: TerminalTheme,
 ) {
     for output in outputs {
         match output {
@@ -4442,7 +4468,7 @@ fn push_tool_text_lines(
     text: String,
     indent: usize,
     collapse_limit: Option<usize>,
-    theme: crate::theme::TerminalTheme,
+    theme: TerminalTheme,
 ) {
     let prefix = " ".repeat(indent);
     let lines: Vec<&str> = text.split('\n').collect();
@@ -4469,7 +4495,7 @@ fn push_collapse_hint(
     out: &mut Vec<Line<'static>>,
     indent: usize,
     hidden: usize,
-    theme: crate::theme::TerminalTheme,
+    theme: TerminalTheme,
 ) {
     let prefix = " ".repeat(indent);
     out.push(Line::from(Span::styled(
@@ -4480,7 +4506,7 @@ fn push_collapse_hint(
     )));
 }
 
-fn tool_output_line_style(raw: &str, theme: crate::theme::TerminalTheme) -> Style {
+fn tool_output_line_style(raw: &str, theme: TerminalTheme) -> Style {
     let lower = raw.to_ascii_lowercase();
     if lower.contains("error")
         || lower.contains("failed")
@@ -4512,7 +4538,7 @@ fn push_diff_output(
     new_text: &str,
     width: u16,
     collapse_limit: Option<usize>,
-    theme: crate::theme::TerminalTheme,
+    theme: TerminalTheme,
 ) {
     out.push(Line::from(vec![
         Span::styled("  diff ", Style::default().fg(theme.muted)),
@@ -4696,7 +4722,7 @@ fn tool_status_label(status: agent_client_protocol::schema::ToolCallStatus) -> &
 
 fn tool_status_color(
     status: agent_client_protocol::schema::ToolCallStatus,
-    theme: crate::theme::TerminalTheme,
+    theme: TerminalTheme,
 ) -> Color {
     match status {
         agent_client_protocol::schema::ToolCallStatus::Failed => theme.error,
@@ -6018,25 +6044,7 @@ fn draw_autocomplete_popover(f: &mut ratatui::Frame, input_area: Rect, state: &A
                 line.push_str("  -- ");
                 line.push_str(description);
             }
-            // Truncate to the visible width so the description doesn't
-            // wrap and break the row alignment.
-            let cap = inner.width as usize;
-            if line.chars().count() > cap {
-                line = if cap > 3 {
-                    line.chars().take(cap - 3).collect::<String>() + "..."
-                } else {
-                    line.chars().take(cap).collect()
-                };
-            }
-            let style = if absolute == selected {
-                Style::default()
-                    .fg(state.theme.selection_fg)
-                    .bg(state.theme.selection_bg)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(line).style(style)
+            truncate_line(line, inner.width, absolute == selected, state.theme)
         })
         .collect();
 

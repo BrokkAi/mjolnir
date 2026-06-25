@@ -14,6 +14,7 @@ mod event;
 mod headless;
 mod install;
 mod notifications;
+mod palette;
 mod paths;
 mod picker;
 mod registry;
@@ -663,6 +664,28 @@ struct RuntimeOptions {
     fs_max_text_bytes: u64,
 }
 
+struct RunSessionResult {
+    reason: UiExitReason,
+    session_id: Option<String>,
+    session_title: Option<String>,
+    theme_kind: theme::TerminalThemeKind,
+}
+
+impl From<ui::UiRunResult> for RunSessionResult {
+    fn from(result: ui::UiRunResult) -> Self {
+        Self {
+            reason: result.reason,
+            session_id: result.session_id,
+            session_title: result.session_title,
+            theme_kind: result.theme_kind,
+        }
+    }
+}
+
+fn apply_session_result_to_config(cfg: &mut Config, result: &RunSessionResult) {
+    cfg.theme = result.theme_kind;
+}
+
 async fn run_app(
     cwd: PathBuf,
     runtime_options: RuntimeOptions,
@@ -711,7 +734,7 @@ async fn run_app(
             })?
         };
 
-        let (reason, session_id, session_title) = run_session(
+        let session_result = run_session(
             &agent,
             cwd.clone(),
             runtime_options.clone(),
@@ -725,8 +748,9 @@ async fn run_app(
             cfg.theme,
         )
         .await?;
-        match reason {
-            UiExitReason::Quit => return Ok(session_id),
+        apply_session_result_to_config(&mut cfg, &session_result);
+        match session_result.reason {
+            UiExitReason::Quit => return Ok(session_result.session_id),
             UiExitReason::NewSession => {
                 pick_agent = true;
                 continue;
@@ -736,10 +760,10 @@ async fn run_app(
                 continue;
             }
             UiExitReason::SwitchSession => {
-                if let Some(session_id) = session_id {
+                if let Some(session_id) = session_result.session_id {
                     initial_resume = Some(ResumeTarget {
                         session_id,
-                        title: session_title,
+                        title: session_result.session_title,
                     });
                     initial_agent = Some(agent);
                     continue;
@@ -751,8 +775,8 @@ async fn run_app(
                     &agent,
                     cwd.clone(),
                     runtime_options.agent_stderr.as_deref(),
-                    session_id,
-                    session_title,
+                    session_result.session_id,
+                    session_result.session_title,
                     cfg.theme.palette(),
                 )
                 .await?
@@ -775,7 +799,7 @@ async fn run_session_picker_action_for_agent(
     agent_stderr: Option<&Path>,
     current_session_id: Option<String>,
     current_session_title: Option<String>,
-    theme: theme::TerminalTheme,
+    theme: palette::TerminalTheme,
 ) -> Result<SessionPickerAction> {
     let mut notice = None;
     loop {
@@ -902,7 +926,7 @@ async fn run_session_picker_once(
     sessions: Vec<session::SessionEntry>,
     delete_supported: bool,
     notice: Option<String>,
-    theme: theme::TerminalTheme,
+    theme: palette::TerminalTheme,
 ) -> Result<session::ResumeOutcome> {
     let mut terminal = ui::setup_fullscreen_terminal().context("setup terminal")?;
     let outcome =
@@ -1019,8 +1043,8 @@ async fn run_session(
     header_labels: HeaderLabels,
     resume_session: Option<String>,
     mode: UiMode,
-    theme_kind: theme::TerminalThemeKind,
-) -> Result<(UiExitReason, Option<String>, Option<String>)> {
+    mut theme_kind: theme::TerminalThemeKind,
+) -> Result<RunSessionResult> {
     let mut terminal = setup_session_terminal(mode)?;
 
     let (event_tx, runtime_event_rx) = mpsc::unbounded_channel();
@@ -1113,18 +1137,25 @@ async fn run_session(
         if let Err(e) = restore_result {
             tracing::warn!("restore terminal failed: {e}");
         }
+        if let Ok(result) = ui_result.as_ref() {
+            theme_kind = result.theme_kind;
+        }
         if matches!(
-            ui_result.as_ref().map(|(reason, _, _)| reason),
+            ui_result.as_ref().map(|result| result.reason),
             Ok(UiExitReason::ClearSession)
         ) && let Err(e) = ui::clear_terminal_screen(&mut terminal)
         {
             tracing::warn!("clear terminal for /clear failed: {e}");
         }
 
-        let Ok((UiExitReason::LoadSession, current_session_id, current_session_title)) = ui_result
-        else {
-            break ui_result;
+        let Ok(result) = ui_result else {
+            break ui_result.map(Into::into);
         };
+        if result.reason != UiExitReason::LoadSession {
+            break Ok(result.into());
+        }
+        let current_session_id = result.session_id;
+        let current_session_title = result.session_title;
 
         let action = match run_session_picker_action_for_agent(
             agent,
@@ -1148,11 +1179,12 @@ async fn run_session(
         } = action
         else {
             let _ = cmd_tx.send(UiCommand::Shutdown);
-            break Ok((
-                UiExitReason::Quit,
-                current_session_id,
-                current_session_title,
-            ));
+            break Ok(RunSessionResult {
+                reason: UiExitReason::Quit,
+                session_id: current_session_id,
+                session_title: current_session_title,
+                theme_kind,
+            });
         };
 
         match request_inline_session_load(
@@ -1177,11 +1209,12 @@ async fn run_session(
             LoadSessionResult::Fallback { message } => {
                 tracing::info!("falling back to restart-based session load: {message}");
                 let _ = cmd_tx.send(UiCommand::Shutdown);
-                break Ok((
-                    UiExitReason::SwitchSession,
-                    Some(target_session_id),
-                    target_title,
-                ));
+                break Ok(RunSessionResult {
+                    reason: UiExitReason::SwitchSession,
+                    session_id: Some(target_session_id),
+                    session_title: target_title,
+                    theme_kind,
+                });
             }
         }
     };
@@ -1459,6 +1492,21 @@ mod tests {
             },
             None
         ));
+    }
+
+    #[test]
+    fn session_result_updates_supervisor_theme_before_next_action() {
+        let mut cfg = Config::default();
+        let result = RunSessionResult {
+            reason: UiExitReason::ClearSession,
+            session_id: Some("session-1".to_string()),
+            session_title: Some("Current".to_string()),
+            theme_kind: theme::TerminalThemeKind::AnsiLight,
+        };
+
+        apply_session_result_to_config(&mut cfg, &result);
+
+        assert_eq!(cfg.theme, theme::TerminalThemeKind::AnsiLight);
     }
 
     #[test]

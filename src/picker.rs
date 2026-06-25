@@ -23,9 +23,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::install::{self, Progress};
+use crate::palette::TerminalTheme;
 use crate::paths::{expand_home_shortcut, normalize_spawn_program};
 use crate::registry::{DistributionKind, Registry};
-use crate::theme::TerminalTheme;
 use crate::version::mjolnir_version_label;
 
 /// Resolved launch command for the chosen agent.

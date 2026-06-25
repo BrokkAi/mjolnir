@@ -23,7 +23,8 @@ use crate::event::{
     PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, TerminalOutputSnapshot,
     UiEvent, content_block_text,
 };
-use crate::theme::{TerminalTheme, TerminalThemeKind};
+use crate::palette::TerminalTheme;
+use crate::theme::TerminalThemeKind;
 
 /// Maximum width of the queued-prompt preview shown above the input.
 /// Beyond this we truncate with an ellipsis.
