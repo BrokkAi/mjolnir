@@ -1355,8 +1355,11 @@ fn handle_crossterm(
         return TerminalRequest::None;
     }
 
-    // The /mjconfig overlay owns the keyboard while it is open.
-    if state.mjconfig_menu.is_some() {
+    // The /mjconfig overlay owns the keyboard while it is open, but yields to a
+    // pending permission prompt: that modal is drawn on top of the menu and must
+    // stay actionable (the menu can be opened mid-turn, before the prompt
+    // arrives). Mirrors the transcript-viewer carve-out below.
+    if state.mjconfig_menu.is_some() && !state.has_pending_permission() {
         return handle_mjconfig_menu_key(state, key.modifiers, key.code, mode);
     }
 
@@ -2947,17 +2950,11 @@ fn draw_mjconfig_menu(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     };
     let theme = state.theme;
 
-    let width = 58.min(area.width);
-    let height = 15.min(area.height);
-    if width < 24 || height < 8 {
+    // Bail on terminals too small to render the two sections legibly.
+    if area.width.min(58) < 24 || area.height.min(15) < 8 {
         return;
     }
-    let rect = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
+    let rect = crate::term::centered_rect(area, 58, 15);
     f.render_widget(Clear, rect);
 
     let block = Block::default()
@@ -7588,6 +7585,39 @@ mod tests {
         assert!(state.mjconfig_menu.is_none(), "menu closes on cancel");
         assert_eq!(state.theme_kind, orig_theme, "theme reverted");
         assert_eq!(state.spinner_style, orig_spinner, "spinner reverted");
+    }
+
+    #[test]
+    fn mjconfig_menu_yields_keyboard_to_pending_permission() {
+        // The menu can be opened mid-turn; a permission prompt may then arrive
+        // and is drawn on top of it. Keys must drive the prompt, not the hidden
+        // menu's live preview.
+        let pending =
+            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
+        state.open_mjconfig_menu();
+        assert!(state.has_pending_permission());
+        assert!(state.mjconfig_menu.is_some());
+        let theme_before = state.theme_kind;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            CtEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        );
+
+        assert_eq!(
+            state.pending_permission().expect("still pending").selected,
+            1,
+            "Down should move the permission selection"
+        );
+        assert_eq!(
+            state.theme_kind, theme_before,
+            "menu must not consume keys while a permission prompt is up"
+        );
+        assert!(state.mjconfig_menu.is_some(), "menu stays open underneath");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! A spinner style is a purely client-side visual preference, mirroring
 //! [`crate::theme::TerminalThemeKind`]: it is persisted in `config.toml`,
-//! chosen on first run, and changeable via `/spinner` or `/mjconfig`.
+//! chosen on first run, and changeable via the `/mjconfig` menu.
 //!
 //! Every style renders to frames of exactly [`SPINNER_WIDTH`] display columns
 //! (including its idle frame) so the prompt title never reflows when a turn
@@ -48,7 +48,7 @@ impl SpinnerStyle {
         }
     }
 
-    /// Short human description, shown in pickers and `/spinner` listings.
+    /// Short human description, shown in the first-run picker and `/mjconfig`.
     pub fn description(self) -> &'static str {
         match self {
             Self::Pulse => "a bright dot glides across a faint row",
@@ -63,12 +63,11 @@ impl SpinnerStyle {
     }
 
     fn index(self) -> usize {
-        match self {
-            Self::Pulse => 0,
-            Self::Wave => 1,
-            Self::Bars => 2,
-            Self::Shimmer => 3,
-        }
+        // Derived from ALL so it cannot drift from FRAME_SETS (also ALL-ordered).
+        Self::ALL
+            .iter()
+            .position(|style| *style == self)
+            .unwrap_or(0)
     }
 
     /// Animated frames for this style. Always non-empty; index with the
@@ -128,10 +127,20 @@ struct FrameSet {
     idle: String,
 }
 
-/// All styles' frames, generated once and kept for the process lifetime.
-/// Ordered to match [`SpinnerStyle::index`].
-static FRAME_SETS: LazyLock<[FrameSet; 4]> =
-    LazyLock::new(|| [build_pulse(), build_wave(), build_bars(), build_shimmer()]);
+fn frame_set_for(style: SpinnerStyle) -> FrameSet {
+    match style {
+        SpinnerStyle::Pulse => build_pulse(),
+        SpinnerStyle::Wave => build_wave(),
+        SpinnerStyle::Bars => build_bars(),
+        SpinnerStyle::Shimmer => build_shimmer(),
+    }
+}
+
+/// All styles' frames, generated once and kept for the process lifetime. Built
+/// by mapping over [`SpinnerStyle::ALL`], so `FRAME_SETS[style.index()]` is
+/// always `style`'s frames — the array length and the exhaustive match in
+/// `frame_set_for` force this to stay correct when a variant is added.
+static FRAME_SETS: LazyLock<[FrameSet; 4]> = LazyLock::new(|| SpinnerStyle::ALL.map(frame_set_for));
 
 fn row(s: String) -> String {
     debug_assert_eq!(
@@ -287,6 +296,17 @@ mod tests {
                 (700..=2_000).contains(&loop_ms),
                 "{style} loop_ms = {loop_ms}"
             );
+        }
+    }
+
+    #[test]
+    fn each_style_maps_to_its_own_frames() {
+        // Guards against a frame_set_for mis-mapping (e.g. two arms building the
+        // same set) and against FRAME_SETS desyncing from ALL/index().
+        for (i, a) in SpinnerStyle::ALL.iter().enumerate() {
+            for b in &SpinnerStyle::ALL[i + 1..] {
+                assert_ne!(a.frames(), b.frames(), "{a} and {b} share frames");
+            }
         }
     }
 }

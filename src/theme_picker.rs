@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind};
 use futures::StreamExt;
 use ratatui::Terminal;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
@@ -101,7 +101,7 @@ fn handle_event(state: &mut ThemePickerState, ev: CtEvent) -> Option<Option<Term
 
 fn draw(f: &mut ratatui::Frame, state: &ThemePickerState) {
     let theme = state.selected_theme().palette();
-    let area = centered_rect(f.area(), 68, 14);
+    let area = crate::term::centered_rect(f.area(), 68, 14);
     let block = Block::default()
         .title(" First-run setup: choose theme ")
         .borders(Borders::ALL)
@@ -166,19 +166,6 @@ fn theme_row(
         ),
     ]))
     .style(style)
-}
-
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
-    Rect {
-        x,
-        y,
-        width,
-        height,
-    }
 }
 
 #[cfg(test)]

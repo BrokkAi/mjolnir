@@ -21,7 +21,20 @@ use std::io::{self, Write};
 
 use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
 use ratatui::buffer::Cell;
-use ratatui::layout::{Position, Size};
+use ratatui::layout::{Position, Rect, Size};
+
+/// Center a `width` x `height` rectangle within `area`, clamping each dimension
+/// to fit. Shared by the modal overlays and the first-run pickers.
+pub fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
 
 #[derive(Debug)]
 pub struct TrackedBackend<W: Write> {
