@@ -1065,14 +1065,21 @@ async fn run_session(
             break ui_result;
         };
 
-        let action = run_session_picker_action_for_agent(
+        let action = match run_session_picker_action_for_agent(
             agent,
             cwd.clone(),
             agent_stderr.as_deref(),
             current_session_id.clone(),
             current_session_title.clone(),
         )
-        .await?;
+        .await
+        {
+            Ok(action) => action,
+            Err(e) => {
+                let _ = cmd_tx.send(UiCommand::Shutdown);
+                break Err(e);
+            }
+        };
         let SessionPickerAction::Resume {
             session_id: target_session_id,
             title: target_title,
@@ -1096,7 +1103,13 @@ async fn run_session(
         {
             LoadSessionResult::Switched => {
                 header_labels.session_title = target_title;
-                terminal = setup_session_terminal(mode)?;
+                terminal = match setup_session_terminal(mode) {
+                    Ok(terminal) => terminal,
+                    Err(e) => {
+                        let _ = cmd_tx.send(UiCommand::Shutdown);
+                        break Err(e);
+                    }
+                };
                 continue;
             }
             LoadSessionResult::Fallback { message } => {
@@ -1197,11 +1210,15 @@ async fn request_inline_session_load(
             message: "ACP runtime command channel closed".to_string(),
         };
     }
-    response
-        .await
-        .unwrap_or_else(|_| LoadSessionResult::Fallback {
+    match tokio::time::timeout(Duration::from_secs(15), response).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_closed)) => LoadSessionResult::Fallback {
             message: "ACP runtime closed before session switch completed".to_string(),
-        })
+        },
+        Err(_elapsed) => LoadSessionResult::Fallback {
+            message: "ACP runtime did not complete session switch within 15s".to_string(),
+        },
+    }
 }
 
 async fn wait_for_task(label: &str, handle: tokio::task::JoinHandle<()>) {

@@ -308,6 +308,18 @@ fn require_load_session(capabilities: &AgentCapabilities) -> std::result::Result
     }
 }
 
+fn require_resume_or_load_session(
+    capabilities: &AgentCapabilities,
+) -> std::result::Result<(), LaunchError> {
+    if capabilities.session_capabilities.resume.is_some() || capabilities.load_session {
+        Ok(())
+    } else {
+        Err(LaunchError::UnsupportedCapability {
+            capability: "sessionCapabilities.resume or loadSession",
+        })
+    }
+}
+
 async fn resume_existing_session(
     conn: &ConnectionTo<Agent>,
     session_id: SessionId,
@@ -917,7 +929,10 @@ where
     // The on_receive_request closure forwards (req, responder) here and
     // returns immediately so the JSON-RPC dispatch loop stays unblocked.
     let session_state = RuntimeSessionState::new();
-    let terminals = Arc::new(ManagedTerminals::new(ui_tx.clone()));
+    let terminals = Arc::new(ManagedTerminals::with_active_session(
+        ui_tx.clone(),
+        session_state.active_session_id.clone(),
+    ));
     let perm_ui_tx = ui_tx.clone();
     let perm_session_state = session_state.clone();
     let notif_ui_tx = ui_tx.clone();
@@ -927,6 +942,7 @@ where
     let release_terminals = terminals.clone();
     let wait_terminals = terminals.clone();
     let kill_terminals = terminals.clone();
+    let drive_terminals = terminals.clone();
     let result = Client
         .builder()
         .on_receive_notification(
@@ -942,6 +958,11 @@ where
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
                 let session_id = request.session_id.clone();
+                if perm_session_state.active_session_id().await.as_ref() != Some(&session_id) {
+                    return responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    ));
+                }
                 if perm_session_state
                     .permission_cancelled(&session_id)
                     .await
@@ -1019,6 +1040,7 @@ where
                 &mut ui_rx,
                 fatal_emitted,
                 session_state,
+                drive_terminals,
             )
             .await
             {
@@ -1038,6 +1060,7 @@ where
 /// Initialize the agent, open a session, then loop forwarding prompts and
 /// cancellations until the UI requests shutdown or the agent closes the
 /// connection.
+#[allow(clippy::too_many_arguments)]
 async fn drive_session(
     conn: ConnectionTo<Agent>,
     cwd: PathBuf,
@@ -1046,6 +1069,7 @@ async fn drive_session(
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     fatal_emitted: Arc<AtomicBool>,
     session_state: RuntimeSessionState,
+    terminals: Arc<ManagedTerminals>,
 ) -> Result<()> {
     // Advertise our client capabilities. We do not yet implement
     // `fs/read_text_file` or `fs/write_text_file`, so we declare both as
@@ -1282,7 +1306,8 @@ async fn drive_session(
                     &init_resp.agent_capabilities,
                     &init_resp.auth_methods,
                     &mut session_config,
-                    &session_state.active_session_id,
+                    &session_state,
+                    &terminals,
                     &connected_fields,
                     ui_tx,
                 )
@@ -1325,12 +1350,20 @@ async fn switch_existing_session(
     capabilities: &AgentCapabilities,
     auth_methods: &[AuthMethod],
     session_config: &mut SessionConfigCache,
-    active_session_id: &Arc<Mutex<Option<SessionId>>>,
+    session_state: &RuntimeSessionState,
+    terminals: &ManagedTerminals,
     connected_fields: &ConnectedEventFields,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
 ) -> std::result::Result<SessionId, LaunchError> {
+    require_resume_or_load_session(capabilities)?;
     close_session(conn, current_session_id.clone(), auth_methods).await?;
-    *active_session_id.lock().await = Some(target_session_id.clone());
+    session_state
+        .mark_permissions_cancelled(current_session_id)
+        .await;
+    terminals.shutdown_session(current_session_id).await;
+    session_state
+        .set_active_session_id(target_session_id.clone())
+        .await;
     let loaded_config = resume_existing_session(
         conn,
         target_session_id.clone(),
@@ -1632,6 +1665,7 @@ struct ManagedTerminals {
     terminals: Mutex<HashMap<String, Arc<ManagedTerminal>>>,
     next_id: AtomicU64,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
+    active_session_id: Option<Arc<Mutex<Option<SessionId>>>>,
 }
 
 #[derive(Debug)]
@@ -1683,11 +1717,25 @@ impl TerminalOutputBuffer {
 }
 
 impl ManagedTerminals {
+    #[cfg(test)]
     fn new(ui_tx: mpsc::UnboundedSender<UiEvent>) -> Self {
         Self {
             terminals: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             ui_tx,
+            active_session_id: None,
+        }
+    }
+
+    fn with_active_session(
+        ui_tx: mpsc::UnboundedSender<UiEvent>,
+        active_session_id: Arc<Mutex<Option<SessionId>>>,
+    ) -> Self {
+        Self {
+            terminals: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            ui_tx,
+            active_session_id: Some(active_session_id),
         }
     }
 
@@ -1695,6 +1743,7 @@ impl ManagedTerminals {
         &self,
         request: CreateTerminalRequest,
     ) -> std::result::Result<CreateTerminalResponse, agent_client_protocol::Error> {
+        self.validate_active_session(&request.session_id).await?;
         if request.command.trim().is_empty() {
             return Err(terminal_invalid_params("terminal command cannot be empty"));
         }
@@ -1845,6 +1894,7 @@ impl ManagedTerminals {
         session_id: &SessionId,
         terminal_id: &TerminalId,
     ) -> std::result::Result<Arc<ManagedTerminal>, agent_client_protocol::Error> {
+        self.validate_active_session(session_id).await?;
         let key = terminal_id.to_string();
         let Some(terminal) = self.terminals.lock().await.get(&key).cloned() else {
             return Err(terminal_invalid_params(format!(
@@ -1860,6 +1910,7 @@ impl ManagedTerminals {
         session_id: &SessionId,
         terminal_id: &TerminalId,
     ) -> std::result::Result<Arc<ManagedTerminal>, agent_client_protocol::Error> {
+        self.validate_active_session(session_id).await?;
         let key = terminal_id.to_string();
         let mut terminals = self.terminals.lock().await;
         let Some(terminal) = terminals.get(&key).cloned() else {
@@ -1870,6 +1921,42 @@ impl ManagedTerminals {
         terminal.validate_session(session_id)?;
         terminals.remove(&key);
         Ok(terminal)
+    }
+
+    async fn validate_active_session(
+        &self,
+        session_id: &SessionId,
+    ) -> std::result::Result<(), agent_client_protocol::Error> {
+        let Some(active_session_id) = &self.active_session_id else {
+            return Ok(());
+        };
+        if active_session_id.lock().await.as_ref() == Some(session_id) {
+            return Ok(());
+        }
+        Err(terminal_invalid_params(format!(
+            "terminal request for inactive session {session_id}"
+        )))
+    }
+
+    async fn shutdown_session(&self, session_id: &SessionId) {
+        let terminals: Vec<Arc<ManagedTerminal>> = {
+            let mut terminals = self.terminals.lock().await;
+            let keys = terminals
+                .iter()
+                .filter(|(_, terminal)| terminal.session_id == *session_id)
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| terminals.remove(&key))
+                .collect()
+        };
+        for terminal in terminals {
+            if terminal.exit_rx.borrow().is_none()
+                && let Err(e) = kill_terminal_process(terminal.pid).await
+            {
+                tracing::warn!("shutdown terminal {}: {e}", terminal.terminal_id);
+            }
+        }
     }
 
     async fn shutdown_all(&self) {
@@ -2383,7 +2470,7 @@ mod tests {
         PermissionOption, PermissionOptionKind, PromptResponse, ResumeSessionResponse,
         SessionCapabilities, SessionCloseCapabilities, SessionConfigId, SessionConfigValueId,
         SessionForkCapabilities, SessionId, SessionNotification, SessionResumeCapabilities,
-        SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent,
+        SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent, ToolCallUpdate,
         ToolCallUpdateFields,
     };
     use std::sync::{
@@ -2551,6 +2638,49 @@ mod tests {
             .release(ReleaseTerminalRequest::new(session_id, terminal_id))
             .await
             .expect("release with correct session");
+    }
+
+    #[tokio::test]
+    async fn managed_terminals_reject_inactive_sessions_and_shutdown_session() {
+        let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
+        let session_id = SessionId::new("session-1");
+        let other_session_id = SessionId::new("session-2");
+        let active_session_id = Arc::new(Mutex::new(Some(session_id.clone())));
+        let terminals = ManagedTerminals::with_active_session(ui_tx, active_session_id.clone());
+        #[cfg(windows)]
+        let script = "ping -n 30 127.0.0.1 >NUL";
+        #[cfg(not(windows))]
+        let script = "sleep 30";
+        let (command, args) = terminal_test_command(script);
+
+        let created = terminals
+            .create(
+                CreateTerminalRequest::new(session_id.clone(), command)
+                    .args(args)
+                    .output_byte_limit(1024),
+            )
+            .await
+            .expect("create terminal");
+        let terminal_id = created.terminal_id;
+
+        *active_session_id.lock().await = Some(other_session_id.clone());
+        assert!(
+            terminals
+                .output(TerminalOutputRequest::new(
+                    session_id.clone(),
+                    terminal_id.clone(),
+                ))
+                .await
+                .is_err()
+        );
+
+        terminals.shutdown_session(&session_id).await;
+        assert!(
+            terminals
+                .get_terminal(&session_id, &terminal_id)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -3208,9 +3338,11 @@ mod tests {
         stream: tokio::io::DuplexStream,
         close_seen: Arc<StdAtomicBool>,
         resume_seen: Arc<StdAtomicBool>,
+        stale_permission_cancelled: Arc<StdAtomicBool>,
     ) {
         let close_seen_for_req = close_seen.clone();
         let resume_seen_for_req = resume_seen.clone();
+        let stale_permission_cancelled_for_req = stale_permission_cancelled.clone();
         let (r, w) = split(stream);
         let transport = ByteStreams::new(w.compat_write(), r.compat());
         let _ = AgentRole
@@ -3252,7 +3384,32 @@ mod tests {
                             responder,
                             cx: ConnectionTo<agent_client_protocol::Client>| {
                     assert_eq!(req.session_id.to_string(), "target-session");
+                    let resume_seen_for_req = resume_seen_for_req.clone();
+                    let stale_permission_cancelled_for_req =
+                        stale_permission_cancelled_for_req.clone();
                     resume_seen_for_req.store(true, Ordering::SeqCst);
+                    let stale_permission_cx = cx.clone();
+                    tokio::spawn(async move {
+                        let permission_response = stale_permission_cx
+                            .send_request(RequestPermissionRequest::new(
+                                SessionId::new("old-session"),
+                                ToolCallUpdate::new("stale-call", ToolCallUpdateFields::default()),
+                                vec![PermissionOption::new(
+                                    "allow",
+                                    "Allow",
+                                    PermissionOptionKind::AllowOnce,
+                                )],
+                            ))
+                            .block_task()
+                            .await
+                            .expect("stale permission response");
+                        if matches!(
+                            permission_response.outcome,
+                            RequestPermissionOutcome::Cancelled
+                        ) {
+                            stale_permission_cancelled_for_req.store(true, Ordering::SeqCst);
+                        }
+                    });
                     let _ = cx.send_notification(SessionNotification::new(
                         req.session_id.clone(),
                         SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
@@ -3304,6 +3461,50 @@ mod tests {
             .await;
     }
 
+    async fn run_mock_agent_without_resume_capability(
+        stream: tokio::io::DuplexStream,
+        close_seen: Arc<StdAtomicBool>,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                            AgentCapabilities::new().session_capabilities(
+                                SessionCapabilities::new().close(SessionCloseCapabilities::new()),
+                            ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(NewSessionResponse::new(SessionId::new("old-session")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: CloseSessionRequest, responder, _cx| {
+                    close_seen.store(true, Ordering::SeqCst);
+                    responder.respond(CloseSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
     async fn wait_for_session_started(
         ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
         expected_session_id: &str,
@@ -3336,6 +3537,17 @@ mod tests {
                 return;
             }
         }
+    }
+
+    async fn wait_for_atomic_bool(flag: &StdAtomicBool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if flag.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(flag.load(Ordering::SeqCst));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4671,11 +4883,13 @@ mod tests {
         let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
         let close_seen = Arc::new(StdAtomicBool::new(false));
         let resume_seen = Arc::new(StdAtomicBool::new(false));
+        let stale_permission_cancelled = Arc::new(StdAtomicBool::new(false));
 
         let agent_task = tokio::spawn(run_mock_agent_inline_session_switch(
             agent_side,
             close_seen.clone(),
             resume_seen.clone(),
+            stale_permission_cancelled.clone(),
         ));
 
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
@@ -4710,6 +4924,7 @@ mod tests {
 
         assert!(close_seen.load(Ordering::SeqCst));
         assert!(resume_seen.load(Ordering::SeqCst));
+        wait_for_atomic_bool(&stale_permission_cancelled).await;
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         client_task.abort();
@@ -4753,6 +4968,54 @@ mod tests {
             }
             other => panic!("expected fallback, got {other:?}"),
         }
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        client_task.abort();
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_session_command_falls_back_before_close_without_resume_or_load_capability() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let close_seen = Arc::new(StdAtomicBool::new(false));
+
+        let agent_task = tokio::spawn(run_mock_agent_without_resume_capability(
+            agent_side,
+            close_seen.clone(),
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "old-session").await;
+
+        let (responder, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::LoadSession {
+                session_id: "target-session".to_string(),
+                cwd: std::env::temp_dir(),
+                title: None,
+                responder,
+            })
+            .expect("send load session");
+
+        match response.await.expect("load response") {
+            LoadSessionResult::Fallback { message } => {
+                assert!(message.contains("sessionCapabilities.resume or loadSession"));
+            }
+            other => panic!("expected fallback, got {other:?}"),
+        }
+        assert!(!close_seen.load(Ordering::SeqCst));
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         client_task.abort();

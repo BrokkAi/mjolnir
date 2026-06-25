@@ -453,6 +453,20 @@ impl TrackerState {
         }
     }
 
+    fn reset_for_session_change(&mut self, new_session_id: &str, now: &str) {
+        self.session_id = Some(new_session_id.to_string());
+        self.name = Some(new_session_id.to_string());
+        self.start_time = Some(now.to_string());
+        self.total_messages = 0;
+        self.agent_message_open = false;
+        self.prompt_in_flight = false;
+        self.transcript.clear();
+        self.terminal_outputs.clear();
+        self.tool_transcript_entries.clear();
+        self.pending_permissions.clear();
+        self.session_config.clear();
+    }
+
     fn observe_event(&mut self, event: &UiEvent) {
         match event {
             UiEvent::SessionStarted { session_id, .. } => {
@@ -461,19 +475,21 @@ impl TrackerState {
                     && previous != session_id
                 {
                     self.sessions_to_disconnect.push(previous.clone());
-                }
-                self.session_id = Some(session_id.clone());
-                if self.name.is_none() {
-                    self.name = Some(session_id.clone());
-                }
-                if self.start_time.is_none() {
-                    self.start_time = Some(now.clone());
+                    self.reset_for_session_change(session_id, &now);
+                } else {
+                    self.session_id = Some(session_id.clone());
+                    if self.name.is_none() {
+                        self.name = Some(session_id.clone());
+                    }
+                    if self.start_time.is_none() {
+                        self.start_time = Some(now.clone());
+                    }
+                    self.agent_message_open = false;
+                    self.prompt_in_flight = false;
+                    self.pending_permissions.clear();
+                    self.session_config.clear();
                 }
                 self.last_update = Some(now);
-                self.agent_message_open = false;
-                self.prompt_in_flight = false;
-                self.pending_permissions.clear();
-                self.session_config.clear();
             }
             UiEvent::SessionConfigOptions { options, targets } => {
                 self.session_config = config_option_records(options, targets);
@@ -2893,8 +2909,9 @@ fn rfc3339_before(age: Duration) -> String {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        PermissionOption, SessionConfigSelectOption, Terminal, TerminalExitStatus, TerminalId,
-        ToolCall, ToolCallContent, ToolCallUpdate, ToolCallUpdateFields,
+        PermissionOption, SessionConfigSelect, SessionConfigSelectOption, Terminal,
+        TerminalExitStatus, TerminalId, ToolCall, ToolCallContent, ToolCallUpdate,
+        ToolCallUpdateFields,
     };
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
@@ -3069,6 +3086,64 @@ mod tests {
         assert!(!snapshot.transcript[0].text.contains("[output truncated]"));
         assert!(snapshot.transcript[0].text.contains("done\n"));
         assert!(snapshot.transcript[0].text.contains("exit signal SIGTERM"));
+    }
+
+    #[test]
+    fn tracker_resets_per_session_state_when_session_changes() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        state.observe_command(&UiCommand::SendPrompt {
+            text: "old prompt".to_string(),
+            images: Vec::new(),
+        });
+        state.observe_event(&UiEvent::SessionConfigOptions {
+            options: vec![SessionConfigOption::new(
+                SessionConfigId::from("model"),
+                "Model",
+                SessionConfigKind::Select(SessionConfigSelect::new(
+                    SessionConfigValueId::from("fast"),
+                    vec![SessionConfigSelectOption::new(
+                        SessionConfigValueId::from("fast"),
+                        "Fast",
+                    )],
+                )),
+            )],
+            targets: vec![SessionConfigTarget::ConfigOption {
+                config_id: SessionConfigId::from("model"),
+            }],
+        });
+        state.observe_event(&UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "old output\n".to_string(),
+            truncated: false,
+            exit_status: None,
+        }));
+
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-2".to_string(),
+            resumed: true,
+        });
+        state.observe_event(&UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            agent_client_protocol::schema::ContentChunk::new(
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("new reply"),
+                ),
+            ),
+        )));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.session_id, "sess-2");
+        assert_eq!(snapshot.name, "sess-2");
+        assert_eq!(snapshot.total_messages, 1);
+        assert!(snapshot.session_config.is_empty());
+        assert_eq!(snapshot.transcript.len(), 1);
+        assert_eq!(snapshot.transcript[0].kind, "agent");
+        assert_eq!(snapshot.transcript[0].text, "new reply");
+        assert!(state.terminal_outputs.is_empty());
+        assert_eq!(state.take_sessions_to_disconnect(), vec!["sess-1"]);
     }
 
     #[test]
