@@ -21,6 +21,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::install::{self, Progress};
 use crate::palette::TerminalTheme;
@@ -263,10 +264,7 @@ impl<'a> PickerState<'a> {
             Item::Custom => "save a named command for next time".to_string(),
             Item::Agent(idx) => {
                 let a = &self.registry.agents[*idx];
-                match a.preferred_kind(&self.platform) {
-                    Some(kind) => format!("{} v{}", kind.label(), a.version),
-                    None => "no compatible distribution".to_string(),
-                }
+                registry_agent_hint(a, &self.platform)
             }
             Item::CustomAgent(idx) => {
                 let a = &self.preferences.custom_agents[*idx];
@@ -503,6 +501,19 @@ impl<'a> PickerState<'a> {
         self.rebuild_items(Some(&new_source_id));
         self.notice = Some(format!("updated custom agent: {label}"));
         self.mode = Mode::Browse;
+    }
+}
+
+fn registry_agent_hint(agent: &Agent, platform: &str) -> String {
+    let distribution = match agent.preferred_kind(platform) {
+        Some(kind) => format!("{} v{}", kind.label(), agent.version),
+        None => "no compatible distribution".to_string(),
+    };
+    let description = agent.description.trim();
+    if description.is_empty() {
+        distribution
+    } else {
+        format!("{description} ({distribution})")
     }
 }
 
@@ -1132,7 +1143,7 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
             };
             let label = state.item_label(item);
             let hint = state.item_hint(item);
-            let line = format!("{marker} {label}{badge}  -- {hint}");
+            let line = picker_row_line(marker, &label, &badge, &hint, inner.width);
             let style = if is_selected {
                 Style::default()
                     .fg(theme.selection_fg)
@@ -1147,6 +1158,37 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
 
     let list = List::new(items);
     f.render_widget(list, inner);
+}
+
+fn picker_row_line(marker: &str, label: &str, badge: &str, hint: &str, width: u16) -> String {
+    truncate_text_to_width(format!("{marker} {label}{badge}  -- {hint}"), width)
+}
+
+fn truncate_text_to_width(line: String, width: u16) -> String {
+    let cap = width as usize;
+    if line.width() <= cap {
+        return line;
+    }
+    if cap == 0 {
+        return String::new();
+    }
+    if cap <= 3 {
+        return ".".repeat(cap);
+    }
+
+    let target = cap - 3;
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in line.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w > target {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push_str("...");
+    out
 }
 
 fn draw_filter(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme: TerminalTheme) {
@@ -1953,17 +1995,48 @@ mod tests {
             .iter()
             .find(|(l, _)| l == "Claude")
             .expect("claude");
-        assert!(claude.1.starts_with("npx"), "hint: {}", claude.1);
+        assert_eq!(claude.1, "Claude ACP (npx v0.36.1)");
         let bin = labels_and_hints
             .iter()
             .find(|(l, _)| l == "BinaryOnly")
             .expect("binonly");
-        assert!(bin.1.starts_with("binary"), "hint: {}", bin.1);
+        assert_eq!(bin.1, "binary distribution only (binary v1.0.0)");
         let uvx = labels_and_hints
             .iter()
             .find(|(l, _)| l == "UvxBinary")
             .expect("uvx");
-        assert!(uvx.1.starts_with("uvx"), "hint: {}", uvx.1);
+        assert_eq!(uvx.1, "uvx and binary distributions (uvx v2.0.0)");
+    }
+
+    #[test]
+    fn picker_hint_falls_back_to_distribution_when_registry_description_is_missing() {
+        let json = r#"{
+            "version": "1.0.0",
+            "agents": [
+                {
+                    "id": "plain-agent",
+                    "name": "Plain",
+                    "version": "0.1.0",
+                    "distribution": {
+                        "npx": {"package": "@x/plain@0.1.0"}
+                    }
+                }
+            ]
+        }"#;
+        let reg = Registry::from_json(json).expect("parse");
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        let plain = state
+            .items
+            .iter()
+            .find(|item| state.item_source_id(item) == "plain-agent")
+            .expect("plain");
+
+        assert_eq!(state.item_hint(plain), "npx v0.1.0");
     }
 
     #[test]
@@ -1986,7 +2059,25 @@ mod tests {
                 }
             })
             .expect("bin hint");
+        assert!(bin_hint.contains("binary distribution only"));
         assert!(bin_hint.contains("no compatible"), "hint: {bin_hint}");
+    }
+
+    #[test]
+    fn picker_row_line_truncates_long_descriptions_to_terminal_width() {
+        let line = picker_row_line(
+            ">",
+            "Claude",
+            "",
+            "a very long client description that cannot fit in a narrow picker row (npx v1.0.0)",
+            38,
+        );
+
+        assert!(line.ends_with("..."), "line: {line}");
+        assert!(
+            UnicodeWidthStr::width(line.as_str()) <= 38,
+            "line should fit: {line}"
+        );
     }
 
     #[test]
