@@ -38,9 +38,10 @@ use tokio::time::MissedTickBehavior;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    AppState, ConfigValueChoice, ConnectionState, Entry, PastedAttachment, PastedImageAttachment,
-    PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, StatusKind, StatusMessage,
-    ToolCallOutput, UiExitReason, config_option_choices, config_option_current_value_label,
+    AppState, ConfigValueChoice, ConnectionState, Entry, MjConfigSection, PastedAttachment,
+    PastedImageAttachment, PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt,
+    StatusKind, StatusMessage, ToolCallOutput, UiExitReason, config_option_choices,
+    config_option_current_value_label,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -50,6 +51,7 @@ use crate::event::{PermissionDecision, PermissionPrompt, PromptImage, UiCommand,
 use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
 use crate::speech::{dictation_error_message, run_dictation};
+use crate::spinner::SpinnerStyle;
 use crate::term::TrackedBackend;
 use crate::text::truncate_text_to_width;
 use crate::theme::TerminalThemeKind;
@@ -61,6 +63,8 @@ const PROMPT_SIDE_PADDING: u16 = 1;
 pub const INLINE_CHAT_HEIGHT: u16 = 8;
 const INLINE_EXPANDED_MAX_HEIGHT: u16 = 20;
 const INLINE_HELP_HEIGHT: u16 = 18;
+/// Inline viewport height for the `/mjconfig` overlay (border + two sections).
+const INLINE_MJCONFIG_HEIGHT: u16 = 15;
 const QUEUED_PROMPT_VISIBLE_ROWS: usize = 3;
 const CURSOR_POSITION_TIMEOUT_MESSAGE: &str =
     "The cursor position could not be read within a normal duration";
@@ -282,6 +286,7 @@ pub struct UiRunOptions<'a> {
     pub persistence: UiPersistencePaths<'a>,
     pub mode: UiMode,
     pub theme_kind: TerminalThemeKind,
+    pub spinner_style: SpinnerStyle,
 }
 
 pub struct UiRunResult {
@@ -289,6 +294,7 @@ pub struct UiRunResult {
     pub session_id: Option<String>,
     pub session_title: Option<String>,
     pub theme_kind: TerminalThemeKind,
+    pub spinner_style: SpinnerStyle,
 }
 
 struct UiInitialState {
@@ -298,6 +304,7 @@ struct UiInitialState {
     transcript_export_dir: Option<PathBuf>,
     config_path: Option<PathBuf>,
     theme_kind: TerminalThemeKind,
+    spinner_style: SpinnerStyle,
 }
 
 pub async fn run(
@@ -313,7 +320,7 @@ pub async fn run(
         .history_path
         .map(config::load_history)
         .unwrap_or_default();
-    let (reason, session_id, session_title, theme_kind, history) = ui_loop(
+    let (reason, session_id, session_title, theme_kind, spinner_style, history) = ui_loop(
         terminal,
         cmd_tx,
         event_rx,
@@ -327,6 +334,7 @@ pub async fn run(
                 .map(Path::to_path_buf),
             config_path: options.persistence.config_path.map(Path::to_path_buf),
             theme_kind: options.theme_kind,
+            spinner_style: options.spinner_style,
         },
         options.mode,
     )
@@ -341,6 +349,7 @@ pub async fn run(
         session_id,
         session_title,
         theme_kind,
+        spinner_style,
     })
 }
 
@@ -348,25 +357,33 @@ pub async fn run(
 /// overlays, and picker updates.
 const FRAME_BUDGET: Duration = Duration::from_millis(33);
 
-/// Slower redraw rate while the agent is streaming output in the
-/// fullscreen TUI. This preserves a visible spinner without repainting
-/// the prompt area as aggressively as normal local editing.
-const STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(120);
+/// Slower redraw rate while prompt activity is animated in the fullscreen
+/// TUI. This preserves a visible spinner without repainting the prompt area
+/// as aggressively as normal local editing.
+const STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(125);
 
-/// Much slower redraw rate for inline streaming UI. Inline terminals are
-/// more prone to visible prompt flicker, so keep the spinner alive but
-/// update it on a calm cadence.
-const INLINE_STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(75);
+/// Much slower redraw rate for inline animated prompt activity. Inline
+/// terminals are more prone to visible prompt flicker, so keep the spinner
+/// alive but update it on a calm cadence.
+const INLINE_STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(125);
 
 fn redraw_budget(mode: UiMode, state: &AppState) -> Duration {
     match (mode, state.connection_state()) {
         (
             UiMode::InlineChat,
-            ConnectionState::Streaming | ConnectionState::Cancelling | ConnectionState::Forking,
+            ConnectionState::Launching
+            | ConnectionState::Initializing
+            | ConnectionState::Streaming
+            | ConnectionState::Cancelling
+            | ConnectionState::Forking,
         ) => INLINE_STREAMING_FRAME_BUDGET,
         (
             _,
-            ConnectionState::Streaming | ConnectionState::Cancelling | ConnectionState::Forking,
+            ConnectionState::Launching
+            | ConnectionState::Initializing
+            | ConnectionState::Streaming
+            | ConnectionState::Cancelling
+            | ConnectionState::Forking,
         ) => STREAMING_FRAME_BUDGET,
         _ => FRAME_BUDGET,
     }
@@ -402,6 +419,7 @@ async fn ui_loop(
     Option<String>,
     Option<String>,
     TerminalThemeKind,
+    SpinnerStyle,
     Vec<String>,
 )> {
     let mut state = AppState::new();
@@ -417,6 +435,7 @@ async fn ui_loop(
     }
     state.transcript_export_dir = initial.transcript_export_dir;
     state.set_theme(initial.theme_kind);
+    state.set_spinner_style(initial.spinner_style);
     state.config_path = initial.config_path;
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut transcript_sink = TranscriptSink::default();
@@ -635,6 +654,7 @@ async fn ui_loop(
                 state.session_id.clone(),
                 state.session_title.clone(),
                 state.theme_kind,
+                state.spinner_style,
                 state.prompt_history(),
             ));
         }
@@ -711,6 +731,7 @@ async fn ui_loop(
         None,
         None,
         state.theme_kind,
+        state.spinner_style,
         state.prompt_history(),
     ))
 }
@@ -902,6 +923,7 @@ fn inline_repair_heartbeat_active(state: &AppState) -> bool {
         || state.help_overlay
         || state.has_pending_permission()
         || state.config_picker.is_some()
+        || state.mjconfig_menu.is_some()
         || matches!(
             state.connection_state(),
             ConnectionState::Launching | ConnectionState::Initializing
@@ -987,6 +1009,8 @@ fn needs_live_redraw(state: &AppState) -> bool {
         || state.help_overlay
         || state.has_pending_permission()
         || state.config_picker.is_some()
+        // Keep redrawing so the menu's live spinner previews keep animating.
+        || state.mjconfig_menu.is_some()
         || should_show_spinner(state)
 }
 
@@ -1259,6 +1283,8 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
     let width = terminal_size.width.saturating_sub(2).max(1);
     let desired = if state.help_overlay {
         usize::from(INLINE_HELP_HEIGHT)
+    } else if state.mjconfig_menu.is_some() {
+        usize::from(INLINE_MJCONFIG_HEIGHT)
     } else if let Some(pending) = state.pending_permission() {
         permission_view_lines(
             pending,
@@ -1291,7 +1317,10 @@ fn handle_crossterm(
             // Skip paste when a modal is active;
             // the input buffer isn't focused and pasted text would land
             // invisibly in the background.
-            if state.help_overlay || state.has_pending_permission() || state.config_picker.is_some()
+            if state.help_overlay
+                || state.has_pending_permission()
+                || state.config_picker.is_some()
+                || state.mjconfig_menu.is_some()
             {
                 return TerminalRequest::None;
             }
@@ -1324,6 +1353,11 @@ fn handle_crossterm(
             return inline_repair_request(mode);
         }
         return TerminalRequest::None;
+    }
+
+    // The /mjconfig overlay owns the keyboard while it is open.
+    if state.mjconfig_menu.is_some() {
+        return handle_mjconfig_menu_key(state, key.modifiers, key.code, mode);
     }
 
     if should_open_help(key.modifiers, key.code) {
@@ -2711,15 +2745,12 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
-    if images.is_empty() && (text == "/theme" || text.starts_with("/theme ")) {
+    if images.is_empty() && text == "/mjconfig" {
         state.input.clear();
         clear_attachments(state);
         state.input_cursor = 0;
         state.scroll_input_to_bottom();
-        apply_theme_command(
-            state,
-            text.strip_prefix("/theme").unwrap_or_default().trim(),
-        );
+        state.open_mjconfig_menu();
         return;
     }
 
@@ -2818,50 +2849,171 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     let _ = cmd_tx.send(UiCommand::SendPrompt { text, images });
 }
 
-fn apply_theme_command(state: &mut AppState, theme_name: &str) {
-    if theme_name.is_empty() {
-        let names = TerminalThemeKind::ALL
-            .iter()
-            .map(|kind| {
-                if *kind == state.theme_kind {
-                    format!("{kind} (current)")
-                } else {
-                    kind.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        state.record_status_message(StatusKind::Info, format!("themes: {names}"));
-        return;
-    }
-
-    let theme_kind = match theme_name.parse::<TerminalThemeKind>() {
-        Ok(theme_kind) => theme_kind,
-        Err(e) => {
-            state.record_status_message(StatusKind::Warning, e);
-            return;
+fn handle_mjconfig_menu_key(
+    state: &mut AppState,
+    modifiers: KeyModifiers,
+    code: KeyCode,
+    mode: UiMode,
+) -> TerminalRequest {
+    match (modifiers, code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
+            state.mjconfig_menu_cancel();
+            inline_repair_request(mode)
         }
-    };
+        (_, KeyCode::Enter) => {
+            if let Some((theme, style)) = state.mjconfig_menu_accept() {
+                persist_mjconfig_selection(state, theme, style);
+            }
+            inline_repair_request(mode)
+        }
+        (_, KeyCode::Tab)
+        | (_, KeyCode::BackTab)
+        | (_, KeyCode::Left)
+        | (_, KeyCode::Right)
+        | (_, KeyCode::Char('h'))
+        | (_, KeyCode::Char('l')) => {
+            state.mjconfig_menu_toggle_section();
+            TerminalRequest::None
+        }
+        (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+            state.mjconfig_menu_move(-1);
+            TerminalRequest::None
+        }
+        (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+            state.mjconfig_menu_move(1);
+            TerminalRequest::None
+        }
+        _ => TerminalRequest::None,
+    }
+}
 
-    state.set_theme(theme_kind);
+/// Persist the theme + spinner accepted in the `/mjconfig` menu. The live UI is
+/// already showing them (preview), so this only writes config and reports.
+fn persist_mjconfig_selection(state: &mut AppState, theme: TerminalThemeKind, style: SpinnerStyle) {
     if let Some(path) = state.config_path.clone() {
         match config::Config::load(&path).and_then(|mut cfg| {
-            cfg.theme = theme_kind;
+            cfg.theme = theme;
+            cfg.spinner = style;
             cfg.save(&path)
         }) {
-            Ok(()) => {
-                state.record_status_message(StatusKind::Info, format!("theme set to {theme_kind}"));
-            }
-            Err(e) => {
-                state.record_status_message(
-                    StatusKind::Warning,
-                    format!("theme changed but save failed: {e:#}"),
-                );
-            }
+            Ok(()) => state.record_status_message(
+                StatusKind::Info,
+                format!("config saved — theme {theme}, spinner {style}"),
+            ),
+            Err(e) => state.record_status_message(
+                StatusKind::Warning,
+                format!("config changed but save failed: {e:#}"),
+            ),
         }
     } else {
-        state.record_status_message(StatusKind::Info, format!("theme set to {theme_kind}"));
+        state.record_status_message(StatusKind::Info, format!("theme {theme}, spinner {style}"));
     }
+}
+
+fn mjconfig_section_header(title: &str, focused: bool, theme: TerminalTheme) -> Line<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(theme.header)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+    Line::from(Span::styled(title.to_string(), style))
+}
+
+fn mjconfig_option_line(
+    selected: bool,
+    focused: bool,
+    label: String,
+    theme: TerminalTheme,
+) -> Line<'static> {
+    let marker = if selected { "▶ " } else { "  " };
+    let style = if selected && focused {
+        Style::default()
+            .fg(theme.selection_fg)
+            .bg(theme.selection_bg)
+            .add_modifier(Modifier::BOLD)
+    } else if selected {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.text)
+    };
+    Line::from(Span::styled(format!("{marker}{label}"), style))
+}
+
+fn draw_mjconfig_menu(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let Some(menu) = state.mjconfig_menu.as_ref() else {
+        return;
+    };
+    let theme = state.theme;
+
+    let width = 58.min(area.width);
+    let height = 15.min(area.height);
+    if width < 24 || height < 8 {
+        return;
+    }
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, rect);
+
+    let block = Block::default()
+        .title(" mj config ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(theme.text));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(4),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let intro = Paragraph::new("Changes preview live. Enter saves to config; Esc reverts.")
+        .style(Style::default().fg(theme.muted));
+    f.render_widget(intro, rows[0]);
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(rows[1]);
+
+    let theme_focused = menu.section == MjConfigSection::Theme;
+    let mut theme_lines = vec![mjconfig_section_header("Theme", theme_focused, theme)];
+    for (idx, kind) in TerminalThemeKind::ALL.iter().enumerate() {
+        theme_lines.push(mjconfig_option_line(
+            idx == menu.theme_idx,
+            theme_focused,
+            kind.to_string(),
+            theme,
+        ));
+    }
+    f.render_widget(Paragraph::new(theme_lines), cols[0]);
+
+    let spinner_focused = menu.section == MjConfigSection::Spinner;
+    let mut spinner_lines = vec![mjconfig_section_header("Spinner", spinner_focused, theme)];
+    for (idx, style) in SpinnerStyle::ALL.iter().enumerate() {
+        // Each row previews its own style, animating from wall-clock time.
+        let label = format!("{:<8}{}", style.to_string(), style.current_frame());
+        spinner_lines.push(mjconfig_option_line(
+            idx == menu.spinner_idx,
+            spinner_focused,
+            label,
+            theme,
+        ));
+    }
+    f.render_widget(Paragraph::new(spinner_lines), cols[1]);
+
+    let footer = Paragraph::new("↑/↓ change · Tab switch · Enter save · Esc cancel")
+        .style(Style::default().fg(theme.muted));
+    f.render_widget(footer, rows[2]);
 }
 
 fn export_transcript(state: &AppState) -> Result<PathBuf> {
@@ -3558,6 +3710,10 @@ fn draw(
         draw_help_modal(f, f.area(), mode, state.theme);
     }
 
+    if state.mjconfig_menu.is_some() {
+        draw_mjconfig_menu(f, f.area(), state);
+    }
+
     if let Some(pending) = state.pending_permission() {
         draw_permission_modal(
             f,
@@ -3583,6 +3739,11 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
 
     if state.config_picker.is_some() {
         draw_inline_config_value_picker(f, f.area(), state);
+        return;
+    }
+
+    if state.mjconfig_menu.is_some() {
+        draw_mjconfig_menu(f, f.area(), state);
         return;
     }
 
@@ -3930,20 +4091,6 @@ fn take_display_suffix(text: &str, max_width: usize) -> String {
         width += ch_width;
     }
     chars.into_iter().rev().collect()
-}
-
-fn prompt_activity_frames() -> &'static [&'static str] {
-    &["●━━", "━●━", "━━●", "━━●", "━●━", "●━━"]
-}
-
-fn spinner_frame() -> &'static str {
-    let frames = prompt_activity_frames();
-    let idx = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| (duration.as_millis() / 100) as usize)
-        .unwrap_or(0)
-        % frames.len();
-    frames[idx]
 }
 
 fn turn_elapsed_value_label(state: &AppState) -> Option<String> {
@@ -5117,9 +5264,9 @@ fn voice_level_meter(level: Option<f32>) -> String {
 
 fn prompt_activity_ornament(state: &AppState) -> &'static str {
     if should_show_spinner(state) {
-        spinner_frame()
+        state.spinner_style.current_frame()
     } else {
-        "━━━"
+        state.spinner_style.idle_frame()
     }
 }
 
@@ -5342,6 +5489,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         && !state.has_pending_permission()
         && state.config_picker.is_none()
         && !state.help_overlay
+        && state.mjconfig_menu.is_none()
         && (mode == UiMode::InlineChat || !state.text_selection_mode)
     {
         let (cursor_row, cursor_col) =
@@ -6237,9 +6385,13 @@ mod tests {
     }
 
     fn contains_prompt_activity_frame(text: &str) -> bool {
-        prompt_activity_frames()
+        // The rendered ornament is one animation frame of the active style.
+        // Tests build an `AppState::new()` (default style), but check every
+        // style's frames so the helper stays correct if a test sets another.
+        SpinnerStyle::ALL
             .iter()
-            .any(|frame| text.contains(frame))
+            .flat_map(|style| style.frames())
+            .any(|frame| text.contains(frame.as_str()))
     }
 
     #[test]
@@ -6559,7 +6711,7 @@ mod tests {
             redraw_budget(UiMode::InlineChat, &state),
             INLINE_STREAMING_FRAME_BUDGET
         );
-        assert_eq!(INLINE_STREAMING_FRAME_BUDGET, Duration::from_millis(75));
+        assert_eq!(INLINE_STREAMING_FRAME_BUDGET, Duration::from_millis(125));
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
     }
 
@@ -6625,8 +6777,14 @@ mod tests {
     fn redraw_budget_slows_during_streaming() {
         let mut state = AppState::new();
 
-        assert_eq!(redraw_budget(UiMode::FullscreenTui, &state), FRAME_BUDGET);
-        assert_eq!(redraw_budget(UiMode::InlineChat, &state), FRAME_BUDGET);
+        assert_eq!(
+            redraw_budget(UiMode::FullscreenTui, &state),
+            STREAMING_FRAME_BUDGET
+        );
+        assert_eq!(
+            redraw_budget(UiMode::InlineChat, &state),
+            INLINE_STREAMING_FRAME_BUDGET
+        );
 
         state.set_connection_state(ConnectionState::Streaming);
         assert_eq!(
@@ -7362,59 +7520,106 @@ mod tests {
     }
 
     #[test]
-    fn slash_theme_changes_theme_and_persists_config() {
+    fn slash_mjconfig_opens_menu() {
+        let mut state = AppState::new();
+        state.input = "/mjconfig".to_string();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.mjconfig_menu.is_some(), "menu should be open");
+        assert!(state.input.is_empty(), "input should be consumed");
+    }
+
+    #[test]
+    fn mjconfig_menu_previews_live_and_persists_on_accept() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut state = AppState::new();
         state.config_path = Some(path.clone());
-        state.input = "/theme ansi-light".to_string();
-        let starting_revision = state.transcript_revision();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        state.open_mjconfig_menu();
 
-        submit_prompt(&mut state, &cmd_tx);
+        // Spinner section: move once to preview the next style live.
+        state.mjconfig_menu_toggle_section();
+        let before = state.spinner_style;
+        state.mjconfig_menu_move(1);
+        assert_ne!(state.spinner_style, before, "preview should apply live");
+        let previewed = state.spinner_style;
 
-        assert!(cmd_rx.try_recv().is_err());
-        assert_eq!(state.theme_kind, TerminalThemeKind::AnsiLight);
-        assert_eq!(state.theme.kind, TerminalThemeKind::AnsiLight);
-        assert_ne!(state.transcript_revision(), starting_revision);
+        // Theme section: preview a different theme live.
+        state.mjconfig_menu_toggle_section();
+        state.mjconfig_menu_move(1);
+        let previewed_theme = state.theme_kind;
+
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        handle_mjconfig_menu_key(
+            &mut state,
+            KeyModifiers::NONE,
+            KeyCode::Enter,
+            UiMode::FullscreenTui,
+        );
+
+        assert!(state.mjconfig_menu.is_none(), "menu closes on accept");
         let saved = config::Config::load(&path).expect("load saved config");
-        assert_eq!(saved.theme, TerminalThemeKind::AnsiLight);
-        let status = state.status_line.expect("status");
-        assert_eq!(status.kind, StatusKind::Info);
-        assert_eq!(status.text, "theme set to ansi-light");
+        assert_eq!(saved.spinner, previewed);
+        assert_eq!(saved.theme, previewed_theme);
     }
 
     #[test]
-    fn slash_theme_lists_available_themes_without_runtime_command() {
+    fn mjconfig_menu_cancel_reverts_live_preview() {
         let mut state = AppState::new();
-        state.input = "/theme".to_string();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let orig_theme = state.theme_kind;
+        let orig_spinner = state.spinner_style;
+        state.open_mjconfig_menu();
 
-        submit_prompt(&mut state, &cmd_tx);
+        // Preview different values in both sections.
+        state.mjconfig_menu_move(1);
+        state.mjconfig_menu_toggle_section();
+        state.mjconfig_menu_move(1);
+        assert!(state.theme_kind != orig_theme || state.spinner_style != orig_spinner);
 
-        assert!(cmd_rx.try_recv().is_err());
-        assert_eq!(state.theme_kind, TerminalThemeKind::Dark);
-        let status = state.status_line.expect("status");
-        assert_eq!(status.kind, StatusKind::Info);
-        assert!(status.text.contains("light"));
-        assert!(status.text.contains("dark (current)"));
-        assert!(status.text.contains("ansi-light"));
-        assert!(status.text.contains("ansi-dark"));
+        handle_mjconfig_menu_key(
+            &mut state,
+            KeyModifiers::NONE,
+            KeyCode::Esc,
+            UiMode::FullscreenTui,
+        );
+
+        assert!(state.mjconfig_menu.is_none(), "menu closes on cancel");
+        assert_eq!(state.theme_kind, orig_theme, "theme reverted");
+        assert_eq!(state.spinner_style, orig_spinner, "spinner reverted");
     }
 
     #[test]
-    fn slash_theme_rejects_unknown_theme_without_runtime_command() {
+    fn mjconfig_menu_renders_both_sections() {
+        let backend = TestBackend::new(90, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
         let mut state = AppState::new();
-        state.input = "/theme solarized".to_string();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        state.open_mjconfig_menu();
+        let mut transcript_scroll = TranscriptScrollState::default();
 
-        submit_prompt(&mut state, &cmd_tx);
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &mut transcript_scroll,
+                    UiMode::FullscreenTui,
+                )
+            })
+            .expect("draw");
 
-        assert!(cmd_rx.try_recv().is_err());
-        assert_eq!(state.theme_kind, TerminalThemeKind::Dark);
-        let status = state.status_line.expect("status");
-        assert_eq!(status.kind, StatusKind::Warning);
-        assert!(status.text.contains("unknown theme"));
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("mj config"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Theme"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Spinner"), "rendered:\n{rendered}");
+        // Every spinner style name is listed as a row.
+        for style in SpinnerStyle::ALL {
+            assert!(
+                rendered.contains(style.as_str()),
+                "missing {style} in:\n{rendered}"
+            );
+        }
     }
 
     #[test]
@@ -8407,7 +8612,7 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("━━━ (Enter send"),
+            rendered.contains("············ (Enter send"),
             "rendered:\n{rendered}"
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
@@ -8445,7 +8650,7 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("━━━ (Enter send"),
+            rendered.contains("············ (Enter send"),
             "rendered:\n{rendered}"
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
@@ -8467,7 +8672,7 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("━━━ 0s (Enter send"),
+            rendered.contains("············ 0s (Enter send"),
             "rendered:\n{rendered}"
         );
         assert!(!rendered.contains("prompt"), "rendered:\n{rendered}");
@@ -8517,13 +8722,28 @@ mod tests {
     }
 
     #[test]
-    fn prompt_activity_frames_have_stable_display_width() {
-        let widths: Vec<usize> = prompt_activity_frames()
-            .iter()
-            .map(|frame| UnicodeWidthStr::width(*frame))
-            .collect();
+    fn prompt_activity_ornament_uses_selected_style() {
+        // Per-style frame width and loop length are covered in `spinner`'s own
+        // tests; here we verify the ornament wiring picks the active style and
+        // switches between its idle and animation frames with connection state.
+        for style in SpinnerStyle::ALL {
+            let mut state = AppState::new();
+            state.set_spinner_style(style);
 
-        assert_eq!(widths, vec![3, 3, 3, 3, 3, 3]);
+            state.set_connection_state(ConnectionState::Ready);
+            assert_eq!(
+                prompt_activity_ornament(&state),
+                style.idle_frame(),
+                "{style} idle ornament"
+            );
+
+            state.set_connection_state(ConnectionState::Streaming);
+            let busy = prompt_activity_ornament(&state);
+            assert!(
+                style.frames().iter().any(|frame| frame == busy),
+                "{style} busy ornament {busy:?} is not one of its frames"
+            );
+        }
     }
 
     #[test]

@@ -24,6 +24,7 @@ use crate::event::{
     UiEvent, content_block_text,
 };
 use crate::palette::TerminalTheme;
+use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
 
 /// Maximum width of the queued-prompt preview shown above the input.
@@ -35,7 +36,7 @@ const BUILTIN_CLEAR_COMMAND: &str = "clear";
 const BUILTIN_LOAD_COMMAND: &str = "load";
 const BUILTIN_FORK_COMMAND: &str = "fork";
 const BUILTIN_EXPORT_COMMAND: &str = "export";
-const BUILTIN_THEME_COMMAND: &str = "theme";
+const BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
 const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
 
 fn builtin_new_command() -> AvailableCommand {
@@ -64,10 +65,10 @@ fn builtin_export_command() -> AvailableCommand {
     AvailableCommand::new(BUILTIN_EXPORT_COMMAND, "export transcript to markdown")
 }
 
-fn builtin_theme_command() -> AvailableCommand {
+fn builtin_mjconfig_command() -> AvailableCommand {
     AvailableCommand::new(
-        BUILTIN_THEME_COMMAND,
-        "change terminal theme: light, dark, ansi-light, ansi-dark",
+        BUILTIN_MJCONFIG_COMMAND,
+        "open the mj config menu (theme + spinner)",
     )
 }
 
@@ -78,12 +79,12 @@ fn install_builtin_commands(commands: &mut Vec<AvailableCommand>, include_fork: 
             && command.name != BUILTIN_LOAD_COMMAND
             && command.name != BUILTIN_FORK_COMMAND
             && command.name != BUILTIN_EXPORT_COMMAND
-            && command.name != BUILTIN_THEME_COMMAND
+            && command.name != BUILTIN_MJCONFIG_COMMAND
     });
     if include_fork {
         commands.insert(0, builtin_fork_command());
     }
-    commands.insert(0, builtin_theme_command());
+    commands.insert(0, builtin_mjconfig_command());
     commands.insert(0, builtin_export_command());
     commands.insert(0, builtin_load_command());
     commands.insert(0, builtin_clear_command());
@@ -462,10 +463,34 @@ fn number_field(
         .and_then(serde_json::Value::as_f64)
 }
 
+/// Which row group the `/mjconfig` menu is currently editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MjConfigSection {
+    Theme,
+    Spinner,
+}
+
+/// In-session `/mjconfig` overlay: pick the terminal theme and spinner style.
+/// Selections preview live against the running UI; the originals are kept so
+/// cancelling can restore them.
+#[derive(Debug, Clone)]
+pub struct MjConfigMenu {
+    pub section: MjConfigSection,
+    pub theme_idx: usize,
+    pub spinner_idx: usize,
+    orig_theme: TerminalThemeKind,
+    orig_spinner: SpinnerStyle,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub theme_kind: TerminalThemeKind,
     pub theme: TerminalTheme,
+    /// Client-side prompt-activity spinner style. Purely cosmetic; persisted
+    /// in config like [`theme_kind`](Self::theme_kind).
+    pub spinner_style: SpinnerStyle,
+    /// Open `/mjconfig` overlay, if any.
+    pub mjconfig_menu: Option<MjConfigMenu>,
     pub agent_label: String,
     pub session_id: Option<String>,
     pub session_title: Option<String>,
@@ -572,7 +597,7 @@ pub struct AppState {
     pub additional_roots: usize,
     /// Directory where `/export` writes Markdown transcript files.
     pub transcript_export_dir: Option<PathBuf>,
-    /// Config file used by local UI-only settings such as `/theme`.
+    /// Config file used by local UI-only settings such as `/mjconfig`.
     pub config_path: Option<PathBuf>,
     /// Holds the platform clipboard lease so copied text remains available
     /// on Linux/X11 where the owning process must stay alive.
@@ -677,6 +702,8 @@ impl AppState {
         Self {
             theme_kind,
             theme: theme_kind.palette(),
+            spinner_style: SpinnerStyle::default(),
+            mjconfig_menu: None,
             agent_label: String::new(),
             session_id: None,
             session_title: None,
@@ -739,6 +766,83 @@ impl AppState {
         }
         self.theme_kind = theme_kind;
         self.theme = theme_kind.palette();
+    }
+
+    pub fn set_spinner_style(&mut self, spinner_style: SpinnerStyle) {
+        self.spinner_style = spinner_style;
+    }
+
+    /// Open the `/mjconfig` overlay, seeded with the current theme and spinner.
+    pub fn open_mjconfig_menu(&mut self) {
+        let theme_idx = TerminalThemeKind::ALL
+            .iter()
+            .position(|kind| *kind == self.theme_kind)
+            .unwrap_or(0);
+        let spinner_idx = SpinnerStyle::ALL
+            .iter()
+            .position(|style| *style == self.spinner_style)
+            .unwrap_or(0);
+        self.mjconfig_menu = Some(MjConfigMenu {
+            section: MjConfigSection::Theme,
+            theme_idx,
+            spinner_idx,
+            orig_theme: self.theme_kind,
+            orig_spinner: self.spinner_style,
+        });
+    }
+
+    pub fn mjconfig_menu_toggle_section(&mut self) {
+        if let Some(menu) = self.mjconfig_menu.as_mut() {
+            menu.section = match menu.section {
+                MjConfigSection::Theme => MjConfigSection::Spinner,
+                MjConfigSection::Spinner => MjConfigSection::Theme,
+            };
+        }
+    }
+
+    /// Move the selection within the focused section, previewing the change
+    /// live against the running UI.
+    pub fn mjconfig_menu_move(&mut self, delta: i32) {
+        let Some(menu) = self.mjconfig_menu.as_mut() else {
+            return;
+        };
+        let mut next_theme = None;
+        let mut next_spinner = None;
+        match menu.section {
+            MjConfigSection::Theme => {
+                let len = TerminalThemeKind::ALL.len() as i32;
+                menu.theme_idx = (menu.theme_idx as i32 + delta).rem_euclid(len) as usize;
+                next_theme = Some(TerminalThemeKind::ALL[menu.theme_idx]);
+            }
+            MjConfigSection::Spinner => {
+                let len = SpinnerStyle::ALL.len() as i32;
+                menu.spinner_idx = (menu.spinner_idx as i32 + delta).rem_euclid(len) as usize;
+                next_spinner = Some(SpinnerStyle::ALL[menu.spinner_idx]);
+            }
+        }
+        if let Some(theme) = next_theme {
+            self.set_theme(theme);
+        }
+        if let Some(spinner) = next_spinner {
+            self.set_spinner_style(spinner);
+        }
+    }
+
+    /// Close the menu, keeping the live-previewed theme and spinner. Returns the
+    /// accepted pair so the caller can persist it.
+    pub fn mjconfig_menu_accept(&mut self) -> Option<(TerminalThemeKind, SpinnerStyle)> {
+        self.mjconfig_menu
+            .take()
+            .map(|_| (self.theme_kind, self.spinner_style))
+    }
+
+    /// Close the menu and restore the theme and spinner that were active when
+    /// it opened, discarding the live preview.
+    pub fn mjconfig_menu_cancel(&mut self) {
+        if let Some(menu) = self.mjconfig_menu.take() {
+            self.set_theme(menu.orig_theme);
+            self.set_spinner_style(menu.orig_spinner);
+        }
     }
 
     /// Stage a prompt to fire when the current turn completes.
@@ -3223,7 +3327,7 @@ mod tests {
             .iter()
             .map(|&i| s.available_commands[i].name.as_str())
             .collect();
-        assert_eq!(names, vec!["new", "clear", "load", "export", "theme"]);
+        assert_eq!(names, vec!["new", "clear", "load", "export", "mjconfig"]);
     }
 
     #[test]
@@ -3247,7 +3351,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["new", "clear", "load", "export", "theme", "fork"]
+            vec!["new", "clear", "load", "export", "mjconfig", "fork"]
         );
     }
 
@@ -3282,7 +3386,7 @@ mod tests {
                 "clear",
                 "load",
                 "export",
-                "theme",
+                "mjconfig",
                 "fork",
                 "review_pr"
             ]
@@ -3302,7 +3406,7 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[4].description,
-            "change terminal theme: light, dark, ansi-light, ansi-dark"
+            "open the mj config menu (theme + spinner)"
         );
         assert_eq!(
             s.available_commands[5].description,
@@ -3327,7 +3431,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["new", "clear", "load", "export", "theme", "review_pr"]
+            vec!["new", "clear", "load", "export", "mjconfig", "review_pr"]
         );
     }
 

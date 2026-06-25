@@ -10,12 +10,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::paths::{expand_home_shortcut, normalize_spawn_program};
+use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "TerminalThemeKind::is_default")]
     pub theme: TerminalThemeKind,
+    #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
+    pub spinner: SpinnerStyle,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SelectedAgent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -260,6 +263,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let cfg = Config {
             theme: TerminalThemeKind::Light,
+            spinner: SpinnerStyle::default(),
             agent: Some(SelectedAgent {
                 source_id: "claude-acp".to_string(),
                 program: PathBuf::from("/usr/local/bin/claude-acp"),
@@ -286,6 +290,7 @@ mod tests {
         let path = dir.path().join("nested").join("deep").join("config.toml");
         let cfg = Config {
             theme: TerminalThemeKind::Dark,
+            spinner: SpinnerStyle::default(),
             agent: Some(SelectedAgent {
                 source_id: "anvil".to_string(),
                 program: PathBuf::from("uvx"),
@@ -368,6 +373,7 @@ args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
         let path = dir.path().join("config.toml");
         let cfg = Config {
             theme: TerminalThemeKind::AnsiDark,
+            spinner: SpinnerStyle::default(),
             agent: None,
             favorite_agents: Vec::new(),
             custom_agents: vec![
@@ -517,5 +523,33 @@ args = ["--flag", "$HOME/data"]
 
         let loaded = Config::load(&path).expect("load saved");
         assert_eq!(loaded.theme, TerminalThemeKind::AnsiLight);
+    }
+
+    #[test]
+    fn spinner_config_defaulting_and_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").expect("write");
+        let cfg = Config::load(&path).expect("load default");
+        assert_eq!(cfg.spinner, SpinnerStyle::default());
+
+        // Default style is omitted from the serialized form.
+        Config::default().save(&path).expect("save default");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !body.contains("spinner"),
+            "default spinner should not be serialized: {body:?}"
+        );
+
+        let cfg = Config {
+            spinner: SpinnerStyle::Bars,
+            ..Config::default()
+        };
+        cfg.save(&path).expect("save");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(body.contains("spinner = \"bars\""));
+
+        let loaded = Config::load(&path).expect("load saved");
+        assert_eq!(loaded.spinner, SpinnerStyle::Bars);
     }
 }

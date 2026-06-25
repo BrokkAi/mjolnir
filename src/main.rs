@@ -22,6 +22,8 @@ mod remote;
 mod self_update;
 mod session;
 mod speech;
+mod spinner;
+mod spinner_picker;
 mod term;
 mod text;
 mod theme;
@@ -771,6 +773,7 @@ struct RunSessionResult {
     session_id: Option<String>,
     session_title: Option<String>,
     theme_kind: theme::TerminalThemeKind,
+    spinner_style: spinner::SpinnerStyle,
 }
 
 impl From<ui::UiRunResult> for RunSessionResult {
@@ -780,12 +783,14 @@ impl From<ui::UiRunResult> for RunSessionResult {
             session_id: result.session_id,
             session_title: result.session_title,
             theme_kind: result.theme_kind,
+            spinner_style: result.spinner_style,
         }
     }
 }
 
 fn apply_session_result_to_config(cfg: &mut Config, result: &RunSessionResult) {
     cfg.theme = result.theme_kind;
+    cfg.spinner = result.spinner_style;
 }
 
 async fn run_app(
@@ -853,6 +858,7 @@ async fn run_app(
             resume.as_ref().map(|target| target.session_id.clone()),
             mode,
             cfg.theme,
+            cfg.spinner,
         )
         .await?;
         apply_session_result_to_config(&mut cfg, &session_result);
@@ -908,6 +914,14 @@ async fn run_first_run_setup(
         return Ok(None);
     };
     cfg.theme = theme_kind;
+    cfg.save(config_path)
+        .with_context(|| format!("save {}", config_path.display()))?;
+
+    let Some(spinner_style) = run_spinner_picker_once(cfg.theme.palette(), cfg.spinner).await?
+    else {
+        return Ok(None);
+    };
+    cfg.spinner = spinner_style;
     cfg.save(config_path)
         .with_context(|| format!("save {}", config_path.display()))?;
 
@@ -1086,6 +1100,19 @@ async fn run_theme_picker_once(
     result
 }
 
+async fn run_spinner_picker_once(
+    theme: palette::TerminalTheme,
+    initial: spinner::SpinnerStyle,
+) -> Result<Option<spinner::SpinnerStyle>> {
+    let mut terminal = ui::setup_fullscreen_terminal().context("setup terminal")?;
+    let result = spinner_picker::run_spinner_picker(&mut terminal, theme, initial).await;
+    if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
+        tracing::warn!("restore terminal (spinner picker) failed: {e}");
+    }
+    settle_after_fullscreen_picker_restore().await;
+    result
+}
+
 async fn run_session_picker_once(
     sessions: Vec<session::SessionEntry>,
     delete_supported: bool,
@@ -1208,6 +1235,7 @@ async fn run_session(
     resume_session: Option<String>,
     mode: UiMode,
     mut theme_kind: theme::TerminalThemeKind,
+    mut spinner_style: spinner::SpinnerStyle,
 ) -> Result<RunSessionResult> {
     let mut terminal = setup_session_terminal(mode)?;
 
@@ -1294,6 +1322,7 @@ async fn run_session(
                 },
                 mode,
                 theme_kind,
+                spinner_style,
             },
         )
         .await;
@@ -1304,6 +1333,7 @@ async fn run_session(
         }
         if let Ok(result) = ui_result.as_ref() {
             theme_kind = result.theme_kind;
+            spinner_style = result.spinner_style;
         }
         if matches!(
             ui_result.as_ref().map(|result| result.reason),
@@ -1349,6 +1379,7 @@ async fn run_session(
                 session_id: current_session_id,
                 session_title: current_session_title,
                 theme_kind,
+                spinner_style,
             });
         };
 
@@ -1379,6 +1410,7 @@ async fn run_session(
                     session_id: Some(target_session_id),
                     session_title: target_title,
                     theme_kind,
+                    spinner_style,
                 });
             }
         }
@@ -1629,6 +1661,7 @@ mod tests {
         assert!(!should_open_initial_agent_picker(
             &Config {
                 theme: Default::default(),
+                spinner: Default::default(),
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
@@ -1651,6 +1684,7 @@ mod tests {
         assert!(!should_open_initial_agent_picker(
             &Config {
                 theme: Default::default(),
+                spinner: Default::default(),
                 agent: Some(custom_default),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
@@ -1680,6 +1714,7 @@ mod tests {
             false,
             &Config {
                 theme: Default::default(),
+                spinner: Default::default(),
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
@@ -1737,17 +1772,20 @@ mod tests {
             session_id: Some("session-1".to_string()),
             session_title: Some("Current".to_string()),
             theme_kind: theme::TerminalThemeKind::AnsiLight,
+            spinner_style: spinner::SpinnerStyle::Bars,
         };
 
         apply_session_result_to_config(&mut cfg, &result);
 
         assert_eq!(cfg.theme, theme::TerminalThemeKind::AnsiLight);
+        assert_eq!(cfg.spinner, spinner::SpinnerStyle::Bars);
     }
 
     #[test]
     fn picker_preferences_round_trip_custom_agents() {
         let cfg = Config {
             theme: Default::default(),
+            spinner: Default::default(),
             agent: None,
             favorite_agents: Vec::new(),
             custom_agents: vec![ConfigCustomAgent {
