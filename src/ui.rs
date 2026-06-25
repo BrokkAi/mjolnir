@@ -307,6 +307,17 @@ struct UiInitialState {
     spinner_style: SpinnerStyle,
 }
 
+/// Internal result of [`ui_loop`]. `run` unpacks it into the public
+/// [`UiRunResult`] and persists `history`.
+struct UiLoopOutcome {
+    reason: UiExitReason,
+    session_id: Option<String>,
+    session_title: Option<String>,
+    theme_kind: TerminalThemeKind,
+    spinner_style: SpinnerStyle,
+    history: Vec<String>,
+}
+
 pub async fn run(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
@@ -320,7 +331,14 @@ pub async fn run(
         .history_path
         .map(config::load_history)
         .unwrap_or_default();
-    let (reason, session_id, session_title, theme_kind, spinner_style, history) = ui_loop(
+    let UiLoopOutcome {
+        reason,
+        session_id,
+        session_title,
+        theme_kind,
+        spinner_style,
+        history,
+    } = ui_loop(
         terminal,
         cmd_tx,
         event_rx,
@@ -414,14 +432,7 @@ async fn ui_loop(
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
     initial: UiInitialState,
     mode: UiMode,
-) -> Result<(
-    UiExitReason,
-    Option<String>,
-    Option<String>,
-    TerminalThemeKind,
-    SpinnerStyle,
-    Vec<String>,
-)> {
+) -> Result<UiLoopOutcome> {
     let mut state = AppState::new();
     state.set_prompt_history(initial.history);
     state.project_label = initial.header_labels.project;
@@ -649,14 +660,14 @@ async fn ui_loop(
                     set_mouse_capture(terminal, enabled)
                 })?;
             }
-            return Ok((
+            return Ok(UiLoopOutcome {
                 reason,
-                state.session_id.clone(),
-                state.session_title.clone(),
-                state.theme_kind,
-                state.spinner_style,
-                state.prompt_history(),
-            ));
+                session_id: state.session_id.clone(),
+                session_title: state.session_title.clone(),
+                theme_kind: state.theme_kind,
+                spinner_style: state.spinner_style,
+                history: state.prompt_history(),
+            });
         }
 
         if force_soft_inline_repair && !inline_resize_reflow.is_pending() {
@@ -726,14 +737,14 @@ async fn ui_loop(
             set_mouse_capture(terminal, enabled)
         })?;
     }
-    Ok((
-        UiExitReason::Quit,
-        None,
-        None,
-        state.theme_kind,
-        state.spinner_style,
-        state.prompt_history(),
-    ))
+    Ok(UiLoopOutcome {
+        reason: UiExitReason::Quit,
+        session_id: None,
+        session_title: None,
+        theme_kind: state.theme_kind,
+        spinner_style: state.spinner_style,
+        history: state.prompt_history(),
+    })
 }
 
 fn notification_message_for_event(
