@@ -15,8 +15,10 @@
 //!   the signal.)
 //! * [`ProbeStatus::NotInstalled`] — the launcher (`uvx`/`npx`) or binary
 //!   is not present locally. We never install it just to probe.
-//! * [`ProbeStatus::Failed`] — spawn/handshake error, unsupported protocol,
-//!   or the probe timed out.
+//! * [`ProbeStatus::Unknown`] — the probe ran out of time. This is *not* a
+//!   failure: a cold `npx`/`uvx` first-run package fetch can legitimately
+//!   outlast the budget, so we report it neutrally rather than as broken.
+//! * [`ProbeStatus::Failed`] — spawn/handshake error or unsupported protocol.
 //!
 //! Opening a session is a real side effect: it creates a throwaway session.
 //! The probe deletes it again when the agent advertises
@@ -46,8 +48,10 @@ pub const PROBE_CONCURRENCY: usize = 5;
 /// Per-agent probe budget. Covers spawn + any first-run package fetch +
 /// the `initialize`/`session/new` round-trips. Generous because a cold
 /// `npx`/`uvx` fetch can be slow; probes run in the background and update
-/// the picker live, so a long-but-rare wait does not block the UI.
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+/// the picker live, so a long-but-rare wait does not block the UI. A probe
+/// that still exceeds this is reported as [`ProbeStatus::Unknown`], not a
+/// failure.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Outcome of probing one agent. Keyed back to the picker row by its
 /// `source_id`.
@@ -60,8 +64,11 @@ pub enum ProbeStatus {
     NeedsAuth,
     /// Launcher/binary not present locally; not probed, not installed.
     NotInstalled,
-    /// Could not validate (spawn failure, handshake error, unsupported
-    /// protocol version, or timeout). Carries a short reason for logs.
+    /// The probe exceeded its time budget before reaching a verdict — most
+    /// often a cold `npx`/`uvx` package fetch. Indeterminate, not broken.
+    Unknown,
+    /// Could not validate (spawn failure, handshake error, or unsupported
+    /// protocol version). Carries a short reason for logs.
     Failed(String),
 }
 
@@ -90,7 +97,9 @@ pub async fn probe_agent(
 
     let status = match tokio::time::timeout(timeout, session_probe(transport, cwd)).await {
         Ok(status) => status,
-        Err(_) => ProbeStatus::Failed("timed out".to_string()),
+        // A cold npx/uvx package fetch can outlast the budget; that is not a
+        // failure, just an indeterminate result.
+        Err(_) => ProbeStatus::Unknown,
     };
 
     // The probe subprocess (and its `npx`/`uvx` grandchildren) must not

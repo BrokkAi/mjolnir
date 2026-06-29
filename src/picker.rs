@@ -365,25 +365,9 @@ impl<'a> PickerState<'a> {
                     return Some(ProbeResolution::NotInstalled);
                 };
                 match kind {
-                    DistributionKind::Npx => {
-                        let pkg = agent.distribution.npx.as_ref()?;
-                        let mut args = vec!["-y".to_string(), pkg.package.clone()];
-                        args.extend(pkg.args.iter().cloned());
-                        Some(ProbeResolution::Command {
-                            program: normalize_spawn_program(PathBuf::from("npx")),
-                            args,
-                            env: pkg.env.clone(),
-                        })
-                    }
-                    DistributionKind::Uvx => {
-                        let pkg = agent.distribution.uvx.as_ref()?;
-                        let mut args = vec![pkg.package.clone()];
-                        args.extend(pkg.args.iter().cloned());
-                        Some(ProbeResolution::Command {
-                            program: PathBuf::from("uvx"),
-                            args,
-                            env: pkg.env.clone(),
-                        })
+                    DistributionKind::Npx | DistributionKind::Uvx => {
+                        let (program, args, env) = registry_pkg_command(agent, kind)?;
+                        Some(ProbeResolution::Command { program, args, env })
                     }
                     DistributionKind::Binary => {
                         let target = agent
@@ -1096,33 +1080,14 @@ async fn start_item_action(
                     };
                     Ok(None)
                 }
-                DistributionKind::Npx => {
-                    let pkg = agent.distribution.npx.as_ref().expect("npx checked");
-                    let mut args = vec!["-y".to_string(), pkg.package.clone()];
-                    args.extend(pkg.args.iter().cloned());
+                DistributionKind::Npx | DistributionKind::Uvx => {
+                    let (program, args, env) =
+                        registry_pkg_command(&agent, kind).expect("npx/uvx package checked");
                     let outcome = PickerOutcome {
                         source_id: agent.id.clone(),
-                        program: normalize_spawn_program(PathBuf::from("npx")),
+                        program,
                         args,
-                        env: pkg.env.clone(),
-                    };
-                    match action {
-                        ItemAction::Select => Ok(Some(outcome)),
-                        ItemAction::SetDefault => {
-                            state.set_default_outcome(outcome, agent.name);
-                            Ok(None)
-                        }
-                    }
-                }
-                DistributionKind::Uvx => {
-                    let pkg = agent.distribution.uvx.as_ref().expect("uvx checked");
-                    let mut args = vec![pkg.package.clone()];
-                    args.extend(pkg.args.iter().cloned());
-                    let outcome = PickerOutcome {
-                        source_id: agent.id.clone(),
-                        program: PathBuf::from("uvx"),
-                        args,
-                        env: pkg.env.clone(),
+                        env,
                     };
                     match action {
                         ItemAction::Select => Ok(Some(outcome)),
@@ -1134,6 +1099,36 @@ async fn start_item_action(
                 }
             }
         }
+    }
+}
+
+/// Build the `(program, args, env)` launch command for a registry agent's
+/// npx or uvx distribution. Returns `None` for `Binary` (handled separately:
+/// install vs. resolve) or when the package metadata is absent. Shared by the
+/// live launch path ([`start_item_action`]) and the startup probe
+/// ([`PickerState::item_probe_target`]) so the two never drift.
+fn registry_pkg_command(
+    agent: &Agent,
+    kind: DistributionKind,
+) -> Option<(PathBuf, Vec<String>, HashMap<String, String>)> {
+    match kind {
+        DistributionKind::Npx => {
+            let pkg = agent.distribution.npx.as_ref()?;
+            let mut args = vec!["-y".to_string(), pkg.package.clone()];
+            args.extend(pkg.args.iter().cloned());
+            Some((
+                normalize_spawn_program(PathBuf::from("npx")),
+                args,
+                pkg.env.clone(),
+            ))
+        }
+        DistributionKind::Uvx => {
+            let pkg = agent.distribution.uvx.as_ref()?;
+            let mut args = vec![pkg.package.clone()];
+            args.extend(pkg.args.iter().cloned());
+            Some((PathBuf::from("uvx"), args, pkg.env.clone()))
+        }
+        DistributionKind::Binary => None,
     }
 }
 
@@ -1329,7 +1324,10 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
                 Span::styled(format!("{} ", probe_glyph(probeable, status)), glyph_style),
                 Span::styled(body, base),
             ]);
-            ListItem::new(line)
+            // Keep the item-level style so the selection background fills the
+            // whole row width, not just the cells behind the text (matches the
+            // other pickers); the spans' per-segment fg still wins.
+            ListItem::new(line).style(base)
         })
         .collect();
 
@@ -1354,7 +1352,8 @@ fn probe_glyph(probeable: bool, status: Option<&ProbeStatus>) -> &'static str {
         Some(ProbeStatus::Configured) => "✓",
         Some(ProbeStatus::NeedsAuth) => "•",
         Some(ProbeStatus::NotInstalled) | Some(ProbeStatus::Failed(_)) => " ",
-        None => "·",
+        // Indeterminate (timed out) and still-checking both read as "·".
+        Some(ProbeStatus::Unknown) | None => "·",
     }
 }
 
@@ -1370,7 +1369,7 @@ fn probe_glyph_color(
     match status {
         Some(ProbeStatus::Configured) => Some(theme.success),
         Some(ProbeStatus::NeedsAuth) => Some(theme.warning),
-        None => Some(theme.muted),
+        Some(ProbeStatus::Unknown) | None => Some(theme.muted),
         Some(ProbeStatus::NotInstalled) | Some(ProbeStatus::Failed(_)) => None,
     }
 }
@@ -1385,7 +1384,8 @@ fn probe_badge(probeable: bool, status: Option<&ProbeStatus>) -> Option<&'static
         Some(ProbeStatus::NeedsAuth) => Some("needs auth"),
         Some(ProbeStatus::NotInstalled) => Some("not installed"),
         Some(ProbeStatus::Failed(_)) => Some("unavailable"),
-        Some(ProbeStatus::Configured) | None => None,
+        // Unknown (timed out) and still-checking stay badge-free.
+        Some(ProbeStatus::Configured) | Some(ProbeStatus::Unknown) | None => None,
     }
 }
 
@@ -2446,6 +2446,14 @@ mod tests {
             probe_badge(true, Some(&ProbeStatus::Failed("boom".to_string()))),
             Some("unavailable")
         );
+
+        // Unknown (timed out): neutral, no scary badge.
+        assert_eq!(probe_glyph(true, Some(&ProbeStatus::Unknown)), "·");
+        assert_eq!(
+            probe_glyph_color(true, Some(&ProbeStatus::Unknown), &theme),
+            Some(theme.muted)
+        );
+        assert_eq!(probe_badge(true, Some(&ProbeStatus::Unknown)), None);
 
         // Still checking: muted dot, no badge.
         assert_eq!(probe_glyph(true, None), "·");
