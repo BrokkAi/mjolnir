@@ -13,6 +13,7 @@ mod config;
 mod event;
 mod headless;
 mod install;
+mod mcp;
 mod notifications;
 mod palette;
 mod paths;
@@ -151,7 +152,18 @@ enum Commands {
     Resume(ResumeArgs),
     /// Start the local remote-control server.
     Server(ServerArgs),
+    /// Run as a Model Context Protocol (MCP) stdio server.
+    ///
+    /// Exposes mj's ACP-client capabilities as MCP tools (connect to an agent,
+    /// inspect session config, submit prompts, poll progress, answer permission
+    /// requests, cancel, read results) over stdin/stdout. Reuses the top-level
+    /// `--cwd`, `--agent-stderr`, `--fs-max-text-bytes`, and `--debug-file`
+    /// flags. Logs go only to `--debug-file`; stdout carries MCP frames.
+    Mcp(McpArgs),
 }
+
+#[derive(Debug, clap::Args, Default)]
+struct McpArgs {}
 
 fn parse_fs_max_text_bytes(value: &str) -> std::result::Result<u64, String> {
     let bytes = value
@@ -286,6 +298,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     match &cli.command {
         Some(Commands::Resume(args)) => !args.list,
         Some(Commands::Server(_)) => false,
+        Some(Commands::Mcp(_)) => false,
         None => true,
     }
 }
@@ -329,6 +342,17 @@ async fn main() -> Result<()> {
                     workspace_roots.additional_directories().to_vec(),
                     fs_max_text_bytes,
                 )
+                .await
+            }
+            Commands::Mcp(_) => {
+                let workspace_roots =
+                    validate_workspace_roots(&cwd, &top_level_additional_directories)?;
+                mcp::serve(mcp::McpConfig {
+                    default_cwd: cwd,
+                    additional_directories: workspace_roots.additional_directories().to_vec(),
+                    agent_stderr: cli.agent_stderr,
+                    fs_max_text_bytes,
+                })
                 .await
             }
         };
