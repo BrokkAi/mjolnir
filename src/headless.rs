@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use agent_client_protocol::schema::v1::{
-    PermissionOptionKind, SessionUpdate, StopReason, ToolCall, ToolCallStatus, ToolCallUpdate,
-    ToolKind, Usage,
+    PermissionOptionKind, SessionUpdate, StopReason, ToolCall, ToolCallUpdate, ToolKind, Usage,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
@@ -18,6 +17,7 @@ use tokio::sync::mpsc;
 use crate::acp::{self, AcpRuntimeConfig};
 use crate::config;
 use crate::event::{PermissionDecision, UiCommand, UiEvent, content_block_text};
+use crate::labels::{stop_reason_label, tool_kind_label, tool_status_label};
 use crate::remote;
 
 #[derive(Debug, Clone, Copy)]
@@ -439,39 +439,5 @@ fn emit_json<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
-fn stop_reason_label(reason: StopReason) -> &'static str {
-    match reason {
-        StopReason::EndTurn => "end_turn",
-        StopReason::MaxTokens => "max_tokens",
-        StopReason::MaxTurnRequests => "max_turn_requests",
-        StopReason::Refusal => "refusal",
-        StopReason::Cancelled => "cancelled",
-        _ => "other",
-    }
-}
-
-fn tool_kind_label(kind: ToolKind) -> &'static str {
-    match kind {
-        ToolKind::Read => "read",
-        ToolKind::Edit => "edit",
-        ToolKind::Delete => "delete",
-        ToolKind::Move => "move",
-        ToolKind::Search => "search",
-        ToolKind::Execute => "execute",
-        ToolKind::Think => "think",
-        ToolKind::Fetch => "fetch",
-        ToolKind::SwitchMode => "switch_mode",
-        ToolKind::Other => "other",
-        _ => "other",
-    }
-}
-
-fn tool_status_label(status: ToolCallStatus) -> &'static str {
-    match status {
-        ToolCallStatus::Pending => "pending",
-        ToolCallStatus::InProgress => "in_progress",
-        ToolCallStatus::Completed => "completed",
-        ToolCallStatus::Failed => "failed",
-        _ => "other",
-    }
-}
+// Stop-reason / tool-kind / tool-status labels live in `crate::labels` so the
+// MCP server and this runner cannot drift apart on `#[non_exhaustive]` enums.

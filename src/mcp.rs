@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
-    PermissionOption, PermissionOptionKind, SessionConfigId, SessionConfigOption,
-    SessionConfigValueId, SessionUpdate, StopReason, ToolCallStatus, ToolKind, Usage,
+    PermissionOption, SessionConfigId, SessionConfigOption, SessionConfigValueId, SessionUpdate,
+    StopReason, Usage,
 };
 use anyhow::Result;
 use rmcp::{
@@ -49,6 +49,9 @@ use crate::app::{
 use crate::config;
 use crate::event::{
     PermissionDecision, PromptImage, SessionConfigTarget, UiCommand, UiEvent, content_block_text,
+};
+use crate::labels::{
+    permission_option_kind_label, stop_reason_label, tool_kind_label, tool_status_label,
 };
 use crate::remote;
 
@@ -117,55 +120,7 @@ pub struct McpConfig {
     pub fs_max_text_bytes: u64,
 }
 
-// --- label helpers (mirrors the small mappers in headless.rs; the protocol
-// enums are `#[non_exhaustive]`, hence the trailing catch-alls) ---
-
-fn tool_kind_label(kind: ToolKind) -> &'static str {
-    match kind {
-        ToolKind::Read => "read",
-        ToolKind::Edit => "edit",
-        ToolKind::Delete => "delete",
-        ToolKind::Move => "move",
-        ToolKind::Search => "search",
-        ToolKind::Execute => "execute",
-        ToolKind::Think => "think",
-        ToolKind::Fetch => "fetch",
-        ToolKind::SwitchMode => "switch_mode",
-        ToolKind::Other => "other",
-        _ => "other",
-    }
-}
-
-fn tool_status_label(status: ToolCallStatus) -> &'static str {
-    match status {
-        ToolCallStatus::Pending => "pending",
-        ToolCallStatus::InProgress => "in_progress",
-        ToolCallStatus::Completed => "completed",
-        ToolCallStatus::Failed => "failed",
-        _ => "other",
-    }
-}
-
-fn stop_reason_label(reason: StopReason) -> &'static str {
-    match reason {
-        StopReason::EndTurn => "end_turn",
-        StopReason::MaxTokens => "max_tokens",
-        StopReason::MaxTurnRequests => "max_turn_requests",
-        StopReason::Refusal => "refusal",
-        StopReason::Cancelled => "cancelled",
-        _ => "other",
-    }
-}
-
-fn perm_kind_label(kind: PermissionOptionKind) -> &'static str {
-    match kind {
-        PermissionOptionKind::AllowOnce => "allow_once",
-        PermissionOptionKind::AllowAlways => "allow_always",
-        PermissionOptionKind::RejectOnce => "reject_once",
-        PermissionOptionKind::RejectAlways => "reject_always",
-        _ => "other",
-    }
-}
+// Enum→label mappers live in `crate::labels`, shared with the headless runner.
 
 // --- pollable connection state ---
 
@@ -275,7 +230,7 @@ fn perm_option_view(option: &PermissionOption) -> PermOptionView {
     PermOptionView {
         option_id: option.option_id.to_string(),
         name: option.name.clone(),
-        kind: perm_kind_label(option.kind).to_string(),
+        kind: permission_option_kind_label(option.kind).to_string(),
     }
 }
 
@@ -288,6 +243,34 @@ struct PendingPermission {
     options: Vec<PermOptionView>,
 }
 
+/// Per-turn state, replaced wholesale on each `submit_prompt` (via
+/// [`TurnState::new`]) so no field can silently leak from one turn to the next.
+struct TurnState {
+    id: u64,
+    status: TurnStatus,
+    stop_reason: Option<StopReason>,
+    usage: Option<Usage>,
+    final_text: String,
+    /// Set when `final_text` hit its size cap and later agent text was dropped
+    /// from the accumulated buffer (individual items still appear in `items`).
+    final_text_truncated: bool,
+    error_message: Option<String>,
+}
+
+impl TurnState {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            status: TurnStatus::Idle,
+            stop_reason: None,
+            usage: None,
+            final_text: String::new(),
+            final_text_truncated: false,
+            error_message: None,
+        }
+    }
+}
+
 struct ConnState {
     status: ConnStatus,
     status_message: Option<String>,
@@ -297,15 +280,13 @@ struct ConnState {
     session_fork_supported: bool,
     session_id: Option<String>,
     config_options: Vec<SessionConfigOption>,
-    turn_id: u64,
-    turn_status: TurnStatus,
-    stop_reason: Option<StopReason>,
-    usage: Option<Usage>,
-    final_text: String,
-    final_text_truncated: bool,
-    error_message: Option<String>,
+    turn: TurnState,
     progress: Vec<ProgressEntry>,
     seq: u64,
+    /// Cumulative count of progress entries dropped from the front when the
+    /// buffer exceeded `MAX_PROGRESS_ENTRIES`. Surfaced so a slow poller can
+    /// detect it missed entries.
+    dropped_progress: u64,
     pending_permissions: HashMap<String, PendingPermission>,
     next_perm_id: u64,
 }
@@ -321,15 +302,10 @@ impl ConnState {
             session_fork_supported: false,
             session_id: None,
             config_options: Vec::new(),
-            turn_id: 0,
-            turn_status: TurnStatus::Idle,
-            stop_reason: None,
-            usage: None,
-            final_text: String::new(),
-            final_text_truncated: false,
-            error_message: None,
+            turn: TurnState::new(0),
             progress: Vec::new(),
             seq: 0,
+            dropped_progress: 0,
             pending_permissions: HashMap::new(),
             next_perm_id: 0,
         }
@@ -385,24 +361,24 @@ impl ConnState {
                         options,
                     },
                 );
-                self.turn_status = TurnStatus::AwaitingPermission;
+                self.turn.status = TurnStatus::AwaitingPermission;
             }
             UiEvent::CancelPendingPermissions => self.drain_pending_permissions(),
             UiEvent::PromptDone { stop_reason, usage } => {
-                self.stop_reason = Some(stop_reason);
-                self.usage = usage;
-                self.turn_status = TurnStatus::Done;
+                self.turn.stop_reason = Some(stop_reason);
+                self.turn.usage = usage;
+                self.turn.status = TurnStatus::Done;
             }
             UiEvent::PromptFailed { message } | UiEvent::SessionForkFailed { message } => {
-                self.error_message = Some(message);
-                self.turn_status = TurnStatus::Failed;
+                self.turn.error_message = Some(message);
+                self.turn.status = TurnStatus::Failed;
             }
             UiEvent::Fatal(message) => {
                 self.status = ConnStatus::Failed;
                 self.status_message = Some(message.clone());
-                self.error_message = Some(message);
-                if self.turn_status.is_active() {
-                    self.turn_status = TurnStatus::Failed;
+                self.turn.error_message = Some(message);
+                if self.turn.status.is_active() {
+                    self.turn.status = TurnStatus::Failed;
                 }
                 self.drain_pending_permissions();
             }
@@ -421,10 +397,10 @@ impl ConnState {
                 // Append whole chunks until the cap, then stop growing `final_text`
                 // (the text is still visible as an individual progress item). The
                 // whole-chunk check keeps us off a UTF-8 boundary.
-                if self.final_text.len() + text.len() <= MAX_FINAL_TEXT_BYTES {
-                    self.final_text.push_str(&text);
+                if self.turn.final_text.len() + text.len() <= MAX_FINAL_TEXT_BYTES {
+                    self.turn.final_text.push_str(&text);
                 } else {
-                    self.final_text_truncated = true;
+                    self.turn.final_text_truncated = true;
                 }
                 self.push(ProgressItem::AgentMessage { text });
             }
@@ -459,12 +435,13 @@ impl ConnState {
         self.seq += 1;
         self.progress.push(ProgressEntry {
             seq: self.seq,
-            turn_id: self.turn_id,
+            turn_id: self.turn.id,
             item,
         });
         if self.progress.len() > MAX_PROGRESS_ENTRIES {
             let overflow = self.progress.len() - MAX_PROGRESS_ENTRIES;
             self.progress.drain(0..overflow);
+            self.dropped_progress += overflow as u64;
         }
     }
 
@@ -479,8 +456,8 @@ impl ConnState {
         for (_, pending) in self.pending_permissions.drain() {
             let _ = pending.responder.send(PermissionDecision::Cancelled);
         }
-        if self.turn_status == TurnStatus::AwaitingPermission {
-            self.turn_status = TurnStatus::Running;
+        if self.turn.status == TurnStatus::AwaitingPermission {
+            self.turn.status = TurnStatus::Running;
         }
     }
 }
@@ -668,12 +645,15 @@ struct PollResult {
     turn_status: &'static str,
     items: Vec<ProgressEntryView>,
     next_seq: u64,
+    /// Total progress entries dropped from the buffer's front because it hit
+    /// `MAX_PROGRESS_ENTRIES`. Nonzero means a slow poller may have missed items.
+    dropped_progress: u64,
     final_text_so_far: String,
     /// True if `final_text` hit its size cap and later agent text was dropped
     /// from the accumulated buffer (individual items still appear in `items`).
     final_text_truncated: bool,
     stop_reason: Option<&'static str>,
-    usage: Option<Usage>,
+    usage: Option<UsageView>,
     pending_permissions: Vec<PendingPermissionView>,
     error: Option<String>,
 }
@@ -705,8 +685,37 @@ struct GetResultView {
     /// True if `final_text` was truncated at its size cap.
     final_text_truncated: bool,
     stop_reason: Option<&'static str>,
-    usage: Option<Usage>,
+    usage: Option<UsageView>,
     error: Option<String>,
+}
+
+/// MCP-owned view of token usage. Decouples the tool wire contract from the
+/// `agent-client-protocol` `Usage` type so an ACP crate bump cannot silently
+/// change the MCP schema. Mirrors the token fields, dropping protocol `_meta`.
+#[derive(Debug, Serialize)]
+struct UsageView {
+    total_tokens: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_read_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_write_tokens: Option<u64>,
+}
+
+impl UsageView {
+    fn from_usage(usage: &Usage) -> Self {
+        Self {
+            total_tokens: usage.total_tokens,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            thought_tokens: usage.thought_tokens,
+            cached_read_tokens: usage.cached_read_tokens,
+            cached_write_tokens: usage.cached_write_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -978,6 +987,7 @@ impl McpServer {
                     .clone()
                     .unwrap_or_else(|| "agent did not start a session in time".to_string());
                 drop(st);
+                tracing::warn!(error = %message, "mcp connect: agent did not become ready");
                 // Reap the agent we just spawned before bailing.
                 let _ = cmd_tx.send(UiCommand::Shutdown);
                 let aborter = runtime_task.abort_handle();
@@ -1000,6 +1010,11 @@ impl McpServer {
         };
 
         let conn_id = format!("conn-{}", self.next_conn_id.fetch_add(1, Ordering::SeqCst));
+        tracing::info!(
+            connection_id = %conn_id,
+            agent = result.agent_name.as_deref().unwrap_or("unknown"),
+            "mcp connect: session ready"
+        );
         self.connections.lock().await.insert(
             conn_id.clone(),
             Arc::new(Connection {
@@ -1084,20 +1099,17 @@ impl McpServer {
                     st.status.label()
                 )));
             }
-            if st.turn_status.is_active() {
+            if st.turn.status.is_active() {
                 return Err(err(
                     "a prompt turn is already in progress; poll_progress or cancel_prompt first",
                 ));
             }
-            st.turn_id += 1;
-            st.final_text.clear();
-            st.final_text_truncated = false;
-            st.stop_reason = None;
-            st.usage = None;
-            st.error_message = None;
-            st.turn_status = TurnStatus::Running;
+            // Replace per-turn state wholesale so nothing leaks from the prior turn.
+            let next_id = st.turn.id + 1;
+            st.turn = TurnState::new(next_id);
+            st.turn.status = TurnStatus::Running;
             SubmitResult {
-                turn_id: st.turn_id,
+                turn_id: st.turn.id,
                 since_seq: st.seq,
             }
         };
@@ -1167,16 +1179,17 @@ impl McpServer {
 
         json_result(&PollResult {
             connection_status: st.status.label(),
-            turn_id: st.turn_id,
-            turn_status: st.turn_status.label(),
+            turn_id: st.turn.id,
+            turn_status: st.turn.status.label(),
             items,
             next_seq: st.seq,
-            final_text_so_far: st.final_text.clone(),
-            final_text_truncated: st.final_text_truncated,
-            stop_reason: st.stop_reason.map(stop_reason_label),
-            usage: st.usage.clone(),
+            dropped_progress: st.dropped_progress,
+            final_text_so_far: st.turn.final_text.clone(),
+            final_text_truncated: st.turn.final_text_truncated,
+            stop_reason: st.turn.stop_reason.map(stop_reason_label),
+            usage: st.turn.usage.as_ref().map(UsageView::from_usage),
             pending_permissions: pending,
-            error: st.error_message.clone(),
+            error: st.turn.error_message.clone(),
         })
     }
 
@@ -1203,8 +1216,8 @@ impl McpServer {
             None => PermissionDecision::Cancelled,
         };
         let _ = pending.responder.send(decision);
-        if st.pending_permissions.is_empty() && st.turn_status == TurnStatus::AwaitingPermission {
-            st.turn_status = TurnStatus::Running;
+        if st.pending_permissions.is_empty() && st.turn.status == TurnStatus::AwaitingPermission {
+            st.turn.status = TurnStatus::Running;
         }
         ack("permission answered")
     }
@@ -1235,20 +1248,20 @@ impl McpServer {
         if let Some(ms) = args.wait_ms {
             let wait = Duration::from_millis(ms).min(MAX_GET_RESULT_WAIT);
             wait_for(&conn.state, wait, |st| {
-                matches!(st.turn_status, TurnStatus::Done | TurnStatus::Failed)
+                matches!(st.turn.status, TurnStatus::Done | TurnStatus::Failed)
                     || st.status == ConnStatus::Failed
             })
             .await;
         }
         let st = conn.state.lock().await;
         json_result(&GetResultView {
-            turn_id: st.turn_id,
-            turn_status: st.turn_status.label(),
-            final_text: st.final_text.clone(),
-            final_text_truncated: st.final_text_truncated,
-            stop_reason: st.stop_reason.map(stop_reason_label),
-            usage: st.usage.clone(),
-            error: st.error_message.clone(),
+            turn_id: st.turn.id,
+            turn_status: st.turn.status.label(),
+            final_text: st.turn.final_text.clone(),
+            final_text_truncated: st.turn.final_text_truncated,
+            stop_reason: st.turn.stop_reason.map(stop_reason_label),
+            usage: st.turn.usage.as_ref().map(UsageView::from_usage),
+            error: st.turn.error_message.clone(),
         })
     }
 
@@ -1266,6 +1279,7 @@ impl McpServer {
             .remove(&args.connection_id)
             .ok_or_else(|| err(format!("unknown connection_id: {}", args.connection_id)))?;
         teardown_connection(&conn).await;
+        tracing::info!(connection_id = %args.connection_id, "mcp: disconnected");
         ack("disconnected")
     }
 
@@ -1298,7 +1312,7 @@ impl McpServer {
                 agent_name: st.agent_name.clone(),
                 session_id: st.session_id.clone(),
                 connection_status: st.status.label(),
-                turn_status: st.turn_status.label(),
+                turn_status: st.turn.status.label(),
             });
         }
         out.sort_by(|a, b| a.connection_id.cmp(&b.connection_id));
@@ -1360,7 +1374,7 @@ pub async fn serve(config: McpConfig) -> Result<()> {
         .serve(stdio())
         .await
         .map_err(|e| anyhow::anyhow!("start MCP stdio server: {e}"))?;
-
+    tracing::info!("mcp server: listening on stdio");
     let outcome = tokio::select! {
         r = service.waiting() => {
             r.map(|_| ()).map_err(|e| anyhow::anyhow!("MCP server stopped: {e}"))
@@ -1368,6 +1382,7 @@ pub async fn serve(config: McpConfig) -> Result<()> {
         _ = wait_for_terminate() => Ok(()),
     };
     teardown.shutdown_all().await;
+    tracing::info!("mcp server: stopped");
     outcome
 }
 
@@ -1376,8 +1391,8 @@ mod tests {
     use super::*;
     use crate::event::PermissionPrompt;
     use agent_client_protocol::schema::v1::{
-        ContentBlock, ContentChunk, PermissionOptionId, TextContent, ToolCall, ToolCallId,
-        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        ContentBlock, ContentChunk, PermissionOptionId, PermissionOptionKind, TextContent,
+        ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
 
     fn agent_chunk(text: &str) -> UiEvent {
@@ -1424,7 +1439,7 @@ mod tests {
         let mut st = ConnState::new();
         st.fold(agent_chunk("Hello, "));
         st.fold(agent_chunk("world"));
-        assert_eq!(st.final_text, "Hello, world");
+        assert_eq!(st.turn.final_text, "Hello, world");
         assert_eq!(st.seq, 2);
         assert_eq!(st.progress.len(), 2);
         // Cursor filtering: only items after seq 1 remain.
@@ -1469,13 +1484,13 @@ mod tests {
     #[test]
     fn prompt_done_sets_terminal_status() {
         let mut st = ConnState::new();
-        st.turn_status = TurnStatus::Running;
+        st.turn.status = TurnStatus::Running;
         st.fold(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
             usage: None,
         });
-        assert_eq!(st.turn_status, TurnStatus::Done);
-        assert_eq!(st.stop_reason.map(stop_reason_label), Some("end_turn"));
+        assert_eq!(st.turn.status, TurnStatus::Done);
+        assert_eq!(st.turn.stop_reason.map(stop_reason_label), Some("end_turn"));
     }
 
     fn permission_prompt() -> (PermissionPrompt, oneshot::Receiver<PermissionDecision>) {
@@ -1505,10 +1520,10 @@ mod tests {
     #[test]
     fn permission_request_is_surfaced_and_pending() {
         let mut st = ConnState::new();
-        st.turn_status = TurnStatus::Running;
+        st.turn.status = TurnStatus::Running;
         let (prompt, _rx) = permission_prompt();
         st.fold(UiEvent::PermissionRequest(prompt));
-        assert_eq!(st.turn_status, TurnStatus::AwaitingPermission);
+        assert_eq!(st.turn.status, TurnStatus::AwaitingPermission);
         assert_eq!(st.pending_permissions.len(), 1);
         assert!(st.pending_permissions.contains_key("perm-1"));
         match &st.progress[0].item {
@@ -1530,7 +1545,7 @@ mod tests {
     #[tokio::test]
     async fn answering_a_permission_delivers_the_decision() {
         let mut st = ConnState::new();
-        st.turn_status = TurnStatus::Running;
+        st.turn.status = TurnStatus::Running;
         let (prompt, rx) = permission_prompt();
         st.fold(UiEvent::PermissionRequest(prompt));
 
@@ -1540,11 +1555,11 @@ mod tests {
             .responder
             .send(PermissionDecision::Selected("allow".to_string()))
             .expect("send decision");
-        if st.pending_permissions.is_empty() && st.turn_status == TurnStatus::AwaitingPermission {
-            st.turn_status = TurnStatus::Running;
+        if st.pending_permissions.is_empty() && st.turn.status == TurnStatus::AwaitingPermission {
+            st.turn.status = TurnStatus::Running;
         }
 
-        assert_eq!(st.turn_status, TurnStatus::Running);
+        assert_eq!(st.turn.status, TurnStatus::Running);
         match rx.await.expect("decision delivered") {
             PermissionDecision::Selected(id) => assert_eq!(id, "allow"),
             other => panic!("unexpected decision: {other:?}"),
@@ -1554,14 +1569,14 @@ mod tests {
     #[test]
     fn cancel_pending_permissions_drains_and_resumes() {
         let mut st = ConnState::new();
-        st.turn_status = TurnStatus::Running;
+        st.turn.status = TurnStatus::Running;
         let (prompt, mut rx) = permission_prompt();
         st.fold(UiEvent::PermissionRequest(prompt));
-        assert_eq!(st.turn_status, TurnStatus::AwaitingPermission);
+        assert_eq!(st.turn.status, TurnStatus::AwaitingPermission);
 
         st.fold(UiEvent::CancelPendingPermissions);
         assert!(st.pending_permissions.is_empty());
-        assert_eq!(st.turn_status, TurnStatus::Running);
+        assert_eq!(st.turn.status, TurnStatus::Running);
         // The held responder was answered with Cancelled.
         match rx.try_recv() {
             Ok(PermissionDecision::Cancelled) => {}
@@ -1573,10 +1588,10 @@ mod tests {
     fn fatal_marks_connection_failed() {
         let mut st = ConnState::new();
         st.status = ConnStatus::Ready;
-        st.turn_status = TurnStatus::Running;
+        st.turn.status = TurnStatus::Running;
         st.fold(UiEvent::Fatal("agent crashed".to_string()));
         assert_eq!(st.status, ConnStatus::Failed);
-        assert_eq!(st.turn_status, TurnStatus::Failed);
+        assert_eq!(st.turn.status, TurnStatus::Failed);
         assert_eq!(st.status_message.as_deref(), Some("agent crashed"));
     }
 
@@ -1585,13 +1600,13 @@ mod tests {
         let mut st = ConnState::new();
         let big = "a".repeat(MAX_FINAL_TEXT_BYTES);
         st.fold(agent_chunk(&big));
-        assert_eq!(st.final_text.len(), MAX_FINAL_TEXT_BYTES);
-        assert!(!st.final_text_truncated);
+        assert_eq!(st.turn.final_text.len(), MAX_FINAL_TEXT_BYTES);
+        assert!(!st.turn.final_text_truncated);
         // The next chunk would overflow the cap, so it is dropped from
         // `final_text` (still emitted as a progress item) and the flag is set.
         st.fold(agent_chunk("more text"));
-        assert!(st.final_text_truncated);
-        assert_eq!(st.final_text.len(), MAX_FINAL_TEXT_BYTES);
+        assert!(st.turn.final_text_truncated);
+        assert_eq!(st.turn.final_text.len(), MAX_FINAL_TEXT_BYTES);
         assert!(matches!(
             st.progress.last().map(|e| &e.item),
             Some(ProgressItem::AgentMessage { .. })
@@ -1607,5 +1622,37 @@ mod tests {
         // Sibling prefix must not match (component-wise, not string prefix).
         assert!(!path_within_any(Path::new("/tmp/wsother"), &roots));
         assert!(!path_within_any(Path::new("/etc"), &roots));
+    }
+
+    #[test]
+    fn progress_buffer_caps_and_counts_drops() {
+        let mut st = ConnState::new();
+        let overflow = 50;
+        for _ in 0..(MAX_PROGRESS_ENTRIES + overflow) {
+            st.fold(agent_chunk("x"));
+        }
+        // Buffer is capped, the drop counter records the overflow, and `seq`
+        // keeps advancing so cursors past the dropped floor still work.
+        assert_eq!(st.progress.len(), MAX_PROGRESS_ENTRIES);
+        assert_eq!(st.dropped_progress, overflow as u64);
+        assert_eq!(st.seq, (MAX_PROGRESS_ENTRIES + overflow) as u64);
+        assert_eq!(st.progress.first().unwrap().seq, overflow as u64 + 1);
+    }
+
+    #[test]
+    fn submit_turn_reset_clears_prior_turn_state() {
+        // Simulate the per-turn reset submit_prompt performs and confirm no
+        // field leaks from the previous turn.
+        let mut st = ConnState::new();
+        st.turn.final_text.push_str("old answer");
+        st.turn.stop_reason = Some(StopReason::EndTurn);
+        st.turn.status = TurnStatus::Done;
+        let next = st.turn.id + 1;
+        st.turn = TurnState::new(next);
+        st.turn.status = TurnStatus::Running;
+        assert_eq!(st.turn.id, 1);
+        assert!(st.turn.final_text.is_empty());
+        assert!(st.turn.stop_reason.is_none());
+        assert_eq!(st.turn.status, TurnStatus::Running);
     }
 }

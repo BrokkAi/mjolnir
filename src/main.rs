@@ -13,6 +13,7 @@ mod config;
 mod event;
 mod headless;
 mod install;
+mod labels;
 mod mcp;
 mod notifications;
 mod palette;
