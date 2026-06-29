@@ -20,7 +20,7 @@
 //! configured by `--debug-file`).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -40,6 +40,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use crate::acp::{self, AcpRuntimeConfig};
 use crate::app::{
@@ -58,9 +59,43 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Upper bound on buffered progress entries per connection. Cursor-based polling
 /// keeps working past this; only the oldest entries (already-polled in practice)
-/// are dropped to bound memory. `final_text` is preserved separately, so a
-/// completed result is never lost to this cap.
+/// are dropped to bound memory.
 const MAX_PROGRESS_ENTRIES: usize = 10_000;
+
+/// Upper bound on accumulated `final_text` per turn. Bounds memory and the
+/// per-poll clone cost for a runaway/very long agent turn; once reached, further
+/// agent-message text is dropped from `final_text` (still visible as individual
+/// progress items) and `final_text_truncated` is set.
+const MAX_FINAL_TEXT_BYTES: usize = 1 << 20; // 1 MiB
+
+/// Maximum number of simultaneous ACP connections one server process will hold.
+/// Each connection owns an agent process tree plus background tasks, so this
+/// bounds resource use against a buggy or hostile client.
+const MAX_CONNECTIONS: usize = 32;
+
+/// Hard ceiling on the client-supplied `get_result` `wait_ms`, so a caller
+/// cannot pin a request open indefinitely.
+const MAX_GET_RESULT_WAIT: Duration = Duration::from_secs(300);
+
+/// How long to wait for an agent's runtime task to exit (running
+/// `kill_agent_tree`) during teardown before aborting it.
+const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Opt-in environment variable that enables launching an arbitrary `program`
+/// via `connect`. Off by default: an MCP client can otherwise only connect to
+/// agents already configured on the host (see `list_agents`).
+const ADHOC_PROGRAM_ENV: &str = "MJ_MCP_ALLOW_ADHOC_PROGRAM";
+
+fn adhoc_program_allowed() -> bool {
+    std::env::var_os(ADHOC_PROGRAM_ENV).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Whether `path` is one of, or nested under, any of `roots`. All inputs are
+/// expected to be canonicalized; `Path::starts_with` is component-wise, so
+/// `/a/bc` is not considered under `/a/b`.
+fn path_within_any(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
 
 /// A launch command resolved from `connect` arguments (explicit program or a
 /// configured agent), ready to drop into an [`AcpRuntimeConfig`].
@@ -267,6 +302,7 @@ struct ConnState {
     stop_reason: Option<StopReason>,
     usage: Option<Usage>,
     final_text: String,
+    final_text_truncated: bool,
     error_message: Option<String>,
     progress: Vec<ProgressEntry>,
     seq: u64,
@@ -290,6 +326,7 @@ impl ConnState {
             stop_reason: None,
             usage: None,
             final_text: String::new(),
+            final_text_truncated: false,
             error_message: None,
             progress: Vec::new(),
             seq: 0,
@@ -381,7 +418,14 @@ impl ConnState {
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 let text = content_block_text(&chunk.content);
-                self.final_text.push_str(&text);
+                // Append whole chunks until the cap, then stop growing `final_text`
+                // (the text is still visible as an individual progress item). The
+                // whole-chunk check keeps us off a UTF-8 boundary.
+                if self.final_text.len() + text.len() <= MAX_FINAL_TEXT_BYTES {
+                    self.final_text.push_str(&text);
+                } else {
+                    self.final_text_truncated = true;
+                }
                 self.push(ProgressItem::AgentMessage { text });
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
@@ -445,6 +489,25 @@ impl ConnState {
 struct Connection {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     state: Arc<Mutex<ConnState>>,
+    /// Handle to the spawned `acp::run` task, taken during teardown so we can
+    /// await its exit (which runs `kill_agent_tree`) before giving up.
+    runtime_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Tear down one connection: ask the runtime to shut down (which kills the whole
+/// agent process tree) and await its task, aborting if it does not exit promptly.
+async fn teardown_connection(conn: &Connection) {
+    let _ = conn.cmd_tx.send(UiCommand::Shutdown);
+    let handle = conn.runtime_task.lock().await.take();
+    if let Some(handle) = handle {
+        let aborter = handle.abort_handle();
+        if tokio::time::timeout(TEARDOWN_TIMEOUT, handle)
+            .await
+            .is_err()
+        {
+            aborter.abort();
+        }
+    }
 }
 
 // --- the MCP server ---
@@ -606,6 +669,9 @@ struct PollResult {
     items: Vec<ProgressEntryView>,
     next_seq: u64,
     final_text_so_far: String,
+    /// True if `final_text` hit its size cap and later agent text was dropped
+    /// from the accumulated buffer (individual items still appear in `items`).
+    final_text_truncated: bool,
     stop_reason: Option<&'static str>,
     usage: Option<Usage>,
     pending_permissions: Vec<PendingPermissionView>,
@@ -636,6 +702,8 @@ struct GetResultView {
     turn_id: u64,
     turn_status: &'static str,
     final_text: String,
+    /// True if `final_text` was truncated at its size cap.
+    final_text_truncated: bool,
     stop_reason: Option<&'static str>,
     usage: Option<Usage>,
     error: Option<String>,
@@ -715,6 +783,15 @@ impl McpServer {
     /// Resolve a `ConnectArgs` into an `AcpRuntimeConfig`.
     fn build_runtime_config(&self, args: &ConnectArgs) -> Result<AcpRuntimeConfig, String> {
         let resolved = if let Some(program) = &args.program {
+            // Launching an arbitrary executable chosen by the MCP client is a
+            // process-spawn capability; require an explicit opt-in so the default
+            // surface is limited to host-configured agents.
+            if !adhoc_program_allowed() {
+                return Err(format!(
+                    "ad-hoc `program` launch is disabled; connect by `agent` id instead \
+                     (see list_agents), or set {ADHOC_PROGRAM_ENV}=1 on the server to enable it"
+                ));
+            }
             ResolvedAgent {
                 command: PathBuf::from(program),
                 args: args.args.clone(),
@@ -726,18 +803,7 @@ impl McpServer {
             self.resolve_configured_agent(&cfg, args.agent.as_deref())?
         };
 
-        let cwd = match &args.cwd {
-            Some(c) => PathBuf::from(c),
-            None => self.config.default_cwd.clone(),
-        };
-        let additional_directories = if args.additional_directories.is_empty() {
-            self.config.additional_directories.clone()
-        } else {
-            args.additional_directories
-                .iter()
-                .map(PathBuf::from)
-                .collect()
-        };
+        let (cwd, additional_directories) = self.resolve_workspace_roots(args)?;
 
         Ok(AcpRuntimeConfig {
             command: resolved.command,
@@ -749,6 +815,52 @@ impl McpServer {
             agent_stderr: self.config.agent_stderr.clone(),
             fs_max_text_bytes: self.config.fs_max_text_bytes,
         })
+    }
+
+    /// Resolve the session's working directory and additional workspace roots,
+    /// constraining any client-supplied paths to live under a root the server
+    /// operator allowed at launch (`default_cwd` or a configured
+    /// `--additional-directory`). This bounds the agent's filesystem scope to the
+    /// operator's intent rather than anywhere the client names.
+    fn resolve_workspace_roots(
+        &self,
+        args: &ConnectArgs,
+    ) -> Result<(PathBuf, Vec<PathBuf>), String> {
+        let allowed = self.allowed_roots();
+        let check = |label: &str, raw: &str| -> Result<PathBuf, String> {
+            let path = std::fs::canonicalize(raw)
+                .map_err(|e| format!("{label} {raw:?} is not a usable directory: {e}"))?;
+            if path_within_any(&path, &allowed) {
+                Ok(path)
+            } else {
+                Err(format!(
+                    "{label} {raw:?} is outside the server's allowed workspace roots; \
+                     launch `mj mcp` with --cwd/--additional-directory covering it"
+                ))
+            }
+        };
+
+        let cwd = match &args.cwd {
+            Some(c) => check("cwd", c)?,
+            None => self.config.default_cwd.clone(),
+        };
+        let additional_directories = if args.additional_directories.is_empty() {
+            self.config.additional_directories.clone()
+        } else {
+            args.additional_directories
+                .iter()
+                .map(|d| check("additional directory", d))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok((cwd, additional_directories))
+    }
+
+    /// Canonicalized roots the operator allowed at launch.
+    fn allowed_roots(&self) -> Vec<PathBuf> {
+        std::iter::once(&self.config.default_cwd)
+            .chain(self.config.additional_directories.iter())
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .collect()
     }
 
     fn resolve_configured_agent(
@@ -823,6 +935,11 @@ impl McpServer {
         &self,
         Parameters(args): Parameters<ConnectArgs>,
     ) -> Result<CallToolResult, McpError> {
+        if self.connections.lock().await.len() >= MAX_CONNECTIONS {
+            return Err(err(format!(
+                "connection limit reached ({MAX_CONNECTIONS}); disconnect an existing connection first"
+            )));
+        }
         let runtime_cfg = self.build_runtime_config(&args).map_err(err)?;
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -844,7 +961,7 @@ impl McpServer {
             }
         });
 
-        tokio::spawn(async move {
+        let runtime_task = tokio::spawn(async move {
             let _ = acp::run(runtime_cfg, event_tx, cmd_rx).await;
         });
 
@@ -861,7 +978,15 @@ impl McpServer {
                     .clone()
                     .unwrap_or_else(|| "agent did not start a session in time".to_string());
                 drop(st);
+                // Reap the agent we just spawned before bailing.
                 let _ = cmd_tx.send(UiCommand::Shutdown);
+                let aborter = runtime_task.abort_handle();
+                if tokio::time::timeout(TEARDOWN_TIMEOUT, runtime_task)
+                    .await
+                    .is_err()
+                {
+                    aborter.abort();
+                }
                 return Err(err(message));
             }
             ConnectResult {
@@ -880,6 +1005,7 @@ impl McpServer {
             Arc::new(Connection {
                 cmd_tx,
                 state: state.clone(),
+                runtime_task: Mutex::new(Some(runtime_task)),
             }),
         );
         json_result(&ConnectResult {
@@ -965,6 +1091,7 @@ impl McpServer {
             }
             st.turn_id += 1;
             st.final_text.clear();
+            st.final_text_truncated = false;
             st.stop_reason = None;
             st.usage = None;
             st.error_message = None;
@@ -1045,6 +1172,7 @@ impl McpServer {
             items,
             next_seq: st.seq,
             final_text_so_far: st.final_text.clone(),
+            final_text_truncated: st.final_text_truncated,
             stop_reason: st.stop_reason.map(stop_reason_label),
             usage: st.usage.clone(),
             pending_permissions: pending,
@@ -1105,7 +1233,8 @@ impl McpServer {
     ) -> Result<CallToolResult, McpError> {
         let conn = self.get_conn(&args.connection_id).await?;
         if let Some(ms) = args.wait_ms {
-            wait_for(&conn.state, Duration::from_millis(ms), |st| {
+            let wait = Duration::from_millis(ms).min(MAX_GET_RESULT_WAIT);
+            wait_for(&conn.state, wait, |st| {
                 matches!(st.turn_status, TurnStatus::Done | TurnStatus::Failed)
                     || st.status == ConnStatus::Failed
             })
@@ -1116,6 +1245,7 @@ impl McpServer {
             turn_id: st.turn_id,
             turn_status: st.turn_status.label(),
             final_text: st.final_text.clone(),
+            final_text_truncated: st.final_text_truncated,
             stop_reason: st.stop_reason.map(stop_reason_label),
             usage: st.usage.clone(),
             error: st.error_message.clone(),
@@ -1135,8 +1265,21 @@ impl McpServer {
             .await
             .remove(&args.connection_id)
             .ok_or_else(|| err(format!("unknown connection_id: {}", args.connection_id)))?;
-        let _ = conn.cmd_tx.send(UiCommand::Shutdown);
+        teardown_connection(&conn).await;
         ack("disconnected")
+    }
+
+    /// Tear down every live connection, killing their agent process trees. Used
+    /// on server shutdown so a client disconnect or signal does not orphan
+    /// agents.
+    async fn shutdown_all(&self) {
+        let conns: Vec<Arc<Connection>> = {
+            let mut map = self.connections.lock().await;
+            map.drain().map(|(_, conn)| conn).collect()
+        };
+        for conn in &conns {
+            teardown_connection(conn).await;
+        }
     }
 
     #[tool(
@@ -1179,18 +1322,53 @@ impl ServerHandler for McpServer {
     }
 }
 
-/// Run the MCP server over stdio until the client disconnects.
+/// Block until the process receives a termination signal (SIGTERM/SIGINT on
+/// Unix, Ctrl-C elsewhere). MCP hosts stop stdio servers with a signal, so we
+/// catch it to tear agents down rather than orphaning their process trees.
+async fn wait_for_terminate() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
+            (Ok(mut term), Ok(mut intr)) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = intr.recv() => {}
+                }
+            }
+            // Could not install handlers; fall back to Ctrl-C only.
+            _ => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Run the MCP server over stdio until the client disconnects or the process is
+/// signalled, then tear down every connection so no agent process tree leaks.
 pub async fn serve(config: McpConfig) -> Result<()> {
     let server = McpServer::new(config);
+    let teardown = server.clone();
     let service = server
         .serve(stdio())
         .await
         .map_err(|e| anyhow::anyhow!("start MCP stdio server: {e}"))?;
-    service
-        .waiting()
-        .await
-        .map_err(|e| anyhow::anyhow!("MCP server stopped: {e}"))?;
-    Ok(())
+
+    let outcome = tokio::select! {
+        r = service.waiting() => {
+            r.map(|_| ()).map_err(|e| anyhow::anyhow!("MCP server stopped: {e}"))
+        }
+        _ = wait_for_terminate() => Ok(()),
+    };
+    teardown.shutdown_all().await;
+    outcome
 }
 
 #[cfg(test)]
@@ -1400,5 +1578,34 @@ mod tests {
         assert_eq!(st.status, ConnStatus::Failed);
         assert_eq!(st.turn_status, TurnStatus::Failed);
         assert_eq!(st.status_message.as_deref(), Some("agent crashed"));
+    }
+
+    #[test]
+    fn final_text_is_capped_and_flags_truncation() {
+        let mut st = ConnState::new();
+        let big = "a".repeat(MAX_FINAL_TEXT_BYTES);
+        st.fold(agent_chunk(&big));
+        assert_eq!(st.final_text.len(), MAX_FINAL_TEXT_BYTES);
+        assert!(!st.final_text_truncated);
+        // The next chunk would overflow the cap, so it is dropped from
+        // `final_text` (still emitted as a progress item) and the flag is set.
+        st.fold(agent_chunk("more text"));
+        assert!(st.final_text_truncated);
+        assert_eq!(st.final_text.len(), MAX_FINAL_TEXT_BYTES);
+        assert!(matches!(
+            st.progress.last().map(|e| &e.item),
+            Some(ProgressItem::AgentMessage { .. })
+        ));
+    }
+
+    #[test]
+    fn path_within_any_is_component_wise() {
+        let root = PathBuf::from("/tmp/ws");
+        let roots = vec![root];
+        assert!(path_within_any(Path::new("/tmp/ws"), &roots));
+        assert!(path_within_any(Path::new("/tmp/ws/sub/dir"), &roots));
+        // Sibling prefix must not match (component-wise, not string prefix).
+        assert!(!path_within_any(Path::new("/tmp/wsother"), &roots));
+        assert!(!path_within_any(Path::new("/etc"), &roots));
     }
 }
