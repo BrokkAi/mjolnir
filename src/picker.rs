@@ -703,6 +703,44 @@ pub fn spawn_startup_probes(
     spawn_probes(state.probe_plan());
 }
 
+/// Resolved launch command for one agent (for `mj dump-models`).
+pub struct LaunchCommand {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+}
+
+/// The launch commands for the agents shown in the picker's default view
+/// (curated + favorites + default), deduped by `source_id`. `None` means the
+/// agent is known but not installed locally. Reuses the same resolution as the
+/// startup probes; never installs anything.
+pub fn launch_plan(
+    registry: &Registry,
+    platform: &str,
+    install_root: &Path,
+    preferences: PickerPreferences,
+) -> Vec<(String, Option<LaunchCommand>)> {
+    let state = PickerState::new(
+        registry,
+        platform.to_string(),
+        install_root.to_path_buf(),
+        preferences,
+    );
+    state
+        .probe_plan()
+        .into_iter()
+        .map(|(source_id, resolution)| {
+            let command = match resolution {
+                ProbeResolution::Command { program, args, env } => {
+                    Some(LaunchCommand { program, args, env })
+                }
+                ProbeResolution::NotInstalled => None,
+            };
+            (source_id, command)
+        })
+        .collect()
+}
+
 /// Spawn background validation tasks for the probe plan. Concurrency is
 /// capped by a semaphore so we do not spawn a swarm of agent subprocesses at
 /// once. Each agent is seeded as `Checking`, then overwritten with its

@@ -28,6 +28,45 @@ pub struct Config {
     /// `custom:<name>`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_agents: Vec<CustomAgent>,
+    /// Model strength score (LMArena Elo) display in the picker.
+    #[serde(default, skip_serializing_if = "ScoresConfig::is_default")]
+    pub scores: ScoresConfig,
+}
+
+/// Controls the Elo strength scores shown next to selectable models.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ScoresConfig {
+    /// Show Elo scores next to selectable models in the picker.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Override the leaderboard feed URL (defaults to [`crate::scores::DEFAULT_SCORES_URL`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Manual resolver overrides: `"<agent_id>/<option_id>" -> "<provider>/<model>"`.
+    /// Highest precedence; use for agent-specific tunes or aliases the heuristics miss.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub overrides: HashMap<String, String>,
+}
+
+impl Default for ScoresConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            url: None,
+            overrides: HashMap::new(),
+        }
+    }
+}
+
+impl ScoresConfig {
+    /// True when every field is at its default, so it can be omitted from TOML.
+    fn is_default(&self) -> bool {
+        self.enabled && self.url.is_none() && self.overrides.is_empty()
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Launch command resolved by the picker. `source_id` identifies where
@@ -272,6 +311,7 @@ mod tests {
             }),
             favorite_agents: vec!["claude-acp".to_string(), "anvil".to_string()],
             custom_agents: Vec::new(),
+            scores: ScoresConfig::default(),
         };
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
@@ -299,6 +339,7 @@ mod tests {
             }),
             favorite_agents: Vec::new(),
             custom_agents: Vec::new(),
+            scores: ScoresConfig::default(),
         };
         cfg.save(&path).expect("save");
         assert!(path.exists());
@@ -390,6 +431,7 @@ args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
                     description: String::new(),
                 },
             ],
+            scores: ScoresConfig::default(),
         };
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");

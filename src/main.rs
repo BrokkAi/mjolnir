@@ -15,6 +15,7 @@ mod headless;
 mod install;
 mod labels;
 mod mcp;
+mod model_resolve;
 mod notifications;
 mod palette;
 mod paths;
@@ -22,6 +23,7 @@ mod picker;
 mod probe;
 mod registry;
 mod remote;
+mod scores;
 mod self_update;
 mod session;
 mod speech;
@@ -162,10 +164,32 @@ enum Commands {
     /// `--cwd`, `--agent-stderr`, `--fs-max-text-bytes`, and `--debug-file`
     /// flags. Logs go only to `--debug-file`; stdout carries MCP frames.
     Mcp(McpArgs),
+    /// Debug: dump each configured agent's selectable models as JSON.
+    ///
+    /// Launches the picker's default-view agents (curated + favorites +
+    /// default), opens a session on each, and prints the Model-category config
+    /// options (`value`/`name`/`description`) plus the resolved LMArena score
+    /// key. Used to verify model-score matching against real agent output.
+    #[command(hide = true)]
+    DumpModels(DumpModelsArgs),
 }
 
 #[derive(Debug, clap::Args, Default)]
 struct McpArgs {}
+
+#[derive(Debug, clap::Args, Default)]
+struct DumpModelsArgs {
+    /// Only dump this agent (by `source_id`, e.g. `claude-acp`). With
+    /// `--program`, this is just the label used for score resolution.
+    agent: Option<String>,
+    /// Probe this explicit program instead of registry resolution (e.g. an
+    /// agent installed outside mj, like `~/.opencode/bin/opencode`).
+    #[arg(long)]
+    program: Option<PathBuf>,
+    /// Argument for `--program` (repeatable), e.g. `--arg acp`.
+    #[arg(long = "arg")]
+    args: Vec<String>,
+}
 
 fn parse_fs_max_text_bytes(value: &str) -> std::result::Result<u64, String> {
     let bytes = value
@@ -301,6 +325,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
         Some(Commands::Resume(args)) => !args.list,
         Some(Commands::Server(_)) => false,
         Some(Commands::Mcp(_)) => false,
+        Some(Commands::DumpModels(_)) => false,
         None => true,
     }
 }
@@ -356,6 +381,9 @@ async fn main() -> Result<()> {
                     fs_max_text_bytes,
                 })
                 .await
+            }
+            Commands::DumpModels(args) => {
+                run_dump_models(args.agent, args.program, args.args).await
             }
         };
     }
@@ -643,6 +671,7 @@ async fn pick_agent_for_resume() -> Result<Option<SelectedAgent>> {
         Config::load(&config_path).with_context(|| format!("load {}", config_path.display()))?;
 
     kick_off_agent_probes(&cfg);
+    kick_off_score_load(&cfg);
     let picker_result = run_agent_picker_once(&cfg).await?;
     apply_picker_preferences(&mut cfg, picker_result.preferences);
     let selected = picker_result.outcome.map(picker_outcome_to_selected);
@@ -848,6 +877,7 @@ async fn run_app(
     // global probe store; every agent picker shown during this run just pulls
     // from it.
     kick_off_agent_probes(&cfg);
+    kick_off_score_load(&cfg);
 
     // Supervisor loop. Initial sessions use the configured default agent when
     // available. The picker is reserved for first-run setup and explicit
@@ -1211,6 +1241,127 @@ fn kick_off_agent_probes(cfg: &Config) {
     });
 }
 
+/// Load the model strength-score catalog (LMArena Elo) in the background and
+/// install it for the picker. Best-effort and offline-safe: the loader falls
+/// back through stale cache to the bundled snapshot, so the catalog is always
+/// populated. Skipped entirely when the user disabled scores.
+fn kick_off_score_load(cfg: &Config) {
+    if !cfg.scores.enabled {
+        return;
+    }
+    let scores_cfg = cfg.scores.clone();
+    tokio::spawn(async move {
+        let cache_path = scores::default_cache_path();
+        let url = scores_cfg
+            .url
+            .as_deref()
+            .unwrap_or(scores::DEFAULT_SCORES_URL)
+            .to_string();
+        let file = scores::load_scores_file(&cache_path, scores::CACHE_TTL, &url).await;
+        let catalog = scores::ScoreCatalog::build(&file, scores_cfg.overrides, scores_cfg.enabled);
+        scores::install(catalog);
+    });
+}
+
+/// Debug command (`mj dump-models`): launch each configured agent, read its
+/// real selectable models, and print them — with the score the picker would
+/// render — as JSON. Lets us verify model-score matching against real agent
+/// output instead of assumed id formats.
+async fn run_dump_models(
+    filter: Option<String>,
+    program: Option<PathBuf>,
+    program_args: Vec<String>,
+) -> Result<()> {
+    let cfg = Config::load(&config::default_config_path()).unwrap_or_default();
+
+    // Install the score catalog so we can show the resolved score per model.
+    let scores_file = scores::load_scores_file(
+        &scores::default_cache_path(),
+        scores::CACHE_TTL,
+        cfg.scores
+            .url
+            .as_deref()
+            .unwrap_or(scores::DEFAULT_SCORES_URL),
+    )
+    .await;
+    scores::install(scores::ScoreCatalog::build(
+        &scores_file,
+        cfg.scores.overrides.clone(),
+        true,
+    ));
+
+    // Either probe one explicit command, or the picker's default-view agents.
+    let explicit = program.is_some();
+    let plan: Vec<(String, Option<picker::LaunchCommand>)> = if let Some(program) = program {
+        let source_id = filter.clone().unwrap_or_else(|| "explicit".to_string());
+        vec![(
+            source_id,
+            Some(picker::LaunchCommand {
+                program,
+                args: program_args,
+                env: std::collections::HashMap::new(),
+            }),
+        )]
+    } else {
+        let registry = load_agent_registry().await;
+        picker::launch_plan(
+            &registry,
+            &registry::current_platform(),
+            &install::default_install_root(),
+            picker_preferences_from_config(&cfg),
+        )
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let mut report = Vec::new();
+    for (source_id, command) in plan {
+        if !explicit
+            && let Some(f) = &filter
+            && &source_id != f
+        {
+            continue;
+        }
+        eprintln!("probing {source_id} …");
+        let entry = match command {
+            None => serde_json::json!({ "agent": source_id, "error": "not installed" }),
+            Some(cmd) => match probe::session_models(
+                cmd.program,
+                cmd.args,
+                cmd.env,
+                cwd.clone(),
+                Duration::from_secs(60),
+            )
+            .await
+            {
+                Ok(models) => {
+                    let models: Vec<_> = models
+                        .into_iter()
+                        .map(|m| {
+                            let score = scores::score_suffix(
+                                &source_id,
+                                &m.value,
+                                &m.name,
+                                m.description.as_deref().unwrap_or_default(),
+                            );
+                            serde_json::json!({
+                                "value": m.value,
+                                "name": m.name,
+                                "description": m.description,
+                                "score": score,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({ "agent": source_id, "models": models })
+                }
+                Err(e) => serde_json::json!({ "agent": source_id, "error": e }),
+            },
+        };
+        report.push(entry);
+    }
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
 async fn run_picker_with_registry(
     terminal: &mut ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>,
     cfg: &Config,
@@ -1336,6 +1487,9 @@ async fn run_session(
     // agents use their source id so the header matches the picker/config,
     // while custom agents show the exact command line being launched.
     let agent_display_name = Some(agent_header_label(agent));
+    // Stable registry id for the model-score resolver (distinct from the
+    // display label above, which is a command line for custom agents).
+    let agent_source_id = Some(agent.source_id.clone());
     let tracker_project_label = header_labels.project.clone();
     let remote_tracker = remote::RemoteSessionTracker::new(
         tracker_project_label,
@@ -1377,6 +1531,7 @@ async fn run_session(
             &mut ui_event_rx,
             header_labels.clone(),
             agent_display_name.clone(),
+            agent_source_id.clone(),
             ui::UiRunOptions {
                 persistence: ui::UiPersistencePaths {
                     history_path: Some(&hist_path),
@@ -1728,6 +1883,7 @@ mod tests {
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                scores: config::ScoresConfig::default(),
             },
             None
         ));
@@ -1751,6 +1907,7 @@ mod tests {
                 agent: Some(custom_default),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                scores: config::ScoresConfig::default(),
             },
             None
         ));
@@ -1781,6 +1938,7 @@ mod tests {
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                scores: config::ScoresConfig::default(),
             },
             None
         ));
@@ -1857,6 +2015,7 @@ mod tests {
                 args: vec!["--flag".to_string()],
                 description: "test".to_string(),
             }],
+            scores: config::ScoresConfig::default(),
         };
         let prefs = picker_preferences_from_config(&cfg);
         assert_eq!(prefs.custom_agents.len(), 1);

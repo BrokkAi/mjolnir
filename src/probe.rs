@@ -212,6 +212,122 @@ where
     result.unwrap_or_else(|e| ProbeStatus::Failed(format!("connection error: {e}")))
 }
 
+/// One model an agent exposes as a selectable session config value.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelOption {
+    pub value: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// Launch the agent, open a session, and return its Model-category config
+/// options (the selectable models, with their `value`/`name`/`description`).
+/// Used by `mj dump-models` to read each agent's real model list. Never
+/// installs; kills the subprocess afterward. `Err` carries a short reason.
+pub async fn session_models(
+    program: PathBuf,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    cwd: PathBuf,
+    timeout: Duration,
+) -> std::result::Result<Vec<ModelOption>, String> {
+    let Some(prepared) = acp::resolve_agent_command_no_install(&program, &env) else {
+        return Err("not installed".to_string());
+    };
+    let (mut child, child_stdin, child_stdout) = acp::spawn_agent(
+        &prepared.command,
+        &args,
+        &prepared.env,
+        None,
+        acp::SpawnIsolation::DetachedSession,
+    )
+    .map_err(|e| format!("spawn failed: {e}"))?;
+    let agent_pid = child.id();
+    let transport = ByteStreams::new(child_stdin.compat_write(), child_stdout.compat());
+
+    let result = match tokio::time::timeout(timeout, session_model_options(transport, cwd)).await {
+        Ok(result) => result,
+        Err(_) => Err("timed out".to_string()),
+    };
+
+    acp::kill_agent_tree(&mut child, agent_pid).await;
+    result
+}
+
+/// Drive `initialize` + `session/new` and extract the Model-category options.
+async fn session_model_options<T>(
+    transport: T,
+    cwd: PathBuf,
+) -> std::result::Result<Vec<ModelOption>, String>
+where
+    T: ConnectTo<Client>,
+{
+    let result: std::result::Result<
+        std::result::Result<Vec<ModelOption>, String>,
+        agent_client_protocol::Error,
+    > = Client
+        .builder()
+        .connect_with(transport, move |conn: ConnectionTo<Agent>| async move {
+            let init_req = InitializeRequest::new(ProtocolVersion::V1)
+                .client_info(acp::client_implementation());
+            let init_resp = match conn.send_request(init_req).block_task().await {
+                Ok(resp) => resp,
+                Err(err) if err.code == ErrorCode::AuthRequired => {
+                    return Ok(Err("needs auth".to_string()));
+                }
+                Err(err) => return Ok(Err(format!("initialize failed: {err}"))),
+            };
+            if init_resp.protocol_version != ProtocolVersion::LATEST {
+                return Ok(Err(format!(
+                    "unsupported protocol {}",
+                    init_resp.protocol_version
+                )));
+            }
+
+            let session = match conn
+                .send_request(NewSessionRequest::new(cwd))
+                .block_task()
+                .await
+            {
+                Ok(session) => session,
+                Err(err) if err.code == ErrorCode::AuthRequired => {
+                    return Ok(Err("needs auth".to_string()));
+                }
+                Err(err) => return Ok(Err(format!("session/new failed: {err}"))),
+            };
+
+            let models = session
+                .config_options
+                .unwrap_or_default()
+                .iter()
+                .filter(|opt| crate::app::is_model_config_option(opt))
+                .filter_map(crate::app::config_option_choices)
+                .flatten()
+                .map(|choice| ModelOption {
+                    value: choice.value.to_string(),
+                    name: choice.name,
+                    description: choice.description,
+                })
+                .collect();
+
+            if init_resp
+                .agent_capabilities
+                .session_capabilities
+                .delete
+                .is_some()
+            {
+                let _ = conn
+                    .send_request(DeleteSessionRequest::new(session.session_id.clone()))
+                    .block_task()
+                    .await;
+            }
+
+            Ok(Ok(models))
+        })
+        .await;
+    result.unwrap_or_else(|e| Err(format!("connection error: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

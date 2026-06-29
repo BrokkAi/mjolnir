@@ -492,6 +492,11 @@ pub struct AppState {
     /// Open `/mjconfig` overlay, if any.
     pub mjconfig_menu: Option<MjConfigMenu>,
     pub agent_label: String,
+    /// Registry `source_id` of the launched agent (e.g. `claude-acp`,
+    /// `opencode`, `custom:foo`, `anvil`). Distinct from `agent_label`,
+    /// which is a *display* string; this is the stable id the model-score
+    /// resolver keys on. Empty until the launch site fills it in.
+    pub agent_source_id: String,
     pub session_id: Option<String>,
     pub session_title: Option<String>,
     /// Current connection lifecycle state. Private to enforce the invariant
@@ -705,6 +710,7 @@ impl AppState {
             spinner_style: SpinnerStyle::default(),
             mjconfig_menu: None,
             agent_label: String::new(),
+            agent_source_id: String::new(),
             session_id: None,
             session_title: None,
             connection_state: ConnectionState::Launching,
@@ -1917,6 +1923,12 @@ pub fn config_option_choices(option: &SessionConfigOption) -> Option<Vec<ConfigV
         SessionConfigKind::Select(select) => Some(config_select_choices(select)),
         _ => None,
     }
+}
+
+/// Whether a session config option selects a model (vs. a mode or thought
+/// level). Used to decide which picker rows get a strength score.
+pub fn is_model_config_option(option: &SessionConfigOption) -> bool {
+    matches!(option.category, Some(SessionConfigOptionCategory::Model))
 }
 
 fn config_shortcut_char(select_index: usize) -> Option<char> {
