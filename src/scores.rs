@@ -205,7 +205,11 @@ fn parse_parquet(body: bytes::Bytes) -> Result<ScoresFile> {
                 continue;
             }
             let vendor = (!orgs.is_null(i)).then(|| orgs.value(i).to_string());
-            let vote_count = (!votes.is_null(i)).then(|| votes.value(i)).unwrap_or(0.0);
+            let vote_count = if votes.is_null(i) {
+                0.0
+            } else {
+                votes.value(i)
+            };
             models.push(ScoreRow {
                 name,
                 vendor: vendor.unwrap_or_default(),
