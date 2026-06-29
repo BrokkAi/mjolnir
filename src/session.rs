@@ -115,10 +115,15 @@ pub async fn list_sessions_with_capabilities(
         .map_err(|launch_err| anyhow::anyhow!("{launch_err}"))
         .context("prepare agent for session listing")?;
 
-    let (mut child, child_stdin, child_stdout) =
-        acp::spawn_agent(&prepared.command, &agent.args, &prepared.env, agent_stderr)
-            .map_err(|launch_err| anyhow::anyhow!("{launch_err}"))
-            .context("spawn agent for session listing")?;
+    let (mut child, child_stdin, child_stdout) = acp::spawn_agent(
+        &prepared.command,
+        &agent.args,
+        &prepared.env,
+        agent_stderr,
+        acp::SpawnIsolation::ProcessGroup,
+    )
+    .map_err(|launch_err| anyhow::anyhow!("{launch_err}"))
+    .context("spawn agent for session listing")?;
     let agent_pid = child.id();
 
     let transport = ByteStreams::new(child_stdin.compat_write(), child_stdout.compat());
@@ -142,10 +147,15 @@ pub async fn delete_session(
         .map_err(|launch_err| anyhow::anyhow!("{launch_err}"))
         .context("prepare agent for session deletion")?;
 
-    let (mut child, child_stdin, child_stdout) =
-        acp::spawn_agent(&prepared.command, &agent.args, &prepared.env, agent_stderr)
-            .map_err(|launch_err| anyhow::anyhow!("{launch_err}"))
-            .context("spawn agent for session deletion")?;
+    let (mut child, child_stdin, child_stdout) = acp::spawn_agent(
+        &prepared.command,
+        &agent.args,
+        &prepared.env,
+        agent_stderr,
+        acp::SpawnIsolation::ProcessGroup,
+    )
+    .map_err(|launch_err| anyhow::anyhow!("{launch_err}"))
+    .context("spawn agent for session deletion")?;
     let agent_pid = child.id();
 
     let transport = ByteStreams::new(child_stdin.compat_write(), child_stdout.compat());

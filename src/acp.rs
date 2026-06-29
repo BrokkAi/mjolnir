@@ -546,6 +546,7 @@ pub async fn run(
         &cfg.args,
         &prepared.env,
         cfg.agent_stderr.as_deref(),
+        SpawnIsolation::ProcessGroup,
     ) {
         Ok(spawned) => spawned,
         Err(launch_err) => {
@@ -1802,11 +1803,25 @@ async fn fork_session(
     Ok((resp.session_id, config))
 }
 
+/// How a spawned agent relates to the controlling terminal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SpawnIsolation {
+    /// New process group, but keep the controlling terminal. The normal
+    /// interactive/headless launch path.
+    ProcessGroup,
+    /// New session with **no controlling terminal** (`setsid` on Unix). Used
+    /// by the startup probe: a backgrounded agent (and its `uvx`/`npx`
+    /// grandchildren) must never read or write the user's TTY while the
+    /// picker owns it.
+    DetachedSession,
+}
+
 pub(crate) fn spawn_agent(
     command: &Path,
     args: &[String],
     env: &HashMap<String, String>,
     stderr_path: Option<&std::path::Path>,
+    isolation: SpawnIsolation,
 ) -> std::result::Result<
     (
         Child,
@@ -1832,10 +1847,38 @@ pub(crate) fn spawn_agent(
     // an orphan when mjolnir kills only the immediate child PID.
     #[cfg(unix)]
     {
-        cmd.process_group(0);
+        match isolation {
+            SpawnIsolation::ProcessGroup => {
+                cmd.process_group(0);
+            }
+            SpawnIsolation::DetachedSession => {
+                // `setsid` (in the forked child, pre-exec) gives the agent a
+                // brand-new session with no controlling terminal, so any
+                // /dev/tty access — auth prompts, progress bars, job-control
+                // tcsetpgrp — fails cleanly instead of stealing the user's
+                // terminal input (SIGTTIN) or scribbling over the picker.
+                // It also makes the child its own process-group leader
+                // (pgid == pid), so `kill_agent_tree`'s killpg(pid) still
+                // reaches the whole subtree.
+                //
+                // SAFETY: `setsid` is async-signal-safe and touches no Rust
+                // state; the closure captures nothing.
+                unsafe {
+                    cmd.pre_exec(|| {
+                        if libc::setsid() == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
+        }
     }
     #[cfg(windows)]
     {
+        // Windows has no controlling-terminal / SIGTTIN semantics to detach
+        // from, so both isolation modes use the same process group.
+        let _ = isolation;
         // CREATE_NEW_PROCESS_GROUP from winbase.h. The child becomes
         // the root of a new group; `taskkill /T` walks the tree from
         // there.
@@ -3215,6 +3258,61 @@ mod tests {
         let resolved = resolve_agent_command_no_install(&bin, &env).expect("resolve");
         assert_eq!(resolved.command, bin);
         assert_eq!(resolved.env.get("FOO"), Some(&"bar".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detached_session_child_becomes_session_leader() {
+        // The startup probe spawns agents with `DetachedSession` so they get
+        // their own session with no controlling terminal — the guard against
+        // a backgrounded agent stealing the picker's TTY (SIGTTIN / tty
+        // corruption). A session leader has sid == pid.
+        let (mut child, _stdin, _stdout) = spawn_agent(
+            &PathBuf::from("sleep"),
+            &["5".to_string()],
+            &HashMap::new(),
+            None,
+            SpawnIsolation::DetachedSession,
+        )
+        .expect("spawn sleep");
+        let pid = child.id().expect("pid") as libc::pid_t;
+
+        // setsid runs in the child between fork and exec, so poll briefly to
+        // avoid racing the exec.
+        let mut sid = -1;
+        for _ in 0..100 {
+            sid = unsafe { libc::getsid(pid) };
+            if sid == pid {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(sid, pid, "detached child should be its own session leader");
+
+        kill_agent_tree(&mut child, Some(pid as u32)).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_group_child_stays_in_our_session() {
+        // The normal launch path keeps the controlling terminal: the child
+        // shares our session and is not itself a session leader.
+        let (mut child, _stdin, _stdout) = spawn_agent(
+            &PathBuf::from("sleep"),
+            &["5".to_string()],
+            &HashMap::new(),
+            None,
+            SpawnIsolation::ProcessGroup,
+        )
+        .expect("spawn sleep");
+        let pid = child.id().expect("pid") as libc::pid_t;
+
+        let our_sid = unsafe { libc::getsid(0) };
+        let child_sid = unsafe { libc::getsid(pid) };
+        assert_eq!(child_sid, our_sid, "process-group child shares our session");
+        assert_ne!(pid, child_sid, "and is not a session leader");
+
+        kill_agent_tree(&mut child, Some(pid as u32)).await;
     }
 
     #[test]

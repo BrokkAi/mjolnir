@@ -87,11 +87,18 @@ pub async fn probe_agent(
         return ProbeStatus::NotInstalled;
     };
 
-    let (mut child, child_stdin, child_stdout) =
-        match acp::spawn_agent(&prepared.command, &args, &prepared.env, None) {
-            Ok(spawned) => spawned,
-            Err(e) => return ProbeStatus::Failed(format!("spawn failed: {e}")),
-        };
+    // Detach the probe from the controlling terminal: a backgrounded agent
+    // must never touch the user's TTY while the picker owns it.
+    let (mut child, child_stdin, child_stdout) = match acp::spawn_agent(
+        &prepared.command,
+        &args,
+        &prepared.env,
+        None,
+        acp::SpawnIsolation::DetachedSession,
+    ) {
+        Ok(spawned) => spawned,
+        Err(e) => return ProbeStatus::Failed(format!("spawn failed: {e}")),
+    };
     let agent_pid = child.id();
     let transport = ByteStreams::new(child_stdin.compat_write(), child_stdout.compat());
 
