@@ -66,6 +66,25 @@ pub async fn install_or_resolve(
     Ok((program, target.args.clone()))
 }
 
+/// Resolve the launch command for an already-installed binary agent
+/// **without downloading**. Returns `None` when the install sentinel is
+/// absent (the agent was never installed) or the executable can no longer
+/// be located. Used by the startup validation probe so it can mark
+/// uninstalled binary agents "not installed" instead of fetching them.
+pub fn resolve_installed(
+    agent_id: &str,
+    version: &str,
+    target: &BinaryTarget,
+    install_root: &Path,
+) -> Option<(PathBuf, Vec<String>)> {
+    let dir = install_root.join(agent_id).join(version);
+    if !dir.join(".installed").exists() {
+        return None;
+    }
+    let program = resolve_cmd_path(&dir, &target.cmd).ok()?;
+    Some((program, target.args.clone()))
+}
+
 /// Resolve `cmd` (e.g. `./codex-acp`, `./bin/agent.exe`) against the
 /// install directory. Rejects paths that escape `dir` for safety.
 fn resolve_cmd_path(dir: &Path, cmd: &str) -> Result<PathBuf> {
@@ -278,6 +297,39 @@ mod tests {
         // Try to escape via `..`.
         let result = resolve_cmd_path(&dir.path().join("sub"), "../whatever");
         assert!(result.is_err(), "expected rejection, got {result:?}");
+    }
+
+    #[test]
+    fn resolve_installed_returns_none_without_sentinel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let install_root = dir.path();
+        // Create the agent dir + binary but NO `.installed` sentinel.
+        let agent_dir = install_root.join("test-agent").join("1.0.0");
+        std::fs::create_dir_all(&agent_dir).expect("mkdir");
+        std::fs::write(agent_dir.join("bin"), b"#!/bin/sh\n").expect("write bin");
+
+        let target = fake_target("https://not-used.example.com/x.tar.gz", "./bin");
+        assert!(resolve_installed("test-agent", "1.0.0", &target, install_root).is_none());
+    }
+
+    #[test]
+    fn resolve_installed_resolves_when_sentinel_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let install_root = dir.path();
+        let agent_dir = install_root.join("test-agent").join("1.0.0");
+        std::fs::create_dir_all(&agent_dir).expect("mkdir");
+        let bin = agent_dir.join("bin");
+        std::fs::write(&bin, b"#!/bin/sh\n").expect("write bin");
+        std::fs::write(agent_dir.join(".installed"), "ok").expect("sentinel");
+
+        let target = fake_target("https://not-used.example.com/x.tar.gz", "./bin");
+        let (program, args) =
+            resolve_installed("test-agent", "1.0.0", &target, install_root).expect("resolve");
+        assert_eq!(
+            std::fs::canonicalize(&program).expect("canon"),
+            std::fs::canonicalize(&bin).expect("canon bin")
+        );
+        assert_eq!(args, vec!["--flag"]);
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ mod notifications;
 mod palette;
 mod paths;
 mod picker;
+mod probe;
 mod registry;
 mod remote;
 mod self_update;

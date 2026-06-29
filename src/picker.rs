@@ -6,9 +6,10 @@
 //! needed, with a progress spinner). Used for first-run setup, explicit
 //! new-session requests, and agent selection before interactive resume flows.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::term::TrackedBackend;
@@ -17,10 +18,10 @@ use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, Key
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 
 #[cfg(test)]
 use unicode_width::UnicodeWidthStr;
@@ -28,6 +29,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::install::{self, Progress};
 use crate::palette::TerminalTheme;
 use crate::paths::{expand_home_shortcut, normalize_spawn_program};
+use crate::probe::{self, ProbeStatus};
 use crate::registry::{Agent, DistributionKind, Registry};
 use crate::text::{normalize_single_line_text, truncate_text_to_width};
 use crate::version::mjolnir_version_label;
@@ -103,6 +105,21 @@ enum ItemAction {
     SetDefault,
 }
 
+/// How a picker row resolves for the startup validation probe. Resolution
+/// never triggers an install: a binary agent that is not already on disk
+/// resolves to [`ProbeResolution::NotInstalled`] rather than downloading.
+enum ProbeResolution {
+    /// Spawn this command and run the light ACP `initialize` probe.
+    Command {
+        program: PathBuf,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+    },
+    /// Known not installed without spawning anything (binary agent with no
+    /// local install, or no distribution for this platform).
+    NotInstalled,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum AddCustomFocus {
     Name,
@@ -147,6 +164,10 @@ struct PickerState<'a> {
     expanded: bool,
     notice: Option<String>,
     preferences: PickerPreferences,
+    /// Startup validation results, keyed by `source_id`. Populated
+    /// asynchronously while the picker is open; missing entries render as
+    /// "still checking".
+    probe_status: HashMap<String, ProbeStatus>,
 }
 
 impl<'a> PickerState<'a> {
@@ -169,6 +190,7 @@ impl<'a> PickerState<'a> {
             expanded: false,
             notice: None,
             preferences,
+            probe_status: HashMap::new(),
         };
         let default_source_id = state.default_source_id().map(ToOwned::to_owned);
         state.rebuild_items(default_source_id.as_deref());
@@ -316,6 +338,94 @@ impl<'a> PickerState<'a> {
             Item::Agent(idx) => registry_agent_initially_visible(&self.registry.agents[*idx]),
             Item::CustomAgent(_) | Item::Other => false,
         }
+    }
+
+    /// Resolve a row into a probe action, or `None` for non-agent rows
+    /// (`Other`, `Custom`). Mirrors the launch-command resolution in
+    /// [`start_item_action`] but is side-effect free: it never installs.
+    fn item_probe_target(&self, item: &Item) -> Option<ProbeResolution> {
+        match item {
+            Item::Other | Item::Custom => None,
+            Item::Anvil => Some(ProbeResolution::Command {
+                program: PathBuf::from("uvx"),
+                args: vec!["brokk".to_string(), "acp".to_string()],
+                env: HashMap::new(),
+            }),
+            Item::CustomAgent(idx) => {
+                let agent = &self.preferences.custom_agents[*idx];
+                Some(ProbeResolution::Command {
+                    program: agent.program.clone(),
+                    args: agent.args.clone(),
+                    env: HashMap::new(),
+                })
+            }
+            Item::Agent(idx) => {
+                let agent = &self.registry.agents[*idx];
+                let Some(kind) = agent.preferred_kind(&self.platform) else {
+                    return Some(ProbeResolution::NotInstalled);
+                };
+                match kind {
+                    DistributionKind::Npx => {
+                        let pkg = agent.distribution.npx.as_ref()?;
+                        let mut args = vec!["-y".to_string(), pkg.package.clone()];
+                        args.extend(pkg.args.iter().cloned());
+                        Some(ProbeResolution::Command {
+                            program: normalize_spawn_program(PathBuf::from("npx")),
+                            args,
+                            env: pkg.env.clone(),
+                        })
+                    }
+                    DistributionKind::Uvx => {
+                        let pkg = agent.distribution.uvx.as_ref()?;
+                        let mut args = vec![pkg.package.clone()];
+                        args.extend(pkg.args.iter().cloned());
+                        Some(ProbeResolution::Command {
+                            program: PathBuf::from("uvx"),
+                            args,
+                            env: pkg.env.clone(),
+                        })
+                    }
+                    DistributionKind::Binary => {
+                        let target = agent
+                            .distribution
+                            .binary
+                            .as_ref()
+                            .and_then(|m| m.get(&self.platform))?;
+                        match install::resolve_installed(
+                            &agent.id,
+                            &agent.version,
+                            target,
+                            &self.install_root,
+                        ) {
+                            Some((program, args)) => Some(ProbeResolution::Command {
+                                program,
+                                args,
+                                env: HashMap::new(),
+                            }),
+                            None => Some(ProbeResolution::NotInstalled),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build the deduplicated `(source_id, resolution)` set to validate when
+    /// the picker opens. Deduped by `source_id` so an agent that is also the
+    /// default is probed once.
+    fn probe_plan(&self) -> Vec<(String, ProbeResolution)> {
+        let mut seen = HashSet::new();
+        let mut plan = Vec::new();
+        for item in &self.items {
+            let Some(resolution) = self.item_probe_target(item) else {
+                continue;
+            };
+            let source_id = self.item_source_id(item);
+            if seen.insert(source_id.clone()) {
+                plan.push((source_id, resolution));
+            }
+        }
+        plan
     }
 
     fn item_is_visible_when_collapsed(&self, item: &Item) -> bool {
@@ -540,6 +650,12 @@ pub async fn run_picker(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
 
+    // Kick off async validation of every probeable agent. Results stream
+    // back over `probe_rx` and update the picker live; the picker is fully
+    // usable while probes are still in flight.
+    let (probe_tx, mut probe_rx) = mpsc::unbounded_channel::<(String, ProbeStatus)>();
+    spawn_probes(state.probe_plan(), probe_tx);
+
     terminal.draw(|f| draw(f, &state, theme))?;
 
     loop {
@@ -560,6 +676,9 @@ pub async fn run_picker(
                     });
                 }
             }
+            Some((source_id, status)) = probe_rx.recv() => {
+                state.probe_status.insert(source_id, status);
+            }
             _ = tick.tick() => {
                 if let Some(outcome) = pump_install(&mut state).await {
                     return Ok(PickerResult {
@@ -577,6 +696,42 @@ pub async fn run_picker(
             });
         }
     }
+}
+
+/// Spawn background validation tasks for the probe plan. Concurrency is
+/// capped by a semaphore so opening the picker does not spawn a swarm of
+/// agent subprocesses at once. Each task reports `(source_id, status)` over
+/// `tx`; once every task finishes, the sender side closes and the picker's
+/// `probe_rx.recv()` branch goes idle.
+fn spawn_probes(
+    plan: Vec<(String, ProbeResolution)>,
+    tx: mpsc::UnboundedSender<(String, ProbeStatus)>,
+) {
+    // The probe opens a session rooted here. The process cwd is fine: session
+    // config options are account/agent-level, not workspace-specific.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let sem = Arc::new(Semaphore::new(probe::PROBE_CONCURRENCY));
+    for (source_id, resolution) in plan {
+        match resolution {
+            ProbeResolution::NotInstalled => {
+                // No subprocess needed; report immediately.
+                let _ = tx.send((source_id, ProbeStatus::NotInstalled));
+            }
+            ProbeResolution::Command { program, args, env } => {
+                let tx = tx.clone();
+                let sem = sem.clone();
+                let cwd = cwd.clone();
+                tokio::spawn(async move {
+                    let _permit = sem.acquire_owned().await.ok();
+                    let status =
+                        probe::probe_agent(program, args, env, cwd, probe::PROBE_TIMEOUT).await;
+                    let _ = tx.send((source_id, status));
+                });
+            }
+        }
+    }
+    // `tx` (this scope's sender) drops here; the receiver closes once all
+    // spawned task clones have also dropped.
 }
 
 async fn pump_install(state: &mut PickerState<'_>) -> Option<PickerOutcome> {
@@ -1130,6 +1285,9 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
             let i = slot.unwrap();
             let item = &state.items[i];
             let is_selected = Some(i) == selected_item;
+            let probeable = item_is_probeable(item);
+            let source_id = state.item_source_id(item);
+            let status = state.probe_status.get(&source_id);
 
             let marker = if is_selected { ">" } else { " " };
             let mut badges = Vec::new();
@@ -1139,6 +1297,9 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
             if state.item_is_favorite(item) {
                 badges.push("favorite");
             }
+            if let Some(b) = probe_badge(probeable, status) {
+                badges.push(b);
+            }
             let badge = if badges.is_empty() {
                 String::new()
             } else {
@@ -1146,8 +1307,8 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
             };
             let label = state.item_label(item);
             let hint = state.item_hint(item);
-            let line = picker_row_line(marker, &label, &badge, &hint, inner.width);
-            let style = if is_selected {
+
+            let base = if is_selected {
                 Style::default()
                     .fg(theme.selection_fg)
                     .bg(theme.selection_bg)
@@ -1155,7 +1316,20 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
             } else {
                 Style::default()
             };
-            ListItem::new(line).style(style)
+            // Status glyph keeps its own color (e.g. green check) while still
+            // inheriting the selection background/bold of the focused row.
+            let glyph_style = match probe_glyph_color(probeable, status, &theme) {
+                Some(color) => base.fg(color),
+                None => base,
+            };
+            // 4-column prefix: "<marker> " + "<glyph> ".
+            let body = picker_row_body(&label, &badge, &hint, inner.width.saturating_sub(4));
+            let line = Line::from(vec![
+                Span::styled(format!("{marker} "), base),
+                Span::styled(format!("{} ", probe_glyph(probeable, status)), glyph_style),
+                Span::styled(body, base),
+            ]);
+            ListItem::new(line)
         })
         .collect();
 
@@ -1163,9 +1337,61 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
     f.render_widget(list, inner);
 }
 
-fn picker_row_line(marker: &str, label: &str, badge: &str, hint: &str, width: u16) -> String {
+/// Agent rows that the startup probe validates. Synthetic rows (`Other...`,
+/// `Add custom agent...`) are excluded so they show no status column.
+fn item_is_probeable(item: &Item) -> bool {
+    matches!(item, Item::Anvil | Item::Agent(_) | Item::CustomAgent(_))
+}
+
+/// Single-column status glyph shown before an agent label. A space when the
+/// row is not an agent, has no status to show, or is still being checked
+/// without a determinate marker.
+fn probe_glyph(probeable: bool, status: Option<&ProbeStatus>) -> &'static str {
+    if !probeable {
+        return " ";
+    }
+    match status {
+        Some(ProbeStatus::Configured) => "✓",
+        Some(ProbeStatus::NeedsAuth) => "•",
+        Some(ProbeStatus::NotInstalled) | Some(ProbeStatus::Failed(_)) => " ",
+        None => "·",
+    }
+}
+
+/// Color for the status glyph, or `None` to inherit the row's default fg.
+fn probe_glyph_color(
+    probeable: bool,
+    status: Option<&ProbeStatus>,
+    theme: &TerminalTheme,
+) -> Option<Color> {
+    if !probeable {
+        return None;
+    }
+    match status {
+        Some(ProbeStatus::Configured) => Some(theme.success),
+        Some(ProbeStatus::NeedsAuth) => Some(theme.warning),
+        None => Some(theme.muted),
+        Some(ProbeStatus::NotInstalled) | Some(ProbeStatus::Failed(_)) => None,
+    }
+}
+
+/// Short status badge appended after the label, if the status warrants one.
+/// `Configured` and "still checking" stay badge-free; the glyph carries them.
+fn probe_badge(probeable: bool, status: Option<&ProbeStatus>) -> Option<&'static str> {
+    if !probeable {
+        return None;
+    }
+    match status {
+        Some(ProbeStatus::NeedsAuth) => Some("needs auth"),
+        Some(ProbeStatus::NotInstalled) => Some("not installed"),
+        Some(ProbeStatus::Failed(_)) => Some("unavailable"),
+        Some(ProbeStatus::Configured) | None => None,
+    }
+}
+
+fn picker_row_body(label: &str, badge: &str, hint: &str, width: u16) -> String {
     truncate_text_to_width(
-        normalize_single_line_text(&format!("{marker} {label}{badge}  -- {hint}")),
+        normalize_single_line_text(&format!("{label}{badge}  -- {hint}")),
         width,
     )
 }
@@ -2043,9 +2269,8 @@ mod tests {
     }
 
     #[test]
-    fn picker_row_line_truncates_long_descriptions_to_terminal_width() {
-        let line = picker_row_line(
-            ">",
+    fn picker_row_body_truncates_long_descriptions_to_terminal_width() {
+        let line = picker_row_body(
             "Claude",
             "",
             "a very long client description that cannot fit in a narrow picker row (npx v1.0.0)",
@@ -2060,14 +2285,8 @@ mod tests {
     }
 
     #[test]
-    fn picker_row_line_normalizes_multiline_registry_descriptions() {
-        let line = picker_row_line(
-            ">",
-            "Claude",
-            "",
-            "first\nsecond\rthird\tfourth\u{0007}",
-            80,
-        );
+    fn picker_row_body_normalizes_multiline_registry_descriptions() {
+        let line = picker_row_body("Claude", "", "first\nsecond\rthird\tfourth\u{0007}", 80);
 
         assert!(!line.contains('\n'), "line: {line:?}");
         assert!(!line.contains('\r'), "line: {line:?}");
@@ -2078,6 +2297,165 @@ mod tests {
             UnicodeWidthStr::width(line.as_str()) <= 80,
             "line should fit: {line}"
         );
+    }
+
+    #[test]
+    fn probe_target_for_npx_agent_resolves_to_npx_command() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        let item = state
+            .items
+            .iter()
+            .find(|i| state.item_source_id(i) == "claude-acp")
+            .expect("claude")
+            .clone();
+        match state.item_probe_target(&item).expect("target") {
+            ProbeResolution::Command { program, args, env } => {
+                if cfg!(windows) {
+                    assert_eq!(program, PathBuf::from("npx.cmd"));
+                } else {
+                    assert_eq!(program, PathBuf::from("npx"));
+                }
+                assert_eq!(args, vec!["-y", "@x/claude@0.36.1"]);
+                assert_eq!(env.get("NO_UPDATE"), Some(&"1".to_string()));
+            }
+            ProbeResolution::NotInstalled => panic!("expected a command, got NotInstalled"),
+        }
+    }
+
+    #[test]
+    fn probe_target_for_anvil_resolves_to_uvx_brokk() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        match state.item_probe_target(&Item::Anvil).expect("target") {
+            ProbeResolution::Command { program, args, .. } => {
+                assert_eq!(program, PathBuf::from("uvx"));
+                assert_eq!(args, vec!["brokk", "acp"]);
+            }
+            ProbeResolution::NotInstalled => panic!("expected a command, got NotInstalled"),
+        }
+    }
+
+    #[test]
+    fn probe_target_for_uninstalled_binary_is_not_installed() {
+        let reg = fixture_registry();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            dir.path().to_path_buf(),
+            PickerPreferences::default(),
+        );
+        let item = state
+            .items
+            .iter()
+            .find(|i| state.item_source_id(i) == "binary-only")
+            .expect("binary-only")
+            .clone();
+        assert!(matches!(
+            state.item_probe_target(&item),
+            Some(ProbeResolution::NotInstalled)
+        ));
+    }
+
+    #[test]
+    fn probe_target_skips_synthetic_rows() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        assert!(state.item_probe_target(&Item::Other).is_none());
+        assert!(state.item_probe_target(&Item::Custom).is_none());
+    }
+
+    #[test]
+    fn probe_plan_covers_agents_and_dedupes() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                // Default duplicates a registry agent; it must be probed once.
+                default_agent: Some(PickerOutcome {
+                    source_id: "claude-acp".to_string(),
+                    program: PathBuf::from("npx"),
+                    args: vec!["-y".to_string(), "@x/claude@0.36.1".to_string()],
+                    env: HashMap::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let plan = state.probe_plan();
+        let ids: Vec<&str> = plan.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"anvil"), "ids: {ids:?}");
+        assert!(ids.contains(&"claude-acp"), "ids: {ids:?}");
+        assert!(!ids.contains(&"other"), "synthetic rows excluded: {ids:?}");
+        assert!(!ids.contains(&"custom"), "synthetic rows excluded: {ids:?}");
+        let mut deduped = ids.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(deduped.len(), ids.len(), "no duplicate source ids: {ids:?}");
+    }
+
+    #[test]
+    fn probe_indicator_reflects_status() {
+        let theme = crate::theme::TerminalThemeKind::Dark.palette();
+
+        // Configured: green check, no badge.
+        assert_eq!(probe_glyph(true, Some(&ProbeStatus::Configured)), "✓");
+        assert_eq!(
+            probe_glyph_color(true, Some(&ProbeStatus::Configured), &theme),
+            Some(theme.success)
+        );
+        assert_eq!(probe_badge(true, Some(&ProbeStatus::Configured)), None);
+
+        // Needs auth: warning glyph + badge.
+        assert_eq!(probe_glyph(true, Some(&ProbeStatus::NeedsAuth)), "•");
+        assert_eq!(
+            probe_glyph_color(true, Some(&ProbeStatus::NeedsAuth), &theme),
+            Some(theme.warning)
+        );
+        assert_eq!(
+            probe_badge(true, Some(&ProbeStatus::NeedsAuth)),
+            Some("needs auth")
+        );
+
+        // Not installed: no glyph, informative badge.
+        assert_eq!(probe_glyph(true, Some(&ProbeStatus::NotInstalled)), " ");
+        assert_eq!(
+            probe_badge(true, Some(&ProbeStatus::NotInstalled)),
+            Some("not installed")
+        );
+
+        // Failed: muted, "unavailable".
+        assert_eq!(
+            probe_badge(true, Some(&ProbeStatus::Failed("boom".to_string()))),
+            Some("unavailable")
+        );
+
+        // Still checking: muted dot, no badge.
+        assert_eq!(probe_glyph(true, None), "·");
+        assert_eq!(probe_glyph_color(true, None, &theme), Some(theme.muted));
+        assert_eq!(probe_badge(true, None), None);
+
+        // Non-agent rows: blank, no color, no badge.
+        assert_eq!(probe_glyph(false, None), " ");
+        assert_eq!(probe_glyph_color(false, None, &theme), None);
+        assert_eq!(probe_badge(false, Some(&ProbeStatus::NeedsAuth)), None);
     }
 
     #[test]

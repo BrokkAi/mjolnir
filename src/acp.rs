@@ -666,6 +666,43 @@ async fn prepare_agent_command(
     })
 }
 
+/// Resolve an agent launch command for spawning **without triggering any
+/// install**. Used by the startup validation probe, which must never kick
+/// off a multi-hundred-megabyte uv/Node/binary download just to check
+/// whether an agent is reachable.
+///
+/// Returns `None` when the launcher (`uvx`/`npx`) or the program itself is
+/// not already present, so the caller can mark the agent "not installed"
+/// rather than installing it. Mirrors the env-merging order of
+/// [`prepare_agent_command_for_spawn`]: launcher-provided env first, then
+/// the agent's own env on top.
+pub(crate) fn resolve_agent_command_no_install(
+    command: &Path,
+    env: &HashMap<String, String>,
+) -> Option<PreparedAgentCommand> {
+    let command = normalize_spawn_program(command.to_path_buf());
+    let (resolved, mut merged_env) = if is_program_name(&command, "uvx") {
+        let path = find_on_path(&command).or_else(|| {
+            let embedded = embedded_uvx_path();
+            is_executable_file(&embedded).then_some(embedded)
+        })?;
+        (path, embedded_uv_env())
+    } else if is_program_name(&command, "npx") {
+        let path = find_on_path(&command)
+            .or_else(|| embedded_npx_path().filter(|p| is_executable_file(p)))?;
+        (path, HashMap::new())
+    } else {
+        // Plain program or explicit path: must already resolve on PATH or
+        // exist on disk.
+        (find_on_path(&command)?, HashMap::new())
+    };
+    merged_env.extend(env.clone());
+    Some(PreparedAgentCommand {
+        command: resolved,
+        env: merged_env,
+    })
+}
+
 async fn prepare_uvx_command(
     command: PathBuf,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
@@ -1019,7 +1056,7 @@ fn node24_archive_suffix() -> Option<&'static str> {
     }
 }
 
-fn client_implementation() -> Implementation {
+pub(crate) fn client_implementation() -> Implementation {
     Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).title("Mjolnir")
 }
 
@@ -3158,6 +3195,27 @@ mod tests {
     };
     use std::time::Duration;
     use tokio::io::split;
+
+    #[test]
+    fn resolve_no_install_returns_none_for_missing_program() {
+        let resolved = resolve_agent_command_no_install(
+            &PathBuf::from("definitely-not-a-real-program-xyzzy"),
+            &HashMap::new(),
+        );
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_no_install_resolves_existing_path_and_keeps_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("agent-bin");
+        std::fs::write(&bin, b"#!/bin/sh\n").expect("write bin");
+
+        let env = HashMap::from([("FOO".to_string(), "bar".to_string())]);
+        let resolved = resolve_agent_command_no_install(&bin, &env).expect("resolve");
+        assert_eq!(resolved.command, bin);
+        assert_eq!(resolved.env.get("FOO"), Some(&"bar".to_string()));
+    }
 
     #[test]
     fn prompt_content_blocks_include_text_and_images() {
