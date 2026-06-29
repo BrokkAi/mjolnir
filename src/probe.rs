@@ -1,11 +1,18 @@
 //! Async startup validation of ACP agents.
 //!
-//! When the agent picker opens we want to show, at a glance, which agents
-//! will "just work" versus which still need setup. For every agent we can
-//! launch *without* triggering an install, we run the ACP handshake through
-//! to `session/new` — which is the only point at which an agent reveals its
-//! session config options (models/modes) — and classify the result:
+//! At startup — in the background, before the agent picker is even on screen
+//! — we validate the agents the picker shows by default (its curated +
+//! favorite + default set; see [`crate::picker::spawn_startup_probes`]) so
+//! the picker can show, at a glance, which agents will "just work". We
+//! deliberately do *not* probe the full registry: spawning a subprocess per
+//! agent is expensive, and the long tail behind "Other..." is rarely used.
 //!
+//! For every in-scope agent we can launch *without* triggering an install,
+//! we run the ACP handshake through to `session/new` — the only point at
+//! which an agent reveals its session config options (models/modes) — and
+//! classify the result:
+//!
+//! * [`ProbeStatus::Checking`] — seeded while the probe is in flight.
 //! * [`ProbeStatus::Configured`] — the agent opened a session, so we were
 //!   able to read its session config options. The picker shows a green
 //!   check.
@@ -20,6 +27,10 @@
 //!   outlast the budget, so we report it neutrally rather than as broken.
 //! * [`ProbeStatus::Failed`] — spawn/handshake error or unsupported protocol.
 //!
+//! Results land in a process-global store ([`record`]/[`snapshot`]) that the
+//! picker reads each frame, so probing is fully decoupled from when (or
+//! whether) the picker opens.
+//!
 //! Opening a session is a real side effect: it creates a throwaway session.
 //! The probe deletes it again when the agent advertises
 //! `sessionCapabilities.delete`; agents without delete support may be left
@@ -29,6 +40,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -39,6 +51,25 @@ use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo}
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::acp;
+
+/// Process-global validation results, keyed by picker `source_id`. Written
+/// by the background probes, read by the picker each frame. A poisoned lock
+/// degrades to "no results" rather than panicking the UI.
+static RESULTS: LazyLock<Mutex<HashMap<String, ProbeStatus>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Record a probe result for `source_id`, overwriting any prior value.
+pub fn record(source_id: String, status: ProbeStatus) {
+    if let Ok(mut results) = RESULTS.lock() {
+        results.insert(source_id, status);
+    }
+}
+
+/// Snapshot the current results so the picker can render a frame without
+/// holding the lock across the draw.
+pub fn snapshot() -> HashMap<String, ProbeStatus> {
+    RESULTS.lock().map(|m| m.clone()).unwrap_or_default()
+}
 
 /// Maximum agents probed concurrently. Probing spawns a subprocess (and,
 /// for `npx`/`uvx` agents, may fetch the package on first run), so we cap
@@ -57,6 +88,10 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// `source_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeStatus {
+    /// The probe has been queued/started but has not yet reached a verdict.
+    /// Seeded by the spawner so the picker can show in-progress agents and
+    /// distinguish them from agents that are out of scope (never probed).
+    Checking,
     /// Spawned, completed `initialize`, and opened a session — so its
     /// session config options were retrievable.
     Configured,

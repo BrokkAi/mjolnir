@@ -642,6 +642,7 @@ async fn pick_agent_for_resume() -> Result<Option<SelectedAgent>> {
     let mut cfg =
         Config::load(&config_path).with_context(|| format!("load {}", config_path.display()))?;
 
+    kick_off_agent_probes(&cfg);
     let picker_result = run_agent_picker_once(&cfg).await?;
     apply_picker_preferences(&mut cfg, picker_result.preferences);
     let selected = picker_result.outcome.map(picker_outcome_to_selected);
@@ -842,6 +843,11 @@ async fn run_app(
     let config_path = config::default_config_path();
     let config_exists = config_path.exists();
     let mut cfg = Config::load(&config_path)?;
+
+    // Validate agents in the background once, up front. Results land in the
+    // global probe store; every agent picker shown during this run just pulls
+    // from it.
+    kick_off_agent_probes(&cfg);
 
     // Supervisor loop. Initial sessions use the configured default agent when
     // available. The picker is reserved for first-run setup and explicit
@@ -1174,23 +1180,42 @@ async fn settle_after_fullscreen_picker_restore() {
     tokio::time::sleep(Duration::from_millis(75)).await;
 }
 
+/// Load the agent registry from cache (refreshing per its TTL), falling back
+/// to a built-in default (anvil + custom only) when it cannot be loaded.
+async fn load_agent_registry() -> registry::Registry {
+    let cache_path = registry::default_cache_path();
+    match registry::load_with_cache(&cache_path, registry::CACHE_TTL, registry::REGISTRY_URL).await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("registry load failed, offering anvil + custom only: {e:#}");
+            registry::Registry::default()
+        }
+    }
+}
+
+/// Kick off background validation of the default-view agents so the picker's
+/// "configured" checkmarks are ready (or settling) by the time it opens. No-op
+/// to the terminal; safe to call before any TUI is set up. Best-effort: if the
+/// registry never loads, the picker simply shows no checkmarks.
+fn kick_off_agent_probes(cfg: &Config) {
+    let preferences = picker_preferences_from_config(cfg);
+    tokio::spawn(async move {
+        let registry = load_agent_registry().await;
+        picker::spawn_startup_probes(
+            &registry,
+            &registry::current_platform(),
+            &install::default_install_root(),
+            preferences,
+        );
+    });
+}
+
 async fn run_picker_with_registry(
     terminal: &mut ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>,
     cfg: &Config,
 ) -> Result<PickerResult> {
-    let cache_path = registry::default_cache_path();
-    let registry =
-        match registry::load_with_cache(&cache_path, registry::CACHE_TTL, registry::REGISTRY_URL)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    "registry load failed, picker will offer anvil + custom only: {e:#}"
-                );
-                registry::Registry::default()
-            }
-        };
+    let registry = load_agent_registry().await;
     picker::run_picker(
         terminal,
         &registry,

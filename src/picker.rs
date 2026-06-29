@@ -164,10 +164,6 @@ struct PickerState<'a> {
     expanded: bool,
     notice: Option<String>,
     preferences: PickerPreferences,
-    /// Startup validation results, keyed by `source_id`. Populated
-    /// asynchronously while the picker is open; missing entries render as
-    /// "still checking".
-    probe_status: HashMap<String, ProbeStatus>,
 }
 
 impl<'a> PickerState<'a> {
@@ -190,7 +186,6 @@ impl<'a> PickerState<'a> {
             expanded: false,
             notice: None,
             preferences,
-            probe_status: HashMap::new(),
         };
         let default_source_id = state.default_source_id().map(ToOwned::to_owned);
         state.rebuild_items(default_source_id.as_deref());
@@ -394,13 +389,19 @@ impl<'a> PickerState<'a> {
         }
     }
 
-    /// Build the deduplicated `(source_id, resolution)` set to validate when
-    /// the picker opens. Deduped by `source_id` so an agent that is also the
-    /// default is probed once.
+    /// Build the deduplicated `(source_id, resolution)` set to validate at
+    /// startup. Scoped to the agents shown in the default (collapsed) view —
+    /// curated agents, favorites, and the default — so we do not spawn a
+    /// subprocess for the full registry's long tail behind "Other...".
+    /// Deduped by `source_id` so an agent that is also the default is probed
+    /// once.
     fn probe_plan(&self) -> Vec<(String, ProbeResolution)> {
         let mut seen = HashSet::new();
         let mut plan = Vec::new();
         for item in &self.items {
+            if !self.item_is_visible_when_collapsed(item) {
+                continue;
+            }
             let Some(resolution) = self.item_probe_target(item) else {
                 continue;
             };
@@ -634,11 +635,9 @@ pub async fn run_picker(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
 
-    // Kick off async validation of every probeable agent. Results stream
-    // back over `probe_rx` and update the picker live; the picker is fully
-    // usable while probes are still in flight.
-    let (probe_tx, mut probe_rx) = mpsc::unbounded_channel::<(String, ProbeStatus)>();
-    spawn_probes(state.probe_plan(), probe_tx);
+    // Agent validation runs in the background from startup (see
+    // `spawn_startup_probes`); the picker just reads the shared results each
+    // frame. The 100ms tick redraw is what surfaces newly-arrived results.
 
     terminal.draw(|f| draw(f, &state, theme))?;
 
@@ -660,9 +659,6 @@ pub async fn run_picker(
                     });
                 }
             }
-            Some((source_id, status)) = probe_rx.recv() => {
-                state.probe_status.insert(source_id, status);
-            }
             _ = tick.tick() => {
                 if let Some(outcome) = pump_install(&mut state).await {
                     return Ok(PickerResult {
@@ -682,40 +678,61 @@ pub async fn run_picker(
     }
 }
 
-/// Spawn background validation tasks for the probe plan. Concurrency is
-/// capped by a semaphore so opening the picker does not spawn a swarm of
-/// agent subprocesses at once. Each task reports `(source_id, status)` over
-/// `tx`; once every task finishes, the sender side closes and the picker's
-/// `probe_rx.recv()` branch goes idle.
-fn spawn_probes(
-    plan: Vec<(String, ProbeResolution)>,
-    tx: mpsc::UnboundedSender<(String, ProbeStatus)>,
+/// Validate the agents the picker shows by default, in the background, and
+/// publish results to the global probe store. Call once at startup (before
+/// the picker opens) so checkmarks are ready — or already settling — by the
+/// time the user reaches the agent picker.
+///
+/// Side-effect free with respect to the terminal: probe subprocesses are
+/// detached from the controlling terminal (see `acp::SpawnIsolation`).
+pub fn spawn_startup_probes(
+    registry: &Registry,
+    platform: &str,
+    install_root: &Path,
+    preferences: PickerPreferences,
 ) {
+    // Reuse the picker's own item/visibility logic to decide what to probe,
+    // without opening the picker. The temporary state is collapsed, so
+    // `probe_plan` yields only the default-view agents.
+    let state = PickerState::new(
+        registry,
+        platform.to_string(),
+        install_root.to_path_buf(),
+        preferences,
+    );
+    spawn_probes(state.probe_plan());
+}
+
+/// Spawn background validation tasks for the probe plan. Concurrency is
+/// capped by a semaphore so we do not spawn a swarm of agent subprocesses at
+/// once. Each agent is seeded as `Checking`, then overwritten with its
+/// verdict in the global probe store as it completes.
+fn spawn_probes(plan: Vec<(String, ProbeResolution)>) {
     // The probe opens a session rooted here. The process cwd is fine: session
     // config options are account/agent-level, not workspace-specific.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let sem = Arc::new(Semaphore::new(probe::PROBE_CONCURRENCY));
     for (source_id, resolution) in plan {
+        // Mark in-scope agents as "checking" up front so the picker can
+        // distinguish them from out-of-scope rows (which are never recorded).
+        probe::record(source_id.clone(), ProbeStatus::Checking);
         match resolution {
             ProbeResolution::NotInstalled => {
                 // No subprocess needed; report immediately.
-                let _ = tx.send((source_id, ProbeStatus::NotInstalled));
+                probe::record(source_id, ProbeStatus::NotInstalled);
             }
             ProbeResolution::Command { program, args, env } => {
-                let tx = tx.clone();
                 let sem = sem.clone();
                 let cwd = cwd.clone();
                 tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.ok();
                     let status =
                         probe::probe_agent(program, args, env, cwd, probe::PROBE_TIMEOUT).await;
-                    let _ = tx.send((source_id, status));
+                    probe::record(source_id, status);
                 });
             }
         }
     }
-    // `tx` (this scope's sender) drops here; the receiver closes once all
-    // spawned task clones have also dropped.
 }
 
 async fn pump_install(state: &mut PickerState<'_>) -> Option<PickerOutcome> {
@@ -1260,6 +1277,10 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
     };
     let end = (start + visible).min(total);
 
+    // One lock per frame: snapshot the background validation results so the
+    // per-row closure can look up each agent's status without re-locking.
+    let probe_status = probe::snapshot();
+
     let items: Vec<ListItem> = slots[start..end]
         .iter()
         .map(|slot| {
@@ -1280,9 +1301,10 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
             let i = slot.unwrap();
             let item = &state.items[i];
             let is_selected = Some(i) == selected_item;
-            let probeable = item_is_probeable(item);
             let source_id = state.item_source_id(item);
-            let status = state.probe_status.get(&source_id);
+            // Out-of-scope rows (synthetic rows, agents we never probed) have
+            // no entry and render without a status column.
+            let status = probe_status.get(&source_id);
 
             let marker = if is_selected { ">" } else { " " };
             let mut badges = Vec::new();
@@ -1292,7 +1314,7 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
             if state.item_is_favorite(item) {
                 badges.push("favorite");
             }
-            if let Some(b) = probe_badge(probeable, status) {
+            if let Some(b) = probe_badge(status) {
                 badges.push(b);
             }
             let badge = if badges.is_empty() {
@@ -1313,7 +1335,7 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
             };
             // Status glyph keeps its own color (e.g. green check) while still
             // inheriting the selection background/bold of the focused row.
-            let glyph_style = match probe_glyph_color(probeable, status, &theme) {
+            let glyph_style = match probe_glyph_color(status, &theme) {
                 Some(color) => base.fg(color),
                 None => base,
             };
@@ -1321,7 +1343,7 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
             let body = picker_row_body(&label, &badge, &hint, inner.width.saturating_sub(4));
             let line = Line::from(vec![
                 Span::styled(format!("{marker} "), base),
-                Span::styled(format!("{} ", probe_glyph(probeable, status)), glyph_style),
+                Span::styled(format!("{} ", probe_glyph(status)), glyph_style),
                 Span::styled(body, base),
             ]);
             // Keep the item-level style so the selection background fills the
@@ -1335,57 +1357,48 @@ fn draw_list(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, theme:
     f.render_widget(list, inner);
 }
 
-/// Agent rows that the startup probe validates. Synthetic rows (`Other...`,
-/// `Add custom agent...`) are excluded so they show no status column.
-fn item_is_probeable(item: &Item) -> bool {
-    matches!(item, Item::Anvil | Item::Agent(_) | Item::CustomAgent(_))
-}
-
-/// Single-column status glyph shown before an agent label. A space when the
-/// row is not an agent, has no status to show, or is still being checked
-/// without a determinate marker.
-fn probe_glyph(probeable: bool, status: Option<&ProbeStatus>) -> &'static str {
-    if !probeable {
-        return " ";
-    }
+/// Single-column status glyph shown before an agent label. `None` (no entry
+/// in the probe store) means the row is out of scope / not probed, so it gets
+/// a blank column.
+fn probe_glyph(status: Option<&ProbeStatus>) -> &'static str {
     match status {
         Some(ProbeStatus::Configured) => "✓",
         Some(ProbeStatus::NeedsAuth) => "•",
-        Some(ProbeStatus::NotInstalled) | Some(ProbeStatus::Failed(_)) => " ",
-        // Indeterminate (timed out) and still-checking both read as "·".
-        Some(ProbeStatus::Unknown) | None => "·",
+        Some(ProbeStatus::Checking) => "·",
+        // Not installed / failed / timed-out / not-probed carry no glyph
+        // (failures lean on the badge instead).
+        Some(ProbeStatus::NotInstalled)
+        | Some(ProbeStatus::Failed(_))
+        | Some(ProbeStatus::Unknown)
+        | None => " ",
     }
 }
 
 /// Color for the status glyph, or `None` to inherit the row's default fg.
-fn probe_glyph_color(
-    probeable: bool,
-    status: Option<&ProbeStatus>,
-    theme: &TerminalTheme,
-) -> Option<Color> {
-    if !probeable {
-        return None;
-    }
+fn probe_glyph_color(status: Option<&ProbeStatus>, theme: &TerminalTheme) -> Option<Color> {
     match status {
         Some(ProbeStatus::Configured) => Some(theme.success),
         Some(ProbeStatus::NeedsAuth) => Some(theme.warning),
-        Some(ProbeStatus::Unknown) | None => Some(theme.muted),
-        Some(ProbeStatus::NotInstalled) | Some(ProbeStatus::Failed(_)) => None,
+        Some(ProbeStatus::Checking) => Some(theme.muted),
+        Some(ProbeStatus::NotInstalled)
+        | Some(ProbeStatus::Failed(_))
+        | Some(ProbeStatus::Unknown)
+        | None => None,
     }
 }
 
 /// Short status badge appended after the label, if the status warrants one.
-/// `Configured` and "still checking" stay badge-free; the glyph carries them.
-fn probe_badge(probeable: bool, status: Option<&ProbeStatus>) -> Option<&'static str> {
-    if !probeable {
-        return None;
-    }
+/// `Configured`/`Checking`/`Unknown` stay badge-free; the glyph (or its
+/// absence) carries them.
+fn probe_badge(status: Option<&ProbeStatus>) -> Option<&'static str> {
     match status {
         Some(ProbeStatus::NeedsAuth) => Some("needs auth"),
         Some(ProbeStatus::NotInstalled) => Some("not installed"),
         Some(ProbeStatus::Failed(_)) => Some("unavailable"),
-        // Unknown (timed out) and still-checking stay badge-free.
-        Some(ProbeStatus::Configured) | Some(ProbeStatus::Unknown) | None => None,
+        Some(ProbeStatus::Configured)
+        | Some(ProbeStatus::Checking)
+        | Some(ProbeStatus::Unknown)
+        | None => None,
     }
 }
 
@@ -2405,6 +2418,16 @@ mod tests {
         assert!(ids.contains(&"claude-acp"), "ids: {ids:?}");
         assert!(!ids.contains(&"other"), "synthetic rows excluded: {ids:?}");
         assert!(!ids.contains(&"custom"), "synthetic rows excluded: {ids:?}");
+        // Scope: non-curated registry agents are NOT probed at startup unless
+        // they are a favorite or the default.
+        assert!(
+            !ids.contains(&"binary-only"),
+            "non-curated agent should be out of scope: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"uvx-binary"),
+            "non-curated agent should be out of scope: {ids:?}"
+        );
         let mut deduped = ids.clone();
         deduped.sort_unstable();
         deduped.dedup();
@@ -2412,58 +2435,83 @@ mod tests {
     }
 
     #[test]
+    fn probe_plan_includes_favorited_non_curated_agent() {
+        let reg = fixture_registry();
+        let state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                // A non-curated agent the user favorited is in the default
+                // view, so it is in scope.
+                favorite_source_ids: vec!["uvx-binary".to_string()],
+                ..Default::default()
+            },
+        );
+        let ids: Vec<String> = state.probe_plan().into_iter().map(|(id, _)| id).collect();
+        assert!(
+            ids.iter().any(|id| id == "uvx-binary"),
+            "favorited agent should be probed: {ids:?}"
+        );
+        assert!(
+            !ids.iter().any(|id| id == "binary-only"),
+            "still-hidden agent stays out of scope: {ids:?}"
+        );
+    }
+
+    #[test]
     fn probe_indicator_reflects_status() {
         let theme = crate::theme::TerminalThemeKind::Dark.palette();
 
         // Configured: green check, no badge.
-        assert_eq!(probe_glyph(true, Some(&ProbeStatus::Configured)), "✓");
+        assert_eq!(probe_glyph(Some(&ProbeStatus::Configured)), "✓");
         assert_eq!(
-            probe_glyph_color(true, Some(&ProbeStatus::Configured), &theme),
+            probe_glyph_color(Some(&ProbeStatus::Configured), &theme),
             Some(theme.success)
         );
-        assert_eq!(probe_badge(true, Some(&ProbeStatus::Configured)), None);
+        assert_eq!(probe_badge(Some(&ProbeStatus::Configured)), None);
 
         // Needs auth: warning glyph + badge.
-        assert_eq!(probe_glyph(true, Some(&ProbeStatus::NeedsAuth)), "•");
+        assert_eq!(probe_glyph(Some(&ProbeStatus::NeedsAuth)), "•");
         assert_eq!(
-            probe_glyph_color(true, Some(&ProbeStatus::NeedsAuth), &theme),
+            probe_glyph_color(Some(&ProbeStatus::NeedsAuth), &theme),
             Some(theme.warning)
         );
         assert_eq!(
-            probe_badge(true, Some(&ProbeStatus::NeedsAuth)),
+            probe_badge(Some(&ProbeStatus::NeedsAuth)),
             Some("needs auth")
         );
 
-        // Not installed: no glyph, informative badge.
-        assert_eq!(probe_glyph(true, Some(&ProbeStatus::NotInstalled)), " ");
+        // Checking: muted dot, no badge.
+        assert_eq!(probe_glyph(Some(&ProbeStatus::Checking)), "·");
         assert_eq!(
-            probe_badge(true, Some(&ProbeStatus::NotInstalled)),
+            probe_glyph_color(Some(&ProbeStatus::Checking), &theme),
+            Some(theme.muted)
+        );
+        assert_eq!(probe_badge(Some(&ProbeStatus::Checking)), None);
+
+        // Not installed: no glyph, informative badge.
+        assert_eq!(probe_glyph(Some(&ProbeStatus::NotInstalled)), " ");
+        assert_eq!(
+            probe_badge(Some(&ProbeStatus::NotInstalled)),
             Some("not installed")
         );
 
         // Failed: muted, "unavailable".
         assert_eq!(
-            probe_badge(true, Some(&ProbeStatus::Failed("boom".to_string()))),
+            probe_badge(Some(&ProbeStatus::Failed("boom".to_string()))),
             Some("unavailable")
         );
 
-        // Unknown (timed out): neutral, no scary badge.
-        assert_eq!(probe_glyph(true, Some(&ProbeStatus::Unknown)), "·");
-        assert_eq!(
-            probe_glyph_color(true, Some(&ProbeStatus::Unknown), &theme),
-            Some(theme.muted)
-        );
-        assert_eq!(probe_badge(true, Some(&ProbeStatus::Unknown)), None);
+        // Unknown (timed out): blank, no scary badge.
+        assert_eq!(probe_glyph(Some(&ProbeStatus::Unknown)), " ");
+        assert_eq!(probe_glyph_color(Some(&ProbeStatus::Unknown), &theme), None);
+        assert_eq!(probe_badge(Some(&ProbeStatus::Unknown)), None);
 
-        // Still checking: muted dot, no badge.
-        assert_eq!(probe_glyph(true, None), "·");
-        assert_eq!(probe_glyph_color(true, None, &theme), Some(theme.muted));
-        assert_eq!(probe_badge(true, None), None);
-
-        // Non-agent rows: blank, no color, no badge.
-        assert_eq!(probe_glyph(false, None), " ");
-        assert_eq!(probe_glyph_color(false, None, &theme), None);
-        assert_eq!(probe_badge(false, Some(&ProbeStatus::NeedsAuth)), None);
+        // Not probed / out of scope: blank, no color, no badge.
+        assert_eq!(probe_glyph(None), " ");
+        assert_eq!(probe_glyph_color(None, &theme), None);
+        assert_eq!(probe_badge(None), None);
     }
 
     #[test]
