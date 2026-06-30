@@ -119,6 +119,9 @@ pub enum Entry {
     Plan(Vec<PlanEntry>),
     /// System-level note (errors, warnings, mode changes).
     System(String),
+    /// Visual separator inserted at local session boundaries so a freshly
+    /// started session is not confused with the previous transcript.
+    SessionBoundary(String),
 }
 
 /// One displayed value for a select-style session config option.
@@ -1112,7 +1115,12 @@ impl AppState {
     pub fn last_agent_message(&self) -> Option<String> {
         self.transcript.iter().rev().find_map(|entry| match entry {
             Entry::AgentMessage(text) => Some(text.clone()),
-            _ => None,
+            Entry::UserPrompt(_)
+            | Entry::AgentThought(_)
+            | Entry::ToolCall(_)
+            | Entry::Plan(_)
+            | Entry::System(_)
+            | Entry::SessionBoundary(_) => None,
         })
     }
 
@@ -1192,6 +1200,11 @@ impl AppState {
 
     pub fn push_system_message(&mut self, text: impl Into<String>) {
         self.transcript.push(Entry::System(text.into()));
+        self.bump_transcript_revision();
+    }
+
+    pub fn push_session_boundary(&mut self, text: impl Into<String>) {
+        self.transcript.push(Entry::SessionBoundary(text.into()));
         self.bump_transcript_revision();
     }
 

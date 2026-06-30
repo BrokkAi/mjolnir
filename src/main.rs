@@ -890,6 +890,7 @@ async fn run_app(
     let mut first_run_setup =
         should_open_first_run_setup(config_exists, &cfg, initial_agent.as_ref());
     let mut pick_agent = should_open_initial_agent_picker(&cfg, initial_agent.as_ref());
+    let mut pending_new_session_boundary = false;
     loop {
         let resume = initial_resume.take();
         let agent = if let Some(agent) = initial_agent.take() {
@@ -919,6 +920,11 @@ async fn run_app(
             })?
         };
 
+        let session_boundary = new_session_boundary_for_agent(
+            std::mem::take(&mut pending_new_session_boundary),
+            &agent,
+        );
+
         let session_result = run_session(
             &agent,
             cwd.clone(),
@@ -934,6 +940,7 @@ async fn run_app(
             cfg.theme,
             cfg.spinner,
             score_store.clone(),
+            session_boundary,
         )
         .await?;
         apply_session_result_to_config(&mut cfg, &session_result);
@@ -941,6 +948,7 @@ async fn run_app(
             UiExitReason::Quit => return Ok(session_result.session_id),
             UiExitReason::NewSession => {
                 pick_agent = true;
+                pending_new_session_boundary = true;
                 continue;
             }
             UiExitReason::ClearSession => {
@@ -1125,6 +1133,14 @@ enum SessionPickerAction {
 struct ResumeTarget {
     session_id: String,
     title: Option<String>,
+}
+
+fn new_session_boundary_for_agent(
+    pending_new_session_boundary: bool,
+    agent: &SelectedAgent,
+) -> Option<String> {
+    pending_new_session_boundary
+        .then(|| format!("new {} session started", agent_header_label(agent)))
 }
 
 fn session_picker_action(
@@ -1454,6 +1470,7 @@ async fn run_session(
     mut theme_kind: theme::TerminalThemeKind,
     mut spinner_style: spinner::SpinnerStyle,
     score_store: scores::ScoreStore,
+    mut session_boundary: Option<String>,
 ) -> Result<RunSessionResult> {
     let mut terminal = SessionTerminal::fresh(mode)?;
 
@@ -1546,6 +1563,7 @@ async fn run_session(
                 theme_kind,
                 spinner_style,
                 score_store: score_store.clone(),
+                session_boundary: session_boundary.take(),
             },
         )
         .await;
@@ -1855,6 +1873,22 @@ mod tests {
             agent_header_label(&agent),
             "'/usr/local/bin/my agent' --flag 'value with space'"
         );
+    }
+
+    #[test]
+    fn new_session_boundary_uses_selected_agent_label_only_when_pending() {
+        let agent = SelectedAgent {
+            source_id: "claude-acp".to_string(),
+            program: PathBuf::from("npx"),
+            args: vec!["-y".to_string(), "@x/claude".to_string()],
+            env: Default::default(),
+        };
+
+        assert_eq!(
+            new_session_boundary_for_agent(true, &agent),
+            Some("new claude-acp session started".to_string())
+        );
+        assert_eq!(new_session_boundary_for_agent(false, &agent), None);
     }
 
     #[test]

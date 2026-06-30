@@ -234,7 +234,9 @@ fn stable_transcript_entry_count(state: &AppState) -> usize {
 
 fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bool {
     match entry {
-        Entry::UserPrompt(_) | Entry::System(_) | Entry::Plan(_) => true,
+        Entry::UserPrompt(_) | Entry::System(_) | Entry::SessionBoundary(_) | Entry::Plan(_) => {
+            true
+        }
         Entry::AgentMessage(_) | Entry::AgentThought(_) => {
             !(state.is_streaming() && idx + 1 == state.transcript.len())
         }
@@ -290,6 +292,7 @@ pub struct UiRunOptions<'a> {
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
     pub score_store: crate::scores::ScoreStore,
+    pub session_boundary: Option<String>,
 }
 
 pub struct UiRunResult {
@@ -310,6 +313,7 @@ struct UiInitialState {
     config_path: Option<PathBuf>,
     theme_kind: TerminalThemeKind,
     spinner_style: SpinnerStyle,
+    session_boundary: Option<String>,
 }
 
 /// Internal result of [`ui_loop`]. `run` unpacks it into the public
@@ -361,6 +365,7 @@ pub async fn run(
             config_path: options.persistence.config_path.map(Path::to_path_buf),
             theme_kind: options.theme_kind,
             spinner_style: options.spinner_style,
+            session_boundary: options.session_boundary,
         },
         options.mode,
     )
@@ -472,6 +477,9 @@ async fn ui_loop(
     state.set_theme(initial.theme_kind);
     state.set_spinner_style(initial.spinner_style);
     state.config_path = initial.config_path;
+    if let Some(boundary) = initial.session_boundary {
+        state.push_session_boundary(boundary);
+    }
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut transcript_sink = TranscriptSink::default();
     let mut inline_resize_reflow = InlineResizeReflow::default();
@@ -3181,6 +3189,7 @@ fn transcript_export_markdown(state: &AppState) -> String {
             Entry::AgentMessage(text) => push_export_text(&mut out, "Agent", text),
             Entry::AgentThought(text) => push_export_text(&mut out, "Thought", text),
             Entry::System(text) => push_export_text(&mut out, "System", text),
+            Entry::SessionBoundary(text) => push_export_text(&mut out, "Session", text),
             Entry::Plan(entries) => {
                 out.push_str("## Plan\n\n");
                 for entry in entries {
@@ -4500,9 +4509,33 @@ fn render_transcript_entry_range(
                 )));
                 out.push(Line::from(""));
             }
+            Entry::SessionBoundary(text) => {
+                out.push(Line::from(""));
+                out.push(session_boundary_line(text, width, theme));
+                out.push(Line::from(""));
+            }
         }
     }
     out
+}
+
+fn session_boundary_line(text: &str, width: u16, theme: TerminalTheme) -> Line<'static> {
+    let label = format!(" {text} ");
+    let label_width = label.width();
+    let total_width = usize::from(width);
+    let remaining = total_width.saturating_sub(label_width);
+    let left = remaining / 2;
+    let right = remaining.saturating_sub(left);
+    Line::from(vec![
+        Span::styled("─".repeat(left), Style::default().fg(theme.muted)),
+        Span::styled(
+            label,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("─".repeat(right), Style::default().fg(theme.muted)),
+    ])
 }
 
 fn push_markdown_block(
@@ -7097,6 +7130,24 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn session_boundary_renders_as_separator_and_is_stable() {
+        let mut state = AppState::new();
+        state.push_session_boundary("new claude-acp session started");
+
+        assert_eq!(stable_transcript_entry_count(&state), 1);
+        let rendered: Vec<String> = render_transcript_lines(&state, 50)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert_eq!(rendered.len(), 3);
+        assert!(rendered[0].is_empty());
+        assert!(rendered[1].contains("new claude-acp session started"));
+        assert!(rendered[1].contains("─"));
+        assert!(rendered[2].is_empty());
     }
 
     fn contains_prompt_activity_frame(text: &str) -> bool {
