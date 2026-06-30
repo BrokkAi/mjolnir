@@ -4316,11 +4316,19 @@ fn render_transcript_entry_range(
             }
             Entry::ToolCall(id) => {
                 if let Some(view) = state.tool_calls.get(id) {
-                    let status_label = tool_status_label(view.status);
                     let color = tool_status_color(view.status, theme);
+                    // Successful calls don't need a status marker — the output
+                    // already implies success. Only annotate non-completed states
+                    // (pending/running/failed/interrupted) so they stand out.
+                    let prefix = match view.status {
+                        agent_client_protocol::schema::v1::ToolCallStatus::Completed => {
+                            "tool ".to_string()
+                        }
+                        _ => format!("tool [{}] ", tool_status_label(view.status)),
+                    };
                     let mut spans = vec![
                         Span::styled(
-                            format!("tool [{}] ", status_label),
+                            prefix,
                             Style::default().fg(color).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
@@ -8240,7 +8248,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(rendered, vec!["tool [done] exec cargo test", "  ok", ""]);
+        assert_eq!(rendered, vec!["tool exec cargo test", "  ok", ""]);
         assert!(sink.pending_lines(&state, 80).is_empty());
     }
 
@@ -9324,11 +9332,7 @@ mod tests {
             .map(line_text)
             .collect();
 
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line == "tool [done] exec run checks")
-        );
+        assert!(rendered.iter().any(|line| line == "tool exec run checks"));
         assert!(rendered.iter().any(|line| line == "  ## Output"));
         assert!(rendered.iter().any(|line| line == "  `ok`"));
         assert!(rendered.iter().any(|line| line == "  diff src/main.rs"));
