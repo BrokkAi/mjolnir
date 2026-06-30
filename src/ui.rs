@@ -4318,7 +4318,7 @@ fn render_transcript_entry_range(
                 if let Some(view) = state.tool_calls.get(id) {
                     let status_label = tool_status_label(view.status);
                     let color = tool_status_color(view.status, theme);
-                    out.push(Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             format!("tool [{}] ", status_label),
                             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -4327,8 +4327,16 @@ fn render_transcript_entry_range(
                             format!("{} ", tool_kind_label(view.kind)),
                             Style::default().fg(theme.muted),
                         ),
-                        Span::raw(view.title.clone()),
-                    ]));
+                    ];
+                    if matches!(
+                        view.kind,
+                        agent_client_protocol::schema::v1::ToolKind::Execute
+                    ) {
+                        spans.extend(highlight_command(&view.title, theme));
+                    } else {
+                        spans.push(Span::raw(view.title.clone()));
+                    }
+                    out.push(Line::from(spans));
                     push_tool_outputs(&mut out, &view.body, width, collapse_limit, theme);
                     out.push(Line::from(""));
                 }
@@ -4866,6 +4874,91 @@ fn truncate_display_line(text: &str, width: usize) -> String {
         return text.chars().take(width).collect();
     }
     text.chars().take(width - 3).collect::<String>() + "..."
+}
+
+/// Returns true if `token` is a shell control/redirection operator that
+/// separates distinct commands (so the next word starts a fresh program).
+fn is_shell_operator(token: &str) -> bool {
+    matches!(
+        token,
+        "|" | "||" | "&&" | "&" | ";" | ">" | ">>" | "<" | "<<" | "2>" | "2>&1" | "|&"
+    )
+}
+
+/// Lightweight syntax highlighting for a displayed shell command.
+///
+/// Tokenizes on whitespace (preserving the original spacing) and colors the
+/// program name, subcommand, flags, and shell operators distinctly. This is
+/// intentionally simple — it does not parse quoting or expansions, it just
+/// improves at-a-glance readability of the command line.
+fn highlight_command(cmd: &str, theme: TerminalTheme) -> Vec<Span<'static>> {
+    let program_style = Style::default()
+        .fg(theme.primary)
+        .add_modifier(Modifier::BOLD);
+    let subcommand_style = Style::default().fg(theme.secondary);
+    let flag_style = Style::default().fg(theme.accent);
+    let operator_style = Style::default().fg(theme.muted);
+    let arg_style = Style::default().fg(theme.text);
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    // Next word token is expected to be a program name (start of the command
+    // or immediately after a shell operator).
+    let mut expect_program = true;
+    let mut subcommand_seen = false;
+
+    let mut rest = cmd;
+    while !rest.is_empty() {
+        // Emit any leading whitespace run verbatim so spacing is preserved.
+        let ws_len: usize = rest
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .map(char::len_utf8)
+            .sum();
+        if ws_len > 0 {
+            spans.push(Span::raw(rest[..ws_len].to_string()));
+            rest = &rest[ws_len..];
+            continue;
+        }
+
+        let tok_len: usize = rest
+            .chars()
+            .take_while(|c| !c.is_whitespace())
+            .map(char::len_utf8)
+            .sum();
+        let token = &rest[..tok_len];
+        rest = &rest[tok_len..];
+
+        let style = if is_shell_operator(token) {
+            expect_program = true;
+            subcommand_seen = false;
+            operator_style
+        } else if expect_program {
+            // Leading `FOO=bar` assignments precede the program; keep waiting.
+            if token.contains('=') && !token.starts_with('-') {
+                arg_style
+            } else {
+                expect_program = false;
+                program_style
+            }
+        } else if token.starts_with('-') {
+            flag_style
+        } else if !subcommand_seen
+            && !token.contains('/')
+            && !token.contains('.')
+            && !token.contains('=')
+        {
+            // First plain word after the program reads as a subcommand
+            // (e.g. `status` in `git status`); paths and `key=value` args do not.
+            subcommand_seen = true;
+            subcommand_style
+        } else {
+            arg_style
+        };
+
+        spans.push(Span::styled(token.to_string(), style));
+    }
+
+    spans
 }
 
 fn tool_kind_label(kind: agent_client_protocol::schema::v1::ToolKind) -> &'static str {
@@ -11139,5 +11232,68 @@ mod tests {
         assert!(!preview.contains('\n'));
         assert!(!preview.contains('\r'));
         assert!(preview.starts_with("line one"));
+    }
+
+    fn command_spans(cmd: &str) -> Vec<(String, Style)> {
+        let theme = TerminalThemeKind::Dark.palette();
+        super::highlight_command(cmd, theme)
+            .into_iter()
+            .map(|s| (s.content.into_owned(), s.style))
+            .collect()
+    }
+
+    fn style_of<'a>(spans: &'a [(String, Style)], token: &str) -> &'a Style {
+        &spans
+            .iter()
+            .find(|(content, _)| content == token)
+            .unwrap_or_else(|| panic!("token {token:?} not found in spans"))
+            .1
+    }
+
+    #[test]
+    fn highlight_command_colors_program_subcommand_and_flags() {
+        let theme = TerminalThemeKind::Dark.palette();
+        let spans = command_spans("git commit --amend -m msg");
+
+        // Reassembling the spans reproduces the original command verbatim.
+        let reassembled: String = spans.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(reassembled, "git commit --amend -m msg");
+
+        let program = style_of(&spans, "git");
+        assert_eq!(program.fg, Some(theme.primary));
+        assert!(program.add_modifier.contains(Modifier::BOLD));
+
+        assert_eq!(style_of(&spans, "commit").fg, Some(theme.secondary));
+        assert_eq!(style_of(&spans, "--amend").fg, Some(theme.accent));
+        assert_eq!(style_of(&spans, "-m").fg, Some(theme.accent));
+        assert_eq!(style_of(&spans, "msg").fg, Some(theme.text));
+    }
+
+    #[test]
+    fn highlight_command_treats_operator_as_new_program() {
+        let theme = TerminalThemeKind::Dark.palette();
+        let spans = command_spans("cat file.txt | grep foo");
+
+        // `cat` is the program; `file.txt` is an arg (has a dot), not a subcommand.
+        assert_eq!(style_of(&spans, "cat").fg, Some(theme.primary));
+        assert_eq!(style_of(&spans, "file.txt").fg, Some(theme.text));
+        assert_eq!(style_of(&spans, "|").fg, Some(theme.muted));
+        // After the pipe, `grep` is treated as a fresh program.
+        let grep = style_of(&spans, "grep");
+        assert_eq!(grep.fg, Some(theme.primary));
+        assert!(grep.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(style_of(&spans, "foo").fg, Some(theme.secondary));
+    }
+
+    #[test]
+    fn highlight_command_skips_leading_env_assignment() {
+        let theme = TerminalThemeKind::Dark.palette();
+        let spans = command_spans("FOO=bar cargo test");
+
+        assert_eq!(style_of(&spans, "FOO=bar").fg, Some(theme.text));
+        let cargo = style_of(&spans, "cargo");
+        assert_eq!(cargo.fg, Some(theme.primary));
+        assert!(cargo.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(style_of(&spans, "test").fg, Some(theme.secondary));
     }
 }
