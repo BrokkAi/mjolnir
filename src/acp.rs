@@ -10,7 +10,9 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, ClientCapabilities,
-    CloseSessionRequest, ContentBlock, CreateTerminalRequest, CreateTerminalResponse, ErrorCode,
+    CloseSessionRequest, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
+    CreateTerminalRequest, CreateTerminalResponse, ElicitationAcceptAction, ElicitationAction,
+    ElicitationCapabilities, ElicitationFormCapabilities, ElicitationUrlCapabilities, ErrorCode,
     FileSystemCapabilities, ForkSessionRequest, ImageContent, Implementation, InitializeRequest,
     KillTerminalRequest, KillTerminalResponse, LoadSessionRequest, NewSessionRequest,
     PermissionOption, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
@@ -34,8 +36,8 @@ use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::event::{
-    LoadSessionResult, PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget,
-    TerminalOutputSnapshot, UiCommand, UiEvent,
+    ElicitationOutcome, ElicitationPrompt, LoadSessionResult, PermissionDecision, PermissionPrompt,
+    PromptImage, SessionConfigTarget, TerminalOutputSnapshot, UiCommand, UiEvent,
 };
 use crate::install;
 use crate::paths::{WorkspaceRoots, normalize_spawn_program, path_is_under_any_root};
@@ -1156,6 +1158,7 @@ where
         fs_max_text_bytes,
     ));
     let perm_ui_tx = ui_tx.clone();
+    let elicit_ui_tx = ui_tx.clone();
     let perm_session_state = session_state.clone();
     let notif_ui_tx = ui_tx.clone();
     let notif_session_state = session_state.clone();
@@ -1224,6 +1227,38 @@ where
                     }
                 };
                 responder.respond(RequestPermissionResponse::new(outcome))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: CreateElicitationRequest, responder, _cx| {
+                // Unlike permissions, do NOT gate on `is_active_session`:
+                // request-scoped elicitations (the `/setup` case) have no
+                // session and would be wrongly dropped. Render whatever
+                // arrives; the UI degrades unsupported shapes to `decline`.
+                let (tx, rx) = oneshot::channel::<ElicitationOutcome>();
+                let prompt = ElicitationPrompt {
+                    message: request.message.clone(),
+                    mode: request.mode.clone(),
+                    responder: tx,
+                };
+                if elicit_ui_tx
+                    .send(UiEvent::ElicitationRequest(prompt))
+                    .is_err()
+                {
+                    return responder
+                        .respond(CreateElicitationResponse::new(ElicitationAction::Cancel));
+                }
+                // `Err(_)` means the UI tore down without answering (responder
+                // dropped); treat it as Cancel, mirroring permission semantics.
+                let action = match rx.await {
+                    Ok(ElicitationOutcome::Accept(content)) => {
+                        ElicitationAction::Accept(ElicitationAcceptAction::new().content(content))
+                    }
+                    Ok(ElicitationOutcome::Decline) => ElicitationAction::Decline,
+                    Ok(ElicitationOutcome::Cancel) | Err(_) => ElicitationAction::Cancel,
+                };
+                responder.respond(CreateElicitationResponse::new(action))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -1320,7 +1355,17 @@ async fn drive_session(
                 .fs(FileSystemCapabilities::new()
                     .read_text_file(true)
                     .write_text_file(true))
-                .terminal(true),
+                .terminal(true)
+                // Advertise both elicitation modes. `form` covers single-select
+                // `/setup` menus and `url` covers OAuth-login steps. v1 fully
+                // implements single-select forms and URL/QR; any richer form
+                // shape degrades to a `decline` response (a valid answer), so
+                // advertising `form` does not over-promise.
+                .elicitation(
+                    ElicitationCapabilities::new()
+                        .form(ElicitationFormCapabilities::new())
+                        .url(ElicitationUrlCapabilities::new()),
+                ),
         );
     let init_resp = match conn.send_request(init_req).block_task().await {
         Ok(r) => r,

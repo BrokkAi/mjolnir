@@ -5,9 +5,11 @@
 //! network I/O. They communicate over two unbounded mpsc channels.
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, PermissionOption, SessionConfigId, SessionConfigOption, SessionConfigValueId,
-    SessionUpdate, StopReason, TerminalExitStatus, ToolCallUpdate, Usage,
+    ContentBlock, ElicitationContentValue, ElicitationMode, PermissionOption, SessionConfigId,
+    SessionConfigOption, SessionConfigValueId, SessionUpdate, StopReason, TerminalExitStatus,
+    ToolCallUpdate, Usage,
 };
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
@@ -51,6 +53,11 @@ pub enum UiEvent {
     /// `session/request_permission` from the agent. The UI is expected to
     /// render a modal and answer through `responder` exactly once.
     PermissionRequest(PermissionPrompt),
+    /// `elicitation/create` from the agent (single-select form or URL). The
+    /// UI renders a modal and answers through `responder` exactly once. Used
+    /// by agent-driven `/setup` menus, which are global (not per-session) and
+    /// therefore must NOT be routed through `session/set_config_option`.
+    ElicitationRequest(ElicitationPrompt),
     /// The runtime sent `session/cancel`; queued permission prompts for the
     /// cancelled turn must answer with `cancelled` and disappear.
     CancelPendingPermissions,
@@ -106,6 +113,29 @@ pub struct PermissionPrompt {
 pub enum PermissionDecision {
     Selected(String),
     Cancelled,
+}
+
+/// A pending elicitation request. The UI owns `responder` until the user
+/// answers (accept/decline) or cancels with Esc. Mirrors `PermissionPrompt`.
+#[derive(Debug)]
+pub struct ElicitationPrompt {
+    /// Human-readable description of what input the agent needs.
+    pub message: String,
+    /// The elicitation mode (single-select form or URL) and its fields.
+    pub mode: ElicitationMode,
+    /// One-shot to the ACP runtime. Dropping the sender is treated as Cancel.
+    pub responder: oneshot::Sender<ElicitationOutcome>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ElicitationOutcome {
+    /// Accept with the user's content (property name -> value). Empty for the
+    /// URL mode, which carries no form fields.
+    Accept(BTreeMap<String, ElicitationContentValue>),
+    /// Explicit user refusal, also used for unsupported form shapes.
+    Decline,
+    /// Esc / dropped responder. Equivalent to the agent observing a cancel.
+    Cancel,
 }
 
 /// The ACP request to send when the user changes a displayed session config

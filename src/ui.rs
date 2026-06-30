@@ -40,10 +40,10 @@ use tokio::time::MissedTickBehavior;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    AppState, ConfigValueChoice, ConnectionState, Entry, MjConfigSection, PastedAttachment,
-    PastedImageAttachment, PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt,
-    StatusKind, StatusMessage, ToolCallOutput, UiExitReason, config_option_choices,
-    config_option_current_value_label,
+    AppState, ConfigValueChoice, ConnectionState, ElicitationView, Entry, MjConfigSection,
+    PastedAttachment, PastedImageAttachment, PendingElicitation, PendingPermission,
+    QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, StatusKind, StatusMessage, ToolCallOutput,
+    UiExitReason, classify_elicitation, config_option_choices, config_option_current_value_label,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -880,15 +880,17 @@ fn should_force_inline_repair_for_event(mode: UiMode, state: &AppState, ev: &CtE
     if matches!(ev, CtEvent::Paste(_))
         && !state.help_overlay
         && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
         && state.config_picker.is_none()
     {
         return true;
     }
 
-    // Permission prompts get a few early repair attempts right after
-    // opening, and a hard repair when the inline viewport is resized
-    // while the modal is open.
-    state.has_pending_permission() && matches!(ev, CtEvent::Resize(_, _))
+    // Permission and elicitation prompts get a few early repair attempts
+    // right after opening, and a hard repair when the inline viewport is
+    // resized while the modal is open.
+    (state.has_pending_permission() || state.has_pending_elicitation())
+        && matches!(ev, CtEvent::Resize(_, _))
 }
 
 fn should_force_inline_repair_for_ui_event(mode: UiMode, ev: &UiEvent) -> bool {
@@ -900,6 +902,7 @@ fn should_force_inline_repair_for_ui_event(mode: UiMode, ev: &UiEvent) -> bool {
             UiEvent::PermissionRequest(_)
                 | UiEvent::CancelPendingPermissions
                 | UiEvent::RemotePermissionDecision { .. }
+                | UiEvent::ElicitationRequest(_)
         )
 }
 
@@ -908,7 +911,9 @@ fn should_attempt_inline_repair_before_flush(
     mode: UiMode,
     state: &AppState,
 ) -> bool {
-    mode == UiMode::InlineChat && force_inline_repair && state.has_pending_permission()
+    mode == UiMode::InlineChat
+        && force_inline_repair
+        && (state.has_pending_permission() || state.has_pending_elicitation())
 }
 
 fn should_attempt_inline_repair(
@@ -922,12 +927,12 @@ fn should_attempt_inline_repair(
         return true;
     }
 
-    // Permission modals already get an immediate forced repair when they
-    // open, when focus returns, on resize, and when the user accepts or
-    // cancels. Avoid a background heartbeat while the modal merely stays
-    // open: the regular diff-based redraw path updates selection changes
-    // without full-screen flashing.
-    if state.has_pending_permission() {
+    // Permission and elicitation modals already get an immediate forced
+    // repair when they open, when focus returns, on resize, and when the
+    // user accepts or cancels. Avoid a background heartbeat while the modal
+    // merely stays open: the regular diff-based redraw path updates
+    // selection changes without full-screen flashing.
+    if state.has_pending_permission() || state.has_pending_elicitation() {
         return false;
     }
 
@@ -946,7 +951,7 @@ fn permission_repair_budget_allows_attempt(state: &AppState) -> bool {
 }
 
 fn inline_repair_interval(state: &AppState) -> Duration {
-    if state.has_pending_permission() {
+    if state.has_pending_permission() || state.has_pending_elicitation() {
         INLINE_PERMISSION_REPAIR_INTERVAL
     } else {
         INLINE_REPAIR_INTERVAL
@@ -957,6 +962,7 @@ fn inline_repair_heartbeat_active(state: &AppState) -> bool {
     state.voice_input_active
         || state.help_overlay
         || state.has_pending_permission()
+        || state.has_pending_elicitation()
         || state.config_picker.is_some()
         || state.mjconfig_menu.is_some()
         || matches!(
@@ -1043,6 +1049,7 @@ fn needs_live_redraw(state: &AppState) -> bool {
     state.voice_input_active
         || state.help_overlay
         || state.has_pending_permission()
+        || state.has_pending_elicitation()
         || state.config_picker.is_some()
         // Keep redrawing so the menu's live spinner previews keep animating.
         || state.mjconfig_menu.is_some()
@@ -1305,7 +1312,10 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
     // long histories are calm to page through. It outranks the compact
     // overlays below but yields to a pending permission prompt, which must
     // stay visible and actionable.
-    if state.transcript_viewer && !state.has_pending_permission() {
+    if state.transcript_viewer
+        && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+    {
         return terminal_size
             .height
             .saturating_sub(1)
@@ -1327,6 +1337,16 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
             width,
             state.theme,
         )
+        .len()
+            + 1
+    } else if let Some(pending) = state.pending_elicitation() {
+        elicitation_view_lines(
+            pending,
+            state.pending_elicitation_count(),
+            width,
+            state.theme,
+        )
+        .lines
         .len()
             + 1
     } else if state.config_picker.is_some() {
@@ -1354,6 +1374,7 @@ fn handle_crossterm(
             // invisibly in the background.
             if state.help_overlay
                 || state.has_pending_permission()
+                || state.has_pending_elicitation()
                 || state.config_picker.is_some()
                 || state.mjconfig_menu.is_some()
             {
@@ -1394,7 +1415,10 @@ fn handle_crossterm(
     // pending permission prompt: that modal is drawn on top of the menu and must
     // stay actionable (the menu can be opened mid-turn, before the prompt
     // arrives). Mirrors the transcript-viewer carve-out below.
-    if state.mjconfig_menu.is_some() && !state.has_pending_permission() {
+    if state.mjconfig_menu.is_some()
+        && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+    {
         return handle_mjconfig_menu_key(state, key.modifiers, key.code, mode);
     }
 
@@ -1406,7 +1430,10 @@ fn handle_crossterm(
     // The full-transcript reader owns the keyboard while open so scrolling
     // keys don't leak into the prompt. A pending permission prompt takes
     // precedence: it suspends the reader (drawn over it) until resolved.
-    if state.transcript_viewer && !state.has_pending_permission() {
+    if state.transcript_viewer
+        && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+    {
         return handle_transcript_viewer_key(state, key.modifiers, key.code, mode);
     }
 
@@ -1473,6 +1500,12 @@ fn handle_crossterm(
     // Permission modal owns the keyboard while it's open.
     if state.has_pending_permission() {
         return handle_permission_key(state, key.code, mode);
+    }
+
+    // Elicitation modal owns the keyboard next. Permission is safety-critical
+    // and wins if both are somehow pending (its check runs first above).
+    if state.has_pending_elicitation() {
+        return handle_elicitation_key(state, key.code, mode);
     }
 
     if state.config_picker.is_some() {
@@ -1730,6 +1763,7 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
     if state.text_selection_mode
         || state.help_overlay
         || state.has_pending_permission()
+        || state.has_pending_elicitation()
         || state.config_picker.is_some()
     {
         return;
@@ -2686,7 +2720,10 @@ fn is_text_selection_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
 }
 
 fn can_toggle_text_selection_mode(state: &AppState) -> bool {
-    !state.help_overlay && !state.has_pending_permission() && state.config_picker.is_none()
+    !state.help_overlay
+        && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+        && state.config_picker.is_none()
 }
 
 #[cfg(target_os = "macos")]
@@ -3405,6 +3442,54 @@ fn handle_permission_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> T
     TerminalRequest::None
 }
 
+/// Keyboard handler for the elicitation modal. Up/Down move the single-select
+/// cursor; PgUp/PgDn/Home/End scroll content taller than the modal (e.g. a URL
+/// QR); Enter accepts (single-select value, empty URL content, or `decline`
+/// for an unsupported shape); Esc dismisses (cancel for supported views,
+/// `decline` for the unsupported info modal).
+fn handle_elicitation_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> TerminalRequest {
+    if !state.has_pending_elicitation() {
+        return TerminalRequest::None;
+    }
+    match code {
+        KeyCode::PageUp => {
+            if let Some(pending) = state.pending_elicitation_mut() {
+                let current = pending.scroll_offset.unwrap_or(0);
+                pending.scroll_offset = Some(current.saturating_sub(5));
+            }
+        }
+        KeyCode::PageDown => {
+            if let Some(pending) = state.pending_elicitation_mut() {
+                let current = pending.scroll_offset.unwrap_or(0);
+                pending.scroll_offset = Some(current.saturating_add(5));
+            }
+        }
+        KeyCode::Home => {
+            if let Some(pending) = state.pending_elicitation_mut() {
+                pending.scroll_offset = Some(0);
+            }
+        }
+        KeyCode::End => {
+            if let Some(pending) = state.pending_elicitation_mut() {
+                pending.scroll_offset = Some(usize::MAX);
+            }
+        }
+        // No-op for URL / unsupported views (they have no selectable options).
+        KeyCode::Up | KeyCode::Char('k') => state.elicitation_select_move(-1),
+        KeyCode::Down | KeyCode::Char('j') => state.elicitation_select_move(1),
+        KeyCode::Enter => {
+            state.resolve_elicitation_accept();
+            return inline_repair_request(mode);
+        }
+        KeyCode::Esc => {
+            state.resolve_elicitation_dismiss();
+            return inline_repair_request(mode);
+        }
+        _ => {}
+    }
+    TerminalRequest::None
+}
+
 fn inline_repair_request(mode: UiMode) -> TerminalRequest {
     if mode == UiMode::InlineChat {
         TerminalRequest::ForceInlineRepair
@@ -3764,6 +3849,16 @@ fn draw(
             state.pending_permission_count(),
             state.theme,
         );
+    } else if let Some(pending) = state.pending_elicitation() {
+        // Drawn only when no permission is pending so the safety-critical
+        // permission modal always renders on top.
+        draw_elicitation_modal(
+            f,
+            f.area(),
+            pending,
+            state.pending_elicitation_count(),
+            state.theme,
+        );
     }
 }
 
@@ -3774,6 +3869,17 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
             f.area(),
             pending,
             state.pending_permission_count(),
+            state.theme,
+        );
+        return;
+    }
+
+    if let Some(pending) = state.pending_elicitation() {
+        draw_inline_elicitation_view(
+            f,
+            f.area(),
+            pending,
+            state.pending_elicitation_count(),
             state.theme,
         );
         return;
@@ -3812,7 +3918,10 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     draw_input(f, chunks[2], state, UiMode::InlineChat);
     draw_config_shortcuts_row(f, chunks[3], state);
 
-    if state.autocomplete.visible && !state.has_pending_permission() {
+    if state.autocomplete.visible
+        && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+    {
         draw_inline_autocomplete_popover(f, f.area(), state);
     }
 
@@ -5643,6 +5752,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
 
     if !state.runtime_closed
         && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
         && state.config_picker.is_none()
         && !state.help_overlay
         && state.mjconfig_menu.is_none()
@@ -5905,6 +6015,291 @@ fn selected_permission_content_row(pending: &PendingPermission, width: u16) -> u
         .sum::<usize>();
 
     1 + detail_rows + 1 + option_rows_before
+}
+
+/// Rendered elicitation modal content plus the row of the selected option, so
+/// the windowing logic can auto-scroll to keep it visible.
+struct ElicitationContent {
+    lines: Vec<Line<'static>>,
+    /// Row index of the selected single-select option. Points at the heading
+    /// (0) for URL / unsupported views, which have no selection to follow.
+    selected_row: usize,
+}
+
+/// Build the modal's content lines. Single-select renders the agent message
+/// plus a selectable option list; URL renders the link text and a QR code;
+/// unsupported renders an informational notice.
+fn elicitation_view_lines(
+    pending: &PendingElicitation,
+    queue_len: usize,
+    width: u16,
+    theme: TerminalTheme,
+) -> ElicitationContent {
+    let view = classify_elicitation(&pending.prompt);
+    let heading = if queue_len > 1 {
+        format!("setup request (1 of {queue_len})")
+    } else {
+        "setup request".to_string()
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        heading,
+        Style::default()
+            .fg(theme.permission)
+            .add_modifier(Modifier::BOLD),
+    ))];
+
+    // The agent's human-readable prompt message.
+    lines.extend(
+        wrap_text_to_width(&pending.prompt.message, width)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(theme.text)))),
+    );
+
+    let mut selected_row = 0;
+    match view {
+        ElicitationView::SingleSelect { title, options, .. } => {
+            if let Some(title) = title.filter(|t| !t.is_empty()) {
+                lines.push(Line::from(""));
+                lines.extend(
+                    wrap_text_to_width(&title, width).into_iter().map(|line| {
+                        Line::from(Span::styled(line, Style::default().fg(theme.muted)))
+                    }),
+                );
+            }
+            lines.push(Line::from(""));
+            let selected = pending.selected.min(options.len().saturating_sub(1));
+            for (i, opt) in options.iter().enumerate() {
+                if i == selected {
+                    selected_row = lines.len();
+                }
+                let marker = if i == selected { "> " } else { "  " };
+                let style = if i == selected {
+                    Style::default()
+                        .fg(theme.selection_fg)
+                        .bg(theme.permission)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.text)
+                };
+                for line in wrap_prefixed_text_to_width(&opt.title, width, marker, "  ") {
+                    let line = if i == selected {
+                        pad_text_to_width(line, width)
+                    } else {
+                        line
+                    };
+                    lines.push(Line::from(Span::styled(line, style)));
+                }
+            }
+        }
+        ElicitationView::Url { url } => {
+            lines.push(Line::from(""));
+            lines.extend(
+                wrap_text_to_width(&url, width)
+                    .into_iter()
+                    .map(|line| Line::from(Span::styled(line, Style::default().fg(theme.accent)))),
+            );
+            lines.push(Line::from(""));
+            match crate::qr::render_qr(&url) {
+                Ok(qr) => lines.extend(qr.lines().map(|line| {
+                    Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(theme.text),
+                    ))
+                })),
+                Err(_) => lines.push(Line::from(Span::styled(
+                    "(could not render QR code; use the URL above)".to_string(),
+                    Style::default().fg(theme.muted),
+                ))),
+            }
+        }
+        ElicitationView::Unsupported => {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "This setup step isn't supported in this build.".to_string(),
+                Style::default().fg(theme.warning),
+            )));
+        }
+    }
+
+    ElicitationContent {
+        lines,
+        selected_row,
+    }
+}
+
+fn elicitation_footer_text(view: &ElicitationView) -> &'static str {
+    match view {
+        ElicitationView::SingleSelect { .. } => "Up/Down choose | Enter confirm | Esc cancel",
+        ElicitationView::Url { .. } => "Enter acknowledge | PgUp/PgDn scroll | Esc cancel",
+        ElicitationView::Unsupported => "Enter / Esc to skip",
+    }
+}
+
+/// Natural (unwrapped) content width for sizing the modal: the widest of the
+/// message, the option labels / property title, and (for URL) the QR width.
+fn elicitation_content_width_hint(view: &ElicitationView, message: &str) -> usize {
+    let message_width = message.lines().map(|line| line.width()).max().unwrap_or(0);
+    match view {
+        ElicitationView::SingleSelect { title, options, .. } => {
+            let option_width = options
+                .iter()
+                .map(|opt| format!("> {}", opt.title).width())
+                .max()
+                .unwrap_or(0);
+            let title_width = title.as_deref().map(|t| t.width()).unwrap_or(0);
+            message_width.max(option_width).max(title_width)
+        }
+        ElicitationView::Url { url } => {
+            let qr_width = crate::qr::render_qr(url)
+                .ok()
+                .and_then(|qr| qr.lines().map(|line| line.chars().count()).max())
+                .unwrap_or(0);
+            message_width.max(url.width()).max(qr_width)
+        }
+        ElicitationView::Unsupported => {
+            message_width.max("This setup step isn't supported in this build.".width())
+        }
+    }
+}
+
+/// Window `content` to `visible_rows`, honoring a manual `scroll_offset` or
+/// auto-scrolling to keep the selected option visible. Mirrors
+/// [`visible_permission_content_lines`].
+fn elicitation_visible_window(
+    content: &ElicitationContent,
+    scroll_offset: Option<usize>,
+    visible_rows: u16,
+) -> Vec<Line<'static>> {
+    let visible_rows = usize::from(visible_rows);
+    if visible_rows == 0 {
+        return Vec::new();
+    }
+    let max_start = content.lines.len().saturating_sub(visible_rows);
+    let auto_start = content
+        .selected_row
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(max_start);
+    let start = scroll_offset.unwrap_or(auto_start).min(max_start);
+    content
+        .lines
+        .iter()
+        .skip(start)
+        .take(visible_rows)
+        .cloned()
+        .collect()
+}
+
+fn draw_elicitation_modal(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    pending: &PendingElicitation,
+    queue_len: usize,
+    theme: TerminalTheme,
+) {
+    const HORIZONTAL_PADDING: u16 = 2;
+    const VERTICAL_PADDING: u16 = 1;
+
+    let view = classify_elicitation(&pending.prompt);
+    let footer_text = elicitation_footer_text(&view);
+
+    let max_width = area.width.saturating_sub(4);
+    if max_width < 16 || area.height == 0 {
+        return;
+    }
+    let max_content_width = max_width.saturating_sub(2 + HORIZONTAL_PADDING * 2);
+    if max_content_width == 0 {
+        return;
+    }
+
+    let desired_content_width = elicitation_content_width_hint(&view, &pending.prompt.message)
+        .max(footer_text.width())
+        .max(40)
+        .min(max_content_width as usize) as u16;
+    let width = desired_content_width
+        .saturating_add(2)
+        .saturating_add(HORIZONTAL_PADDING * 2)
+        .min(max_width);
+
+    let content_lines = elicitation_view_lines(pending, queue_len, desired_content_width, theme);
+    let view_rows = content_lines.lines.len().min(u16::MAX as usize) as u16;
+
+    let max_height = area.height.saturating_sub(2);
+    let height = view_rows
+        .saturating_add(3)
+        .saturating_add(VERTICAL_PADDING * 2)
+        .min(max_height);
+    if height < 7 {
+        return;
+    }
+
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let rect = Rect::new(area.x + x, area.y + y, width, height);
+
+    f.render_widget(Clear, rect);
+    let title = if queue_len > 1 {
+        format!(" setup request (1 of {queue_len}) ")
+    } else {
+        " setup request ".to_string()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(Style::default().fg(theme.permission));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let content = Rect::new(
+        inner.x.saturating_add(HORIZONTAL_PADDING),
+        inner.y.saturating_add(VERTICAL_PADDING),
+        inner.width.saturating_sub(HORIZONTAL_PADDING * 2),
+        inner.height.saturating_sub(VERTICAL_PADDING * 2),
+    );
+    if content.width == 0 || content.height < 3 {
+        return;
+    }
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(content);
+
+    let visible_lines =
+        elicitation_visible_window(&content_lines, pending.scroll_offset, layout[0].height);
+    f.render_widget(Paragraph::new(visible_lines), layout[0]);
+
+    let footer = Paragraph::new(footer_text).style(Style::default().fg(theme.muted));
+    f.render_widget(footer, layout[1]);
+}
+
+fn draw_inline_elicitation_view(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    pending: &PendingElicitation,
+    queue_len: usize,
+    theme: TerminalTheme,
+) {
+    f.render_widget(Clear, area);
+    let content = inline_content_rect(area);
+    if content.width == 0 || content.height < 4 {
+        return;
+    }
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(content);
+
+    let view = classify_elicitation(&pending.prompt);
+    let content_lines = elicitation_view_lines(pending, queue_len, content.width, theme);
+    let visible_lines =
+        elicitation_visible_window(&content_lines, pending.scroll_offset, layout[0].height);
+    f.render_widget(Paragraph::new(visible_lines), layout[0]);
+
+    f.render_widget(
+        Paragraph::new(elicitation_footer_text(&view)).style(Style::default().fg(theme.muted)),
+        layout[1],
+    );
 }
 
 fn wrap_prefixed_text_to_width(
@@ -6491,13 +6886,16 @@ fn model_choice_score(
 #[cfg(test)]
 mod tests {
     use crate::app::StatusKind;
-    use crate::event::SessionConfigTarget;
+    use crate::event::{ElicitationPrompt, SessionConfigTarget};
 
     use super::*;
     use agent_client_protocol::schema::v1::{
-        AvailableCommand, ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind,
-        SessionConfigOption, SessionConfigSelectOption, SessionConfigValueId, SessionUpdate,
-        StopReason, TextContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        AvailableCommand, ContentBlock, ContentChunk, ElicitationFormMode, ElicitationId,
+        ElicitationMode, ElicitationSchema, ElicitationSessionScope, ElicitationUrlMode,
+        EnumOption, PermissionOption, PermissionOptionKind, SessionConfigOption,
+        SessionConfigSelectOption, SessionConfigValueId, SessionUpdate, StopReason,
+        StringPropertySchema, TextContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+        ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::{Backend, TestBackend};
@@ -6802,6 +7200,168 @@ mod tests {
             opened_at: Instant::now(),
             repair_attempts: 0,
         }
+    }
+
+    fn single_select_elicitation_prompt() -> ElicitationPrompt {
+        let (responder, _rx) = tokio::sync::oneshot::channel();
+        let schema = ElicitationSchema::new().title("Choose a model").property(
+            "model",
+            StringPropertySchema::new().one_of(vec![
+                EnumOption::new("fast", "Fast model"),
+                EnumOption::new("smart", "Smart model"),
+            ]),
+            true,
+        );
+        ElicitationPrompt {
+            message: "Pick a model".to_string(),
+            mode: ElicitationMode::from(ElicitationFormMode::new(
+                ElicitationSessionScope::new("setup".to_string()),
+                schema,
+            )),
+            responder,
+        }
+    }
+
+    fn url_elicitation_prompt() -> ElicitationPrompt {
+        let (responder, _rx) = tokio::sync::oneshot::channel();
+        ElicitationPrompt {
+            message: "Open this URL to sign in".to_string(),
+            mode: ElicitationMode::from(ElicitationUrlMode::new(
+                ElicitationSessionScope::new("setup".to_string()),
+                ElicitationId::new("login-1"),
+                "https://example.com/oauth/authorize?client_id=abc",
+            )),
+            responder,
+        }
+    }
+
+    #[test]
+    fn elicitation_modal_renders_single_select_options() {
+        let pending = PendingElicitation {
+            prompt: single_select_elicitation_prompt(),
+            selected: 0,
+            scroll_offset: None,
+        };
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| {
+                draw_elicitation_modal(
+                    frame,
+                    frame.area(),
+                    &pending,
+                    1,
+                    TerminalThemeKind::default().palette(),
+                )
+            })
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        for expected in ["setup request", "Pick a model", "Fast model", "Smart model"] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?}; rendered:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn elicitation_url_modal_renders_qr_without_panicking() {
+        // Acceptance: URL + QR renders without panicking for an OAuth URL.
+        let pending = PendingElicitation {
+            prompt: url_elicitation_prompt(),
+            selected: 0,
+            scroll_offset: None,
+        };
+        let backend = TestBackend::new(100, 60);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| {
+                draw_elicitation_modal(
+                    frame,
+                    frame.area(),
+                    &pending,
+                    1,
+                    TerminalThemeKind::default().palette(),
+                )
+            })
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("setup request"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("example.com/oauth"),
+            "URL must be shown; rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains('█') || rendered.contains('▀') || rendered.contains('▄'),
+            "QR should render as half-block glyphs; rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn inline_chat_replaces_content_with_elicitation_view() {
+        let mut state = AppState::new();
+        state.agent_label = "anvil".to_string();
+        state.record_user_prompt("hello".to_string());
+        state.apply_event(UiEvent::ElicitationRequest(
+            single_select_elicitation_prompt(),
+        ));
+        let backend = TestBackend::new(100, INLINE_CHAT_HEIGHT);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("setup request"), "rendered:\n{rendered}");
+        assert!(
+            !rendered.contains("agent anvil"),
+            "elicitation view must replace the chat header; rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn inline_elicitation_view_handles_keyboard_selection() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::ElicitationRequest(
+            single_select_elicitation_prompt(),
+        ));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+
+        let pending = state.pending_elicitation().expect("pending elicitation");
+        assert_eq!(pending.selected, 1);
+    }
+
+    #[test]
+    fn permission_modal_wins_keyboard_over_elicitation() {
+        // Both modals pending: the safety-critical permission modal must own
+        // the keyboard. Down should move the permission cursor, not elicitation.
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::ElicitationRequest(
+            single_select_elicitation_prompt(),
+        ));
+        let permission = permission_pending_with_options("run cmd", &["Allow", "Reject"], 0);
+        state.apply_event(UiEvent::PermissionRequest(permission.prompt));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+
+        assert_eq!(
+            state.pending_permission().expect("permission").selected,
+            1,
+            "permission cursor should move"
+        );
+        assert_eq!(
+            state.pending_elicitation().expect("elicitation").selected,
+            0,
+            "elicitation cursor must stay put while permission owns keys"
+        );
     }
 
     #[test]

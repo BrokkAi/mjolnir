@@ -48,7 +48,8 @@ use crate::app::{
 };
 use crate::config;
 use crate::event::{
-    PermissionDecision, PromptImage, SessionConfigTarget, UiCommand, UiEvent, content_block_text,
+    ElicitationOutcome, PermissionDecision, PromptImage, SessionConfigTarget, UiCommand, UiEvent,
+    content_block_text,
 };
 use crate::labels::{
     permission_option_kind_label, stop_reason_label, tool_kind_label, tool_status_label,
@@ -384,6 +385,12 @@ impl ConnState {
             }
             UiEvent::Warning(message) => self.push(ProgressItem::Warning { message }),
             UiEvent::Info(message) => self.push(ProgressItem::Info { message }),
+            UiEvent::ElicitationRequest(prompt) => {
+                // The MCP bridge exposes mj's ACP-client surface as tools and
+                // cannot render an interactive form/URL modal. Decline so the
+                // agent gets a valid response rather than blocking.
+                let _ = prompt.responder.send(ElicitationOutcome::Decline);
+            }
             // The MCP server does not host an embedded terminal view and never
             // injects remote permission decisions of its own.
             UiEvent::TerminalOutput(_) | UiEvent::RemotePermissionDecision { .. } => {}

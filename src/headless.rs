@@ -16,7 +16,9 @@ use tokio::sync::mpsc;
 
 use crate::acp::{self, AcpRuntimeConfig};
 use crate::config;
-use crate::event::{PermissionDecision, UiCommand, UiEvent, content_block_text};
+use crate::event::{
+    ElicitationOutcome, PermissionDecision, UiCommand, UiEvent, content_block_text,
+};
 use crate::labels::{stop_reason_label, tool_kind_label, tool_status_label};
 use crate::remote;
 
@@ -256,6 +258,12 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             // Headless runs never receive remote decisions (no UI event
             // channel is registered with the tracker).
             UiEvent::RemotePermissionDecision { .. } => {}
+            UiEvent::ElicitationRequest(prompt) => {
+                // Headless runs have no interactive modal to render a form or
+                // URL, so we cannot collect the user's answer. Decline so the
+                // agent gets a valid response instead of blocking on input.
+                let _ = prompt.responder.send(ElicitationOutcome::Decline);
+            }
         }
     }
 

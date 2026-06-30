@@ -12,7 +12,7 @@ name = "mj"
 path = "src/main.rs"
 
 [dependencies]
-agent-client-protocol = { version = "1", features = ["unstable_session_fork", "unstable_end_turn_token_usage"] }
+agent-client-protocol = { version = "1", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation"] }
 anyhow = "1"
 # Read the official LMArena leaderboard parquet (model strength scores). Pinned
 # to the same major as `parquet` below. Apache-2.0 (GPL-3.0-compatible).

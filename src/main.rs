@@ -21,6 +21,7 @@ mod palette;
 mod paths;
 mod picker;
 mod probe;
+mod qr;
 mod registry;
 mod remote;
 mod scores;

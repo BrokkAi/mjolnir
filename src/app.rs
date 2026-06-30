@@ -5,12 +5,13 @@
 //! ACP event is folded in through `apply_event`; ratatui then renders from
 //! this state.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{
-    AvailableCommand, Diff, Plan, PlanEntry, SessionConfigKind, SessionConfigOption,
+    AvailableCommand, Diff, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
+    EnumOption, Plan, PlanEntry, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOptions,
     SessionConfigValueId, SessionUpdate, StopReason, TerminalExitStatus, ToolCall, ToolCallContent,
     ToolCallStatus, ToolCallUpdate, ToolKind, Usage, UsageUpdate,
@@ -20,8 +21,8 @@ use chrono::{DateTime, FixedOffset, Local, TimeZone};
 use crate::clipboard::ClipboardLease;
 
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, TerminalOutputSnapshot,
-    UiEvent, content_block_text,
+    ElicitationOutcome, ElicitationPrompt, PermissionDecision, PermissionPrompt, PromptImage,
+    SessionConfigTarget, TerminalOutputSnapshot, UiEvent, content_block_text,
 };
 use crate::palette::TerminalTheme;
 use crate::spinner::SpinnerStyle;
@@ -558,6 +559,12 @@ pub struct AppState {
     /// `has_pending_permission` / `pending_permission` /
     /// `take_pending_permission` / `cancel_all_pending_permissions`.
     permission_queue: VecDeque<PendingPermission>,
+    /// FIFO queue of elicitation prompts (`/setup` menus / URL steps), with
+    /// the same anti-drop invariant as `permission_queue`: a second request
+    /// queues behind the first rather than overwriting (and silently
+    /// cancelling) its responder. Private; accessed via the
+    /// `*_pending_elicitation*` helpers.
+    elicitation_queue: VecDeque<PendingElicitation>,
     pub config_picker: Option<ConfigPicker>,
     /// Scroll offset measured in rendered lines from the bottom of the
     /// transcript. `0` keeps the view pinned to the newest line.
@@ -639,6 +646,77 @@ pub struct PendingPermission {
     pub scroll_offset: Option<usize>,
     pub opened_at: Instant,
     pub repair_attempts: usize,
+}
+
+#[derive(Debug)]
+pub struct PendingElicitation {
+    pub prompt: ElicitationPrompt,
+    /// Cursor into the single-select option list. Ignored by URL/unsupported
+    /// views, which have no selectable options.
+    pub selected: usize,
+    /// Manual scroll position for content taller than the modal (e.g. a URL
+    /// QR code). `None` auto-scrolls to keep the selected option visible.
+    pub scroll_offset: Option<usize>,
+}
+
+/// How a pending elicitation should be rendered and resolved, derived once
+/// from its mode + schema so the renderer and the key handler agree on the
+/// interpretation. Owned data keeps both call sites borrow-free.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ElicitationView {
+    /// Single-select form: exactly one property, a `StringPropertySchema`
+    /// with a non-empty `oneOf`. Accept maps `{ property => String(value) }`.
+    SingleSelect {
+        property_name: String,
+        title: Option<String>,
+        options: Vec<EnumOption>,
+    },
+    /// URL/QR step (e.g. OAuth login). Accept carries no content.
+    Url { url: String },
+    /// Any shape v1 cannot render (multi-field forms, free-text/number/
+    /// boolean/multi-select fields, an enum with no options). The modal shows
+    /// an informational message and resolves to `decline` on dismiss.
+    Unsupported,
+}
+
+/// Classify an elicitation prompt into the renderable/resolvable view. Never
+/// panics on an unexpected schema: anything outside the v1 single-select /
+/// URL subset becomes [`ElicitationView::Unsupported`].
+pub fn classify_elicitation(prompt: &ElicitationPrompt) -> ElicitationView {
+    match &prompt.mode {
+        ElicitationMode::Url(url_mode) => ElicitationView::Url {
+            url: url_mode.url.clone(),
+        },
+        ElicitationMode::Form(form) => {
+            let schema = &form.requested_schema;
+            // v1 supports exactly one single-select property.
+            if schema.properties.len() != 1 {
+                return ElicitationView::Unsupported;
+            }
+            let Some((property_name, property)) = schema.properties.iter().next() else {
+                return ElicitationView::Unsupported;
+            };
+            match property {
+                ElicitationPropertySchema::String(string_schema) => {
+                    match string_schema.one_of.as_ref() {
+                        Some(options) if !options.is_empty() => ElicitationView::SingleSelect {
+                            property_name: property_name.clone(),
+                            // Prefer the per-property title, falling back to the
+                            // schema-level title for the modal heading.
+                            title: string_schema.title.clone().or_else(|| schema.title.clone()),
+                            options: options.clone(),
+                        },
+                        // A string field without `oneOf` is free text, which v1
+                        // does not render; `enum` (untitled) is also out of scope.
+                        _ => ElicitationView::Unsupported,
+                    }
+                }
+                _ => ElicitationView::Unsupported,
+            }
+        }
+        // `ElicitationMode` is `#[non_exhaustive]`; future modes degrade safely.
+        _ => ElicitationView::Unsupported,
+    }
 }
 
 /// A text attachment shown as a compact badge in the input box.
@@ -744,6 +822,7 @@ impl AppState {
             history_cursor: None,
             history_saved_input: String::new(),
             permission_queue: VecDeque::new(),
+            elicitation_queue: VecDeque::new(),
             config_picker: None,
             scroll_offset: 0,
             expand_tool_outputs: false,
@@ -1116,6 +1195,7 @@ impl AppState {
         self.runtime_closed = true;
         self.finish_turn_timer();
         self.cancel_all_pending_permissions();
+        self.cancel_all_pending_elicitations();
         self.config_picker = None;
         self.autocomplete = Autocomplete::default();
         self.clear_queued_prompts();
@@ -1229,6 +1309,115 @@ impl AppState {
         );
         self.update_autocomplete();
         true
+    }
+
+    /// The elicitation prompt the UI should currently render, if any.
+    pub fn pending_elicitation(&self) -> Option<&PendingElicitation> {
+        self.elicitation_queue.front()
+    }
+
+    /// Mutable accessor for the front elicitation (used to move the
+    /// single-select cursor without removing it from the queue).
+    pub fn pending_elicitation_mut(&mut self) -> Option<&mut PendingElicitation> {
+        self.elicitation_queue.front_mut()
+    }
+
+    /// True when there is at least one queued elicitation prompt.
+    pub fn has_pending_elicitation(&self) -> bool {
+        !self.elicitation_queue.is_empty()
+    }
+
+    /// Number of elicitation prompts queued, including the displayed one.
+    pub fn pending_elicitation_count(&self) -> usize {
+        self.elicitation_queue.len()
+    }
+
+    /// The renderable/resolvable view for the front elicitation, if any.
+    pub fn elicitation_view(&self) -> Option<ElicitationView> {
+        self.pending_elicitation()
+            .map(|pending| classify_elicitation(&pending.prompt))
+    }
+
+    /// Pop the front elicitation off the queue. The caller must answer the
+    /// responder before dropping it (a drop maps to Cancel on the runtime side).
+    fn take_pending_elicitation(&mut self) -> Option<PendingElicitation> {
+        self.elicitation_queue.pop_front()
+    }
+
+    /// Drain every queued elicitation and send `Cancel` through each
+    /// responder. Used during fatal shutdown / runtime close, mirroring
+    /// `cancel_all_pending_permissions`.
+    pub fn cancel_all_pending_elicitations(&mut self) {
+        while let Some(pending) = self.elicitation_queue.pop_front() {
+            let _ = pending.prompt.responder.send(ElicitationOutcome::Cancel);
+        }
+    }
+
+    /// Move the single-select cursor by `delta`, wrapping within the option
+    /// list. No-op when the front view is not a single-select.
+    pub fn elicitation_select_move(&mut self, delta: i32) {
+        let Some(ElicitationView::SingleSelect { options, .. }) = self.elicitation_view() else {
+            return;
+        };
+        let len = options.len();
+        if len == 0 {
+            return;
+        }
+        if let Some(pending) = self.elicitation_queue.front_mut() {
+            let cur = pending.selected.min(len - 1) as i32;
+            pending.selected = (cur + delta).rem_euclid(len as i32) as usize;
+            // Resume auto-scroll so the newly selected option stays visible.
+            pending.scroll_offset = None;
+        }
+    }
+
+    /// Resolve the front elicitation as an Accept (Enter). The content map is
+    /// built from the view: single-select sends the chosen value, URL sends
+    /// empty content, and an unsupported shape degrades to Decline.
+    pub fn resolve_elicitation_accept(&mut self) {
+        let Some(pending) = self.take_pending_elicitation() else {
+            return;
+        };
+        let outcome = match classify_elicitation(&pending.prompt) {
+            ElicitationView::SingleSelect {
+                property_name,
+                options,
+                ..
+            } => {
+                // `options` is non-empty (classify guarantees it); clamp the
+                // cursor defensively before indexing.
+                let index = pending.selected.min(options.len().saturating_sub(1));
+                match options.get(index) {
+                    Some(option) => {
+                        let mut content = BTreeMap::new();
+                        content.insert(
+                            property_name,
+                            ElicitationContentValue::String(option.value.clone()),
+                        );
+                        ElicitationOutcome::Accept(content)
+                    }
+                    None => ElicitationOutcome::Cancel,
+                }
+            }
+            ElicitationView::Url { .. } => ElicitationOutcome::Accept(BTreeMap::new()),
+            ElicitationView::Unsupported => ElicitationOutcome::Decline,
+        };
+        let _ = pending.prompt.responder.send(outcome);
+        self.update_autocomplete();
+    }
+
+    /// Resolve the front elicitation as a dismiss (Esc). Supported views send
+    /// Cancel; the unsupported-shape info modal sends Decline.
+    pub fn resolve_elicitation_dismiss(&mut self) {
+        let Some(pending) = self.take_pending_elicitation() else {
+            return;
+        };
+        let outcome = match classify_elicitation(&pending.prompt) {
+            ElicitationView::Unsupported => ElicitationOutcome::Decline,
+            _ => ElicitationOutcome::Cancel,
+        };
+        let _ = pending.prompt.responder.send(outcome);
+        self.update_autocomplete();
     }
 
     /// Push a user prompt into the transcript immediately, before the
@@ -1556,6 +1745,19 @@ impl AppState {
             UiEvent::CancelPendingPermissions => {
                 self.cancel_all_pending_permissions();
                 self.mark_unfinished_tool_calls_failed("tool call cancelled");
+                self.update_autocomplete();
+            }
+            UiEvent::ElicitationRequest(prompt) => {
+                // Append to the queue rather than replacing the front prompt:
+                // overwriting would drop the prior oneshot responder, which the
+                // agent reads as a silent cancel. Render unconditionally (no
+                // session gating) -- `/setup` elicitations are request-scoped.
+                self.help_overlay = false;
+                self.elicitation_queue.push_back(PendingElicitation {
+                    prompt,
+                    selected: 0,
+                    scroll_offset: None,
+                });
                 self.update_autocomplete();
             }
             UiEvent::RemotePermissionDecision {
@@ -1988,10 +2190,13 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
         AudioContent, AvailableCommand, AvailableCommandsUpdate, ConfigOptionUpdate, Content,
-        ContentBlock, ContentChunk, Cost, Diff, EmbeddedResource, EmbeddedResourceResource,
-        ImageContent, PermissionOption, PermissionOptionKind, ResourceLink, SessionConfigOption,
-        SessionConfigOptionCategory, SessionConfigSelectOption, StopReason, Terminal, TextContent,
-        TextResourceContents, Usage, UsageUpdate,
+        ContentBlock, ContentChunk, Cost, CreateElicitationRequest, CreateElicitationResponse,
+        Diff, ElicitationAcceptAction, ElicitationAction, ElicitationFormMode, ElicitationId,
+        ElicitationSchema, ElicitationSessionScope, ElicitationUrlMode, EmbeddedResource,
+        EmbeddedResourceResource, ImageContent, PermissionOption, PermissionOptionKind,
+        ResourceLink, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        StopReason, StringPropertySchema, Terminal, TextContent, TextResourceContents, Usage,
+        UsageUpdate,
     };
 
     fn text_chunk(s: &str) -> ContentChunk {
@@ -3319,6 +3524,275 @@ mod tests {
             responder,
         };
         (prompt, rx)
+    }
+
+    fn elicitation_select_schema() -> ElicitationSchema {
+        ElicitationSchema::new().title("Choose a model").property(
+            "model",
+            StringPropertySchema::new().title("Model").one_of(vec![
+                EnumOption::new("fast", "Fast"),
+                EnumOption::new("smart", "Smart"),
+            ]),
+            true,
+        )
+    }
+
+    /// Build a single-select elicitation prompt and keep its responder
+    /// receiver so the test can assert what outcome was sent back.
+    fn elicitation_prompt() -> (
+        ElicitationPrompt,
+        tokio::sync::oneshot::Receiver<ElicitationOutcome>,
+    ) {
+        let (responder, rx) = tokio::sync::oneshot::channel();
+        let mode = ElicitationMode::from(ElicitationFormMode::new(
+            ElicitationSessionScope::new("setup-session".to_string()),
+            elicitation_select_schema(),
+        ));
+        let prompt = ElicitationPrompt {
+            message: "Pick a model".to_string(),
+            mode,
+            responder,
+        };
+        (prompt, rx)
+    }
+
+    fn url_elicitation_prompt() -> (
+        ElicitationPrompt,
+        tokio::sync::oneshot::Receiver<ElicitationOutcome>,
+    ) {
+        let (responder, rx) = tokio::sync::oneshot::channel();
+        let mode = ElicitationMode::from(ElicitationUrlMode::new(
+            ElicitationSessionScope::new("setup-session".to_string()),
+            ElicitationId::new("login-1"),
+            "https://example.com/oauth/authorize?client_id=abc&scope=all",
+        ));
+        let prompt = ElicitationPrompt {
+            message: "Open this URL to sign in".to_string(),
+            mode,
+            responder,
+        };
+        (prompt, rx)
+    }
+
+    fn two_property_elicitation_prompt() -> (
+        ElicitationPrompt,
+        tokio::sync::oneshot::Receiver<ElicitationOutcome>,
+    ) {
+        let (responder, rx) = tokio::sync::oneshot::channel();
+        let schema = ElicitationSchema::new()
+            .property(
+                "model",
+                StringPropertySchema::new().one_of(vec![EnumOption::new("a", "A")]),
+                true,
+            )
+            .property(
+                "region",
+                StringPropertySchema::new().one_of(vec![EnumOption::new("us", "US")]),
+                true,
+            );
+        let mode = ElicitationMode::from(ElicitationFormMode::new(
+            ElicitationSessionScope::new("setup-session".to_string()),
+            schema,
+        ));
+        let prompt = ElicitationPrompt {
+            message: "Configure".to_string(),
+            mode,
+            responder,
+        };
+        (prompt, rx)
+    }
+
+    #[test]
+    fn elicitation_request_enqueues_pending() {
+        let mut s = AppState::new();
+        let (prompt, _rx) = elicitation_prompt();
+        s.apply_event(UiEvent::ElicitationRequest(prompt));
+        assert!(s.has_pending_elicitation());
+        assert_eq!(s.pending_elicitation_count(), 1);
+        assert!(matches!(
+            s.elicitation_view(),
+            Some(ElicitationView::SingleSelect { .. })
+        ));
+    }
+
+    #[test]
+    fn elicitation_form_accept_sends_selected_value() {
+        let mut s = AppState::new();
+        let (prompt, rx) = elicitation_prompt();
+        s.apply_event(UiEvent::ElicitationRequest(prompt));
+        // Move from "fast" to "smart" and accept.
+        s.elicitation_select_move(1);
+        s.resolve_elicitation_accept();
+        assert!(!s.has_pending_elicitation());
+        match rx.blocking_recv() {
+            Ok(ElicitationOutcome::Accept(content)) => {
+                assert_eq!(content.len(), 1);
+                assert_eq!(
+                    content.get("model"),
+                    Some(&ElicitationContentValue::String("smart".to_string()))
+                );
+            }
+            other => panic!("expected Accept, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn elicitation_select_move_wraps() {
+        let mut s = AppState::new();
+        let (prompt, _rx) = elicitation_prompt();
+        s.apply_event(UiEvent::ElicitationRequest(prompt));
+        // Two options: Up from index 0 wraps to the last option.
+        s.elicitation_select_move(-1);
+        assert_eq!(s.pending_elicitation().expect("pending").selected, 1);
+        s.elicitation_select_move(1);
+        assert_eq!(s.pending_elicitation().expect("pending").selected, 0);
+    }
+
+    #[test]
+    fn elicitation_esc_cancels() {
+        let mut s = AppState::new();
+        let (prompt, rx) = elicitation_prompt();
+        s.apply_event(UiEvent::ElicitationRequest(prompt));
+        s.resolve_elicitation_dismiss();
+        assert!(!s.has_pending_elicitation());
+        assert!(matches!(rx.blocking_recv(), Ok(ElicitationOutcome::Cancel)));
+    }
+
+    #[test]
+    fn fatal_cancels_pending_elicitation() {
+        let mut s = AppState::new();
+        let (prompt, rx) = elicitation_prompt();
+        s.apply_event(UiEvent::ElicitationRequest(prompt));
+        assert!(s.has_pending_elicitation());
+        s.apply_event(UiEvent::Fatal("boom".to_string()));
+        assert!(!s.has_pending_elicitation());
+        assert!(matches!(rx.blocking_recv(), Ok(ElicitationOutcome::Cancel)));
+    }
+
+    #[test]
+    fn elicitation_url_mode_accepts_with_empty_content() {
+        let mut s = AppState::new();
+        let (prompt, rx) = url_elicitation_prompt();
+        s.apply_event(UiEvent::ElicitationRequest(prompt));
+        match s.elicitation_view() {
+            Some(ElicitationView::Url { url }) => {
+                assert!(url.starts_with("https://example.com/oauth/authorize"));
+            }
+            other => panic!("expected URL view, got {other:?}"),
+        }
+        s.resolve_elicitation_accept();
+        match rx.blocking_recv() {
+            Ok(ElicitationOutcome::Accept(content)) => assert!(content.is_empty()),
+            other => panic!("expected empty Accept, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_multi_field_form_declines() {
+        let mut s = AppState::new();
+        let (prompt, rx) = two_property_elicitation_prompt();
+        s.apply_event(UiEvent::ElicitationRequest(prompt));
+        assert!(matches!(
+            s.elicitation_view(),
+            Some(ElicitationView::Unsupported)
+        ));
+        // Dismissing the info modal resolves to Decline (the v1 fallback).
+        s.resolve_elicitation_dismiss();
+        assert!(matches!(
+            rx.blocking_recv(),
+            Ok(ElicitationOutcome::Decline)
+        ));
+    }
+
+    #[test]
+    fn free_text_string_form_is_unsupported() {
+        // A string property without `oneOf` is free text, out of scope for v1.
+        let (responder, _rx) = tokio::sync::oneshot::channel();
+        let schema = ElicitationSchema::new().property(
+            "name",
+            StringPropertySchema::new().title("Your name"),
+            true,
+        );
+        let prompt = ElicitationPrompt {
+            message: "Enter your name".to_string(),
+            mode: ElicitationMode::from(ElicitationFormMode::new(
+                ElicitationSessionScope::new("setup-session".to_string()),
+                schema,
+            )),
+            responder,
+        };
+        assert!(matches!(
+            classify_elicitation(&prompt),
+            ElicitationView::Unsupported
+        ));
+    }
+
+    #[test]
+    fn second_elicitation_queues_without_dropping_first() {
+        let mut s = AppState::new();
+        let (prompt_a, mut rx_a) = elicitation_prompt();
+        let (prompt_b, _rx_b) = url_elicitation_prompt();
+        s.apply_event(UiEvent::ElicitationRequest(prompt_a));
+        s.apply_event(UiEvent::ElicitationRequest(prompt_b));
+        assert_eq!(s.pending_elicitation_count(), 2);
+        // The first responder must still be alive (not silently dropped).
+        assert!(matches!(
+            rx_a.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        // The front view is the first (single-select) prompt.
+        assert!(matches!(
+            s.elicitation_view(),
+            Some(ElicitationView::SingleSelect { .. })
+        ));
+    }
+
+    #[test]
+    fn elicitation_request_and_response_round_trip() {
+        // Pins the `#[serde(flatten)]` + `tag = "mode"` / `tag = "action"`
+        // wire framing that mjolnir and anvil must agree on.
+        let form_req = CreateElicitationRequest::new(
+            ElicitationMode::from(ElicitationFormMode::new(
+                ElicitationSessionScope::new("s".to_string()),
+                elicitation_select_schema(),
+            )),
+            "pick",
+        );
+        let value = serde_json::to_value(&form_req).expect("serialize form req");
+        let back: CreateElicitationRequest =
+            serde_json::from_value(value).expect("deserialize form req");
+        assert_eq!(form_req, back);
+
+        let url_req = CreateElicitationRequest::new(
+            ElicitationMode::from(ElicitationUrlMode::new(
+                ElicitationSessionScope::new("s".to_string()),
+                ElicitationId::new("id-1"),
+                "https://example.com",
+            )),
+            "open",
+        );
+        let value = serde_json::to_value(&url_req).expect("serialize url req");
+        let back: CreateElicitationRequest =
+            serde_json::from_value(value).expect("deserialize url req");
+        assert_eq!(url_req, back);
+
+        let mut content = BTreeMap::new();
+        content.insert(
+            "model".to_string(),
+            ElicitationContentValue::String("smart".to_string()),
+        );
+        let actions = [
+            ElicitationAction::Accept(ElicitationAcceptAction::new().content(content)),
+            ElicitationAction::Decline,
+            ElicitationAction::Cancel,
+        ];
+        for action in actions {
+            let resp = CreateElicitationResponse::new(action);
+            let value = serde_json::to_value(&resp).expect("serialize resp");
+            let back: CreateElicitationResponse =
+                serde_json::from_value(value).expect("deserialize resp");
+            assert_eq!(resp, back);
+        }
     }
 
     #[test]
