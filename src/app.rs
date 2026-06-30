@@ -665,7 +665,7 @@ pub struct PendingElicitation {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ElicitationView {
     /// Single-select form: exactly one property, a `StringPropertySchema`
-    /// with a non-empty `oneOf`. Accept maps `{ property => String(value) }`.
+    /// with a non-empty `oneOf` or `enum`. Accept maps `{ property => String(value) }`.
     SingleSelect {
         property_name: String,
         title: Option<String>,
@@ -698,16 +698,32 @@ pub fn classify_elicitation(prompt: &ElicitationPrompt) -> ElicitationView {
             };
             match property {
                 ElicitationPropertySchema::String(string_schema) => {
-                    match string_schema.one_of.as_ref() {
-                        Some(options) if !options.is_empty() => ElicitationView::SingleSelect {
+                    let one_of_options = string_schema
+                        .one_of
+                        .as_ref()
+                        .filter(|opts| !opts.is_empty());
+                    let enum_options = string_schema
+                        .enum_values
+                        .as_ref()
+                        .filter(|opts| !opts.is_empty());
+                    match (one_of_options, enum_options) {
+                        (Some(options), _) => ElicitationView::SingleSelect {
                             property_name: property_name.clone(),
                             // Prefer the per-property title, falling back to the
                             // schema-level title for the modal heading.
                             title: string_schema.title.clone().or_else(|| schema.title.clone()),
                             options: options.clone(),
                         },
-                        // A string field without `oneOf` is free text, which v1
-                        // does not render; `enum` (untitled) is also out of scope.
+                        (None, Some(values)) => ElicitationView::SingleSelect {
+                            property_name: property_name.clone(),
+                            title: string_schema.title.clone().or_else(|| schema.title.clone()),
+                            options: values
+                                .iter()
+                                .map(|value| EnumOption::new(value.clone(), value.clone()))
+                                .collect(),
+                        },
+                        // A string field without `oneOf` or `enum` is free text,
+                        // which v1 does not render.
                         _ => ElicitationView::Unsupported,
                     }
                 }
@@ -3556,6 +3572,30 @@ mod tests {
         (prompt, rx)
     }
 
+    fn enum_values_elicitation_prompt() -> (
+        ElicitationPrompt,
+        tokio::sync::oneshot::Receiver<ElicitationOutcome>,
+    ) {
+        let (responder, rx) = tokio::sync::oneshot::channel();
+        let schema = ElicitationSchema::new().title("Choose a model").property(
+            "model",
+            StringPropertySchema::new()
+                .title("Model")
+                .enum_values(vec!["fast".to_string(), "smart".to_string()]),
+            true,
+        );
+        let mode = ElicitationMode::from(ElicitationFormMode::new(
+            ElicitationSessionScope::new("setup-session".to_string()),
+            schema,
+        ));
+        let prompt = ElicitationPrompt {
+            message: "Pick a model".to_string(),
+            mode,
+            responder,
+        };
+        (prompt, rx)
+    }
+
     fn url_elicitation_prompt() -> (
         ElicitationPrompt,
         tokio::sync::oneshot::Receiver<ElicitationOutcome>,
@@ -3624,6 +3664,30 @@ mod tests {
         s.elicitation_select_move(1);
         s.resolve_elicitation_accept();
         assert!(!s.has_pending_elicitation());
+        match rx.blocking_recv() {
+            Ok(ElicitationOutcome::Accept(content)) => {
+                assert_eq!(content.len(), 1);
+                assert_eq!(
+                    content.get("model"),
+                    Some(&ElicitationContentValue::String("smart".to_string()))
+                );
+            }
+            other => panic!("expected Accept, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn elicitation_enum_values_accept_sends_selected_value() {
+        let mut s = AppState::new();
+        let (prompt, rx) = enum_values_elicitation_prompt();
+        s.apply_event(UiEvent::ElicitationRequest(prompt));
+        assert!(matches!(
+            s.elicitation_view(),
+            Some(ElicitationView::SingleSelect { .. })
+        ));
+        s.elicitation_select_move(1);
+        s.resolve_elicitation_accept();
+
         match rx.blocking_recv() {
             Ok(ElicitationOutcome::Accept(content)) => {
                 assert_eq!(content.len(), 1);

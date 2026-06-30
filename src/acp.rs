@@ -1231,7 +1231,7 @@ where
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |request: CreateElicitationRequest, responder, _cx| {
+            async move |request: CreateElicitationRequest, responder, cx| {
                 // Unlike permissions, do NOT gate on `is_active_session`:
                 // request-scoped elicitations (the `/setup` case) have no
                 // session and would be wrongly dropped. Render whatever
@@ -1251,14 +1251,19 @@ where
                 }
                 // `Err(_)` means the UI tore down without answering (responder
                 // dropped); treat it as Cancel, mirroring permission semantics.
-                let action = match rx.await {
-                    Ok(ElicitationOutcome::Accept(content)) => {
-                        ElicitationAction::Accept(ElicitationAcceptAction::new().content(content))
-                    }
-                    Ok(ElicitationOutcome::Decline) => ElicitationAction::Decline,
-                    Ok(ElicitationOutcome::Cancel) | Err(_) => ElicitationAction::Cancel,
-                };
-                responder.respond(CreateElicitationResponse::new(action))
+                cx.spawn(async move {
+                    let action = match rx.await {
+                        Ok(ElicitationOutcome::Accept(content)) => {
+                            ElicitationAction::Accept(
+                                ElicitationAcceptAction::new().content(content),
+                            )
+                        }
+                        Ok(ElicitationOutcome::Decline) => ElicitationAction::Decline,
+                        Ok(ElicitationOutcome::Cancel) | Err(_) => ElicitationAction::Cancel,
+                    };
+                    responder.respond(CreateElicitationResponse::new(action))
+                })?;
+                Ok(())
             },
             agent_client_protocol::on_receive_request!(),
         )
