@@ -497,6 +497,10 @@ pub struct AppState {
     /// which is a *display* string; this is the stable id the model-score
     /// resolver keys on. Empty until the launch site fills it in.
     pub agent_source_id: String,
+    /// Score catalog for this UI run. It may be populated asynchronously after
+    /// startup; render code reads through this explicit state rather than a
+    /// process-global catalog.
+    pub score_store: crate::scores::ScoreStore,
     pub session_id: Option<String>,
     pub session_title: Option<String>,
     /// Current connection lifecycle state. Private to enforce the invariant
@@ -711,6 +715,7 @@ impl AppState {
             mjconfig_menu: None,
             agent_label: String::new(),
             agent_source_id: String::new(),
+            score_store: crate::scores::ScoreStore::default(),
             session_id: None,
             session_title: None,
             connection_state: ConnectionState::Launching,

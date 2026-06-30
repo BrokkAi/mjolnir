@@ -41,6 +41,16 @@ use std::collections::HashMap;
 /// A normalized join key (see module docs). Compared by exact equality only.
 pub type MatchKey = String;
 
+/// How directly a leaderboard row produced a key. Exact keys are generated from
+/// the row's published model name; aliases come from progressively stripped
+/// suffixes such as `-high`, `-preview`, or a date. Exact rows must beat aliases
+/// so a high-vote variant cannot overwrite a base model's own score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MatchSpecificity {
+    Alias,
+    Exact,
+}
+
 /// Single-vendor agents whose model option ids are bare vendor-native names
 /// (provider implied by the agent). Aggregators are absent (their ids carry
 /// `provider/model`); closed agents are absent (no public provider).
@@ -252,6 +262,23 @@ fn dedup_preserving(keys: Vec<MatchKey>) -> Vec<MatchKey> {
         .collect()
 }
 
+fn dedup_ranked_preserving(
+    keys: Vec<(MatchKey, MatchSpecificity)>,
+) -> Vec<(MatchKey, MatchSpecificity)> {
+    let mut out: Vec<(MatchKey, MatchSpecificity)> = Vec::new();
+    for (key, specificity) in keys {
+        if let Some((_, existing)) = out
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == &key)
+        {
+            *existing = (*existing).max(specificity);
+        } else {
+            out.push((key, specificity));
+        }
+    }
+    out
+}
+
 /// Split a model id into (provider, model-name), stripping any `backend::`
 /// prefix and detecting an embedded provider among `.`-separated segments.
 fn parse_id(agent_id: &str, option_id: &str) -> (Option<String>, String) {
@@ -358,12 +385,32 @@ pub fn agent_keys(
 
 /// Match keys for an LMArena leaderboard row (`model_name` + `organization`).
 /// Used to index the score catalog.
-pub fn lmarena_keys(name: &str, vendor: &str) -> Vec<MatchKey> {
+#[cfg(test)]
+fn lmarena_keys(name: &str, vendor: &str) -> Vec<MatchKey> {
+    lmarena_keys_ranked(name, vendor)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// Match keys for a leaderboard row, annotated with whether they came from the
+/// exact published name or from a stripped fallback alias.
+pub fn lmarena_keys_ranked(name: &str, vendor: &str) -> Vec<(MatchKey, MatchSpecificity)> {
     let provider = (!vendor.trim().is_empty()).then_some(vendor);
-    dedup_preserving(
+    dedup_ranked_preserving(
         model_candidates(name)
             .iter()
-            .flat_map(|m| keys_for(provider, m))
+            .enumerate()
+            .flat_map(|(idx, m)| {
+                let specificity = if idx == 0 {
+                    MatchSpecificity::Exact
+                } else {
+                    MatchSpecificity::Alias
+                };
+                keys_for(provider, m)
+                    .into_iter()
+                    .map(move |key| (key, specificity))
+            })
             .collect(),
     )
 }

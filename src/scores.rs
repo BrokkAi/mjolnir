@@ -18,14 +18,16 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use arrow_array::{Array, Float64Array, RecordBatch, StringArray};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
-use crate::model_resolve::{self, MatchKey};
+use crate::model_resolve::{self, MatchKey, MatchSpecificity};
 
 /// How long a cached scores copy is considered fresh. New frontier models reach
 /// LMArena within ~24–48h; weekly polling is ample for "new models show up".
@@ -43,6 +45,12 @@ const OVERALL_CATEGORY: &str = "overall";
 /// Below this many votes, a model's Elo is treated as provisional (rendered with
 /// a trailing `*`). `0` votes means "unknown", which is *not* flagged.
 const PROVISIONAL_VOTE_THRESHOLD: u64 = 3000;
+
+/// Hard cap for the fetched leaderboard body. The current feed is small; this
+/// keeps a bad upstream/custom URL from turning startup into an unbounded read.
+const MAX_SCORES_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SCORE_ROWS: usize = 20_000;
+const MAX_SCORE_FIELD_BYTES: usize = 256;
 
 /// Bundled fallback so scores render offline / before the first successful fetch.
 const BUNDLED_SNAPSHOT: &str = include_str!("scores_snapshot.json");
@@ -107,8 +115,18 @@ fn write_cache(cache_path: &Path, file: &ScoresFile) {
     }
     match serde_json::to_string_pretty(file) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(cache_path, json) {
+            let tmp = cache_path.with_file_name(format!(
+                "{}.tmp",
+                cache_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("scores-v2.json")
+            ));
+            if let Err(e) =
+                std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, cache_path))
+            {
                 tracing::warn!("write scores cache {cache_path:?}: {e:#}");
+                let _ = std::fs::remove_file(tmp);
             }
         }
         Err(e) => tracing::warn!("serialize scores cache: {e:#}"),
@@ -140,7 +158,10 @@ pub async fn load_scores_file(cache_path: &Path, ttl: Duration, url: &str) -> Sc
             file
         }
         Err(e) => {
-            tracing::warn!("refresh scores from {url} ({e:#}); using fallback");
+            tracing::warn!(
+                "refresh scores from {} ({e:#}); using fallback",
+                redact_url(url)
+            );
             fallback(cache_path)
         }
     }
@@ -150,8 +171,11 @@ pub async fn load_scores_file(cache_path: &Path, ttl: Duration, url: &str) -> Sc
 /// override points at our own JSON schema instead, accept that too.
 async fn fetch_leaderboard(url: &str) -> Result<ScoresFile> {
     let body = fetch_bytes(url).await?;
-    if let Ok(file) = parse_parquet(body.clone()) {
-        return Ok(file);
+    let parquet_body = body.clone();
+    match tokio::task::spawn_blocking(move || parse_parquet(parquet_body)).await {
+        Ok(Ok(file)) => return Ok(file),
+        Ok(Err(_)) => {}
+        Err(e) => anyhow::bail!("scores parquet parser task failed: {e}"),
     }
     // Fallback: a URL serving our normalized JSON schema directly.
     let text = std::str::from_utf8(&body).context("scores body not parquet and not utf-8")?;
@@ -160,19 +184,55 @@ async fn fetch_leaderboard(url: &str) -> Result<ScoresFile> {
 
 /// GET the raw bytes of a leaderboard file (async; reqwest is already a dep).
 async fn fetch_bytes(url: &str) -> Result<bytes::Bytes> {
+    let parsed =
+        Url::parse(url).with_context(|| format!("parse scores URL {}", redact_url(url)))?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https"),
+        "scores URL must use http or https"
+    );
+    let safe_url = redact_url(url);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5))
         .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("build http client")?;
     let resp = client
-        .get(url)
+        .get(parsed)
         .send()
         .await
-        .with_context(|| format!("GET {url}"))?;
+        .with_context(|| format!("GET {safe_url}"))?;
     let status = resp.status();
-    anyhow::ensure!(status.is_success(), "GET {url}: HTTP {status}");
-    resp.bytes().await.context("read scores body")
+    anyhow::ensure!(status.is_success(), "GET {safe_url}: HTTP {status}");
+    if let Some(len) = resp.content_length() {
+        anyhow::ensure!(
+            len <= MAX_SCORES_BODY_BYTES as u64,
+            "scores body from {safe_url} is too large ({len} bytes)"
+        );
+    }
+
+    let mut body = bytes::BytesMut::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("read scores body from {safe_url}"))?;
+        anyhow::ensure!(
+            body.len() + chunk.len() <= MAX_SCORES_BODY_BYTES,
+            "scores body from {safe_url} exceeded {MAX_SCORES_BODY_BYTES} bytes"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body.freeze())
+}
+
+fn redact_url(url: &str) -> String {
+    let Ok(mut parsed) = Url::parse(url) else {
+        return "<invalid url>".to_string();
+    };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
 }
 
 /// Parse the official LMArena parquet, keeping only the `overall` category and
@@ -204,12 +264,26 @@ fn parse_parquet(body: bytes::Bytes) -> Result<ScoresFile> {
             if name.is_empty() {
                 continue;
             }
+            anyhow::ensure!(
+                name.len() <= MAX_SCORE_FIELD_BYTES,
+                "scores parquet model name too large"
+            );
             let vendor = (!orgs.is_null(i)).then(|| orgs.value(i).to_string());
+            if let Some(vendor) = &vendor {
+                anyhow::ensure!(
+                    vendor.len() <= MAX_SCORE_FIELD_BYTES,
+                    "scores parquet vendor too large"
+                );
+            }
             let vote_count = if votes.is_null(i) {
                 0.0
             } else {
                 votes.value(i)
             };
+            anyhow::ensure!(
+                models.len() < MAX_SCORE_ROWS,
+                "scores parquet has more than {MAX_SCORE_ROWS} rows"
+            );
             models.push(ScoreRow {
                 name,
                 vendor: vendor.unwrap_or_default(),
@@ -253,6 +327,20 @@ fn col_f64<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Float64Array> {
 fn parse_scores(body: &str) -> Result<ScoresFile> {
     let file: ScoresFile = serde_json::from_str(body).context("parse scores json")?;
     anyhow::ensure!(!file.models.is_empty(), "scores json has no models");
+    anyhow::ensure!(
+        file.models.len() <= MAX_SCORE_ROWS,
+        "scores json has more than {MAX_SCORE_ROWS} models"
+    );
+    for row in &file.models {
+        anyhow::ensure!(
+            row.name.len() <= MAX_SCORE_FIELD_BYTES,
+            "scores json model name too large"
+        );
+        anyhow::ensure!(
+            row.vendor.len() <= MAX_SCORE_FIELD_BYTES,
+            "scores json vendor too large"
+        );
+    }
     Ok(file)
 }
 
@@ -260,6 +348,7 @@ fn parse_scores(body: &str) -> Result<ScoresFile> {
 
 /// Indexed scores plus the resolver config, installed once at startup and read
 /// by the picker on every frame.
+#[derive(Debug)]
 pub struct ScoreCatalog {
     by_key: HashMap<MatchKey, ModelScore>,
     overrides: HashMap<String, String>,
@@ -270,20 +359,28 @@ impl ScoreCatalog {
     /// Index a scores file by normalized match key. On key collision the
     /// higher-voted (more reliable) row wins.
     pub fn build(file: &ScoresFile, overrides: HashMap<String, String>, enabled: bool) -> Self {
-        let mut by_key: HashMap<MatchKey, ModelScore> = HashMap::new();
-        let mut votes_for: HashMap<MatchKey, u64> = HashMap::new();
+        let mut indexed: HashMap<MatchKey, (ModelScore, MatchSpecificity, u64)> = HashMap::new();
         for row in &file.models {
             let score = ModelScore {
                 elo: row.elo,
                 provisional: row.votes != 0 && row.votes < PROVISIONAL_VOTE_THRESHOLD,
             };
-            for key in model_resolve::lmarena_keys(&row.name, &row.vendor) {
-                if votes_for.get(&key).is_none_or(|&v| row.votes >= v) {
-                    by_key.insert(key.clone(), score);
-                    votes_for.insert(key, row.votes);
+            for (key, specificity) in model_resolve::lmarena_keys_ranked(&row.name, &row.vendor) {
+                let replace = indexed
+                    .get(&key)
+                    .is_none_or(|&(_, old_specificity, old_votes)| {
+                        specificity > old_specificity
+                            || (specificity == old_specificity && row.votes >= old_votes)
+                    });
+                if replace {
+                    indexed.insert(key, (score, specificity, row.votes));
                 }
             }
         }
+        let by_key = indexed
+            .into_iter()
+            .map(|(key, (score, _, _))| (key, score))
+            .collect();
         Self {
             by_key,
             overrides,
@@ -307,42 +404,53 @@ impl ScoreCatalog {
     }
 }
 
-static CATALOG: LazyLock<RwLock<Option<ScoreCatalog>>> = LazyLock::new(|| RwLock::new(None));
-
-/// Install the catalog for the process (call once at startup).
-pub fn install(catalog: ScoreCatalog) {
-    if let Ok(mut guard) = CATALOG.write() {
-        *guard = Some(catalog);
-    }
+#[derive(Clone, Debug, Default)]
+pub struct ScoreStore {
+    catalog: Arc<RwLock<Option<ScoreCatalog>>>,
 }
 
-/// True when a catalog is installed and scoring is enabled — i.e. a score
-/// column is actually being rendered, so the picker should show the legend.
-pub fn is_active() -> bool {
-    CATALOG
-        .read()
-        .ok()
-        .and_then(|guard| guard.as_ref().map(|c| c.enabled))
-        .unwrap_or(false)
-}
-
-/// Render suffix for a model row in the picker: the Elo, or a provisional `*`
-/// variant. `None` (append nothing) when scoring is disabled / not installed, or
-/// when the model isn't on the leaderboard — an unmatched row stays bare rather
-/// than showing a placeholder dash (the picker's legend explains a blank).
-pub fn score_suffix(agent_id: &str, value: &str, name: &str, description: &str) -> Option<String> {
-    let guard = CATALOG.read().ok()?;
-    let catalog = guard.as_ref()?;
-    if !catalog.enabled {
-        return None;
+impl ScoreStore {
+    /// Install or replace the catalog for this UI run.
+    pub fn install(&self, catalog: ScoreCatalog) {
+        if let Ok(mut guard) = self.catalog.write() {
+            *guard = Some(catalog);
+        }
     }
-    let score = catalog.lookup(agent_id, value, name, description)?;
-    // The trailing `*` (on provisional ratings) stays attached to the number.
-    Some(if score.provisional {
-        format!("{}* elo", score.elo)
-    } else {
-        format!("{} elo", score.elo)
-    })
+
+    /// True when a catalog is installed and scoring is enabled — i.e. a score
+    /// column is actually being rendered, so the picker should show the legend.
+    pub fn is_active(&self) -> bool {
+        self.catalog
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|c| c.enabled))
+            .unwrap_or(false)
+    }
+
+    /// Render suffix for a model row in the picker: the Elo, or a provisional
+    /// `*` variant. `None` (append nothing) when scoring is disabled / not
+    /// installed, or when the model isn't on the leaderboard — an unmatched row
+    /// stays bare rather than showing a placeholder dash.
+    pub fn score_suffix(
+        &self,
+        agent_id: &str,
+        value: &str,
+        name: &str,
+        description: &str,
+    ) -> Option<String> {
+        let guard = self.catalog.read().ok()?;
+        let catalog = guard.as_ref()?;
+        if !catalog.enabled {
+            return None;
+        }
+        let score = catalog.lookup(agent_id, value, name, description)?;
+        // The trailing `*` (on provisional ratings) stays attached to the number.
+        Some(if score.provisional {
+            format!("{}* elo", score.elo)
+        } else {
+            format!("{} elo", score.elo)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -492,6 +600,38 @@ mod tests {
     }
 
     #[test]
+    fn exact_base_row_beats_higher_vote_variant_alias() {
+        let file = ScoresFile {
+            as_of: String::new(),
+            models: vec![
+                ScoreRow {
+                    name: "gpt-5.5".to_string(),
+                    vendor: "openai".to_string(),
+                    elo: 1463,
+                    votes: 100,
+                },
+                ScoreRow {
+                    name: "gpt-5.5-high".to_string(),
+                    vendor: "openai".to_string(),
+                    elo: 1468,
+                    votes: 10_000,
+                },
+            ],
+        };
+        let cat = ScoreCatalog::build(&file, HashMap::new(), true);
+        assert_eq!(
+            cat.lookup("codex-acp", "gpt-5.5", "GPT-5.5", "")
+                .map(|s| s.elo),
+            Some(1463)
+        );
+        assert_eq!(
+            cat.lookup("codex-acp", "gpt-5.5-high", "GPT-5.5 High", "")
+                .map(|s| s.elo),
+            Some(1468)
+        );
+    }
+
+    #[test]
     fn parse_accepts_our_schema() {
         let body = r#"{"as_of":"2026-01-01","models":[{"name":"gpt-5.5","vendor":"openai","elo":1463,"votes":34794}]}"#;
         let file = parse_scores(body).expect("our schema");
@@ -502,6 +642,14 @@ mod tests {
     #[test]
     fn parse_rejects_unrelated_json() {
         assert!(parse_scores(r#"{"hello":"world"}"#).is_err());
+    }
+
+    #[test]
+    fn redacted_url_removes_credentials_query_and_fragment() {
+        assert_eq!(
+            redact_url("https://user:secret@example.com/private/feed.parquet?token=abc#frag"),
+            "https://example.com/private/feed.parquet"
+        );
     }
 
     #[test]

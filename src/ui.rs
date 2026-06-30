@@ -283,12 +283,13 @@ pub struct UiPersistencePaths<'a> {
     pub config_path: Option<&'a Path>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct UiRunOptions<'a> {
     pub persistence: UiPersistencePaths<'a>,
     pub mode: UiMode,
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
+    pub score_store: crate::scores::ScoreStore,
 }
 
 pub struct UiRunResult {
@@ -303,6 +304,7 @@ struct UiInitialState {
     header_labels: HeaderLabels,
     agent_label: Option<String>,
     agent_source_id: Option<String>,
+    score_store: crate::scores::ScoreStore,
     history: Vec<String>,
     transcript_export_dir: Option<PathBuf>,
     config_path: Option<PathBuf>,
@@ -350,6 +352,7 @@ pub async fn run(
             header_labels,
             agent_label: initial_agent_label,
             agent_source_id: initial_agent_source_id,
+            score_store: options.score_store.clone(),
             history: initial_history,
             transcript_export_dir: options
                 .persistence
@@ -464,6 +467,7 @@ async fn ui_loop(
     if let Some(source_id) = initial.agent_source_id {
         state.agent_source_id = source_id;
     }
+    state.score_store = initial.score_store;
     state.transcript_export_dir = initial.transcript_export_dir;
     state.set_theme(initial.theme_kind);
     state.set_spinner_style(initial.spinner_style);
@@ -3875,7 +3879,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
         .collect::<Vec<_>>();
     let detail_height = detail_lines.len().max(1).min(u16::MAX as usize) as u16;
     // Score attribution, rendered as its own row just above the footer.
-    let legend = model_score_legend(option);
+    let legend = model_score_legend(state, option);
     let legend_rows = u16::from(legend.is_some());
 
     let layout = Layout::default()
@@ -3935,7 +3939,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
                 let marker = if absolute == selected { ">" } else { " " };
                 let choice = &choices[full_idx];
                 let score = model_choice_score(state, option, choice);
-                let line = config_value_row_text(choice, score.as_deref());
+                let line = config_value_row_text(choice, score.as_deref(), layout[3].width);
                 truncate_line(line, layout[3].width, marker == ">", state.theme)
             })
             .collect::<Vec<ListItem>>();
@@ -4013,7 +4017,8 @@ fn inline_config_view_line_count(state: &AppState, width: u16) -> usize {
         .unwrap_or_else(|| config_option_current_value_label(option));
     let detail_rows = wrap_text_to_width(&detail, width).len().max(1);
     let option_rows = picker.filtered_indices.len().max(1);
-    1 + detail_rows + 1 + option_rows + 1
+    let legend_rows = usize::from(model_score_legend(state, option).is_some());
+    1 + detail_rows + 1 + option_rows + legend_rows + 1
 }
 
 fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -6054,7 +6059,7 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
         .description
         .clone()
         .unwrap_or_else(|| config_option_current_value_label(option));
-    let legend = model_score_legend(option);
+    let legend = model_score_legend(state, option);
     let legend_rows = u16::from(legend.is_some());
     let total = picker.filtered_indices.len();
     let selected = picker.selected_value;
@@ -6149,7 +6154,7 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
             let marker = if absolute == selected { ">" } else { " " };
             let choice = &choices[full_idx];
             let score = model_choice_score(state, option, choice);
-            let line = config_value_row_text(choice, score.as_deref());
+            let line = config_value_row_text(choice, score.as_deref(), layout[2].width);
             truncate_line(line, layout[2].width, marker == ">", state.theme)
         })
         .collect::<Vec<ListItem>>();
@@ -6319,7 +6324,7 @@ fn truncate_line(
     ListItem::new(line).style(style)
 }
 
-fn config_value_row_text(choice: &ConfigValueChoice, score: Option<&str>) -> String {
+fn config_value_row_text(choice: &ConfigValueChoice, score: Option<&str>, width: u16) -> String {
     let mut line = if let Some(group) = choice.group.as_ref() {
         format!("{group} / {}", choice.name)
     } else {
@@ -6331,20 +6336,25 @@ fn config_value_row_text(choice: &ConfigValueChoice, score: Option<&str>) -> Str
         line.push_str("  -- ");
         line.push_str(description.trim());
     }
-    // Strength score (LMArena Elo) for model-category options; `—` when the
-    // model couldn't be matched. Appended last so it trails the row.
-    if let Some(score) = score {
-        line.push_str("  ");
-        line.push_str(score);
+    let Some(score) = score else {
+        return line;
+    };
+    let suffix = format!("  {score}");
+    let suffix_width = suffix.width();
+    let width = usize::from(width);
+    if suffix_width >= width {
+        return truncate_text_to_width(score.to_string(), width as u16);
     }
-    line
+    let prefix_width = width - suffix_width;
+    let prefix = truncate_text_to_width(line, prefix_width as u16);
+    format!("{prefix}{suffix}")
 }
 
 /// Attribution shown under a model-selection picker explaining the trailing
 /// number, or `None` when scores aren't being rendered (not a model option, or
 /// scoring disabled). Keeps a blank score readable as "not ranked".
-fn model_score_legend(option: &SessionConfigOption) -> Option<&'static str> {
-    (crate::app::is_model_config_option(option) && crate::scores::is_active()).then_some(
+fn model_score_legend(state: &AppState, option: &SessionConfigOption) -> Option<&'static str> {
+    (crate::app::is_model_config_option(option) && state.score_store.is_active()).then_some(
         "elo: LMArena text-arena rating, higher is better · https://lmarena.ai · blank = not ranked",
     )
 }
@@ -6359,7 +6369,7 @@ fn model_choice_score(
     if !crate::app::is_model_config_option(option) {
         return None;
     }
-    crate::scores::score_suffix(
+    state.score_store.score_suffix(
         &state.agent_source_id,
         &choice.value.to_string(),
         &choice.name,
@@ -6375,8 +6385,8 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
         AvailableCommand, ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind,
-        SessionConfigOption, SessionConfigSelectOption, SessionUpdate, StopReason, TextContent,
-        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        SessionConfigOption, SessionConfigSelectOption, SessionConfigValueId, SessionUpdate,
+        StopReason, TextContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::{Backend, TestBackend};
@@ -6420,6 +6430,24 @@ mod tests {
             height: image.height,
             byte_len: image.byte_len,
         }
+    }
+
+    #[test]
+    fn config_value_row_keeps_score_visible_with_long_description() {
+        let choice = ConfigValueChoice {
+            value: SessionConfigValueId::new("gpt-5.5"),
+            name: "GPT-5.5".to_string(),
+            description: Some(
+                "A very long model description that would normally consume the whole row"
+                    .to_string(),
+            ),
+            group: None,
+        };
+
+        let row = config_value_row_text(&choice, Some("1463 elo"), 32);
+
+        assert!(row.ends_with("  1463 elo"), "{row}");
+        assert!(row.width() <= 32, "{row}");
     }
 
     fn write_test_png(path: &Path) {

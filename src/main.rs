@@ -671,7 +671,6 @@ async fn pick_agent_for_resume() -> Result<Option<SelectedAgent>> {
         Config::load(&config_path).with_context(|| format!("load {}", config_path.display()))?;
 
     kick_off_agent_probes(&cfg);
-    kick_off_score_load(&cfg);
     let picker_result = run_agent_picker_once(&cfg).await?;
     apply_picker_preferences(&mut cfg, picker_result.preferences);
     let selected = picker_result.outcome.map(picker_outcome_to_selected);
@@ -877,7 +876,8 @@ async fn run_app(
     // global probe store; every agent picker shown during this run just pulls
     // from it.
     kick_off_agent_probes(&cfg);
-    kick_off_score_load(&cfg);
+    let score_store = scores::ScoreStore::default();
+    kick_off_score_load(&cfg, score_store.clone());
 
     // Supervisor loop. Initial sessions use the configured default agent when
     // available. The picker is reserved for first-run setup and explicit
@@ -932,6 +932,7 @@ async fn run_app(
             mode,
             cfg.theme,
             cfg.spinner,
+            score_store.clone(),
         )
         .await?;
         apply_session_result_to_config(&mut cfg, &session_result);
@@ -1245,7 +1246,7 @@ fn kick_off_agent_probes(cfg: &Config) {
 /// install it for the picker. Best-effort and offline-safe: the loader falls
 /// back through stale cache to the bundled snapshot, so the catalog is always
 /// populated. Skipped entirely when the user disabled scores.
-fn kick_off_score_load(cfg: &Config) {
+fn kick_off_score_load(cfg: &Config, score_store: scores::ScoreStore) {
     if !cfg.scores.enabled {
         return;
     }
@@ -1259,7 +1260,7 @@ fn kick_off_score_load(cfg: &Config) {
             .to_string();
         let file = scores::load_scores_file(&cache_path, scores::CACHE_TTL, &url).await;
         let catalog = scores::ScoreCatalog::build(&file, scores_cfg.overrides, scores_cfg.enabled);
-        scores::install(catalog);
+        score_store.install(catalog);
     });
 }
 
@@ -1284,7 +1285,8 @@ async fn run_dump_models(
             .unwrap_or(scores::DEFAULT_SCORES_URL),
     )
     .await;
-    scores::install(scores::ScoreCatalog::build(
+    let score_store = scores::ScoreStore::default();
+    score_store.install(scores::ScoreCatalog::build(
         &scores_file,
         cfg.scores.overrides.clone(),
         true,
@@ -1337,7 +1339,7 @@ async fn run_dump_models(
                     let models: Vec<_> = models
                         .into_iter()
                         .map(|m| {
-                            let score = scores::score_suffix(
+                            let score = score_store.score_suffix(
                                 &source_id,
                                 &m.value,
                                 &m.name,
@@ -1450,6 +1452,7 @@ async fn run_session(
     mode: UiMode,
     mut theme_kind: theme::TerminalThemeKind,
     mut spinner_style: spinner::SpinnerStyle,
+    score_store: scores::ScoreStore,
 ) -> Result<RunSessionResult> {
     let mut terminal = setup_session_terminal(mode)?;
 
@@ -1541,6 +1544,7 @@ async fn run_session(
                 mode,
                 theme_kind,
                 spinner_style,
+                score_store: score_store.clone(),
             },
         )
         .await;

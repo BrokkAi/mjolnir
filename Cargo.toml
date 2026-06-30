@@ -44,10 +44,10 @@ hmac = "0.12"
 iana-time-zone = "0.1"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = "0.2"
-# Reads the official LMArena leaderboard dataset (parquet). `arrow` feature
-# yields Arrow RecordBatches; default compression codecs (snappy/zstd) cover
-# HF's encoding. Apache-2.0 (GPL-3.0-compatible).
-parquet = { version = "55", features = ["arrow"] }
+# Reads the official LMArena leaderboard dataset (parquet). Keep default
+# features off to avoid native zstd in Android/cross builds; these pure-Rust
+# codecs cover common parquet encodings, with snapshot fallback otherwise.
+parquet = { version = "55", default-features = false, features = ["arrow", "brotli", "flate2", "lz4", "snap"] }
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
