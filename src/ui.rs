@@ -1538,15 +1538,7 @@ fn handle_crossterm(
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             if state.is_streaming() {
-                let _ = cmd_tx.send(UiCommand::CancelPrompt);
-                state.mark_cancelling();
-                let queued = state.queued_prompt_count();
-                let msg = if queued > 0 {
-                    format!("cancelling current turn... ({queued} queued)")
-                } else {
-                    "cancelling current turn...".to_string()
-                };
-                state.status_line = Some(StatusMessage::info(msg));
+                cancel_current_turn(state, cmd_tx);
             } else if state.input.is_empty() && attachment_count(state) == 0 {
                 state.exit_reason = Some(UiExitReason::Quit);
             } else if !state.input.is_empty() {
@@ -1561,6 +1553,9 @@ fn handle_crossterm(
                 state.scroll_input_to_bottom();
                 state.update_autocomplete();
             }
+        }
+        (_, KeyCode::Esc) if state.is_streaming() => {
+            cancel_current_turn(state, cmd_tx);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('d'))
             if state.input.is_empty() && attachment_count(state) == 0 =>
@@ -1692,6 +1687,18 @@ fn handle_crossterm(
         _ => {}
     }
     TerminalRequest::None
+}
+
+fn cancel_current_turn(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
+    let _ = cmd_tx.send(UiCommand::CancelPrompt);
+    state.mark_cancelling();
+    let queued = state.queued_prompt_count();
+    let msg = if queued > 0 {
+        format!("cancelling current turn... ({queued} queued)")
+    } else {
+        "cancelling current turn...".to_string()
+    };
+    state.status_line = Some(StatusMessage::info(msg));
 }
 
 fn dictation_request_for_state(state: &AppState, voice_input_supported: bool) -> TerminalRequest {
@@ -5325,9 +5332,9 @@ fn busy_prompt_title(state: &AppState) -> Option<String> {
     let hint = match state.connection_state() {
         ConnectionState::Streaming | ConnectionState::Cancelling => {
             if queued > 0 {
-                format!("{queued} queued | Enter queue next | Ctrl-C cancel current")
+                format!("{queued} queued | Enter queue next | Ctrl-C/Esc cancel current")
             } else {
-                "Enter queue next | Ctrl-C cancel current".to_string()
+                "Enter queue next | Ctrl-C/Esc cancel current".to_string()
             }
         }
         ConnectionState::Forking => {
@@ -6006,7 +6013,7 @@ fn general_help_lines(voice_input_supported: bool) -> Vec<Line<'static>> {
     lines.extend([
         Line::from("  Ctrl-V/Ctrl-Alt-V paste image from clipboard"),
         Line::from("  Ctrl-Y           copy last agent message to clipboard"),
-        Line::from("  Esc              clear input, chips, and browsing history"),
+        Line::from("  Esc              cancel streaming; clear input, chips, and browsing history"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Attachment chips",
@@ -8792,7 +8799,7 @@ mod tests {
         );
         assert!(rendered.contains("0s"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("Ctrl-C cancel current"),
+            rendered.contains("Ctrl-C/Esc cancel current"),
             "rendered:\n{rendered}"
         );
         assert!(!rendered.contains("streaming"), "rendered:\n{rendered}");
@@ -8833,7 +8840,10 @@ mod tests {
         let cancelling = busy_prompt_title(&state).expect("cancelling title");
         assert!(contains_prompt_activity_frame(&cancelling), "{cancelling}");
         assert!(cancelling.contains("Enter queue next"), "{cancelling}");
-        assert!(cancelling.contains("Ctrl-C cancel current"), "{cancelling}");
+        assert!(
+            cancelling.contains("Ctrl-C/Esc cancel current"),
+            "{cancelling}"
+        );
         assert!(!cancelling.contains("cancelling"), "{cancelling}");
         assert!(!cancelling.contains("streaming"), "{cancelling}");
         assert!(!cancelling.contains("prompt"), "{cancelling}");
@@ -8845,14 +8855,14 @@ mod tests {
         });
         let queued = busy_prompt_title(&state).expect("queued title");
         assert!(queued.contains("1 queued"), "{queued}");
-        assert!(queued.contains("Ctrl-C cancel current"), "{queued}");
+        assert!(queued.contains("Ctrl-C/Esc cancel current"), "{queued}");
 
         state.set_connection_state(ConnectionState::Forking);
         let forking = busy_prompt_title(&state).expect("forking title");
         assert!(contains_prompt_activity_frame(&forking), "{forking}");
         assert!(forking.contains("1 queued"), "{forking}");
         assert!(forking.contains("Enter queue next"), "{forking}");
-        assert!(!forking.contains("Ctrl-C cancel current"), "{forking}");
+        assert!(!forking.contains("Ctrl-C/Esc cancel current"), "{forking}");
         assert!(!forking.contains("forking"), "{forking}");
         assert!(!forking.contains("prompt"), "{forking}");
     }
@@ -11093,6 +11103,52 @@ mod tests {
             UiCommand::CancelPrompt => {}
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn esc_during_streaming_preserves_queued_prompt() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+        state.push_queued_prompt(QueuedPrompt {
+            text: "keep me".to_string(),
+            images: Vec::new(),
+            display_text: "keep me".to_string(),
+        });
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+
+        assert_eq!(state.queued_prompt_count(), 1, "queue preserved by Esc");
+        assert_eq!(
+            state.queued_prompts().next().expect("queued prompt").text,
+            "keep me"
+        );
+        assert_eq!(state.connection_state(), ConnectionState::Cancelling);
+        match cmd_rx.try_recv().expect("cancel dispatched") {
+            UiCommand::CancelPrompt => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_during_streaming_dismisses_autocomplete_without_interrupting() {
+        let mut state = ready_state_with_session();
+        state.available_commands = vec![AvailableCommand::new("help", "show help")];
+        state.record_user_prompt("first".to_string());
+        state.input = "/he".to_string();
+        state.input_cursor = state.input.chars().count();
+        state.update_autocomplete();
+        assert!(state.autocomplete.visible);
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "Esc should stay local to autocomplete"
+        );
+        assert!(!state.autocomplete.visible);
     }
 
     #[test]
