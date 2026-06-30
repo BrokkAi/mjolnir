@@ -1527,6 +1527,11 @@ async fn run_session(
     });
 
     let mut header_labels = header_labels;
+    // Whether the inline terminal has already been restored. The LoadSession
+    // picker path restores eagerly (the fullscreen picker needs the inline
+    // viewport gone first); every exit/restart path defers the restore until
+    // after runtime teardown so the prompt stays on screen during shutdown.
+    let mut restored = false;
     let ui_result = loop {
         let ui_result = ui::run(
             &mut terminal,
@@ -1549,28 +1554,31 @@ async fn run_session(
         )
         .await;
 
-        let restore_result = restore_session_terminal(&mut terminal, mode);
-        if let Err(e) = restore_result {
-            tracing::warn!("restore terminal failed: {e}");
-        }
+        // Adopt any theme/spinner the user changed during the session so the
+        // picker and any follow-on session inherit them.
         if let Ok(result) = ui_result.as_ref() {
             theme_kind = result.theme_kind;
             spinner_style = result.spinner_style;
         }
-        if matches!(
+
+        // Only the session picker (LoadSession) needs the inline terminal torn
+        // down before it draws. Every other outcome — quit, /new, /clear, or an
+        // error — keeps the prompt on screen while the runtime shuts down below;
+        // the terminal is restored just before we return so the user never
+        // watches a cleared viewport during teardown.
+        if !matches!(
             ui_result.as_ref().map(|result| result.reason),
-            Ok(UiExitReason::ClearSession)
-        ) && let Err(e) = ui::clear_terminal_screen(&mut terminal)
-        {
-            tracing::warn!("clear terminal for /clear failed: {e}");
+            Ok(UiExitReason::LoadSession)
+        ) {
+            break ui_result.map(Into::into);
         }
 
-        let Ok(result) = ui_result else {
-            break ui_result.map(Into::into);
-        };
-        if result.reason != UiExitReason::LoadSession {
-            break Ok(result.into());
+        if let Err(e) = restore_session_terminal(&mut terminal, mode) {
+            tracing::warn!("restore terminal failed: {e}");
         }
+        restored = true;
+
+        let result = ui_result.expect("LoadSession reason implies an Ok result");
         let current_session_id = result.session_id;
         let current_session_title = result.session_title;
 
@@ -1622,6 +1630,8 @@ async fn run_session(
                         break Err(e);
                     }
                 };
+                // Fresh inline terminal: it needs restoring again on exit.
+                restored = false;
                 continue;
             }
             LoadSessionResult::Fallback { message } => {
@@ -1679,6 +1689,22 @@ async fn run_session(
 
     wait_for_task("remote-control event proxy", event_proxy).await;
     wait_for_task("remote-control command proxy", cmd_proxy).await;
+
+    // Restore the terminal only now, after the runtime has finished tearing
+    // down, so the prompt stayed visible through shutdown and the viewport is
+    // cleared moments before the process exits (or the next session draws)
+    // instead of leaving a blank gap during teardown. The LoadSession path
+    // already restored before showing the session picker.
+    if !restored && let Err(e) = restore_session_terminal(&mut terminal, mode) {
+        tracing::warn!("restore terminal failed: {e}");
+    }
+    if matches!(
+        ui_result.as_ref().map(|result| result.reason),
+        Ok(UiExitReason::ClearSession)
+    ) && let Err(e) = ui::clear_terminal_screen(&mut terminal)
+    {
+        tracing::warn!("clear terminal for /clear failed: {e}");
+    }
 
     ui_result
 }
