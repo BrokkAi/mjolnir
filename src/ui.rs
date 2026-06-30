@@ -1377,7 +1377,19 @@ fn handle_crossterm(
     let key = match ev {
         CtEvent::Key(k) => k,
         CtEvent::Paste(text) => {
-            // Skip paste when a modal is active;
+            // Route paste into an active free-text elicitation field -- users
+            // paste API keys/tokens there. Strip control characters so a
+            // trailing newline can't pre-submit or split the field.
+            if state.has_pending_elicitation()
+                && matches!(state.elicitation_view(), Some(ElicitationView::Text { .. }))
+            {
+                let cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
+                if let Some(pending) = state.pending_elicitation_mut() {
+                    pending.input.push_str(&cleaned);
+                }
+                return TerminalRequest::None;
+            }
+            // Skip paste when another modal is active;
             // the input buffer isn't focused and pasted text would land
             // invisibly in the background.
             if state.help_overlay
@@ -3458,6 +3470,33 @@ fn handle_permission_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> T
 /// `decline` for the unsupported info modal).
 fn handle_elicitation_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> TerminalRequest {
     if !state.has_pending_elicitation() {
+        return TerminalRequest::None;
+    }
+    // A free-text field captures typed characters first -- including `j`/`k`,
+    // which are option-navigation keys for single-select views. Editing is
+    // append/backspace at the end of the buffer.
+    if matches!(state.elicitation_view(), Some(ElicitationView::Text { .. })) {
+        match code {
+            KeyCode::Char(c) => {
+                if let Some(pending) = state.pending_elicitation_mut() {
+                    pending.input.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(pending) = state.pending_elicitation_mut() {
+                    pending.input.pop();
+                }
+            }
+            KeyCode::Enter => {
+                state.resolve_elicitation_accept();
+                return inline_repair_request(mode);
+            }
+            KeyCode::Esc => {
+                state.resolve_elicitation_dismiss();
+                return inline_repair_request(mode);
+            }
+            _ => {}
+        }
         return TerminalRequest::None;
     }
     match code {
@@ -6145,6 +6184,35 @@ fn elicitation_view_lines(
                 ))),
             }
         }
+        ElicitationView::Text {
+            title, description, ..
+        } => {
+            if let Some(title) = title.filter(|t| !t.is_empty()) {
+                lines.push(Line::from(""));
+                lines.extend(
+                    wrap_text_to_width(&title, width).into_iter().map(|line| {
+                        Line::from(Span::styled(line, Style::default().fg(theme.muted)))
+                    }),
+                );
+            }
+            if let Some(description) = description.filter(|d| !d.is_empty()) {
+                lines.extend(
+                    wrap_text_to_width(&description, width)
+                        .into_iter()
+                        .map(|line| {
+                            Line::from(Span::styled(line, Style::default().fg(theme.muted)))
+                        }),
+                );
+            }
+            lines.push(Line::from(""));
+            // The typed value with a trailing cursor block, padded so the field
+            // reads as an input box even while empty.
+            let shown = pad_text_to_width(format!("{}\u{2588}", pending.input), width);
+            lines.push(Line::from(Span::styled(
+                shown,
+                Style::default().fg(theme.selection_fg).bg(theme.permission),
+            )));
+        }
         ElicitationView::Unsupported => {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
@@ -6164,6 +6232,7 @@ fn elicitation_footer_text(view: &ElicitationView) -> &'static str {
     match view {
         ElicitationView::SingleSelect { .. } => "Up/Down choose | Enter confirm | Esc cancel",
         ElicitationView::Url { .. } => "Enter acknowledge | PgUp/PgDn scroll | Esc cancel",
+        ElicitationView::Text { .. } => "Type value | Backspace delete | Enter submit | Esc cancel",
         ElicitationView::Unsupported => "Enter / Esc to skip",
     }
 }
@@ -6188,6 +6257,17 @@ fn elicitation_content_width_hint(view: &ElicitationView, message: &str) -> usiz
                 .and_then(|qr| qr.lines().map(|line| line.chars().count()).max())
                 .unwrap_or(0);
             message_width.max(url.width()).max(qr_width)
+        }
+        ElicitationView::Text {
+            title, description, ..
+        } => {
+            let title_width = title.as_deref().map(|t| t.width()).unwrap_or(0);
+            let description_width = description.as_deref().map(|d| d.width()).unwrap_or(0);
+            // Reserve a comfortable field width for pasted keys/tokens.
+            message_width
+                .max(title_width)
+                .max(description_width)
+                .max(48)
         }
         ElicitationView::Unsupported => {
             message_width.max("This setup step isn't supported in this build.".width())
@@ -7390,6 +7470,7 @@ mod tests {
             prompt: single_select_elicitation_prompt(),
             selected: 0,
             scroll_offset: None,
+            input: String::new(),
         };
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -7422,6 +7503,7 @@ mod tests {
             prompt: url_elicitation_prompt(),
             selected: 0,
             scroll_offset: None,
+            input: String::new(),
         };
         let backend = TestBackend::new(100, 60);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -7485,6 +7567,101 @@ mod tests {
 
         let pending = state.pending_elicitation().expect("pending elicitation");
         assert_eq!(pending.selected, 1);
+    }
+
+    fn text_elicitation_prompt() -> ElicitationPrompt {
+        let (responder, _rx) = tokio::sync::oneshot::channel();
+        let schema = ElicitationSchema::new().property(
+            "key",
+            StringPropertySchema::new()
+                .title("OpenRouter API key")
+                .description("Paste your key."),
+            true,
+        );
+        ElicitationPrompt {
+            message: "Enter your OpenRouter API key".to_string(),
+            mode: ElicitationMode::from(ElicitationFormMode::new(
+                ElicitationSessionScope::new("setup".to_string()),
+                schema,
+            )),
+            responder,
+        }
+    }
+
+    #[test]
+    fn elicitation_modal_renders_text_input() {
+        // The typed value and a cursor block render inside the modal.
+        let pending = PendingElicitation {
+            prompt: text_elicitation_prompt(),
+            selected: 0,
+            scroll_offset: None,
+            input: "sk-or-abc".to_string(),
+        };
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| {
+                draw_elicitation_modal(
+                    frame,
+                    frame.area(),
+                    &pending,
+                    1,
+                    TerminalThemeKind::default().palette(),
+                )
+            })
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("setup request"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("OpenRouter API key"),
+            "field title must show; rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("sk-or-abc"),
+            "typed value must show; rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains('█'),
+            "cursor block must show; rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn inline_elicitation_text_field_captures_typing() {
+        // A free-text field captures typed characters -- including `j`/`k`,
+        // which navigate option lists for single-select views -- and Backspace
+        // deletes the last one.
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::ElicitationRequest(text_elicitation_prompt()));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        for c in ['s', 'k', '-', 'j'] {
+            handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char(c)));
+        }
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Backspace));
+
+        let pending = state.pending_elicitation().expect("pending elicitation");
+        assert_eq!(pending.input, "sk-");
+    }
+
+    #[test]
+    fn inline_elicitation_text_field_accepts_paste() {
+        // Pasting a key (with a trailing newline) lands in the field with
+        // control characters stripped, so it can't pre-submit.
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::ElicitationRequest(text_elicitation_prompt()));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_inline_crossterm(
+            &mut state,
+            &cmd_tx,
+            CtEvent::Paste("sk-or-xyz\n".to_string()),
+        );
+
+        let pending = state.pending_elicitation().expect("pending elicitation");
+        assert_eq!(pending.input, "sk-or-xyz");
     }
 
     #[test]

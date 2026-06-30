@@ -660,6 +660,10 @@ pub struct PendingElicitation {
     /// Manual scroll position for content taller than the modal (e.g. a URL
     /// QR code). `None` auto-scrolls to keep the selected option visible.
     pub scroll_offset: Option<usize>,
+    /// Typed buffer for a [`ElicitationView::Text`] free-text field. Editing is
+    /// append/backspace at the end (the cursor renders after the last char);
+    /// empty for every other view.
+    pub input: String,
 }
 
 /// How a pending elicitation should be rendered and resolved, derived once
@@ -676,9 +680,17 @@ pub enum ElicitationView {
     },
     /// URL/QR step (e.g. OAuth login). Accept carries no content.
     Url { url: String },
-    /// Any shape v1 cannot render (multi-field forms, free-text/number/
-    /// boolean/multi-select fields, an enum with no options). The modal shows
-    /// an informational message and resolves to `decline` on dismiss.
+    /// Free-text form: exactly one property, a `StringPropertySchema` with no
+    /// `oneOf`/`enum` (e.g. an API-key entry). Accept maps
+    /// `{ property => String(typed_value) }`.
+    Text {
+        property_name: String,
+        title: Option<String>,
+        description: Option<String>,
+    },
+    /// Any shape v1 cannot render (multi-field forms, number/boolean/
+    /// multi-select fields, an enum with no options). The modal shows an
+    /// informational message and resolves to `decline` on dismiss.
     Unsupported,
 }
 
@@ -725,9 +737,13 @@ pub fn classify_elicitation(prompt: &ElicitationPrompt) -> ElicitationView {
                                 .map(|value| EnumOption::new(value.clone(), value.clone()))
                                 .collect(),
                         },
-                        // A string field without `oneOf` or `enum` is free text,
-                        // which v1 does not render.
-                        _ => ElicitationView::Unsupported,
+                        // A string field without `oneOf` or `enum` is free
+                        // text: render an input field (e.g. API-key entry).
+                        _ => ElicitationView::Text {
+                            property_name: property_name.clone(),
+                            title: string_schema.title.clone().or_else(|| schema.title.clone()),
+                            description: string_schema.description.clone(),
+                        },
                     }
                 }
                 _ => ElicitationView::Unsupported,
@@ -1429,6 +1445,21 @@ impl AppState {
                 }
             }
             ElicitationView::Url { .. } => ElicitationOutcome::Accept(BTreeMap::new()),
+            ElicitationView::Text { property_name, .. } => {
+                let value = pending.input.trim();
+                // An empty submission is a no-op skip rather than writing a
+                // blank value the agent would reject.
+                if value.is_empty() {
+                    ElicitationOutcome::Cancel
+                } else {
+                    let mut content = BTreeMap::new();
+                    content.insert(
+                        property_name,
+                        ElicitationContentValue::String(value.to_string()),
+                    );
+                    ElicitationOutcome::Accept(content)
+                }
+            }
             ElicitationView::Unsupported => ElicitationOutcome::Decline,
         };
         let _ = pending.prompt.responder.send(outcome);
@@ -1786,6 +1817,7 @@ impl AppState {
                     prompt,
                     selected: 0,
                     scroll_offset: None,
+                    input: String::new(),
                 });
                 self.update_autocomplete();
             }
@@ -3782,25 +3814,94 @@ mod tests {
     }
 
     #[test]
-    fn free_text_string_form_is_unsupported() {
-        // A string property without `oneOf` is free text, out of scope for v1.
+    fn free_text_string_form_is_text_input() {
+        // A string property without `oneOf`/`enum` is free text: render an
+        // input field (e.g. an API-key entry) carrying the property title and
+        // description.
         let (responder, _rx) = tokio::sync::oneshot::channel();
         let schema = ElicitationSchema::new().property(
-            "name",
-            StringPropertySchema::new().title("Your name"),
+            "key",
+            StringPropertySchema::new()
+                .title("OpenRouter API key")
+                .description("Paste your key."),
             true,
         );
         let prompt = ElicitationPrompt {
-            message: "Enter your name".to_string(),
+            message: "Enter your OpenRouter API key".to_string(),
             mode: ElicitationMode::from(ElicitationFormMode::new(
                 ElicitationSessionScope::new("setup-session".to_string()),
                 schema,
             )),
             responder,
         };
-        assert!(matches!(
+        assert_eq!(
             classify_elicitation(&prompt),
-            ElicitationView::Unsupported
+            ElicitationView::Text {
+                property_name: "key".to_string(),
+                title: Some("OpenRouter API key".to_string()),
+                description: Some("Paste your key.".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn text_elicitation_accept_sends_typed_value() {
+        // Typing into a free-text field and pressing Enter returns the trimmed
+        // value keyed by the property name.
+        let mut s = AppState::new();
+        let (responder, rx) = tokio::sync::oneshot::channel();
+        let schema = ElicitationSchema::new().property(
+            "key",
+            StringPropertySchema::new().title("OpenRouter API key"),
+            true,
+        );
+        s.apply_event(UiEvent::ElicitationRequest(ElicitationPrompt {
+            message: "Enter your OpenRouter API key".to_string(),
+            mode: ElicitationMode::from(ElicitationFormMode::new(
+                ElicitationSessionScope::new("setup-session".to_string()),
+                schema,
+            )),
+            responder,
+        }));
+        if let Some(pending) = s.pending_elicitation_mut() {
+            pending.input = "  sk-or-123  ".to_string();
+        }
+        s.resolve_elicitation_accept();
+        let outcome = rx.blocking_recv().expect("outcome");
+        match outcome {
+            ElicitationOutcome::Accept(content) => {
+                assert_eq!(
+                    content.get("key"),
+                    Some(&ElicitationContentValue::String("sk-or-123".to_string()))
+                );
+            }
+            other => panic!("expected Accept, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_elicitation_empty_accept_is_skip() {
+        // Pressing Enter on an empty field skips (Cancel) rather than writing a
+        // blank value the agent would reject.
+        let mut s = AppState::new();
+        let (responder, rx) = tokio::sync::oneshot::channel();
+        let schema = ElicitationSchema::new().property(
+            "key",
+            StringPropertySchema::new().title("OpenRouter API key"),
+            true,
+        );
+        s.apply_event(UiEvent::ElicitationRequest(ElicitationPrompt {
+            message: "Enter your OpenRouter API key".to_string(),
+            mode: ElicitationMode::from(ElicitationFormMode::new(
+                ElicitationSessionScope::new("setup-session".to_string()),
+                schema,
+            )),
+            responder,
+        }));
+        s.resolve_elicitation_accept();
+        assert!(matches!(
+            rx.blocking_recv().expect("outcome"),
+            ElicitationOutcome::Cancel
         ));
     }
 
