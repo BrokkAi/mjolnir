@@ -6462,91 +6462,189 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode, theme: Term
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let mut lines = general_help_lines(VOICE_INPUT_SUPPORTED);
-    if mode == UiMode::FullscreenTui {
-        lines.extend([
-            Line::from("  F12              toggle mouse text selection / wheel scrolling"),
-            Line::from(""),
-            Line::from(vec![Span::styled(
-                "Scroll transcript",
-                Style::default().add_modifier(Modifier::BOLD),
-            )]),
-            Line::from("  Wheel / Ctrl+Up/Down / Ctrl+PageUp/Down / Ctrl+Home/End / Ctrl-T"),
-            Line::from(""),
-        ]);
-    } else {
-        lines.extend([
-            Line::from(vec![Span::styled(
-                "Read transcript",
-                Style::default().add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(
-                "  Ctrl-T           open full transcript reader (Up/Down/PgUp/PgDn, Esc closes)",
-            ),
-            Line::from(""),
-        ]);
-    }
-    lines.extend([
-        Line::from(vec![Span::styled(
-            "Overlays",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  F10 / Tab       help toggle / accept selected slash command"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Config",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  F1..F9 / Ctrl-1..9 / Up/Down  edit or move inside choices"),
-        Line::from(""),
-        Line::from(
-            "Built-in commands: /clear keeps agent; /new opens agent picker; /load opens session picker",
-        ),
-    ]);
+    let lines = help_modal_lines(mode, VOICE_INPUT_SUPPORTED, theme);
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().fg(theme.text))
+        .wrap(Wrap { trim: false });
     f.render_widget(paragraph, inner);
 }
 
-fn general_help_lines(voice_input_supported: bool) -> Vec<Line<'static>> {
+fn help_modal_lines(
+    mode: UiMode,
+    voice_input_supported: bool,
+    theme: TerminalTheme,
+) -> Vec<Line<'static>> {
+    let mut lines = general_help_lines(voice_input_supported, theme);
+    if mode == UiMode::FullscreenTui {
+        lines.extend([
+            help_binding_line(
+                "F12",
+                "toggle mouse text selection / wheel scrolling",
+                theme,
+            ),
+            help_blank_line(),
+            help_section_line("Scroll transcript", theme),
+            help_binding_line(
+                "Wheel / Ctrl+Up/Down / Ctrl+PageUp/Down / Ctrl+Home/End / Ctrl-T",
+                "",
+                theme,
+            ),
+            help_blank_line(),
+        ]);
+    } else {
+        lines.extend([
+            help_section_line("Read transcript", theme),
+            help_binding_line(
+                "Ctrl-T",
+                "open full transcript reader (Up/Down/PgUp/PgDn, Esc closes)",
+                theme,
+            ),
+            help_blank_line(),
+        ]);
+    }
+    lines.extend([
+        help_section_line("Overlays", theme),
+        help_binding_line(
+            "F10 / Tab",
+            "help toggle / accept selected slash command",
+            theme,
+        ),
+        help_blank_line(),
+        help_section_line("Config", theme),
+        help_binding_line(
+            "F1..F9 / Ctrl-1..9 / Up/Down",
+            "edit or move inside choices",
+            theme,
+        ),
+        help_blank_line(),
+        help_command_line(
+            "Built-in commands:",
+            "/clear keeps agent; /new opens agent picker; /load opens session picker",
+            theme,
+        ),
+    ]);
+    lines
+}
+
+fn general_help_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::from(vec![Span::styled(
-            "General",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  Ctrl-N          new session"),
-        Line::from("  Ctrl-O          load session"),
-        Line::from("  Enter           send prompt / accept selected item"),
-        Line::from(format!(
-            "  {PROMPT_NEWLINE_HINT:<15} insert a newline in the prompt"
-        )),
-        Line::from("  Left/Right       move the prompt cursor"),
-        Line::from("  Up/Down          cursor line or browse prompt history (top/bottom)"),
-        Line::from("  PageUp/Down      move the cursor five lines"),
-        Line::from("  Home/End         jump to the start / end of the current line"),
-        Line::from("  Ctrl-A/E/B/F     line start/end and char left/right"),
-        Line::from("  Ctrl-K/U/W       delete to end/start of line or previous word"),
-        Line::from("  Ctrl-D           delete at cursor; quit when input and chips are empty"),
-        Line::from("  Ctrl-C           cancel streaming; clear input/chips; quit when empty"),
+        help_section_line("General", theme),
+        help_binding_line("Ctrl-N", "new session", theme),
+        help_binding_line("Ctrl-O", "load session", theme),
+        help_binding_line("Enter", "send prompt / accept selected item", theme),
+        help_binding_line(PROMPT_NEWLINE_HINT, "insert a newline in the prompt", theme),
+        help_binding_line("Left/Right", "move the prompt cursor", theme),
+        help_binding_line(
+            "Up/Down",
+            "cursor line or browse prompt history (top/bottom)",
+            theme,
+        ),
+        help_binding_line("PageUp/Down", "move the cursor five lines", theme),
+        help_binding_line(
+            "Home/End",
+            "jump to the start / end of the current line",
+            theme,
+        ),
+        help_binding_line("Ctrl-A/E/B/F", "line start/end and char left/right", theme),
+        help_binding_line(
+            "Ctrl-K/U/W",
+            "delete to end/start of line or previous word",
+            theme,
+        ),
+        help_binding_line(
+            "Ctrl-D",
+            "delete at cursor; quit when input and chips are empty",
+            theme,
+        ),
+        help_binding_line(
+            "Ctrl-C",
+            "cancel streaming; clear input/chips; quit when empty",
+            theme,
+        ),
     ];
     if voice_input_supported {
-        lines.push(Line::from(
-            "  🎙 Ctrl-R        start/stop microphone dictation into the prompt",
+        lines.push(help_binding_line(
+            "🎙 Ctrl-R",
+            "start/stop microphone dictation into the prompt",
+            theme,
         ));
     }
     lines.extend([
-        Line::from("  Ctrl-V/Ctrl-Alt-V paste image from clipboard"),
-        Line::from("  Ctrl-Y           copy last agent message to clipboard"),
-        Line::from("  Esc              cancel streaming; clear input, chips, and browsing history"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Attachment chips",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  Backspace / Esc / Enter  remove chip / clear / send chips + input"),
-        Line::from(""),
+        help_binding_line("Ctrl-V/Ctrl-Alt-V", "paste image from clipboard", theme),
+        help_binding_line("Ctrl-Y", "copy last agent message to clipboard", theme),
+        help_binding_line(
+            "Esc",
+            "cancel streaming; clear input, chips, and browsing history",
+            theme,
+        ),
+        help_blank_line(),
+        help_section_line("Attachment chips", theme),
+        help_binding_line(
+            "Backspace / Esc / Enter",
+            "remove chip / clear / send chips + input",
+            theme,
+        ),
+        help_blank_line(),
     ]);
     lines
+}
+
+// Keep help body text on high-contrast semantic roles: section labels use
+// header styling, keybindings use accent + bold, and descriptions use the
+// normal text color instead of inheriting the green help-modal chrome.
+fn help_section_line(label: &'static str, theme: TerminalTheme) -> Line<'static> {
+    Line::from(Span::styled(
+        label,
+        Style::default()
+            .fg(theme.header)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    ))
+}
+
+fn help_binding_line(
+    binding: &'static str,
+    description: &'static str,
+    theme: TerminalTheme,
+) -> Line<'static> {
+    const HELP_BINDING_WIDTH: usize = 27;
+    let binding_width = binding.width();
+    let gap = HELP_BINDING_WIDTH.saturating_sub(binding_width).max(1);
+    let mut spans = vec![
+        Span::styled("  ", Style::default().fg(theme.muted)),
+        Span::styled(
+            binding,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ".repeat(gap), Style::default().fg(theme.muted)),
+    ];
+    if !description.is_empty() {
+        spans.push(Span::styled(description, Style::default().fg(theme.text)));
+    }
+    Line::from(spans)
+}
+
+fn help_command_line(
+    prefix: &'static str,
+    description: &'static str,
+    theme: TerminalTheme,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            prefix,
+            Style::default()
+                .fg(theme.header)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", Style::default().fg(theme.text)),
+        Span::styled(description, Style::default().fg(theme.text)),
+    ])
+}
+
+fn help_blank_line() -> Line<'static> {
+    Line::from(Span::styled("", Style::default()))
 }
 
 fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -10674,7 +10772,7 @@ mod tests {
 
     #[test]
     fn android_help_hides_voice_shortcut() {
-        let help = general_help_lines(false)
+        let help = general_help_lines(false, TerminalThemeKind::Dark.palette())
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -10682,6 +10780,45 @@ mod tests {
 
         assert!(!help.contains("Ctrl-R"));
         assert!(!help.contains("dictation"));
+    }
+
+    #[test]
+    fn help_lines_style_headings_bindings_and_descriptions_separately() {
+        let theme = TerminalThemeKind::Dark.palette();
+        let lines = help_modal_lines(UiMode::InlineChat, false, theme);
+
+        let heading = lines
+            .iter()
+            .find(|line| line_text(line) == "General")
+            .expect("general heading");
+        assert_eq!(heading.spans[0].style.fg, Some(theme.header));
+        assert!(heading.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            heading.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
+        );
+
+        let ctrl_n = lines
+            .iter()
+            .find(|line| line_text(line).contains("Ctrl-N"))
+            .expect("Ctrl-N line");
+        let binding = ctrl_n
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "Ctrl-N")
+            .expect("binding span");
+        assert_eq!(binding.style.fg, Some(theme.accent));
+        assert!(binding.style.add_modifier.contains(Modifier::BOLD));
+
+        let description = ctrl_n
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "new session")
+            .expect("description span");
+        assert_eq!(description.style.fg, Some(theme.text));
+        assert!(!description.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
