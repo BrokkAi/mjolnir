@@ -1690,6 +1690,9 @@ fn handle_crossterm(
 }
 
 fn cancel_current_turn(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
+    if state.connection_state() != ConnectionState::Streaming {
+        return;
+    }
     let _ = cmd_tx.send(UiCommand::CancelPrompt);
     state.mark_cancelling();
     let queued = state.queued_prompt_count();
@@ -11128,6 +11131,56 @@ mod tests {
             UiCommand::CancelPrompt => {}
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn repeated_ctrl_c_during_cancelling_does_not_dispatch_duplicate_cancel() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        match cmd_rx.try_recv().expect("first cancel dispatched") {
+            UiCommand::CancelPrompt => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(state.connection_state(), ConnectionState::Cancelling);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "second Ctrl-C while cancelling must not enqueue another cancel"
+        );
+    }
+
+    #[test]
+    fn repeated_esc_during_cancelling_does_not_dispatch_duplicate_cancel() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+        match cmd_rx.try_recv().expect("first cancel dispatched") {
+            UiCommand::CancelPrompt => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+
+        assert_eq!(state.connection_state(), ConnectionState::Cancelling);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "second Esc while cancelling must not enqueue another cancel"
+        );
     }
 
     #[test]

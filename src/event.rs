@@ -143,7 +143,7 @@ pub enum UiCommand {
         title: Option<String>,
         responder: oneshot::Sender<LoadSessionResult>,
     },
-    /// Cancel the in-flight prompt turn (Ctrl-C while streaming).
+    /// Cancel the in-flight prompt turn.
     CancelPrompt,
     /// Tear down: kill the agent child and exit.
     Shutdown,
