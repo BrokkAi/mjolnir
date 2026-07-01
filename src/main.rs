@@ -432,6 +432,7 @@ async fn main() -> Result<()> {
         Ok(Some(session_id)) => {
             if worktree_kept {
                 print_resume_hint(
+                    ui_mode(fullscreen_tui),
                     session_id,
                     worktree_label.as_deref(),
                     workspace_roots.additional_directories(),
@@ -446,11 +447,37 @@ async fn main() -> Result<()> {
 }
 
 /// Print a hint showing how to resume the session.
-fn print_resume_hint(session_id: &str, worktree_label: Option<&str>, additional_roots: &[PathBuf]) {
+fn print_resume_hint(
+    mode: UiMode,
+    session_id: &str,
+    worktree_label: Option<&str>,
+    additional_roots: &[PathBuf],
+) {
     println!(
-        "To resume: {}",
-        resume_hint_command(session_id, worktree_label, additional_roots)
+        "{}",
+        resume_hint_output(mode, session_id, worktree_label, additional_roots)
     );
+}
+
+/// Build the post-session resume hint text.
+///
+/// Inline mode leaves the cursor on the host shell's prompt row after teardown,
+/// so a bare `println!` writes the hint onto that row where the shell overwrites
+/// it when it repaints its prompt — the same collision `handle_worktree_after_tui`
+/// avoids for worktree output. Leading with a newline moves off the prompt row
+/// first. Fullscreen restores via the primary buffer, so its output already
+/// lands on a fresh line and needs no lead.
+fn resume_hint_output(
+    mode: UiMode,
+    session_id: &str,
+    worktree_label: Option<&str>,
+    additional_roots: &[PathBuf],
+) -> String {
+    let lead = if mode == UiMode::InlineChat { "\n" } else { "" };
+    format!(
+        "{lead}To resume: {}",
+        resume_hint_command(session_id, worktree_label, additional_roots)
+    )
 }
 
 fn resume_hint_command(
@@ -584,6 +611,7 @@ async fn run_resume(
             && worktree_kept
         {
             print_resume_hint(
+                mode,
                 resumed_id,
                 worktree_label.as_deref(),
                 workspace_roots.additional_directories(),
@@ -655,6 +683,7 @@ async fn run_resume(
                     && worktree_kept
                 {
                     print_resume_hint(
+                        mode,
                         resumed_id,
                         worktree_label.as_deref(),
                         workspace_roots.additional_directories(),
@@ -2458,6 +2487,18 @@ mod tests {
             command,
             "mj resume sess-123 --worktree 'named tree' --additional-directory '/tmp/extra root' --additional-directory '/tmp/quote'\\''root'"
         );
+    }
+
+    #[test]
+    fn resume_hint_leads_with_newline_in_inline_mode_only() {
+        // Inline teardown leaves the cursor on the host shell's prompt row, so
+        // the hint must start on a fresh line to survive the shell repaint.
+        let inline = resume_hint_output(UiMode::InlineChat, "sess-123", None, &[]);
+        assert_eq!(inline, "\nTo resume: mj resume sess-123");
+
+        // Fullscreen restores via the primary buffer and needs no lead.
+        let fullscreen = resume_hint_output(UiMode::FullscreenTui, "sess-123", None, &[]);
+        assert_eq!(fullscreen, "To resume: mj resume sess-123");
     }
 
     #[test]
