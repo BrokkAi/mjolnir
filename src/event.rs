@@ -70,6 +70,10 @@ pub enum UiEvent {
     /// Latest Claude Code `/usage` quota scrape. This is UI-only side-channel
     /// data; it never goes through ACP.
     ClaudeUsage(crate::claude_usage::ClaudeUsageReport),
+    /// Latest Codex subscription-quota scrape (or an unavailable reason). Like
+    /// `ClaudeUsage`, this is UI-only side-channel data scraped from Codex's
+    /// rollout logs; it never goes through ACP.
+    CodexUsage(crate::codex_usage::CodexUsageStatus),
     /// The prompt request failed before returning a stop reason. UI can
     /// re-enable the input prompt and surface the error.
     PromptFailed { message: String },

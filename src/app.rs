@@ -20,6 +20,7 @@ use chrono::{DateTime, FixedOffset, Local, TimeZone};
 
 use crate::claude_usage::ClaudeUsageReport;
 use crate::clipboard::ClipboardLease;
+use crate::codex_usage::CodexUsageStatus;
 
 use crate::event::{
     ElicitationOutcome, ElicitationPrompt, PermissionDecision, PermissionPrompt, PromptImage,
@@ -603,6 +604,8 @@ pub struct AppState {
     pub token_usage: TokenUsage,
     /// Last Claude Code `/usage` quota scrape, when the active agent is Claude.
     pub claude_usage: Option<ClaudeUsageReport>,
+    /// Last Codex subscription-quota scrape, when the active agent is Codex.
+    pub codex_usage: Option<CodexUsageStatus>,
     /// Slash-command autocomplete state, recomputed on every input edit.
     pub autocomplete: Autocomplete,
     /// True while the keyboard help overlay is visible.
@@ -876,6 +879,7 @@ impl AppState {
             connection_state_started_at: now,
             token_usage: TokenUsage::default(),
             claude_usage: None,
+            codex_usage: None,
             autocomplete: Autocomplete::default(),
             help_overlay: false,
             text_selection_mode: false,
@@ -1299,6 +1303,24 @@ impl AppState {
     /// True when there is at least one queued permission prompt.
     pub fn has_pending_permission(&self) -> bool {
         !self.permission_queue.is_empty()
+    }
+
+    /// Whether a subscription-quota row should be reserved and rendered. Only
+    /// one provider's poller runs per session, so at most one field is set.
+    pub fn has_usage_quota(&self) -> bool {
+        self.claude_usage.is_some() || self.codex_usage.is_some()
+    }
+
+    /// Compact one-line subscription-quota label for the active provider, when
+    /// available. `now_unix` is only consulted for the Codex reset countdown.
+    pub fn usage_quota_label(&self, now_unix: i64) -> Option<String> {
+        if let Some(report) = &self.claude_usage {
+            return Some(report.compact_label());
+        }
+        if let Some(status) = &self.codex_usage {
+            return Some(status.compact_label(now_unix));
+        }
+        None
     }
 
     /// Number of prompts queued, including the one currently displayed.
@@ -1847,6 +1869,19 @@ impl AppState {
             }
             UiEvent::ClaudeUsage(report) => {
                 self.claude_usage = Some(report);
+            }
+            UiEvent::CodexUsage(status) => {
+                // Keep a known-good report on screen: a transient unavailable
+                // scrape (e.g. a brand-new session before Codex records limits)
+                // must not clobber real quota we already displayed.
+                match status {
+                    CodexUsageStatus::Available(_) => self.codex_usage = Some(status),
+                    CodexUsageStatus::Unavailable(_) => {
+                        if !matches!(self.codex_usage, Some(CodexUsageStatus::Available(_))) {
+                            self.codex_usage = Some(status);
+                        }
+                    }
+                }
             }
             UiEvent::PromptFailed { message } => {
                 self.finish_prompt_turn(true);
@@ -3246,6 +3281,54 @@ mod tests {
                 .as_ref()
                 .map(ClaudeUsageReport::compact_label),
             Some("Claude usage: 5H 88% left · week 63% left".to_string())
+        );
+    }
+
+    #[test]
+    fn codex_usage_event_records_report_and_keeps_it_over_later_failure() {
+        use crate::codex_usage::{CodexUsageReport, CodexUsageStatus, CodexUsageWindow};
+
+        let mut s = AppState::new();
+
+        let report = CodexUsageReport {
+            five_hour: Some(CodexUsageWindow {
+                remaining_percent: 97,
+                resets_at: None,
+            }),
+            weekly: Some(CodexUsageWindow {
+                remaining_percent: 85,
+                resets_at: None,
+            }),
+            plan_type: Some("pro".to_string()),
+        };
+        s.apply_event(UiEvent::CodexUsage(CodexUsageStatus::Available(
+            report.clone(),
+        )));
+        assert_eq!(
+            s.codex_usage,
+            Some(CodexUsageStatus::Available(report.clone()))
+        );
+
+        // A later transient failure must not wipe the known-good report.
+        s.apply_event(UiEvent::CodexUsage(CodexUsageStatus::Unavailable(
+            "no Codex quota data recorded yet".to_string(),
+        )));
+        assert_eq!(s.codex_usage, Some(CodexUsageStatus::Available(report)));
+    }
+
+    #[test]
+    fn codex_usage_unavailable_shows_when_no_report_yet() {
+        use crate::codex_usage::CodexUsageStatus;
+
+        let mut s = AppState::new();
+        s.apply_event(UiEvent::CodexUsage(CodexUsageStatus::Unavailable(
+            "no Codex session logs found".to_string(),
+        )));
+        assert_eq!(
+            s.codex_usage,
+            Some(CodexUsageStatus::Unavailable(
+                "no Codex session logs found".to_string()
+            ))
         );
     }
 

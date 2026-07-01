@@ -10,6 +10,7 @@ mod acp;
 mod app;
 mod claude_usage;
 mod clipboard;
+mod codex_usage;
 mod config;
 mod event;
 mod headless;
@@ -1508,31 +1509,55 @@ async fn run_session(
     let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
     let (runtime_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (cmd_tx, mut ui_cmd_rx) = mpsc::unbounded_channel();
-    let (usage_turn_tx, usage_task) = if agent.source_id == "claude-acp" {
-        let (tx, mut rx) = mpsc::unbounded_channel::<()>();
-        let usage_ui_tx = ui_event_tx.clone();
-        let usage_cwd = cwd.clone();
-        let usage_env = agent.env.clone();
-        let handle = tokio::spawn(async move {
-            let mut completed_turns = 0_u64;
-            while rx.recv().await.is_some() {
-                completed_turns = completed_turns.saturating_add(1);
-                if !completed_turns.is_multiple_of(2) {
-                    continue;
-                }
-                match claude_usage::query(usage_cwd.clone(), usage_env.clone()).await {
-                    Ok(report) => {
-                        let _ = usage_ui_tx.send(crate::event::UiEvent::ClaudeUsage(report));
+    // Subscription-quota poller. The signal side (`usage_turn_tx`) is pinged
+    // whenever a prompt turn completes; the provider-specific task scrapes the
+    // remaining quota out of band and feeds it back as a UI event.
+    let (usage_turn_tx, usage_task) = match agent.source_id.as_str() {
+        "claude-acp" => {
+            let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+            let usage_ui_tx = ui_event_tx.clone();
+            let usage_cwd = cwd.clone();
+            let usage_env = agent.env.clone();
+            let handle = tokio::spawn(async move {
+                let mut completed_turns = 0_u64;
+                while rx.recv().await.is_some() {
+                    completed_turns = completed_turns.saturating_add(1);
+                    if !completed_turns.is_multiple_of(2) {
+                        continue;
                     }
-                    Err(error) => {
-                        tracing::warn!("claude /usage failed: {error}");
+                    match claude_usage::query(usage_cwd.clone(), usage_env.clone()).await {
+                        Ok(report) => {
+                            let _ = usage_ui_tx.send(crate::event::UiEvent::ClaudeUsage(report));
+                        }
+                        Err(error) => {
+                            tracing::warn!("claude /usage failed: {error}");
+                        }
                     }
                 }
-            }
-        });
-        (Some(tx), Some(handle))
-    } else {
-        (None, None)
+            });
+            (Some(tx), Some(handle))
+        }
+        "codex-acp" => {
+            let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+            let usage_ui_tx = ui_event_tx.clone();
+            // Reading rollout files is cheap, so refresh on every completed turn
+            // rather than throttling like the Claude `/usage` subprocess.
+            let home = codex_usage::codex_home(&agent.env);
+            let handle = tokio::spawn(async move {
+                while rx.recv().await.is_some() {
+                    let status = match codex_usage::query(home.clone()).await {
+                        Ok(report) => codex_usage::CodexUsageStatus::Available(report),
+                        Err(reason) => {
+                            tracing::warn!("codex usage unavailable: {reason}");
+                            codex_usage::CodexUsageStatus::Unavailable(reason)
+                        }
+                    };
+                    let _ = usage_ui_tx.send(crate::event::UiEvent::CodexUsage(status));
+                }
+            });
+            (Some(tx), Some(handle))
+        }
+        _ => (None, None),
     };
     let mut ui_event_rx = ui_event_rx;
 
@@ -1762,7 +1787,7 @@ async fn run_session(
     wait_for_task("remote-control event proxy", event_proxy).await;
     wait_for_task("remote-control command proxy", cmd_proxy).await;
     if let Some(task) = usage_task {
-        wait_for_task("claude usage poller", task).await;
+        wait_for_task("subscription usage poller", task).await;
     }
 
     // Restore the terminal only now, after the runtime has finished tearing

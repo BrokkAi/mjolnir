@@ -532,6 +532,7 @@ impl TrackerState {
                 self.touch();
             }
             UiEvent::ClaudeUsage(_) => {}
+            UiEvent::CodexUsage(_) => {}
             UiEvent::CancelPendingPermissions => {
                 self.pending_permissions.clear();
                 self.touch();

@@ -488,6 +488,7 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
         | UiEvent::CancelPendingPermissions
         | UiEvent::PromptDone { .. }
         | UiEvent::ClaudeUsage(_)
+        | UiEvent::CodexUsage(_)
         | UiEvent::PromptFailed { .. }
         | UiEvent::SessionForkFailed { .. }
         | UiEvent::RemotePermissionDecision { .. }
@@ -1435,7 +1436,7 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
         // the input box keeps its full height while the queue is visible.
         usize::from(INLINE_CHAT_HEIGHT)
             + usize::from(queued_prompt_row_count(state))
-            + usize::from(state.claude_usage.is_some())
+            + usize::from(state.has_usage_quota())
     };
 
     (desired.min(usize::from(u16::MAX)) as u16).clamp(INLINE_CHAT_HEIGHT, max_height)
@@ -3916,7 +3917,7 @@ fn draw(
     }
 
     let has_config_options = !state.selectable_config_options().is_empty();
-    let has_usage_quota = state.claude_usage.is_some();
+    let has_usage_quota = state.has_usage_quota();
 
     // Dynamic input height: borders (2) + chip rows + text lines, clamped.
     let chip_rows = attachment_count(state);
@@ -4025,7 +4026,7 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     }
 
     let has_config_options = !state.selectable_config_options().is_empty();
-    let has_usage_quota = state.claude_usage.is_some();
+    let has_usage_quota = state.has_usage_quota();
     let queued_row = queued_prompt_row_count(state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -5921,14 +5922,15 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
 }
 
 fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let Some(report) = state.claude_usage.as_ref() else {
-        return;
-    };
     if area.height == 0 || area.width == 0 {
         return;
     }
+    let now_unix = chrono::Utc::now().timestamp();
+    let Some(label) = state.usage_quota_label(now_unix) else {
+        return;
+    };
 
-    let label = truncate_text_to_width(report.compact_label(), area.width);
+    let label = truncate_text_to_width(label, area.width);
     let paragraph = Paragraph::new(label).style(Style::default().fg(state.theme.warning));
     f.render_widget(paragraph, area);
 }
@@ -10774,6 +10776,40 @@ mod tests {
         let lines = buffer_lines(terminal.backend().buffer());
         assert!(lines[0].contains("Claude usage: 5H 88% left · week 63% left"));
         assert!(lines[1].contains("[F1 Model: Model 1]"));
+    }
+
+    #[test]
+    fn usage_quota_row_renders_codex_quota() {
+        use crate::codex_usage::{CodexUsageReport, CodexUsageStatus, CodexUsageWindow};
+
+        let mut state = AppState::new();
+        // resets_at is None so the label is independent of the wall clock.
+        state.codex_usage = Some(CodexUsageStatus::Available(CodexUsageReport {
+            five_hour: Some(CodexUsageWindow {
+                remaining_percent: 97,
+                resets_at: None,
+            }),
+            weekly: Some(CodexUsageWindow {
+                remaining_percent: 85,
+                resets_at: None,
+            }),
+            plan_type: Some("pro".to_string()),
+        }));
+
+        let backend = TestBackend::new(100, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1)])
+                    .split(frame.area());
+                draw_usage_quota_row(frame, chunks[0], &state);
+            })
+            .expect("draw");
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        assert!(lines[0].contains("Codex usage (pro): 5H 97% left · week 85% left"));
     }
 
     #[test]

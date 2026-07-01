@@ -393,10 +393,11 @@ impl ConnState {
             }
             // The MCP server does not host an embedded terminal view, never
             // injects remote permission decisions of its own, and does not
-            // surface Claude Code's local quota scrape.
+            // surface the local subscription-quota scrapes.
             UiEvent::TerminalOutput(_)
             | UiEvent::RemotePermissionDecision { .. }
-            | UiEvent::ClaudeUsage(_) => {}
+            | UiEvent::ClaudeUsage(_)
+            | UiEvent::CodexUsage(_) => {}
         }
     }
 
