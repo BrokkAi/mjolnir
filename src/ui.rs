@@ -487,6 +487,7 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
         | UiEvent::ElicitationRequest(_)
         | UiEvent::CancelPendingPermissions
         | UiEvent::PromptDone { .. }
+        | UiEvent::ClaudeUsage(_)
         | UiEvent::PromptFailed { .. }
         | UiEvent::SessionForkFailed { .. }
         | UiEvent::RemotePermissionDecision { .. }
