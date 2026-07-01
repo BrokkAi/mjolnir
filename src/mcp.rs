@@ -391,9 +391,12 @@ impl ConnState {
                 // agent gets a valid response rather than blocking.
                 let _ = prompt.responder.send(ElicitationOutcome::Decline);
             }
-            // The MCP server does not host an embedded terminal view and never
-            // injects remote permission decisions of its own.
-            UiEvent::TerminalOutput(_) | UiEvent::RemotePermissionDecision { .. } => {}
+            // The MCP server does not host an embedded terminal view, never
+            // injects remote permission decisions of its own, and does not
+            // surface Claude Code's local quota scrape.
+            UiEvent::TerminalOutput(_)
+            | UiEvent::RemotePermissionDecision { .. }
+            | UiEvent::ClaudeUsage(_) => {}
         }
     }
 

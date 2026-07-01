@@ -1362,7 +1362,9 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
     } else {
         // Queued prompts render above the input; request extra rows so
         // the input box keeps its full height while the queue is visible.
-        usize::from(INLINE_CHAT_HEIGHT) + usize::from(queued_prompt_row_count(state))
+        usize::from(INLINE_CHAT_HEIGHT)
+            + usize::from(queued_prompt_row_count(state))
+            + usize::from(state.claude_usage.is_some())
     };
 
     (desired.min(usize::from(u16::MAX)) as u16).clamp(INLINE_CHAT_HEIGHT, max_height)
@@ -3843,6 +3845,7 @@ fn draw(
     }
 
     let has_config_options = !state.selectable_config_options().is_empty();
+    let has_usage_quota = state.claude_usage.is_some();
 
     // Dynamic input height: borders (2) + chip rows + text lines, clamped.
     let chip_rows = attachment_count(state);
@@ -3859,6 +3862,7 @@ fn draw(
             Constraint::Length(1),
             Constraint::Length(queued_row),
             Constraint::Length(input_height),
+            Constraint::Length(if has_usage_quota { 1 } else { 0 }),
             Constraint::Length(if has_config_options { 1 } else { 0 }),
         ])
         .split(f.area());
@@ -3867,7 +3871,8 @@ fn draw(
     draw_header(f, chunks[1], state);
     draw_queued_prompt_row(f, chunks[2], state);
     draw_input(f, chunks[3], state, mode);
-    draw_config_shortcuts_row(f, chunks[4], state);
+    draw_usage_quota_row(f, chunks[4], state);
+    draw_config_shortcuts_row(f, chunks[5], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -3949,7 +3954,7 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     }
 
     let has_config_options = !state.selectable_config_options().is_empty();
-    let config_height = if has_config_options { 1 } else { 0 };
+    let has_usage_quota = state.claude_usage.is_some();
     let queued_row = queued_prompt_row_count(state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3957,14 +3962,16 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
             Constraint::Length(1),
             Constraint::Length(queued_row),
             Constraint::Min(MIN_INPUT_HEIGHT),
-            Constraint::Length(config_height),
+            Constraint::Length(if has_usage_quota { 1 } else { 0 }),
+            Constraint::Length(if has_config_options { 1 } else { 0 }),
         ])
         .split(f.area());
 
     draw_header(f, chunks[0], state);
     draw_queued_prompt_row(f, chunks[1], state);
     draw_input(f, chunks[2], state, UiMode::InlineChat);
-    draw_config_shortcuts_row(f, chunks[3], state);
+    draw_usage_quota_row(f, chunks[3], state);
+    draw_config_shortcuts_row(f, chunks[4], state);
 
     if state.autocomplete.visible
         && !state.has_pending_permission()
@@ -5842,8 +5849,21 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     }
 }
 
+fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let Some(report) = state.claude_usage.as_ref() else {
+        return;
+    };
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let label = truncate_text_to_width(report.compact_label(), area.width);
+    let paragraph = Paragraph::new(label).style(Style::default().fg(state.theme.warning));
+    f.render_widget(paragraph, area);
+}
+
 fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    if area.height == 0 {
+    if area.height == 0 || area.width == 0 {
         return;
     }
 
@@ -5862,7 +5882,9 @@ fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppStat
         chips.push(chip);
     }
 
-    let paragraph = Paragraph::new(chips.join(" ")).style(Style::default().fg(state.theme.primary));
+    let text = chips.join(" ");
+
+    let paragraph = Paragraph::new(text).style(Style::default().fg(state.theme.primary));
     f.render_widget(paragraph, area);
 }
 
@@ -7097,6 +7119,7 @@ fn model_choice_score(
 #[cfg(test)]
 mod tests {
     use crate::app::StatusKind;
+    use crate::claude_usage::ClaudeUsageReport;
     use crate::event::{ElicitationPrompt, SessionConfigTarget};
 
     use super::*;
@@ -10628,6 +10651,42 @@ mod tests {
         let picker = state.config_picker.as_ref().expect("picker");
         assert_eq!(picker.selected_option, 1);
         assert_eq!(picker.selected_value, 0);
+    }
+
+    #[test]
+    fn usage_quota_row_renders_between_input_and_config_shortcuts() {
+        let mut state = AppState::new();
+        state.claude_usage = Some(ClaudeUsageReport {
+            five_hour: Some(crate::claude_usage::ClaudeUsageWindow {
+                remaining_percent: 88,
+            }),
+            week: Some(crate::claude_usage::ClaudeUsageWindow {
+                remaining_percent: 63,
+            }),
+        });
+        state.session_config_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "model-1",
+            vec![SessionConfigSelectOption::new("model-1", "Model 1")],
+        )];
+
+        let backend = TestBackend::new(100, 2);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Length(1)])
+                    .split(frame.area());
+                draw_usage_quota_row(frame, chunks[0], &state);
+                draw_config_shortcuts_row(frame, chunks[1], &state);
+            })
+            .expect("draw");
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        assert!(lines[0].contains("Claude usage: 5H 88% left · week 63% left"));
+        assert!(lines[1].contains("[F1 Model: Model 1]"));
     }
 
     #[test]

@@ -18,6 +18,7 @@ use agent_client_protocol::schema::v1::{
 };
 use chrono::{DateTime, FixedOffset, Local, TimeZone};
 
+use crate::claude_usage::ClaudeUsageReport;
 use crate::clipboard::ClipboardLease;
 
 use crate::event::{
@@ -600,6 +601,8 @@ pub struct AppState {
     connection_state_started_at: Instant,
     /// Last token/context usage reported by the agent.
     pub token_usage: TokenUsage,
+    /// Last Claude Code `/usage` quota scrape, when the active agent is Claude.
+    pub claude_usage: Option<ClaudeUsageReport>,
     /// Slash-command autocomplete state, recomputed on every input edit.
     pub autocomplete: Autocomplete,
     /// True while the keyboard help overlay is visible.
@@ -872,6 +875,7 @@ impl AppState {
             last_turn_elapsed: None,
             connection_state_started_at: now,
             token_usage: TokenUsage::default(),
+            claude_usage: None,
             autocomplete: Autocomplete::default(),
             help_overlay: false,
             text_selection_mode: false,
@@ -1840,6 +1844,9 @@ impl AppState {
                     self.set_status_line(StatusKind::Info, format!("turn done: {stop_reason:?}"));
                 }
                 self.update_autocomplete();
+            }
+            UiEvent::ClaudeUsage(report) => {
+                self.claude_usage = Some(report);
             }
             UiEvent::PromptFailed { message } => {
                 self.finish_prompt_turn(true);
@@ -3219,6 +3226,27 @@ mod tests {
             )
             .count();
         assert_eq!(entries, 1);
+    }
+
+    #[test]
+    fn claude_usage_event_records_latest_report() {
+        let mut s = AppState::new();
+
+        s.apply_event(UiEvent::ClaudeUsage(ClaudeUsageReport {
+            five_hour: Some(crate::claude_usage::ClaudeUsageWindow {
+                remaining_percent: 88,
+            }),
+            week: Some(crate::claude_usage::ClaudeUsageWindow {
+                remaining_percent: 63,
+            }),
+        }));
+
+        assert_eq!(
+            s.claude_usage
+                .as_ref()
+                .map(ClaudeUsageReport::compact_label),
+            Some("Claude usage: 5H 88% left · week 63% left".to_string())
+        );
     }
 
     #[test]

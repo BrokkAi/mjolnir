@@ -8,6 +8,7 @@
 
 mod acp;
 mod app;
+mod claude_usage;
 mod clipboard;
 mod config;
 mod event;
@@ -1478,6 +1479,32 @@ async fn run_session(
     let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
     let (runtime_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (cmd_tx, mut ui_cmd_rx) = mpsc::unbounded_channel();
+    let (usage_turn_tx, usage_task) = if agent.source_id == "claude-acp" {
+        let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+        let usage_ui_tx = ui_event_tx.clone();
+        let usage_cwd = cwd.clone();
+        let usage_env = agent.env.clone();
+        let handle = tokio::spawn(async move {
+            let mut completed_turns = 0_u64;
+            while rx.recv().await.is_some() {
+                completed_turns = completed_turns.saturating_add(1);
+                if !completed_turns.is_multiple_of(2) {
+                    continue;
+                }
+                match claude_usage::query(usage_cwd.clone(), usage_env.clone()).await {
+                    Ok(report) => {
+                        let _ = usage_ui_tx.send(crate::event::UiEvent::ClaudeUsage(report));
+                    }
+                    Err(error) => {
+                        tracing::warn!("claude /usage failed: {error}");
+                    }
+                }
+            }
+        });
+        (Some(tx), Some(handle))
+    } else {
+        (None, None)
+    };
     let mut ui_event_rx = ui_event_rx;
 
     let runtime_cfg = acp::AcpRuntimeConfig {
@@ -1528,6 +1555,11 @@ async fn run_session(
             // the pending request.
             let event = event_tracker.intercept_event(event);
             event_tracker.observe_event(&event);
+            if matches!(event, crate::event::UiEvent::PromptDone { .. })
+                && let Some(tx) = usage_turn_tx.as_ref()
+            {
+                let _ = tx.send(());
+            }
             if ui_event_tx.send(event).is_err() {
                 break;
             }
@@ -1700,6 +1732,9 @@ async fn run_session(
 
     wait_for_task("remote-control event proxy", event_proxy).await;
     wait_for_task("remote-control command proxy", cmd_proxy).await;
+    if let Some(task) = usage_task {
+        wait_for_task("claude usage poller", task).await;
+    }
 
     // Restore the terminal only now, after the runtime has finished tearing
     // down, so the session UI stayed on screen through shutdown and is torn
