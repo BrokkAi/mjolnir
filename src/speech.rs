@@ -23,7 +23,12 @@ mod backend {
         fs,
         io::{Read, Write},
         path::{Component, Path, PathBuf},
-        sync::mpsc,
+        process::{Command, Output},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
         thread,
         time::{Duration, Instant},
     };
@@ -40,6 +45,11 @@ mod backend {
 
     const DICTATION_TIMEOUT: Duration = Duration::from_secs(600);
     const DICTATION_SILENCE: Duration = Duration::from_secs(20);
+    /// If the capture stream delivers no audio at all within this window, the
+    /// input device is not producing samples (a common Linux/PipeWire failure
+    /// mode). Fail with a clear message instead of waiting for the much longer
+    /// silence timeout, which would misreport it as "no speech recognized".
+    const NO_AUDIO_TIMEOUT: Duration = Duration::from_secs(5);
 
     const SAMPLE_RATE: i32 = 16000;
     const VAD_WINDOW_SIZE: usize = 512;
@@ -247,6 +257,88 @@ mod backend {
         Ok(())
     }
 
+    /// Load the native models (and exercise decode) in the *current* process.
+    ///
+    /// Called from the `voice-probe` child process. If loading a corrupt model
+    /// or an ABI-incompatible native library throws a foreign exception, the
+    /// Rust runtime aborts *this* child with `SIGABRT`; the parent observes the
+    /// signal instead of dying itself. A clean return means in-process loading
+    /// is safe.
+    pub(super) fn probe_native_engine() -> Result<()> {
+        let paths = model_paths()?;
+        if !paths.is_installed() {
+            bail!("voice models are not installed");
+        }
+        let _vad = create_vad(&paths)?;
+        let recognizer = create_recognizer(&paths)?;
+        // Decoding also crosses into native code, so run a short buffer through
+        // it to catch aborts that only surface on the inference path.
+        let probe_samples = vec![0.0f32; (SAMPLE_RATE / 10) as usize];
+        let _ = decode_segment(&recognizer, SAMPLE_RATE, &probe_samples);
+        Ok(())
+    }
+
+    /// Verify the native engine can be loaded without aborting, by running
+    /// [`probe_native_engine`] in a throwaway child process.
+    ///
+    /// Returns `Ok(())` if the child loaded the engine cleanly; otherwise a
+    /// graceful error (never a process abort) describing the failure. The result
+    /// is memoized per process: engine/library compatibility does not change
+    /// within a run, so later dictations skip the extra load.
+    fn ensure_native_engine_loadable(paths: &ModelPaths) -> Result<()> {
+        static PROBE_PASSED: AtomicBool = AtomicBool::new(false);
+        if PROBE_PASSED.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        let exe = std::env::current_exe().context("locate mj executable for voice probe")?;
+        let output = Command::new(exe)
+            .arg("voice-probe")
+            .output()
+            .context("run voice engine probe")?;
+        if output.status.success() {
+            PROBE_PASSED.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+
+        let voice_dir = paths.vad.parent().unwrap_or(&paths.dir);
+        bail!("{}", describe_probe_failure(&output, voice_dir));
+    }
+
+    /// Turn a failed probe process result into an actionable, user-facing
+    /// message. A terminating signal means the native engine aborted (crash);
+    /// a non-zero exit carries the child's own error text.
+    pub(super) fn describe_probe_failure(output: &Output, voice_dir: &Path) -> String {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = output.status.signal() {
+                return format!(
+                    "voice transcription engine crashed while loading (signal {signal}); the \
+                     prebuilt model library is likely incompatible with your system libraries or \
+                     a model file is corrupt. Try updating your system packages, or delete {} to \
+                     re-download the models.",
+                    voice_dir.display()
+                );
+            }
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr
+            .lines()
+            .map(str::trim)
+            .rev()
+            .find(|line| !line.is_empty());
+        match detail {
+            Some(detail) => format!("voice transcription engine failed to load: {detail}"),
+            None => format!(
+                "voice transcription engine failed to load (exit {}); delete {} to re-download \
+                 the models.",
+                output.status,
+                voice_dir.display()
+            ),
+        }
+    }
+
     pub(super) fn create_vad(paths: &ModelPaths) -> Result<VoiceActivityDetector> {
         let mut config = VadModelConfig::default();
         config.silero_vad.model = Some(paths.vad.display().to_string());
@@ -276,12 +368,16 @@ mod backend {
             .unwrap_or(2)
     }
 
+    /// Latest error reported by the cpal audio thread, shared with the capture
+    /// loop so a backend failure surfaces instead of hanging silently.
+    type StreamErrorSlot = Arc<Mutex<Option<String>>>;
+
     /// Build a cpal input stream that forwards mono f32 samples at the
     /// device's native rate.
     fn build_input_stream(
         device: &cpal::Device,
         tx: mpsc::Sender<Vec<f32>>,
-    ) -> Result<(cpal::Stream, i32)> {
+    ) -> Result<(cpal::Stream, i32, StreamErrorSlot)> {
         let supported = device
             .default_input_config()
             .context("query microphone input format")?;
@@ -289,7 +385,17 @@ mod backend {
         let sample_format = supported.sample_format();
         let channels = config.channels.max(1) as usize;
         let sample_rate = config.sample_rate.0 as i32;
-        let err_fn = |_err| {};
+        // cpal reports stream errors on its own audio thread. Capture the latest
+        // one so the capture loop can surface it instead of hanging silently —
+        // previously these were dropped, hiding "device produces no audio"
+        // failures behind the generic silence timeout.
+        let stream_error: StreamErrorSlot = Arc::new(Mutex::new(None));
+        let err_sink = Arc::clone(&stream_error);
+        let err_fn = move |err: cpal::StreamError| {
+            if let Ok(mut slot) = err_sink.lock() {
+                *slot = Some(err.to_string());
+            }
+        };
 
         let stream = match sample_format {
             SampleFormat::F32 => device.build_input_stream(
@@ -321,7 +427,7 @@ mod backend {
             other => bail!("unsupported microphone sample format: {other:?}"),
         }
         .context("open microphone input stream")?;
-        Ok((stream, sample_rate))
+        Ok((stream, sample_rate, stream_error))
     }
 
     fn downmix<I>(samples: I, channels: usize) -> Vec<f32>
@@ -376,6 +482,12 @@ mod backend {
         let paths = model_paths()?;
         ensure_models_installed(&paths, &mut on_status)?;
 
+        // Load the native engine in an isolated process first: a foreign
+        // exception from an incompatible library or corrupt model aborts the
+        // probe, not the TUI, and surfaces here as a graceful error.
+        on_status("checking voice model...".to_string());
+        ensure_native_engine_loadable(&paths)?;
+
         on_status("loading voice model...".to_string());
         let vad = create_vad(&paths)?;
         let recognizer = create_recognizer(&paths)?;
@@ -385,7 +497,7 @@ mod backend {
             .default_input_device()
             .context("no microphone input device was found")?;
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>();
-        let (stream, mic_sample_rate) = build_input_stream(&device, audio_tx)?;
+        let (stream, mic_sample_rate, stream_error) = build_input_stream(&device, audio_tx)?;
         let resampler = if mic_sample_rate != SAMPLE_RATE {
             Some(
                 LinearResampler::create(mic_sample_rate, SAMPLE_RATE)
@@ -410,14 +522,27 @@ mod backend {
         let mut interim = String::new();
         let mut last_emitted: Option<String> = None;
         let mut cancelled = false;
+        let mut received_any = false;
 
         loop {
             if cancel_rx.try_recv().is_ok() {
                 cancelled = true;
                 break;
             }
+            if let Some(error) = stream_error.lock().ok().and_then(|mut slot| slot.take()) {
+                bail!("voice input lost the microphone stream: {error}");
+            }
             if started_at.elapsed() >= DICTATION_TIMEOUT {
                 break;
+            }
+            // A working microphone delivers buffers continuously (near-silent
+            // ones included). No buffers at all means the device is not
+            // capturing — report it distinctly rather than as recognized silence.
+            if !received_any && started_at.elapsed() >= NO_AUDIO_TIMEOUT {
+                bail!(
+                    "voice input received no audio from the microphone; check that the correct \
+                     input device is selected and that mj has microphone access"
+                );
             }
             if last_activity_at.elapsed() >= DICTATION_SILENCE {
                 break;
@@ -425,6 +550,9 @@ mod backend {
 
             match audio_rx.recv_timeout(Duration::from_millis(30)) {
                 Ok(samples) => {
+                    if !samples.is_empty() {
+                        received_any = true;
+                    }
                     if last_level_at.elapsed() >= LEVEL_EMIT_INTERVAL {
                         on_level(normalized_level(chunk_rms(&samples)));
                         last_level_at = Instant::now();
@@ -549,6 +677,19 @@ where
     backend::run(on_partial, on_level, on_status, cancel_rx)
 }
 
+/// Load the transcription engine and exit; entry point for the hidden
+/// `voice-probe` subcommand. Run as an isolated child process so a foreign
+/// abort during native model load cannot take down the parent TUI.
+#[cfg(not(target_os = "android"))]
+pub fn run_model_probe() -> Result<()> {
+    backend::probe_native_engine()
+}
+
+#[cfg(target_os = "android")]
+pub fn run_model_probe() -> Result<()> {
+    bail!("voice dictation is not supported on Android")
+}
+
 #[cfg(target_os = "android")]
 pub fn run_dictation<F, G, H>(
     _on_partial: F,
@@ -649,6 +790,35 @@ mod tests {
         assert!(backend::safe_archive_path(std::path::Path::new("../evil")).is_err());
         assert!(backend::safe_archive_path(std::path::Path::new("/abs/evil")).is_err());
         assert!(backend::safe_archive_path(std::path::Path::new("")).is_err());
+    }
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn describe_probe_failure_distinguishes_crash_from_error() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+
+        let voice_dir = std::path::Path::new("/cache/mj/voice");
+
+        // A terminating signal is the foreign-abort case: name it a crash and
+        // point at the cache dir to re-download.
+        let crashed = Output {
+            status: ExitStatus::from_raw(6), // SIGABRT
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let msg = backend::describe_probe_failure(&crashed, voice_dir);
+        assert!(msg.contains("crashed"), "{msg}");
+        assert!(msg.contains("/cache/mj/voice"), "{msg}");
+
+        // A clean non-zero exit carries the child's own error text.
+        let failed = Output {
+            status: ExitStatus::from_raw(1 << 8), // exit code 1
+            stdout: Vec::new(),
+            stderr: b"Error: voice models are not installed\n".to_vec(),
+        };
+        let msg = backend::describe_probe_failure(&failed, voice_dir);
+        assert!(msg.contains("voice models are not installed"), "{msg}");
     }
 
     #[cfg(not(target_os = "android"))]

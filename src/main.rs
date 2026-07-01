@@ -174,10 +174,21 @@ enum Commands {
     /// key. Used to verify model-score matching against real agent output.
     #[command(hide = true)]
     DumpModels(DumpModelsArgs),
+    /// Internal: load the voice transcription models and exit.
+    ///
+    /// Run as an isolated child process before in-process dictation so a foreign
+    /// (C++) abort from an incompatible native library or a corrupt model
+    /// download crashes only this probe, not the TUI. A clean exit means the
+    /// engine loaded and decoded without aborting.
+    #[command(hide = true)]
+    VoiceProbe(VoiceProbeArgs),
 }
 
 #[derive(Debug, clap::Args, Default)]
 struct McpArgs {}
+
+#[derive(Debug, clap::Args, Default)]
+struct VoiceProbeArgs {}
 
 #[derive(Debug, clap::Args, Default)]
 struct DumpModelsArgs {
@@ -328,6 +339,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
         Some(Commands::Server(_)) => false,
         Some(Commands::Mcp(_)) => false,
         Some(Commands::DumpModels(_)) => false,
+        Some(Commands::VoiceProbe(_)) => false,
         None => true,
     }
 }
@@ -387,6 +399,9 @@ async fn main() -> Result<()> {
             Commands::DumpModels(args) => {
                 run_dump_models(args.agent, args.program, args.args).await
             }
+            // Isolated model load: exit status tells the parent whether the
+            // native engine can be loaded in-process without aborting.
+            Commands::VoiceProbe(_) => crate::speech::run_model_probe(),
         };
     }
 
