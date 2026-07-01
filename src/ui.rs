@@ -388,47 +388,111 @@ pub async fn run(
 /// overlays, and picker updates.
 const FRAME_BUDGET: Duration = Duration::from_millis(33);
 
-/// Slower redraw rate while prompt activity is animated in the fullscreen
-/// TUI. This preserves a visible spinner without repainting the prompt area
-/// as aggressively as normal local editing.
+/// Slower redraw rate for streaming transcript updates in the fullscreen TUI.
+/// User input is intentionally not throttled by this budget.
 const STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(125);
 
-/// Much slower redraw rate for inline animated prompt activity. Inline
-/// terminals are more prone to visible prompt flicker, so keep the spinner
-/// alive but update it on a calm cadence.
+/// Slower redraw rate for streaming transcript updates in inline chat. Spinner
+/// animation has its own cadence, so queued-prompt typing can stay responsive.
 const INLINE_STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(125);
 
-/// Redraw cadence while the `/mjconfig` overlay is open. The only thing that
-/// animates there is its spinner previews, which advance on the spinner
-/// interval, so repainting faster than that is wasted work. Tied to
-/// `SPINNER_FRAME_INTERVAL_MS` so the two can't drift.
-const MJCONFIG_FRAME_BUDGET: Duration =
+/// Spinner-only redraw cadence. Tied to `SPINNER_FRAME_INTERVAL_MS` so the
+/// wall-clock frame selection and idle animation wakeups cannot drift.
+const SPINNER_FRAME_BUDGET: Duration =
     Duration::from_millis(crate::spinner::SPINNER_FRAME_INTERVAL_MS as u64);
 
-fn redraw_budget(mode: UiMode, state: &AppState) -> Duration {
-    // The /mjconfig overlay's previews animate on the spinner cadence; keypress
-    // redraws are event-driven, so this only throttles the idle animation tick.
-    if state.mjconfig_menu.is_some() {
-        return MJCONFIG_FRAME_BUDGET;
+/// Redraw cadence while the `/mjconfig` overlay is idly previewing spinners.
+/// Keypresses in the menu are still rendered with the interactive budget.
+#[cfg(test)]
+const MJCONFIG_FRAME_BUDGET: Duration = SPINNER_FRAME_BUDGET;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedrawCause {
+    /// Local user-visible edits: typing, queueing, modal navigation, status
+    /// changes, or lifecycle events that should echo promptly.
+    Interactive,
+    /// Remote transcript/output updates that can be coalesced while streaming.
+    Stream,
+    /// Timer-only animation such as spinners and elapsed-time labels.
+    Animation,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PendingRedraw {
+    interactive: bool,
+    stream: bool,
+    animation: bool,
+}
+
+impl PendingRedraw {
+    fn from_failed_initial_draw(rendered: bool) -> Self {
+        let mut pending = Self::default();
+        if !rendered {
+            pending.mark(RedrawCause::Interactive);
+        }
+        pending
     }
-    match (mode, state.connection_state()) {
-        (
-            UiMode::InlineChat,
-            ConnectionState::Launching
-            | ConnectionState::Initializing
-            | ConnectionState::Streaming
-            | ConnectionState::Cancelling
-            | ConnectionState::Forking,
-        ) => INLINE_STREAMING_FRAME_BUDGET,
-        (
-            _,
-            ConnectionState::Launching
-            | ConnectionState::Initializing
-            | ConnectionState::Streaming
-            | ConnectionState::Cancelling
-            | ConnectionState::Forking,
-        ) => STREAMING_FRAME_BUDGET,
-        _ => FRAME_BUDGET,
+
+    fn mark(&mut self, cause: RedrawCause) {
+        match cause {
+            RedrawCause::Interactive => self.interactive = true,
+            RedrawCause::Stream => self.stream = true,
+            RedrawCause::Animation => self.animation = true,
+        }
+    }
+
+    fn mark_interactive(&mut self) {
+        self.mark(RedrawCause::Interactive);
+    }
+
+    fn mark_animation(&mut self) {
+        self.mark(RedrawCause::Animation);
+    }
+
+    fn any(self) -> bool {
+        self.interactive || self.stream || self.animation
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn budget(self, mode: UiMode) -> Duration {
+        if self.interactive {
+            FRAME_BUDGET
+        } else if self.stream {
+            streaming_redraw_budget(mode)
+        } else if self.animation {
+            SPINNER_FRAME_BUDGET
+        } else {
+            FRAME_BUDGET
+        }
+    }
+}
+
+fn streaming_redraw_budget(mode: UiMode) -> Duration {
+    match mode {
+        UiMode::InlineChat => INLINE_STREAMING_FRAME_BUDGET,
+        UiMode::FullscreenTui => STREAMING_FRAME_BUDGET,
+    }
+}
+
+fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
+    match event {
+        UiEvent::SessionUpdate(_) | UiEvent::TerminalOutput(_) => RedrawCause::Stream,
+        UiEvent::Connected { .. }
+        | UiEvent::SessionStarted { .. }
+        | UiEvent::SessionConfigOptions { .. }
+        | UiEvent::PermissionRequest(_)
+        | UiEvent::ElicitationRequest(_)
+        | UiEvent::CancelPendingPermissions
+        | UiEvent::PromptDone { .. }
+        | UiEvent::PromptFailed { .. }
+        | UiEvent::SessionForkFailed { .. }
+        | UiEvent::RemotePermissionDecision { .. }
+        | UiEvent::Warning(_)
+        | UiEvent::Info(_)
+        | UiEvent::Fatal(_) => RedrawCause::Interactive,
     }
 }
 
@@ -488,17 +552,19 @@ async fn ui_loop(
     let (dictation_tx, mut dictation_rx) = mpsc::unbounded_channel::<DictationEvent>();
     let mut dictation_cancel_tx: Option<std_mpsc::Sender<()>> = None;
     let mut inline_height = INLINE_CHAT_HEIGHT;
-    // Wake-up timer so we still get scheduled to draw when no events
-    // arrive (e.g. while waiting on the agent). `Delay` keeps it from
-    // burst-firing after a long busy period.
-    let mut frame_budget = redraw_budget(mode, &state);
-    let mut frame_tick = tokio::time::interval(frame_budget);
-    frame_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Wake-up timers so queued input can render at the interactive cadence
+    // while spinner-only animation advances at a calmer progress cadence.
+    // `Delay` keeps either timer from burst-firing after a long busy period.
+    let mut redraw_tick = tokio::time::interval(FRAME_BUDGET);
+    redraw_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut animation_tick = tokio::time::interval(SPINNER_FRAME_BUDGET);
+    animation_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     if mode == UiMode::InlineChat {
         sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
     }
-    let mut dirty = !draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
+    let initial_rendered = draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
+    let mut pending_redraw = PendingRedraw::from_failed_initial_draw(initial_rendered);
     let mut last_draw = Instant::now();
     let mut last_inline_repair = Instant::now();
     let mut force_inline_repair = false;
@@ -546,26 +612,26 @@ async fn ui_loop(
                     }
                     None => break,
                 }
-                dirty = true;
+                pending_redraw.mark_interactive();
             }
             maybe_dictation = dictation_rx.recv() => {
                 match maybe_dictation {
                     Some(DictationEvent::Partial(text)) => {
                         update_dictation_partial(&mut state, &text);
-                        dirty = true;
+                        pending_redraw.mark_interactive();
                     }
                     Some(DictationEvent::Level(level)) => {
                         update_dictation_level(&mut state, level);
-                        dirty = true;
+                        pending_redraw.mark_interactive();
                     }
                     Some(DictationEvent::Status(message)) => {
                         update_dictation_status(&mut state, message);
-                        dirty = true;
+                        pending_redraw.mark_interactive();
                     }
                     Some(DictationEvent::Finished(result)) => {
                         dictation_cancel_tx = None;
                         finish_dictation(&mut state, result);
-                        dirty = true;
+                        pending_redraw.mark_interactive();
                     }
                     None => {}
                 }
@@ -578,6 +644,7 @@ async fn ui_loop(
             maybe_ev = event_rx.recv(), if !state.runtime_closed => {
                 match maybe_ev {
                     Some(ev) => {
+                        let redraw_cause = ui_event_redraw_cause(&ev);
                         let force_repair_for_event =
                             should_force_inline_repair_for_ui_event(mode, &ev);
                         let notification = notification_message_for_event(mode, &state, &ev);
@@ -612,28 +679,27 @@ async fn ui_loop(
                             &mut notification_backend,
                             notification.as_deref(),
                         );
+                        pending_redraw.mark(redraw_cause);
                     }
                     None => {
                         state.mark_runtime_closed();
+                        pending_redraw.mark_interactive();
                     }
                 }
-                dirty = true;
             }
-            _ = frame_tick.tick() => {
+            _ = redraw_tick.tick() => {
                 if flush_input_paste_burst_if_due(&mut state, Instant::now(), false) {
-                    dirty = true;
+                    pending_redraw.mark_interactive();
                 }
                 if timer_driven_live_redraw(mode, &state) {
-                    dirty = true;
+                    pending_redraw.mark_animation();
                 }
             }
-        }
-
-        let desired_frame_budget = redraw_budget(mode, &state);
-        if desired_frame_budget != frame_budget {
-            frame_budget = desired_frame_budget;
-            frame_tick = tokio::time::interval(frame_budget);
-            frame_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            _ = animation_tick.tick() => {
+                if timer_driven_live_redraw(mode, &state) {
+                    pending_redraw.mark_animation();
+                }
+            }
         }
 
         if !inline_resize_reflow.is_pending()
@@ -651,9 +717,9 @@ async fn ui_loop(
             last_inline_repair = now;
             if repaired {
                 last_draw = now;
-                dirty = false;
+                pending_redraw.clear();
             } else {
-                dirty = true;
+                pending_redraw.mark_interactive();
             }
         }
 
@@ -664,7 +730,7 @@ async fn ui_loop(
             &state,
             &mut inline_height,
         )? {
-            dirty = true;
+            pending_redraw.mark_interactive();
         }
 
         // Pause scrollback flushing while the full-transcript reader owns the
@@ -715,9 +781,9 @@ async fn ui_loop(
             last_inline_repair = now;
             if repaired {
                 last_draw = now;
-                dirty = false;
+                pending_redraw.clear();
             } else {
-                dirty = true;
+                pending_redraw.mark_interactive();
             }
         }
 
@@ -741,25 +807,29 @@ async fn ui_loop(
             last_inline_repair = now;
             if repaired {
                 last_draw = now;
-                dirty = false;
+                pending_redraw.clear();
             } else {
-                dirty = true;
+                pending_redraw.mark_interactive();
             }
         }
 
-        // Throttle: redraw at most once per the current redraw budget.
-        // Under a flood of events (`biased` select keeps picking the
-        // event arm before the timer), this elapsed-time check is what
-        // actually paces the redraws; the timer arm is the wake-up
-        // source when idle.
-        if dirty && last_draw.elapsed() >= frame_budget {
+        // Throttle by redraw cause. Under a flood of runtime events (`biased`
+        // select keeps picking event arms before timers), this elapsed-time
+        // check coalesces stream chunks. Interactive input remains on the fast
+        // budget even while a spinner is active.
+        if pending_redraw.any() && last_draw.elapsed() >= pending_redraw.budget(mode) {
             if mode == UiMode::InlineChat && inline_resize_reflow.waiting(Instant::now()) {
                 continue;
             }
             if mode == UiMode::InlineChat {
                 sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
             }
-            dirty = !draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
+            let rendered = draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
+            if rendered {
+                pending_redraw.clear();
+            } else {
+                pending_redraw.mark_interactive();
+            }
             last_draw = Instant::now();
         }
     }
@@ -7813,10 +7883,23 @@ mod tests {
         assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
         assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
         assert_eq!(
-            redraw_budget(UiMode::InlineChat, &state),
-            INLINE_STREAMING_FRAME_BUDGET
+            PendingRedraw {
+                animation: true,
+                ..PendingRedraw::default()
+            }
+            .budget(UiMode::InlineChat),
+            SPINNER_FRAME_BUDGET
         );
-        assert_eq!(INLINE_STREAMING_FRAME_BUDGET, Duration::from_millis(125));
+        assert_eq!(
+            PendingRedraw {
+                interactive: true,
+                animation: true,
+                ..PendingRedraw::default()
+            }
+            .budget(UiMode::InlineChat),
+            FRAME_BUDGET
+        );
+        assert_eq!(SPINNER_FRAME_BUDGET, Duration::from_millis(250));
         assert!(!should_repair_inline_view(UiMode::InlineChat, &state));
     }
 
@@ -7879,67 +7962,62 @@ mod tests {
     }
 
     #[test]
-    fn redraw_budget_slows_during_streaming() {
-        let mut state = AppState::new();
-
+    fn pending_redraw_budget_prioritizes_interactive_input_over_streaming_and_animation() {
         assert_eq!(
-            redraw_budget(UiMode::FullscreenTui, &state),
+            PendingRedraw {
+                stream: true,
+                ..PendingRedraw::default()
+            }
+            .budget(UiMode::FullscreenTui),
             STREAMING_FRAME_BUDGET
         );
         assert_eq!(
-            redraw_budget(UiMode::InlineChat, &state),
+            PendingRedraw {
+                stream: true,
+                ..PendingRedraw::default()
+            }
+            .budget(UiMode::InlineChat),
             INLINE_STREAMING_FRAME_BUDGET
         );
-
-        state.set_connection_state(ConnectionState::Streaming);
         assert_eq!(
-            redraw_budget(UiMode::FullscreenTui, &state),
-            STREAMING_FRAME_BUDGET
+            PendingRedraw {
+                animation: true,
+                ..PendingRedraw::default()
+            }
+            .budget(UiMode::InlineChat),
+            SPINNER_FRAME_BUDGET
         );
         assert_eq!(
-            redraw_budget(UiMode::InlineChat, &state),
-            INLINE_STREAMING_FRAME_BUDGET
+            PendingRedraw {
+                interactive: true,
+                stream: true,
+                animation: true,
+            }
+            .budget(UiMode::InlineChat),
+            FRAME_BUDGET
         );
-
-        state.set_connection_state(ConnectionState::Cancelling);
-        assert_eq!(
-            redraw_budget(UiMode::FullscreenTui, &state),
-            STREAMING_FRAME_BUDGET
-        );
-        assert_eq!(
-            redraw_budget(UiMode::InlineChat, &state),
-            INLINE_STREAMING_FRAME_BUDGET
-        );
-
-        state.set_connection_state(ConnectionState::Ready);
-        assert_eq!(redraw_budget(UiMode::FullscreenTui, &state), FRAME_BUDGET);
-        assert_eq!(redraw_budget(UiMode::InlineChat, &state), FRAME_BUDGET);
     }
 
     #[test]
-    fn redraw_budget_uses_spinner_cadence_while_mjconfig_open() {
-        let mut state = AppState::new();
-        state.set_connection_state(ConnectionState::Ready);
-        state.open_mjconfig_menu();
-
-        // Idle would normally use the fast interactive budget; the open menu
-        // throttles to the spinner cadence so previews animate without
-        // repainting several times per visible frame change.
+    fn mjconfig_animation_uses_spinner_cadence_but_keys_stay_interactive() {
         assert_ne!(MJCONFIG_FRAME_BUDGET, FRAME_BUDGET);
+        assert_eq!(MJCONFIG_FRAME_BUDGET, SPINNER_FRAME_BUDGET);
         assert_eq!(
-            redraw_budget(UiMode::FullscreenTui, &state),
+            PendingRedraw {
+                animation: true,
+                ..PendingRedraw::default()
+            }
+            .budget(UiMode::FullscreenTui),
             MJCONFIG_FRAME_BUDGET
         );
         assert_eq!(
-            redraw_budget(UiMode::InlineChat, &state),
-            MJCONFIG_FRAME_BUDGET
-        );
-
-        // Applies regardless of connection state while the menu is up.
-        state.set_connection_state(ConnectionState::Streaming);
-        assert_eq!(
-            redraw_budget(UiMode::FullscreenTui, &state),
-            MJCONFIG_FRAME_BUDGET
+            PendingRedraw {
+                interactive: true,
+                animation: true,
+                ..PendingRedraw::default()
+            }
+            .budget(UiMode::FullscreenTui),
+            FRAME_BUDGET
         );
     }
 
@@ -7959,11 +8037,19 @@ mod tests {
         assert!(state.is_streaming());
         assert!(should_show_spinner(&state));
         assert_eq!(
-            redraw_budget(UiMode::InlineChat, &state),
+            PendingRedraw {
+                stream: true,
+                ..PendingRedraw::default()
+            }
+            .budget(UiMode::InlineChat),
             INLINE_STREAMING_FRAME_BUDGET
         );
         assert_eq!(
-            redraw_budget(UiMode::FullscreenTui, &state),
+            PendingRedraw {
+                stream: true,
+                ..PendingRedraw::default()
+            }
+            .budget(UiMode::FullscreenTui),
             STREAMING_FRAME_BUDGET
         );
         assert!(needs_live_redraw(&state));

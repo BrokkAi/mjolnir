@@ -18,9 +18,10 @@ use serde::{Deserialize, Serialize};
 /// Display width (terminal columns) of every spinner frame, for every style.
 pub const SPINNER_WIDTH: usize = 12;
 
-/// Wall-clock dwell per animation frame. Matches the streaming redraw budget so
-/// the spinner advances one frame per repaint (no skipped or aliased frames).
-pub const SPINNER_FRAME_INTERVAL_MS: u128 = 125;
+/// Wall-clock dwell per animation frame. Kept deliberately calmer than
+/// streaming redraws so progress reads as steady activity without making
+/// queued prompt typing feel visually noisy.
+pub const SPINNER_FRAME_INTERVAL_MS: u128 = 250;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -288,12 +289,12 @@ mod tests {
     }
 
     #[test]
-    fn loops_are_brisk() {
-        // Each style is one short, lively loop at the streaming cadence.
+    fn loops_are_calm_progress_indicators() {
+        // Each style should keep moving without reading as frantic activity.
         for style in SpinnerStyle::ALL {
             let loop_ms = style.frames().len() as u128 * SPINNER_FRAME_INTERVAL_MS;
             assert!(
-                (700..=2_000).contains(&loop_ms),
+                (1_500..=3_500).contains(&loop_ms),
                 "{style} loop_ms = {loop_ms}"
             );
         }
