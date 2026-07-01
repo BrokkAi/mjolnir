@@ -4614,8 +4614,22 @@ fn render_transcript_entry_range(
                     } else {
                         spans.push(Span::raw(view.title.clone()));
                     }
-                    out.push(Line::from(spans));
-                    push_tool_outputs(&mut out, &view.body, width, collapse_limit, theme);
+                    // Render the whole tool call — header plus outputs — into a
+                    // temporary buffer, then frame it with a colored left rail so
+                    // the block reads as one unit, visually distinct from the
+                    // flush-left agent prose around it. The rail color carries the
+                    // tool status. See issue #257.
+                    let mut block: Vec<Line<'static>> = vec![Line::from(spans)];
+                    push_tool_outputs(
+                        &mut block,
+                        &view.body,
+                        width.saturating_sub(TOOL_GUTTER_WIDTH),
+                        collapse_limit,
+                        theme,
+                    );
+                    for line in block {
+                        out.push(with_tool_gutter(line, color));
+                    }
                     out.push(Line::from(""));
                 }
             }
@@ -4872,6 +4886,23 @@ fn inline_markdown_spans(raw: &str, theme: TerminalTheme) -> Vec<Span<'static>> 
         rest = tail;
     }
     spans
+}
+
+/// Left rail drawn before every line of a tool-call block, and its width in
+/// cells. The rail frames tool output as a distinct unit so it never blurs
+/// into the flush-left agent messages around it. See issue #257.
+const TOOL_GUTTER: &str = "│ ";
+const TOOL_GUTTER_WIDTH: u16 = 2;
+
+/// Prefix an already-rendered tool-call line with the colored gutter rail.
+/// The color reflects the tool's status (green when done, red on failure, …)
+/// so a glance at the rail communicates both "this is a tool block" and how
+/// it ended.
+fn with_tool_gutter(line: Line<'static>, color: Color) -> Line<'static> {
+    let mut spans = Vec::with_capacity(line.spans.len() + 1);
+    spans.push(Span::styled(TOOL_GUTTER, Style::default().fg(color)));
+    spans.extend(line.spans);
+    Line::from(spans)
 }
 
 fn push_tool_outputs(
@@ -9342,7 +9373,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(rendered, vec!["tool exec cargo test", "  ok", ""]);
+        assert_eq!(rendered, vec!["│ tool exec cargo test", "│   ok", ""]);
         assert!(sink.pending_lines(&state, 80).is_empty());
     }
 
@@ -9382,9 +9413,9 @@ mod tests {
         assert_eq!(
             cancelled_tool,
             vec![
-                "tool [failed] exec cargo test",
-                "  running",
-                "  [tool call ended before completion]",
+                "│ tool [failed] exec cargo test",
+                "│   running",
+                "│   [tool call ended before completion]",
                 ""
             ]
         );
@@ -9822,26 +9853,27 @@ mod tests {
             .map(line_text)
             .collect();
 
-        // First TOOL_OUTPUT_COLLAPSED_LINES lines are visible.
-        assert!(rendered.iter().any(|line| line == "  line 1"));
+        // First TOOL_OUTPUT_COLLAPSED_LINES lines are visible (framed by the
+        // tool gutter).
+        assert!(rendered.iter().any(|line| line == "│   line 1"));
         assert!(
             rendered
                 .iter()
-                .any(|line| line == &format!("  line {}", TOOL_OUTPUT_COLLAPSED_LINES))
+                .any(|line| line == &format!("│   line {}", TOOL_OUTPUT_COLLAPSED_LINES))
         );
         // Everything past the budget is hidden.
         assert!(
             !rendered
                 .iter()
-                .any(|line| line == &format!("  line {}", TOOL_OUTPUT_COLLAPSED_LINES + 1))
+                .any(|line| line == &format!("│   line {}", TOOL_OUTPUT_COLLAPSED_LINES + 1))
         );
         // And a hint tells the user the rest exists.
         let hidden = 20 - TOOL_OUTPUT_COLLAPSED_LINES;
         assert!(
-            rendered.iter().any(|line| line
-                == &format!(
-                    "  ... {hidden} more lines hidden (Ctrl-T to expand)"
-                )),
+            rendered
+                .iter()
+                .any(|line| line
+                    == &format!("│   ... {hidden} more lines hidden (Ctrl-T to expand)")),
             "missing collapse hint, got: {rendered:?}"
         );
 
@@ -9851,7 +9883,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert!(expanded.iter().any(|line| line == "  line 20"));
+        assert!(expanded.iter().any(|line| line == "│   line 20"));
         assert!(
             !expanded
                 .iter()
@@ -10429,13 +10461,62 @@ mod tests {
             .map(line_text)
             .collect();
 
-        assert!(rendered.iter().any(|line| line == "tool exec run checks"));
-        assert!(rendered.iter().any(|line| line == "  ## Output"));
-        assert!(rendered.iter().any(|line| line == "  `ok`"));
-        assert!(rendered.iter().any(|line| line == "  diff src/main.rs"));
-        assert!(rendered.iter().any(|line| line == "    - old"));
-        assert!(rendered.iter().any(|line| line == "    + new"));
-        assert!(rendered.iter().any(|line| line == "  terminal term-1"));
+        assert!(rendered.iter().any(|line| line == "│ tool exec run checks"));
+        assert!(rendered.iter().any(|line| line == "│   ## Output"));
+        assert!(rendered.iter().any(|line| line == "│   `ok`"));
+        assert!(rendered.iter().any(|line| line == "│   diff src/main.rs"));
+        assert!(rendered.iter().any(|line| line == "│     - old"));
+        assert!(rendered.iter().any(|line| line == "│     + new"));
+        assert!(rendered.iter().any(|line| line == "│   terminal term-1"));
+    }
+
+    #[test]
+    fn tool_calls_framed_by_status_colored_gutter_agent_messages_are_not() {
+        let mut state = AppState::new();
+        let theme = state.theme;
+        state
+            .transcript
+            .push(Entry::AgentMessage("hi there".to_string()));
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "cargo test".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Text("ok".to_string())],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let lines = render_transcript_lines(&state, 80);
+
+        // Both the tool header and its output are framed by the gutter rail.
+        assert!(
+            lines
+                .iter()
+                .any(|l| line_text(l) == "│ tool exec cargo test")
+        );
+        assert!(lines.iter().any(|l| line_text(l) == "│   ok"));
+
+        // The rail on every framed line carries the status color — success
+        // here, because the call completed.
+        for line in lines
+            .iter()
+            .filter(|l| line_text(l).starts_with(TOOL_GUTTER))
+        {
+            assert_eq!(line.spans[0].content.as_ref(), TOOL_GUTTER);
+            assert_eq!(line.spans[0].style.fg, Some(theme.success));
+        }
+
+        // The agent message stays flush-left with no rail; that contrast is
+        // the fix for issue #257.
+        assert!(lines.iter().any(|l| line_text(l) == "agent:"));
+        assert!(lines.iter().any(|l| line_text(l) == "hi there"));
+        assert!(
+            !lines
+                .iter()
+                .any(|l| line_text(l).starts_with(TOOL_GUTTER) && line_text(l).contains("hi there"))
+        );
     }
 
     #[test]
@@ -10464,8 +10545,8 @@ mod tests {
 
         assert!(rendered.iter().any(|line| line == "# literal"));
         assert!(rendered.iter().any(|line| line == "`code` and **bold**"));
-        assert!(rendered.iter().any(|line| line == "  # stdout"));
-        assert!(rendered.iter().any(|line| line == "  `ok` and **bold**"));
+        assert!(rendered.iter().any(|line| line == "│   # stdout"));
+        assert!(rendered.iter().any(|line| line == "│   `ok` and **bold**"));
     }
 
     #[test]
