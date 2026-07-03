@@ -254,12 +254,14 @@ function noteSessionActivity() {
 }
 
 function sessionIsWorking(sessionId) {
-  // Prefer the authoritative flag published by the session itself;
-  // fall back to the transcript-activity heuristic for records from
-  // older mj versions that do not publish `working`.
+  // Trust the authoritative flag published by the session itself whenever it
+  // is present (a boolean) — including an explicit `false`, which must win
+  // over the activity heuristic so the working badge and cancel control clear
+  // the instant a turn ends. Only records from older mj versions omit the
+  // flag; for those, fall back to the transcript-activity heuristic.
   const session = sessions.find((s) => s.session_id === sessionId);
-  if (session && session.working === true) {
-    return true;
+  if (typeof session?.working === "boolean") {
+    return session.working;
   }
   const activity = activityBySessionId.get(sessionId);
   return Boolean(activity) && Date.now() - activity.at < WORKING_WINDOW_MS;

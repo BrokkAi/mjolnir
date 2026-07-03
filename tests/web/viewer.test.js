@@ -137,14 +137,24 @@ async function spawnTaskAndSelect(prompt) {
 
 afterAll(async () => {
   let summary = null;
+  let collectionError = null;
   if (page) {
     try {
       summary = await stopAndReport(page);
     } catch (e) {
+      collectionError = e;
       console.log("coverage collection failed:", e.message);
     }
   }
   if (h) await h.stop();
+  // Fail closed: when a threshold is set, a failure to COLLECT coverage must
+  // fail the run too, or a broken collector would silently disable the gate
+  // and let CI pass with no coverage enforced.
+  if (COVERAGE_MIN > 0 && collectionError) {
+    throw new Error(
+      `coverage collection failed, cannot enforce the ${COVERAGE_MIN}% gate: ${collectionError.message}`,
+    );
+  }
   if (summary) {
     const lines = summary.lines?.pct ?? 0;
     if (COVERAGE_MIN > 0 && lines < COVERAGE_MIN) {

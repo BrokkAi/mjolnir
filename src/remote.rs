@@ -1754,6 +1754,16 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
     }
     if task_manager.is_some() {
         println!("task spawning: enabled (viewers can launch agents under the allowed roots)");
+        // A public bind turns spawning into a network-reachable code-execution
+        // surface: anyone who can reach the port and holds viewer credentials
+        // can run processes on this host. Make that unmistakable at startup.
+        if listen.bind_addr == REMOTE_CONTROL_PUBLIC_ADDR {
+            println!(
+                "WARNING: task spawning is reachable from the network on {}. \
+                 Anyone with viewer credentials can run processes on this host.",
+                listen.bind_addr
+            );
+        }
     }
 
     let server_handle = axum_server::Handle::new();
