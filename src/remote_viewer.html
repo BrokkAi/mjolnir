@@ -71,6 +71,81 @@
         text-align: center;
       }
 
+      /* ---- task launcher ---- */
+
+      .new-task-button {
+        width: 100%;
+        margin-top: 8px;
+      }
+
+      .task-dialog {
+        width: min(520px, calc(100vw - 32px));
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        background: var(--panel-alt);
+        color: var(--text);
+        box-shadow: var(--shadow);
+        padding: 24px;
+
+        &::backdrop {
+          background: rgb(0 0 0 / 0.4);
+        }
+
+        & form {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+
+        & h2 {
+          margin: 0 0 8px;
+          font-size: 18px;
+        }
+
+        & label {
+          font-size: 13px;
+          color: var(--muted);
+        }
+
+        & select,
+        & input,
+        & textarea {
+          font: inherit;
+          color: var(--text);
+          background: var(--panel);
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          padding: 8px 10px;
+        }
+
+        & textarea {
+          resize: vertical;
+        }
+      }
+
+      .task-dialog-error {
+        color: var(--danger);
+        font-size: 13px;
+        min-height: 1em;
+        white-space: pre-wrap;
+      }
+
+      .task-dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 8px;
+
+        & button {
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          background: var(--panel);
+          color: var(--text);
+          padding: 8px 14px;
+          cursor: pointer;
+        }
+      }
+
       /* ---- app shell ---- */
 
       .layout {
@@ -1107,6 +1182,7 @@
             <button id="logout-button" class="ghost-danger" type="button">Log out</button>
           </div>
           <p id="status">Loading…</p>
+          <button id="new-task-button" class="primary new-task-button" type="button" hidden>＋ New task</button>
         </div>
         <div id="sessions"></div>
       </aside>
@@ -1119,6 +1195,7 @@
           </div>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
           <span id="working-badge" class="working-badge" hidden>working</span>
+          <button id="stop-task-button" class="ghost-danger" type="button" hidden>Stop task</button>
         </header>
         <div class="transcript-wrap">
           <div id="transcript" role="log" aria-label="Session transcript"></div>
@@ -1143,6 +1220,23 @@
         </section>
       </main>
     </div>
+
+    <dialog id="new-task-dialog" class="task-dialog">
+      <form id="new-task-form" method="dialog">
+        <h2>New task</h2>
+        <label for="new-task-agent">Agent</label>
+        <select id="new-task-agent"></select>
+        <label for="new-task-cwd">Project directory</label>
+        <input id="new-task-cwd" type="text" placeholder="server default" spellcheck="false" autocomplete="off">
+        <label for="new-task-prompt">First prompt (optional)</label>
+        <textarea id="new-task-prompt" rows="3" placeholder="Sent as soon as the session is ready"></textarea>
+        <div id="new-task-error" class="task-dialog-error" role="alert"></div>
+        <div class="task-dialog-actions">
+          <button id="new-task-cancel" type="button">Cancel</button>
+          <button id="new-task-start" class="primary" type="submit">Start task</button>
+        </div>
+      </form>
+    </dialog>
 
     <template id="tpl-session">
       <button type="button" class="session-item">
@@ -1230,6 +1324,16 @@
       const queueStatusEl = $("queue-status");
       const queueListEl = $("queue-list");
       const jumpToLatestEl = $("jump-to-latest");
+      const newTaskButtonEl = $("new-task-button");
+      const stopTaskButtonEl = $("stop-task-button");
+      const newTaskDialogEl = $("new-task-dialog");
+      const newTaskFormEl = $("new-task-form");
+      const newTaskAgentEl = $("new-task-agent");
+      const newTaskCwdEl = $("new-task-cwd");
+      const newTaskPromptEl = $("new-task-prompt");
+      const newTaskErrorEl = $("new-task-error");
+      const newTaskCancelEl = $("new-task-cancel");
+      const newTaskStartEl = $("new-task-start");
       const sessionTpl = $("tpl-session");
       const entryTpl = $("tpl-entry");
       const queueTpl = $("tpl-queue-item");
@@ -1279,6 +1383,12 @@
       // rebuilt on every poll, so text selection and scroll momentum survive.
       let renderedSessionId = null;
       let renderedEntries = [];
+      // Server-spawned tasks. `spawnEnabled` is null until the first
+      // `/api/tasks` probe answers: 200 enables the launcher UI, 403 means the
+      // server runs without --allow-spawn and every control stays hidden.
+      let spawnEnabled = null;
+      let serverTasks = [];
+      const taskBySessionId = new Map();
 
       function scrollBehavior() {
         return reducedMotion.matches ? "auto" : "smooth";
@@ -1331,6 +1441,12 @@
         configPanelUserToggled = false;
         renderedSessionId = null;
         renderedEntries = [];
+        spawnEnabled = null;
+        serverTasks = [];
+        taskBySessionId.clear();
+        if (newTaskDialogEl.open) {
+          newTaskDialogEl.close();
+        }
         if (refreshTimer) {
           clearInterval(refreshTimer);
           refreshTimer = null;
@@ -2347,6 +2463,7 @@
         renderConfig(session);
         renderPermissions(session);
         renderQueue(session);
+        updateTaskControls();
       }
 
       function renderAll() {
@@ -2406,6 +2523,7 @@
           renderAll();
           refreshTimestamps();
           await refreshQueuedPrompts();
+          await refreshServerTasks();
         } catch (error) {
           if (error.message !== "HTTP 401") {
             statusEl.textContent = `Update failed: ${error.message}`;
@@ -2523,6 +2641,138 @@
         }
       }
 
+      /* ---- server tasks ---- */
+
+      function updateTaskControls() {
+        newTaskButtonEl.hidden = spawnEnabled !== true;
+        const task = taskBySessionId.get(selectedSessionId);
+        stopTaskButtonEl.hidden = !(task && task.running);
+      }
+
+      async function refreshServerTasks() {
+        if (!authenticated || spawnEnabled === false) {
+          return;
+        }
+        try {
+          const response = await apiFetch("/api/tasks", { cache: "no-store" });
+          if (response.status === 403) {
+            spawnEnabled = false;
+            serverTasks = [];
+            taskBySessionId.clear();
+            updateTaskControls();
+            return;
+          }
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          spawnEnabled = true;
+          serverTasks = await response.json();
+          taskBySessionId.clear();
+          for (const task of serverTasks) {
+            if (task.session_id) {
+              taskBySessionId.set(task.session_id, task);
+            }
+          }
+          updateTaskControls();
+        } catch (error) {
+          // Task state is auxiliary; the main poll surfaces connectivity
+          // problems, so a failed refresh only leaves the last state in place.
+          if (error.message === "HTTP 401") {
+            throw error;
+          }
+        }
+      }
+
+      async function openNewTaskDialog() {
+        newTaskErrorEl.textContent = "";
+        newTaskStartEl.disabled = false;
+        try {
+          const response = await apiFetch("/api/agents", { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const agents = await response.json();
+          newTaskAgentEl.replaceChildren();
+          for (const agent of agents) {
+            const option = document.createElement("option");
+            option.value = agent.source_id;
+            option.textContent =
+              agent.kind === "default" ? `${agent.label} (default)` : agent.label;
+            newTaskAgentEl.append(option);
+          }
+          if (!agents.length) {
+            newTaskErrorEl.textContent =
+              "No agents configured on the server. Run interactive `mj` once to pick one.";
+          }
+        } catch (error) {
+          if (error.message === "HTTP 401") {
+            return;
+          }
+          newTaskAgentEl.replaceChildren();
+          newTaskErrorEl.textContent = `Could not load agents: ${error.message}`;
+        }
+        newTaskDialogEl.showModal();
+      }
+
+      async function submitNewTask(event) {
+        event.preventDefault();
+        const body = {};
+        if (newTaskAgentEl.value) {
+          body.agent = newTaskAgentEl.value;
+        }
+        if (newTaskCwdEl.value.trim()) {
+          body.cwd = newTaskCwdEl.value.trim();
+        }
+        if (newTaskPromptEl.value.trim()) {
+          body.prompt = newTaskPromptEl.value.trim();
+        }
+        newTaskStartEl.disabled = true;
+        newTaskErrorEl.textContent = "";
+        try {
+          const response = await apiFetch("/api/tasks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!response.ok) {
+            newTaskErrorEl.textContent = await response.text();
+            newTaskStartEl.disabled = false;
+            return;
+          }
+          newTaskDialogEl.close();
+          newTaskPromptEl.value = "";
+          await refreshServerTasks();
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            newTaskErrorEl.textContent = `Start failed: ${error.message}`;
+            newTaskStartEl.disabled = false;
+          }
+        }
+      }
+
+      async function stopSelectedTask() {
+        const task = taskBySessionId.get(selectedSessionId);
+        if (!task || !window.confirm(`Stop this task (${task.agent})?`)) {
+          return;
+        }
+        stopTaskButtonEl.disabled = true;
+        try {
+          const response = await apiFetch(`/api/tasks/${encodeURIComponent(task.task_id)}`, {
+            method: "DELETE",
+          });
+          if (!response.ok && response.status !== 404) {
+            statusEl.textContent = `Stop failed: HTTP ${response.status}`;
+          }
+          await refreshServerTasks();
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            statusEl.textContent = `Stop failed: ${error.message}`;
+          }
+        } finally {
+          stopTaskButtonEl.disabled = false;
+        }
+      }
+
       /* ---- wiring ---- */
 
       authFormEl.addEventListener("submit", submitAuth);
@@ -2558,6 +2808,14 @@
         }
         updateJumpToLatestVisibility();
       }, { passive: true });
+      newTaskButtonEl.addEventListener("click", () => {
+        void openNewTaskDialog();
+      });
+      newTaskFormEl.addEventListener("submit", submitNewTask);
+      newTaskCancelEl.addEventListener("click", () => newTaskDialogEl.close());
+      stopTaskButtonEl.addEventListener("click", () => {
+        void stopSelectedTask();
+      });
       queueSubmitEl.addEventListener("click", submitQueuedPrompt);
       queueInputEl.addEventListener("input", () => {
         saveDraftForSelectedSession();
