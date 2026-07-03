@@ -9,10 +9,15 @@
 //     fallback, so an online client always gets fresh markup while an offline
 //     launch still renders (API calls then fail into the normal sign-in screen).
 
-const CACHE = "mjolnir-shell-v1";
+const CACHE = "mjolnir-shell-v2";
 const SHELL = [
   "/",
   "/manifest.webmanifest",
+  "/assets/app.js",
+  "/assets/dom.js",
+  "/assets/markdown.js",
+  "/assets/palette.js",
+  "/assets/notify.js",
   "/icons/icon.svg",
   "/icons/icon-192.png",
   "/icons/icon-512.png",

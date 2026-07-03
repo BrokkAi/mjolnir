@@ -19,7 +19,7 @@ use axum::http::StatusCode;
 use axum::http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE};
 use axum::middleware::Next;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
@@ -2125,6 +2125,11 @@ fn build_router(config: RouterConfig) -> Router {
         // load before sign-in so the app is installable and can launch offline.
         .route("/manifest.webmanifest", get(remote_manifest))
         .route("/service-worker.js", get(remote_service_worker))
+        .route("/assets/app.js", get(remote_asset_app))
+        .route("/assets/dom.js", get(remote_asset_dom))
+        .route("/assets/markdown.js", get(remote_asset_markdown))
+        .route("/assets/palette.js", get(remote_asset_palette))
+        .route("/assets/notify.js", get(remote_asset_notify))
         .route("/icons/icon.svg", get(remote_icon_svg))
         .route("/icons/icon-192.png", get(remote_icon_192))
         .route("/icons/icon-512.png", get(remote_icon_512))
@@ -2258,14 +2263,61 @@ fn session_cookie_valid(cookie_key: &str, value: &str, now_unix: u64) -> bool {
     constant_time_eq(expected.as_bytes(), value.as_bytes())
 }
 
-async fn remote_viewer() -> Html<&'static str> {
-    Html(include_str!("remote_viewer.html"))
+async fn remote_viewer() -> Response {
+    // `no-cache` (revalidate, not no-store): the shell references versioned
+    // ES modules, and a heuristically cached stale shell paired with fresh
+    // modules (or vice versa) would skew the app across mj upgrades.
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("remote_viewer.html"),
+    )
+        .into_response()
 }
 
 /// Serve a compiled-in static asset with an explicit content type. Used for the
 /// PWA manifest, service worker, and icons.
 fn static_asset(content_type: &'static str, body: &'static [u8]) -> Response {
     ([(axum::http::header::CONTENT_TYPE, content_type)], body).into_response()
+}
+
+/// Serve a compiled-in ES module. Same skew concern as the shell: modules
+/// must revalidate so one release's `app.js` never imports another release's
+/// `dom.js` from a heuristic browser cache.
+fn module_asset(body: &'static [u8]) -> Response {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/javascript; charset=utf-8",
+            ),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+async fn remote_asset_app() -> Response {
+    module_asset(include_bytes!("remote_assets/app.js"))
+}
+
+async fn remote_asset_dom() -> Response {
+    module_asset(include_bytes!("remote_assets/dom.js"))
+}
+
+async fn remote_asset_markdown() -> Response {
+    module_asset(include_bytes!("remote_assets/markdown.js"))
+}
+
+async fn remote_asset_palette() -> Response {
+    module_asset(include_bytes!("remote_assets/palette.js"))
+}
+
+async fn remote_asset_notify() -> Response {
+    module_asset(include_bytes!("remote_assets/notify.js"))
 }
 
 async fn remote_manifest() -> Response {
