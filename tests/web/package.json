@@ -1,0 +1,13 @@
+{
+  "name": "mjolnir-web-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Browser E2E tests for the Mjolnir Web viewer. Dev-only tooling: never part of the mj build or shipping path.",
+  "scripts": {
+    "test": "jest"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "puppeteer-core": "^23.11.1"
+  }
+}

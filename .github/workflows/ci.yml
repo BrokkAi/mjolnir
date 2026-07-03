@@ -50,6 +50,66 @@ jobs:
     - name: Run tests
       run: cargo test
 
+  web-tests:
+    name: Web viewer E2E (browser)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install Linux audio dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
+
+    - name: Cache cargo registry and build
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-mjolnir-cargo-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-mjolnir-cargo-
+
+    # The browser harness launches ./target/debug/mj, so a debug build is what
+    # it needs (not --release).
+    - name: Build mj (debug)
+      run: cargo build
+
+    - name: Set up Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: Install Chrome for puppeteer
+      id: setup-chrome
+      uses: browser-actions/setup-chrome@v1
+      with:
+        chrome-version: stable
+
+    - name: Install web test dependencies
+      working-directory: tests/web
+      run: npm install --no-audit --no-fund
+
+    - name: Run browser E2E suite with coverage gate
+      working-directory: tests/web
+      env:
+        MJ_TEST_CHROME: ${{ steps.setup-chrome.outputs.chrome-path }}
+        COVERAGE_MIN: "75"
+      run: npm test
+
+    - name: Upload coverage and screenshots
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: web-viewer-artifacts
+        path: tests/web/artifacts
+        if-no-files-found: ignore
+
   android:
     name: Android aarch64-linux-android
     runs-on: ubuntu-latest
