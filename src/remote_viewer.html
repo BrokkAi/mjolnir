@@ -1195,6 +1195,7 @@
           </div>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
           <span id="working-badge" class="working-badge" hidden>working</span>
+          <button id="cancel-turn-button" class="ghost-danger" type="button" hidden>Cancel turn</button>
           <button id="stop-task-button" class="ghost-danger" type="button" hidden>Stop task</button>
         </header>
         <div class="transcript-wrap">
@@ -1326,6 +1327,7 @@
       const jumpToLatestEl = $("jump-to-latest");
       const newTaskButtonEl = $("new-task-button");
       const stopTaskButtonEl = $("stop-task-button");
+      const cancelTurnButtonEl = $("cancel-turn-button");
       const newTaskDialogEl = $("new-task-dialog");
       const newTaskFormEl = $("new-task-form");
       const newTaskAgentEl = $("new-task-agent");
@@ -1389,6 +1391,12 @@
       let spawnEnabled = null;
       let serverTasks = [];
       const taskBySessionId = new Map();
+      // Server-push stream. While it is open the 2s poll degrades to a slow
+      // safety net; every SSE payload also counts as a fresh sessions fetch.
+      let eventSource = null;
+      let sseConnected = false;
+      let lastSessionsFetch = 0;
+      const SSE_POLL_FALLBACK_MS = 30000;
 
       function scrollBehavior() {
         return reducedMotion.matches ? "auto" : "smooth";
@@ -1444,6 +1452,7 @@
         spawnEnabled = null;
         serverTasks = [];
         taskBySessionId.clear();
+        disconnectEventStream();
         if (newTaskDialogEl.open) {
           newTaskDialogEl.close();
         }
@@ -1461,6 +1470,7 @@
         if (!refreshTimer) {
           refreshTimer = setInterval(refreshSessions, POLL_MS);
         }
+        connectEventStream();
       }
 
       async function apiFetch(url, options = {}) {
@@ -1608,6 +1618,13 @@
       }
 
       function sessionIsWorking(sessionId) {
+        // Prefer the authoritative flag published by the session itself;
+        // fall back to the transcript-activity heuristic for records from
+        // older mj versions that do not publish `working`.
+        const session = sessions.find((s) => s.session_id === sessionId);
+        if (session && session.working === true) {
+          return true;
+        }
         const activity = activityBySessionId.get(sessionId);
         return Boolean(activity) && Date.now() - activity.at < WORKING_WINDOW_MS;
       }
@@ -2011,12 +2028,23 @@
 
         if (!session) {
           queueStatusEl.textContent = "Select a session to queue prompts.";
+          queueSubmitEl.textContent = "Queue";
           return;
         }
 
+        // Server-owned tasks accept live prompts; other sessions only take
+        // queued prompts that run when their local owner is idle.
+        const live = Boolean(selectedLiveTask());
+        queueSubmitEl.textContent = live ? "Send" : "Queue";
+        queueInputEl.placeholder = live
+          ? "Send a prompt to this task"
+          : "Queue a prompt for this session";
+
         queueStatusEl.textContent = queuedPrompts.length
           ? `${queuedPrompts.length} queued prompt${queuedPrompts.length === 1 ? "" : "s"} waiting.`
-          : "Prompts queue here and run when the session is idle.";
+          : live
+            ? "Prompts run immediately; a busy task queues them instead."
+            : "Prompts queue here and run when the session is idle.";
 
         for (const prompt of queuedPrompts) {
           const item = cloneTemplate(queueTpl);
@@ -2510,6 +2538,12 @@
         if (!authenticated) {
           return;
         }
+        // While the event stream is delivering, polling is only a safety
+        // net: skip the fetch unless the stream has been quiet too long.
+        if (sseConnected && Date.now() - lastSessionsFetch < SSE_POLL_FALLBACK_MS) {
+          refreshTimestamps();
+          return;
+        }
         try {
           const response = await apiFetch("/live/sessions", {
             cache: "no-store",
@@ -2518,6 +2552,7 @@
             throw new Error(`HTTP ${response.status}`);
           }
           sessions = await response.json();
+          lastSessionsFetch = Date.now();
           noteSessionActivity();
           statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
           renderAll();
@@ -2566,31 +2601,80 @@
         }
         queueSubmitEl.disabled = true;
         try {
-          const response = await apiFetch("/api/queued-prompts", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              session_id: sessionId,
-              text,
-            }),
-          });
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
+          let queuedInstead = false;
+          const liveTask = selectedLiveTask();
+          let delivered = false;
+          if (liveTask) {
+            // Live-send to the server-owned task; a 409 means a turn is in
+            // flight, so fall back to the queue rather than failing.
+            const response = await apiFetch(
+              `/api/tasks/${encodeURIComponent(liveTask.task_id)}/prompt`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text }),
+              },
+            );
+            if (response.ok) {
+              delivered = true;
+            } else if (response.status !== 409) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+          }
+          if (!delivered) {
+            const response = await apiFetch("/api/queued-prompts", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                session_id: sessionId,
+                text,
+              }),
+            });
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            queuedInstead = Boolean(liveTask);
           }
           queueInputEl.value = "";
           draftBySessionId.set(sessionId, "");
           syncComposerHeight();
           pendingNewEntries = 0;
           forceScrollToBottom = true;
-          await refreshSessions();
+          if (queuedInstead) {
+            queueStatusEl.textContent = "Task is mid-turn; prompt queued instead.";
+          }
+          await refreshQueuedPrompts();
         } catch (error) {
           if (error.message !== "HTTP 401") {
-            queueStatusEl.textContent = `Queue submit failed: ${error.message}`;
+            queueStatusEl.textContent = `Prompt submit failed: ${error.message}`;
           }
         } finally {
           queueSubmitEl.disabled = !selectedSessionId;
+        }
+      }
+
+      async function cancelSelectedTaskTurn() {
+        const task = selectedLiveTask();
+        if (!task) {
+          return;
+        }
+        cancelTurnButtonEl.disabled = true;
+        try {
+          const response = await apiFetch(
+            `/api/tasks/${encodeURIComponent(task.task_id)}/cancel`,
+            { method: "POST" },
+          );
+          if (!response.ok) {
+            queueStatusEl.textContent = `Cancel failed: HTTP ${response.status}`;
+          }
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            queueStatusEl.textContent = `Cancel failed: ${error.message}`;
+          }
+        } finally {
+          cancelTurnButtonEl.disabled = false;
         }
       }
 
@@ -2641,12 +2725,116 @@
         }
       }
 
+      /* ---- server-push events ---- */
+
+      function upsertSessionRecord(record) {
+        const index = sessions.findIndex((s) => s.session_id === record.session_id);
+        if (index >= 0) {
+          sessions[index] = record;
+        } else {
+          sessions.push(record);
+        }
+        // Keep the server's ordering: newest activity first, id tiebreak.
+        sessions.sort(
+          (a, b) =>
+            (b.last_update || "").localeCompare(a.last_update || "") ||
+            (a.session_id || "").localeCompare(b.session_id || ""),
+        );
+      }
+
+      function applyServerTasks(tasks) {
+        spawnEnabled = tasks != null;
+        serverTasks = tasks || [];
+        taskBySessionId.clear();
+        for (const task of serverTasks) {
+          if (task.session_id) {
+            taskBySessionId.set(task.session_id, task);
+          }
+        }
+        updateTaskControls();
+      }
+
+      function connectEventStream() {
+        if (eventSource || !authenticated) {
+          return;
+        }
+        const url = new URL("/api/events", window.location.origin);
+        if (viewerToken) {
+          url.searchParams.set("token", viewerToken);
+        }
+        eventSource = new EventSource(url);
+        eventSource.onopen = () => {
+          sseConnected = true;
+          statusEl.textContent = "Live";
+        };
+        eventSource.onerror = () => {
+          // EventSource reconnects on its own; while it is down the 2s poll
+          // takes over again. A 401 cannot be observed here — the poll's 401
+          // handling is what returns the app to the sign-in screen.
+          sseConnected = false;
+        };
+        eventSource.addEventListener("snapshot", (event) => {
+          const payload = JSON.parse(event.data);
+          sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+          applyServerTasks(payload.tasks ?? null);
+          lastSessionsFetch = Date.now();
+          noteSessionActivity();
+          statusEl.textContent = "Live";
+          renderAll();
+          refreshTimestamps();
+        });
+        eventSource.addEventListener("session", (event) => {
+          const record = JSON.parse(event.data);
+          upsertSessionRecord(record);
+          lastSessionsFetch = Date.now();
+          noteSessionActivity();
+          renderAll();
+          if (record.session_id === selectedSessionId) {
+            void refreshQueuedPrompts();
+          }
+          // A task's session id becomes known shortly after spawn; refetch
+          // the task list once when an unmapped session appears while a
+          // task is still waiting for its id.
+          if (
+            spawnEnabled === true &&
+            !taskBySessionId.has(record.session_id) &&
+            serverTasks.some((task) => !task.session_id)
+          ) {
+            void refreshServerTasks();
+          }
+        });
+        eventSource.addEventListener("session_disconnected", (event) => {
+          const payload = JSON.parse(event.data);
+          sessions = sessions.filter((s) => s.session_id !== payload.session_id);
+          lastSessionsFetch = Date.now();
+          renderAll();
+        });
+        eventSource.addEventListener("tasks", (event) => {
+          applyServerTasks(JSON.parse(event.data));
+        });
+      }
+
+      function disconnectEventStream() {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        sseConnected = false;
+      }
+
       /* ---- server tasks ---- */
 
       function updateTaskControls() {
         newTaskButtonEl.hidden = spawnEnabled !== true;
         const task = taskBySessionId.get(selectedSessionId);
-        stopTaskButtonEl.hidden = !(task && task.running);
+        const live = Boolean(task && task.running);
+        stopTaskButtonEl.hidden = !live;
+        cancelTurnButtonEl.hidden = !(live && sessionIsWorking(selectedSessionId));
+      }
+
+      function selectedLiveTask() {
+        const task = taskBySessionId.get(selectedSessionId);
+        return task && task.running ? task : null;
       }
 
       async function refreshServerTasks() {
@@ -2815,6 +3003,9 @@
       newTaskCancelEl.addEventListener("click", () => newTaskDialogEl.close());
       stopTaskButtonEl.addEventListener("click", () => {
         void stopSelectedTask();
+      });
+      cancelTurnButtonEl.addEventListener("click", () => {
+        void cancelSelectedTaskTurn();
       });
       queueSubmitEl.addEventListener("click", submitQueuedPrompt);
       queueInputEl.addEventListener("input", () => {
