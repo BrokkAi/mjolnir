@@ -16,9 +16,11 @@ use agent_client_protocol::schema::v1::{
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
 use axum::http::StatusCode;
-use axum::http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE};
+use axum::http::header::{
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, HeaderValue, SET_COOKIE,
+};
 use axum::middleware::Next;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
@@ -1618,6 +1620,14 @@ fn build_router(config: RouterConfig) -> Router {
         .route("/icons/icon-512.png", get(remote_icon_512))
         .route("/icons/maskable-512.png", get(remote_icon_maskable))
         .route("/icons/apple-touch-icon.png", get(remote_icon_apple_touch))
+        .route("/fonts/staatliches-400.woff2", get(remote_font_staatliches))
+        .route("/fonts/rajdhani-500.woff2", get(remote_font_rajdhani_500))
+        .route("/fonts/rajdhani-600.woff2", get(remote_font_rajdhani_600))
+        .route("/fonts/rajdhani-700.woff2", get(remote_font_rajdhani_700))
+        .route(
+            "/fonts/jetbrains-mono.woff2",
+            get(remote_font_jetbrains_mono),
+        )
         .route("/auth/login", get(create_viewer_session_from_query))
         .route(
             "/auth/session",
@@ -1746,8 +1756,21 @@ fn session_cookie_valid(cookie_key: &str, value: &str, now_unix: u64) -> bool {
     constant_time_eq(expected.as_bytes(), value.as_bytes())
 }
 
-async fn remote_viewer() -> Html<&'static str> {
-    Html(include_str!("remote_viewer.html"))
+async fn remote_viewer() -> Response {
+    (
+        [
+            (
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            ),
+            (
+                CACHE_CONTROL,
+                HeaderValue::from_static("no-store, max-age=0"),
+            ),
+        ],
+        include_str!("remote_viewer.html"),
+    )
+        .into_response()
 }
 
 /// Serve a compiled-in static asset with an explicit content type. Used for the
@@ -1764,10 +1787,20 @@ async fn remote_manifest() -> Response {
 }
 
 async fn remote_service_worker() -> Response {
-    static_asset(
-        "text/javascript; charset=utf-8",
+    (
+        [
+            (
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/javascript; charset=utf-8"),
+            ),
+            (
+                CACHE_CONTROL,
+                HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+            ),
+        ],
         include_bytes!("remote_service_worker.js"),
     )
+        .into_response()
 }
 
 async fn remote_icon_svg() -> Response {
@@ -1788,6 +1821,43 @@ async fn remote_icon_maskable() -> Response {
 
 async fn remote_icon_apple_touch() -> Response {
     static_asset("image/png", include_bytes!("icons/apple-touch-icon.png"))
+}
+
+/// Like `static_asset`, but marked immutable so browsers never refetch. Only
+/// the brand fonts use this: they are the heaviest shell assets and a change
+/// would ship under a new file name anyway.
+fn static_asset_immutable(content_type: &'static str, body: &'static [u8]) -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+async fn remote_font_staatliches() -> Response {
+    static_asset_immutable("font/woff2", include_bytes!("fonts/staatliches-400.woff2"))
+}
+
+async fn remote_font_rajdhani_500() -> Response {
+    static_asset_immutable("font/woff2", include_bytes!("fonts/rajdhani-500.woff2"))
+}
+
+async fn remote_font_rajdhani_600() -> Response {
+    static_asset_immutable("font/woff2", include_bytes!("fonts/rajdhani-600.woff2"))
+}
+
+async fn remote_font_rajdhani_700() -> Response {
+    static_asset_immutable("font/woff2", include_bytes!("fonts/rajdhani-700.woff2"))
+}
+
+async fn remote_font_jetbrains_mono() -> Response {
+    static_asset_immutable("font/woff2", include_bytes!("fonts/jetbrains-mono.woff2"))
 }
 
 async fn create_viewer_session(

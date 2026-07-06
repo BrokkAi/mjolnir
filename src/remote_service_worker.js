@@ -9,7 +9,7 @@
 //     fallback, so an online client always gets fresh markup while an offline
 //     launch still renders (API calls then fail into the normal sign-in screen).
 
-const CACHE = "mjolnir-shell-v1";
+const CACHE = "mjolnir-shell-v3";
 const SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -18,6 +18,11 @@ const SHELL = [
   "/icons/icon-512.png",
   "/icons/maskable-512.png",
   "/icons/apple-touch-icon.png",
+  "/fonts/staatliches-400.woff2",
+  "/fonts/rajdhani-500.woff2",
+  "/fonts/rajdhani-600.woff2",
+  "/fonts/rajdhani-700.woff2",
+  "/fonts/jetbrains-mono.woff2",
 ];
 
 self.addEventListener("install", (event) => {
