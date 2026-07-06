@@ -1441,6 +1441,12 @@ fn start_server_agent_session(
     let (runtime_event_tx, mut runtime_event_rx) = mpsc::unbounded_channel();
     let (runtime_cmd_tx, runtime_cmd_rx) = mpsc::unbounded_channel();
     let (remote_event_tx, mut remote_event_rx) = mpsc::unbounded_channel();
+    let agent_source_id = agent.source_id.clone();
+    let config_path = config::default_config_path();
+    let saved_session_config = config::Config::load(&config_path)
+        .ok()
+        .and_then(|cfg| cfg.session_config.get(&agent_source_id).cloned())
+        .unwrap_or_default();
     let agent_label = agent_display_label(&agent);
     let project_label = crate::paths::project_label_from_cwd(&cwd);
     let tracker = RemoteSessionTracker::new(
@@ -1458,6 +1464,9 @@ fn start_server_agent_session(
         env: agent.env,
         agent_stderr: None,
         fs_max_text_bytes,
+        agent_source_id: Some(agent_source_id),
+        config_path: Some(config_path),
+        saved_session_config,
     };
     let command_tx = runtime_cmd_tx.clone();
     let shutdown_tx = runtime_cmd_tx;

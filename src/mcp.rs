@@ -104,9 +104,11 @@ fn path_within_any(path: &Path, roots: &[PathBuf]) -> bool {
 /// A launch command resolved from `connect` arguments (explicit program or a
 /// configured agent), ready to drop into an [`AcpRuntimeConfig`].
 struct ResolvedAgent {
+    source_id: Option<String>,
     command: PathBuf,
     args: Vec<String>,
     env: HashMap<String, String>,
+    saved_session_config: HashMap<String, String>,
 }
 
 /// Server-level configuration assembled by `main` from the top-level CLI args.
@@ -812,9 +814,11 @@ impl McpServer {
                 ));
             }
             ResolvedAgent {
+                source_id: None,
                 command: PathBuf::from(program),
                 args: args.args.clone(),
                 env: args.env.clone(),
+                saved_session_config: HashMap::new(),
             }
         } else {
             let cfg = config::Config::load(&config::default_config_path())
@@ -833,6 +837,9 @@ impl McpServer {
             env: resolved.env,
             agent_stderr: self.config.agent_stderr.clone(),
             fs_max_text_bytes: self.config.fs_max_text_bytes,
+            agent_source_id: resolved.source_id,
+            config_path: Some(config::default_config_path()),
+            saved_session_config: resolved.saved_session_config,
         })
     }
 
@@ -892,10 +899,17 @@ impl McpServer {
         if let Some(selected) = &cfg.agent
             && want.is_none_or(|w| selected.source_id == w)
         {
+            let source_id = selected.source_id.clone();
             return Ok(ResolvedAgent {
+                source_id: Some(source_id.clone()),
                 command: selected.program.clone(),
                 args: selected.args.clone(),
                 env: selected.env.clone(),
+                saved_session_config: cfg
+                    .session_config
+                    .get(&source_id)
+                    .cloned()
+                    .unwrap_or_default(),
             });
         }
         if let Some(w) = want {
@@ -903,10 +917,17 @@ impl McpServer {
                 .strip_prefix(config::CUSTOM_AGENT_SOURCE_PREFIX)
                 .unwrap_or(w);
             if let Some(custom) = cfg.custom_agents.iter().find(|c| c.name == name) {
+                let source_id = format!("{}{}", config::CUSTOM_AGENT_SOURCE_PREFIX, custom.name);
                 return Ok(ResolvedAgent {
+                    source_id: Some(source_id.clone()),
                     command: custom.program.clone(),
                     args: custom.args.clone(),
                     env: HashMap::new(),
+                    saved_session_config: cfg
+                        .session_config
+                        .get(&source_id)
+                        .cloned()
+                        .unwrap_or_default(),
                 });
             }
             return Err(format!(

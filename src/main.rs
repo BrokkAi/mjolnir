@@ -1572,6 +1572,12 @@ async fn run_session(
         env: agent.env.clone(),
         agent_stderr: runtime_options.agent_stderr.clone(),
         fs_max_text_bytes: runtime_options.fs_max_text_bytes,
+        agent_source_id: Some(agent.source_id.clone()),
+        config_path: Some(config::default_config_path()),
+        saved_session_config: config::Config::load(&config::default_config_path())
+            .ok()
+            .and_then(|cfg| cfg.session_config.get(&agent.source_id).cloned())
+            .unwrap_or_default(),
     };
 
     // Drive the ACP runtime on its own task so the UI can own the
@@ -2062,6 +2068,7 @@ mod tests {
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                session_config: Default::default(),
                 scores: config::ScoresConfig::default(),
             },
             None
@@ -2086,6 +2093,7 @@ mod tests {
                 agent: Some(custom_default),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                session_config: Default::default(),
                 scores: config::ScoresConfig::default(),
             },
             None
@@ -2117,6 +2125,7 @@ mod tests {
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                session_config: Default::default(),
                 scores: config::ScoresConfig::default(),
             },
             None
@@ -2194,6 +2203,7 @@ mod tests {
                 args: vec!["--flag".to_string()],
                 description: "test".to_string(),
             }],
+            session_config: Default::default(),
             scores: config::ScoresConfig::default(),
         };
         let prefs = picker_preferences_from_config(&cfg);

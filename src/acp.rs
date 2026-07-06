@@ -19,12 +19,12 @@ use agent_client_protocol::schema::v1::{
     ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId, SessionId,
-    SessionInfoUpdate, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, TextContent, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
-    WriteTextFileRequest, WriteTextFileResponse,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionId, SessionInfoUpdate, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus,
+    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
@@ -35,6 +35,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use crate::config;
 use crate::event::{
     ElicitationOutcome, ElicitationPrompt, LoadSessionResult, PermissionDecision, PermissionPrompt,
     PromptImage, SessionConfigTarget, TerminalOutputSnapshot, UiCommand, UiEvent,
@@ -61,6 +62,12 @@ pub struct AcpRuntimeConfig {
     /// Maximum text bytes returned by ACP filesystem reads or accepted by
     /// ACP filesystem writes.
     pub fs_max_text_bytes: u64,
+    /// Stable configured agent id used for per-agent session-config memory.
+    pub agent_source_id: Option<String>,
+    /// Config file to update when a prompt snapshots current session options.
+    pub config_path: Option<PathBuf>,
+    /// Values remembered from the last prompt submitted for this agent.
+    pub saved_session_config: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -586,6 +593,9 @@ pub async fn run(
             ui_rx,
             fatal_emitted.clone(),
             cfg.fs_max_text_bytes,
+            cfg.agent_source_id.clone(),
+            cfg.config_path.clone(),
+            cfg.saved_session_config.clone(),
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -1100,6 +1110,9 @@ where
         ui_rx,
         fatal_emitted,
         DEFAULT_FS_TEXT_BYTES,
+        None,
+        None,
+        HashMap::new(),
     )
     .await
 }
@@ -1126,6 +1139,9 @@ where
         ui_rx,
         fatal_emitted,
         DEFAULT_FS_TEXT_BYTES,
+        None,
+        None,
+        HashMap::new(),
     )
     .await
 }
@@ -1140,6 +1156,9 @@ async fn drive_client_with_fs_limit<T>(
     mut ui_rx: mpsc::UnboundedReceiver<UiCommand>,
     fatal_emitted: Arc<AtomicBool>,
     fs_max_text_bytes: u64,
+    agent_source_id: Option<String>,
+    config_path: Option<PathBuf>,
+    saved_session_config: HashMap<String, String>,
 ) -> Result<()>
 where
     T: ConnectTo<Client>,
@@ -1320,6 +1339,9 @@ where
                 fatal_emitted,
                 session_state,
                 drive_terminals,
+                agent_source_id,
+                config_path,
+                saved_session_config,
             )
             .await
             {
@@ -1350,6 +1372,9 @@ async fn drive_session(
     fatal_emitted: Arc<AtomicBool>,
     session_state: RuntimeSessionState,
     terminals: Arc<ManagedTerminals>,
+    agent_source_id: Option<String>,
+    config_path: Option<PathBuf>,
+    saved_session_config: HashMap<String, String>,
 ) -> Result<()> {
     // Advertise the client capabilities backed by handlers registered in
     // `drive_client` above.
@@ -1499,6 +1524,16 @@ async fn drive_session(
         options: session_config_options,
         targets: session_config_targets,
     };
+    if !resumed && !saved_session_config.is_empty() {
+        apply_saved_session_config(
+            &conn,
+            &session_id,
+            &mut session_config,
+            &saved_session_config,
+            ui_tx,
+        )
+        .await;
+    }
     let _ = ui_tx.send(UiEvent::SessionStarted {
         session_id: session_id.to_string(),
         resumed,
@@ -1513,6 +1548,11 @@ async fn drive_session(
     while let Some(cmd) = ui_rx.recv().await {
         match cmd {
             UiCommand::SendPrompt { text, images } => {
+                persist_current_session_config(
+                    config_path.as_deref(),
+                    agent_source_id.as_deref(),
+                    &session_config,
+                );
                 session_state.clear_permissions_cancelled(&session_id).await;
                 if !drive_prompt_turn(
                     &conn,
@@ -3076,6 +3116,124 @@ struct SessionConfigCache {
     targets: Vec<SessionConfigTarget>,
 }
 
+fn session_config_target_key(target: &SessionConfigTarget) -> String {
+    match target {
+        SessionConfigTarget::ConfigOption { config_id } => format!("config:{config_id}"),
+        SessionConfigTarget::LegacyModel => "legacy:model".to_string(),
+        SessionConfigTarget::LegacyMode => "legacy:mode".to_string(),
+    }
+}
+
+fn current_session_config_values(session_config: &SessionConfigCache) -> HashMap<String, String> {
+    session_config
+        .options
+        .iter()
+        .zip(session_config.targets.iter())
+        .filter_map(|(option, target)| {
+            let SessionConfigKind::Select(select) = &option.kind else {
+                return None;
+            };
+            Some((
+                session_config_target_key(target),
+                select.current_value.to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn session_config_option_contains_value(
+    option: &SessionConfigOption,
+    value: &SessionConfigValueId,
+) -> bool {
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return false;
+    };
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => {
+            options.iter().any(|choice| choice.value == *value)
+        }
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .any(|choice| choice.value == *value),
+        _ => false,
+    }
+}
+
+async fn apply_saved_session_config(
+    conn: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    session_config: &mut SessionConfigCache,
+    saved: &HashMap<String, String>,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) {
+    let changes: Vec<_> = session_config
+        .options
+        .iter()
+        .zip(session_config.targets.iter())
+        .filter_map(|(option, target)| {
+            let saved_value = saved.get(&session_config_target_key(target))?;
+            let value = SessionConfigValueId::from(saved_value.clone());
+            if config_option_current_value(option) == Some(&value)
+                || !session_config_option_contains_value(option, &value)
+            {
+                return None;
+            }
+            Some((target.clone(), value))
+        })
+        .collect();
+
+    for (target, value) in changes {
+        match send_config_update(conn, session_id, target.clone(), value.clone()).await {
+            Ok(Some(options)) => {
+                session_config.targets = config_option_targets(&options);
+                session_config.options = options;
+            }
+            Ok(None) => {
+                set_current_config_value(
+                    &mut session_config.options,
+                    &session_config.targets,
+                    &target,
+                    &value,
+                );
+            }
+            Err(e) => {
+                let _ = ui_tx.send(UiEvent::Warning(format!(
+                    "saved session config update failed: {e}"
+                )));
+            }
+        }
+    }
+}
+
+fn config_option_current_value(option: &SessionConfigOption) -> Option<&SessionConfigValueId> {
+    match &option.kind {
+        SessionConfigKind::Select(select) => Some(&select.current_value),
+        _ => None,
+    }
+}
+
+fn persist_current_session_config(
+    config_path: Option<&Path>,
+    agent_source_id: Option<&str>,
+    session_config: &SessionConfigCache,
+) {
+    let (Some(config_path), Some(agent_source_id)) = (config_path, agent_source_id) else {
+        return;
+    };
+    let values = current_session_config_values(session_config);
+    if values.is_empty() {
+        return;
+    }
+    if let Err(error) = config::Config::load(config_path).and_then(|mut cfg| {
+        cfg.session_config
+            .insert(agent_source_id.to_string(), values);
+        cfg.save(config_path)
+    }) {
+        tracing::warn!("persist session config for {agent_source_id}: {error:#}");
+    }
+}
+
 async fn drive_config_update(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -4084,6 +4242,74 @@ mod tests {
         );
 
         assert_eq!(current_select_value(&options[0]).as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn current_session_config_values_snapshots_selected_options() {
+        let session_config = SessionConfigCache {
+            options: vec![
+                SessionConfigOption::select(
+                    "model",
+                    "Model",
+                    "gpt-5",
+                    vec![
+                        SessionConfigSelectOption::new("gpt-4", "GPT-4"),
+                        SessionConfigSelectOption::new("gpt-5", "GPT-5"),
+                    ],
+                ),
+                SessionConfigOption::select(
+                    "mode",
+                    "Mode",
+                    "code",
+                    vec![
+                        SessionConfigSelectOption::new("ask", "Ask"),
+                        SessionConfigSelectOption::new("code", "Code"),
+                    ],
+                ),
+            ],
+            targets: vec![
+                SessionConfigTarget::ConfigOption {
+                    config_id: "model".into(),
+                },
+                SessionConfigTarget::LegacyMode,
+            ],
+        };
+
+        let values = current_session_config_values(&session_config);
+
+        assert_eq!(
+            values.get("config:model").map(String::as_str),
+            Some("gpt-5")
+        );
+        assert_eq!(values.get("legacy:mode").map(String::as_str), Some("code"));
+    }
+
+    #[test]
+    fn persist_current_session_config_saves_values_by_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let session_config = SessionConfigCache {
+            options: vec![SessionConfigOption::select(
+                "model",
+                "Model",
+                "gpt-5",
+                vec![SessionConfigSelectOption::new("gpt-5", "GPT-5")],
+            )],
+            targets: vec![SessionConfigTarget::ConfigOption {
+                config_id: "model".into(),
+            }],
+        };
+
+        persist_current_session_config(Some(&path), Some("codex-acp"), &session_config);
+
+        let cfg = crate::config::Config::load(&path).expect("load config");
+        assert_eq!(
+            cfg.session_config
+                .get("codex-acp")
+                .and_then(|values| values.get("config:model"))
+                .map(String::as_str),
+            Some("gpt-5")
+        );
     }
 
     #[test]
@@ -6090,6 +6316,9 @@ mod tests {
             env: HashMap::new(),
             agent_stderr: None,
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
+            agent_source_id: None,
+            config_path: None,
+            saved_session_config: HashMap::new(),
         };
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
@@ -6142,6 +6371,9 @@ mod tests {
             env: HashMap::new(),
             agent_stderr: Some(bad_stderr),
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
+            agent_source_id: None,
+            config_path: None,
+            saved_session_config: HashMap::new(),
         };
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
@@ -6273,6 +6505,9 @@ mod tests {
             env: HashMap::new(),
             agent_stderr: None,
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
+            agent_source_id: None,
+            config_path: None,
+            saved_session_config: HashMap::new(),
         };
         assert_run_reports_agent_exited(cfg).await;
     }
@@ -6294,6 +6529,9 @@ mod tests {
             env: HashMap::new(),
             agent_stderr: None,
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
+            agent_source_id: None,
+            config_path: None,
+            saved_session_config: HashMap::new(),
         };
         assert_run_reports_agent_exited(cfg).await;
     }
