@@ -4897,7 +4897,7 @@ mod tests {
         )
         .expect("viewer utf8");
         assert!(viewer.contains("Mjolnir Web"));
-        assert!(viewer.contains("Sign In"));
+        assert!(viewer.contains("Sign in"));
         assert!(!viewer.contains("Unlock Remote Sessions"));
         assert!(!viewer.contains(&token));
 
