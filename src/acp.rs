@@ -1,7 +1,7 @@
 //! ACP client runtime: spawns the agent subprocess, wires JSON-RPC over
 //! stdio, and bridges UI commands/events through two mpsc channels.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -10,21 +10,23 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, ClientCapabilities,
-    CloseSessionRequest, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
-    CreateTerminalRequest, CreateTerminalResponse, ElicitationAcceptAction, ElicitationAction,
-    ElicitationCapabilities, ElicitationFormCapabilities, ElicitationUrlCapabilities, ErrorCode,
-    FileSystemCapabilities, ForkSessionRequest, ImageContent, Implementation, InitializeRequest,
-    KillTerminalRequest, KillTerminalResponse, LoadSessionRequest, NewSessionRequest,
-    PermissionOption, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
-    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionId, SessionInfoUpdate, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus,
-    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolKind, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    CloseSessionRequest, Content, ContentBlock, CreateElicitationRequest,
+    CreateElicitationResponse, CreateTerminalRequest, CreateTerminalResponse, Diff,
+    ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
+    ElicitationFormCapabilities, ElicitationUrlCapabilities, ErrorCode, FileSystemCapabilities,
+    ForkSessionRequest, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
+    KillTerminalResponse, LoadSessionRequest, NewSessionRequest, PermissionOption,
+    PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
+    SessionInfoUpdate, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus, TerminalId,
+    TerminalOutputRequest, TerminalOutputResponse, TextContent, ToolCall, ToolCallContent,
+    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
@@ -1339,6 +1341,7 @@ where
                 fatal_emitted,
                 session_state,
                 drive_terminals,
+                fs_max_text_bytes,
                 agent_source_id,
                 config_path,
                 saved_session_config,
@@ -1372,6 +1375,7 @@ async fn drive_session(
     fatal_emitted: Arc<AtomicBool>,
     session_state: RuntimeSessionState,
     terminals: Arc<ManagedTerminals>,
+    fs_max_text_bytes: u64,
     agent_source_id: Option<String>,
     config_path: Option<PathBuf>,
     saved_session_config: HashMap<String, String>,
@@ -1545,6 +1549,11 @@ async fn drive_session(
         });
     }
 
+    let mut workspace_roots = Vec::with_capacity(1 + additional_directories.len());
+    workspace_roots.push(cwd.clone());
+    workspace_roots.extend(additional_directories.iter().cloned());
+    let mut next_turn_diff_id = 1_u64;
+
     while let Some(cmd) = ui_rx.recv().await {
         match cmd {
             UiCommand::SendPrompt { text, images } => {
@@ -1554,19 +1563,26 @@ async fn drive_session(
                     &session_config,
                 );
                 session_state.clear_permissions_cancelled(&session_id).await;
+                let req =
+                    PromptRequest::new(session_id.clone(), prompt_content_blocks(text, images));
                 if !drive_prompt_turn(
                     &conn,
                     &session_id,
-                    text,
-                    images,
+                    req,
                     ui_tx,
                     ui_rx,
                     &session_state,
+                    PromptTurnDiffConfig {
+                        workspace_roots: &workspace_roots,
+                        max_text_bytes: fs_max_text_bytes,
+                        turn_id: next_turn_diff_id,
+                    },
                 )
                 .await?
                 {
                     break;
                 }
+                next_turn_diff_id = next_turn_diff_id.saturating_add(1);
             }
             UiCommand::SetSessionConfigOption { target, value } => {
                 if !drive_config_update(
@@ -2090,6 +2106,7 @@ const DEFAULT_TERMINAL_OUTPUT_LIMIT: usize = 1024 * 1024;
 pub(crate) const DEFAULT_FS_TEXT_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_CONFIGURABLE_FS_TEXT_BYTES: u64 = 64 * 1024 * 1024;
 const FS_TEXT_SCAN_MULTIPLIER: u64 = 16;
+const TURN_DIFF_MAX_FILES: usize = 20;
 
 #[derive(Clone, Copy)]
 enum ReadSizePolicy {
@@ -3339,16 +3356,23 @@ fn legacy_model_config_update_error() -> agent_client_protocol::Error {
     }))
 }
 
+struct PromptTurnDiffConfig<'a> {
+    workspace_roots: &'a [PathBuf],
+    max_text_bytes: u64,
+    turn_id: u64,
+}
+
 async fn drive_prompt_turn(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
-    text: String,
-    images: Vec<PromptImage>,
+    req: PromptRequest,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     session_state: &RuntimeSessionState,
+    diff_config: PromptTurnDiffConfig<'_>,
 ) -> Result<bool> {
-    let req = PromptRequest::new(session_id.clone(), prompt_content_blocks(text, images));
+    let turn_diff_tracker =
+        TurnDiffTracker::snapshot(diff_config.workspace_roots, diff_config.max_text_bytes).await;
     let prompt = conn.send_request(req).block_task();
     tokio::pin!(prompt);
 
@@ -3358,12 +3382,18 @@ async fn drive_prompt_turn(
             prompt_result = &mut prompt => {
                 match prompt_result {
                     Ok(resp) => {
+                        turn_diff_tracker
+                            .emit_if_changed(ui_tx, diff_config.turn_id)
+                            .await;
                         let _ = ui_tx.send(UiEvent::PromptDone {
                             stop_reason: resp.stop_reason,
                             usage: resp.usage,
                         });
                     }
                     Err(e) => {
+                        turn_diff_tracker
+                            .emit_if_changed(ui_tx, diff_config.turn_id)
+                            .await;
                         let _ = ui_tx.send(UiEvent::PromptFailed {
                             message: format!("prompt failed: {e}"),
                         });
@@ -3410,6 +3440,283 @@ async fn drive_prompt_turn(
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TextFileState {
+    Present(String),
+    Absent,
+}
+
+#[derive(Debug)]
+struct WorkspaceDiff {
+    path: PathBuf,
+    old_text: Option<String>,
+    new_text: String,
+}
+
+#[derive(Debug)]
+struct TurnDiffTracker {
+    roots: Vec<GitTurnDiffRoot>,
+    max_text_bytes: u64,
+}
+
+#[derive(Debug)]
+struct GitTurnDiffRoot {
+    repo_root: PathBuf,
+    pathspec: PathBuf,
+    pre_turn: HashMap<PathBuf, TextFileState>,
+}
+
+impl TurnDiffTracker {
+    async fn snapshot(workspace_roots: &[PathBuf], max_text_bytes: u64) -> Self {
+        let mut roots = Vec::new();
+        let mut seen = HashSet::new();
+        for workspace_root in workspace_roots {
+            let Some(root) = GitTurnDiffRoot::snapshot(workspace_root, max_text_bytes).await else {
+                continue;
+            };
+            if seen.insert((root.repo_root.clone(), root.pathspec.clone())) {
+                roots.push(root);
+            }
+        }
+        Self {
+            roots,
+            max_text_bytes,
+        }
+    }
+
+    async fn changed_diffs(&self) -> Vec<WorkspaceDiff> {
+        let mut diffs = Vec::new();
+        for root in &self.roots {
+            diffs.extend(root.changed_diffs(self.max_text_bytes).await);
+        }
+        diffs.sort_by(|a, b| a.path.cmp(&b.path));
+        diffs
+    }
+
+    async fn emit_if_changed(&self, ui_tx: &mpsc::UnboundedSender<UiEvent>, turn_id: u64) {
+        let mut diffs = self.changed_diffs().await;
+        if diffs.is_empty() {
+            return;
+        }
+
+        let total = diffs.len();
+        if diffs.len() > TURN_DIFF_MAX_FILES {
+            diffs.truncate(TURN_DIFF_MAX_FILES);
+        }
+
+        let title = if total == 1 {
+            "workspace changes (1 file)".to_string()
+        } else {
+            format!("workspace changes ({total} files)")
+        };
+        let mut content = diffs
+            .iter()
+            .map(|diff| {
+                ToolCallContent::Diff(
+                    Diff::new(diff.path.clone(), diff.new_text.clone())
+                        .old_text(diff.old_text.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        if total > TURN_DIFF_MAX_FILES {
+            content.push(ToolCallContent::Content(Content::new(ContentBlock::Text(
+                TextContent::new(format!("showing first {TURN_DIFF_MAX_FILES} changed files")),
+            ))));
+        }
+        let locations = diffs
+            .iter()
+            .map(|diff| ToolCallLocation::new(diff.path.clone()))
+            .collect();
+        let tool_call = ToolCall::new(format!("mj-turn-diff-{turn_id}"), title)
+            .kind(ToolKind::Edit)
+            .status(ToolCallStatus::Completed)
+            .locations(locations)
+            .content(content);
+        let _ = ui_tx.send(UiEvent::SessionUpdate(SessionUpdate::ToolCall(tool_call)));
+    }
+}
+
+impl GitTurnDiffRoot {
+    async fn snapshot(workspace_root: &Path, max_text_bytes: u64) -> Option<Self> {
+        let workspace_root = tokio::fs::canonicalize(workspace_root).await.ok()?;
+        let repo_root = git_repo_root(&workspace_root).await?;
+        let pathspec = git_pathspec_for_workspace(&repo_root, &workspace_root)?;
+        let changed_paths = git_status_paths(&repo_root, &pathspec).await?;
+        let mut pre_turn = HashMap::new();
+        for rel_path in changed_paths {
+            let abs_path = repo_root.join(&rel_path);
+            if let Some(state) = read_workspace_text_state(&abs_path, max_text_bytes).await {
+                pre_turn.insert(rel_path, state);
+            }
+        }
+        Some(Self {
+            repo_root,
+            pathspec,
+            pre_turn,
+        })
+    }
+
+    async fn changed_diffs(&self, max_text_bytes: u64) -> Vec<WorkspaceDiff> {
+        let post_paths = git_status_paths(&self.repo_root, &self.pathspec)
+            .await
+            .unwrap_or_default();
+        let mut candidates = BTreeSet::new();
+        candidates.extend(self.pre_turn.keys().cloned());
+        candidates.extend(post_paths);
+
+        let mut diffs = Vec::new();
+        for rel_path in candidates {
+            let abs_path = self.repo_root.join(&rel_path);
+            let Some(new_state) = read_workspace_text_state(&abs_path, max_text_bytes).await else {
+                continue;
+            };
+            let old_state = match self.pre_turn.get(&rel_path) {
+                Some(state) => state.clone(),
+                None => {
+                    match read_head_text_state(&self.repo_root, &rel_path, max_text_bytes).await {
+                        Some(state) => state,
+                        None => continue,
+                    }
+                }
+            };
+            if old_state == new_state {
+                continue;
+            }
+            let old_text = match old_state {
+                TextFileState::Present(text) => Some(text),
+                TextFileState::Absent => None,
+            };
+            let new_text = match new_state {
+                TextFileState::Present(text) => text,
+                TextFileState::Absent => String::new(),
+            };
+            diffs.push(WorkspaceDiff {
+                path: abs_path,
+                old_text,
+                new_text,
+            });
+        }
+        diffs
+    }
+}
+
+async fn git_repo_root(workspace_root: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let root = stdout.trim();
+    if root.is_empty() {
+        return None;
+    }
+    tokio::fs::canonicalize(root).await.ok()
+}
+
+fn git_pathspec_for_workspace(repo_root: &Path, workspace_root: &Path) -> Option<PathBuf> {
+    match workspace_root.strip_prefix(repo_root).ok() {
+        Some(relative) if relative.as_os_str().is_empty() => Some(PathBuf::from(".")),
+        Some(relative) => Some(relative.to_path_buf()),
+        None => None,
+    }
+}
+
+async fn git_status_paths(repo_root: &Path, pathspec: &Path) -> Option<BTreeSet<PathBuf>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .arg("--")
+        .arg(pathspec)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_git_status_paths(&output.stdout))
+}
+
+fn parse_git_status_paths(output: &[u8]) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    let mut entries = output
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty());
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let status = &entry[..2];
+        let path = &entry[3..];
+        if let Some(path) = path_from_git_status_bytes(path) {
+            paths.insert(path);
+        }
+        if matches!(status.first(), Some(b'R' | b'C')) || matches!(status.get(1), Some(b'R' | b'C'))
+        {
+            let _ = entries.next();
+        }
+    }
+    paths
+}
+
+fn path_from_git_status_bytes(bytes: &[u8]) -> Option<PathBuf> {
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(String::from_utf8_lossy(bytes).into_owned()))
+}
+
+async fn read_workspace_text_state(path: &Path, max_text_bytes: u64) -> Option<TextFileState> {
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(TextFileState::Absent),
+        Err(_) => return None,
+    };
+    if !metadata.is_file() || metadata.len() > max_text_bytes {
+        return None;
+    }
+    tokio::fs::read_to_string(path)
+        .await
+        .ok()
+        .map(TextFileState::Present)
+}
+
+async fn read_head_text_state(
+    repo_root: &Path,
+    rel_path: &Path,
+    max_text_bytes: u64,
+) -> Option<TextFileState> {
+    let spec = git_head_object_spec(rel_path)?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("show")
+        .arg(spec)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return Some(TextFileState::Absent);
+    }
+    if output.stdout.len() as u64 > max_text_bytes {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(TextFileState::Present)
+}
+
+fn git_head_object_spec(rel_path: &Path) -> Option<String> {
+    let path = rel_path.to_str()?.replace('\\', "/");
+    Some(format!("HEAD:{path}"))
 }
 
 fn prompt_content_blocks(text: String, images: Vec<PromptImage>) -> Vec<ContentBlock> {
@@ -5282,6 +5589,110 @@ mod tests {
         assert!(flag.load(Ordering::SeqCst));
     }
 
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_git_repo(root: &Path) {
+        run_git(root, &["init"]);
+        run_git(root, &["config", "user.email", "mjolnir@example.test"]);
+        run_git(root, &["config", "user.name", "Mjolnir Tests"]);
+    }
+
+    async fn run_mock_agent_that_writes_file(
+        stream: tokio::io::DuplexStream,
+        path: PathBuf,
+        content: &'static str,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(InitializeResponse::new(ProtocolVersion::V1))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: agent_client_protocol::schema::v1::PromptRequest,
+                            responder,
+                            cx: ConnectionTo<agent_client_protocol::Client>| {
+                    let session_id = req.session_id.clone();
+                    let path = path.clone();
+                    tokio::spawn(async move {
+                        let _ = cx.send_notification(SessionNotification::new(
+                            session_id,
+                            SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                ContentBlock::Text(TextContent::new("writing")),
+                            )),
+                        ));
+                        tokio::fs::write(path, content).await.expect("write file");
+                        let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
+                    });
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn turn_diff_tracker_uses_dirty_pre_turn_baseline() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        init_git_repo(temp.path());
+        let path = temp.path().join("notes.txt");
+        tokio::fs::write(&path, "committed\n")
+            .await
+            .expect("seed file");
+        run_git(temp.path(), &["add", "notes.txt"]);
+        run_git(temp.path(), &["commit", "-m", "seed"]);
+
+        tokio::fs::write(&path, "dirty before turn\n")
+            .await
+            .expect("dirty file");
+        let root = tokio::fs::canonicalize(temp.path()).await.expect("root");
+        let tracker = TurnDiffTracker::snapshot(&[root], DEFAULT_FS_TEXT_BYTES).await;
+
+        tokio::fs::write(&path, "after turn\n")
+            .await
+            .expect("write after");
+        let diffs = tracker.changed_diffs().await;
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(
+            diffs[0].path,
+            tokio::fs::canonicalize(&path)
+                .await
+                .expect("canonical path")
+        );
+        assert_eq!(diffs[0].old_text.as_deref(), Some("dirty before turn\n"));
+        assert_eq!(diffs[0].new_text, "after turn\n");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn full_prompt_turn_against_mock_agent() {
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
@@ -5344,6 +5755,89 @@ mod tests {
                     saw_done = true;
                 }
                 UiEvent::Warning(_) | UiEvent::Fatal(_) => panic!("unexpected: {ev:?}"),
+                _ => {}
+            }
+        }
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prompt_turn_emits_workspace_diff_for_git_change() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        init_git_repo(temp.path());
+        let path = temp.path().join("notes.txt");
+        tokio::fs::write(&path, "before\n")
+            .await
+            .expect("seed file");
+        run_git(temp.path(), &["add", "notes.txt"]);
+        run_git(temp.path(), &["commit", "-m", "seed"]);
+
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+
+        let agent_task = tokio::spawn(run_mock_agent_that_writes_file(
+            agent_side,
+            path.clone(),
+            "after\n",
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            temp.path().to_path_buf(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "test-session").await;
+        cmd_tx
+            .send(UiCommand::SendPrompt {
+                text: "edit file".to_string(),
+                images: Vec::new(),
+            })
+            .expect("send prompt");
+
+        let expected_path = tokio::fs::canonicalize(&path)
+            .await
+            .expect("canonical path");
+        let mut saw_diff = false;
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for prompt turn")
+                .expect("channel closed");
+            match ev {
+                UiEvent::SessionUpdate(SessionUpdate::ToolCall(tool_call))
+                    if tool_call.title == "workspace changes (1 file)" =>
+                {
+                    assert_eq!(tool_call.kind, ToolKind::Edit);
+                    assert_eq!(tool_call.status, ToolCallStatus::Completed);
+                    assert_eq!(tool_call.content.len(), 1);
+                    match &tool_call.content[0] {
+                        ToolCallContent::Diff(diff) => {
+                            assert_eq!(diff.path, expected_path);
+                            assert_eq!(diff.old_text.as_deref(), Some("before\n"));
+                            assert_eq!(diff.new_text, "after\n");
+                        }
+                        other => panic!("unexpected tool content: {other:?}"),
+                    }
+                    saw_diff = true;
+                }
+                UiEvent::PromptDone { stop_reason, .. } => {
+                    assert!(saw_diff, "workspace diff should arrive before PromptDone");
+                    assert!(matches!(stop_reason, StopReason::EndTurn));
+                    break;
+                }
+                UiEvent::Warning(_) | UiEvent::Fatal(_) | UiEvent::PromptFailed { .. } => {
+                    panic!("unexpected: {ev:?}")
+                }
                 _ => {}
             }
         }
