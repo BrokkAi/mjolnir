@@ -10,21 +10,23 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, ClientCapabilities,
-    CloseSessionRequest, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
-    CreateTerminalRequest, CreateTerminalResponse, ElicitationAcceptAction, ElicitationAction,
-    ElicitationCapabilities, ElicitationFormCapabilities, ElicitationUrlCapabilities, ErrorCode,
-    FileSystemCapabilities, ForkSessionRequest, ImageContent, Implementation, InitializeRequest,
-    KillTerminalRequest, KillTerminalResponse, LoadSessionRequest, NewSessionRequest,
-    PermissionOption, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
-    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionId, SessionInfoUpdate, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus,
-    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolKind, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    CloseSessionRequest, Content, ContentBlock, CreateElicitationRequest,
+    CreateElicitationResponse, CreateTerminalRequest, CreateTerminalResponse, Diff,
+    ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
+    ElicitationFormCapabilities, ElicitationUrlCapabilities, ErrorCode, FileSystemCapabilities,
+    ForkSessionRequest, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
+    KillTerminalResponse, LoadSessionRequest, NewSessionRequest, PermissionOption,
+    PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
+    SessionInfoUpdate, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus, TerminalId,
+    TerminalOutputRequest, TerminalOutputResponse, TextContent, ToolCall, ToolCallContent,
+    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
@@ -2160,16 +2162,57 @@ impl LocalFileSystem {
                 "filesystem write content exceeds client limit",
             ));
         }
+        let bytes = content.len();
         let path = self.resolve_write_path(&roots, &request.path).await?;
-        self.confirm_write_permission(&request.session_id, &path, content.len())
+        let request_id = self
+            .confirm_write_permission(&request.session_id, &path, bytes)
             .await?;
         self.session_state
             .ensure_active_session(&request.session_id, "filesystem")
             .await?;
         let path = self.resolve_write_path(&roots, &path).await?;
-        write_text_file_no_follow(&path, content)
-            .await
-            .map_err(|e| fs_io_error("write text file", &path, e, "file must be writable"))?;
+        let old_text = capture_write_diff_baseline(&path, self.max_text_bytes).await;
+        self.emit_fs_write_started(&request_id, &path, bytes);
+        if let Err(e) = write_text_file_no_follow(&path, content.clone()).await {
+            let message = format!(
+                "write text file failed for {}: {e}; file must be writable",
+                path.display()
+            );
+            self.emit_fs_write_completed(
+                &request_id,
+                &path,
+                bytes,
+                ToolCallStatus::Failed,
+                vec![text_tool_call_content(message.clone())],
+                Some(serde_json::json!({ "error": message })),
+            );
+            return Err(fs_io_error(
+                "write text file",
+                &path,
+                e,
+                "file must be writable",
+            ));
+        }
+        let content = match old_text {
+            Some(old_text) => vec![ToolCallContent::Diff(
+                Diff::new(path.clone(), content).old_text(old_text),
+            )],
+            None => vec![text_tool_call_content(format!(
+                "wrote {bytes} bytes to {}",
+                path.display()
+            ))],
+        };
+        self.emit_fs_write_completed(
+            &request_id,
+            &path,
+            bytes,
+            ToolCallStatus::Completed,
+            content,
+            Some(serde_json::json!({
+                "path": path.display().to_string(),
+                "bytes": bytes,
+            })),
+        );
         Ok(WriteTextFileResponse::new())
     }
 
@@ -2281,7 +2324,7 @@ impl LocalFileSystem {
         session_id: &SessionId,
         path: &Path,
         bytes: usize,
-    ) -> std::result::Result<(), agent_client_protocol::Error> {
+    ) -> std::result::Result<String, agent_client_protocol::Error> {
         let request_id = format!(
             "mj-fs-write-{}",
             self.next_permission_id.fetch_add(1, Ordering::Relaxed)
@@ -2296,7 +2339,7 @@ impl LocalFileSystem {
         }));
         let (tx, rx) = oneshot::channel::<PermissionDecision>();
         let prompt = PermissionPrompt {
-            tool_call: ToolCallUpdate::new(request_id, fields),
+            tool_call: ToolCallUpdate::new(request_id.clone(), fields),
             options: vec![
                 PermissionOption::new("allow", "Allow write", PermissionOptionKind::AllowOnce),
                 PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
@@ -2316,7 +2359,43 @@ impl LocalFileSystem {
         }?;
         self.session_state
             .ensure_active_session(session_id, "filesystem")
-            .await
+            .await?;
+        Ok(request_id)
+    }
+
+    fn emit_fs_write_started(&self, request_id: &str, path: &Path, bytes: usize) {
+        let tool_call = ToolCall::new(request_id.to_string(), fs_write_title(path))
+            .kind(ToolKind::Edit)
+            .status(ToolCallStatus::InProgress)
+            .locations(vec![ToolCallLocation::new(path.to_path_buf())])
+            .raw_input(fs_write_io(path, bytes));
+        let _ = self
+            .ui_tx
+            .send(UiEvent::SessionUpdate(SessionUpdate::ToolCall(tool_call)));
+    }
+
+    fn emit_fs_write_completed(
+        &self,
+        request_id: &str,
+        path: &Path,
+        bytes: usize,
+        status: ToolCallStatus,
+        content: Vec<ToolCallContent>,
+        raw_output: Option<serde_json::Value>,
+    ) {
+        let fields = ToolCallUpdateFields::new()
+            .kind(ToolKind::Edit)
+            .status(status)
+            .title(fs_write_title(path))
+            .content(content)
+            .locations(vec![ToolCallLocation::new(path.to_path_buf())])
+            .raw_output(raw_output)
+            .raw_input(fs_write_io(path, bytes));
+        let _ = self
+            .ui_tx
+            .send(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+                ToolCallUpdate::new(request_id.to_string(), fields),
+            )));
     }
 }
 
@@ -2338,6 +2417,58 @@ async fn write_text_file_no_follow(path: &Path, content: String) -> std::io::Res
     {
         tokio::fs::write(path, content).await
     }
+}
+
+async fn capture_write_diff_baseline(path: &Path, max_text_bytes: u64) -> Option<Option<String>> {
+    match read_existing_text_file_no_follow_for_diff(path, max_text_bytes).await {
+        Ok(Some(text)) => Some(Some(text)),
+        Ok(None) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+        Err(_) => None,
+    }
+}
+
+async fn read_existing_text_file_no_follow_for_diff(
+    path: &Path,
+    max_text_bytes: u64,
+) -> std::io::Result<Option<String>> {
+    #[cfg(unix)]
+    let file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .await?;
+
+    #[cfg(not(unix))]
+    let file = tokio::fs::File::open(path).await?;
+
+    let metadata = file.metadata().await?;
+    if !metadata.is_file() || metadata.len() > max_text_bytes {
+        return Ok(None);
+    }
+
+    let mut reader = file.take(max_text_bytes.saturating_add(1));
+    let mut content = String::new();
+    reader.read_to_string(&mut content).await?;
+    if content.len() as u64 > max_text_bytes {
+        return Ok(None);
+    }
+    Ok(Some(content))
+}
+
+fn fs_write_title(path: &Path) -> String {
+    format!("write {}", path.display())
+}
+
+fn fs_write_io(path: &Path, bytes: usize) -> serde_json::Value {
+    serde_json::json!({
+        "path": path.display().to_string(),
+        "bytes": bytes,
+    })
+}
+
+fn text_tool_call_content(text: impl Into<String>) -> ToolCallContent {
+    ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(text))))
 }
 
 async fn read_text_line_range_from_file(
@@ -3611,6 +3742,60 @@ mod tests {
         }
     }
 
+    async fn next_session_update(ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>) -> SessionUpdate {
+        let ev = tokio::time::timeout(Duration::from_secs(2), ui_rx.recv())
+            .await
+            .expect("session update event")
+            .expect("session update event");
+        match ev {
+            UiEvent::SessionUpdate(update) => update,
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    async fn expect_next_fs_write_diff(
+        ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
+        path: &Path,
+        old_text: Option<&str>,
+        new_text: &str,
+    ) {
+        let expected_path = tokio::fs::canonicalize(path)
+            .await
+            .expect("canonical write path");
+        let tool_call = match next_session_update(ui_rx).await {
+            SessionUpdate::ToolCall(tool_call) => tool_call,
+            other => panic!("unexpected session update: {other:?}"),
+        };
+        assert_eq!(tool_call.kind, ToolKind::Edit);
+        assert_eq!(tool_call.status, ToolCallStatus::InProgress);
+        assert_eq!(
+            tool_call.title,
+            format!("write {}", expected_path.display())
+        );
+
+        let update = match next_session_update(ui_rx).await {
+            SessionUpdate::ToolCallUpdate(update) => update,
+            other => panic!("unexpected session update: {other:?}"),
+        };
+        assert_eq!(tool_call.tool_call_id, update.tool_call_id);
+        assert_eq!(update.fields.status, Some(ToolCallStatus::Completed));
+        assert_eq!(update.fields.kind, Some(ToolKind::Edit));
+        assert_eq!(
+            update.fields.title,
+            Some(format!("write {}", expected_path.display()))
+        );
+        let content = update.fields.content.expect("tool content");
+        assert_eq!(content.len(), 1);
+        match &content[0] {
+            ToolCallContent::Diff(diff) => {
+                assert_eq!(diff.path, expected_path);
+                assert_eq!(diff.old_text.as_deref(), old_text);
+                assert_eq!(diff.new_text, new_text);
+            }
+            other => panic!("unexpected tool content: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn local_filesystem_reads_and_writes_inside_root() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -3644,11 +3829,12 @@ mod tests {
         }
         write.await.expect("write");
         assert_eq!(
-            tokio::fs::read_to_string(write_path)
+            tokio::fs::read_to_string(&write_path)
                 .await
                 .expect("written"),
             "created"
         );
+        expect_next_fs_write_diff(&mut ui_rx, &write_path, None, "created").await;
     }
 
     #[tokio::test]
@@ -3689,11 +3875,41 @@ mod tests {
         }
         write.await.expect("write additional root");
         assert_eq!(
-            tokio::fs::read_to_string(write_path)
+            tokio::fs::read_to_string(&write_path)
                 .await
                 .expect("written"),
             "created"
         );
+        expect_next_fs_write_diff(&mut ui_rx, &write_path, None, "created").await;
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_write_emits_diff_for_overwrite() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = SessionId::new("session-1");
+        let path = temp.path().join("notes.txt");
+        tokio::fs::write(&path, "old contents\n")
+            .await
+            .expect("seed file");
+        let (filesystem, mut ui_rx, _state) = test_filesystem(temp.path(), &session_id).await;
+
+        let write = filesystem.write_text_file(WriteTextFileRequest::new(
+            session_id,
+            path.clone(),
+            "new contents\n",
+        ));
+        tokio::pin!(write);
+        tokio::select! {
+            _ = allow_next_permission(&mut ui_rx) => {}
+            result = &mut write => panic!("write completed before permission: {result:?}"),
+        }
+        write.await.expect("write");
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.expect("written"),
+            "new contents\n"
+        );
+        expect_next_fs_write_diff(&mut ui_rx, &path, Some("old contents\n"), "new contents\n")
+            .await;
     }
 
     #[tokio::test]
