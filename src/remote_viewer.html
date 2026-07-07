@@ -2324,6 +2324,20 @@
         appendCommandTokens(el, command.command);
       }
 
+      // Like appendMonoInline, but the caller already knows the line is a shell
+      // command (an execute tool's title), so it is tokenized even when the
+      // agent sent it bare — no "$"/"❯"/"Run" prefix for commandShape to latch
+      // onto. A recognized prefix is still honored when present.
+      function appendCommandInline(el, text) {
+        const command = commandShape(text);
+        if (command) {
+          appendToken(el, command.prefix, "cmd-prompt");
+          appendCommandTokens(el, command.command);
+        } else {
+          appendCommandTokens(el, stripWholeCommandCode(text));
+        }
+      }
+
       function appendMetaLine(fragment, text) {
         const p = document.createElement("p");
         p.className = "meta-line";
@@ -3013,6 +3027,23 @@
         }
       }
 
+      // An execute tool card is "<command>\n\n<terminal output>" (see
+      // format_tool_call in remote.rs). The command line is highlighted by
+      // ToolKind rather than by a prompt prefix the agent may omit; the rest —
+      // terminal output — flows through the normal mono renderer.
+      function appendExecuteToolBody(body, text) {
+        const sep = text.indexOf("\n\n");
+        const command = sep === -1 ? text : text.slice(0, sep);
+        const rest = sep === -1 ? "" : text.slice(sep + 2);
+        const pre = document.createElement("pre");
+        pre.className = "entry-text";
+        appendCommandInline(pre, command);
+        body.appendChild(pre);
+        if (rest.trim()) {
+          body.appendChild(renderRichText(rest, "mono"));
+        }
+      }
+
       function setEntryBody(refs, entry) {
         // Streaming updates rewrite the whole body; keep folds the reader
         // opened from snapping shut on every poll.
@@ -3024,7 +3055,12 @@
         });
         refs.body.replaceChildren();
         const voice = refs.kind === "agent" || refs.kind === "thought" ? "prose" : "mono";
-        refs.body.appendChild(renderRichText(entry.text || "", voice));
+        const text = entry.text || "";
+        if (refs.kind === "tool" && entry.tool_kind === "execute" && text.trim()) {
+          appendExecuteToolBody(refs.body, text);
+        } else {
+          refs.body.appendChild(renderRichText(text, voice));
+        }
         if (openFolds.length) {
           const folds = refs.body.querySelectorAll("details.block-fold");
           for (const index of openFolds) {

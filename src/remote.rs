@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use agent_client_protocol::schema::v1::{
     ContentBlock, PermissionOptionKind, SessionConfigId, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate,
-    ToolCallContent, ToolCallStatus,
+    ToolCallContent, ToolCallStatus, ToolKind,
 };
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
@@ -285,6 +285,11 @@ pub struct TranscriptEntry {
     pub text: String,
     #[serde(default)]
     pub timestamp: String,
+    /// Stable ACP tool-call kind label (`execute`, `read`, `edit`, ...) for
+    /// `tool` entries, so the viewer can highlight by semantics instead of
+    /// re-sniffing the command text. Absent for non-tool entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -580,6 +585,7 @@ impl TrackerState {
                     tool_call.title.clone(),
                     tool_call.content.clone(),
                     tool_call.status,
+                    tool_call.kind,
                 );
                 self.touch();
             }
@@ -595,6 +601,7 @@ impl TrackerState {
                             .unwrap_or_else(|| "tool".to_string()),
                         content.clone(),
                         update.fields.status.unwrap_or(ToolCallStatus::Pending),
+                        update.fields.kind.unwrap_or(ToolKind::Other),
                     );
                 }
                 if let Some(status) = update.fields.status {
@@ -656,6 +663,7 @@ impl TrackerState {
             kind: kind.to_string(),
             text,
             timestamp: now_rfc3339(),
+            tool_kind: None,
         });
         index
     }
@@ -666,11 +674,17 @@ impl TrackerState {
         title: String,
         content: Vec<ToolCallContent>,
         status: ToolCallStatus,
+        kind: ToolKind,
     ) {
         let index = self.push_transcript_entry(
             "tool",
             format_tool_call(&title, &content, status, &self.terminal_outputs),
         );
+        // Preserve the ACP tool kind so the viewer highlights execute calls by
+        // semantics rather than guessing from the command text's shape. This
+        // rides on the TranscriptEntry (rebuilt-in-place text updates leave it
+        // intact), so ToolTranscriptEntry need not carry it.
+        self.transcript[index].tool_kind = Some(crate::labels::tool_kind_label(kind).to_string());
         self.tool_transcript_entries.insert(
             index,
             ToolTranscriptEntry {
@@ -3567,6 +3581,57 @@ mod tests {
     }
 
     #[test]
+    fn tool_transcript_entry_carries_execute_kind() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let mut tool_call = ToolCall::new("call-1", "rg --files | rg -n LICENSE");
+        tool_call.kind = ToolKind::Execute;
+        tool_call.content = vec![ToolCallContent::Terminal(Terminal::new(TerminalId::new(
+            "term-1",
+        )))];
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript.len(), 1);
+        assert_eq!(snapshot.transcript[0].kind, "tool");
+        // The ACP tool kind rides on the entry so the viewer can shell-highlight
+        // the command by semantics instead of guessing from a prompt prefix.
+        assert_eq!(snapshot.transcript[0].tool_kind.as_deref(), Some("execute"));
+
+        // A late terminal snapshot rebuilds the entry text in place; the kind
+        // must survive that rebuild.
+        state.observe_event(&UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "match\n".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        }));
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript[0].tool_kind.as_deref(), Some("execute"));
+    }
+
+    #[test]
+    fn tool_transcript_entry_defaults_non_execute_kind() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        // ToolCall::new leaves kind at its default (Other), so a non-command
+        // tool is labelled accordingly and the viewer will not shell-highlight.
+        let tool_call = ToolCall::new("call-1", "read src/remote.rs");
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript[0].tool_kind.as_deref(), Some("other"));
+    }
+
+    #[test]
     fn tracker_renders_pending_terminal_without_snapshot_as_waiting() {
         let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
         state.observe_event(&UiEvent::SessionStarted {
@@ -3702,11 +3767,13 @@ mod tests {
                     kind: "user".to_string(),
                     text: "hello".to_string(),
                     timestamp: "2026-06-03T10:00:05Z".to_string(),
+                    tool_kind: None,
                 },
                 TranscriptEntry {
                     kind: "agent".to_string(),
                     text: "hi".to_string(),
                     timestamp: "2026-06-03T10:00:06Z".to_string(),
+                    tool_kind: None,
                 },
             ],
             queued_prompt_count: 0,
@@ -3725,11 +3792,13 @@ mod tests {
                         kind: "user".to_string(),
                         text: "hello".to_string(),
                         timestamp: "2026-06-03T10:00:05Z".to_string(),
+                        tool_kind: None,
                     },
                     TranscriptEntry {
                         kind: "agent".to_string(),
                         text: "hi there".to_string(),
                         timestamp: "2026-06-03T10:00:06Z".to_string(),
+                        tool_kind: None,
                     },
                 ],
                 ..session.clone()
