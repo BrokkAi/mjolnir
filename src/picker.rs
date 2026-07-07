@@ -138,6 +138,10 @@ enum Mode {
         /// in `preferences.custom_agents`; `None` when adding a new one.
         edit_index: Option<usize>,
     },
+    ConfirmRemoveCustomAgent {
+        name: String,
+        source_id: String,
+    },
     Installing {
         label: String,
         total_bytes: Option<u64>,
@@ -600,6 +604,57 @@ impl<'a> PickerState<'a> {
         self.notice = Some(format!("updated custom agent: {label}"));
         self.mode = Mode::Browse;
     }
+
+    fn open_remove_custom_agent_confirmation(&mut self) {
+        match self.focused_item().cloned() {
+            Some(Item::CustomAgent(idx)) => {
+                let Some(agent) = self.preferences.custom_agents.get(idx) else {
+                    self.notice = Some("custom agent is no longer available".to_string());
+                    return;
+                };
+                self.mode = Mode::ConfirmRemoveCustomAgent {
+                    name: agent.name.clone(),
+                    source_id: agent.source_id(),
+                };
+                self.notice = None;
+            }
+            _ => {
+                self.notice = Some("only custom agents can be removed".to_string());
+            }
+        }
+    }
+
+    fn remove_custom_agent(&mut self, source_id: &str) {
+        let Some(idx) = self
+            .preferences
+            .custom_agents
+            .iter()
+            .position(|agent| agent.source_id() == source_id)
+        else {
+            self.mode = Mode::Browse;
+            self.notice = Some("custom agent is no longer available".to_string());
+            self.rebuild_items(Some(source_id));
+            return;
+        };
+
+        let removed = self.preferences.custom_agents.remove(idx);
+        let label = removed.name.clone();
+        self.preferences
+            .favorite_source_ids
+            .retain(|id| id != source_id);
+        if self
+            .preferences
+            .default_agent
+            .as_ref()
+            .is_some_and(|agent| agent.source_id == source_id)
+        {
+            self.preferences.default_agent = None;
+        }
+
+        self.rebuild_items(Some(source_id));
+        self.notice = Some(format!("removed custom agent: {label}"));
+        self.mode = Mode::Browse;
+    }
 }
 
 fn registry_agent_hint(agent: &Agent, platform: &str) -> String {
@@ -957,6 +1012,16 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
             },
             _ => {}
         },
+        Mode::ConfirmRemoveCustomAgent { source_id, .. } => match (key.modifiers, key.code) {
+            (_, KeyCode::Enter) | (KeyModifiers::NONE, KeyCode::Char('y' | 'Y')) => {
+                let source_id = source_id.clone();
+                state.remove_custom_agent(&source_id);
+            }
+            (_, KeyCode::Esc) | (KeyModifiers::NONE, KeyCode::Char('n' | 'N')) => {
+                state.mode = Mode::Browse;
+            }
+            _ => {}
+        },
         Mode::Cancelled => {}
         Mode::Browse => match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
@@ -1013,6 +1078,11 @@ async fn handle_event(state: &mut PickerState<'_>, ev: CtEvent) -> Result<Option
                         state.notice = Some("only custom agents can be edited".to_string());
                     }
                 }
+            }
+            (KeyModifiers::NONE, KeyCode::Char('x')) | (_, KeyCode::Delete)
+                if !state.search_focused =>
+            {
+                state.open_remove_custom_agent_confirmation();
             }
             (_, KeyCode::Char(c)) if state.search_focused => {
                 state.filter.push(c);
@@ -1249,6 +1319,9 @@ fn draw(f: &mut ratatui::Frame, state: &PickerState<'_>, theme: TerminalTheme) {
             edit_index.is_some(),
             theme,
         ),
+        Mode::ConfirmRemoveCustomAgent { name, source_id } => {
+            draw_remove_custom_agent_modal(f, f.area(), name, source_id, theme)
+        }
         Mode::Installing {
             label,
             total_bytes,
@@ -1471,6 +1544,8 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, state: &PickerState<'_>, them
         notice.as_str()
     } else if state.search_focused {
         "typing filters | Up/Down navigate | Enter select | Esc stop search"
+    } else if matches!(state.focused_item(), Some(Item::CustomAgent(_))) {
+        "Up/Down | Enter select | / search | f favorite | d default | e edit | x remove | Esc"
     } else {
         "Up/Down navigate | Enter select | / search | f favorite | d default | e edit | Esc cancel"
     };
@@ -1584,6 +1659,63 @@ fn draw_add_custom_agent_modal(
     let footer = Paragraph::new("Tab switches fields | Enter confirms | Esc cancels")
         .style(Style::default().fg(theme.muted));
     f.render_widget(footer, layout[6]);
+}
+
+fn draw_remove_custom_agent_modal(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    name: &str,
+    source_id: &str,
+    theme: TerminalTheme,
+) {
+    let width = area.width.saturating_sub(8).min(72);
+    let height = 8.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let rect = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" remove custom agent ")
+        .style(Style::default().fg(theme.warning));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let title = Line::from(vec![
+        Span::raw("Remove "),
+        Span::styled(
+            name.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("?"),
+    ]);
+    f.render_widget(Paragraph::new(title), layout[0]);
+
+    let source = Paragraph::new(format!("source: {source_id}"))
+        .style(Style::default().fg(theme.muted))
+        .wrap(Wrap { trim: false });
+    f.render_widget(source, layout[1]);
+
+    let body = Paragraph::new(
+        "This removes the saved picker entry and clears matching default/favorite references. It does not delete the agent executable.",
+    )
+    .wrap(Wrap { trim: false });
+    f.render_widget(body, layout[2]);
+
+    let footer =
+        Paragraph::new("Enter/Y removes | Esc/N cancels").style(Style::default().fg(theme.muted));
+    f.render_widget(footer, layout[3]);
 }
 
 fn draw_install_modal(
@@ -3059,6 +3191,132 @@ mod tests {
         let default = state.preferences.default_agent.as_ref().expect("default");
         assert_eq!(default.source_id, "custom:renamed");
         assert_eq!(default.args, vec!["--new"], "default command also updated");
+    }
+
+    #[tokio::test]
+    async fn pressing_x_on_custom_agent_opens_remove_confirmation() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        state.expanded = true;
+        state.recompute_filter();
+        state.select_source_id("custom:local-claude");
+
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(key)).await.unwrap();
+
+        let Mode::ConfirmRemoveCustomAgent { name, source_id } = &state.mode else {
+            panic!("expected remove confirmation");
+        };
+        assert_eq!(name, "local-claude");
+        assert_eq!(source_id, "custom:local-claude");
+    }
+
+    #[tokio::test]
+    async fn confirming_custom_agent_removal_deletes_row_and_cleans_preferences() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                favorite_source_ids: vec!["custom:experiment".to_string()],
+                default_agent: Some(PickerOutcome {
+                    source_id: "custom:experiment".to_string(),
+                    program: PathBuf::from("/tmp/agent"),
+                    args: vec![],
+                    env: HashMap::new(),
+                }),
+            },
+        );
+        state.expanded = true;
+        state.recompute_filter();
+        state.select_source_id("custom:experiment");
+
+        let delete = crossterm::event::KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(delete))
+            .await
+            .unwrap();
+        assert!(matches!(state.mode, Mode::ConfirmRemoveCustomAgent { .. }));
+
+        let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(enter)).await.unwrap();
+
+        assert!(matches!(state.mode, Mode::Browse));
+        assert_eq!(state.preferences.custom_agents.len(), 1);
+        assert_eq!(state.preferences.custom_agents[0].name, "local-claude");
+        assert!(state.preferences.favorite_source_ids.is_empty());
+        assert!(state.preferences.default_agent.is_none());
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("removed custom agent: experiment")
+        );
+        assert!(
+            state
+                .items
+                .iter()
+                .all(|item| state.item_source_id(item) != "custom:experiment")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_custom_agent_removal_keeps_row() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences {
+                custom_agents: fixture_custom_agents(),
+                ..Default::default()
+            },
+        );
+        state.expanded = true;
+        state.recompute_filter();
+        state.select_source_id("custom:local-claude");
+
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(key)).await.unwrap();
+        let esc = crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(esc)).await.unwrap();
+
+        assert!(matches!(state.mode, Mode::Browse));
+        assert_eq!(state.preferences.custom_agents.len(), 2);
+        assert!(
+            state
+                .items
+                .iter()
+                .any(|item| state.item_source_id(item) == "custom:local-claude")
+        );
+    }
+
+    #[tokio::test]
+    async fn pressing_x_on_non_custom_row_sets_notice() {
+        let reg = fixture_registry();
+        let mut state = PickerState::new(
+            &reg,
+            "darwin-aarch64".to_string(),
+            PathBuf::from("/tmp"),
+            PickerPreferences::default(),
+        );
+        state.select_source_id("anvil");
+
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        handle_event(&mut state, CtEvent::Key(key)).await.unwrap();
+
+        assert!(matches!(state.mode, Mode::Browse));
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("only custom agents can be removed")
+        );
     }
 
     #[tokio::test]

@@ -4,10 +4,20 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Mjolnir Web</title>
-    <!-- PWA: installable app shell. Status bar / theme color follow the SPA's
-         light-dark palette; Apple meta tags enable standalone home-screen launch. -->
-    <meta name="theme-color" content="#eef2f7" media="(prefers-color-scheme: light)">
-    <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
+    <script>
+      (() => {
+        try {
+          if (localStorage.getItem("mjolnir-remote-theme") === "light") {
+            document.documentElement.dataset.theme = "light";
+          }
+        } catch {
+          // Theme preference is cosmetic; private or locked-down storage can fail.
+        }
+      })();
+    </script>
+    <!-- PWA: installable app shell. Apple meta tags enable standalone
+         home-screen launch; script updates theme-color when the palette flips. -->
+    <meta name="theme-color" content="#050606">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -16,27 +26,168 @@
     <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
     <style>
+      /* Brokk HUD: near-black machined surfaces, one signal red, zero
+         border-radius. Cut-corner controls are built from three layers —
+         element background = edge, ::before = gap, ::after = fill — with
+         negative z-index pseudos so text needs no wrapper spans. Kind hues
+         (user/agent/thought/tool) appear only as 2px rails, labels, and
+         glyphs; red always means state: live, selected, or needs you. */
+
+      @font-face {
+        font-family: "Staatliches";
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url("/fonts/staatliches-400.woff2") format("woff2");
+      }
+
+      @font-face {
+        font-family: "Rajdhani";
+        font-style: normal;
+        font-weight: 500;
+        font-display: swap;
+        src: url("/fonts/rajdhani-500.woff2") format("woff2");
+      }
+
+      @font-face {
+        font-family: "Rajdhani";
+        font-style: normal;
+        font-weight: 600;
+        font-display: swap;
+        src: url("/fonts/rajdhani-600.woff2") format("woff2");
+      }
+
+      @font-face {
+        font-family: "Rajdhani";
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+        src: url("/fonts/rajdhani-700.woff2") format("woff2");
+      }
+
+      @font-face {
+        font-family: "JetBrains Mono";
+        font-style: normal;
+        font-weight: 400 700;
+        font-display: swap;
+        src: url("/fonts/jetbrains-mono.woff2") format("woff2");
+      }
+
       :root {
-        color-scheme: light dark;
-        --bg: light-dark(#eef2f7, #0b1220);
-        --panel: light-dark(#ffffff, #1c2433);
-        --panel-alt: light-dark(#f7f9fc, #131b2a);
-        --border: light-dark(#d8e0ea, #2e3a4f);
-        --text: light-dark(#16202e, #e6eaf2);
-        --muted: light-dark(#5d6b7e, #93a1b7);
-        --accent: light-dark(#2563eb, #6ea8fe);
-        --on-accent: light-dark(#ffffff, #071120);
-        --danger: light-dark(#d92d20, #f97066);
-        --user: light-dark(#0086c9, #36bffa);
-        --agent: light-dark(#079455, #32d583);
-        --thought: light-dark(#dc6803, #fdb022);
-        --tool: light-dark(#7839ee, #a48afb);
-        --system: light-dark(#5d6b7e, #93a1b7);
-        --radius: 12px;
-        --shadow: 0 6px 20px light-dark(rgb(16 24 40 / 0.06), rgb(0 0 0 / 0.35));
-        --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        color-scheme: dark;
+        --theme-color: #050606;
+
+        /* surfaces */
+        --bg: #050606;
+        --surface-well: #080909;
+        --surface-chrome: #0b0d0e;
+        --surface-panel: #0d0f10;
+        --surface-control: #101213;
+        --surface-terminal: #090a0b;
+
+        /* text */
+        --text: #f2f0eb;
+        --text-control: #e8e4de;
+        --muted: #a8a8a8;
+        --dim: #6f7375;
+
+        /* signal */
+        --red: #eb3f33;
+        --red-hot: #f05a50;
+        --red-deep: #4d1614;
+
+        /* hairlines */
+        --line-row: rgb(255 255 255 / 0.085);
+        --line: rgb(255 255 255 / 0.11);
+        --line-control: rgb(255 255 255 / 0.14);
+        --line-strong: rgb(255 255 255 / 0.22);
+        --grid-line: rgb(255 255 255 / 0.03);
+        --selection-bg: rgb(235 63 51 / 0.32);
+        --selection-text: #fff;
+        --inline-bg: rgb(255 255 255 / 0.055);
+        --inline-bg-strong: rgb(255 255 255 / 0.06);
+        --row-hover: rgb(255 255 255 / 0.03);
+        --row-subtle: rgb(255 255 255 / 0.015);
+        --live-dot-bg: #26292b;
+        --button-edge-hover: rgb(255 255 255 / 0.34);
+        --button-hover-text: #fff;
+        --permission-badge-text: #f6a49e;
+        --user-entry-text: #edf3f7;
+        --overlay-shadow: rgb(0 0 0 / 0.55);
+        --scrollbar-thumb: #2a2d2f;
+
+        /* transcript kind hues: rails, labels, glyphs only — never washes */
+        --user: #5fa8cf;
+        --agent: #4fae84;
+        --thought: #c79a4b;
+        --tool: #9a8cc9;
+        --system: #6f7375;
+
+        /* type */
+        --font-display: "Staatliches", "Arial Narrow", Impact, sans-serif;
+        --font-body: "Rajdhani", "Segoe UI", system-ui, sans-serif;
+        --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+        /* cut-corner shapes: key = buttons, console = the composer frame,
+           chip = small badges (asymmetric cuts) */
+        --shape-key: polygon(9px 0, calc(100% - 9px) 0, 100% 9px, 100% calc(100% - 9px), calc(100% - 9px) 100%, 9px 100%, 0 calc(100% - 9px), 0 9px);
+        --shape-key-inner: polygon(8px 0, calc(100% - 8px) 0, 100% 8px, 100% calc(100% - 8px), calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px), 0 8px);
+        --shape-key-fill: polygon(7px 0, calc(100% - 7px) 0, 100% 7px, 100% calc(100% - 7px), calc(100% - 7px) 100%, 7px 100%, 0 calc(100% - 7px), 0 7px);
+        --shape-console: polygon(12px 0, calc(100% - 12px) 0, 100% 12px, 100% calc(100% - 12px), calc(100% - 12px) 100%, 12px 100%, 0 calc(100% - 12px), 0 12px);
+        --shape-console-inner: polygon(11px 0, calc(100% - 11px) 0, 100% 11px, 100% calc(100% - 11px), calc(100% - 11px) 100%, 11px 100%, 0 calc(100% - 11px), 0 11px);
+        --shape-console-fill: polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px);
+        --shape-chip: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+
         --keyboard-inset: 0px;
-        accent-color: var(--accent);
+        --theme-toggle-reserve: 78px;
+        accent-color: var(--red);
+        scrollbar-color: var(--scrollbar-thumb) transparent;
+      }
+
+      :root[data-theme="light"] {
+        color-scheme: light;
+        --theme-color: #f7f2e8;
+
+        --bg: #f7f2e8;
+        --surface-well: #eee8dc;
+        --surface-chrome: #fbf7ef;
+        --surface-panel: #fffaf2;
+        --surface-control: #f2eadf;
+        --surface-terminal: #fffdf8;
+
+        --text: #171614;
+        --text-control: #28231c;
+        --muted: #596064;
+        --dim: #7c8182;
+
+        --red: #c83228;
+        --red-hot: #a92c24;
+        --red-deep: #f1c6c0;
+
+        --line-row: rgb(24 23 21 / 0.095);
+        --line: rgb(24 23 21 / 0.14);
+        --line-control: rgb(24 23 21 / 0.18);
+        --line-strong: rgb(24 23 21 / 0.27);
+        --grid-line: rgb(24 23 21 / 0.045);
+        --selection-bg: rgb(200 50 40 / 0.24);
+        --selection-text: #171614;
+        --inline-bg: rgb(24 23 21 / 0.045);
+        --inline-bg-strong: rgb(24 23 21 / 0.06);
+        --row-hover: rgb(24 23 21 / 0.045);
+        --row-subtle: rgb(24 23 21 / 0.025);
+        --live-dot-bg: #b9b2a7;
+        --button-edge-hover: rgb(24 23 21 / 0.34);
+        --button-hover-text: #11100f;
+        --permission-badge-text: #9f3029;
+        --user-entry-text: #14313f;
+        --overlay-shadow: rgb(61 54 43 / 0.2);
+        --scrollbar-thumb: #c8beb0;
+
+        --user: #176b96;
+        --agent: #14754f;
+        --thought: #88600e;
+        --tool: #6c58a0;
+        --system: #777c7f;
       }
 
       * {
@@ -47,18 +198,38 @@
         margin: 0;
         height: 100dvh;
         overflow: hidden;
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-family: var(--font-body);
+        font-size: 15px;
+        font-weight: 500;
         color: var(--text);
-        background: var(--bg);
+        -webkit-tap-highlight-color: transparent;
+        /* blueprint grid over near-black; opaque panes cover it, so it reads
+           mainly on the auth screen and at pane seams */
+        background:
+          linear-gradient(var(--grid-line) 1px, transparent 1px),
+          linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+          var(--bg);
+        background-size: 9rem 9rem, 9rem 9rem, auto;
       }
 
       :focus-visible {
-        outline: 2px solid var(--accent);
-        outline-offset: 2px;
+        outline: 1px solid var(--red);
+        outline-offset: 3px;
+      }
+
+      ::selection {
+        background: var(--selection-bg);
+        color: var(--selection-text);
+      }
+
+      ::placeholder {
+        color: var(--dim);
+        opacity: 1;
       }
 
       button {
         font: inherit;
+        color: inherit;
       }
 
       [hidden] {
@@ -66,16 +237,217 @@
       }
 
       .empty {
-        color: var(--muted);
-        padding: 24px;
+        color: var(--dim);
+        font: 700 10.5px/1.6 var(--font-mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        padding: 28px 18px;
         text-align: center;
+      }
+
+      /* ---- HUD keys: cut-corner buttons (edge / gap / fill layers) ---- */
+
+      .primary,
+      .permission-option,
+      .jump-to-latest,
+      .icon-button,
+      .theme-toggle {
+        position: relative;
+        isolation: isolate;
+        border: 0;
+        cursor: pointer;
+        clip-path: var(--shape-key);
+        background: var(--key-edge, var(--line-strong));
+        color: var(--key-text, var(--text-control));
+        font: 700 11.5px/1 var(--font-body);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        transition: background-color 0.15s ease, color 0.15s ease;
+
+        &::before {
+          content: "";
+          position: absolute;
+          inset: 1px;
+          z-index: -2;
+          background: var(--bg);
+          clip-path: var(--shape-key-inner);
+        }
+
+        &::after {
+          content: "";
+          position: absolute;
+          inset: 2px;
+          z-index: -1;
+          background: var(--key-fill, linear-gradient(180deg, rgb(255 255 255 / 0.05), rgb(255 255 255 / 0.008) 60%), var(--surface-control));
+          clip-path: var(--shape-key-fill);
+        }
+
+        &:hover:not(:disabled) {
+          background: var(--key-edge-hover, var(--button-edge-hover));
+          color: var(--key-text-hover, var(--button-hover-text));
+        }
+
+        &:disabled {
+          opacity: 0.45;
+          cursor: default;
+        }
+      }
+
+      .primary {
+        --key-edge: rgb(235 63 51 / 0.52);
+        --key-edge-hover: rgb(235 63 51 / 0.85);
+        --key-fill:
+          linear-gradient(90deg, rgb(235 63 51 / 0.2), transparent 58%),
+          linear-gradient(180deg, rgb(235 63 51 / 0.14), rgb(235 63 51 / 0.03)),
+          #151010;
+        --key-text: #ffe9e6;
+        --key-text-hover: #fff;
+        height: 34px;
+        padding: 0 18px;
+
+        &:hover:not(:disabled) {
+          filter: drop-shadow(0 0 9px rgb(235 63 51 / 0.33));
+        }
+      }
+
+      .theme-toggle {
+        position: fixed;
+        top: calc(10px + env(safe-area-inset-top));
+        right: calc(12px + env(safe-area-inset-right));
+        z-index: 120;
+        min-width: 66px;
+        height: 34px;
+        padding: 0 13px;
+      }
+
+      /* ---- auth screen ---- */
+
+      .auth-screen {
+        height: 100dvh;
+        overflow-y: auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background:
+          radial-gradient(circle at 86% 12%, rgb(235 63 51 / 0.12), transparent 26rem),
+          radial-gradient(circle at 8% 90%, rgb(235 63 51 / 0.09), transparent 24rem);
+      }
+
+      .auth-card {
+        position: relative;
+        isolation: isolate;
+        width: min(430px, 100%);
+        padding: 30px 28px 26px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        clip-path: var(--shape-console);
+        background: linear-gradient(135deg, rgb(255 255 255 / 0.2), rgb(255 255 255 / 0.09) 40%, rgb(235 63 51 / 0.38));
+
+        &::before {
+          content: "";
+          position: absolute;
+          inset: 1px;
+          z-index: -2;
+          background: var(--bg);
+          clip-path: var(--shape-console-inner);
+        }
+
+        &::after {
+          content: "";
+          position: absolute;
+          inset: 2px;
+          z-index: -1;
+          background: linear-gradient(180deg, rgb(255 255 255 / 0.03), transparent 42%), var(--surface-chrome);
+          clip-path: var(--shape-console-fill);
+        }
+
+        & h1 {
+          margin: 0;
+          font: 400 44px/1 var(--font-display);
+          letter-spacing: 0.05em;
+          text-transform: uppercase;
+          color: var(--text);
+          text-shadow: 0 0 26px rgb(242 240 235 / 0.14);
+        }
+
+        & p {
+          margin: 0;
+          color: var(--muted);
+          font-size: 15px;
+          line-height: 1.55;
+
+          & code {
+            font: 0.85em var(--font-mono);
+            color: var(--text-control);
+            background: var(--inline-bg-strong);
+            border: 1px solid var(--line-row);
+            padding: 1px 5px;
+          }
+        }
+
+        & form {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        & label {
+          font: 700 10px/1 var(--font-mono);
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          color: var(--dim);
+        }
+
+        & input {
+          border: 1px solid var(--line-control);
+          background: var(--bg);
+          color: var(--text);
+          caret-color: var(--red);
+          padding: 13px 12px;
+          font: 400 20px/1.4 var(--font-mono);
+          letter-spacing: 0.45em;
+          text-indent: 0.45em;
+          text-align: center;
+          transition: border-color 0.15s ease, box-shadow 0.15s ease;
+
+          &:focus-visible {
+            outline: none;
+            border-color: rgb(235 63 51 / 0.65);
+            box-shadow: 0 0 16px rgb(235 63 51 / 0.18);
+          }
+        }
+      }
+
+      .auth-kicker {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font: 400 13px/1 var(--font-display);
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--red);
+
+        &::after {
+          content: "";
+          flex: 1;
+          height: 1px;
+          background: linear-gradient(90deg, rgb(235 63 51 / 0.7), rgb(235 63 51 / 0.05));
+        }
+      }
+
+      .auth-error {
+        min-height: 18px;
+        color: var(--red-hot);
+        font: 400 12px/1.5 var(--font-mono);
       }
 
       /* ---- app shell ---- */
 
       .layout {
         display: grid;
-        grid-template-columns: 340px minmax(0, 1fr);
+        grid-template-columns: 300px minmax(0, 1fr);
         height: 100dvh;
       }
 
@@ -83,81 +455,121 @@
         display: flex;
         flex-direction: column;
         min-height: 0;
-        border-right: 1px solid var(--border);
-        background: var(--panel-alt);
+        border-right: 1px solid var(--line);
+        background: var(--surface-chrome);
 
         & .panel-header {
-          padding: 14px 16px;
-          border-bottom: 1px solid var(--border);
+          padding: 16px 16px 10px;
+          border-bottom: 1px solid var(--line);
         }
       }
 
       .sidebar-title-row {
         display: flex;
         align-items: center;
-        justify-content: space-between;
         gap: 12px;
 
         & h1 {
+          flex: 1;
           margin: 0;
-          font-size: 17px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          font: 400 19px/1 var(--font-display);
+          letter-spacing: 0.09em;
+          text-transform: uppercase;
+          color: var(--text);
+
+          &::after {
+            content: "";
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(90deg, rgb(235 63 51 / 0.65), rgb(235 63 51 / 0.05));
+          }
         }
       }
 
       #status {
-        margin: 6px 0 0;
-        color: var(--muted);
-        font-size: 12.5px;
+        margin: 7px 0 0;
+        color: var(--dim);
+        font: 400 10px/1.4 var(--font-mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
       }
 
       .ghost-danger {
-        border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-        background: transparent;
-        color: var(--danger);
-        border-radius: 8px;
-        padding: 6px 12px;
+        border: 0;
+        background: none;
+        padding: 4px 0;
+        color: var(--dim);
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
         cursor: pointer;
 
         &:hover {
-          background: color-mix(in srgb, var(--danger) 10%, transparent);
+          color: var(--red-hot);
         }
       }
 
-      /* ---- session list ---- */
+      /* ---- session list: full-bleed hairline rows with a status rail ---- */
 
       #sessions {
         flex: 1;
         min-height: 0;
         overflow-y: auto;
         overscroll-behavior: contain;
-        padding: 10px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        scrollbar-color: var(--border) transparent;
-        padding-bottom: calc(10px + env(safe-area-inset-bottom));
+        padding-bottom: env(safe-area-inset-bottom);
       }
 
       .session-item {
+        position: relative;
         width: 100%;
         text-align: left;
-        border: 1px solid var(--border);
-        background: var(--panel);
-        color: inherit;
-        border-radius: var(--radius);
-        padding: 12px 14px;
+        border: 0;
+        border-bottom: 1px solid var(--line-row);
+        background: transparent;
+        padding: 12px 14px 12px 18px;
         cursor: pointer;
         display: flex;
         flex-direction: column;
         gap: 6px;
+        transition: background-color 0.15s ease;
 
         &:hover {
-          border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+          background: var(--row-hover);
         }
 
         &.active {
-          border-color: var(--accent);
-          background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+          background: linear-gradient(90deg, rgb(235 63 51 / 0.11), transparent 70%);
+        }
+      }
+
+      /* the .live-dot span doubles as the row's 2px status rail */
+      .live-dot {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: -1px;
+        width: 2px;
+        background: var(--live-dot-bg);
+      }
+
+      .session-item.working .live-dot {
+        background: var(--red);
+        box-shadow: 0 0 10px rgb(235 63 51 / 0.5);
+        animation: rail-pulse 1.6s ease-in-out infinite;
+      }
+
+      .session-item.needs-approval .live-dot {
+        background: var(--red-hot);
+        box-shadow: 0 0 12px rgb(235 63 51 / 0.65);
+        animation: rail-pulse 1.1s ease-in-out infinite;
+      }
+
+      @keyframes rail-pulse {
+        50% {
+          opacity: 0.4;
         }
       }
 
@@ -168,62 +580,33 @@
         min-width: 0;
       }
 
-      .live-dot {
-        flex: 0 0 auto;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: var(--agent);
-      }
-
-      .session-item.working .live-dot {
-        animation: pulse 1.6s ease-in-out infinite;
-      }
-
-      .session-item.needs-approval .live-dot {
-        background: var(--thought);
-        animation: pulse-approval 1.6s ease-in-out infinite;
-      }
-
-      @keyframes pulse-approval {
-        50% {
-          box-shadow: 0 0 0 5px color-mix(in srgb, var(--thought) 30%, transparent);
-        }
-      }
-
-      .session-approval {
-        flex: 0 0 auto;
-        font-size: 10.5px;
-        font-weight: 700;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
-        color: var(--thought);
-        border: 1px solid color-mix(in srgb, var(--thought) 45%, transparent);
-        background: color-mix(in srgb, var(--thought) 12%, transparent);
-        border-radius: 999px;
-        padding: 2px 8px;
-      }
-
-      @keyframes pulse {
-        50% {
-          box-shadow: 0 0 0 5px color-mix(in srgb, var(--agent) 25%, transparent);
-        }
-      }
-
       .session-title {
-        font-weight: 600;
-        font-size: 14px;
+        flex: 1;
+        min-width: 0;
+        font: 600 15px/1.25 var(--font-body);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
 
+      .session-approval {
+        flex: 0 0 auto;
+        font: 700 9px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--permission-badge-text);
+        background: rgb(235 63 51 / 0.16);
+        clip-path: var(--shape-chip);
+        padding: 4px 8px 3px;
+        animation: attention-fade 1.4s ease-in-out infinite;
+      }
+
       .session-meta {
         display: flex;
         flex-wrap: wrap;
-        column-gap: 10px;
+        column-gap: 12px;
         color: var(--muted);
-        font-size: 12.5px;
+        font: 400 11px/1.5 var(--font-mono);
         min-width: 0;
 
         & span {
@@ -238,8 +621,10 @@
         display: flex;
         justify-content: space-between;
         gap: 10px;
-        color: var(--muted);
-        font-size: 12px;
+        color: var(--dim);
+        font: 400 9.5px/1.5 var(--font-mono);
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
       }
 
       /* ---- chat panel ---- */
@@ -249,31 +634,29 @@
         flex-direction: column;
         min-height: 0;
         min-width: 0;
+        background: var(--surface-well);
       }
 
       .chat-header {
         display: flex;
         align-items: center;
-        gap: 10px;
-        padding: 10px 16px;
+        gap: 12px;
+        padding: 10px 18px;
         padding-top: calc(10px + env(safe-area-inset-top));
-        border-bottom: 1px solid var(--border);
-        background: var(--panel-alt);
+        padding-right: calc(18px + var(--theme-toggle-reserve) + env(safe-area-inset-right));
+        border-bottom: 1px solid var(--line);
+        background: var(--surface-chrome);
       }
 
       .icon-button {
         display: none;
         align-items: center;
         justify-content: center;
-        width: 38px;
-        height: 38px;
+        width: 36px;
+        height: 36px;
         flex: 0 0 auto;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: var(--panel);
-        color: var(--text);
-        font-size: 18px;
-        cursor: pointer;
+        font-size: 16px;
+        letter-spacing: 0;
       }
 
       .chat-heading {
@@ -282,7 +665,7 @@
 
         & h2 {
           margin: 0;
-          font-size: 16px;
+          font: 600 16px/1.3 var(--font-body);
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
@@ -290,8 +673,10 @@
 
         & p {
           margin: 2px 0 0;
-          color: var(--muted);
-          font-size: 12.5px;
+          color: var(--dim);
+          font: 400 10px/1.4 var(--font-mono);
+          letter-spacing: 0.07em;
+          text-transform: uppercase;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
@@ -300,35 +685,44 @@
 
       .working-badge {
         flex: 0 0 auto;
-        font-size: 12px;
-        font-weight: 600;
-        color: var(--agent);
-        border: 1px solid color-mix(in srgb, var(--agent) 40%, transparent);
-        background: color-mix(in srgb, var(--agent) 10%, transparent);
-        border-radius: 999px;
-        padding: 4px 10px;
-        animation: working-fade 1.4s ease-in-out infinite;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--red-hot);
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
 
         &::after {
-          content: "…";
+          content: "";
+          width: 6px;
+          height: 11px;
+          background: currentColor;
+          animation: cursor-blink 1.05s steps(2, start) infinite;
         }
       }
 
       .approval-badge {
         flex: 0 0 auto;
-        font-size: 12px;
-        font-weight: 600;
-        color: var(--thought);
-        border: 1px solid color-mix(in srgb, var(--thought) 45%, transparent);
-        background: color-mix(in srgb, var(--thought) 12%, transparent);
-        border-radius: 999px;
-        padding: 4px 10px;
-        animation: working-fade 1.4s ease-in-out infinite;
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--permission-badge-text);
+        background: rgb(235 63 51 / 0.16);
+        clip-path: var(--shape-chip);
+        padding: 5px 9px 4px;
+        animation: attention-fade 1.4s ease-in-out infinite;
       }
 
-      @keyframes working-fade {
+      @keyframes attention-fade {
         50% {
           opacity: 0.55;
+        }
+      }
+
+      @keyframes cursor-blink {
+        50% {
+          opacity: 0;
         }
       }
 
@@ -342,48 +736,49 @@
         height: 100%;
         overflow-y: auto;
         overscroll-behavior: contain;
-        padding: 16px;
+        padding: 0 0 20px;
         display: flex;
         flex-direction: column;
-        gap: 12px;
-        scrollbar-color: var(--border) transparent;
       }
 
       .jump-to-latest {
         position: absolute;
-        right: 16px;
-        bottom: 16px;
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        padding: 9px 14px;
-        background: var(--panel);
-        color: var(--text);
-        box-shadow: var(--shadow);
-        cursor: pointer;
-
-        &:hover {
-          border-color: var(--accent);
-        }
+        right: 18px;
+        bottom: 14px;
+        padding: 9px 13px 8px;
+        font-size: 10px;
 
         &.has-new {
-          border-color: var(--accent);
-          background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+          --key-edge: rgb(235 63 51 / 0.52);
+          --key-edge-hover: rgb(235 63 51 / 0.85);
+          --key-fill:
+            linear-gradient(90deg, rgb(235 63 51 / 0.2), transparent 58%),
+            linear-gradient(180deg, rgb(235 63 51 / 0.14), rgb(235 63 51 / 0.03)),
+            #151010;
+          --key-text: #ffe9e6;
+          filter: drop-shadow(0 0 9px rgb(235 63 51 / 0.3));
         }
       }
 
-      /* ---- transcript entries ---- */
+      /* ---- transcript entries: flat log rows, kind rail + mono label ---- */
 
       .entry {
         --kind-color: var(--system);
-        border: 1px solid color-mix(in srgb, var(--kind-color) 30%, var(--border));
-        background: linear-gradient(
-          180deg,
-          color-mix(in srgb, var(--kind-color) 7%, var(--panel)),
-          var(--panel)
-        );
-        border-radius: var(--radius);
-        padding: 12px 14px;
+        position: relative;
+        border-bottom: 1px solid var(--line-row);
+        padding: 13px 18px 15px;
         animation: entry-in 0.18s ease-out;
+
+        &::before {
+          content: "";
+          position: absolute;
+          left: 0;
+          top: 13px;
+          bottom: 13px;
+          width: 2px;
+          background: var(--kind-color);
+          opacity: 0.8;
+        }
 
         &[data-kind="user"] { --kind-color: var(--user); }
         &[data-kind="agent"] { --kind-color: var(--agent); }
@@ -394,57 +789,52 @@
       @keyframes entry-in {
         from {
           opacity: 0;
-          translate: 0 6px;
+          translate: 0 4px;
         }
       }
 
       .entry-header {
         display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-bottom: 8px;
-      }
-
-      .entry-icon {
-        width: 24px;
-        height: 24px;
-        flex: 0 0 auto;
-        border-radius: 999px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 12px;
-        font-weight: 700;
-        color: var(--kind-color);
-        background: color-mix(in srgb, var(--kind-color) 14%, transparent);
+        align-items: baseline;
+        gap: 10px;
+        margin-bottom: 7px;
       }
 
       .entry-kind {
-        flex: 1;
-        font-size: 11.5px;
-        font-weight: 700;
-        letter-spacing: 0.07em;
+        flex: 0 0 auto;
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.12em;
         text-transform: uppercase;
         color: var(--kind-color);
       }
 
       .entry-time {
-        color: var(--muted);
-        font-size: 11.5px;
+        margin-left: auto;
+        color: var(--dim);
+        font: 400 10px/1 var(--font-mono);
         white-space: nowrap;
       }
 
       .entry-body {
-        border-top: 1px solid color-mix(in srgb, var(--kind-color) 14%, var(--border));
-        padding-top: 10px;
-        font-size: 13.5px;
-        line-height: 1.6;
+        font-size: 15px;
+        font-weight: 500;
+        line-height: 1.55;
         word-break: break-word;
 
         & .entry-text {
-          margin: 0;
+          margin: 0 0 10px;
           white-space: pre-wrap;
-          font: 13px/1.6 var(--font-mono);
+          font: 400 12.5px/1.65 var(--font-mono);
+
+          /* Inside an already-mono run, inline code and paths signal with
+             color alone — boxes around every token would read as noise. */
+          & code {
+            border: 0;
+            background: transparent;
+            padding: 0;
+            font-size: inherit;
+            color: var(--text-control);
+          }
         }
 
         & p {
@@ -455,8 +845,10 @@
         & h4,
         & h5,
         & h6 {
-          margin: 12px 0 8px;
-          font-size: 14px;
+          margin: 14px 0 6px;
+          font: 700 13px/1.4 var(--font-body);
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
         }
 
         & ul,
@@ -470,31 +862,180 @@
         }
 
         & a {
-          color: var(--accent);
+          color: var(--red-hot);
+          text-underline-offset: 3px;
         }
 
         & code {
-          font: 0.92em/1.5 var(--font-mono);
-          background: var(--panel-alt);
-          border: 1px solid var(--border);
-          border-radius: 5px;
+          font: 400 0.88em/1.5 var(--font-mono);
+          background: var(--inline-bg);
+          border: 1px solid var(--line-row);
           padding: 1px 5px;
         }
 
         & pre.code-block {
-          margin: 0 0 10px;
+          margin: 2px 0 12px;
           padding: 10px 12px;
-          background: var(--panel-alt);
-          border: 1px solid var(--border);
-          border-radius: 8px;
-          overflow-x: auto;
+          background: var(--bg);
+          border: 1px solid var(--line-row);
+          overflow: auto;
+          max-height: 340px;
+          /* Plain identifiers and punctuation recede so tinted tokens carry
+             the structure, whatever kind of entry the block sits in. */
+          color: var(--muted);
+
+          &[data-lang]::before {
+            content: attr(data-lang);
+            float: right;
+            margin: -3px -5px 4px 14px;
+            font: 700 9px/1 var(--font-mono);
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--dim);
+          }
 
           & code {
             border: 0;
             background: transparent;
             padding: 0;
-            font-size: 12.5px;
+            font-size: 12px;
             white-space: pre;
+          }
+        }
+
+        /* Syntax roles reuse the kind hues as a fixed code theme: names blue,
+           strings green, keywords/numbers amber, macros violet, calls bright.
+           Inside a code surface they read as syntax, not entry coding. */
+        & .tok-key { color: var(--user); }
+        & .tok-str { color: var(--agent); }
+        & .tok-num { color: var(--thought); }
+        & .tok-kw { color: var(--thought); font-weight: 700; }
+        & .tok-cmt { color: var(--dim); font-style: italic; }
+        & .tok-type { color: var(--user); }
+        & .tok-fn { color: var(--text-control); }
+        & .tok-mac { color: var(--tool); }
+        & .tok-add { color: var(--agent); }
+        & .tok-del { color: var(--red-hot); }
+        & .cmd-prompt { color: var(--dim); }
+        & .cmd-program { color: var(--text-control); font-weight: 700; }
+        & .cmd-subcommand { color: var(--user); }
+        & .cmd-flag { color: var(--thought); }
+        & .cmd-path { color: var(--agent); }
+        & .cmd-env { color: var(--tool); }
+        & .cmd-string { color: var(--agent); }
+        & .cmd-op { color: var(--dim); }
+
+        & details.block-fold {
+          margin: 2px 0 12px;
+          border: 1px solid var(--line-row);
+          background: var(--bg);
+
+          & > summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 8px 12px;
+            font: 700 9.5px/1 var(--font-mono);
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--dim);
+            user-select: none;
+
+            &::-webkit-details-marker {
+              display: none;
+            }
+
+            &::before {
+              content: "▸";
+              display: inline-block;
+              margin-right: 9px;
+              color: var(--red);
+              transition: rotate 0.12s;
+            }
+
+            &:hover {
+              color: var(--muted);
+            }
+          }
+
+          &[open] > summary {
+            color: var(--muted);
+            border-bottom: 1px solid var(--line-row);
+
+            &::before {
+              rotate: 90deg;
+            }
+          }
+
+          /* Opening a fold is an explicit request to read the payload, so
+             folded content gets more height than an inline block. */
+          & > pre.code-block {
+            margin: 0;
+            border: 0;
+            max-height: 60vh;
+          }
+
+          & > pre.entry-text {
+            margin: 0;
+            padding: 10px 12px;
+            max-height: 60vh;
+            overflow: auto;
+          }
+        }
+
+        & .meta-line {
+          margin: 0 0 8px;
+          font: 400 11px/1.6 var(--font-mono);
+          color: var(--dim);
+          white-space: pre-wrap;
+
+          & strong {
+            color: var(--muted);
+          }
+
+          & code {
+            font-size: 10.5px;
+          }
+        }
+
+        & code.path {
+          background: var(--inline-bg);
+          color: var(--text-control);
+        }
+
+        & em {
+          font-style: italic;
+          color: var(--muted);
+        }
+
+        & .table-scroll {
+          margin: 2px 0 12px;
+          overflow-x: auto;
+          border: 1px solid var(--line-row);
+        }
+
+        & table.md-table {
+          border-collapse: collapse;
+          width: 100%;
+          font-size: 13.5px;
+          line-height: 1.45;
+
+          & th {
+            font: 700 10px/1.4 var(--font-mono);
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--dim);
+            text-align: left;
+          }
+
+          & th,
+          & td {
+            padding: 6px 12px;
+            border-bottom: 1px solid var(--line-row);
+            vertical-align: top;
+          }
+
+          & tr:last-child td {
+            border-bottom: 0;
           }
         }
 
@@ -503,257 +1044,37 @@
         }
       }
 
-      .entry[data-kind="thought"] .entry-body {
-        color: var(--muted);
-        font-style: italic;
+      .entry[data-kind="user"] .entry-text {
+        color: var(--user-entry-text);
       }
 
-      /* ---- pending permissions ---- */
+      .entry[data-kind="tool"] .entry-text,
+      .entry[data-kind="system"] .entry-text {
+        color: var(--muted);
+      }
+
+      .entry[data-kind="thought"] .entry-body {
+        color: var(--muted);
+        font-size: 14.5px;
+      }
+
+      /* ---- pending permissions: the app's alarm state ---- */
 
       .permission-list {
         display: flex;
         flex-direction: column;
-        gap: 8px;
-
-        &:empty {
-          display: none;
-        }
-      }
-
-      .config-panel {
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        background: var(--panel);
-
-        &[hidden] {
-          display: none;
-        }
-      }
-
-      .config-panel-summary {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
         gap: 10px;
-        min-height: 42px;
-        padding: 9px 12px;
-        cursor: pointer;
-        list-style: none;
-
-        &::-webkit-details-marker {
-          display: none;
-        }
-      }
-
-      .config-panel-title {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-        color: var(--muted);
-      }
-
-      .config-panel-meta {
-        margin-left: auto;
-        color: var(--muted);
-        font-size: 12px;
-        white-space: nowrap;
-      }
-
-      .config-panel-chevron {
-        flex: none;
-        width: 8px;
-        height: 8px;
-        border-right: 2px solid var(--muted);
-        border-bottom: 2px solid var(--muted);
-        transform: translateY(-2px) rotate(45deg);
-        transition: transform 0.12s ease;
-      }
-
-      .config-panel[open] .config-panel-chevron {
-        transform: translateY(2px) rotate(225deg);
-      }
-
-      .config-list {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-        gap: 12px 16px;
-        padding: 12px 14px;
-        border-top: 1px solid var(--border);
 
         &:empty {
           display: none;
         }
-      }
-
-      .config-option {
-        display: flex;
-        flex-direction: column;
-        gap: 5px;
-        min-width: 0;
-      }
-
-      .config-option-head {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 8px;
-      }
-
-      .config-option-name {
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-        color: var(--muted);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .config-option-status {
-        font-size: 11px;
-        font-weight: 600;
-        color: var(--accent);
-        white-space: nowrap;
-
-        &:empty {
-          display: none;
-        }
-      }
-
-      .config-combo {
-        position: relative;
-      }
-
-      .config-combo-trigger {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        width: 100%;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 9px 12px;
-        background: var(--panel-alt);
-        color: var(--text);
-        font: 13px/1.3 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        text-align: left;
-        cursor: pointer;
-        transition: border-color 0.12s ease;
-
-        &:hover {
-          border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-        }
-
-        &[aria-expanded="true"] {
-          border-color: var(--accent);
-        }
-
-        &:disabled {
-          cursor: progress;
-          opacity: 0.6;
-        }
-      }
-
-      .config-combo-value {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .config-combo-chevron {
-        flex: none;
-        width: 7px;
-        height: 7px;
-        border-right: 2px solid var(--muted);
-        border-bottom: 2px solid var(--muted);
-        transform: translateY(-2px) rotate(45deg);
-      }
-
-      /* Anchored above the trigger: the config bar lives at the bottom of the
-         screen next to the prompt box, so a downward popup would overflow. */
-      .config-combo-popup {
-        position: absolute;
-        z-index: 30;
-        bottom: calc(100% + 6px);
-        left: 0;
-        min-width: 100%;
-        max-width: min(360px, 80vw);
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        padding: 8px;
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        box-shadow: var(--shadow);
-      }
-
-      .config-combo-search {
-        width: 100%;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 7px 10px;
-        background: var(--panel-alt);
-        color: var(--text);
-        font: 13px/1.3 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-
-      .config-combo-list {
-        list-style: none;
-        margin: 0;
-        padding: 0;
-        max-height: 244px;
-        overflow-y: auto;
-        overscroll-behavior: contain;
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-      }
-
-      .config-combo-option {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-        padding: 7px 10px;
-        border-radius: 7px;
-        cursor: pointer;
-
-        &.is-active {
-          background: color-mix(in srgb, var(--accent) 14%, transparent);
-        }
-
-        &.is-selected .config-combo-option-label {
-          font-weight: 700;
-          color: var(--accent);
-        }
-      }
-
-      .config-combo-option-label {
-        font-size: 13px;
-      }
-
-      .config-combo-option-desc {
-        font-size: 11.5px;
-        color: var(--muted);
-      }
-
-      .config-combo-empty {
-        padding: 8px 10px;
-        color: var(--muted);
-        font-size: 12.5px;
       }
 
       .permission-card {
-        border: 1px solid color-mix(in srgb, var(--thought) 45%, var(--border));
-        background: color-mix(in srgb, var(--thought) 8%, var(--panel));
-        border-radius: var(--radius);
-        padding: 12px 14px;
+        border: 1px solid rgb(235 63 51 / 0.5);
+        background: linear-gradient(90deg, rgb(235 63 51 / 0.07), transparent 55%), var(--surface-panel);
+        box-shadow: 0 0 20px rgb(235 63 51 / 0.14);
+        padding: 12px 14px 13px;
       }
 
       .permission-header {
@@ -764,24 +1085,30 @@
       }
 
       .permission-label {
-        font-size: 11.5px;
-        font-weight: 700;
-        letter-spacing: 0.07em;
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.14em;
         text-transform: uppercase;
-        color: var(--thought);
+        color: var(--red-hot);
+        text-shadow: 0 0 10px rgb(235 63 51 / 0.45);
       }
 
       .permission-time {
-        color: var(--muted);
-        font-size: 11.5px;
+        color: var(--dim);
+        font: 400 10px/1 var(--font-mono);
         white-space: nowrap;
       }
 
+      /* Never truncate the requested permission: the full command stays
+         readable by scrolling this block. */
       .permission-title {
-        margin: 8px 0 10px;
+        margin: 10px 0 12px;
         white-space: pre-wrap;
         word-break: break-word;
-        font: 12.5px/1.6 var(--font-mono);
+        font: 400 12px/1.6 var(--font-mono);
+        color: var(--text-control);
+        background: var(--bg);
+        border: 1px solid var(--line-row);
+        padding: 10px 12px;
         max-height: 30dvh;
         overflow-y: auto;
         overscroll-behavior: contain;
@@ -794,186 +1121,402 @@
       }
 
       .permission-option {
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 8px 14px;
-        font-weight: 600;
-        cursor: pointer;
-        background: var(--panel);
-        color: var(--text);
+        height: 32px;
+        padding: 0 14px;
+        letter-spacing: 0.08em;
 
         &[data-kind^="allow"] {
-          border-color: color-mix(in srgb, var(--agent) 45%, var(--border));
-          background: color-mix(in srgb, var(--agent) 10%, var(--panel));
-          color: var(--agent);
+          --key-edge: rgb(79 174 132 / 0.45);
+          --key-edge-hover: rgb(79 174 132 / 0.8);
+          --key-fill:
+            linear-gradient(90deg, rgb(79 174 132 / 0.16), transparent 58%),
+            linear-gradient(180deg, rgb(79 174 132 / 0.12), rgb(79 174 132 / 0.02)),
+            #0f1512;
+          --key-text: #a9dfc4;
+          --key-text-hover: #d7f4e5;
         }
 
         &[data-kind^="reject"] {
-          border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
-          background: color-mix(in srgb, var(--danger) 8%, var(--panel));
-          color: var(--danger);
-        }
-
-        &:disabled {
-          opacity: 0.55;
-          cursor: default;
+          --key-edge: rgb(235 63 51 / 0.4);
+          --key-edge-hover: rgb(235 63 51 / 0.75);
+          --key-fill:
+            linear-gradient(90deg, rgb(235 63 51 / 0.12), transparent 58%),
+            linear-gradient(180deg, rgb(235 63 51 / 0.08), rgb(235 63 51 / 0.02)),
+            #151010;
+          --key-text: #f39c94;
+          --key-text-hover: #ffc4be;
         }
       }
 
       .permission-status {
-        color: var(--muted);
-        font-size: 12px;
+        color: var(--dim);
+        font: 400 11px/1.5 var(--font-mono);
 
         &:empty {
           display: none;
         }
 
         &:not(:empty) {
-          margin-top: 8px;
+          margin-top: 9px;
         }
       }
 
-      /* ---- composer ---- */
+      /* ---- composer: one machined console ---- */
 
       .composer {
-        border-top: 1px solid var(--border);
-        background: var(--panel-alt);
+        border-top: 1px solid var(--line);
+        background: var(--surface-chrome);
         padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
         display: flex;
         flex-direction: column;
         gap: 10px;
       }
 
-      .composer-row {
-        display: flex;
-        gap: 10px;
-        align-items: flex-end;
-      }
-
-      .composer textarea {
-        flex: 1;
-        min-height: 56px;
-        max-height: 200px;
-        resize: none;
-        overflow-y: auto;
-        border-radius: 10px;
-        border: 1px solid var(--border);
-        background: var(--panel);
-        color: var(--text);
-        padding: 12px;
-        font: 14px/1.5 var(--font-mono);
-      }
-
-      .primary {
-        border: 0;
-        border-radius: 10px;
-        height: 44px;
-        padding: 0 18px;
-        background: var(--accent);
-        color: var(--on-accent);
-        font-weight: 700;
-        cursor: pointer;
-
-        &:disabled {
-          opacity: 0.55;
-          cursor: default;
-        }
-      }
-
-      .queue-meta {
-        color: var(--muted);
-        font-size: 12.5px;
-      }
-
+      /* queued prompts: compact mono rows above the console */
       .queue-list {
         display: flex;
         flex-direction: column;
-        gap: 8px;
         max-height: 28dvh;
         overflow-y: auto;
         overscroll-behavior: contain;
+
+        &:empty {
+          display: none;
+        }
       }
 
       .queue-item {
-        border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
-        border-radius: 10px;
-        background: color-mix(in srgb, var(--accent) 7%, var(--panel));
-        padding: 10px 12px;
+        position: relative;
+        padding: 8px 12px 9px 14px;
+        border-bottom: 1px solid var(--line-row);
+        background: var(--row-subtle);
+
+        &::before {
+          content: "";
+          position: absolute;
+          left: 0;
+          top: 0;
+          bottom: -1px;
+          width: 2px;
+          background: var(--line-strong);
+        }
+
+        &:last-child {
+          border-bottom: 0;
+
+          &::before {
+            bottom: 0;
+          }
+        }
       }
 
       .queue-item-time {
-        color: var(--muted);
-        font-size: 11.5px;
-        margin-bottom: 6px;
+        color: var(--dim);
+        font: 400 9.5px/1 var(--font-mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 5px;
+
+        &::before {
+          content: "queued · ";
+        }
       }
 
       .queue-item-text {
         margin: 0;
         white-space: pre-wrap;
         word-break: break-word;
-        font: 12.5px/1.5 var(--font-mono);
+        font: 400 12px/1.55 var(--font-mono);
+        color: var(--text-control);
       }
 
-      /* ---- auth ---- */
+      /* The frame is a dedicated child (edge bg + gap/fill pseudos) instead of
+         layers on .console itself: clip-path on .console would also clip the
+         combobox popups that open out of the control strip. */
+      .console {
+        position: relative;
+        isolation: isolate;
+      }
 
-      .auth-screen {
-        height: 100dvh;
+      .console-frame {
+        position: absolute;
+        inset: 0;
+        z-index: -1;
+        clip-path: var(--shape-console);
+        background: linear-gradient(90deg, rgb(255 255 255 / 0.17), rgb(255 255 255 / 0.09) 55%, rgb(235 63 51 / 0.4));
+        transition: background 0.15s ease, filter 0.15s ease;
+
+        &::before {
+          content: "";
+          position: absolute;
+          inset: 1px;
+          background: var(--bg);
+          clip-path: var(--shape-console-inner);
+        }
+
+        &::after {
+          content: "";
+          position: absolute;
+          inset: 2px;
+          background: linear-gradient(180deg, rgb(255 255 255 / 0.025), transparent 34%), var(--surface-terminal);
+          clip-path: var(--shape-console-fill);
+        }
+      }
+
+      .console:focus-within .console-frame {
+        background: linear-gradient(90deg, rgb(235 63 51 / 0.5), rgb(255 255 255 / 0.13) 45%, rgb(235 63 51 / 0.55));
+        filter: drop-shadow(0 0 12px rgb(235 63 51 / 0.14));
+      }
+
+      /* red prompt glyph in the textarea gutter */
+      .console::before {
+        content: "$";
+        position: absolute;
+        left: 15px;
+        top: 13px;
+        z-index: 1;
+        pointer-events: none;
+        font: 700 13px/1.55 var(--font-mono);
+        color: var(--red);
+        text-shadow: 0 0 8px rgb(235 63 51 / 0.5);
+      }
+
+      .console:has(textarea:disabled)::before {
+        color: var(--dim);
+        text-shadow: none;
+      }
+
+      .console textarea {
+        display: block;
+        width: 100%;
+        min-height: 56px;
+        max-height: 200px;
+        resize: none;
         overflow-y: auto;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 24px;
+        border: 0;
+        background: transparent;
+        color: var(--text);
+        caret-color: var(--red);
+        padding: 13px 14px 9px 32px;
+        font: 400 13px/1.55 var(--font-mono);
+
+        &:focus,
+        &:focus-visible {
+          outline: none; /* the console frame itself signals focus */
+        }
+
+        &:disabled {
+          color: var(--dim);
+        }
       }
 
-      .auth-card {
-        width: min(520px, 100%);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        background: var(--panel-alt);
-        box-shadow: var(--shadow);
-        padding: 24px;
+      /* control strip: inline settings · queue status · Queue key */
+      .console-strip {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px 16px;
+        padding: 7px 8px 7px 14px;
+        border-top: 1px solid var(--line-row);
+      }
+
+      .config-strip {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 16px;
+        min-width: 0;
+        flex: 0 1 auto;
+
+        &:empty {
+          display: none;
+        }
+      }
+
+      .config-option {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 0;
+      }
+
+      .config-option-name {
+        flex: none;
+        font: 700 9.5px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--dim);
+      }
+
+      .config-option-status {
+        font: 400 9.5px/1 var(--font-mono);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--red-hot);
+        white-space: nowrap;
+        animation: attention-fade 1.4s ease-in-out infinite;
+
+        &:empty {
+          display: none;
+        }
+      }
+
+      .config-combo {
+        position: relative;
+        min-width: 0;
+      }
+
+      .config-combo-trigger {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        max-width: 260px;
+        border: 0;
+        background: transparent;
+        padding: 5px 2px;
+        color: var(--text-control);
+        font: 500 12px/1.2 var(--font-mono);
+        text-align: left;
+        cursor: pointer;
+        transition: color 0.12s ease;
+
+        &:hover {
+          color: var(--button-hover-text);
+        }
+
+        &[aria-expanded="true"] {
+          color: var(--red-hot);
+        }
+
+        &:disabled {
+          cursor: progress;
+          opacity: 0.5;
+        }
+      }
+
+      .config-combo-value {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .config-combo-chevron {
+        flex: none;
+        width: 6px;
+        height: 6px;
+        border-right: 1.5px solid var(--dim);
+        border-bottom: 1.5px solid var(--dim);
+        transform: translateY(-2px) rotate(45deg);
+      }
+
+      .config-combo-trigger:hover .config-combo-chevron,
+      .config-combo-trigger[aria-expanded="true"] .config-combo-chevron {
+        border-color: currentColor;
+      }
+
+      /* Anchored above the trigger: the strip sits at the bottom of the
+         screen, so a downward popup would overflow. */
+      .config-combo-popup {
+        position: absolute;
+        z-index: 30;
+        bottom: calc(100% + 8px);
+        left: 0;
+        min-width: min(250px, 76vw);
+        max-width: min(360px, 80vw);
         display: flex;
         flex-direction: column;
-        gap: 16px;
+        gap: 6px;
+        padding: 8px;
+        background: var(--surface-panel);
+        border: 1px solid var(--line-control);
+        box-shadow: 0 18px 44px var(--overlay-shadow);
+      }
 
-        & h1 {
-          margin: 0;
-          font-size: 22px;
-        }
+      .config-combo-search {
+        width: 100%;
+        border: 1px solid var(--line-control);
+        background: var(--bg);
+        color: var(--text);
+        caret-color: var(--red);
+        padding: 7px 9px;
+        font: 400 12px/1.4 var(--font-mono);
 
-        & p {
-          margin: 0;
-          color: var(--muted);
-          line-height: 1.6;
-        }
-
-        & form {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        & label {
-          font-size: 13px;
-          color: var(--muted);
-        }
-
-        & input {
-          border-radius: 10px;
-          border: 1px solid var(--border);
-          background: var(--panel);
-          color: var(--text);
-          padding: 12px;
-          font: 16px/1.5 var(--font-mono);
-          letter-spacing: 0.3em;
-          text-align: center;
+        &:focus-visible {
+          outline: none;
+          border-color: rgb(235 63 51 / 0.6);
         }
       }
 
-      .auth-error {
-        min-height: 20px;
-        color: var(--danger);
-        font-size: 14px;
+      .config-combo-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        max-height: 244px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .config-combo-option {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 7px 9px;
+        border-left: 2px solid transparent;
+        cursor: pointer;
+
+        &.is-active {
+          background: rgb(235 63 51 / 0.12);
+          border-left-color: var(--red);
+        }
+
+        &.is-selected .config-combo-option-label {
+          color: var(--red-hot);
+          font-weight: 700;
+        }
+      }
+
+      .config-combo-option-label {
+        font: 400 12px/1.4 var(--font-mono);
+        color: var(--text-control);
+        word-break: break-word;
+      }
+
+      .config-combo-option-desc {
+        font: 400 10.5px/1.5 var(--font-mono);
+        color: var(--dim);
+        word-break: break-word;
+      }
+
+      .config-combo-empty {
+        padding: 8px 9px;
+        color: var(--dim);
+        font: 400 11px/1.4 var(--font-mono);
+      }
+
+      #queue-status {
+        margin-left: auto;
+        flex: none;
+        color: var(--dim);
+        font: 400 10px/1.4 var(--font-mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        text-align: right;
+
+        &.is-error {
+          color: var(--red-hot);
+        }
+
+        &:empty {
+          display: none;
+        }
+      }
+
+      #queue-submit {
+        flex: none;
+        height: 30px;
+        padding: 0 16px;
       }
 
       /* ---- phone layout: list <-> chat navigation ---- */
@@ -996,7 +1539,17 @@
         }
 
         .sidebar .panel-header {
-          padding-top: calc(14px + env(safe-area-inset-top));
+          padding-top: calc(16px + env(safe-area-inset-top));
+          padding-right: calc(16px + var(--theme-toggle-reserve) + env(safe-area-inset-right));
+        }
+
+        .entry {
+          padding: 12px 14px 14px;
+        }
+
+        .chat-header {
+          padding-left: 12px;
+          padding-right: calc(12px + var(--theme-toggle-reserve) + env(safe-area-inset-right));
         }
 
         .composer {
@@ -1004,27 +1557,14 @@
           padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
         }
 
-        .config-panel-summary {
-          min-height: 38px;
-          padding: 7px 10px;
-        }
-
-        .config-list {
-          grid-template-columns: 1fr;
-          gap: 8px;
-          max-height: min(34dvh, 260px);
-          overflow-y: auto;
-          overscroll-behavior: contain;
-          padding: 8px;
-        }
-
-        .config-option {
-          gap: 4px;
+        .console-strip {
+          gap: 2px 12px;
+          padding: 6px 8px 6px 12px;
         }
 
         .config-combo-trigger {
-          min-height: 38px;
-          padding: 7px 10px;
+          max-width: 60vw;
+          min-height: 30px;
         }
 
         .config-combo-popup {
@@ -1057,43 +1597,57 @@
           max-height: none;
         }
 
-        .composer textarea {
-          min-height: 44px;
-          max-height: 130px;
-          padding: 10px;
+        .console textarea {
+          padding: 11px 12px 8px 30px;
         }
 
-        .primary {
-          height: 40px;
-          padding: 0 14px;
+        .console::before {
+          left: 13px;
+          top: 11px;
         }
 
         .queue-list {
           max-height: 18dvh;
         }
+
+        .auth-card {
+          padding: 24px 20px 20px;
+
+          & h1 {
+            font-size: 36px;
+          }
+        }
       }
 
       @media (prefers-reduced-motion: reduce) {
         .entry,
-        .working-badge,
-        .session-item.working .live-dot {
+        .working-badge::after,
+        .approval-badge,
+        .session-approval,
+        .config-option-status,
+        .session-item.working .live-dot,
+        .session-item.needs-approval .live-dot {
           animation: none;
+        }
+
+        .entry-body details.block-fold > summary::before {
+          transition: none;
         }
       }
     </style>
   </head>
   <body>
+    <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch to light mode" aria-pressed="false">Light</button>
+
     <section id="auth-screen" class="auth-screen">
       <div class="auth-card">
-        <h1>Mjolnir Web</h1>
-        <p>
-          Enter the six-digit viewer code printed by <code>mj server</code>. QR login still uses the
-          full embedded URL token on the server side, but manual browser sign-in only needs this code.
-        </p>
+        <div class="auth-kicker">Remote console</div>
+        <h1>Mjolnir</h1>
+        <p>Enter the six-digit viewer code printed by <code>mj server</code>.</p>
         <form id="auth-form">
           <label for="auth-token">Viewer code</label>
           <input id="auth-token" name="code" type="password" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" maxlength="6" pattern="[0-9]{6}">
-          <button id="auth-submit" class="primary" type="submit">Sign In</button>
+          <button id="auth-submit" class="primary" type="submit">Sign in</button>
         </form>
         <div id="auth-error" class="auth-error" role="alert"></div>
       </div>
@@ -1103,7 +1657,7 @@
       <aside class="sidebar">
         <div class="panel-header">
           <div class="sidebar-title-row">
-            <h1>Sessions</h1>
+            <h1>Mjolnir</h1>
             <button id="logout-button" class="ghost-danger" type="button">Log out</button>
           </div>
           <p id="status">Loading…</p>
@@ -1125,21 +1679,17 @@
           <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
         </div>
         <section class="composer">
-          <details id="session-config-panel" class="config-panel" hidden>
-            <summary class="config-panel-summary">
-              <span class="config-panel-title">Session settings</span>
-              <span id="session-config-summary" class="config-panel-meta"></span>
-              <span class="config-panel-chevron" aria-hidden="true"></span>
-            </summary>
-            <div id="session-config" class="config-list"></div>
-          </details>
           <div id="permissions" class="permission-list"></div>
-          <div class="composer-row">
-            <textarea id="queue-input" placeholder="Queue a prompt for this session" enterkeyhint="send" aria-label="Prompt to queue"></textarea>
-            <button id="queue-submit" class="primary" type="button">Queue</button>
-          </div>
-          <div id="queue-status" class="queue-meta">Select a session to queue prompts.</div>
           <div id="queue-list" class="queue-list"></div>
+          <div class="console">
+            <span class="console-frame" aria-hidden="true"></span>
+            <textarea id="queue-input" placeholder="Queue a prompt — runs when the session is idle" enterkeyhint="send" aria-label="Prompt to queue"></textarea>
+            <div class="console-strip">
+              <div id="session-config" class="config-strip"></div>
+              <span id="queue-status" class="queue-meta">Select a session.</span>
+              <button id="queue-submit" class="primary" type="button">Queue</button>
+            </div>
+          </div>
         </section>
       </main>
     </div>
@@ -1165,7 +1715,6 @@
     <template id="tpl-entry">
       <article class="entry">
         <header class="entry-header">
-          <span class="entry-icon" aria-hidden="true"></span>
           <span class="entry-kind"></span>
           <time class="entry-time" data-ts=""></time>
         </header>
@@ -1194,10 +1743,8 @@
 
     <template id="tpl-config-option">
       <div class="config-option">
-        <span class="config-option-head">
-          <span class="config-option-name"></span>
-          <span class="config-option-status"></span>
-        </span>
+        <span class="config-option-name"></span>
+        <span class="config-option-status"></span>
       </div>
     </template>
 
@@ -1206,6 +1753,7 @@
       const viewerToken = queryParams.get("token") || "";
 
       const $ = (id) => document.getElementById(id);
+      const themeToggleEl = $("theme-toggle");
       const authScreenEl = $("auth-screen");
       const appEl = $("app");
       const authFormEl = $("auth-form");
@@ -1222,8 +1770,6 @@
       const approvalBadgeEl = $("approval-badge");
       const backButtonEl = $("back-button");
       const permissionsEl = $("permissions");
-      const sessionConfigPanelEl = $("session-config-panel");
-      const sessionConfigSummaryEl = $("session-config-summary");
       const sessionConfigEl = $("session-config");
       const queueInputEl = $("queue-input");
       const queueSubmitEl = $("queue-submit");
@@ -1238,6 +1784,11 @@
 
       const POLL_MS = 2000;
       const WORKING_WINDOW_MS = 6000;
+      const THEME_STORAGE_KEY = "mjolnir-remote-theme";
+      const THEME_COLORS = {
+        dark: "#050606",
+        light: "#f7f2e8",
+      };
       // How long a sent config change may stay "applying…" before the control
       // re-enables. The session applies changes only between turns, and a
       // change it cannot apply at all (agent rejected it) never shows up in a
@@ -1256,8 +1807,6 @@
       let shouldStickToBottom = true;
       let forceScrollToBottom = false;
       let pendingNewEntries = 0;
-      let configPanelUserToggled = false;
-      let expectedConfigPanelOpen = null;
       const draftBySessionId = new Map();
       const activityBySessionId = new Map();
       const sessionCardById = new Map();
@@ -1284,6 +1833,35 @@
         return reducedMotion.matches ? "auto" : "smooth";
       }
 
+      function currentTheme() {
+        return document.documentElement.dataset.theme === "light" ? "light" : "dark";
+      }
+
+      function applyTheme(theme) {
+        const light = theme === "light";
+        if (light) {
+          document.documentElement.dataset.theme = "light";
+        } else {
+          document.documentElement.removeAttribute("data-theme");
+        }
+        themeToggleEl.textContent = light ? "Dark" : "Light";
+        themeToggleEl.setAttribute("aria-label", `Switch to ${light ? "dark" : "light"} mode`);
+        themeToggleEl.setAttribute("aria-pressed", light ? "true" : "false");
+        document.querySelector('meta[name="theme-color"]')?.setAttribute(
+          "content",
+          THEME_COLORS[light ? "light" : "dark"],
+        );
+      }
+
+      function setTheme(theme) {
+        applyTheme(theme);
+        try {
+          localStorage.setItem(THEME_STORAGE_KEY, theme);
+        } catch {
+          // The current page can still switch themes when storage is blocked.
+        }
+      }
+
       function syncKeyboardInset() {
         const viewport = window.visualViewport;
         const inset = viewport
@@ -1298,7 +1876,8 @@
 
       function withViewTransition(update) {
         if (document.startViewTransition && !reducedMotion.matches) {
-          document.startViewTransition(update);
+          const transition = document.startViewTransition(update);
+          transition.ready.catch(() => {});
         } else {
           update();
         }
@@ -1328,7 +1907,6 @@
         sentDecisions.clear();
         sentConfigChanges.clear();
         configCombos.clear();
-        configPanelUserToggled = false;
         renderedSessionId = null;
         renderedEntries = [];
         if (refreshTimer) {
@@ -1435,7 +2013,6 @@
           selectedSessionId = routed;
           queuedPrompts = [];
           pendingNewEntries = 0;
-          configPanelUserToggled = false;
           forceScrollToBottom = true;
           restoreDraftForSelectedSession();
           void refreshQueuedPrompts();
@@ -1456,7 +2033,6 @@
           // path, so the previous session's queue never bleeds through.
           queuedPrompts = [];
           pendingNewEntries = 0;
-          configPanelUserToggled = false;
           forceScrollToBottom = true;
           restoreDraftForSelectedSession();
           void refreshQueuedPrompts();
@@ -1468,7 +2044,7 @@
       function transcriptActivitySignature(session) {
         const transcript = Array.isArray(session.transcript) ? session.transcript : [];
         const last = transcript[transcript.length - 1];
-        return `${transcript.length}:${last ? (last.text || "").length : 0}`;
+        return `${transcript.length}:${last ? entryActivitySignature(last) : ""}`;
       }
 
       function noteSessionActivity() {
@@ -1582,8 +2158,20 @@
 
       /* ---- markdown-lite rendering (DOM building only, never innerHTML) ---- */
 
+      // Something with a slash only reads as a path when it carries another
+      // path signal (leading marker, depth, or an extension) — this keeps
+      // prose like "and/or" plain while catching src/**/*.rs and Cargo.toml.
+      function isPathLike(token) {
+        return (
+          /^[~./]/.test(token) ||
+          token.split("/").length > 2 ||
+          /\.\w+$/.test(token.replace(/\/$/, ""))
+        );
+      }
+
       function appendInline(el, text) {
-        const re = /`([^`\n]+)`|\*\*([^*\n]+?)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')\]]+)/g;
+        const re =
+          /`([^`\n]+)`|\*\*([^*\n]+?)\*\*|\*([^*\s](?:[^*\n]*[^*\s])?)\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')\]]+)|((?:~?\/)?(?:[\w.@+*-]+\/)+[\w.@+*-]+\/?|\b[\w@+-]+\.(?:rs|toml|md|json|jsonl|js|mjs|cjs|ts|tsx|jsx|html|css|py|sh|fish|yml|yaml|lock|txt|svg|png|jpe?g|webp|gif|woff2?|ttf|wasm|c|h|hpp|cpp|go|java|kt|rb|sql|proto)\b)/g;
         let last = 0;
         let match;
         while ((match = re.exec(text))) {
@@ -1598,10 +2186,23 @@
             const strong = document.createElement("strong");
             strong.textContent = match[2];
             el.appendChild(strong);
+          } else if (match[3] !== undefined) {
+            const em = document.createElement("em");
+            em.textContent = match[3];
+            el.appendChild(em);
+          } else if (match[7] !== undefined) {
+            if (isPathLike(match[7])) {
+              const code = document.createElement("code");
+              code.className = "path";
+              code.textContent = match[7];
+              el.appendChild(code);
+            } else {
+              el.appendChild(document.createTextNode(match[7]));
+            }
           } else {
             const anchor = document.createElement("a");
-            anchor.href = match[4] !== undefined ? match[4] : match[5];
-            anchor.textContent = match[3] !== undefined ? match[3] : match[5];
+            anchor.href = match[5] !== undefined ? match[5] : match[6];
+            anchor.textContent = match[4] !== undefined ? match[4] : match[6];
             anchor.target = "_blank";
             anchor.rel = "noopener noreferrer";
             el.appendChild(anchor);
@@ -1611,6 +2212,201 @@
         if (last < text.length) {
           el.appendChild(document.createTextNode(text.slice(last)));
         }
+      }
+
+      function appendToken(el, text, className = "") {
+        if (!text) {
+          return;
+        }
+        if (!className) {
+          el.appendChild(document.createTextNode(text));
+          return;
+        }
+        const span = document.createElement("span");
+        span.className = className;
+        span.textContent = text;
+        el.appendChild(span);
+      }
+
+      function commandShape(text) {
+        const titled = /^(Run|Execute|Command)\s+(.+)$/i.exec(text);
+        if (titled) {
+          return { prefix: `${titled[1]} `, command: stripWholeCommandCode(titled[2]) };
+        }
+        const prompted = /^((?:[>$]\s+|❯\s+))(.*\S.*)$/.exec(text);
+        if (prompted) {
+          return { prefix: prompted[1], command: stripWholeCommandCode(prompted[2]) };
+        }
+        return null;
+      }
+
+      function stripWholeCommandCode(command) {
+        const trimmed = command.trim();
+        if (/^`[^`\n]+`$/.test(trimmed)) {
+          return command.replace(trimmed, trimmed.slice(1, -1));
+        }
+        return command;
+      }
+
+      function shellTokens(command) {
+        const re = /(\s+|&&|\|\||[|;()<>]+|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|[^\s|;&()<>]+)/g;
+        return command.match(re) || [];
+      }
+
+      function isShellWhitespace(token) {
+        return /^\s+$/.test(token);
+      }
+
+      function isShellOperator(token) {
+        return /^(?:&&|\|\||[|;()<>]+)$/.test(token);
+      }
+
+      function isEnvAssignment(token) {
+        return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
+      }
+
+      function isShellFlag(token) {
+        return /^-{1,2}[A-Za-z0-9][\w-]*(?:=.*)?$/.test(token) || token === "--";
+      }
+
+      function isQuotedToken(token) {
+        return /^(['"`])[\s\S]*\1$/.test(token);
+      }
+
+      function appendCommandTokens(el, command) {
+        let expectProgram = true;
+        let wordIndex = 0;
+        for (const token of shellTokens(command)) {
+          if (isShellWhitespace(token)) {
+            appendToken(el, token);
+            continue;
+          }
+          if (isShellOperator(token)) {
+            appendToken(el, token, "cmd-op");
+            if (/^(?:&&|\|\||[|;])$/.test(token)) {
+              expectProgram = true;
+              wordIndex = 0;
+            }
+            continue;
+          }
+          if (expectProgram && isEnvAssignment(token)) {
+            appendToken(el, token, "cmd-env");
+            continue;
+          }
+          if (expectProgram) {
+            appendToken(el, token, "cmd-program");
+            expectProgram = false;
+            wordIndex = 1;
+            continue;
+          }
+          if (isShellFlag(token)) {
+            appendToken(el, token, "cmd-flag");
+          } else if (isQuotedToken(token)) {
+            appendToken(el, token, "cmd-string");
+          } else if (isPathLike(token)) {
+            appendToken(el, token, "cmd-path");
+          } else if (wordIndex === 1) {
+            appendToken(el, token, "cmd-subcommand");
+          } else {
+            appendToken(el, token);
+          }
+          wordIndex += 1;
+        }
+      }
+
+      function appendMonoInline(el, text) {
+        const command = commandShape(text);
+        if (!command) {
+          appendInline(el, text);
+          return;
+        }
+        appendToken(el, command.prefix, "cmd-prompt");
+        appendCommandTokens(el, command.command);
+      }
+
+      // Like appendMonoInline, but the caller already knows the line is a shell
+      // command (an execute tool's title), so it is tokenized even when the
+      // agent sent it bare — no "$"/"❯"/"Run" prefix for commandShape to latch
+      // onto. A recognized prefix is still honored when present.
+      function appendCommandInline(el, text) {
+        const command = commandShape(text);
+        if (command) {
+          appendToken(el, command.prefix, "cmd-prompt");
+          appendCommandTokens(el, command.command);
+        } else {
+          appendCommandTokens(el, stripWholeCommandCode(text));
+        }
+      }
+
+      function appendMetaLine(fragment, text) {
+        const p = document.createElement("p");
+        p.className = "meta-line";
+        appendInline(p, text);
+        fragment.appendChild(p);
+      }
+
+      /* ---- markdown tables ---- */
+
+      function isTableRow(line) {
+        const trimmed = line.trim();
+        return trimmed.startsWith("|") && trimmed.includes("|", 1);
+      }
+
+      function isTableDivider(line) {
+        const trimmed = line.trim();
+        return /^\|?[\s:|-]+\|?$/.test(trimmed) && trimmed.includes("-");
+      }
+
+      function splitTableRow(line) {
+        let trimmed = line.trim();
+        if (trimmed.startsWith("|")) {
+          trimmed = trimmed.slice(1);
+        }
+        if (trimmed.endsWith("|")) {
+          trimmed = trimmed.slice(0, -1);
+        }
+        return trimmed.split("|").map((cell) => cell.trim());
+      }
+
+      // Consume a markdown table starting at lines[start]; returns the index
+      // of its last line, or -1 when lines[start] does not open a table.
+      function tryAppendTable(fragment, lines, start) {
+        if (!isTableRow(lines[start]) || start + 1 >= lines.length || !isTableDivider(lines[start + 1])) {
+          return -1;
+        }
+        let end = start + 1;
+        const bodyRows = [];
+        while (end + 1 < lines.length && isTableRow(lines[end + 1])) {
+          end += 1;
+          bodyRows.push(splitTableRow(lines[end]));
+        }
+        const wrap = document.createElement("div");
+        wrap.className = "table-scroll";
+        const table = document.createElement("table");
+        table.className = "md-table";
+        const thead = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        for (const cell of splitTableRow(lines[start])) {
+          const th = document.createElement("th");
+          appendInline(th, cell);
+          headRow.appendChild(th);
+        }
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+        const tbody = document.createElement("tbody");
+        for (const cells of bodyRows) {
+          const tr = document.createElement("tr");
+          for (const cell of cells) {
+            const td = document.createElement("td");
+            appendInline(td, cell);
+            tr.appendChild(td);
+          }
+          tbody.appendChild(tr);
+        }
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        fragment.appendChild(wrap);
+        return end;
       }
 
       function appendProse(fragment, text) {
@@ -1632,7 +2428,8 @@
             list = null;
           }
         };
-        for (const line of lines) {
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
           if (!line.trim()) {
             flushParagraph();
             flushList();
@@ -1645,6 +2442,20 @@
             const el = document.createElement(`h${Math.min(3 + heading[1].length, 6)}`);
             appendInline(el, heading[2]);
             fragment.appendChild(el);
+            continue;
+          }
+          const meta = /^(?:_([^_]+)_|\*([^*]+)\*)([.!:]?)$/.exec(line.trim());
+          if (meta) {
+            flushParagraph();
+            flushList();
+            appendMetaLine(fragment, (meta[1] ?? meta[2]) + meta[3]);
+            continue;
+          }
+          const tableEnd = tryAppendTable(fragment, lines, i);
+          if (tableEnd !== -1) {
+            flushParagraph();
+            flushList();
+            i = tableEnd;
             continue;
           }
           const item = /^\s*(?:([-*])|(\d+)[.)])\s+(.*)$/.exec(line);
@@ -1667,28 +2478,531 @@
         flushList();
       }
 
-      function renderRichText(text) {
-        const fragment = document.createDocumentFragment();
-        // Odd-indexed segments sit between ``` fences; an unterminated fence
-        // (mid-stream) still renders as a code block.
-        const segments = (text || "").split("```");
-        segments.forEach((segment, index) => {
-          if (index % 2 === 1) {
-            const pre = document.createElement("pre");
-            pre.className = "code-block";
-            const code = document.createElement("code");
-            let body = segment;
-            const newline = body.indexOf("\n");
-            if (newline !== -1 && /^[\w#+./-]*$/.test(body.slice(0, newline).trim())) {
-              body = body.slice(newline + 1);
+      /* ---- structured blocks: code, JSON, folds ---- */
+
+      const FOLD_LINE_LIMIT = 24;
+      const FOLD_CHAR_LIMIT = 4000;
+
+      function tryParseJson(text) {
+        try {
+          const value = JSON.parse(text);
+          return typeof value === "object" && value !== null ? value : undefined;
+        } catch {
+          return undefined;
+        }
+      }
+
+      // Tint a pretty-printed JSON string: keys bright, string values muted,
+      // numbers and keywords in the single amber accent, punctuation plain.
+      function appendJsonTokens(el, pretty) {
+        const re = /"(?:[^"\\]|\\.)*"(\s*:)?|-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b|\btrue\b|\bfalse\b|\bnull\b/g;
+        let last = 0;
+        let match;
+        while ((match = re.exec(pretty))) {
+          if (match.index > last) {
+            el.appendChild(document.createTextNode(pretty.slice(last, match.index)));
+          }
+          const token = match[0];
+          const span = document.createElement("span");
+          if (token.startsWith('"')) {
+            if (match[1]) {
+              span.className = "tok-key";
+              span.textContent = token.slice(0, token.length - match[1].length);
+              el.appendChild(span);
+              el.appendChild(document.createTextNode(match[1]));
+              last = match.index + token.length;
+              continue;
             }
-            code.textContent = body.replace(/\n$/, "");
-            pre.appendChild(code);
-            fragment.appendChild(pre);
-          } else if (segment) {
-            appendProse(fragment, segment);
+            span.className = "tok-str";
+          } else if (token === "true" || token === "false" || token === "null") {
+            span.className = "tok-kw";
+          } else {
+            span.className = "tok-num";
+          }
+          span.textContent = token;
+          el.appendChild(span);
+          last = match.index + token.length;
+        }
+        if (last < pretty.length) {
+          el.appendChild(document.createTextNode(pretty.slice(last)));
+        }
+      }
+
+      /* ---- code tinting: one cached single-pass regex per language family ----
+         A linear scan classifies comments, strings, macros/attributes,
+         keywords, capitalized type names, call sites, and numbers. Plain
+         identifiers and punctuation never match, so untinted runs coalesce
+         into large text nodes instead of one node per word. Unknown
+         languages render untinted. */
+
+      const CODE_TINT_CHAR_LIMIT = 120000;
+
+      const CODE_LANG_FAMILY = {
+        rust: "rust", rs: "rust",
+        js: "js", jsx: "js", ts: "js", tsx: "js", mjs: "js", cjs: "js", javascript: "js", typescript: "js",
+        python: "python", py: "python", python3: "python",
+        shell: "shell", sh: "shell", bash: "shell", zsh: "shell", fish: "shell", shellscript: "shell", console: "shell",
+        go: "go", golang: "go",
+        c: "c", h: "c", cc: "c", cpp: "c", cxx: "c", hpp: "c",
+        java: "java", kt: "java", kotlin: "java",
+        ruby: "ruby", rb: "ruby",
+        sql: "sql",
+        toml: "conf", ini: "conf", yaml: "conf", yml: "conf", conf: "conf", properties: "conf", env: "conf", dockerfile: "conf", makefile: "conf",
+        css: "css", scss: "css", less: "css",
+        html: "markup", xml: "markup", svg: "markup", vue: "markup",
+        diff: "diff", patch: "diff",
+      };
+
+      const CODE_FAMILY_SYNTAX = {
+        rust: { comments: "slash", chars: true, types: true, calls: true, mac: "#!?\\[[^\\]\\n]*\\]|\\b[a-z_]\\w*!(?!=)", keywords: "as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type union unsafe use where while" },
+        js: { comments: "slash", templates: true, types: true, calls: true, mac: "@[A-Za-z_][\\w.]*", keywords: "abstract as async await break case catch class const continue debugger declare default delete do else enum export extends false finally for from function if implements import in instanceof interface keyof let namespace new null of readonly return satisfies static super switch this throw true try type typeof undefined var void while with yield" },
+        python: { comments: "hash", types: true, calls: true, mac: "^[ \\t]*@[\\w.]+", keywords: "and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield False None True" },
+        shell: { comments: "hash", vars: true, keywords: "alias begin break case cd command continue do done echo elif else end esac eval exec exit export fi for function if in local read readonly return select set shift source switch then trap unset until while" },
+        go: { comments: "slash", templates: true, types: true, calls: true, keywords: "break case chan const continue default defer else fallthrough false for func go goto if import interface iota map nil package range return select struct switch true type var" },
+        c: { comments: "slash", types: true, calls: true, mac: "^[ \\t]*#[ \\t]*\\w+", keywords: "auto bool break case catch char class const constexpr continue default delete do double else enum extern false float for goto if inline int long namespace new nullptr operator private protected public return short signed sizeof static struct switch template this throw true try typedef typename union unsigned using virtual void volatile while" },
+        java: { comments: "slash", types: true, calls: true, mac: "@[A-Za-z_][\\w.]*", keywords: "abstract assert boolean break byte case catch char class const continue default do double else enum extends final finally float for fun if implements import instanceof int interface is long native new null object override package private protected public return short static super switch synchronized this throw throws transient true try val var void volatile when while false" },
+        ruby: { comments: "hash", types: true, calls: true, mac: "@{1,2}[A-Za-z_]\\w*", keywords: "alias and begin break case class def do else elsif end ensure false for if in module next nil not or redo require rescue retry return self super then true undef unless until when while yield" },
+        sql: { comments: "sql", calls: true, flags: "gim", keywords: "add all alter and as asc begin between by case create default delete desc distinct drop else end exists foreign from group having if in index inner insert into is join key left like limit not null offset on or order outer primary references right select set table then union unique update values view when where" },
+        conf: { comments: "hash", keys: true },
+        css: { comments: "slash", keys: true, calls: true },
+        markup: { comments: "markup", tags: true },
+        diff: { diff: true },
+      };
+
+      const codeTintRegexCache = new Map();
+
+      function codeTintRegex(family) {
+        let re = codeTintRegexCache.get(family);
+        if (re) {
+          return re;
+        }
+        const syntax = CODE_FAMILY_SYNTAX[family];
+        const parts = [];
+        if (syntax.diff) {
+          parts.push(
+            "(?<cmt>^(?:@@|diff|index|---|\\+\\+\\+)[^\\n]*)",
+            "(?<ins>^\\+[^\\n]*)",
+            "(?<del>^-[^\\n]*)",
+          );
+        } else {
+          if (syntax.comments === "slash") {
+            parts.push("(?<cmt>\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?(?:\\*\\/|$))");
+          } else if (syntax.comments === "hash") {
+            parts.push("(?<cmt>(?<=^|\\s)#[^\\n]*)");
+          } else if (syntax.comments === "sql") {
+            parts.push("(?<cmt>--[^\\n]*|\\/\\*[\\s\\S]*?(?:\\*\\/|$))");
+          } else if (syntax.comments === "markup") {
+            parts.push("(?<cmt><!--[\\s\\S]*?(?:-->|$))");
+          }
+          if (syntax.tags) {
+            parts.push("(?<tag><\\/?[A-Za-z][\\w.:-]*|\\/?>)");
+          }
+          // Rust single quotes are char literals (exactly one char), so
+          // lifetimes like <'a, T> don't get eaten as strings.
+          const strings = ['"(?:[^"\\\\\\n]|\\\\.)*"?'];
+          strings.push(syntax.chars ? "'(?:[^'\\\\\\n]|\\\\.)'" : "'(?:[^'\\\\\\n]|\\\\.)*'?");
+          if (syntax.templates) {
+            strings.push("`(?:[^`\\\\]|\\\\.)*`?");
+          }
+          parts.push(`(?<str>${strings.join("|")})`);
+          if (syntax.mac) {
+            parts.push(`(?<mac>${syntax.mac})`);
+          }
+          if (syntax.keys) {
+            parts.push("(?<key>^[ \\t]*[\\w$.-]+(?=[ \\t]*[:=]))");
+          }
+          if (syntax.vars) {
+            parts.push("(?<vari>\\$(?:\\{[^}\\n]*\\}|\\w+))");
+          }
+          if (syntax.keywords) {
+            parts.push(`(?<kw>\\b(?:${syntax.keywords.split(" ").join("|")})\\b)`);
+          }
+          if (syntax.types) {
+            parts.push("(?<type>\\b[A-Z][A-Za-z0-9_]*\\b)");
+          }
+          if (syntax.calls) {
+            parts.push("(?<fn>\\b[A-Za-z_]\\w*(?=\\s*\\())");
+          }
+          parts.push("(?<num>\\b\\d[\\w.]*\\b)");
+        }
+        re = new RegExp(parts.join("|"), syntax.flags || "gm");
+        codeTintRegexCache.set(family, re);
+        return re;
+      }
+
+      function codeTokenClass(groups) {
+        if (groups.cmt !== undefined) return "tok-cmt";
+        if (groups.str !== undefined) return "tok-str";
+        if (groups.mac !== undefined) return "tok-mac";
+        if (groups.kw !== undefined) return "tok-kw";
+        if (groups.type !== undefined) return "tok-type";
+        if (groups.fn !== undefined) return "tok-fn";
+        if (groups.key !== undefined || groups.vari !== undefined || groups.tag !== undefined) return "tok-key";
+        if (groups.num !== undefined) return "tok-num";
+        if (groups.ins !== undefined) return "tok-add";
+        if (groups.del !== undefined) return "tok-del";
+        return "";
+      }
+
+      function appendCodeTokens(el, body, lang) {
+        const family = CODE_LANG_FAMILY[lang];
+        if (!family || body.length > CODE_TINT_CHAR_LIMIT) {
+          el.textContent = body;
+          return;
+        }
+        const re = codeTintRegex(family);
+        re.lastIndex = 0;
+        let last = 0;
+        let match;
+        while ((match = re.exec(body))) {
+          if (!match[0]) {
+            re.lastIndex += 1;
+            continue;
+          }
+          const cls = codeTokenClass(match.groups);
+          if (!cls) {
+            continue;
+          }
+          if (match.index > last) {
+            el.appendChild(document.createTextNode(body.slice(last, match.index)));
+          }
+          const span = document.createElement("span");
+          span.className = cls;
+          span.textContent = match[0];
+          el.appendChild(span);
+          last = match.index + match[0].length;
+        }
+        if (last < body.length) {
+          el.appendChild(document.createTextNode(body.slice(last)));
+        }
+      }
+
+      function countLines(text) {
+        let count = 1;
+        for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) {
+          count += 1;
+        }
+        return count;
+      }
+
+      // Big blocks collapse to a labelled fold so a page of JSON cannot
+      // swallow the transcript. Content is built lazily on first open, so a
+      // five-thousand-line payload costs no DOM until someone asks for it.
+      function foldBlock(label, build) {
+        const details = document.createElement("details");
+        details.className = "block-fold";
+        const summary = document.createElement("summary");
+        summary.textContent = label;
+        details.appendChild(summary);
+        let built = false;
+        details.addEventListener("toggle", () => {
+          if (details.open && !built) {
+            built = true;
+            details.appendChild(build());
           }
         });
+        return details;
+      }
+
+      function jsonBlock(value) {
+        const pretty = JSON.stringify(value, null, 2);
+        const build = () => {
+          const pre = document.createElement("pre");
+          pre.className = "code-block";
+          pre.dataset.lang = "json";
+          const code = document.createElement("code");
+          appendJsonTokens(code, pretty);
+          pre.appendChild(code);
+          return pre;
+        };
+        const lineCount = countLines(pretty);
+        return lineCount > FOLD_LINE_LIMIT ? foldBlock(`json · ${lineCount} lines`, build) : build();
+      }
+
+      function codeBlock(body, lang) {
+        if (lang === "json" || (!lang && /^\s*[[{]/.test(body))) {
+          const parsed = tryParseJson(body);
+          if (parsed !== undefined) {
+            return jsonBlock(parsed);
+          }
+        }
+        // A fence is code by declaration, so sniffing may accept a weaker
+        // signal than the unfenced fold path does.
+        const tintLang = lang || detectLang(body, 2);
+        const build = () => {
+          const pre = document.createElement("pre");
+          pre.className = "code-block";
+          if (tintLang) {
+            pre.dataset.lang = tintLang;
+          }
+          const code = document.createElement("code");
+          appendCodeTokens(code, body, tintLang);
+          pre.appendChild(code);
+          return pre;
+        };
+        const lineCount = countLines(body);
+        return lineCount > FOLD_LINE_LIMIT ? foldBlock(`${tintLang || "code"} · ${lineCount} lines`, build) : build();
+      }
+
+      function inlineTextPre(runLines) {
+        const pre = document.createElement("pre");
+        pre.className = "entry-text";
+        runLines.forEach((runLine, index) => {
+          if (index) {
+            pre.appendChild(document.createTextNode("\n"));
+          }
+          appendMonoInline(pre, runLine);
+        });
+        return pre;
+      }
+
+      // A tool title like "Read src/remote.rs" hints at the language of the
+      // dump that follows; only extensions with a tint profile count.
+      function foldLangHint(line) {
+        const match = /[\w~./@-]*\.([A-Za-z][\w+]{0,11})\b/.exec(line);
+        const ext = match ? match[1].toLowerCase() : "";
+        return CODE_LANG_FAMILY[ext] ? ext : "";
+      }
+
+      // Tool results usually arrive as bare unfenced text with no filename
+      // in sight, so language has to be sniffed from the content itself.
+      // Fingerprints count distinctive constructs over the head of the dump;
+      // only a clear multi-hit winner tints — logs and prose stay plain.
+      const LANG_FINGERPRINTS = [
+        ["diff", /^@@ -\d|^diff --git|^index \w{7}|^--- |^\+\+\+ /gm],
+        ["rust", /\bfn \w+|\blet (?:mut )?\w|\bpub (?:fn|struct|enum|trait|mod|use|const|static|async|crate|\w+:)|\bimpl[ <]|\buse \w+::|#!?\[|\.unwrap\(\)|\bSelf\b|&mut |\bmatch \w+[\w.]* \{|\b[a-z_]\w*!\(/g],
+        ["python", /\bdef \w+\(|\bimport \w|\bfrom [\w.]+ import |\bself\.\w|\belif |\bexcept[ :]|^[ \t]*@\w|\blambda /gm],
+        ["js", /\bconst \w+ *=|\blet \w+ *=|\bvar \w+ *=| => |=>\s*\{|\bfunction[ (]|\bexport (?:default|const|function|class)|\bimport \{|\brequire\(|===|!==|\bawait |\bconsole\.\w/g],
+        ["go", /\bfunc \w+\(|\bfunc \(\w| := |^package \w+$|\bfmt\.\w|\bdefer |\bgo func\b|\bchan /gm],
+        ["java", /\bpublic (?:class|static|final|void)|\bprivate (?:final )?\w+ \w+|\bSystem\.out|@Override\b|\bthrows \w|\bextends \w+ \{/g],
+        ["c", /#include\s*[<"]|\bprintf\s*\(|\bvoid \w+\s*\(|\bint \w+ *[=(;]|\bchar \*|\bsizeof\(|\bstd::|\btemplate *</g],
+        ["shell", /(?:^|[|&;] *)(?:cargo|git|npm|pnpm|yarn|sudo|curl|grep|rg|sed|awk|rm|cp|mv|mkdir|echo|cd|ls|cat|tail|head|python3?|node|make|docker|kubectl|ssh|export) |&& |\$\(|\$\{|^#!\//gm],
+        ["ruby", /\bdef \w+$|^[ \t]*end$|\bputs |\brequire ["']|\bdo \|\w/gm],
+        ["sql", /\bselect .+ from |\binsert into |\bcreate (?:table|index|view)|\bgroup by |\border by |\bleft join |\bwhere \w+ *=/gi],
+        ["html", /<\/[a-z][\w-]*>|<[a-z][\w-]* [^<>\n]*>|<!doctype|<!--/gi],
+        ["conf", /^\[[\w. -]+\]$|^[\w.-]+ *= [^=\n]/gm],
+      ];
+      const DETECT_SAMPLE_CHARS = 2500;
+      const DETECT_MIN_SCORE = 5;
+
+      function detectLang(text, minScore = DETECT_MIN_SCORE) {
+        if (looksLikeDiff(text)) {
+          return "diff";
+        }
+        const sample = text.slice(0, DETECT_SAMPLE_CHARS);
+        let best = "";
+        let bestScore = 0;
+        let runnerUp = 0;
+        for (const [lang, re] of LANG_FINGERPRINTS) {
+          const score = (sample.match(re) || []).length;
+          if (score > bestScore) {
+            runnerUp = bestScore;
+            bestScore = score;
+            best = lang;
+          } else if (score > runnerUp) {
+            runnerUp = score;
+          }
+        }
+        return bestScore >= minScore && bestScore >= runnerUp * 2 ? best : "";
+      }
+
+      function looksLikeDiff(text) {
+        return (
+          /^(?:diff --git |@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@)/m.test(text)
+          || (/^--- [^\n]+$/m.test(text) && /^\+\+\+ [^\n]+$/m.test(text))
+        );
+      }
+
+      function firstDiffLineIndex(lines) {
+        return lines.findIndex((line) =>
+          /^(?:diff --git |@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|--- |\+\+\+ )/.test(line),
+        );
+      }
+
+      function appendCodeRun(fragment, body, lang) {
+        fragment.appendChild(codeBlock(body.replace(/\n$/, ""), lang));
+      }
+
+      // Mono-voice rendering for user/tool/system entries: plain runs keep
+      // their whitespace in an .entry-text pre, while structure the runtime
+      // actually emits — trailing JSON payloads, _meta_ notes, bare tag
+      // lines, markdown tables — gets pulled out and rendered properly.
+      function appendMonoText(fragment, text) {
+        const lines = text.split("\n");
+        let plain = [];
+        const flushPlain = () => {
+          while (plain.length && !plain[0].trim()) {
+            plain.shift();
+          }
+          while (plain.length && !plain[plain.length - 1].trim()) {
+            plain.pop();
+          }
+          if (!plain.length) {
+            return;
+          }
+          const run = plain;
+          plain = [];
+          const chars = run.reduce((total, runLine) => total + runLine.length, 0);
+          const body = run.join("\n");
+          if (looksLikeDiff(body)) {
+            const diffStart = firstDiffLineIndex(run);
+            if (diffStart > 0) {
+              fragment.appendChild(inlineTextPre(run.slice(0, diffStart)));
+              appendCodeRun(fragment, run.slice(diffStart).join("\n"), "diff");
+            } else {
+              appendCodeRun(fragment, body, "diff");
+            }
+            return;
+          }
+          if (run.length <= FOLD_LINE_LIMIT && chars <= FOLD_CHAR_LIMIT) {
+            fragment.appendChild(inlineTextPre(run));
+            return;
+          }
+          // A dump this big would swallow the transcript: keep the opening
+          // line as a visible preview (a tool title, the first line of a
+          // paste) and fold the bulk behind a count label.
+          const preview = run[0].length > 160 ? `${run[0].slice(0, 160)}…` : run[0];
+          fragment.appendChild(inlineTextPre([preview]));
+          let start = 1;
+          while (start < run.length && !run[start].trim()) {
+            start += 1;
+          }
+          const rest = run.slice(start);
+          const foldLines = rest.length ? rest : run;
+          const lang = foldLangHint(run[0]) || detectLang(foldLines.slice(0, 80).join("\n"));
+          const label = foldLines.length > 1
+            ? `${lang || "text"} · ${foldLines.length} lines`
+            : `text · ${foldLines[0].length} chars`;
+          fragment.appendChild(
+            foldBlock(label, () => {
+              const pre = document.createElement("pre");
+              const body = foldLines.join("\n");
+              if (lang) {
+                pre.className = "code-block";
+                pre.dataset.lang = lang;
+                const code = document.createElement("code");
+                appendCodeTokens(code, body, lang);
+                pre.appendChild(code);
+              } else {
+                pre.className = "entry-text";
+                pre.textContent = body;
+              }
+              return pre;
+            }),
+          );
+        };
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          const trimmed = line.trim();
+          const meta = /^(?:_([^_]+)_|\*([^*]+)\*)([.!:]?)$/.exec(trimmed);
+          if (meta) {
+            flushPlain();
+            appendMetaLine(fragment, (meta[1] ?? meta[2]) + meta[3]);
+            continue;
+          }
+          // The runtime labels streamed command output with a bare
+          // "terminal: <id>" line; render it as a dim annotation.
+          if (/^terminal: \S+$/.test(trimmed)) {
+            flushPlain();
+            appendMetaLine(fragment, trimmed);
+            continue;
+          }
+          if (/^<\/?[A-Za-z][\w:.-]*(\s[^<>]*)?>$/.test(trimmed)) {
+            flushPlain();
+            appendMetaLine(fragment, trimmed);
+            continue;
+          }
+          const tableEnd = tryAppendTable(fragment, lines, i);
+          if (tableEnd !== -1) {
+            flushPlain();
+            i = tableEnd;
+            continue;
+          }
+          if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+            const tail = tryParseJson(lines.slice(i).join("\n"));
+            if (tail !== undefined) {
+              flushPlain();
+              fragment.appendChild(jsonBlock(tail));
+              return;
+            }
+            const single = tryParseJson(trimmed);
+            if (single !== undefined) {
+              flushPlain();
+              fragment.appendChild(jsonBlock(single));
+              continue;
+            }
+          }
+          plain.push(line);
+        }
+        flushPlain();
+      }
+
+      function fenceOpeningLang(line, voice) {
+        const re = voice === "mono"
+          ? /^```([\w#+./-]*)\s*$/
+          : /^ {0,3}```([\w#+./-]*)\s*$/;
+        const match = re.exec(line);
+        return match ? match[1].toLowerCase() : null;
+      }
+
+      function isFenceClose(line, lang, voice) {
+        if (voice === "mono" || lang === "diff") {
+          return /^```\s*$/.test(line);
+        }
+        return /^ {0,3}```\s*$/.test(line);
+      }
+
+      function nextLineEnd(text, start) {
+        const newline = text.indexOf("\n", start);
+        return newline === -1 ? text.length : newline + 1;
+      }
+
+      function appendTextSegment(fragment, segment, voice) {
+        if (!segment) {
+          return;
+        }
+        if (voice === "mono") {
+          appendMonoText(fragment, segment);
+        } else {
+          appendProse(fragment, segment);
+        }
+      }
+
+      function renderRichText(text, voice = "prose") {
+        const fragment = document.createDocumentFragment();
+        const source = text || "";
+        let chunkStart = 0;
+        let lineStart = 0;
+        while (lineStart < source.length) {
+          const lineEnd = nextLineEnd(source, lineStart);
+          const rawLine = source.slice(lineStart, lineEnd);
+          const line = rawLine.endsWith("\n") ? rawLine.slice(0, -1) : rawLine;
+          const lang = fenceOpeningLang(line, voice);
+          if (lang === null) {
+            lineStart = lineEnd;
+            continue;
+          }
+          appendTextSegment(fragment, source.slice(chunkStart, lineStart), voice);
+          const codeStart = lineEnd;
+          let scan = lineEnd;
+          let codeEnd = source.length;
+          let nextChunkStart = source.length;
+          while (scan < source.length) {
+            const closeLineEnd = nextLineEnd(source, scan);
+            const rawCloseLine = source.slice(scan, closeLineEnd);
+            const closeLine = rawCloseLine.endsWith("\n") ? rawCloseLine.slice(0, -1) : rawCloseLine;
+            if (isFenceClose(closeLine, lang, voice)) {
+              codeEnd = scan;
+              nextChunkStart = closeLineEnd;
+              break;
+            }
+            scan = closeLineEnd;
+          }
+          appendCodeRun(fragment, source.slice(codeStart, codeEnd), lang);
+          chunkStart = nextChunkStart;
+          lineStart = nextChunkStart;
+        }
+        appendTextSegment(fragment, source.slice(chunkStart), voice);
         return fragment;
       }
 
@@ -1713,45 +3027,135 @@
         }
       }
 
-      function entryIcon(kind) {
-        switch (kind) {
-          case "user":
-            return "U";
-          case "agent":
-            return "A";
-          case "thought":
-            return "T";
-          case "tool":
-            return "#";
-          default:
-            return "i";
+      function legacyToolTextParts(text) {
+        const sep = text.indexOf("\n\n");
+        return {
+          title: sep === -1 ? text : text.slice(0, sep),
+          body: sep === -1 ? "" : text.slice(sep + 2),
+        };
+      }
+
+      function structuredToolTextParts(entry) {
+        const text = entry.text || "";
+        if (typeof entry.tool_title === "string" || typeof entry.tool_body === "string") {
+          return {
+            title: typeof entry.tool_title === "string" ? entry.tool_title : "",
+            body: typeof entry.tool_body === "string" ? entry.tool_body : "",
+          };
+        }
+        return legacyToolTextParts(text);
+      }
+
+      // Execute tool cards carry structured title/body fields when published
+      // by current mj builds. Fall back to the old flattened split for stored
+      // sessions written before those fields existed.
+      function appendExecuteToolBody(body, entry) {
+        const parts = structuredToolTextParts(entry);
+        const pre = document.createElement("pre");
+        pre.className = "entry-text";
+        appendCommandInline(pre, parts.title);
+        body.appendChild(pre);
+        if (parts.body.trim()) {
+          body.appendChild(renderRichText(parts.body, "mono"));
         }
       }
 
+      function entryRenderSignature(entry) {
+        return [
+          entry.text || "",
+          entry.tool_kind || "",
+          entry.tool_title || "",
+          entry.tool_body || "",
+        ].join("\u0000");
+      }
+
+      function entryActivitySignature(entry) {
+        return [
+          (entry.text || "").length,
+          entry.tool_kind || "",
+          (entry.tool_title || "").length,
+          (entry.tool_body || "").length,
+        ].join(":");
+      }
+
       function setEntryBody(refs, entry) {
+        // Streaming updates rewrite the whole body; keep folds the reader
+        // opened from snapping shut on every poll.
+        const openFolds = [];
+        refs.body.querySelectorAll("details.block-fold").forEach((fold, index) => {
+          if (fold.open) {
+            openFolds.push(index);
+          }
+        });
         refs.body.replaceChildren();
+        const voice = refs.kind === "agent" || refs.kind === "thought" ? "prose" : "mono";
         const text = entry.text || "";
-        if (refs.kind === "agent" || refs.kind === "thought") {
-          refs.body.appendChild(renderRichText(text));
+        if (refs.kind === "tool" && entry.tool_kind === "execute" && text.trim()) {
+          appendExecuteToolBody(refs.body, entry);
         } else {
-          const pre = document.createElement("pre");
-          pre.className = "entry-text";
-          pre.textContent = text;
-          refs.body.appendChild(pre);
+          refs.body.appendChild(renderRichText(text, voice));
         }
+        if (openFolds.length) {
+          const folds = refs.body.querySelectorAll("details.block-fold");
+          for (const index of openFolds) {
+            if (folds[index]) {
+              folds[index].open = true;
+            }
+          }
+        }
+      }
+
+      function toolPlaceholderBody(entry) {
+        if (entryKind(entry) !== "tool") {
+          return null;
+        }
+        const text = entry.text || "";
+        const match = /^tool(?:\n{2,}|$)([\s\S]*)$/.exec(text);
+        return match ? match[1] : null;
+      }
+
+      function canMergeToolPlaceholder(titleEntry, bodyEntry) {
+        const title = titleEntry.text || "";
+        return (
+          entryKind(titleEntry) === "tool"
+          && entryKind(bodyEntry) === "tool"
+          && title.trim()
+          && title.trim() !== "tool"
+          && !title.includes("\n")
+          && toolPlaceholderBody(bodyEntry) !== null
+        );
+      }
+
+      function normalizeTranscript(entries) {
+        const out = [];
+        for (let i = 0; i < entries.length; i += 1) {
+          const current = entries[i];
+          const next = entries[i + 1];
+          if (next && canMergeToolPlaceholder(current, next)) {
+            const body = toolPlaceholderBody(next);
+            out.push({
+              ...current,
+              text: body ? `${current.text || ""}\n\n${body}` : (current.text || ""),
+            });
+            i += 1;
+          } else {
+            out.push(current);
+          }
+        }
+        return out;
       }
 
       function createEntryRefs(entry) {
         const el = cloneTemplate(entryTpl);
         const kind = entryKind(entry);
         el.dataset.kind = kind;
-        el.querySelector(".entry-icon").textContent = entryIcon(kind);
         el.querySelector(".entry-kind").textContent = entryLabel(kind);
         setTimestamp(el.querySelector(".entry-time"), entry.timestamp || "");
         const refs = {
           kind,
           timestamp: entry.timestamp || "",
           text: entry.text || "",
+          renderSignature: entryRenderSignature(entry),
           el,
           body: el.querySelector(".entry-body"),
         };
@@ -1802,7 +3206,8 @@
           return;
         }
 
-        const transcript = Array.isArray(session.transcript) ? session.transcript : [];
+        const rawTranscript = Array.isArray(session.transcript) ? session.transcript : [];
+        const transcript = normalizeTranscript(rawTranscript);
         transcriptTitleEl.textContent = sessionLabel(session);
         transcriptMetaEl.textContent = `${session.project || "-"} · ${session.agent || "-"} · ${transcript.length} entries`;
         workingBadgeEl.hidden = !sessionIsWorking(session.session_id);
@@ -1824,8 +3229,9 @@
           transcriptEl.replaceChildren();
         }
 
-        // Match the rendered prefix by position (kind + timestamp identify an
-        // entry; only the last entry's text grows while streaming).
+        // Match the rendered prefix by position. Kind + timestamp identify an
+        // entry; the render signature catches streaming text and tool metadata
+        // updates without rebuilding stable DOM nodes.
         let matched = 0;
         const limit = Math.min(renderedEntries.length, transcript.length);
         while (matched < limit) {
@@ -1840,8 +3246,10 @@
           const have = renderedEntries[i];
           const want = transcript[i];
           const text = want.text || "";
-          if (have.text !== text) {
+          const renderSignature = entryRenderSignature(want);
+          if (have.renderSignature !== renderSignature) {
             have.text = text;
+            have.renderSignature = renderSignature;
             setEntryBody(have, want);
           }
         }
@@ -1888,19 +3296,23 @@
         queueInputEl.style.height = `${Math.max(next, 56)}px`;
       }
 
+      function setQueueStatus(text, isError = false) {
+        queueStatusEl.textContent = text;
+        queueStatusEl.classList.toggle("is-error", isError);
+      }
+
       function renderQueue(session) {
         queueListEl.replaceChildren();
         queueInputEl.disabled = !session;
         queueSubmitEl.disabled = !session;
 
         if (!session) {
-          queueStatusEl.textContent = "Select a session to queue prompts.";
+          setQueueStatus("Select a session.");
           return;
         }
 
-        queueStatusEl.textContent = queuedPrompts.length
-          ? `${queuedPrompts.length} queued prompt${queuedPrompts.length === 1 ? "" : "s"} waiting.`
-          : "Prompts queue here and run when the session is idle.";
+        // The placeholder explains queueing; the strip only reports depth.
+        setQueueStatus(queuedPrompts.length ? `${queuedPrompts.length} queued` : "");
 
         for (const prompt of queuedPrompts) {
           const item = cloneTemplate(queueTpl);
@@ -1978,7 +3390,7 @@
         } catch (error) {
           sentDecisions.delete(key);
           if (error.message !== "HTTP 401") {
-            queueStatusEl.textContent = `Decision failed: ${error.message}`;
+            setQueueStatus(`Decision failed: ${error.message}`, true);
           }
           renderChat();
         }
@@ -1986,31 +3398,6 @@
 
       function sessionConfigOptions(session) {
         return session && Array.isArray(session.session_config) ? session.session_config : [];
-      }
-
-      function setConfigPanelOpen(open) {
-        if (sessionConfigPanelEl.open === open) {
-          return;
-        }
-        expectedConfigPanelOpen = open;
-        sessionConfigPanelEl.open = open;
-      }
-
-      function updateConfigPanel(session, options) {
-        const hasOptions = Boolean(session && options.length);
-        sessionConfigPanelEl.hidden = !hasOptions;
-        if (!hasOptions) {
-          sessionConfigSummaryEl.textContent = "";
-          configPanelUserToggled = false;
-          setConfigPanelOpen(false);
-          return;
-        }
-
-        sessionConfigSummaryEl.textContent =
-          `${options.length} option${options.length === 1 ? "" : "s"}`;
-        if (!configPanelUserToggled) {
-          setConfigPanelOpen(!isNarrowScreen());
-        }
       }
 
       function configOptionKey(option) {
@@ -2242,7 +3629,6 @@
 
       function renderConfig(session) {
         const options = sessionConfigOptions(session);
-        updateConfigPanel(session, options);
         // Forget sent changes the session has applied (current_value caught
         // up), that vanished from the snapshot, or that timed out waiting to
         // apply, so the control re-enables.
@@ -2285,7 +3671,7 @@
             const combo = createCombobox(option, key, (value) => {
               void submitConfigChange(session.session_id, option, value);
             });
-            row.appendChild(combo.element);
+            row.insertBefore(combo.element, statusEl);
             const entry = { combo, statusEl };
             configCombos.set(key, entry);
             applyConfigComboState(entry, key, option);
@@ -2335,7 +3721,7 @@
         } catch (error) {
           sentConfigChanges.delete(key);
           if (error.message !== "HTTP 401") {
-            queueStatusEl.textContent = `Config change failed: ${error.message}`;
+            setQueueStatus(`Config change failed: ${error.message}`, true);
           }
           renderChat();
         }
@@ -2435,7 +3821,7 @@
           renderQueue(selected);
         } catch (error) {
           if (error.message !== "HTTP 401") {
-            queueStatusEl.textContent = `Queue update failed: ${error.message}`;
+            setQueueStatus(`Queue update failed: ${error.message}`, true);
           }
         }
       }
@@ -2469,7 +3855,7 @@
           await refreshSessions();
         } catch (error) {
           if (error.message !== "HTTP 401") {
-            queueStatusEl.textContent = `Queue submit failed: ${error.message}`;
+            setQueueStatus(`Queue submit failed: ${error.message}`, true);
           }
         } finally {
           queueSubmitEl.disabled = !selectedSessionId;
@@ -2525,20 +3911,14 @@
 
       /* ---- wiring ---- */
 
+      themeToggleEl.addEventListener("click", () => {
+        setTheme(currentTheme() === "light" ? "dark" : "light");
+      });
       authFormEl.addEventListener("submit", submitAuth);
       logoutButtonEl.addEventListener("click", logout);
       backButtonEl.addEventListener("click", navigateToList);
-      sessionConfigPanelEl.addEventListener("toggle", () => {
-        if (expectedConfigPanelOpen === sessionConfigPanelEl.open) {
-          expectedConfigPanelOpen = null;
-          return;
-        }
-        expectedConfigPanelOpen = null;
-        configPanelUserToggled = true;
-      });
       window.addEventListener("hashchange", applyRoute);
       narrowScreen.addEventListener("change", () => {
-        configPanelUserToggled = false;
         if (authenticated) {
           renderAll();
         }
@@ -2575,6 +3955,7 @@
         }
       });
 
+      applyTheme(currentTheme());
       syncComposerHeight();
       syncKeyboardInset();
       applyRoute();

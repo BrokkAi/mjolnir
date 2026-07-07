@@ -126,6 +126,12 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             config_path.display()
         )
     })?;
+    let agent_source_id = agent.source_id.clone();
+    let saved_session_config = app_config
+        .session_config
+        .get(&agent_source_id)
+        .cloned()
+        .unwrap_or_default();
 
     let project_label = crate::paths::project_label_from_cwd(&cfg.cwd);
     let agent_label = remote::agent_display_label(&agent);
@@ -141,6 +147,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         agent_stderr: cfg.agent_stderr,
         fs_max_text_bytes: cfg.fs_max_text_bytes,
         access_mode: acp::RuntimeAccessMode::Full,
+        agent_source_id: Some(agent_source_id),
+        config_path: Some(config_path),
+        saved_session_config,
     };
 
     let runtime = tokio::spawn(async move { acp::run(runtime_cfg, event_tx, cmd_rx).await });

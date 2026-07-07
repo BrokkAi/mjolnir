@@ -1476,6 +1476,24 @@ fn apply_picker_preferences(cfg: &mut Config, preferences: PickerPreferences) {
         .into_iter()
         .map(picker_custom_to_config_custom)
         .collect();
+    prune_removed_custom_agent_session_config(cfg);
+}
+
+fn prune_removed_custom_agent_session_config(cfg: &mut Config) {
+    let custom_source_ids: Vec<String> = cfg
+        .custom_agents
+        .iter()
+        .map(|agent| format!("{}{}", config::CUSTOM_AGENT_SOURCE_PREFIX, agent.name))
+        .collect();
+    let selected_source_id = cfg.agent.as_ref().map(|agent| agent.source_id.clone());
+
+    cfg.session_config.retain(|source_id, _| {
+        !source_id.starts_with(config::CUSTOM_AGENT_SOURCE_PREFIX)
+            || custom_source_ids.iter().any(|id| id == source_id)
+            || selected_source_id
+                .as_ref()
+                .is_some_and(|id| id == source_id)
+    });
 }
 
 fn config_custom_to_picker_custom(c: &ConfigCustomAgent) -> PickerCustomAgent {
@@ -1575,6 +1593,12 @@ async fn run_session(
         agent_stderr: runtime_options.agent_stderr.clone(),
         fs_max_text_bytes: runtime_options.fs_max_text_bytes,
         access_mode: acp::RuntimeAccessMode::Full,
+        agent_source_id: Some(agent.source_id.clone()),
+        config_path: Some(config::default_config_path()),
+        saved_session_config: config::Config::load(&config::default_config_path())
+            .ok()
+            .and_then(|cfg| cfg.session_config.get(&agent.source_id).cloned())
+            .unwrap_or_default(),
     };
 
     // Drive the ACP runtime on its own task so the UI can own the
@@ -2071,6 +2095,7 @@ mod tests {
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                session_config: Default::default(),
                 scores: config::ScoresConfig::default(),
                 ragnarok: config::RagnarokConfig::default(),
             },
@@ -2096,6 +2121,7 @@ mod tests {
                 agent: Some(custom_default),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                session_config: Default::default(),
                 scores: config::ScoresConfig::default(),
                 ragnarok: config::RagnarokConfig::default(),
             },
@@ -2128,6 +2154,7 @@ mod tests {
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                session_config: Default::default(),
                 scores: config::ScoresConfig::default(),
                 ragnarok: config::RagnarokConfig::default(),
             },
@@ -2206,6 +2233,7 @@ mod tests {
                 args: vec!["--flag".to_string()],
                 description: "test".to_string(),
             }],
+            session_config: Default::default(),
             scores: config::ScoresConfig::default(),
             ragnarok: config::RagnarokConfig::default(),
         };
@@ -2218,6 +2246,61 @@ mod tests {
         assert_eq!(roundtripped.custom_agents.len(), 1);
         assert_eq!(roundtripped.custom_agents[0].name, "my-agent");
         assert_eq!(roundtripped.custom_agents[0].description, "test");
+    }
+
+    #[test]
+    fn picker_preferences_prune_removed_custom_agent_session_config() {
+        let mut cfg = Config {
+            theme: Default::default(),
+            spinner: Default::default(),
+            agent: Some(SelectedAgent {
+                source_id: "custom:old-agent".to_string(),
+                program: PathBuf::from("/tmp/old"),
+                args: Vec::new(),
+                env: Default::default(),
+            }),
+            favorite_agents: vec!["custom:old-agent".to_string()],
+            custom_agents: vec![ConfigCustomAgent {
+                name: "old-agent".to_string(),
+                program: PathBuf::from("/tmp/old"),
+                args: Vec::new(),
+                description: String::new(),
+            }],
+            session_config: std::collections::HashMap::from([
+                (
+                    "custom:old-agent".to_string(),
+                    std::collections::HashMap::from([("model".to_string(), "old".to_string())]),
+                ),
+                (
+                    "custom:kept-agent".to_string(),
+                    std::collections::HashMap::from([("model".to_string(), "kept".to_string())]),
+                ),
+                (
+                    "claude-acp".to_string(),
+                    std::collections::HashMap::from([("model".to_string(), "sonnet".to_string())]),
+                ),
+            ]),
+            scores: config::ScoresConfig::default(),
+            ragnarok: config::RagnarokConfig::default(),
+        };
+
+        apply_picker_preferences(
+            &mut cfg,
+            PickerPreferences {
+                default_agent: None,
+                favorite_source_ids: Vec::new(),
+                custom_agents: vec![PickerCustomAgent {
+                    name: "kept-agent".to_string(),
+                    program: PathBuf::from("/tmp/kept"),
+                    args: Vec::new(),
+                    description: String::new(),
+                }],
+            },
+        );
+
+        assert!(!cfg.session_config.contains_key("custom:old-agent"));
+        assert!(cfg.session_config.contains_key("custom:kept-agent"));
+        assert!(cfg.session_config.contains_key("claude-acp"));
     }
 
     #[test]

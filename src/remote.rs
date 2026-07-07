@@ -11,14 +11,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use agent_client_protocol::schema::v1::{
     ContentBlock, PermissionOptionKind, SessionConfigId, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate,
-    ToolCallContent, ToolCallStatus,
+    ToolCallContent, ToolCallStatus, ToolCallUpdateFields, ToolKind,
 };
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
 use axum::http::StatusCode;
-use axum::http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE};
+use axum::http::header::{
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, HeaderValue, SET_COOKIE,
+};
 use axum::middleware::Next;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
@@ -283,6 +285,19 @@ pub struct TranscriptEntry {
     pub text: String,
     #[serde(default)]
     pub timestamp: String,
+    /// Stable ACP tool-call kind label (`execute`, `read`, `edit`, ...) for
+    /// `tool` entries, so the viewer can highlight by semantics instead of
+    /// re-sniffing the command text. Absent for non-tool entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_kind: Option<String>,
+    /// Structured tool title preserved for viewers that need to distinguish
+    /// the command/title from formatted tool content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_title: Option<String>,
+    /// Formatted tool content without the title prefix. Kept separate so
+    /// execute commands containing blank lines do not get split incorrectly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_body: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -408,6 +423,7 @@ struct ToolTranscriptEntry {
     title: String,
     content: Vec<ToolCallContent>,
     status: ToolCallStatus,
+    kind: ToolKind,
 }
 
 #[derive(Debug, Clone)]
@@ -578,25 +594,25 @@ impl TrackerState {
                     tool_call.title.clone(),
                     tool_call.content.clone(),
                     tool_call.status,
+                    tool_call.kind,
                 );
                 self.touch();
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 self.agent_message_open = false;
-                if let Some(content) = &update.fields.content {
+                let tool_call_id = update.tool_call_id.to_string();
+                if !self.update_tool_transcript_entry(&tool_call_id, &update.fields) {
                     self.push_tool_transcript_entry(
-                        update.tool_call_id.to_string(),
+                        tool_call_id,
                         update
                             .fields
                             .title
                             .clone()
                             .unwrap_or_else(|| "tool".to_string()),
-                        content.clone(),
+                        update.fields.content.clone().unwrap_or_default(),
                         update.fields.status.unwrap_or(ToolCallStatus::Pending),
+                        update.fields.kind.unwrap_or(ToolKind::Other),
                     );
-                }
-                if let Some(status) = update.fields.status {
-                    self.update_tool_transcript_status(&update.tool_call_id.to_string(), status);
                 }
                 self.touch();
             }
@@ -624,12 +640,7 @@ impl TrackerState {
                 continue;
             }
             if let Some(entry) = self.transcript.get_mut(*index) {
-                entry.text = format_tool_call(
-                    &tool_entry.title,
-                    &tool_entry.content,
-                    tool_entry.status,
-                    &self.terminal_outputs,
-                );
+                Self::render_tool_transcript_entry(entry, tool_entry, &self.terminal_outputs);
                 changed = true;
             }
         }
@@ -654,6 +665,9 @@ impl TrackerState {
             kind: kind.to_string(),
             text,
             timestamp: now_rfc3339(),
+            tool_kind: None,
+            tool_title: None,
+            tool_body: None,
         });
         index
     }
@@ -664,37 +678,62 @@ impl TrackerState {
         title: String,
         content: Vec<ToolCallContent>,
         status: ToolCallStatus,
+        kind: ToolKind,
     ) {
-        let index = self.push_transcript_entry(
-            "tool",
-            format_tool_call(&title, &content, status, &self.terminal_outputs),
-        );
-        self.tool_transcript_entries.insert(
-            index,
-            ToolTranscriptEntry {
-                tool_call_id,
-                title,
-                content,
-                status,
-            },
-        );
+        let index = self.push_transcript_entry("tool", String::new());
+        let tool_entry = ToolTranscriptEntry {
+            tool_call_id,
+            title,
+            content,
+            status,
+            kind,
+        };
+        if let Some(entry) = self.transcript.get_mut(index) {
+            Self::render_tool_transcript_entry(entry, &tool_entry, &self.terminal_outputs);
+        }
+        self.tool_transcript_entries.insert(index, tool_entry);
     }
 
-    fn update_tool_transcript_status(&mut self, tool_call_id: &str, status: ToolCallStatus) {
+    fn update_tool_transcript_entry(
+        &mut self,
+        tool_call_id: &str,
+        fields: &ToolCallUpdateFields,
+    ) -> bool {
+        let mut updated = false;
         for (index, tool_entry) in &mut self.tool_transcript_entries {
-            if tool_entry.tool_call_id != tool_call_id || tool_entry.status == status {
+            if tool_entry.tool_call_id != tool_call_id {
                 continue;
             }
-            tool_entry.status = status;
-            if let Some(entry) = self.transcript.get_mut(*index) {
-                entry.text = format_tool_call(
-                    &tool_entry.title,
-                    &tool_entry.content,
-                    tool_entry.status,
-                    &self.terminal_outputs,
-                );
+            if let Some(title) = &fields.title {
+                tool_entry.title = title.clone();
             }
+            if let Some(content) = &fields.content {
+                tool_entry.content = content.clone();
+            }
+            if let Some(status) = fields.status {
+                tool_entry.status = status;
+            }
+            if let Some(kind) = fields.kind {
+                tool_entry.kind = kind;
+            }
+            if let Some(entry) = self.transcript.get_mut(*index) {
+                Self::render_tool_transcript_entry(entry, tool_entry, &self.terminal_outputs);
+            }
+            updated = true;
         }
+        updated
+    }
+
+    fn render_tool_transcript_entry(
+        entry: &mut TranscriptEntry,
+        tool_entry: &ToolTranscriptEntry,
+        terminal_outputs: &HashMap<String, TerminalOutputSnapshot>,
+    ) {
+        let tool_body = format_tool_body(&tool_entry.content, tool_entry.status, terminal_outputs);
+        entry.text = format_tool_call_from_body(&tool_entry.title, tool_body.as_deref());
+        entry.tool_kind = Some(crate::labels::tool_kind_label(tool_entry.kind).to_string());
+        entry.tool_title = Some(tool_entry.title.clone());
+        entry.tool_body = tool_body;
     }
 
     fn snapshot(&self) -> Option<SessionRecord> {
@@ -1441,6 +1480,12 @@ fn start_server_agent_session(
     let (runtime_event_tx, mut runtime_event_rx) = mpsc::unbounded_channel();
     let (runtime_cmd_tx, runtime_cmd_rx) = mpsc::unbounded_channel();
     let (remote_event_tx, mut remote_event_rx) = mpsc::unbounded_channel();
+    let agent_source_id = agent.source_id.clone();
+    let config_path = config::default_config_path();
+    let saved_session_config = config::Config::load(&config_path)
+        .ok()
+        .and_then(|cfg| cfg.session_config.get(&agent_source_id).cloned())
+        .unwrap_or_default();
     let agent_label = agent_display_label(&agent);
     let project_label = crate::paths::project_label_from_cwd(&cwd);
     let tracker = RemoteSessionTracker::new(
@@ -1459,6 +1504,9 @@ fn start_server_agent_session(
         agent_stderr: None,
         fs_max_text_bytes,
         access_mode: crate::acp::RuntimeAccessMode::Full,
+        agent_source_id: Some(agent_source_id),
+        config_path: Some(config_path),
+        saved_session_config,
     };
     let command_tx = runtime_cmd_tx.clone();
     let shutdown_tx = runtime_cmd_tx;
@@ -1852,6 +1900,14 @@ fn build_router(config: RouterConfig) -> Router {
         .route("/icons/icon-512.png", get(remote_icon_512))
         .route("/icons/maskable-512.png", get(remote_icon_maskable))
         .route("/icons/apple-touch-icon.png", get(remote_icon_apple_touch))
+        .route("/fonts/staatliches-400.woff2", get(remote_font_staatliches))
+        .route("/fonts/rajdhani-500.woff2", get(remote_font_rajdhani_500))
+        .route("/fonts/rajdhani-600.woff2", get(remote_font_rajdhani_600))
+        .route("/fonts/rajdhani-700.woff2", get(remote_font_rajdhani_700))
+        .route(
+            "/fonts/jetbrains-mono.woff2",
+            get(remote_font_jetbrains_mono),
+        )
         .route("/auth/login", get(create_viewer_session_from_query))
         .route(
             "/auth/session",
@@ -1980,8 +2036,21 @@ fn session_cookie_valid(cookie_key: &str, value: &str, now_unix: u64) -> bool {
     constant_time_eq(expected.as_bytes(), value.as_bytes())
 }
 
-async fn remote_viewer() -> Html<&'static str> {
-    Html(include_str!("remote_viewer.html"))
+async fn remote_viewer() -> Response {
+    (
+        [
+            (
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            ),
+            (
+                CACHE_CONTROL,
+                HeaderValue::from_static("no-store, max-age=0"),
+            ),
+        ],
+        include_str!("remote_viewer.html"),
+    )
+        .into_response()
 }
 
 /// Serve a compiled-in static asset with an explicit content type. Used for the
@@ -1998,10 +2067,20 @@ async fn remote_manifest() -> Response {
 }
 
 async fn remote_service_worker() -> Response {
-    static_asset(
-        "text/javascript; charset=utf-8",
+    (
+        [
+            (
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/javascript; charset=utf-8"),
+            ),
+            (
+                CACHE_CONTROL,
+                HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+            ),
+        ],
         include_bytes!("remote_service_worker.js"),
     )
+        .into_response()
 }
 
 async fn remote_icon_svg() -> Response {
@@ -2022,6 +2101,43 @@ async fn remote_icon_maskable() -> Response {
 
 async fn remote_icon_apple_touch() -> Response {
     static_asset("image/png", include_bytes!("icons/apple-touch-icon.png"))
+}
+
+/// Like `static_asset`, but marked immutable so browsers never refetch. Only
+/// the brand fonts use this: they are the heaviest shell assets and a change
+/// would ship under a new file name anyway.
+fn static_asset_immutable(content_type: &'static str, body: &'static [u8]) -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+async fn remote_font_staatliches() -> Response {
+    static_asset_immutable("font/woff2", include_bytes!("fonts/staatliches-400.woff2"))
+}
+
+async fn remote_font_rajdhani_500() -> Response {
+    static_asset_immutable("font/woff2", include_bytes!("fonts/rajdhani-500.woff2"))
+}
+
+async fn remote_font_rajdhani_600() -> Response {
+    static_asset_immutable("font/woff2", include_bytes!("fonts/rajdhani-600.woff2"))
+}
+
+async fn remote_font_rajdhani_700() -> Response {
+    static_asset_immutable("font/woff2", include_bytes!("fonts/rajdhani-700.woff2"))
+}
+
+async fn remote_font_jetbrains_mono() -> Response {
+    static_asset_immutable("font/woff2", include_bytes!("fonts/jetbrains-mono.woff2"))
 }
 
 async fn create_viewer_session(
@@ -3201,12 +3317,18 @@ fn content_block_text(block: &ContentBlock) -> String {
     }
 }
 
-fn format_tool_call(
-    title: &str,
+fn format_tool_call_from_body(title: &str, body: Option<&str>) -> String {
+    match body {
+        Some(body) => format!("{title}\n\n{body}"),
+        None => title.to_string(),
+    }
+}
+
+fn format_tool_body(
     content: &[ToolCallContent],
     tool_status: ToolCallStatus,
     terminal_outputs: &HashMap<String, TerminalOutputSnapshot>,
-) -> String {
+) -> Option<String> {
     let mut parts = Vec::new();
     for item in content {
         match item {
@@ -3232,9 +3354,9 @@ fn format_tool_call(
     }
 
     if parts.is_empty() {
-        title.to_string()
+        None
     } else {
-        format!("{}\n\n{}", title, parts.join("\n\n"))
+        Some(parts.join("\n\n"))
     }
 }
 
@@ -3489,6 +3611,116 @@ mod tests {
     }
 
     #[test]
+    fn tool_transcript_entry_carries_execute_kind() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let mut tool_call = ToolCall::new("call-1", "rg --files | rg -n LICENSE");
+        tool_call.kind = ToolKind::Execute;
+        tool_call.content = vec![ToolCallContent::Terminal(Terminal::new(TerminalId::new(
+            "term-1",
+        )))];
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript.len(), 1);
+        assert_eq!(snapshot.transcript[0].kind, "tool");
+        // The ACP tool kind rides on the entry so the viewer can shell-highlight
+        // the command by semantics instead of guessing from a prompt prefix.
+        assert_eq!(snapshot.transcript[0].tool_kind.as_deref(), Some("execute"));
+
+        // A late terminal snapshot rebuilds the entry text in place; the kind
+        // must survive that rebuild.
+        state.observe_event(&UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "match\n".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        }));
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript[0].tool_kind.as_deref(), Some("execute"));
+    }
+
+    #[test]
+    fn tool_transcript_entry_defaults_non_execute_kind() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        // ToolCall::new leaves kind at its default (Other), so a non-command
+        // tool is labelled accordingly and the viewer will not shell-highlight.
+        let tool_call = ToolCall::new("call-1", "read src/remote.rs");
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript[0].tool_kind.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn tool_transcript_kind_update_without_content_updates_existing_entry() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let tool_call = ToolCall::new("call-1", "cargo test");
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+
+        let mut fields = ToolCallUpdateFields::default();
+        fields.kind = Some(ToolKind::Execute);
+        state.observe_session_update(&SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "call-1", fields,
+        )));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript.len(), 1);
+        assert_eq!(snapshot.transcript[0].tool_kind.as_deref(), Some("execute"));
+        assert_eq!(
+            snapshot.transcript[0].tool_title.as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(snapshot.transcript[0].text, "cargo test");
+    }
+
+    #[test]
+    fn tool_transcript_preserves_multiline_execute_title_boundary() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let title = "cat <<'EOF'\nfirst\n\nsecond\nEOF";
+        let mut tool_call = ToolCall::new("call-1", title);
+        tool_call.kind = ToolKind::Execute;
+        tool_call.content = vec![ToolCallContent::Content(
+            agent_client_protocol::schema::v1::Content::new(ContentBlock::Text(
+                agent_client_protocol::schema::v1::TextContent::new("terminal output"),
+            )),
+        )];
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript.len(), 1);
+        assert_eq!(snapshot.transcript[0].tool_kind.as_deref(), Some("execute"));
+        assert_eq!(snapshot.transcript[0].tool_title.as_deref(), Some(title));
+        assert_eq!(
+            snapshot.transcript[0].tool_body.as_deref(),
+            Some("terminal output")
+        );
+        assert_eq!(
+            snapshot.transcript[0].text,
+            format!("{title}\n\nterminal output")
+        );
+    }
+
+    #[test]
     fn tracker_renders_pending_terminal_without_snapshot_as_waiting() {
         let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
         state.observe_event(&UiEvent::SessionStarted {
@@ -3624,11 +3856,17 @@ mod tests {
                     kind: "user".to_string(),
                     text: "hello".to_string(),
                     timestamp: "2026-06-03T10:00:05Z".to_string(),
+                    tool_kind: None,
+                    tool_title: None,
+                    tool_body: None,
                 },
                 TranscriptEntry {
                     kind: "agent".to_string(),
                     text: "hi".to_string(),
                     timestamp: "2026-06-03T10:00:06Z".to_string(),
+                    tool_kind: None,
+                    tool_title: None,
+                    tool_body: None,
                 },
             ],
             queued_prompt_count: 0,
@@ -3647,11 +3885,17 @@ mod tests {
                         kind: "user".to_string(),
                         text: "hello".to_string(),
                         timestamp: "2026-06-03T10:00:05Z".to_string(),
+                        tool_kind: None,
+                        tool_title: None,
+                        tool_body: None,
                     },
                     TranscriptEntry {
                         kind: "agent".to_string(),
                         text: "hi there".to_string(),
                         timestamp: "2026-06-03T10:00:06Z".to_string(),
+                        tool_kind: None,
+                        tool_title: None,
+                        tool_body: None,
                     },
                 ],
                 ..session.clone()
@@ -5257,7 +5501,7 @@ mod tests {
         )
         .expect("viewer utf8");
         assert!(viewer.contains("Mjolnir Web"));
-        assert!(viewer.contains("Sign In"));
+        assert!(viewer.contains("Sign in"));
         assert!(!viewer.contains("Unlock Remote Sessions"));
         assert!(!viewer.contains(&token));
 

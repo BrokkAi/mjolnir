@@ -28,6 +28,10 @@ pub struct Config {
     /// `custom:<name>`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_agents: Vec<CustomAgent>,
+    /// Last session configuration values seen when a prompt was submitted,
+    /// keyed by agent source id and then config option id.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub session_config: HashMap<String, HashMap<String, String>>,
     /// Model strength score (LMArena Elo) display in the picker.
     #[serde(default, skip_serializing_if = "ScoresConfig::is_default")]
     pub scores: ScoresConfig,
@@ -367,6 +371,7 @@ mod tests {
             }),
             favorite_agents: vec!["claude-acp".to_string(), "anvil".to_string()],
             custom_agents: Vec::new(),
+            session_config: HashMap::new(),
             scores: ScoresConfig::default(),
             ragnarok: RagnarokConfig::default(),
         };
@@ -396,6 +401,7 @@ mod tests {
             }),
             favorite_agents: Vec::new(),
             custom_agents: Vec::new(),
+            session_config: HashMap::new(),
             scores: ScoresConfig::default(),
             ragnarok: RagnarokConfig::default(),
         };
@@ -489,6 +495,7 @@ args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
                     description: String::new(),
                 },
             ],
+            session_config: HashMap::new(),
             scores: ScoresConfig::default(),
             ragnarok: RagnarokConfig::default(),
         };

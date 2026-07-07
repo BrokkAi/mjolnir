@@ -1,8 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Mjolnir">
-  <rect width="512" height="512" rx="112" fill="#0b1220"/>
-  <g fill="#6ea8fe">
-    <rect x="128" y="120" width="256" height="132" rx="20"/>
-    <rect x="232" y="240" width="48" height="170" rx="16"/>
-    <rect x="208" y="396" width="96" height="36" rx="16"/>
-  </g>
+  <rect width="512" height="512" fill="#050606"/>
+  <!-- square-cut hammer: cut-corner head in signal red, steel handle -->
+  <path fill="#eb3f33" d="M138 116h236l26 26v84l-26 26H138l-26-26v-84z"/>
+  <path fill="#a8a8a8" d="M234 252h44v138l-14 14h-16l-14-14z"/>
+  <path fill="#eb3f33" d="M112 268h288v2H112z" opacity="0.55"/>
 </svg>
