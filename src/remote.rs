@@ -5,13 +5,13 @@ use std::io::IsTerminal;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::v1::{
     ContentBlock, PermissionOptionKind, SessionConfigId, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate,
-    ToolCallContent,
+    ToolCallContent, ToolCallStatus,
 };
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
@@ -32,6 +32,8 @@ use crossterm::{
 use hmac::{Hmac, Mac};
 use rcgen::generate_simple_self_signed;
 use rusqlite::{Connection, OptionalExtension, params};
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use time::OffsetDateTime;
@@ -404,8 +406,10 @@ struct TrackerState {
 
 #[derive(Debug, Clone)]
 struct ToolTranscriptEntry {
+    tool_call_id: String,
     title: String,
     content: Vec<ToolCallContent>,
+    status: ToolCallStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -571,20 +575,30 @@ impl TrackerState {
             }
             SessionUpdate::ToolCall(tool_call) => {
                 self.agent_message_open = false;
-                self.push_tool_transcript_entry(tool_call.title.clone(), tool_call.content.clone());
+                self.push_tool_transcript_entry(
+                    tool_call.tool_call_id.to_string(),
+                    tool_call.title.clone(),
+                    tool_call.content.clone(),
+                    tool_call.status,
+                );
                 self.touch();
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 self.agent_message_open = false;
                 if let Some(content) = &update.fields.content {
                     self.push_tool_transcript_entry(
+                        update.tool_call_id.to_string(),
                         update
                             .fields
                             .title
                             .clone()
                             .unwrap_or_else(|| "tool".to_string()),
                         content.clone(),
+                        update.fields.status.unwrap_or(ToolCallStatus::Pending),
                     );
+                }
+                if let Some(status) = update.fields.status {
+                    self.update_tool_transcript_status(&update.tool_call_id.to_string(), status);
                 }
                 self.touch();
             }
@@ -615,6 +629,7 @@ impl TrackerState {
                 entry.text = format_tool_call(
                     &tool_entry.title,
                     &tool_entry.content,
+                    tool_entry.status,
                     &self.terminal_outputs,
                 );
                 changed = true;
@@ -645,13 +660,43 @@ impl TrackerState {
         index
     }
 
-    fn push_tool_transcript_entry(&mut self, title: String, content: Vec<ToolCallContent>) {
+    fn push_tool_transcript_entry(
+        &mut self,
+        tool_call_id: String,
+        title: String,
+        content: Vec<ToolCallContent>,
+        status: ToolCallStatus,
+    ) {
         let index = self.push_transcript_entry(
             "tool",
-            format_tool_call(&title, &content, &self.terminal_outputs),
+            format_tool_call(&title, &content, status, &self.terminal_outputs),
         );
-        self.tool_transcript_entries
-            .insert(index, ToolTranscriptEntry { title, content });
+        self.tool_transcript_entries.insert(
+            index,
+            ToolTranscriptEntry {
+                tool_call_id,
+                title,
+                content,
+                status,
+            },
+        );
+    }
+
+    fn update_tool_transcript_status(&mut self, tool_call_id: &str, status: ToolCallStatus) {
+        for (index, tool_entry) in &mut self.tool_transcript_entries {
+            if tool_entry.tool_call_id != tool_call_id || tool_entry.status == status {
+                continue;
+            }
+            tool_entry.status = status;
+            if let Some(entry) = self.transcript.get_mut(*index) {
+                entry.text = format_tool_call(
+                    &tool_entry.title,
+                    &tool_entry.content,
+                    tool_entry.status,
+                    &self.terminal_outputs,
+                );
+            }
+        }
     }
 
     fn snapshot(&self) -> Option<SessionRecord> {
@@ -1249,15 +1294,30 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
     }
 }
 
-pub async fn run_server(
-    hostname: Option<String>,
-    history_days: u32,
-    session_ttl_days: u32,
-    logout_all: bool,
-    cwd: PathBuf,
-    additional_directories: Vec<PathBuf>,
-    fs_max_text_bytes: u64,
-) -> Result<()> {
+/// Options for [`run_server`], mirroring the `mj server` CLI surface.
+#[derive(Debug)]
+pub struct ServerOptions {
+    pub hostname: Option<String>,
+    pub tailscale: bool,
+    pub history_days: u32,
+    pub session_ttl_days: u32,
+    pub logout_all: bool,
+    pub cwd: PathBuf,
+    pub additional_directories: Vec<PathBuf>,
+    pub fs_max_text_bytes: u64,
+}
+
+pub async fn run_server(options: ServerOptions) -> Result<()> {
+    let ServerOptions {
+        hostname,
+        tailscale,
+        history_days,
+        session_ttl_days,
+        logout_all,
+        cwd,
+        additional_directories,
+        fs_max_text_bytes,
+    } = options;
     clear_terminal_screen()?;
     install_crypto_provider();
 
@@ -1271,7 +1331,15 @@ pub async fn run_server(
     })?;
 
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
-    let listen = server_listen_config(requested_hostname.as_deref())?;
+    let tailscale_tls = if tailscale {
+        Some(prepare_tailscale_tls(&remote_control_dir())?)
+    } else {
+        None
+    };
+    let listen = match &tailscale_tls {
+        Some(ts) => tailscale_listen_config(&ts.tailscale.cert_domain),
+        None => server_listen_config(requested_hostname.as_deref())?,
+    };
     let paths = ensure_server_paths(requested_hostname.as_deref())?;
     init_db(&paths.db_path)?;
     let token = ensure_token(&paths.token_path)?;
@@ -1292,10 +1360,22 @@ pub async fn run_server(
         session_ttl,
     });
 
-    let tls_config =
-        axum_server::tls_rustls::RustlsConfig::from_pem_file(&paths.cert_path, &paths.key_path)
-            .await
-            .context("load remote-control TLS certificate")?;
+    let tls_config = match &tailscale_tls {
+        Some(ts) => {
+            let resolver = Arc::new(SniCertResolver {
+                default_key: load_certified_key(&paths.cert_path, &paths.key_path)?,
+                tailscale_domain: ts.tailscale.cert_domain.to_ascii_lowercase(),
+                tailscale_key: RwLock::new(load_certified_key(&ts.cert_path, &ts.key_path)?),
+            });
+            spawn_tailscale_cert_renewer(ts.clone(), resolver.clone());
+            sni_rustls_config(resolver)?
+        }
+        None => {
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(&paths.cert_path, &paths.key_path)
+                .await
+                .context("load remote-control TLS certificate")?
+        }
+    };
 
     let listener = bind_server_listener(&listen.bind_addr)?;
 
@@ -1307,6 +1387,12 @@ pub async fn run_server(
         "Remote control listening on https://{}:11921",
         listen.viewer_host
     );
+    if let Some(ts) = &tailscale_tls {
+        println!(
+            "tls: trusted tailscale certificate for {} (auto-renews daily)",
+            ts.tailscale.cert_domain
+        );
+    }
     println!("{}", crate::qr::render_qr(&viewer_url)?);
     println!("viewer code: {viewer_code}");
     if logout_all {
@@ -1357,6 +1443,12 @@ fn start_server_agent_session(
     let (runtime_event_tx, mut runtime_event_rx) = mpsc::unbounded_channel();
     let (runtime_cmd_tx, runtime_cmd_rx) = mpsc::unbounded_channel();
     let (remote_event_tx, mut remote_event_rx) = mpsc::unbounded_channel();
+    let agent_source_id = agent.source_id.clone();
+    let config_path = config::default_config_path();
+    let saved_session_config = config::Config::load(&config_path)
+        .ok()
+        .and_then(|cfg| cfg.session_config.get(&agent_source_id).cloned())
+        .unwrap_or_default();
     let agent_label = agent_display_label(&agent);
     let project_label = crate::paths::project_label_from_cwd(&cwd);
     let tracker = RemoteSessionTracker::new(
@@ -1374,6 +1466,9 @@ fn start_server_agent_session(
         env: agent.env,
         agent_stderr: None,
         fs_max_text_bytes,
+        agent_source_id: Some(agent_source_id),
+        config_path: Some(config_path),
+        saved_session_config,
     };
     let command_tx = runtime_cmd_tx.clone();
     let shutdown_tx = runtime_cmd_tx;
@@ -1560,6 +1655,153 @@ fn remote_qr_login_url(host: &str, token: &str) -> String {
 /// a second call is a no-op.
 fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+/// The tailscale daemon handle plus where its issued certificate lives on
+/// disk. Kept separate from the self-signed `cert.pem`/`key.pem` pair, which
+/// local `mj` processes pin when reporting sessions.
+#[derive(Debug, Clone)]
+struct TailscaleTls {
+    tailscale: crate::tailscale::Tailscale,
+    cert_path: PathBuf,
+    key_path: PathBuf,
+}
+
+fn prepare_tailscale_tls(root: &Path) -> Result<TailscaleTls> {
+    std::fs::create_dir_all(root)
+        .with_context(|| format!("create remote-control dir {}", root.display()))?;
+    let tailscale = crate::tailscale::Tailscale::discover()?;
+    let cert_path = root.join("tailscale-cert.pem");
+    let key_path = root.join("tailscale-key.pem");
+    println!(
+        "obtaining https certificate for {} via tailscale (first issuance can take ~30s)…",
+        tailscale.cert_domain
+    );
+    mint_tailscale_cert(&tailscale, &cert_path, &key_path)?;
+    Ok(TailscaleTls {
+        tailscale,
+        cert_path,
+        key_path,
+    })
+}
+
+fn mint_tailscale_cert(
+    tailscale: &crate::tailscale::Tailscale,
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<()> {
+    tailscale.mint_cert(cert_path, key_path)?;
+    restrict_permissions(key_path)?;
+    Ok(())
+}
+
+/// In tailscale mode the server must accept connections from tailnet peers
+/// (the phone) *and* local `mj` processes reporting sessions to
+/// `https://localhost:11921`, so it binds all interfaces exactly like
+/// `--hostname` mode. Access is still gated by the bearer token/viewer code.
+fn tailscale_listen_config(cert_domain: &str) -> ServerListenConfig {
+    ServerListenConfig {
+        bind_addr: REMOTE_CONTROL_PUBLIC_ADDR.to_string(),
+        viewer_host: cert_domain.to_string(),
+    }
+}
+
+/// Serves the tailscale (Let's Encrypt) certificate to clients whose SNI is
+/// the ts.net name, and the self-signed certificate to everyone else — so
+/// local `mj` processes hitting `https://localhost:11921` keep validating
+/// against the pinned `cert.pem` unchanged.
+#[derive(Debug)]
+struct SniCertResolver {
+    default_key: Arc<CertifiedKey>,
+    /// Lowercase; SNI hostnames are compared case-insensitively.
+    tailscale_domain: String,
+    /// Behind a lock so the daily renewer can hot-swap the certificate
+    /// without restarting the listener.
+    tailscale_key: RwLock<Arc<CertifiedKey>>,
+}
+
+impl ResolvesServerCert for SniCertResolver {
+    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        if sni_matches(client_hello.server_name(), &self.tailscale_domain) {
+            Some(
+                self.tailscale_key
+                    .read()
+                    .expect("tailscale cert lock")
+                    .clone(),
+            )
+        } else {
+            Some(self.default_key.clone())
+        }
+    }
+}
+
+fn sni_matches(server_name: Option<&str>, tailscale_domain: &str) -> bool {
+    server_name.is_some_and(|name| name.eq_ignore_ascii_case(tailscale_domain))
+}
+
+fn load_certified_key(cert_path: &Path, key_path: &Path) -> Result<Arc<CertifiedKey>> {
+    let cert_pem =
+        std::fs::read(cert_path).with_context(|| format!("read {}", cert_path.display()))?;
+    let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("parse certificates in {}", cert_path.display()))?;
+    if certs.is_empty() {
+        return Err(anyhow!("no certificates found in {}", cert_path.display()));
+    }
+    let key_pem =
+        std::fs::read(key_path).with_context(|| format!("read {}", key_path.display()))?;
+    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
+        .with_context(|| format!("parse private key in {}", key_path.display()))?
+        .ok_or_else(|| anyhow!("no private key found in {}", key_path.display()))?;
+    let signing_key = rustls::crypto::ring::default_provider()
+        .key_provider
+        .load_private_key(key)
+        .map_err(|error| anyhow!("load private key {}: {error}", key_path.display()))?;
+    Ok(Arc::new(CertifiedKey::new(certs, signing_key)))
+}
+
+fn sni_rustls_config(
+    resolver: Arc<SniCertResolver>,
+) -> Result<axum_server::tls_rustls::RustlsConfig> {
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("configure TLS protocol versions")?
+    .with_no_client_auth()
+    .with_cert_resolver(resolver);
+    // Match the ALPN set RustlsConfig::from_pem_file installs.
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(axum_server::tls_rustls::RustlsConfig::from_config(
+        Arc::new(config),
+    ))
+}
+
+/// Let's Encrypt certificates last 90 days and `mj server` can easily run
+/// longer. Re-run `tailscale cert` daily — a cheap local call while the
+/// cached certificate is fresh; tailscaled only contacts Let's Encrypt when
+/// renewal is due — and hot-swap the served certificate.
+fn spawn_tailscale_cert_renewer(ts: TailscaleTls, resolver: Arc<SniCertResolver>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+        interval.tick().await; // first tick fires immediately; the cert is fresh
+        loop {
+            interval.tick().await;
+            let mint = ts.clone();
+            let renewed = tokio::task::spawn_blocking(move || {
+                mint_tailscale_cert(&mint.tailscale, &mint.cert_path, &mint.key_path)?;
+                load_certified_key(&mint.cert_path, &mint.key_path)
+            })
+            .await;
+            match renewed {
+                Ok(Ok(key)) => {
+                    *resolver.tailscale_key.write().expect("tailscale cert lock") = key;
+                }
+                Ok(Err(error)) => warn!("tailscale certificate renewal failed: {error:#}"),
+                Err(error) => warn!("tailscale certificate renewal task failed: {error}"),
+            }
+        }
+    });
 }
 
 /// Inputs needed to build the remote-control router. Grouping these into named
@@ -3040,6 +3282,7 @@ fn content_block_text(block: &ContentBlock) -> String {
 fn format_tool_call(
     title: &str,
     content: &[ToolCallContent],
+    tool_status: ToolCallStatus,
     terminal_outputs: &HashMap<String, TerminalOutputSnapshot>,
 ) -> String {
     let mut parts = Vec::new();
@@ -3049,13 +3292,16 @@ fn format_tool_call(
             ToolCallContent::Diff(diff) => parts.push(format!("diff: {}", diff.path.display())),
             ToolCallContent::Terminal(terminal) => {
                 let terminal_id = terminal.terminal_id.to_string();
-                let mut text = format!("terminal: {terminal_id}");
+                let mut text = "background terminal".to_string();
                 if let Some(snapshot) = terminal_outputs.get(&terminal_id) {
-                    let snapshot = format_terminal_snapshot(snapshot);
+                    let snapshot = format_terminal_snapshot(snapshot, tool_status);
                     if !snapshot.is_empty() {
                         text.push('\n');
                         text.push_str(&snapshot);
                     }
+                } else {
+                    text.push('\n');
+                    text.push_str(terminal_empty_state_label(tool_status));
                 }
                 parts.push(text);
             }
@@ -3079,18 +3325,30 @@ fn tool_call_references_terminal(content: &[ToolCallContent], terminal_id: &str)
     })
 }
 
-fn format_terminal_snapshot(snapshot: &TerminalOutputSnapshot) -> String {
+fn format_terminal_snapshot(
+    snapshot: &TerminalOutputSnapshot,
+    tool_status: ToolCallStatus,
+) -> String {
     let mut parts = Vec::new();
     if snapshot.truncated {
         parts.push("[output truncated]".to_string());
     }
-    if !snapshot.output.is_empty() {
+    if !snapshot.output.trim().is_empty() {
         parts.push(snapshot.output.clone());
     }
     if let Some(status) = &snapshot.exit_status {
         parts.push(format!("exit {}", terminal_exit_status_label(status)));
+    } else if parts.is_empty() {
+        parts.push(terminal_empty_state_label(tool_status).to_string());
     }
     parts.join("\n")
+}
+
+fn terminal_empty_state_label(tool_status: ToolCallStatus) -> &'static str {
+    match tool_status {
+        ToolCallStatus::Pending | ToolCallStatus::InProgress => "waiting for output",
+        _ => "no terminal output received",
+    }
 }
 
 fn terminal_exit_status_label(
@@ -3125,7 +3383,7 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
         PermissionOption, SessionConfigSelect, SessionConfigSelectOption, Terminal,
-        TerminalExitStatus, TerminalId, ToolCall, ToolCallContent, ToolCallUpdate,
+        TerminalExitStatus, TerminalId, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
         ToolCallUpdateFields,
     };
     use http_body_util::BodyExt;
@@ -3288,7 +3546,8 @@ mod tests {
         let snapshot = state.snapshot().expect("snapshot");
         assert_eq!(snapshot.transcript.len(), 1);
         assert_eq!(snapshot.transcript[0].kind, "tool");
-        assert!(snapshot.transcript[0].text.contains("terminal: term-1"));
+        assert!(snapshot.transcript[0].text.contains("background terminal"));
+        assert!(!snapshot.transcript[0].text.contains("term-1"));
         assert!(snapshot.transcript[0].text.contains("[output truncated]"));
         assert!(snapshot.transcript[0].text.contains("hello\n"));
         assert!(snapshot.transcript[0].text.contains("exit code 0"));
@@ -3305,6 +3564,67 @@ mod tests {
         assert!(!snapshot.transcript[0].text.contains("[output truncated]"));
         assert!(snapshot.transcript[0].text.contains("done\n"));
         assert!(snapshot.transcript[0].text.contains("exit signal SIGTERM"));
+    }
+
+    #[test]
+    fn tracker_renders_pending_terminal_without_snapshot_as_waiting() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let mut tool_call = ToolCall::new("call-1", "running command");
+        tool_call.status = ToolCallStatus::InProgress;
+        tool_call.content = vec![ToolCallContent::Terminal(Terminal::new(TerminalId::new(
+            "term-1",
+        )))];
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert!(snapshot.transcript[0].text.contains("background terminal"));
+        assert!(snapshot.transcript[0].text.contains("waiting for output"));
+        assert!(
+            !snapshot.transcript[0]
+                .text
+                .contains("no terminal output received"),
+            "pending terminal should not be rendered as finished-empty: {:?}",
+            snapshot.transcript[0].text
+        );
+    }
+
+    #[test]
+    fn tracker_updates_empty_terminal_placeholder_when_status_completes() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let mut tool_call = ToolCall::new("call-1", "running command");
+        tool_call.status = ToolCallStatus::InProgress;
+        tool_call.content = vec![ToolCallContent::Terminal(Terminal::new(TerminalId::new(
+            "term-1",
+        )))];
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+
+        let mut fields = ToolCallUpdateFields::default();
+        fields.status = Some(ToolCallStatus::Completed);
+        state.observe_session_update(&SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "call-1", fields,
+        )));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert!(
+            snapshot.transcript[0]
+                .text
+                .contains("no terminal output received")
+        );
+        assert!(
+            !snapshot.transcript[0].text.contains("waiting for output"),
+            "completed empty terminal should not keep the pending placeholder: {:?}",
+            snapshot.transcript[0].text
+        );
     }
 
     #[test]
@@ -4754,6 +5074,124 @@ mod tests {
             std::fs::read_to_string(dir.path().join("cert-hostname")).expect("read hostname"),
             "localhost"
         );
+    }
+
+    #[test]
+    fn tailscale_listen_config_binds_all_interfaces_with_ts_domain() {
+        assert_eq!(
+            tailscale_listen_config("mybox.tail1234.ts.net"),
+            ServerListenConfig {
+                bind_addr: REMOTE_CONTROL_PUBLIC_ADDR.to_string(),
+                viewer_host: "mybox.tail1234.ts.net".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn sni_matches_only_the_tailscale_domain() {
+        let domain = "mybox.tail1234.ts.net";
+        assert!(sni_matches(Some("mybox.tail1234.ts.net"), domain));
+        assert!(sni_matches(Some("MyBox.Tail1234.TS.NET"), domain));
+        assert!(!sni_matches(Some("localhost"), domain));
+        assert!(!sni_matches(Some("evil-mybox.tail1234.ts.net"), domain));
+        assert!(!sni_matches(None, domain));
+    }
+
+    #[test]
+    fn load_certified_key_reads_generated_pem_pair() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert = generate_simple_self_signed(vec!["mybox.tail1234.ts.net".to_string()])
+            .expect("generate cert");
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&cert_path, cert.cert.pem()).expect("write cert");
+        std::fs::write(&key_path, cert.key_pair.serialize_pem()).expect("write key");
+        let key = load_certified_key(&cert_path, &key_path).expect("load");
+        assert_eq!(key.cert.len(), 1);
+    }
+
+    // Real-handshake check of the SNI split: a client that asks for the
+    // ts.net name must be served (and validate against) the tailscale
+    // certificate, while a client hitting the raw IP — like local `mj`
+    // processes hitting localhost — must still get the self-signed one it
+    // pins. If the resolver picked the wrong certificate either handshake
+    // would fail hostname validation.
+    #[tokio::test]
+    async fn sni_resolver_serves_each_client_its_own_certificate() {
+        install_crypto_provider();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ts_domain = "mybox.tail1234.ts.net";
+
+        let default_cert =
+            generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+                .expect("default cert");
+        let ts_cert =
+            generate_simple_self_signed(vec![ts_domain.to_string()]).expect("tailscale cert");
+        let default_cert_path = dir.path().join("cert.pem");
+        let default_key_path = dir.path().join("key.pem");
+        let ts_cert_path = dir.path().join("tailscale-cert.pem");
+        let ts_key_path = dir.path().join("tailscale-key.pem");
+        std::fs::write(&default_cert_path, default_cert.cert.pem()).expect("write default cert");
+        std::fs::write(&default_key_path, default_cert.key_pair.serialize_pem())
+            .expect("write default key");
+        std::fs::write(&ts_cert_path, ts_cert.cert.pem()).expect("write ts cert");
+        std::fs::write(&ts_key_path, ts_cert.key_pair.serialize_pem()).expect("write ts key");
+
+        let resolver = Arc::new(SniCertResolver {
+            default_key: load_certified_key(&default_cert_path, &default_key_path)
+                .expect("default key"),
+            tailscale_domain: ts_domain.to_string(),
+            tailscale_key: RwLock::new(
+                load_certified_key(&ts_cert_path, &ts_key_path).expect("ts key"),
+            ),
+        });
+        let tls_config = sni_rustls_config(resolver).expect("tls config");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let app = Router::new().route("/ping", get(|| async { "pong" }));
+        let server_task = tokio::spawn(
+            axum_server::from_tcp_rustls(listener, tls_config).serve(app.into_make_service()),
+        );
+
+        let ts_client = reqwest::Client::builder()
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(ts_cert.cert.pem().as_bytes()).expect("ts root"),
+            )
+            .resolve(ts_domain, addr)
+            .build()
+            .expect("ts client");
+        let body = ts_client
+            .get(format!("https://{ts_domain}:{}/ping", addr.port()))
+            .send()
+            .await
+            .expect("request via ts.net SNI")
+            .text()
+            .await
+            .expect("ts body");
+        assert_eq!(body, "pong");
+
+        let pinned_local_client = reqwest::Client::builder()
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(default_cert.cert.pem().as_bytes())
+                    .expect("default root"),
+            )
+            .build()
+            .expect("local client");
+        let body = pinned_local_client
+            .get(format!("https://127.0.0.1:{}/ping", addr.port()))
+            .send()
+            .await
+            .expect("request via raw IP")
+            .text()
+            .await
+            .expect("local body");
+        assert_eq!(body, "pong");
+
+        server_task.abort();
     }
 
     #[cfg(unix)]

@@ -35,4 +35,7 @@ target/
 # Claude worktrees
 .claude
 
+# Codex PR review worktrees
+.codex-pr-review/
+
 .bifrost

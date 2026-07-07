@@ -1,6 +1,6 @@
 [package]
 name = "brokk-mjolnir"
-version = "0.12.2"
+version = "0.13.0"
 edition = "2024"
 description = "Forge-grade terminal client for any Agent Client Protocol (ACP) server"
 license = "GPL-3.0"
@@ -59,6 +59,9 @@ qrcode = { version = "0.14", default-features = false }
 rmcp = { version = "1", features = ["server", "macros", "transport-io"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# Parses the tailscale-issued certificate/key PEMs for the SNI resolver in
+# `mj server --tailscale`. Already in the tree via reqwest's rustls-tls.
+rustls-pemfile = "2"
 # JSON Schema derivation for MCP tool argument structs (used by rmcp's `#[tool]`
 # macro). Already in the tree via agent-client-protocol; pinned to the same 1.x.
 schemars = "1"

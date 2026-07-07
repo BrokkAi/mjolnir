@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -605,6 +605,7 @@ dependencies = [
  "rmcp",
  "rusqlite",
  "rustls",
+ "rustls-pemfile",
  "schemars 1.2.1",
  "semver",
  "serde",

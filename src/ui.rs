@@ -3296,7 +3296,7 @@ fn transcript_export_markdown(state: &AppState) -> String {
                         tool_status_label(view.status)
                     ));
                     for output in &view.body {
-                        push_export_tool_output(&mut out, output);
+                        push_export_tool_output(&mut out, output, view.status);
                     }
                 }
             }
@@ -3312,7 +3312,7 @@ fn push_export_text(out: &mut String, heading: &str, text: &str) {
     out.push_str("\n\n");
 }
 
-fn push_export_tool_output(out: &mut String, output: &ToolCallOutput) {
+fn push_export_tool_output(out: &mut String, output: &ToolCallOutput, tool_status: ToolCallStatus) {
     match output {
         ToolCallOutput::Text(text) => push_export_fence(out, text),
         ToolCallOutput::Diff {
@@ -3325,17 +3325,22 @@ fn push_export_tool_output(out: &mut String, output: &ToolCallOutput) {
             push_export_fence(out, new_text);
         }
         ToolCallOutput::Terminal {
-            terminal_id,
             output,
             truncated,
             exit_status,
+            ..
         } => {
-            out.push_str(&format!(
-                "### Terminal: {}\n\n",
-                escape_markdown_text(terminal_id)
-            ));
+            out.push_str("### Background terminal\n\n");
             if *truncated {
                 out.push_str("_Output truncated._\n\n");
+            }
+            if !output.trim().is_empty() {
+                push_export_fence(out, output);
+            } else if exit_status.is_none() {
+                out.push_str(&format!(
+                    "_{}._\n\n",
+                    terminal_empty_state_label(tool_status)
+                ));
             }
             if let Some(status) = exit_status {
                 out.push_str(&format!(
@@ -3343,7 +3348,6 @@ fn push_export_tool_output(out: &mut String, output: &ToolCallOutput) {
                     terminal_exit_status_label(status)
                 ));
             }
-            push_export_fence(out, output);
         }
         ToolCallOutput::Note(note) => {
             out.push_str(&format!("_Note: {}_\n\n", escape_markdown_text(note)));
@@ -4625,7 +4629,14 @@ fn render_transcript_entry_range(
                     // color carries the tool status. See issue #257.
                     let content_width = width.saturating_sub(TOOL_GUTTER_WIDTH);
                     let mut block: Vec<Line<'static>> = vec![Line::from(spans)];
-                    push_tool_outputs(&mut block, &view.body, content_width, collapse_limit, theme);
+                    push_tool_outputs(
+                        &mut block,
+                        &view.body,
+                        view.status,
+                        content_width,
+                        collapse_limit,
+                        theme,
+                    );
                     for line in block {
                         for row in wrap_tool_line(line, content_width as usize) {
                             out.push(with_tool_gutter(row, color));
@@ -4707,10 +4718,36 @@ fn push_markdown_lines(
     indent: usize,
     theme: TerminalTheme,
 ) {
+    push_markdown_lines_limited_inner(out, text, indent, None, theme, false);
+}
+
+fn push_tool_markdown_lines_limited(
+    out: &mut Vec<Line<'static>>,
+    text: String,
+    indent: usize,
+    collapse_limit: Option<usize>,
+    theme: TerminalTheme,
+) {
+    push_markdown_lines_limited_inner(out, text, indent, collapse_limit, theme, true);
+}
+
+fn push_markdown_lines_limited_inner(
+    out: &mut Vec<Line<'static>>,
+    text: String,
+    indent: usize,
+    collapse_limit: Option<usize>,
+    theme: TerminalTheme,
+    use_tool_output_style: bool,
+) {
     let prefix = " ".repeat(indent);
     let mut in_code_block = false;
     let mut code_lang = String::new();
-    for raw in text.split('\n') {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let (visible_count, hidden) = match collapse_limit {
+        Some(limit) if lines.len() > limit => (limit, lines.len() - limit),
+        _ => (lines.len(), 0),
+    };
+    for raw in &lines[..visible_count] {
         let trimmed = raw.trim_start();
         if trimmed.starts_with("```") {
             in_code_block = !in_code_block;
@@ -4745,6 +4782,12 @@ fn push_markdown_lines(
             out.push(Line::from(""));
             continue;
         }
+
+        let base_style = if use_tool_output_style {
+            tool_output_line_style(raw, theme)
+        } else {
+            Style::default()
+        };
 
         if let Some((level, heading)) = markdown_heading(raw) {
             let marker = "#".repeat(level);
@@ -4782,7 +4825,7 @@ fn push_markdown_lines(
                 format!("{prefix}- "),
                 Style::default().fg(theme.muted),
             )];
-            spans.extend(inline_markdown_spans(item, theme));
+            spans.extend(inline_markdown_spans_with_style(item, theme, base_style));
             out.push(Line::from(spans));
             continue;
         }
@@ -4792,14 +4835,17 @@ fn push_markdown_lines(
                 format!("{prefix}{number}. "),
                 Style::default().fg(theme.muted),
             )];
-            spans.extend(inline_markdown_spans(item, theme));
+            spans.extend(inline_markdown_spans_with_style(item, theme, base_style));
             out.push(Line::from(spans));
             continue;
         }
 
-        let mut spans = vec![Span::raw(prefix.clone())];
-        spans.extend(inline_markdown_spans(raw, theme));
+        let mut spans = vec![Span::styled(prefix.clone(), base_style)];
+        spans.extend(inline_markdown_spans_with_style(raw, theme, base_style));
         out.push(Line::from(spans));
+    }
+    if hidden > 0 {
+        push_collapse_hint(out, indent, hidden, theme);
     }
 }
 
@@ -4839,54 +4885,107 @@ fn markdown_ordered_item(raw: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn inline_markdown_spans(raw: &str, theme: TerminalTheme) -> Vec<Span<'static>> {
+fn inline_markdown_spans_with_style(
+    raw: &str,
+    theme: TerminalTheme,
+    base_style: Style,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = raw;
+    let mut previous = None;
     while !rest.is_empty() {
         if let Some(after) = rest.strip_prefix("`")
             && let Some(end) = after.find('`')
         {
             let (code, tail) = after.split_at(end);
-            spans.push(Span::styled(
-                code.to_string(),
-                Style::default().fg(theme.code),
-            ));
+            spans.push(Span::styled(code.to_string(), base_style.fg(theme.code)));
             rest = &tail[1..];
+            previous = code.chars().next_back();
             continue;
         }
         if let Some(after) = rest.strip_prefix("**")
             && let Some(end) = after.find("**")
         {
             let (strong, tail) = after.split_at(end);
-            spans.push(Span::styled(
-                strong.to_string(),
-                Style::default().add_modifier(Modifier::BOLD),
+            spans.extend(inline_markdown_spans_with_style(
+                strong,
+                theme,
+                base_style.add_modifier(Modifier::BOLD),
             ));
             rest = &tail[2..];
+            previous = strong.chars().next_back();
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("__")
+            && underscore_can_open(previous, after)
+            && let Some(end) = find_underscore_emphasis_end(after, "__")
+        {
+            let (strong, tail) = after.split_at(end);
+            spans.extend(inline_markdown_spans_with_style(
+                strong,
+                theme,
+                base_style.add_modifier(Modifier::BOLD),
+            ));
+            rest = &tail[2..];
+            previous = strong.chars().next_back();
             continue;
         }
         if let Some(after) = rest.strip_prefix("*")
             && let Some(end) = after.find('*')
         {
             let (em, tail) = after.split_at(end);
-            spans.push(Span::styled(
-                em.to_string(),
-                Style::default().add_modifier(Modifier::ITALIC),
+            spans.extend(inline_markdown_spans_with_style(
+                em,
+                theme,
+                base_style.add_modifier(Modifier::ITALIC),
             ));
             rest = &tail[1..];
+            previous = em.chars().next_back();
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("_")
+            && underscore_can_open(previous, after)
+            && let Some(end) = find_underscore_emphasis_end(after, "_")
+        {
+            let (em, tail) = after.split_at(end);
+            spans.extend(inline_markdown_spans_with_style(
+                em,
+                theme,
+                base_style.add_modifier(Modifier::ITALIC),
+            ));
+            rest = &tail[1..];
+            previous = em.chars().next_back();
             continue;
         }
 
         let next = rest
             .char_indices()
             .skip(1)
-            .find_map(|(idx, ch)| (ch == '`' || ch == '*').then_some(idx))
+            .find_map(|(idx, ch)| (ch == '`' || ch == '*' || ch == '_').then_some(idx))
             .unwrap_or(rest.len());
         let (plain, tail) = rest.split_at(next);
-        spans.push(Span::raw(plain.to_string()));
+        spans.push(Span::styled(plain.to_string(), base_style));
+        previous = plain.chars().next_back().or(previous);
         rest = tail;
     }
     spans
+}
+
+fn underscore_can_open(previous: Option<char>, after: &str) -> bool {
+    let Some(next) = after.chars().next() else {
+        return false;
+    };
+    !next.is_whitespace() && !previous.is_some_and(|ch| ch.is_alphanumeric())
+}
+
+fn find_underscore_emphasis_end(after: &str, marker: &str) -> Option<usize> {
+    after.match_indices(marker).find_map(|(idx, _)| {
+        let before = after[..idx].chars().next_back()?;
+        let next = after[idx + marker.len()..].chars().next();
+        (!(before.is_whitespace()
+            || before.is_alphanumeric() && next.is_some_and(|ch| ch.is_alphanumeric())))
+        .then_some(idx)
+    })
 }
 
 /// Left rail drawn before every line of a tool-call block, and its width in
@@ -5014,6 +5113,7 @@ fn wrap_tool_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
 fn push_tool_outputs(
     out: &mut Vec<Line<'static>>,
     outputs: &[ToolCallOutput],
+    tool_status: agent_client_protocol::schema::v1::ToolCallStatus,
     width: u16,
     collapse_limit: Option<usize>,
     theme: TerminalTheme,
@@ -5021,7 +5121,7 @@ fn push_tool_outputs(
     for output in outputs {
         match output {
             ToolCallOutput::Text(text) => {
-                push_tool_text_lines(out, text.clone(), 2, collapse_limit, theme)
+                push_tool_markdown_lines_limited(out, text.clone(), 2, collapse_limit, theme)
             }
             ToolCallOutput::Diff {
                 path,
@@ -5037,23 +5137,31 @@ fn push_tool_outputs(
                 theme,
             ),
             ToolCallOutput::Terminal {
-                terminal_id,
                 output,
                 truncated,
                 exit_status,
+                ..
             } => {
-                out.push(Line::from(vec![
-                    Span::styled("  terminal ", Style::default().fg(theme.muted)),
-                    Span::styled(terminal_id.clone(), Style::default().fg(theme.terminal)),
-                ]));
+                out.push(Line::from(Span::styled(
+                    "  background terminal",
+                    Style::default()
+                        .fg(theme.terminal)
+                        .add_modifier(Modifier::BOLD),
+                )));
                 if *truncated {
                     out.push(Line::from(Span::styled(
                         "    [output truncated]",
                         Style::default().fg(theme.muted),
                     )));
                 }
-                if !output.is_empty() {
+                if !output.trim().is_empty() {
                     push_tool_text_lines(out, output.clone(), 4, collapse_limit, theme);
+                } else if exit_status.is_none() {
+                    let state = terminal_empty_state_label(tool_status);
+                    out.push(Line::from(Span::styled(
+                        format!("    {state}"),
+                        Style::default().fg(theme.muted),
+                    )));
                 }
                 if let Some(status) = exit_status {
                     out.push(Line::from(Span::styled(
@@ -5069,6 +5177,13 @@ fn push_tool_outputs(
                 )));
             }
         }
+    }
+}
+
+fn terminal_empty_state_label(tool_status: ToolCallStatus) -> &'static str {
+    match tool_status {
+        ToolCallStatus::Pending | ToolCallStatus::InProgress => "waiting for output",
+        _ => "no terminal output received",
     }
 }
 
@@ -7336,8 +7451,8 @@ mod tests {
         ElicitationMode, ElicitationSchema, ElicitationSessionScope, ElicitationUrlMode,
         EnumOption, PermissionOption, PermissionOptionKind, SessionConfigOption,
         SessionConfigSelectOption, SessionConfigValueId, SessionUpdate, StopReason,
-        StringPropertySchema, TextContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
-        ToolKind,
+        StringPropertySchema, TerminalExitStatus, TextContent, ToolCallStatus, ToolCallUpdate,
+        ToolCallUpdateFields, ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::{Backend, TestBackend};
@@ -9047,7 +9162,15 @@ mod tests {
                 title: "cargo `test`".to_string(),
                 kind: ToolKind::Execute,
                 status: ToolCallStatus::Completed,
-                body: vec![ToolCallOutput::Text("```\nnot markdown".to_string())],
+                body: vec![
+                    ToolCallOutput::Text("```\nnot markdown".to_string()),
+                    ToolCallOutput::Terminal {
+                        terminal_id: "call_q403CLAwcOWdujDT6Xylsua6".to_string(),
+                        output: String::new(),
+                        truncated: false,
+                        exit_status: None,
+                    },
+                ],
             },
         );
         state.transcript.push(Entry::ToolCall("call-1".to_string()));
@@ -9060,6 +9183,12 @@ mod tests {
         assert!(markdown.contains("- Kind: exec"));
         assert!(markdown.contains("- Status: done"));
         assert!(markdown.contains("````text\n```\nnot markdown\n````"));
+        assert!(markdown.contains("### Background terminal"));
+        assert!(markdown.contains("_no terminal output received._"));
+        assert!(
+            !markdown.contains("call_q403"),
+            "terminal ids should not leak into exported transcript markdown: {markdown}"
+        );
     }
 
     #[test]
@@ -10569,11 +10698,194 @@ mod tests {
 
         assert!(rendered.iter().any(|line| line == "│ tool exec run checks"));
         assert!(rendered.iter().any(|line| line == "│   ## Output"));
-        assert!(rendered.iter().any(|line| line == "│   `ok`"));
+        assert!(rendered.iter().any(|line| line == "│   ok"));
         assert!(rendered.iter().any(|line| line == "│   diff src/main.rs"));
         assert!(rendered.iter().any(|line| line == "│     - old"));
         assert!(rendered.iter().any(|line| line == "│     + new"));
-        assert!(rendered.iter().any(|line| line == "│   terminal term-1"));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "│   background terminal")
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "│     no terminal output received")
+        );
+        assert!(
+            !rendered.iter().any(|line| line.contains("term-1")),
+            "terminal ids should not leak into user-facing transcript rows: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn transcript_terminal_output_renders_state_without_raw_id() {
+        let mut state = AppState::new();
+        state.tool_calls.insert(
+            "call-q403".to_string(),
+            crate::app::ToolCallView {
+                title: "cargo test".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Failed,
+                body: vec![ToolCallOutput::Terminal {
+                    terminal_id: "call_q403CLAwcOWdujDT6Xylsua6".to_string(),
+                    output: "error: test failed\n".to_string(),
+                    truncated: true,
+                    exit_status: Some(TerminalExitStatus::new().exit_code(101)),
+                }],
+            },
+        );
+        state
+            .transcript
+            .push(Entry::ToolCall("call-q403".to_string()));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "│ tool [failed] exec cargo test")
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "│   background terminal")
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "│     [output truncated]")
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "│     error: test failed")
+        );
+        assert!(rendered.iter().any(|line| line == "│     exit code 101"));
+        assert!(
+            !rendered.iter().any(|line| line.contains("call_q403")),
+            "terminal ids should not leak into user-facing transcript rows: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn transcript_renders_markdown_in_tool_text_output() {
+        let mut state = AppState::new();
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "activate_skill".to_string(),
+                kind: ToolKind::Read,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Text(
+                    "_Auto permissions **approved** this tool call._\n\nReason: `read/search/fetch`\n\n- visible from anvil"
+                        .to_string(),
+                )],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "│   Auto permissions approved this tool call."),
+            "rendered lines: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "│   Reason: read/search/fetch"),
+            "rendered lines: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "│   - visible from anvil"),
+            "rendered lines: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn transcript_tool_markdown_preserves_technical_underscores() {
+        let mut state = AppState::new();
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "log".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Text(
+                    "src/my_file.rs\nfoo_bar_baz\n_Auto permissions approved._".to_string(),
+                )],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert!(rendered.iter().any(|line| line == "│   src/my_file.rs"));
+        assert!(rendered.iter().any(|line| line == "│   foo_bar_baz"));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "│   Auto permissions approved."),
+            "rendered lines: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn transcript_tool_markdown_preserves_log_severity_styles() {
+        let mut state = AppState::new();
+        let theme = state.theme;
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "log".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Text("warning: **check**".to_string())],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let lines = render_transcript_lines(&state, 80);
+        let warning_line = lines
+            .iter()
+            .find(|line| line_text(line) == "│   warning: check")
+            .unwrap_or_else(|| {
+                panic!(
+                    "rendered lines: {:?}",
+                    lines.iter().map(line_text).collect::<Vec<_>>()
+                )
+            });
+
+        assert!(
+            warning_line
+                .spans
+                .iter()
+                .skip(1)
+                .any(|span| span.style.fg == Some(theme.warning)),
+            "warning line should retain tool-output severity color: {warning_line:?}"
+        );
+        assert!(
+            warning_line.spans.iter().skip(1).any(|span| {
+                span.content.as_ref() == "check"
+                    && span.style.fg == Some(theme.warning)
+                    && span.style.add_modifier.contains(Modifier::BOLD)
+            }),
+            "inline markdown should still style the strong segment: {warning_line:?}"
+        );
     }
 
     #[test]
@@ -10668,7 +10980,7 @@ mod tests {
     }
 
     #[test]
-    fn user_prompts_and_tool_text_render_as_plain_text() {
+    fn user_prompts_render_plain_text_tool_text_renders_markdown() {
         let mut state = AppState::new();
         state.transcript.push(Entry::UserPrompt(
             "# literal\n`code` and **bold**".to_string(),
@@ -10694,7 +11006,7 @@ mod tests {
         assert!(rendered.iter().any(|line| line == "# literal"));
         assert!(rendered.iter().any(|line| line == "`code` and **bold**"));
         assert!(rendered.iter().any(|line| line == "│   # stdout"));
-        assert!(rendered.iter().any(|line| line == "│   `ok` and **bold**"));
+        assert!(rendered.iter().any(|line| line == "│   ok and bold"));
     }
 
     #[test]

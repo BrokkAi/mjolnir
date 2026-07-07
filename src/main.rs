@@ -31,6 +31,7 @@ mod session;
 mod speech;
 mod spinner;
 mod spinner_picker;
+mod tailscale;
 mod term;
 mod text;
 mod theme;
@@ -221,6 +222,12 @@ struct ServerArgs {
     /// Public hostname to embed in the login QR code and TLS certificate.
     #[arg(long)]
     hostname: Option<String>,
+    /// Serve a trusted HTTPS certificate for this machine's tailscale
+    /// (ts.net) name, minted via `tailscale cert`, so tailnet devices get no
+    /// browser certificate warning. Requires tailscale to be running with
+    /// MagicDNS and HTTPS Certificates enabled on the tailnet.
+    #[arg(long, conflicts_with = "hostname")]
+    tailscale: bool,
     /// Days of disconnected-session history to keep. Sessions (and their
     /// queued prompts) whose last update is older are deleted by the
     /// periodic sweeper. Pass 0 to keep history forever.
@@ -373,15 +380,16 @@ async fn main() -> Result<()> {
             Commands::Server(args) => {
                 let workspace_roots =
                     validate_workspace_roots(&cwd, &top_level_additional_directories)?;
-                remote::run_server(
-                    args.hostname,
-                    args.history_days,
-                    args.session_ttl_days,
-                    args.logout_all,
+                remote::run_server(remote::ServerOptions {
+                    hostname: args.hostname,
+                    tailscale: args.tailscale,
+                    history_days: args.history_days,
+                    session_ttl_days: args.session_ttl_days,
+                    logout_all: args.logout_all,
                     cwd,
-                    workspace_roots.additional_directories().to_vec(),
+                    additional_directories: workspace_roots.additional_directories().to_vec(),
                     fs_max_text_bytes,
-                )
+                })
                 .await
             }
             Commands::Mcp(_) => {
@@ -1564,6 +1572,12 @@ async fn run_session(
         env: agent.env.clone(),
         agent_stderr: runtime_options.agent_stderr.clone(),
         fs_max_text_bytes: runtime_options.fs_max_text_bytes,
+        agent_source_id: Some(agent.source_id.clone()),
+        config_path: Some(config::default_config_path()),
+        saved_session_config: config::Config::load(&config::default_config_path())
+            .ok()
+            .and_then(|cfg| cfg.session_config.get(&agent.source_id).cloned())
+            .unwrap_or_default(),
     };
 
     // Drive the ACP runtime on its own task so the UI can own the
@@ -2054,6 +2068,7 @@ mod tests {
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                session_config: Default::default(),
                 scores: config::ScoresConfig::default(),
             },
             None
@@ -2078,6 +2093,7 @@ mod tests {
                 agent: Some(custom_default),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                session_config: Default::default(),
                 scores: config::ScoresConfig::default(),
             },
             None
@@ -2109,6 +2125,7 @@ mod tests {
                 agent: Some(configured),
                 favorite_agents: Vec::new(),
                 custom_agents: Vec::new(),
+                session_config: Default::default(),
                 scores: config::ScoresConfig::default(),
             },
             None
@@ -2186,6 +2203,7 @@ mod tests {
                 args: vec!["--flag".to_string()],
                 description: "test".to_string(),
             }],
+            session_config: Default::default(),
             scores: config::ScoresConfig::default(),
         };
         let prefs = picker_preferences_from_config(&cfg);
@@ -2370,6 +2388,7 @@ mod tests {
         match cli.command {
             Some(Commands::Server(args)) => {
                 assert!(args.hostname.is_none());
+                assert!(!args.tailscale);
                 assert_eq!(args.session_ttl_days, 30);
                 assert!(!args.logout_all);
             }
@@ -2407,6 +2426,26 @@ mod tests {
             }
             _ => panic!("expected Server subcommand"),
         }
+    }
+
+    #[test]
+    fn parse_server_subcommand_with_tailscale() {
+        let cli = Cli::try_parse_from(["mj", "server", "--tailscale"]).expect("parse");
+        match cli.command {
+            Some(Commands::Server(args)) => {
+                assert!(args.tailscale);
+                assert!(args.hostname.is_none());
+            }
+            _ => panic!("expected Server subcommand"),
+        }
+    }
+
+    #[test]
+    fn parse_server_rejects_tailscale_with_hostname() {
+        let error =
+            Cli::try_parse_from(["mj", "server", "--tailscale", "--hostname", "example.com"])
+                .expect_err("conflicting flags");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
