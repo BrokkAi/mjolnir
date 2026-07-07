@@ -74,6 +74,9 @@ harness again. The agent picker stays open for that explicit new-session flow
 until you select an agent or cancel it. Use `/load` to open the session picker
 for the current agent.
 
+In the agent picker, `f` toggles a favorite, `d` sets the default, `e` edits a
+custom agent, and `x` or Delete removes a custom agent after confirmation.
+
 ## Why Multiple Harnesses
 
 `mj` is not a lowest-common-denominator model picker. The point is to keep each
