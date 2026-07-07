@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use agent_client_protocol::schema::v1::{
     ContentBlock, PermissionOptionKind, SessionConfigId, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate,
-    ToolCallContent, ToolCallStatus, ToolKind,
+    ToolCallContent, ToolCallStatus, ToolCallUpdateFields, ToolKind,
 };
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
@@ -290,6 +290,14 @@ pub struct TranscriptEntry {
     /// re-sniffing the command text. Absent for non-tool entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_kind: Option<String>,
+    /// Structured tool title preserved for viewers that need to distinguish
+    /// the command/title from formatted tool content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_title: Option<String>,
+    /// Formatted tool content without the title prefix. Kept separate so
+    /// execute commands containing blank lines do not get split incorrectly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_body: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -415,6 +423,7 @@ struct ToolTranscriptEntry {
     title: String,
     content: Vec<ToolCallContent>,
     status: ToolCallStatus,
+    kind: ToolKind,
 }
 
 #[derive(Debug, Clone)]
@@ -591,21 +600,19 @@ impl TrackerState {
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 self.agent_message_open = false;
-                if let Some(content) = &update.fields.content {
+                let tool_call_id = update.tool_call_id.to_string();
+                if !self.update_tool_transcript_entry(&tool_call_id, &update.fields) {
                     self.push_tool_transcript_entry(
-                        update.tool_call_id.to_string(),
+                        tool_call_id,
                         update
                             .fields
                             .title
                             .clone()
                             .unwrap_or_else(|| "tool".to_string()),
-                        content.clone(),
+                        update.fields.content.clone().unwrap_or_default(),
                         update.fields.status.unwrap_or(ToolCallStatus::Pending),
                         update.fields.kind.unwrap_or(ToolKind::Other),
                     );
-                }
-                if let Some(status) = update.fields.status {
-                    self.update_tool_transcript_status(&update.tool_call_id.to_string(), status);
                 }
                 self.touch();
             }
@@ -633,12 +640,7 @@ impl TrackerState {
                 continue;
             }
             if let Some(entry) = self.transcript.get_mut(*index) {
-                entry.text = format_tool_call(
-                    &tool_entry.title,
-                    &tool_entry.content,
-                    tool_entry.status,
-                    &self.terminal_outputs,
-                );
+                Self::render_tool_transcript_entry(entry, tool_entry, &self.terminal_outputs);
                 changed = true;
             }
         }
@@ -664,6 +666,8 @@ impl TrackerState {
             text,
             timestamp: now_rfc3339(),
             tool_kind: None,
+            tool_title: None,
+            tool_body: None,
         });
         index
     }
@@ -676,41 +680,60 @@ impl TrackerState {
         status: ToolCallStatus,
         kind: ToolKind,
     ) {
-        let index = self.push_transcript_entry(
-            "tool",
-            format_tool_call(&title, &content, status, &self.terminal_outputs),
-        );
-        // Preserve the ACP tool kind so the viewer highlights execute calls by
-        // semantics rather than guessing from the command text's shape. This
-        // rides on the TranscriptEntry (rebuilt-in-place text updates leave it
-        // intact), so ToolTranscriptEntry need not carry it.
-        self.transcript[index].tool_kind = Some(crate::labels::tool_kind_label(kind).to_string());
-        self.tool_transcript_entries.insert(
-            index,
-            ToolTranscriptEntry {
-                tool_call_id,
-                title,
-                content,
-                status,
-            },
-        );
+        let index = self.push_transcript_entry("tool", String::new());
+        let tool_entry = ToolTranscriptEntry {
+            tool_call_id,
+            title,
+            content,
+            status,
+            kind,
+        };
+        if let Some(entry) = self.transcript.get_mut(index) {
+            Self::render_tool_transcript_entry(entry, &tool_entry, &self.terminal_outputs);
+        }
+        self.tool_transcript_entries.insert(index, tool_entry);
     }
 
-    fn update_tool_transcript_status(&mut self, tool_call_id: &str, status: ToolCallStatus) {
+    fn update_tool_transcript_entry(
+        &mut self,
+        tool_call_id: &str,
+        fields: &ToolCallUpdateFields,
+    ) -> bool {
+        let mut updated = false;
         for (index, tool_entry) in &mut self.tool_transcript_entries {
-            if tool_entry.tool_call_id != tool_call_id || tool_entry.status == status {
+            if tool_entry.tool_call_id != tool_call_id {
                 continue;
             }
-            tool_entry.status = status;
-            if let Some(entry) = self.transcript.get_mut(*index) {
-                entry.text = format_tool_call(
-                    &tool_entry.title,
-                    &tool_entry.content,
-                    tool_entry.status,
-                    &self.terminal_outputs,
-                );
+            if let Some(title) = &fields.title {
+                tool_entry.title = title.clone();
             }
+            if let Some(content) = &fields.content {
+                tool_entry.content = content.clone();
+            }
+            if let Some(status) = fields.status {
+                tool_entry.status = status;
+            }
+            if let Some(kind) = fields.kind {
+                tool_entry.kind = kind;
+            }
+            if let Some(entry) = self.transcript.get_mut(*index) {
+                Self::render_tool_transcript_entry(entry, tool_entry, &self.terminal_outputs);
+            }
+            updated = true;
         }
+        updated
+    }
+
+    fn render_tool_transcript_entry(
+        entry: &mut TranscriptEntry,
+        tool_entry: &ToolTranscriptEntry,
+        terminal_outputs: &HashMap<String, TerminalOutputSnapshot>,
+    ) {
+        let tool_body = format_tool_body(&tool_entry.content, tool_entry.status, terminal_outputs);
+        entry.text = format_tool_call_from_body(&tool_entry.title, tool_body.as_deref());
+        entry.tool_kind = Some(crate::labels::tool_kind_label(tool_entry.kind).to_string());
+        entry.tool_title = Some(tool_entry.title.clone());
+        entry.tool_body = tool_body;
     }
 
     fn snapshot(&self) -> Option<SessionRecord> {
@@ -3293,12 +3316,18 @@ fn content_block_text(block: &ContentBlock) -> String {
     }
 }
 
-fn format_tool_call(
-    title: &str,
+fn format_tool_call_from_body(title: &str, body: Option<&str>) -> String {
+    match body {
+        Some(body) => format!("{title}\n\n{body}"),
+        None => title.to_string(),
+    }
+}
+
+fn format_tool_body(
     content: &[ToolCallContent],
     tool_status: ToolCallStatus,
     terminal_outputs: &HashMap<String, TerminalOutputSnapshot>,
-) -> String {
+) -> Option<String> {
     let mut parts = Vec::new();
     for item in content {
         match item {
@@ -3324,9 +3353,9 @@ fn format_tool_call(
     }
 
     if parts.is_empty() {
-        title.to_string()
+        None
     } else {
-        format!("{}\n\n{}", title, parts.join("\n\n"))
+        Some(parts.join("\n\n"))
     }
 }
 
@@ -3632,6 +3661,65 @@ mod tests {
     }
 
     #[test]
+    fn tool_transcript_kind_update_without_content_updates_existing_entry() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let tool_call = ToolCall::new("call-1", "cargo test");
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+
+        let mut fields = ToolCallUpdateFields::default();
+        fields.kind = Some(ToolKind::Execute);
+        state.observe_session_update(&SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "call-1", fields,
+        )));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript.len(), 1);
+        assert_eq!(snapshot.transcript[0].tool_kind.as_deref(), Some("execute"));
+        assert_eq!(
+            snapshot.transcript[0].tool_title.as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(snapshot.transcript[0].text, "cargo test");
+    }
+
+    #[test]
+    fn tool_transcript_preserves_multiline_execute_title_boundary() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let title = "cat <<'EOF'\nfirst\n\nsecond\nEOF";
+        let mut tool_call = ToolCall::new("call-1", title);
+        tool_call.kind = ToolKind::Execute;
+        tool_call.content = vec![ToolCallContent::Content(
+            agent_client_protocol::schema::v1::Content::new(ContentBlock::Text(
+                agent_client_protocol::schema::v1::TextContent::new("terminal output"),
+            )),
+        )];
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.transcript.len(), 1);
+        assert_eq!(snapshot.transcript[0].tool_kind.as_deref(), Some("execute"));
+        assert_eq!(snapshot.transcript[0].tool_title.as_deref(), Some(title));
+        assert_eq!(
+            snapshot.transcript[0].tool_body.as_deref(),
+            Some("terminal output")
+        );
+        assert_eq!(
+            snapshot.transcript[0].text,
+            format!("{title}\n\nterminal output")
+        );
+    }
+
+    #[test]
     fn tracker_renders_pending_terminal_without_snapshot_as_waiting() {
         let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
         state.observe_event(&UiEvent::SessionStarted {
@@ -3768,12 +3856,16 @@ mod tests {
                     text: "hello".to_string(),
                     timestamp: "2026-06-03T10:00:05Z".to_string(),
                     tool_kind: None,
+                    tool_title: None,
+                    tool_body: None,
                 },
                 TranscriptEntry {
                     kind: "agent".to_string(),
                     text: "hi".to_string(),
                     timestamp: "2026-06-03T10:00:06Z".to_string(),
                     tool_kind: None,
+                    tool_title: None,
+                    tool_body: None,
                 },
             ],
             queued_prompt_count: 0,
@@ -3793,12 +3885,16 @@ mod tests {
                         text: "hello".to_string(),
                         timestamp: "2026-06-03T10:00:05Z".to_string(),
                         tool_kind: None,
+                        tool_title: None,
+                        tool_body: None,
                     },
                     TranscriptEntry {
                         kind: "agent".to_string(),
                         text: "hi there".to_string(),
                         timestamp: "2026-06-03T10:00:06Z".to_string(),
                         tool_kind: None,
+                        tool_title: None,
+                        tool_body: None,
                     },
                 ],
                 ..session.clone()

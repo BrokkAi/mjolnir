@@ -2044,7 +2044,7 @@
       function transcriptActivitySignature(session) {
         const transcript = Array.isArray(session.transcript) ? session.transcript : [];
         const last = transcript[transcript.length - 1];
-        return `${transcript.length}:${last ? (last.text || "").length : 0}`;
+        return `${transcript.length}:${last ? entryActivitySignature(last) : ""}`;
       }
 
       function noteSessionActivity() {
@@ -3027,21 +3027,55 @@
         }
       }
 
-      // An execute tool card is "<command>\n\n<terminal output>" (see
-      // format_tool_call in remote.rs). The command line is highlighted by
-      // ToolKind rather than by a prompt prefix the agent may omit; the rest —
-      // terminal output — flows through the normal mono renderer.
-      function appendExecuteToolBody(body, text) {
+      function legacyToolTextParts(text) {
         const sep = text.indexOf("\n\n");
-        const command = sep === -1 ? text : text.slice(0, sep);
-        const rest = sep === -1 ? "" : text.slice(sep + 2);
+        return {
+          title: sep === -1 ? text : text.slice(0, sep),
+          body: sep === -1 ? "" : text.slice(sep + 2),
+        };
+      }
+
+      function structuredToolTextParts(entry) {
+        const text = entry.text || "";
+        if (typeof entry.tool_title === "string" || typeof entry.tool_body === "string") {
+          return {
+            title: typeof entry.tool_title === "string" ? entry.tool_title : "",
+            body: typeof entry.tool_body === "string" ? entry.tool_body : "",
+          };
+        }
+        return legacyToolTextParts(text);
+      }
+
+      // Execute tool cards carry structured title/body fields when published
+      // by current mj builds. Fall back to the old flattened split for stored
+      // sessions written before those fields existed.
+      function appendExecuteToolBody(body, entry) {
+        const parts = structuredToolTextParts(entry);
         const pre = document.createElement("pre");
         pre.className = "entry-text";
-        appendCommandInline(pre, command);
+        appendCommandInline(pre, parts.title);
         body.appendChild(pre);
-        if (rest.trim()) {
-          body.appendChild(renderRichText(rest, "mono"));
+        if (parts.body.trim()) {
+          body.appendChild(renderRichText(parts.body, "mono"));
         }
+      }
+
+      function entryRenderSignature(entry) {
+        return [
+          entry.text || "",
+          entry.tool_kind || "",
+          entry.tool_title || "",
+          entry.tool_body || "",
+        ].join("\u0000");
+      }
+
+      function entryActivitySignature(entry) {
+        return [
+          (entry.text || "").length,
+          entry.tool_kind || "",
+          (entry.tool_title || "").length,
+          (entry.tool_body || "").length,
+        ].join(":");
       }
 
       function setEntryBody(refs, entry) {
@@ -3057,7 +3091,7 @@
         const voice = refs.kind === "agent" || refs.kind === "thought" ? "prose" : "mono";
         const text = entry.text || "";
         if (refs.kind === "tool" && entry.tool_kind === "execute" && text.trim()) {
-          appendExecuteToolBody(refs.body, text);
+          appendExecuteToolBody(refs.body, entry);
         } else {
           refs.body.appendChild(renderRichText(text, voice));
         }
@@ -3121,6 +3155,7 @@
           kind,
           timestamp: entry.timestamp || "",
           text: entry.text || "",
+          renderSignature: entryRenderSignature(entry),
           el,
           body: el.querySelector(".entry-body"),
         };
@@ -3194,8 +3229,9 @@
           transcriptEl.replaceChildren();
         }
 
-        // Match the rendered prefix by position (kind + timestamp identify an
-        // entry; only the last entry's text grows while streaming).
+        // Match the rendered prefix by position. Kind + timestamp identify an
+        // entry; the render signature catches streaming text and tool metadata
+        // updates without rebuilding stable DOM nodes.
         let matched = 0;
         const limit = Math.min(renderedEntries.length, transcript.length);
         while (matched < limit) {
@@ -3210,8 +3246,10 @@
           const have = renderedEntries[i];
           const want = transcript[i];
           const text = want.text || "";
-          if (have.text !== text) {
+          const renderSignature = entryRenderSignature(want);
+          if (have.renderSignature !== renderSignature) {
             have.text = text;
+            have.renderSignature = renderSignature;
             setEntryBody(have, want);
           }
         }
