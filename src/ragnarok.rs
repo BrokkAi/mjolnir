@@ -911,7 +911,7 @@ pub struct Launch {
 /// Use the session's score store when it has a catalog; otherwise load one
 /// (cache → network → bundled snapshot; never fails) so Ragnarok works even
 /// when the picker's score display is disabled.
-async fn ensure_scores(store: &ScoreStore, user_cfg: &Config) -> ScoreStore {
+pub(crate) async fn ensure_scores(store: &ScoreStore, user_cfg: &Config) -> ScoreStore {
     if store.has_catalog() {
         return store.clone();
     }
@@ -937,7 +937,7 @@ async fn ensure_scores(store: &ScoreStore, user_cfg: &Config) -> ScoreStore {
 /// Probe every configured agent (the picker's default view: default +
 /// favorites + curated + custom), read each one's real model list, and keep
 /// the Elo-rated models. Result is sorted best-Elo-first.
-async fn muster(
+pub(crate) async fn muster(
     cfg: &BattleConfig,
     user_cfg: &Config,
     store: &ScoreStore,
@@ -1187,7 +1187,7 @@ where
     Some(pool[ranked[choice].0].clone())
 }
 
-fn select_judge_only_reviewer(
+pub(crate) fn select_judge_only_reviewer(
     pool: &[Candidate],
     current_roster: &[Candidate],
     survivor: FighterId,
@@ -1305,7 +1305,7 @@ pub fn select_fighters(pool: &[Candidate], want: usize) -> Vec<Candidate> {
 // chosen — an explicit denial keeps the turn alive where a cancel kills it.
 
 /// What a turn streamed, reduced to what the arena cares about.
-enum TurnEvent {
+pub(crate) enum TurnEvent {
     Message(String),
     Thought(String),
     Tool {
@@ -1318,14 +1318,14 @@ enum TurnEvent {
 }
 
 #[derive(Debug)]
-struct TurnOutcome {
-    text: String,
-    stop: StopReason,
+pub(crate) struct TurnOutcome {
+    pub text: String,
+    pub stop: StopReason,
 }
 
 /// A live agent subprocess + session, driven over the same channel pair the
 /// TUI uses.
-struct AgentHandle {
+pub(crate) struct AgentHandle {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     events: mpsc::UnboundedReceiver<UiEvent>,
     runtime: tokio::task::JoinHandle<Result<()>>,
@@ -1336,9 +1336,10 @@ struct AgentHandle {
 }
 
 impl AgentHandle {
-    async fn connect(
+    pub(crate) async fn connect(
         launch: &Launch,
         cwd: &Path,
+        additional_directories: &[PathBuf],
         abort: watch::Receiver<bool>,
         access_mode: acp::RuntimeAccessMode,
     ) -> Result<Self> {
@@ -1348,7 +1349,7 @@ impl AgentHandle {
             command: launch.program.clone(),
             args: launch.args.clone(),
             cwd: cwd.to_path_buf(),
-            additional_directories: Vec::new(),
+            additional_directories: additional_directories.to_vec(),
             resume_session: None,
             env: launch.env.clone(),
             agent_stderr: None,
@@ -1435,7 +1436,7 @@ impl AgentHandle {
     /// model option carries the requested value; failure surfaces as a
     /// "session config update failed" warning. Already-current models skip
     /// the round trip entirely.
-    async fn arm_model(&mut self, model_value: &str) -> Result<()> {
+    pub(crate) async fn arm_model(&mut self, model_value: &str) -> Result<()> {
         if self.model_is_current(model_value) {
             return Ok(());
         }
@@ -1540,18 +1541,29 @@ impl AgentHandle {
     /// through `on_event`. A rejection caused by a still-in-flight config
     /// update ([`Self::arm_model`] should prevent it, but belt and braces)
     /// re-sends the prompt a bounded number of times instead of failing.
-    async fn prompt(
+    pub(crate) async fn prompt(
         &mut self,
         text: String,
+        budget: Duration,
+        on_event: impl FnMut(TurnEvent),
+    ) -> Result<TurnOutcome> {
+        self.prompt_with_images(text, Vec::new(), budget, on_event)
+            .await
+    }
+
+    /// Send one prompt with optional image blocks and drive it to completion.
+    /// Text-only callers should use [`Self::prompt`].
+    pub(crate) async fn prompt_with_images(
+        &mut self,
+        text: String,
+        images: Vec<crate::event::PromptImage>,
         budget: Duration,
         mut on_event: impl FnMut(TurnEvent),
     ) -> Result<TurnOutcome> {
         let resend_text = text.clone();
+        let resend_images = images.clone();
         let mut resends = 0usize;
-        let _ = self.cmd_tx.send(UiCommand::SendPrompt {
-            text,
-            images: Vec::new(),
-        });
+        let _ = self.cmd_tx.send(UiCommand::SendPrompt { text, images });
         let deadline = tokio::time::Instant::now() + budget;
         let mut acc = String::new();
         let mut truncated = false;
@@ -1641,7 +1653,7 @@ impl AgentHandle {
                         tokio::time::sleep(Duration::from_millis(250)).await;
                         let _ = self.cmd_tx.send(UiCommand::SendPrompt {
                             text: resend_text.clone(),
-                            images: Vec::new(),
+                            images: resend_images.clone(),
                         });
                         continue;
                     }
@@ -1658,7 +1670,7 @@ impl AgentHandle {
                             tokio::time::sleep(Duration::from_millis(250)).await;
                             let _ = self.cmd_tx.send(UiCommand::SendPrompt {
                                 text: resend_text.clone(),
-                                images: Vec::new(),
+                                images: resend_images.clone(),
                             });
                             continue;
                         }
@@ -1674,7 +1686,7 @@ impl AgentHandle {
     /// Graceful teardown: ask the runtime to shut down and give it a moment;
     /// dropping the handle afterwards closes the command channel, which ends
     /// the runtime loop and kills the agent process tree in any case.
-    async fn dismiss(self) {
+    pub(crate) async fn dismiss(self) {
         let _ = self.cmd_tx.send(UiCommand::Shutdown);
         let _ = tokio::time::timeout(Duration::from_secs(3), self.runtime).await;
     }
@@ -2082,6 +2094,7 @@ async fn fight(fighter: Candidate, orders: FightOrders) -> FighterReport {
     let mut handle = match AgentHandle::connect(
         &fighter.launch,
         &created.session_cwd,
+        &[],
         merged.clone(),
         acp::RuntimeAccessMode::Full,
     )
@@ -2723,6 +2736,7 @@ async fn review(
     let mut handle = match AgentHandle::connect(
         &reviewer.launch,
         &defender_cwd,
+        &[],
         abort.clone(),
         acp::RuntimeAccessMode::ReadOnly,
     )
@@ -2869,6 +2883,7 @@ impl Thor {
         let mut handle = AgentHandle::connect(
             &host.launch,
             &camp.session_cwd,
+            &[],
             abort,
             acp::RuntimeAccessMode::Full,
         )
