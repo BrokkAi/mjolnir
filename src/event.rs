@@ -9,12 +9,13 @@ use agent_client_protocol::schema::v1::{
     SessionConfigOption, SessionConfigValueId, SessionUpdate, StopReason, TerminalExitStatus,
     ToolCallUpdate, Usage,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
 /// Image block submitted by the UI with a prompt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptImage {
     pub data_base64: String,
     pub mime_type: String,

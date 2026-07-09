@@ -52,7 +52,6 @@ use crate::event::{
     UiEvent,
 };
 use crate::ragnarok::Launch;
-use crate::scores::ScoreStore;
 
 const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
 const REMOTE_CONTROL_LOCAL_ADDR_V6: &str = "[::1]:11921";
@@ -1960,7 +1959,6 @@ fn start_server_agent_session(
         cwd: cwd.clone(),
         additional_directories: additional_directories.clone(),
         config_path: config_path.clone(),
-        score_store: ScoreStore::default(),
         thor_agent_source_id: agent_source_id.clone(),
         thor_launch: Launch {
             program: agent.program.clone(),
@@ -1973,6 +1971,7 @@ fn start_server_agent_session(
         args: agent.args,
         cwd,
         additional_directories,
+        mcp_servers: Vec::new(),
         resume_session: None,
         env: agent.env,
         agent_stderr: None,
@@ -2030,6 +2029,7 @@ fn start_server_agent_session(
                                 )
                                 .await;
                                 if *abort_rx.borrow() {
+                                    let _ = ui_tx.send(UiEvent::CancelPendingPermissions);
                                     let _ = ui_tx.send(UiEvent::PromptDone {
                                         stop_reason:
                                             agent_client_protocol::schema::v1::StopReason::Cancelled,
@@ -2038,14 +2038,14 @@ fn start_server_agent_session(
                                     return;
                                 }
                                 match result {
-                                    Ok(()) => {
+                                    Ok(result) => {
                                         let _ = ui_tx.send(UiEvent::PromptDone {
-                                            stop_reason:
-                                                agent_client_protocol::schema::v1::StopReason::EndTurn,
-                                            usage: None,
+                                            stop_reason: result.stop_reason,
+                                            usage: result.usage,
                                         });
                                     }
                                     Err(error) => {
+                                        let _ = ui_tx.send(UiEvent::CancelPendingPermissions);
                                         let _ = ui_tx.send(UiEvent::PromptFailed {
                                             message: format!("Thor advisor failed: {error:#}"),
                                         });

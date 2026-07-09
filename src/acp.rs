@@ -15,7 +15,7 @@ use agent_client_protocol::schema::v1::{
     ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
     ElicitationFormCapabilities, ElicitationUrlCapabilities, ErrorCode, FileSystemCapabilities,
     ForkSessionRequest, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, NewSessionRequest, PermissionOption,
+    KillTerminalResponse, LoadSessionRequest, McpServer, NewSessionRequest, PermissionOption,
     PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
@@ -52,6 +52,9 @@ pub struct AcpRuntimeConfig {
     /// Additional absolute workspace roots to pass to ACP session lifecycle
     /// requests. These expand workspace scope but do not imply trust.
     pub additional_directories: Vec<PathBuf>,
+    /// MCP servers provisioned when the agent opens, resumes, loads, or forks
+    /// a session. An empty list keeps the normal single-agent runtime.
+    pub mcp_servers: Vec<McpServer>,
     pub resume_session: Option<String>,
     /// Environment variables to inject into the spawned agent process.
     /// Used for agents that require knobs like `AUGMENT_DISABLE_AUTO_UPDATE=1`.
@@ -445,33 +448,47 @@ fn require_additional_directories(
     }
 }
 
-fn new_session_request(cwd: PathBuf, additional_directories: &[PathBuf]) -> NewSessionRequest {
-    NewSessionRequest::new(cwd).additional_directories(additional_directories.to_vec())
+fn new_session_request(
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
+) -> NewSessionRequest {
+    NewSessionRequest::new(cwd)
+        .additional_directories(additional_directories.to_vec())
+        .mcp_servers(mcp_servers.to_vec())
 }
 
 fn resume_session_request(
     session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
 ) -> ResumeSessionRequest {
     ResumeSessionRequest::new(session_id, cwd)
         .additional_directories(additional_directories.to_vec())
+        .mcp_servers(mcp_servers.to_vec())
 }
 
 fn load_session_request(
     session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
 ) -> LoadSessionRequest {
-    LoadSessionRequest::new(session_id, cwd).additional_directories(additional_directories.to_vec())
+    LoadSessionRequest::new(session_id, cwd)
+        .additional_directories(additional_directories.to_vec())
+        .mcp_servers(mcp_servers.to_vec())
 }
 
 fn fork_session_request(
     session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
 ) -> ForkSessionRequest {
-    ForkSessionRequest::new(session_id, cwd).additional_directories(additional_directories.to_vec())
+    ForkSessionRequest::new(session_id, cwd)
+        .additional_directories(additional_directories.to_vec())
+        .mcp_servers(mcp_servers.to_vec())
 }
 
 async fn resume_existing_session(
@@ -479,12 +496,14 @@ async fn resume_existing_session(
     session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
     capabilities: &AgentCapabilities,
     auth_methods: &[AuthMethod],
 ) -> std::result::Result<Option<(Vec<SessionConfigOption>, Vec<SessionConfigTarget>)>, LaunchError>
 {
     if capabilities.session_capabilities.resume.is_some() {
-        let resume_req = resume_session_request(session_id, cwd, additional_directories);
+        let resume_req =
+            resume_session_request(session_id, cwd, additional_directories, mcp_servers);
         let resumed = match conn.send_request(resume_req.clone()).block_task().await {
             Ok(s) => s,
             Err(source) => match auth_required_detail(&source) {
@@ -505,7 +524,7 @@ async fn resume_existing_session(
     }
 
     require_load_session(capabilities)?;
-    let load_req = load_session_request(session_id, cwd, additional_directories);
+    let load_req = load_session_request(session_id, cwd, additional_directories, mcp_servers);
     let loaded = match conn.send_request(load_req.clone()).block_task().await {
         Ok(s) => s,
         Err(source) => match auth_required_detail(&source) {
@@ -612,6 +631,7 @@ pub async fn run(
             transport,
             cfg.cwd.clone(),
             cfg.additional_directories.clone(),
+            cfg.mcp_servers.clone(),
             cfg.resume_session.clone(),
             ui_tx.clone(),
             ui_rx,
@@ -1130,6 +1150,7 @@ where
         transport,
         cwd,
         Vec::new(),
+        Vec::new(),
         resume_session,
         ui_tx,
         ui_rx,
@@ -1160,6 +1181,7 @@ where
         transport,
         cwd,
         additional_directories,
+        Vec::new(),
         resume_session,
         ui_tx,
         ui_rx,
@@ -1178,6 +1200,7 @@ async fn drive_client_with_fs_limit<T>(
     transport: T,
     cwd: PathBuf,
     additional_directories: Vec<PathBuf>,
+    mcp_servers: Vec<McpServer>,
     resume_session: Option<String>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     mut ui_rx: mpsc::UnboundedReceiver<UiCommand>,
@@ -1363,6 +1386,7 @@ where
                 conn,
                 cwd,
                 additional_directories,
+                mcp_servers,
                 resume_session,
                 &ui_tx,
                 &mut ui_rx,
@@ -1398,6 +1422,7 @@ async fn drive_session(
     conn: ConnectionTo<Agent>,
     cwd: PathBuf,
     additional_directories: Vec<PathBuf>,
+    mcp_servers: Vec<McpServer>,
     resume_session: Option<String>,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
@@ -1474,6 +1499,7 @@ async fn drive_session(
                 session_id.clone(),
                 cwd.clone(),
                 &additional_directories,
+                &mcp_servers,
                 &init_resp.agent_capabilities,
                 &init_resp.auth_methods,
             )
@@ -1493,7 +1519,11 @@ async fn drive_session(
             (session_id, initial_config, true)
         }
         None => match conn
-            .send_request(new_session_request(cwd.clone(), &additional_directories))
+            .send_request(new_session_request(
+                cwd.clone(),
+                &additional_directories,
+                &mcp_servers,
+            ))
             .block_task()
             .await
         {
@@ -1520,7 +1550,11 @@ async fn drive_session(
                         return Err(anyhow::anyhow!(text));
                     }
                     match conn
-                        .send_request(new_session_request(cwd.clone(), &additional_directories))
+                        .send_request(new_session_request(
+                            cwd.clone(),
+                            &additional_directories,
+                            &mcp_servers,
+                        ))
                         .block_task()
                         .await
                     {
@@ -1643,6 +1677,7 @@ async fn drive_session(
                     &conn,
                     cwd.clone(),
                     &additional_directories,
+                    &mcp_servers,
                     &mut session_id,
                     &mut session_config,
                     &session_state,
@@ -1712,6 +1747,7 @@ async fn drive_session(
                     target_session_id,
                     requested_cwd,
                     &additional_directories,
+                    &mcp_servers,
                     title,
                     &init_resp.agent_capabilities,
                     &init_resp.auth_methods,
@@ -1757,6 +1793,7 @@ async fn switch_existing_session(
     target_session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
     title: Option<String>,
     capabilities: &AgentCapabilities,
     auth_methods: &[AuthMethod],
@@ -1778,6 +1815,7 @@ async fn switch_existing_session(
         target_session_id.clone(),
         cwd.clone(),
         additional_directories,
+        mcp_servers,
         capabilities,
         auth_methods,
     )
@@ -1838,6 +1876,7 @@ async fn drive_fork_session(
     conn: &ConnectionTo<Agent>,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
     session_id: &mut SessionId,
     session_config: &mut SessionConfigCache,
     session_state: &RuntimeSessionState,
@@ -1850,6 +1889,7 @@ async fn drive_fork_session(
         &source_session_id,
         cwd.clone(),
         additional_directories,
+        mcp_servers,
     );
     tokio::pin!(fork);
 
@@ -1926,12 +1966,14 @@ async fn fork_session(
     session_id: &SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
 ) -> std::result::Result<(SessionId, Option<SessionConfigCache>), agent_client_protocol::Error> {
     let resp = conn
         .send_request(fork_session_request(
             session_id.clone(),
             cwd,
             additional_directories,
+            mcp_servers,
         ))
         .block_task()
         .await?;
@@ -1972,6 +2014,13 @@ pub(crate) fn spawn_agent(
     cmd.args(args);
     for (k, v) in env {
         cmd.env(k, v);
+    }
+    // `mj mcp` is launched with a parent-only completion marker so the
+    // advisor can verify server-side orchestration independently of model
+    // output. Nested worker/reviewer agents must never inherit either half of
+    // that capability: a full-access worker could otherwise forge the marker.
+    for name in ["MJ_MCP_COMPLETION_MARKER", "MJ_MCP_COMPLETION_TOKEN"] {
+        cmd.env_remove(name);
     }
     // If the runtime task is aborted, dropping the child should still terminate it.
     cmd.stdin(std::process::Stdio::piped())
@@ -3916,11 +3965,11 @@ mod tests {
     use agent_client_protocol::Agent as AgentRole;
     use agent_client_protocol::schema::v1::{
         AuthMethodAgent, AuthenticateResponse, CloseSessionResponse, ContentBlock, ContentChunk,
-        ForkSessionResponse, InitializeResponse, LoadSessionResponse, NewSessionResponse,
-        PermissionOption, PermissionOptionKind, PromptResponse, ResumeSessionResponse,
-        SessionAdditionalDirectoriesCapabilities, SessionCapabilities, SessionCloseCapabilities,
-        SessionConfigId, SessionConfigValueId, SessionForkCapabilities, SessionId,
-        SessionNotification, SessionResumeCapabilities, SessionUpdate,
+        ForkSessionResponse, InitializeResponse, LoadSessionResponse, McpServer, McpServerStdio,
+        NewSessionResponse, PermissionOption, PermissionOptionKind, PromptResponse,
+        ResumeSessionResponse, SessionAdditionalDirectoriesCapabilities, SessionCapabilities,
+        SessionCloseCapabilities, SessionConfigId, SessionConfigValueId, SessionForkCapabilities,
+        SessionId, SessionNotification, SessionResumeCapabilities, SessionUpdate,
         SetSessionConfigOptionRequest, StopReason, TextContent, ToolCallUpdate,
         ToolCallUpdateFields,
     };
@@ -3950,6 +3999,76 @@ mod tests {
         let resolved = resolve_agent_command_no_install(&bin, &env).expect("resolve");
         assert_eq!(resolved.command, bin);
         assert_eq!(resolved.env.get("FOO"), Some(&"bar".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_agent_strips_advisor_completion_capability_from_children() {
+        let env = HashMap::from([
+            ("KEEP_ME".to_string(), "present".to_string()),
+            (
+                "MJ_MCP_COMPLETION_MARKER".to_string(),
+                "/tmp/parent-only-marker".to_string(),
+            ),
+            (
+                "MJ_MCP_COMPLETION_TOKEN".to_string(),
+                "parent-only-token".to_string(),
+            ),
+        ]);
+        let (mut child, stdin, mut stdout) = spawn_agent(
+            &PathBuf::from("env"),
+            &[],
+            &env,
+            None,
+            SpawnIsolation::ProcessGroup,
+        )
+        .expect("spawn env probe");
+        drop(stdin);
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).await.expect("read env");
+        child.wait().await.expect("wait env probe");
+
+        assert!(output.contains("KEEP_ME=present"));
+        assert!(!output.contains("MJ_MCP_COMPLETION_MARKER="));
+        assert!(!output.contains("MJ_MCP_COMPLETION_TOKEN="));
+    }
+
+    #[test]
+    fn session_lifecycle_requests_preserve_mcp_servers() {
+        let cwd = PathBuf::from("/tmp/workspace");
+        let additional_directories = vec![PathBuf::from("/tmp/extra")];
+        let mcp_servers = vec![McpServer::Stdio(McpServerStdio::new("mj", "/tmp/mj"))];
+        let session_id = SessionId::new("session-1");
+
+        assert_eq!(
+            new_session_request(cwd.clone(), &additional_directories, &mcp_servers).mcp_servers,
+            mcp_servers
+        );
+        assert_eq!(
+            resume_session_request(
+                session_id.clone(),
+                cwd.clone(),
+                &additional_directories,
+                &mcp_servers,
+            )
+            .mcp_servers,
+            mcp_servers
+        );
+        assert_eq!(
+            load_session_request(
+                session_id.clone(),
+                cwd.clone(),
+                &additional_directories,
+                &mcp_servers,
+            )
+            .mcp_servers,
+            mcp_servers
+        );
+        assert_eq!(
+            fork_session_request(session_id, cwd, &additional_directories, &mcp_servers)
+                .mcp_servers,
+            mcp_servers
+        );
     }
 
     #[cfg(unix)]
@@ -7151,6 +7270,7 @@ mod tests {
             args: Vec::new(),
             cwd: std::env::temp_dir(),
             additional_directories: Vec::new(),
+            mcp_servers: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,
@@ -7207,6 +7327,7 @@ mod tests {
             args: Vec::new(),
             cwd: std::env::temp_dir(),
             additional_directories: Vec::new(),
+            mcp_servers: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: Some(bad_stderr),
@@ -7342,6 +7463,7 @@ mod tests {
             args,
             cwd: std::env::temp_dir(),
             additional_directories: Vec::new(),
+            mcp_servers: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,
@@ -7367,6 +7489,7 @@ mod tests {
             args,
             cwd: std::env::temp_dir(),
             additional_directories: Vec::new(),
+            mcp_servers: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,

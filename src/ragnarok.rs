@@ -25,7 +25,7 @@ use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::v1::{
-    SessionConfigOption, SessionUpdate, StopReason, ToolCallStatus, ToolKind,
+    McpServer, SessionConfigOption, SessionUpdate, StopReason, ToolCallStatus, ToolKind, Usage,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use futures::StreamExt;
@@ -943,6 +943,22 @@ pub(crate) async fn muster(
     store: &ScoreStore,
     tx: &mpsc::UnboundedSender<RagnarokEvent>,
 ) -> Result<Vec<Candidate>> {
+    let excluded_agent_source_ids = HashSet::new();
+    muster_excluding(cfg, user_cfg, store, tx, &excluded_agent_source_ids).await
+}
+
+/// Like [`muster`], but omits sources before launching their model probes.
+///
+/// The advisor MCP child uses this to keep Thor out of its nested candidate
+/// pool: rejecting a later `connect` is not enough because probing Thor would
+/// already have opened another ACP session.
+pub(crate) async fn muster_excluding(
+    cfg: &BattleConfig,
+    user_cfg: &Config,
+    store: &ScoreStore,
+    tx: &mpsc::UnboundedSender<RagnarokEvent>,
+    excluded_agent_source_ids: &HashSet<String>,
+) -> Result<Vec<Candidate>> {
     let reg = registry::load_with_cache(
         &registry::default_cache_path(),
         registry::CACHE_TTL,
@@ -972,12 +988,15 @@ pub(crate) async fn muster(
             })
             .collect(),
     };
-    let plan = picker::launch_plan(
+    let plan: Vec<_> = picker::launch_plan(
         &reg,
         &registry::current_platform(),
         &install::default_install_root(),
         preferences,
-    );
+    )
+    .into_iter()
+    .filter(|(source_id, _)| !excluded_agent_source_ids.contains(source_id))
+    .collect();
 
     let cwd = cfg.cwd.clone();
     let mut probes = futures::stream::iter(plan.into_iter().map(|(source_id, command)| {
@@ -1306,6 +1325,13 @@ pub fn select_fighters(pool: &[Candidate], want: usize) -> Vec<Candidate> {
 
 /// What a turn streamed, reduced to what the arena cares about.
 pub(crate) enum TurnEvent {
+    /// Exact ACP updates are used by the normal Thor advisor transcript. The
+    /// Ragnarok arena intentionally continues to consume the compact variants
+    /// below.
+    RawSessionUpdate(Box<SessionUpdate>),
+    /// The runtime has cancelled outstanding permission responders for the
+    /// current turn. The advisor forwards this to clear its modal queue.
+    CancelPendingPermissions,
     Message(String),
     Thought(String),
     Tool {
@@ -1325,6 +1351,7 @@ pub(crate) enum TurnEvent {
 pub(crate) struct TurnOutcome {
     pub text: String,
     pub stop: StopReason,
+    pub usage: Option<Usage>,
 }
 
 /// A live agent subprocess + session, driven over the same channel pair the
@@ -1354,6 +1381,7 @@ impl AgentHandle {
             abort,
             access_mode,
             HashMap::new(),
+            Vec::new(),
         )
         .await
     }
@@ -1365,6 +1393,7 @@ impl AgentHandle {
         abort: watch::Receiver<bool>,
         access_mode: acp::RuntimeAccessMode,
         saved_session_config: HashMap<String, String>,
+        mcp_servers: Vec<McpServer>,
     ) -> Result<Self> {
         let (event_tx, events) = mpsc::unbounded_channel();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -1373,6 +1402,7 @@ impl AgentHandle {
             args: launch.args.clone(),
             cwd: cwd.to_path_buf(),
             additional_directories: additional_directories.to_vec(),
+            mcp_servers,
             resume_session: None,
             env: launch.env.clone(),
             agent_stderr: None,
@@ -1595,47 +1625,50 @@ impl AgentHandle {
                 bail!("agent runtime closed mid-turn");
             };
             match ev {
-                UiEvent::SessionUpdate(update) => match update {
-                    SessionUpdate::AgentMessageChunk(chunk) => {
-                        let piece = content_block_text(&chunk.content);
-                        if acc.len() + piece.len() <= FINAL_TEXT_LIMIT {
-                            acc.push_str(&piece);
-                        } else {
-                            truncated = true;
+                UiEvent::SessionUpdate(update) => {
+                    on_event(TurnEvent::RawSessionUpdate(Box::new(update.clone())));
+                    match update {
+                        SessionUpdate::AgentMessageChunk(chunk) => {
+                            let piece = content_block_text(&chunk.content);
+                            if acc.len() + piece.len() <= FINAL_TEXT_LIMIT {
+                                acc.push_str(&piece);
+                            } else {
+                                truncated = true;
+                            }
+                            on_event(TurnEvent::Message(piece));
                         }
-                        on_event(TurnEvent::Message(piece));
-                    }
-                    SessionUpdate::AgentThoughtChunk(chunk) => {
-                        on_event(TurnEvent::Thought(content_block_text(&chunk.content)));
-                    }
-                    SessionUpdate::ToolCall(call) => {
-                        let id = call.tool_call_id.to_string();
-                        known_tools.insert(id, (call.title.clone(), Some(call.kind)));
-                        on_event(TurnEvent::Tool {
-                            title: call.title,
-                            kind: Some(call.kind),
-                            status: Some(call.status),
-                            started: true,
-                        });
-                    }
-                    SessionUpdate::ToolCallUpdate(update) => {
-                        let id = update.tool_call_id.to_string();
-                        let entry = known_tools.entry(id).or_default();
-                        if let Some(title) = &update.fields.title {
-                            entry.0 = title.clone();
+                        SessionUpdate::AgentThoughtChunk(chunk) => {
+                            on_event(TurnEvent::Thought(content_block_text(&chunk.content)));
                         }
-                        if let Some(kind) = update.fields.kind {
-                            entry.1 = Some(kind);
+                        SessionUpdate::ToolCall(call) => {
+                            let id = call.tool_call_id.to_string();
+                            known_tools.insert(id, (call.title.clone(), Some(call.kind)));
+                            on_event(TurnEvent::Tool {
+                                title: call.title,
+                                kind: Some(call.kind),
+                                status: Some(call.status),
+                                started: true,
+                            });
                         }
-                        on_event(TurnEvent::Tool {
-                            title: entry.0.clone(),
-                            kind: entry.1,
-                            status: update.fields.status,
-                            started: false,
-                        });
+                        SessionUpdate::ToolCallUpdate(update) => {
+                            let id = update.tool_call_id.to_string();
+                            let entry = known_tools.entry(id).or_default();
+                            if let Some(title) = &update.fields.title {
+                                entry.0 = title.clone();
+                            }
+                            if let Some(kind) = update.fields.kind {
+                                entry.1 = Some(kind);
+                            }
+                            on_event(TurnEvent::Tool {
+                                title: entry.0.clone(),
+                                kind: entry.1,
+                                status: update.fields.status,
+                                started: false,
+                            });
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 UiEvent::SessionConfigOptions { options, targets } => {
                     self.store_config(options, targets)
                 }
@@ -1648,13 +1681,14 @@ impl AgentHandle {
                 UiEvent::ElicitationRequest(e) => {
                     let _ = e.responder.send(ElicitationOutcome::Decline);
                 }
-                UiEvent::PromptDone { stop_reason, .. } => {
+                UiEvent::PromptDone { stop_reason, usage } => {
                     if truncated {
                         acc.push_str("\n…[output truncated]");
                     }
                     return Ok(TurnOutcome {
                         text: acc,
                         stop: stop_reason,
+                        usage,
                     });
                 }
                 UiEvent::PromptFailed { message } => {
@@ -1691,6 +1725,7 @@ impl AgentHandle {
                     }
                     on_event(TurnEvent::Note(w));
                 }
+                UiEvent::CancelPendingPermissions => on_event(TurnEvent::CancelPendingPermissions),
                 _ => {}
             }
         }
@@ -2337,6 +2372,7 @@ fn forward_turn_event(
     chunk_count: &mut usize,
 ) {
     match ev {
+        TurnEvent::RawSessionUpdate(_) | TurnEvent::CancelPendingPermissions => {}
         TurnEvent::Message(chunk) => {
             *chunk_count += 1;
             if *chunk_count == 1 || chunk_count.is_multiple_of(40) {

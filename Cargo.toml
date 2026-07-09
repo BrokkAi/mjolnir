@@ -71,6 +71,7 @@ serde_json = "1"
 sha2 = "0.10"
 shell-words = "1"
 tar = "0.4"
+tempfile = "3"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
@@ -84,7 +85,6 @@ unicode-width = "0.2.2"
 [dev-dependencies]
 # Build a tiny in-memory parquet to test the LMArena scores parser.
 arrow-schema = "55"
-tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 

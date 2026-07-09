@@ -44,8 +44,9 @@ mod ui;
 mod version;
 mod worktree;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -354,6 +355,69 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
 }
 
+const MCP_PARENT_AGENT_SOURCE_ENV: &str = "MJ_MCP_PARENT_AGENT_SOURCE_ID";
+const MCP_ADVISOR_MODE_ENV: &str = "MJ_MCP_ADVISOR_MODE";
+const MCP_INHERITED_IMAGES_MANIFEST_ENV: &str = "MJ_MCP_INHERITED_IMAGES_MANIFEST";
+const MCP_COMPLETION_MARKER_ENV: &str = "MJ_MCP_COMPLETION_MARKER";
+const MCP_COMPLETION_TOKEN_ENV: &str = "MJ_MCP_COMPLETION_TOKEN";
+
+fn mcp_config_from_environment(
+    default_cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
+    agent_stderr: Option<PathBuf>,
+    fs_max_text_bytes: u64,
+) -> Result<mcp::McpConfig> {
+    let parent_agent_source_id = std::env::var(MCP_PARENT_AGENT_SOURCE_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let advisor_mode = parent_agent_source_id.is_some()
+        || std::env::var_os(MCP_ADVISOR_MODE_ENV).is_some_and(|value| value != "0");
+    let completion_marker = std::env::var_os(MCP_COMPLETION_MARKER_ENV).map(PathBuf::from);
+    let completion_token = std::env::var(MCP_COMPLETION_TOKEN_ENV)
+        .ok()
+        .filter(|value| !value.is_empty());
+    if advisor_mode && (completion_marker.is_none() || completion_token.is_none()) {
+        bail!(
+            "advisor MCP server requires both {MCP_COMPLETION_MARKER_ENV} and {MCP_COMPLETION_TOKEN_ENV}"
+        );
+    }
+    let inherited_images = match std::env::var_os(MCP_INHERITED_IMAGES_MANIFEST_ENV) {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("read inherited image manifest {}", path.display()))?;
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("parse inherited image manifest {}", path.display()))?
+        }
+        None => Vec::new(),
+    };
+    let mut excluded_agent_source_ids = HashSet::new();
+    if let Some(source_id) = parent_agent_source_id {
+        excluded_agent_source_ids.insert(source_id);
+    }
+
+    Ok(mcp::McpConfig {
+        default_cwd,
+        additional_directories,
+        agent_stderr,
+        fs_max_text_bytes,
+        config_path: config::default_config_path(),
+        excluded_agent_source_ids,
+        // An embedded advisor bridge must never accept an arbitrary executable,
+        // even if the parent process opted in for a standalone MCP session.
+        allow_adhoc_program: !advisor_mode && mcp::adhoc_program_allowed(),
+        require_ranked_candidates: advisor_mode,
+        limits: if advisor_mode {
+            mcp::McpLimits::advisor()
+        } else {
+            mcp::McpLimits::standalone()
+        },
+        inherited_images,
+        completion_marker,
+        completion_token,
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -399,12 +463,12 @@ async fn main() -> Result<()> {
             Commands::Mcp(_) => {
                 let workspace_roots =
                     validate_workspace_roots(&cwd, &top_level_additional_directories)?;
-                mcp::serve(mcp::McpConfig {
-                    default_cwd: cwd,
-                    additional_directories: workspace_roots.additional_directories().to_vec(),
-                    agent_stderr: cli.agent_stderr,
+                mcp::serve(mcp_config_from_environment(
+                    cwd,
+                    workspace_roots.additional_directories().to_vec(),
+                    cli.agent_stderr,
                     fs_max_text_bytes,
-                })
+                )?)
                 .await
             }
             Commands::DumpModels(args) => {
@@ -1614,6 +1678,7 @@ async fn run_session(
         args: agent.args.clone(),
         cwd: cwd.clone(),
         additional_directories: runtime_options.additional_directories.clone(),
+        mcp_servers: Vec::new(),
         resume_session,
         env: agent.env.clone(),
         agent_stderr: runtime_options.agent_stderr.clone(),
@@ -1695,7 +1760,6 @@ async fn run_session(
         cwd: cwd.clone(),
         additional_directories: runtime_options.additional_directories.clone(),
         config_path: config::default_config_path(),
-        score_store: score_store.clone(),
         thor_agent_source_id: agent.source_id.clone(),
         thor_launch: ragnarok::Launch {
             program: agent.program.clone(),
@@ -1734,6 +1798,7 @@ async fn run_session(
                             advisor::run_turn(cfg, text, images, ui_tx.clone(), abort_rx.clone())
                                 .await;
                         if *abort_rx.borrow() {
+                            let _ = ui_tx.send(crate::event::UiEvent::CancelPendingPermissions);
                             let _ = ui_tx.send(crate::event::UiEvent::PromptDone {
                                 stop_reason:
                                     agent_client_protocol::schema::v1::StopReason::Cancelled,
@@ -1742,14 +1807,14 @@ async fn run_session(
                             return;
                         }
                         match result {
-                            Ok(()) => {
+                            Ok(result) => {
                                 let _ = ui_tx.send(crate::event::UiEvent::PromptDone {
-                                    stop_reason:
-                                        agent_client_protocol::schema::v1::StopReason::EndTurn,
-                                    usage: None,
+                                    stop_reason: result.stop_reason,
+                                    usage: result.usage,
                                 });
                             }
                             Err(e) => {
+                                let _ = ui_tx.send(crate::event::UiEvent::CancelPendingPermissions);
                                 let _ = ui_tx.send(crate::event::UiEvent::PromptFailed {
                                     message: format!("Thor advisor failed: {e:#}"),
                                 });

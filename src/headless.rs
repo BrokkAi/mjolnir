@@ -143,6 +143,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         args: agent.args,
         cwd: cfg.cwd,
         additional_directories: cfg.additional_directories,
+        mcp_servers: Vec::new(),
         resume_session: cfg.resume_session.clone(),
         env: agent.env,
         agent_stderr: cfg.agent_stderr,
