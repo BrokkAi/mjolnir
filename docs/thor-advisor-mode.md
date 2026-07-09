@@ -125,20 +125,22 @@ MCP tools in a loop of its own design, within server-side caps.
                            │     optionally directs a fix,
                            │     then summarizes for user
                            │          │
-                           └──────────▼───────────────────┐
-                                      complete(delegated)  │
-                                      disconnect cleanup   │
-                                      final answer         │
-                                      └────────────────────┘
+                           └──────────▼──────────────────────┐
+                              complete(delegated, final_response)
+                              stdio close tears down children   │
+                              parent verifies receipt           │
+                              renders final_response            │
+                              └────────────────────────────────┘
 ```
 
 ### Thor's operating contract
 
 `thor_prompt` is an operating manual, not a JSON router. It instructs Thor to:
 
-1. For a small factual, explanatory, or otherwise trivial request, call
-   `complete_orchestration` with `mode: "direct"` before giving the direct
-   answer.
+1. For a small factual, explanatory, or otherwise trivial request, prepare the
+   exact answer, then call `complete_orchestration` with `mode: "direct"` and
+   that text in `final_response`. That tool call is the answer-delivery
+   contract; Thor must not send user-facing prose before or after it.
 2. For implementation, repair, or substantial repository work, call
    `select_ranked_agents` with the original task and use the recommended
    worker and reviewer candidates.
@@ -153,8 +155,10 @@ MCP tools in a loop of its own design, within server-side caps.
    bound to the exact worker `connection_id` and `turn_id` being audited.
 6. Judge the review itself. It may reject speculation, ask the worker to fix
    evidence-backed findings, and repeat its monitoring loop where useful.
-7. Call `complete_orchestration` with `mode: "delegated"`, disconnect its
-   nested connections, and provide a concise user-facing result.
+7. Call `complete_orchestration` with `mode: "delegated"` and the exact
+   user-facing result in `final_response` as its final tool call. It must not
+   send user-facing prose before or after completion; the MCP server tears down
+   any remaining nested connections when its stdio session closes.
 
 Thor is explicitly told not to expose MCP JSON to the user. It must explain the
 result, validation, review/fixes, and any remaining risk in ordinary prose.
@@ -185,7 +189,7 @@ same connection.
 | `respond_permission` | Choose one option advertised by a pending permission request, or reject it. |
 | `cancel_prompt` | Interrupt an in-flight nested turn and reject its pending permissions. |
 | `get_result` | Retrieve final text, stop reason, usage, or wait briefly for a terminal result. |
-| `complete_orchestration` | Ask the server to validate direct/delegated completion and seal further orchestration changes. |
+| `complete_orchestration` | Submit the exact `final_response`, validate direct/delegated completion, seal further orchestration changes, and deliver the accepted response. |
 | `disconnect` / `list_connections` | Clean up or inspect nested ACP sessions. |
 
 `poll_progress` returns the stable structured envelope
@@ -248,6 +252,13 @@ adversarial-review contract with the original user task and records the binding
 outside model-authored text. The reviewer is read-only and must be independent
 from the worker it audits.
 
+In advisor mode, `complete_orchestration` also requires a nonblank,
+64 KiB-or-smaller `final_response`. The server echoes that value only after all
+completion checks succeed and writes it with the parent token in a completion
+receipt. The parent renders only that token-verified receipt, once. This avoids
+relying on a particular Thor binary to resume speaking after its final tool
+call or trusting JSON that merely resembles a completion result.
+
 `complete_orchestration` has two modes:
 
 - **`direct`** is accepted only when no nested prompt was submitted.
@@ -256,10 +267,12 @@ from the worker it audits.
   server-bound review of an exact earlier worker turn by a distinct reviewer.
 
 After accepted completion, state-changing orchestration tools are sealed;
-polling and connection cleanup remain available. In advisor mode the MCP server
-writes the private random token to the parent-owned marker only *after* these
-checks pass. `run_turn` requires both a successful Thor ACP turn and that exact
-marker before it accepts the overall turn. Thor cannot substitute JSON-shaped
+polling and connection cleanup remain available for generic MCP clients. In
+advisor mode, Thor makes completion its final action; the MCP server shuts down
+remaining children when stdio closes. The server writes the private random
+token and `final_response` to the parent-owned receipt only *after* these
+checks pass. `run_turn` requires a successful Thor ACP turn and that exact
+receipt before it accepts the overall turn. Thor cannot substitute JSON-shaped
 text or a claim of completion for that proof.
 
 ---
@@ -279,6 +292,11 @@ Thor's `poll_progress` calls. `AdvisorTranscriptBridge` recognizes the
 - thoughts remain thought chunks;
 - tool calls and updates become role-labelled transcript information;
 - permission requests, warnings, and server information remain visible.
+
+After the parent sees a token-verified completion receipt, it suppresses later
+Thor message and thought chunks while retaining tool cards. The receipt is the
+canonical user-facing answer, so a post-tool status line cannot overwrite or
+compete with it.
 
 The MCP server bounds retained telemetry: each connection retains at most
 10,000 progress entries and 16 MiB of progress JSON, and each accumulated final
@@ -331,8 +349,8 @@ model changes that contradict the ranked candidate.
 
 ## Failure behavior
 
-- **Thor exits without a valid completion marker** — the advisor turn fails,
-  even if Thor wrote an otherwise plausible final response.
+- **Thor exits without a valid completion marker or accepted final response** —
+  the advisor turn fails, even if Thor wrote an otherwise plausible message.
 - **Nested worker/reviewer fails, times out, or needs a denied permission** —
   `poll_progress` exposes the state. Thor may steer, retry within the caps, or
   stop and explain the blocker; Rust does not invent a replacement phase plan.

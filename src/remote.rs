@@ -2028,20 +2028,22 @@ fn start_server_agent_session(
                                     abort_rx.clone(),
                                 )
                                 .await;
-                                if *abort_rx.borrow() {
-                                    let _ = ui_tx.send(UiEvent::CancelPendingPermissions);
-                                    let _ = ui_tx.send(UiEvent::PromptDone {
-                                        stop_reason:
-                                            agent_client_protocol::schema::v1::StopReason::Cancelled,
-                                        usage: None,
-                                    });
-                                    return;
-                                }
                                 match result {
                                     Ok(result) => {
+                                        // A verified completion receipt is terminal.
+                                        // Preserve it if cancellation arrives after
+                                        // the advisor already completed.
                                         let _ = ui_tx.send(UiEvent::PromptDone {
                                             stop_reason: result.stop_reason,
                                             usage: result.usage,
+                                        });
+                                    }
+                                    Err(_) if *abort_rx.borrow() => {
+                                        let _ = ui_tx.send(UiEvent::CancelPendingPermissions);
+                                        let _ = ui_tx.send(UiEvent::PromptDone {
+                                            stop_reason:
+                                                agent_client_protocol::schema::v1::StopReason::Cancelled,
+                                            usage: None,
                                         });
                                     }
                                     Err(error) => {

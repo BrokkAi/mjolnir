@@ -91,6 +91,11 @@ const MAX_COMPLETED_TURNS: usize = 256;
 /// progress items) and `final_text_truncated` is set.
 const MAX_FINAL_TEXT_BYTES: usize = 1 << 20; // 1 MiB
 
+/// A completion response is rendered directly to the user by the advisor
+/// parent, so it needs its own explicit bound instead of relying on an agent's
+/// accumulated streaming buffer.
+const MAX_FINAL_RESPONSE_BYTES: usize = 64 * 1024;
+
 /// Maximum number of simultaneous ACP connections one server process will hold.
 /// Each connection owns an agent process tree plus background tasks, so this
 /// bounds resource use against a buggy or hostile client.
@@ -1190,6 +1195,11 @@ enum CompletionMode {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CompleteOrchestrationArgs {
     mode: CompletionMode,
+    /// The exact user-facing answer to deliver when completion is accepted.
+    /// Required by the embedded Thor advisor; optional for standalone MCP
+    /// clients to preserve the existing public surface.
+    #[serde(default)]
+    final_response: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1202,6 +1212,18 @@ pub(crate) struct CompletionResult {
     pub(crate) worker_turn_id: Option<u64>,
     pub(crate) reviewer_connection_id: Option<String>,
     pub(crate) reviewer_turn_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) final_response: Option<String>,
+}
+
+/// Parent-verifiable completion receipt. The secret token comes only from the
+/// advisor parent; worker/reviewer processes have it stripped before spawn.
+/// Keeping the final response in this receipt binds the displayed answer to
+/// the same server-side validation that accepted completion.
+#[derive(Serialize)]
+struct CompletionReceipt<'a> {
+    token: &'a str,
+    final_response: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -1389,21 +1411,52 @@ impl McpServer {
     /// Record an accepted completion where the supervising Rust process, not
     /// the model's transcript, can verify it. Standalone `mj mcp` has neither
     /// value and intentionally keeps the original stateless behavior.
-    fn record_accepted_completion(&self) -> Result<(), McpError> {
+    fn record_accepted_completion(&self, final_response: Option<&str>) -> Result<(), McpError> {
         match (
             self.config.completion_marker.as_ref(),
             self.config.completion_token.as_ref(),
         ) {
             (None, None) => Ok(()),
-            (Some(marker), Some(token)) => std::fs::write(marker, token).map_err(|error| {
-                err(format!(
-                    "write advisor completion marker {}: {error}",
-                    marker.display()
-                ))
-            }),
+            (Some(marker), Some(token)) => {
+                let final_response = final_response.ok_or_else(|| {
+                    err("advisor completion marker requires a final_response receipt")
+                })?;
+                let receipt = serde_json::to_vec(&CompletionReceipt {
+                    token,
+                    final_response,
+                })
+                .map_err(|error| err(format!("serialize advisor completion receipt: {error}")))?;
+                std::fs::write(marker, receipt).map_err(|error| {
+                    err(format!(
+                        "write advisor completion marker {}: {error}",
+                        marker.display()
+                    ))
+                })
+            }
             _ => Err(err(
                 "invalid advisor completion-marker configuration (marker and token must be paired)",
             )),
+        }
+    }
+
+    /// In embedded advisor mode, completion is also the terminal delivery
+    /// contract: accepting a lifecycle marker without an actual answer leaves
+    /// the user with tool chatter when an ACP agent ends immediately after its
+    /// final tool call.
+    fn completion_response(&self, response: Option<String>) -> Result<Option<String>, McpError> {
+        match response {
+            Some(response) if response.trim().is_empty() => Err(err(
+                "final_response must contain the user-facing answer, not only whitespace",
+            )),
+            Some(response) if response.len() > MAX_FINAL_RESPONSE_BYTES => Err(err(format!(
+                "final_response exceeds the {} byte limit",
+                MAX_FINAL_RESPONSE_BYTES
+            ))),
+            Some(response) => Ok(Some(response)),
+            None if self.config.require_ranked_candidates => Err(err(
+                "advisor completion requires a nonempty final_response; put the exact user-facing answer in the completion call",
+            )),
+            None => Ok(None),
         }
     }
 
@@ -2475,7 +2528,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Declare the orchestration complete. Direct mode is accepted only when no nested prompt was submitted. Delegated mode is accepted only after a successful worker turn and a later successful turn on a distinct read-only reviewer connection."
+        description = "Declare the orchestration complete. In embedded Thor advisor mode, final_response is required and is the exact user-facing answer delivered after server validation. Direct mode is accepted only when no nested prompt was submitted. Delegated mode is accepted only after a successful worker turn and a later successful turn on a distinct read-only reviewer connection."
     )]
     async fn complete_orchestration(
         &self,
@@ -2484,6 +2537,7 @@ impl McpServer {
         self.check_tool_budget()?;
         let _mutation = self.mutation_lock.lock().await;
         self.ensure_orchestration_open()?;
+        let final_response = self.completion_response(args.final_response)?;
         let submitted_turns = self.submitted_turns.load(Ordering::SeqCst);
         match args.mode {
             CompletionMode::Direct => {
@@ -2492,7 +2546,7 @@ impl McpServer {
                         "direct completion rejected: {submitted_turns} nested turn(s) were submitted"
                     )));
                 }
-                self.record_accepted_completion()?;
+                self.record_accepted_completion(final_response.as_deref())?;
                 self.completion_accepted.store(true, Ordering::SeqCst);
                 json_result(&CompletionResult {
                     schema: COMPLETE_ORCHESTRATION_SCHEMA.to_string(),
@@ -2503,6 +2557,7 @@ impl McpServer {
                     worker_turn_id: None,
                     reviewer_connection_id: None,
                     reviewer_turn_id: None,
+                    final_response,
                 })
             }
             CompletionMode::Delegated => {
@@ -2598,7 +2653,7 @@ impl McpServer {
                          (workers={worker_successes}, reviewers={reviewer_successes})"
                     )));
                 };
-                self.record_accepted_completion()?;
+                self.record_accepted_completion(final_response.as_deref())?;
                 self.completion_accepted.store(true, Ordering::SeqCst);
                 json_result(&CompletionResult {
                     schema: COMPLETE_ORCHESTRATION_SCHEMA.to_string(),
@@ -2609,6 +2664,7 @@ impl McpServer {
                     worker_turn_id: Some(worker.2),
                     reviewer_connection_id: Some(reviewer.1.clone()),
                     reviewer_turn_id: Some(reviewer.2),
+                    final_response,
                 })
             }
         }
@@ -2686,8 +2742,11 @@ impl ServerHandler for McpServer {
                  connect the recommended worker -> submit_prompt -> poll_progress (answer \
                  permission_requested items) -> connect the distinct reviewer -> review -> \
                  submit_prompt with review_of={worker_connection_id,worker_turn_id} -> \
-                 complete_orchestration(delegated) -> disconnect. Trivial requests use \
-                 complete_orchestration(direct) without submitting a nested turn.",
+                 prepare a final response -> complete_orchestration(delegated, final_response) \
+                 as the final action. In embedded advisor mode, final_response is required and \
+                 mj tears down remaining connections when the stdio session closes. Trivial \
+                 requests use complete_orchestration(direct, final_response) without submitting \
+                 a nested turn.",
             )
     }
 }
@@ -3396,13 +3455,13 @@ mod tests {
         let result = server
             .complete_orchestration(Parameters(CompleteOrchestrationArgs {
                 mode: CompletionMode::Delegated,
+                final_response: None,
             }))
             .await
             .expect("independent review satisfies audit");
-        assert_eq!(
-            result.structured_content.expect("structured")["accepted"],
-            true
-        );
+        let structured = result.structured_content.expect("structured");
+        assert_eq!(structured["accepted"], true);
+        assert!(structured.get("final_response").is_none());
     }
 
     #[tokio::test]
@@ -3446,6 +3505,7 @@ mod tests {
         let error = server
             .complete_orchestration(Parameters(CompleteOrchestrationArgs {
                 mode: CompletionMode::Delegated,
+                final_response: Some("review was not accepted".to_string()),
             }))
             .await
             .expect_err("an arbitrary reviewer turn cannot satisfy advisor audit");
@@ -3497,13 +3557,13 @@ mod tests {
         let result = server
             .complete_orchestration(Parameters(CompleteOrchestrationArgs {
                 mode: CompletionMode::Delegated,
+                final_response: Some("implementation is complete".to_string()),
             }))
             .await
             .expect("bound independent review satisfies advisor audit");
-        assert_eq!(
-            result.structured_content.expect("structured")["accepted"],
-            true
-        );
+        let structured = result.structured_content.expect("structured");
+        assert_eq!(structured["accepted"], true);
+        assert_eq!(structured["final_response"], "implementation is complete");
     }
 
     #[tokio::test]
@@ -3615,6 +3675,7 @@ mod tests {
             server
                 .complete_orchestration(Parameters(CompleteOrchestrationArgs {
                     mode: CompletionMode::Delegated,
+                    final_response: None,
                 }))
                 .await
                 .is_err()
@@ -3654,6 +3715,7 @@ mod tests {
             server
                 .complete_orchestration(Parameters(CompleteOrchestrationArgs {
                     mode: CompletionMode::Delegated,
+                    final_response: None,
                 }))
                 .await
                 .is_err()
@@ -3666,6 +3728,7 @@ mod tests {
         server
             .complete_orchestration(Parameters(CompleteOrchestrationArgs {
                 mode: CompletionMode::Direct,
+                final_response: None,
             }))
             .await
             .expect("direct completion accepted");
@@ -3690,22 +3753,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_completion_writes_the_parent_marker() {
+    async fn advisor_completion_requires_a_final_response_before_writing_the_parent_marker() {
         let marker = tempfile::NamedTempFile::new().expect("marker");
-        let mut config = test_config();
+        let mut config = strict_test_config();
         config.completion_marker = Some(marker.path().to_path_buf());
         config.completion_token = Some("parent-only-token".to_string());
         let server = McpServer::new(config);
 
-        server
+        let error = server
             .complete_orchestration(Parameters(CompleteOrchestrationArgs {
                 mode: CompletionMode::Direct,
+                final_response: None,
+            }))
+            .await
+            .expect_err("advisor completion needs a user-facing response");
+        assert!(error.message.contains("final_response"));
+        assert_eq!(
+            std::fs::read_to_string(marker.path()).expect("read marker"),
+            ""
+        );
+        assert!(!server.completion_accepted.load(Ordering::SeqCst));
+
+        let whitespace = server
+            .complete_orchestration(Parameters(CompleteOrchestrationArgs {
+                mode: CompletionMode::Direct,
+                final_response: Some(" \n ".to_string()),
+            }))
+            .await
+            .expect_err("advisor completion rejects a blank response");
+        assert!(whitespace.message.contains("whitespace"));
+        assert_eq!(
+            std::fs::read_to_string(marker.path()).expect("read marker"),
+            ""
+        );
+
+        let result = server
+            .complete_orchestration(Parameters(CompleteOrchestrationArgs {
+                mode: CompletionMode::Direct,
+                final_response: Some("The requested answer.".to_string()),
             }))
             .await
             .expect("direct completion accepted");
         assert_eq!(
-            std::fs::read_to_string(marker.path()).expect("read marker"),
-            "parent-only-token"
+            result.structured_content.expect("structured")["final_response"],
+            "The requested answer."
         );
+        let receipt: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(marker.path()).expect("read marker"))
+                .expect("parse completion receipt");
+        assert_eq!(receipt["token"], "parent-only-token");
+        assert_eq!(receipt["final_response"], "The requested answer.");
     }
 }

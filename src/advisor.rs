@@ -57,6 +57,12 @@ struct CompletionMarker {
     token: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CompletionReceipt {
+    token: String,
+    final_response: String,
+}
+
 impl CompletionMarker {
     fn new() -> Result<Self> {
         let file = NamedTempFile::new().context("create advisor completion marker")?;
@@ -74,8 +80,11 @@ impl CompletionMarker {
         self.file.path()
     }
 
-    fn accepted(&self) -> bool {
-        std::fs::read_to_string(self.path()).is_ok_and(|value| value == self.token)
+    fn accepted_response(&self) -> Option<String> {
+        let receipt: CompletionReceipt =
+            serde_json::from_slice(&std::fs::read(self.path()).ok()?).ok()?;
+        (receipt.token == self.token && !receipt.final_response.trim().is_empty())
+            .then_some(receipt.final_response)
     }
 }
 
@@ -124,7 +133,7 @@ pub(crate) async fn run_turn(
             thor_prompt(&user_prompt, !images.is_empty()),
             images,
             THOR_ORCHESTRATION_TIMEOUT,
-            |event| forward_thor_event(&ui_tx, &mut bridge, event),
+            |event| forward_thor_event(&ui_tx, &mut bridge, &completion_marker, event),
         )
         .await;
     thor.dismiss().await;
@@ -136,12 +145,13 @@ pub(crate) async fn run_turn(
             result.stop
         );
     }
-    if !completion_marker.accepted() {
+    let Some(final_response) = completion_marker.accepted_response() else {
         bail!(
-            "Thor ended without an MCP-verified complete_orchestration guardrail; \
+            "Thor ended without an MCP-verified completion receipt containing a user-facing answer; \
              delegated work is not accepted without a completed independent review"
         );
-    }
+    };
+    emit_agent_text(&ui_tx, final_response);
 
     Ok(AdvisorTurnResult {
         stop_reason: result.stop,
@@ -225,9 +235,11 @@ fn thor_prompt(user_prompt: &str, has_images: bool) -> String {
         "You are Thor, mjolnir's supervising advisor. You own this user turn from \
          decision through the final user-facing response. Rust provides bounded MCP \
          tools; you decide the actual workflow.\n\n\
-         For a small factual, explanatory, or otherwise trivial request, answer directly \
-         without opening an ACP worker connection. Before your final answer, call \
-         complete_orchestration with mode `direct`.\n\n\
+         For a small factual, explanatory, or otherwise trivial request, prepare the exact \
+         user-facing answer without opening an ACP worker connection. Do not send user-facing \
+         prose before or after completion. Make complete_orchestration your final tool call with \
+         mode `direct` and that exact answer in final_response. mj renders final_response after \
+         server validation.\n\n\
          For implementation, edits, test repair, or substantial repository work:\n\
          1. Call select_ranked_agents with the original task. Use its recommended worker \
          and reviewer; never choose the Thor identity.\n\
@@ -247,9 +259,11 @@ fn thor_prompt(user_prompt: &str, has_images: bool) -> String {
          original task and current workspace; monitor it to completion.\n\
          7. Judge the review yourself. Reject speculative findings; send valid actionable \
          findings back to the worker and monitor any fix.\n\
-         8. Before the final answer, call complete_orchestration with mode `delegated`; it \
-         refuses completion unless a worker and independent reviewer completed successfully. \
-         Then disconnect every connection you opened.\n\n\
+         8. Make complete_orchestration your final tool call with mode `delegated` and the \
+         exact user-facing answer in final_response; it refuses completion unless a worker and \
+         independent reviewer completed successfully. Do not send user-facing prose before or \
+         after the call. mj renders final_response after server validation and tears down nested \
+         connections when this session closes.\n\n\
          Do not expose MCP JSON to the user. Give a concise final response describing the \
          result, validation, review/fixes, and any remaining risk. If bounded execution makes \
          completion unsafe, clean up and explain the concrete blocker instead of looping.\n\
@@ -261,14 +275,18 @@ fn thor_prompt(user_prompt: &str, has_images: bool) -> String {
 fn forward_thor_event(
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     bridge: &mut AdvisorTranscriptBridge,
+    completion_marker: &CompletionMarker,
     event: TurnEvent,
 ) {
     match event {
         TurnEvent::RawSessionUpdate(update) => {
-            // Preserve rich expandable MCP tool cards first, then project the
-            // nested poll payload into visible worker/reviewer transcript data.
+            // Preserve rich expandable MCP tool cards, then project structured
+            // nested progress into visible worker/reviewer transcript data.
             let raw = *update;
-            let _ = ui_tx.send(UiEvent::SessionUpdate(namespace_tool_ids(raw.clone())));
+            let completion_accepted = completion_marker.accepted_response().is_some();
+            if should_forward_thor_session_update(&raw, completion_accepted) {
+                let _ = ui_tx.send(UiEvent::SessionUpdate(namespace_tool_ids(raw.clone())));
+            }
             bridge.observe_session_update(ui_tx, &raw);
         }
         TurnEvent::Permission { prompt, .. } => {
@@ -284,6 +302,18 @@ fn forward_thor_event(
         | TurnEvent::Tool { .. }
         | TurnEvent::Note(_) => {}
     }
+}
+
+/// The verified receipt is the only user-facing delivery after completion.
+/// Keep tool cards for observability and cleanup, but hide agent text/thoughts
+/// generated after the terminal completion call so generic status boilerplate
+/// cannot compete with the receipt-rendered answer.
+fn should_forward_thor_session_update(update: &SessionUpdate, completion_accepted: bool) -> bool {
+    !completion_accepted
+        || !matches!(
+            update,
+            SessionUpdate::AgentMessageChunk(_) | SessionUpdate::AgentThoughtChunk(_)
+        )
 }
 
 fn namespace_tool_ids(update: SessionUpdate) -> SessionUpdate {
@@ -532,12 +562,12 @@ mod tests {
         let prompt = thor_prompt("add a test", false);
         assert!(prompt.contains("select_ranked_agents"));
         assert!(prompt.contains("complete_orchestration"));
+        assert!(prompt.contains("final_response"));
         assert!(prompt.contains("review_of"));
         assert!(prompt.contains("cancel it"));
-        assert!(
-            prompt.find("complete_orchestration").unwrap()
-                < prompt.find("Then disconnect every connection").unwrap()
-        );
+        assert!(prompt.contains("final tool call"));
+        assert!(prompt.contains("Do not send user-facing prose before or after"));
+        assert!(!prompt.contains("Before your final answer"));
         assert!(!prompt.contains("Respond with ONLY one JSON"));
     }
 
@@ -647,10 +677,46 @@ mod tests {
     }
 
     #[test]
-    fn completion_marker_requires_the_mcp_token() {
+    fn post_completion_agent_text_is_hidden_but_tool_cards_remain_visible() {
+        let message = SessionUpdate::AgentMessageChunk(text_chunk("No issue."));
+        let thought = SessionUpdate::AgentThoughtChunk(text_chunk("I am done."));
+        let tool = SessionUpdate::ToolCall(agent_client_protocol::schema::v1::ToolCall::new(
+            "tool-1",
+            "disconnect",
+        ));
+
+        assert!(!should_forward_thor_session_update(&message, true));
+        assert!(!should_forward_thor_session_update(&thought, true));
+        assert!(should_forward_thor_session_update(&tool, true));
+        assert!(should_forward_thor_session_update(&message, false));
+    }
+
+    #[test]
+    fn completion_receipt_requires_the_mcp_token_and_a_nonempty_response() {
         let marker = CompletionMarker::new().expect("marker");
-        assert!(!marker.accepted());
-        std::fs::write(marker.path(), &marker.token).expect("write marker");
-        assert!(marker.accepted());
+        assert!(marker.accepted_response().is_none());
+        std::fs::write(
+            marker.path(),
+            serde_json::json!({
+                "token": &marker.token,
+                "final_response": "The answer is four."
+            })
+            .to_string(),
+        )
+        .expect("write receipt");
+        assert_eq!(
+            marker.accepted_response().as_deref(),
+            Some("The answer is four.")
+        );
+        std::fs::write(
+            marker.path(),
+            serde_json::json!({
+                "token": "not-the-parent-token",
+                "final_response": "forged"
+            })
+            .to_string(),
+        )
+        .expect("write forged receipt");
+        assert!(marker.accepted_response().is_none());
     }
 }

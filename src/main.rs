@@ -1797,20 +1797,23 @@ async fn run_session(
                         let result =
                             advisor::run_turn(cfg, text, images, ui_tx.clone(), abort_rx.clone())
                                 .await;
-                        if *abort_rx.borrow() {
-                            let _ = ui_tx.send(crate::event::UiEvent::CancelPendingPermissions);
-                            let _ = ui_tx.send(crate::event::UiEvent::PromptDone {
-                                stop_reason:
-                                    agent_client_protocol::schema::v1::StopReason::Cancelled,
-                                usage: None,
-                            });
-                            return;
-                        }
                         match result {
                             Ok(result) => {
+                                // A verified completion receipt is terminal. If a
+                                // cancel arrives after it, preserve the delivered
+                                // answer rather than reporting a contradictory
+                                // cancelled result.
                                 let _ = ui_tx.send(crate::event::UiEvent::PromptDone {
                                     stop_reason: result.stop_reason,
                                     usage: result.usage,
+                                });
+                            }
+                            Err(_) if *abort_rx.borrow() => {
+                                let _ = ui_tx.send(crate::event::UiEvent::CancelPendingPermissions);
+                                let _ = ui_tx.send(crate::event::UiEvent::PromptDone {
+                                    stop_reason:
+                                        agent_client_protocol::schema::v1::StopReason::Cancelled,
+                                    usage: None,
                                 });
                             }
                             Err(e) => {
