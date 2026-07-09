@@ -1314,7 +1314,10 @@ pub(crate) enum TurnEvent {
         status: Option<ToolCallStatus>,
         started: bool,
     },
-    Permission(Box<crate::event::PermissionPrompt>),
+    Permission {
+        prompt: Box<crate::event::PermissionPrompt>,
+        access_mode: acp::RuntimeAccessMode,
+    },
     Note(String),
 }
 
@@ -1344,6 +1347,25 @@ impl AgentHandle {
         abort: watch::Receiver<bool>,
         access_mode: acp::RuntimeAccessMode,
     ) -> Result<Self> {
+        Self::connect_with_saved_session_config(
+            launch,
+            cwd,
+            additional_directories,
+            abort,
+            access_mode,
+            HashMap::new(),
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_with_saved_session_config(
+        launch: &Launch,
+        cwd: &Path,
+        additional_directories: &[PathBuf],
+        abort: watch::Receiver<bool>,
+        access_mode: acp::RuntimeAccessMode,
+        saved_session_config: HashMap<String, String>,
+    ) -> Result<Self> {
         let (event_tx, events) = mpsc::unbounded_channel();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let runtime_cfg = acp::AcpRuntimeConfig {
@@ -1358,7 +1380,7 @@ impl AgentHandle {
             access_mode,
             agent_source_id: None,
             config_path: None,
-            saved_session_config: HashMap::new(),
+            saved_session_config,
         };
         let runtime = tokio::spawn(acp::run(runtime_cfg, event_tx, cmd_rx));
         let mut handle = Self {
@@ -1413,19 +1435,7 @@ impl AgentHandle {
     }
 
     fn answer_permission(&self, prompt: crate::event::PermissionPrompt) {
-        let allow = self.access_mode == acp::RuntimeAccessMode::Full
-            || matches!(
-                prompt.tool_call.fields.kind,
-                Some(ToolKind::Read | ToolKind::Search | ToolKind::Think)
-            );
-        let selected = if allow {
-            choose_allow_option(&prompt.options).or_else(|| choose_reject_option(&prompt.options))
-        } else {
-            choose_reject_option(&prompt.options)
-        };
-        let decision = selected
-            .map(PermissionDecision::Selected)
-            .unwrap_or(PermissionDecision::Cancelled);
+        let decision = permission_decision_for_access(self.access_mode, &prompt);
         let _ = prompt.responder.send(decision);
     }
 
@@ -1630,7 +1640,10 @@ impl AgentHandle {
                     self.store_config(options, targets)
                 }
                 UiEvent::PermissionRequest(p) => {
-                    on_event(TurnEvent::Permission(Box::new(p)));
+                    on_event(TurnEvent::Permission {
+                        prompt: Box::new(p),
+                        access_mode: self.access_mode,
+                    });
                 }
                 UiEvent::ElicitationRequest(e) => {
                     let _ = e.responder.send(ElicitationOutcome::Decline);
@@ -1702,6 +1715,25 @@ fn turn_succeeded(stop: StopReason) -> bool {
 fn prompt_rejected_transiently(message: &str) -> bool {
     message.contains("config update already in flight")
         || message.contains("prompt already in flight")
+}
+
+fn permission_decision_for_access(
+    access_mode: acp::RuntimeAccessMode,
+    prompt: &crate::event::PermissionPrompt,
+) -> PermissionDecision {
+    let allow = access_mode == acp::RuntimeAccessMode::Full
+        || matches!(
+            prompt.tool_call.fields.kind,
+            Some(ToolKind::Read | ToolKind::Search | ToolKind::Think)
+        );
+    let selected = if allow {
+        choose_allow_option(&prompt.options).or_else(|| choose_reject_option(&prompt.options))
+    } else {
+        choose_reject_option(&prompt.options)
+    };
+    selected
+        .map(PermissionDecision::Selected)
+        .unwrap_or(PermissionDecision::Cancelled)
 }
 
 /// First `RejectOnce` option, else first `RejectAlways`. Used only when an
@@ -2376,12 +2408,12 @@ fn forward_turn_event(
                 });
             }
         }
-        TurnEvent::Permission(prompt) => {
-            let _ = prompt.responder.send(
-                choose_allow_option(&prompt.options)
-                    .map(PermissionDecision::Selected)
-                    .unwrap_or(PermissionDecision::Cancelled),
-            );
+        TurnEvent::Permission {
+            prompt,
+            access_mode,
+        } => {
+            let decision = permission_decision_for_access(access_mode, &prompt);
+            let _ = prompt.responder.send(decision);
             let _ = tx.send(RagnarokEvent::Log {
                 fighter: Some(id),
                 text: format!("🛡 {fighter_name} permission auto-answered"),
@@ -4574,6 +4606,43 @@ mod tests {
                 responder: ptx,
             });
         assert!(matches!(prx.await, Ok(PermissionDecision::Selected(id)) if id == "allow"));
+    }
+
+    #[tokio::test]
+    async fn forward_turn_event_respects_read_only_permission_policy() {
+        use agent_client_protocol::schema::v1::{
+            PermissionOption, PermissionOptionKind, ToolCallUpdate, ToolCallUpdateFields,
+        };
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut fields = ToolCallUpdateFields::default();
+        fields.kind = Some(ToolKind::Edit);
+        let (ptx, prx) = tokio::sync::oneshot::channel();
+        let prompt = crate::event::PermissionPrompt {
+            tool_call: ToolCallUpdate::new("edit", fields),
+            options: vec![
+                PermissionOption::new("deny", "Deny", PermissionOptionKind::RejectOnce),
+                PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+            ],
+            responder: ptx,
+        };
+
+        let mut cry_roll = 0;
+        let mut chunk_count = 0;
+        forward_turn_event(
+            &tx,
+            1,
+            "reviewer",
+            TurnEvent::Permission {
+                prompt: Box::new(prompt),
+                access_mode: acp::RuntimeAccessMode::ReadOnly,
+            },
+            TextLane::Tool,
+            &mut cry_roll,
+            &mut chunk_count,
+        );
+
+        assert!(matches!(prx.await, Ok(PermissionDecision::Selected(id)) if id == "deny"));
     }
 
     #[tokio::test]

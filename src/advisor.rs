@@ -4,7 +4,7 @@
 //! entries show Thor routing, worker output, review, judged findings, fixes,
 //! and the final response.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
@@ -163,7 +163,10 @@ pub(crate) async fn run_turn(
         .rationale
         .unwrap_or_else(|| "Thor judged this to be an implementation task".to_string());
 
-    let (worker, reviewer) = select_worker_and_reviewer(&cfg, &task).await?;
+    let (worker, reviewer) = tokio::select! {
+        result = select_worker_and_reviewer(&cfg, &task) => result?,
+        _ = wait_abort(abort.clone()) => bail!("advisor turn cancelled"),
+    };
     emit_info(
         &ui_tx,
         format!(
@@ -299,18 +302,30 @@ async fn connect_role(
     abort: watch::Receiver<bool>,
     access_mode: acp::RuntimeAccessMode,
 ) -> Result<AgentHandle> {
-    let mut handle = AgentHandle::connect(
+    let saved_session_config = saved_session_config(&cfg.config_path, &role.card.agent_source_id);
+    let mut handle = AgentHandle::connect_with_saved_session_config(
         &role.launch,
         &cfg.cwd,
         &cfg.additional_directories,
         abort,
         access_mode,
+        saved_session_config,
     )
     .await?;
     if let Some(model_value) = role.model_value.as_deref() {
         handle.arm_model(model_value).await?;
     }
     Ok(handle)
+}
+
+fn saved_session_config(
+    config_path: &Path,
+    agent_source_id: &str,
+) -> std::collections::HashMap<String, String> {
+    Config::load(config_path)
+        .ok()
+        .and_then(|cfg| cfg.session_config.get(agent_source_id).cloned())
+        .unwrap_or_default()
 }
 
 async fn select_worker_and_reviewer(
@@ -572,7 +587,7 @@ fn forward_turn_event(ui_tx: &mpsc::UnboundedSender<UiEvent>, role: &str, ev: Tu
                 );
             }
         }
-        TurnEvent::Permission(prompt) => {
+        TurnEvent::Permission { prompt, .. } => {
             let _ = ui_tx.send(UiEvent::PermissionRequest(*prompt));
         }
         TurnEvent::Note(note) => emit_info(ui_tx, format!("{role}: {note}")),
@@ -601,9 +616,8 @@ fn text_chunk(text: impl Into<String>) -> ContentChunk {
 }
 
 fn parse_json_object<T: for<'de> Deserialize<'de>>(text: &str) -> Option<T> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    serde_json::from_str(&text[start..=end]).ok()
+    let value = ragnarok::extract_json_object(text)?;
+    serde_json::from_value(value).ok()
 }
 
 async fn capture_workspace_snapshot(cfg: &AdvisorConfig) -> Option<String> {
@@ -654,6 +668,17 @@ async fn git_capture(cwd: &PathBuf, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+async fn wait_abort(mut abort: watch::Receiver<bool>) {
+    loop {
+        if *abort.borrow() {
+            return;
+        }
+        if abort.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 fn turn_succeeded(stop: StopReason) -> bool {
     matches!(
         stop,
@@ -662,15 +687,7 @@ fn turn_succeeded(stop: StopReason) -> bool {
 }
 
 fn truncate_middle(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_string();
-    }
-    let half = limit.saturating_sub(32) / 2;
-    format!(
-        "{}\n...[truncated]...\n{}",
-        &text[..half],
-        &text[text.len().saturating_sub(half)..]
-    )
+    ragnarok::truncate_middle(text, limit)
 }
 
 #[cfg(test)]
@@ -688,6 +705,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_route_json_with_braces_inside_string() {
+        let parsed = parse_json_object::<RouteDecision>(
+            "note {\"action\":\"answer\",\"answer\":\"literal } brace\"} trailing {noise}",
+        )
+        .expect("route");
+        assert_eq!(parsed.action, "answer");
+        assert_eq!(parsed.answer.as_deref(), Some("literal } brace"));
+    }
+
+    #[test]
     fn judgment_summary_lists_valid_and_rejected_findings() {
         let summary = judgment_summary(&ReviewJudgment {
             valid_findings: vec![ValidFinding {
@@ -701,5 +728,41 @@ mod tests {
         assert!(summary.contains("Valid findings"));
         assert!(summary.contains("fix bug"));
         assert!(summary.contains("Rejected findings"));
+    }
+
+    #[test]
+    fn truncate_middle_respects_char_boundaries() {
+        let text = "⚡".repeat(100);
+        let out = truncate_middle(&text, 50);
+
+        assert!(out.contains("excised"));
+        assert!(out.chars().count() > 0);
+    }
+
+    #[test]
+    fn saved_session_config_loads_agent_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.session_config.insert(
+            "agent-a".to_string(),
+            std::collections::HashMap::from([("config:model".to_string(), "opus".to_string())]),
+        );
+        cfg.save(&path).expect("save");
+
+        let loaded = saved_session_config(&path, "agent-a");
+
+        assert_eq!(loaded.get("config:model").map(String::as_str), Some("opus"));
+        assert!(saved_session_config(&path, "agent-b").is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_abort_resolves_when_sender_closes() {
+        let (tx, rx) = watch::channel(false);
+        drop(tx);
+
+        tokio::time::timeout(Duration::from_secs(1), wait_abort(rx))
+            .await
+            .expect("abort wait should resolve");
     }
 }
