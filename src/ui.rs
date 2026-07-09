@@ -5011,6 +5011,9 @@ fn advisor_candidate_label(candidate: &AdvisorCandidate) -> String {
     } else {
         ""
     };
+    if candidate.elo == 0 {
+        return format!("{role}: {model} via {}", candidate.source_id);
+    }
     format!(
         "{role}: {model} via {} (Elo {}{provisional})",
         candidate.source_id, candidate.elo

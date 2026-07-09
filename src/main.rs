@@ -406,7 +406,7 @@ fn mcp_config_from_environment(
         // An embedded advisor bridge must never accept an arbitrary executable,
         // even if the parent process opted in for a standalone MCP session.
         allow_adhoc_program: !advisor_mode && mcp::adhoc_program_allowed(),
-        require_ranked_candidates: advisor_mode,
+        require_advisor_candidates: advisor_mode,
         limits: if advisor_mode {
             mcp::McpLimits::advisor()
         } else {

@@ -171,7 +171,7 @@ pub(crate) async fn run_turn(
     let Some(final_response) = completion_marker.accepted_response() else {
         bail!(
             "Thor ended without an MCP-verified completion receipt containing a user-facing answer; \
-             delegated work is not accepted without a completed independent review"
+             implementation work needs an independent review and review-only work needs a completed read-only reviewer"
         );
     };
     emit_activity(
@@ -276,12 +276,24 @@ fn thor_prompt(user_prompt: &str, has_images: bool) -> String {
          prose before or after completion. Make complete_orchestration your final tool call with \
          mode `direct` and that exact answer in final_response. mj renders final_response after \
          server validation.\n\n\
+         For a branch, pull-request, diff, or code review that must not modify files:\n\
+         1. Call select_advisor_agents once with workflow `review` and the original task. Use only \
+         its recommended reviewer; do not re-run selection to reroll a model.\n\
+         2. Connect that candidate with purpose `reviewer`. It is read-only. Submit a precise \
+         review prompt; do not open a worker, do not include review_of, and do not ask a second \
+         agent to review this review.\n\
+         3. Poll from submit_prompt's since_seq and advance to each next_seq. Report concrete, \
+         evidence-backed findings or explicitly say when there are none.\n\
+         4. Make complete_orchestration your final tool call with mode `review` and the exact \
+         user-facing review in final_response.\n\n\
          For implementation, edits, test repair, or substantial repository work:\n\
-         1. Call select_ranked_agents with the original task. Use its recommended worker \
-         and reviewer; never choose the Thor identity.\n\
+         1. Call select_advisor_agents once with workflow `implementation` and the original task. \
+         Use its recommended worker and reviewer; never choose the Thor identity or re-run \
+         selection to reroll a team.\n\
          2. Connect the worker with purpose `worker`, then submit a precise implementation \
          prompt. Preserve unrelated changes, do not commit or push unless requested, and \
-         run focused validation.\n\
+         run focused validation. There is exactly one live worker connection: steer or re-prompt \
+         it instead of opening another worker.\n\
          3. Poll from submit_prompt's since_seq and advance to each next_seq. Act on actual \
          progress; do not poll blindly.\n\
          4. Answer pending permissions promptly using only advertised option IDs and the \
@@ -289,7 +301,7 @@ fn thor_prompt(user_prompt: &str, has_images: bool) -> String {
          5. If the worker drifts, stalls, exceeds scope, or claims completion without \
          evidence, cancel it, wait until its turn is terminal, then re-prompt or adjust \
          session configuration with a concrete correction.\n\
-         6. After implementation, connect the distinct recommended candidate with purpose \
+         6. After implementation, connect the reserved fresh reviewer session with purpose \
          `reviewer`. Submit its adversarial read-only review with `review_of` set to the exact \
          worker connection_id and turn_id you are auditing. The server binds that review to the \
          original task and current workspace; monitor it to completion.\n\
@@ -297,9 +309,12 @@ fn thor_prompt(user_prompt: &str, has_images: bool) -> String {
          findings back to the worker and monitor any fix.\n\
          8. Make complete_orchestration your final tool call with mode `delegated` and the \
          exact user-facing answer in final_response; it refuses completion unless a worker and \
-         independent reviewer completed successfully. Do not send user-facing prose before or \
+         fresh read-only reviewer completed successfully. Do not send user-facing prose before or \
          after the call. mj renders final_response after server validation and tears down nested \
          connections when this session closes.\n\n\
+         If select_advisor_agents reports that no configured non-Thor delegate exists, do not \
+         retry or connect Thor to itself. Explain that setup blocker and tell the user to add a \
+         custom agent in mj.\n\n\
          Do not expose MCP JSON to the user. Give a concise final response describing the \
          result, validation, review/fixes, and any remaining risk. If bounded execution makes \
          completion unsafe, clean up and explain the concrete blocker instead of looping.\n\
@@ -755,9 +770,10 @@ struct NestedCandidate {
     agent_source_id: String,
     model_value: String,
     model_name: String,
-    elo: u32,
     #[serde(default)]
-    provisional: bool,
+    elo: Option<u32>,
+    #[serde(default)]
+    provisional: Option<bool>,
 }
 
 impl NestedCandidate {
@@ -767,8 +783,8 @@ impl NestedCandidate {
             source_id: self.agent_source_id,
             model_name: self.model_name,
             model_value: self.model_value,
-            elo: self.elo,
-            provisional: self.provisional,
+            elo: self.elo.unwrap_or_default(),
+            provisional: self.provisional.unwrap_or(false),
         }
     }
 }
@@ -896,10 +912,13 @@ mod tests {
     #[test]
     fn thor_prompt_describes_the_tool_control_loop_without_json_routing() {
         let prompt = thor_prompt("add a test", false);
-        assert!(prompt.contains("select_ranked_agents"));
+        assert!(prompt.contains("select_advisor_agents"));
         assert!(prompt.contains("complete_orchestration"));
         assert!(prompt.contains("final_response"));
         assert!(prompt.contains("review_of"));
+        assert!(prompt.contains("workflow `review`"));
+        assert!(prompt.contains("mode `review`"));
+        assert!(prompt.contains("no configured non-Thor delegate"));
         assert!(prompt.contains("cancel it"));
         assert!(prompt.contains("final tool call"));
         assert!(prompt.contains("Do not send user-facing prose before or after"));
@@ -964,6 +983,31 @@ mod tests {
             )])),
             None
         );
+    }
+
+    #[test]
+    fn advisor_reservation_with_an_unprobed_model_projects_to_the_transcript() {
+        let value = serde_json::json!({
+            "workflow": "implementation",
+            "recommended_worker": {
+                "candidate_id": "candidate-worker",
+                "agent_source_id": "custom:delegate",
+                "model_value": "",
+                "model_name": "configured default (model reported by agent)",
+                "elo": null,
+                "provisional": null,
+                "vendor": null
+            }
+        });
+
+        let selection = value_to_selection(&value).expect("advisor reservation parses");
+        let worker = selection
+            .recommended_worker
+            .expect("worker reservation")
+            .into_activity_candidate("worker");
+        assert_eq!(worker.source_id, "custom:delegate");
+        assert_eq!(worker.elo, 0);
+        assert!(!worker.provisional);
     }
 
     #[test]

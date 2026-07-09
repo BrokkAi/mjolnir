@@ -39,7 +39,7 @@ pub struct AdvisorActor {
     pub model_value: Option<String>,
 }
 
-/// One ranked model recommendation made before Thor connects a nested agent.
+/// One reserved nested agent shown before Thor opens its ACP session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AdvisorCandidate {
     pub role: String,

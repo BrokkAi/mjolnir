@@ -53,9 +53,8 @@ use crate::event::{
 use crate::labels::{
     permission_option_kind_label, stop_reason_label, tool_kind_label, tool_status_label,
 };
-use crate::ragnarok::{self, BattleConfig, Candidate};
+use crate::ragnarok::{self, Candidate};
 use crate::remote;
-use crate::scores::ScoreStore;
 
 /// How long `connect` waits for the agent to reach a started session before
 /// giving up. Agents may install packages or authenticate on first launch, so
@@ -219,8 +218,8 @@ pub struct McpConfig {
     /// Whether this server accepts an arbitrary executable in `connect`.
     pub allow_adhoc_program: bool,
     /// Advisor policy: nested worker/reviewer connections must use the
-    /// recommended opaque ids returned by `select_ranked_agents`.
-    pub require_ranked_candidates: bool,
+    /// opaque reservations returned by `select_advisor_agents`.
+    pub require_advisor_candidates: bool,
     /// Server-wide orchestration bounds.
     pub limits: McpLimits,
     /// Original user attachments inherited by the first worker prompt when
@@ -849,10 +848,13 @@ async fn enforce_connection_guardrails(conn: &Connection, permission_timeout: Du
 pub struct McpServer {
     connections: Arc<Mutex<HashMap<String, Arc<Connection>>>>,
     next_conn_id: Arc<AtomicU64>,
-    ranked_candidates: Arc<Mutex<HashMap<String, Candidate>>>,
+    advisor_candidates: Arc<Mutex<HashMap<String, Candidate>>>,
     recommended_worker: Arc<Mutex<Option<String>>>,
     recommended_reviewer: Arc<Mutex<Option<String>>>,
-    /// Original user task for the current ranked advisor selection. It is
+    /// Current advisor selection shape. A review-only selection permits one
+    /// read-only reviewer turn and intentionally has no implementation worker.
+    advisor_workflow: Arc<Mutex<SelectionWorkflow>>,
+    /// Original user task for the current advisor reservation. It is
     /// only populated in strict advisor mode and becomes immutable once a
     /// nested prompt has been submitted.
     advisor_task: Arc<Mutex<Option<String>>>,
@@ -873,7 +875,7 @@ struct NoArgs {}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ConnectArgs {
-    /// Opaque ranked candidate returned by `select_ranked_agents`. Cannot be
+    /// Opaque advisor candidate returned by `select_advisor_agents`. Cannot be
     /// combined with `agent` or `program`.
     #[serde(default)]
     candidate_id: Option<String>,
@@ -929,6 +931,17 @@ impl ConnectionPurpose {
     }
 }
 
+/// The delegation shape Thor is asking the advisor service to support.
+/// Implementation work needs a full-access worker plus a fresh read-only audit;
+/// a branch/PR review is already the audit, so it needs one read-only agent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SelectionWorkflow {
+    #[default]
+    Implementation,
+    Review,
+}
+
 #[derive(Debug, Serialize)]
 struct ConnectResult {
     connection_id: String,
@@ -954,31 +967,36 @@ struct AgentInfo {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct SelectRankedAgentsArgs {
-    /// Original user task. It is retained in the battle configuration while
-    /// installed ACP agents are probed and ranked.
+struct SelectAdvisorAgentsArgs {
+    /// Original user task. It is bound to the later worker/reviewer prompt.
     task: String,
-    /// Candidate ids from an earlier selection that should not be returned.
+    /// Select an implementation worker plus a fresh reviewer (default),
+    /// or one read-only reviewer for a branch/PR/code-review request.
+    #[serde(default)]
+    workflow: SelectionWorkflow,
+    /// Reserved for a future user-directed handoff. Advisor mode never opens
+    /// alternate workers automatically.
     #[serde(default)]
     excluded_candidate_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct RankedCandidateView {
+struct AdvisorCandidateView {
     candidate_id: String,
     agent_source_id: String,
     model_value: String,
     model_name: String,
-    elo: u32,
-    provisional: bool,
+    elo: Option<u32>,
+    provisional: Option<bool>,
     vendor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct RankedSelectionResult {
-    recommended_worker: Option<RankedCandidateView>,
-    recommended_reviewer: Option<RankedCandidateView>,
-    candidates: Vec<RankedCandidateView>,
+    workflow: SelectionWorkflow,
+    recommended_worker: Option<AdvisorCandidateView>,
+    recommended_reviewer: Option<AdvisorCandidateView>,
+    candidates: Vec<AdvisorCandidateView>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1191,6 +1209,7 @@ struct ConnectionView {
 enum CompletionMode {
     Direct,
     Delegated,
+    Review,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1342,9 +1361,10 @@ impl McpServer {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
             next_conn_id: Arc::new(AtomicU64::new(1)),
-            ranked_candidates: Arc::new(Mutex::new(HashMap::new())),
+            advisor_candidates: Arc::new(Mutex::new(HashMap::new())),
             recommended_worker: Arc::new(Mutex::new(None)),
             recommended_reviewer: Arc::new(Mutex::new(None)),
+            advisor_workflow: Arc::new(Mutex::new(SelectionWorkflow::default())),
             advisor_task: Arc::new(Mutex::new(None)),
             next_candidate_id: Arc::new(AtomicU64::new(1)),
             submitted_turns: Arc::new(AtomicU64::new(0)),
@@ -1454,19 +1474,19 @@ impl McpServer {
                 MAX_FINAL_RESPONSE_BYTES
             ))),
             Some(response) => Ok(Some(response)),
-            None if self.config.require_ranked_candidates => Err(err(
+            None if self.config.require_advisor_candidates => Err(err(
                 "advisor completion requires a nonempty final_response; put the exact user-facing answer in the completion call",
             )),
             None => Ok(None),
         }
     }
 
-    /// In advisor mode, a connection remains tied to the exact ranked
+    /// In advisor mode, a connection remains tied to the exact reserved
     /// candidate that is currently authorized for its role. This prevents a
     /// stale connection from a superseded selection being used to satisfy the
     /// worker or reviewer audit.
     async fn require_current_advisor_candidate(&self, conn: &Connection) -> Result<(), McpError> {
-        if !self.config.require_ranked_candidates {
+        if !self.config.require_advisor_candidates {
             return Ok(());
         }
         let expected = match conn.purpose {
@@ -1475,7 +1495,7 @@ impl McpServer {
         };
         if expected.as_deref() != conn.candidate_id.as_deref() {
             return Err(err(format!(
-                "{} connection is not bound to the current ranked selection; reconnect using select_ranked_agents output",
+                "{} connection is not bound to the current advisor reservation; reconnect using select_advisor_agents output",
                 conn.purpose.label()
             )));
         }
@@ -1483,7 +1503,7 @@ impl McpServer {
     }
 
     /// Validate that an advisor reviewer is auditing one exact, successful
-    /// worker turn from the current ranked selection, then return the
+    /// worker turn from the current advisor reservation, then return the
     /// immutable audit reference and original task used to stamp its prompt.
     async fn bind_advisor_review(
         &self,
@@ -1492,7 +1512,7 @@ impl McpServer {
     ) -> Result<(ReviewOfTurn, String), McpError> {
         self.require_current_advisor_candidate(reviewer).await?;
         let task = self.advisor_task.lock().await.clone().ok_or_else(|| {
-            err("advisor reviewer requires a completed select_ranked_agents selection")
+            err("advisor reviewer requires a completed select_advisor_agents reservation")
         })?;
         let worker = self.get_conn(&review_of.worker_connection_id).await?;
         if worker.purpose != ConnectionPurpose::Worker {
@@ -1566,7 +1586,7 @@ impl McpServer {
         selector: ConfigSelector<'_>,
         value: &str,
     ) -> Result<(), McpError> {
-        if self.config.require_ranked_candidates && conn.candidate_id.is_some() {
+        if self.config.require_advisor_candidates && conn.candidate_id.is_some() {
             let changes_model = {
                 let state = conn.state.lock().await;
                 match selector {
@@ -1577,8 +1597,8 @@ impl McpServer {
                 }
             };
             if changes_model && conn.model_value.as_deref() != Some(value) {
-                return Err(err("advisor policy locks ranked candidate models; re-run \
-                     select_ranked_agents and reconnect instead"));
+                return Err(err("advisor policy locks reserved agent models; re-run \
+                     select_advisor_agents and reconnect instead"));
             }
         }
         let option_deadline =
@@ -1661,14 +1681,22 @@ impl McpServer {
         if args.agent.is_some() && args.program.is_some() {
             return Err("agent and program are alternatives; provide only one".to_string());
         }
-        if self.config.require_ranked_candidates && args.candidate_id.is_none() {
+        if self.config.require_advisor_candidates && args.candidate_id.is_none() {
             return Err(
-                "advisor policy requires candidate_id from select_ranked_agents".to_string(),
+                "advisor policy requires candidate_id from select_advisor_agents".to_string(),
             );
         }
 
         let resolved = if let Some(candidate_id) = &args.candidate_id {
-            if self.config.require_ranked_candidates {
+            if self.config.require_advisor_candidates {
+                if *self.advisor_workflow.lock().await == SelectionWorkflow::Review
+                    && args.purpose == ConnectionPurpose::Worker
+                {
+                    return Err(
+                        "review-only selection permits only a read-only reviewer connection"
+                            .to_string(),
+                    );
+                }
                 let recommended = match args.purpose {
                     ConnectionPurpose::Worker => self.recommended_worker.lock().await.clone(),
                     ConnectionPurpose::Reviewer => self.recommended_reviewer.lock().await.clone(),
@@ -1681,20 +1709,30 @@ impl McpServer {
                 }
             }
             let candidate = self
-                .ranked_candidates
+                .advisor_candidates
                 .lock()
                 .await
                 .get(candidate_id)
                 .cloned()
                 .ok_or_else(|| format!("unknown or expired candidate_id: {candidate_id}"))?;
             let source_id = candidate.card.agent_source_id.clone();
+            let has_selected_model = !candidate.card.model_value.is_empty();
+            let saved_session_config = self.saved_session_config(&source_id);
+            let saved_model = saved_session_config.get("model").cloned();
             ResolvedAgent {
                 command: candidate.launch.program,
                 args: candidate.launch.args,
                 env: candidate.launch.env,
-                saved_session_config: self.saved_session_config(&source_id),
-                model_value: Some(candidate.card.model_value),
-                model_name: Some(candidate.card.model_name),
+                saved_session_config,
+                // Advisor reservations deliberately do not guess a model or
+                // force a model config option. The connected ACP agent is the
+                // source of truth for the model it actually starts with.
+                model_value: has_selected_model
+                    .then_some(candidate.card.model_value)
+                    .or_else(|| saved_model.clone()),
+                model_name: has_selected_model
+                    .then_some(candidate.card.model_name)
+                    .or(saved_model),
                 identity: candidate.match_key,
                 candidate_id: Some(candidate_id.clone()),
                 source_id: Some(source_id),
@@ -1927,106 +1965,80 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Probe installed ACP agents, rank their models by mjolnir's Ragnarok Elo/diversity policy, and return opaque candidate ids for connect. The recommended reviewer is independent from the recommended worker."
+        description = "Reserve one configured non-Thor ACP delegate for this Thor advisor turn without probing, ranking, or launching a pool. Implementation returns one full-access worker reservation plus one fresh read-only reviewer reservation. Review returns one read-only reviewer reservation."
     )]
-    async fn select_ranked_agents(
+    async fn select_advisor_agents(
         &self,
-        Parameters(args): Parameters<SelectRankedAgentsArgs>,
+        Parameters(args): Parameters<SelectAdvisorAgentsArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.check_tool_budget()?;
         let _mutation = self.mutation_lock.lock().await;
         self.ensure_orchestration_open()?;
-        if self.config.require_ranked_candidates && self.submitted_turns.load(Ordering::SeqCst) != 0
+        if self.config.require_advisor_candidates
+            && self.submitted_turns.load(Ordering::SeqCst) != 0
         {
             return Err(err(
-                "advisor ranking is immutable after the first nested prompt; continue the current worker/reviewer audit instead",
+                "advisor reservation is immutable after the first nested prompt; continue the current worker/reviewer audit instead",
             ));
         }
         let task = args.task;
+        let workflow = args.workflow;
+        if self.config.require_advisor_candidates
+            && args.excluded_candidate_ids.is_empty()
+            && self.advisor_task.lock().await.is_some()
+        {
+            return Err(err(
+                "advisor reservation already exists; use its recommended connection instead of re-running select_advisor_agents",
+            ));
+        }
+        if !args.excluded_candidate_ids.is_empty() {
+            return Err(err(
+                "advisor mode does not open alternate workers; steer the reserved worker or end the turn",
+            ));
+        }
         let user_cfg = config::Config::load(&self.config.config_path)
             .map_err(|e| err(format!("load config: {e}")))?;
 
-        let excluded_match_keys: HashSet<String> = {
-            let cached = self.ranked_candidates.lock().await;
-            args.excluded_candidate_ids
-                .iter()
-                .filter_map(|id| cached.get(id).map(|candidate| candidate.match_key.clone()))
-                .collect()
+        let reserved = self.reserve_advisor_delegate(&user_cfg)?;
+        let worker = self.configured_advisor_candidate(&reserved, ConnectionPurpose::Worker)?;
+        let reviewer = self.configured_advisor_candidate(&reserved, ConnectionPurpose::Reviewer)?;
+        let (recommended_worker, recommended_reviewer, pool) = match workflow {
+            SelectionWorkflow::Implementation => (
+                Some(worker.clone()),
+                Some(reviewer.clone()),
+                vec![worker, reviewer],
+            ),
+            SelectionWorkflow::Review => (None, Some(reviewer.clone()), vec![reviewer]),
         };
-
-        self.remaining_overall()?;
-        let store = ragnarok::ensure_scores(&ScoreStore::default(), &user_cfg).await;
-        let (events_tx, _events_rx) = mpsc::unbounded_channel();
-        let battle_cfg = BattleConfig {
-            task: task.clone(),
-            cwd: self.config.default_cwd.clone(),
-            config_path: self.config.config_path.clone(),
-            score_store: store.clone(),
-            thor_host: None,
-        };
-        let mut pool = ragnarok::muster_excluding(
-            &battle_cfg,
-            &user_cfg,
-            &store,
-            &events_tx,
-            &self.config.excluded_agent_source_ids,
-        )
-        .await
-        .map_err(|e| err(format!("rank ACP agents: {e:#}")))?;
-        // `muster` owns process-tree cleanup; do not cancel it mid-probe merely
-        // to enforce the outer deadline. Reject immediately after safe cleanup.
-        self.remaining_overall()?;
-        pool.retain(|candidate| {
-            !self
-                .config
-                .excluded_agent_source_ids
-                .contains(&candidate.card.agent_source_id)
-                && !excluded_match_keys.contains(&candidate.match_key)
-        });
-        for (id, candidate) in pool.iter_mut().enumerate() {
-            candidate.card.id = id;
-        }
-
-        let recommended_worker = ragnarok::select_fighters(&pool, 1).into_iter().next();
-        let recommended_reviewer = recommended_worker.as_ref().and_then(|worker| {
-            ragnarok::select_judge_only_reviewer(
-                &pool,
-                std::slice::from_ref(worker),
-                worker.card.id,
-            )
-            .or_else(|| {
-                pool.iter()
-                    .find(|candidate| candidate.match_key != worker.match_key)
-                    .cloned()
-            })
-        });
 
         let mut cached = HashMap::with_capacity(pool.len());
         let mut views = Vec::with_capacity(pool.len());
+        let mut views_by_match_key = HashMap::with_capacity(pool.len());
         for candidate in pool {
             let candidate_id = format!(
                 "candidate-{}",
                 self.next_candidate_id.fetch_add(1, Ordering::SeqCst)
             );
-            views.push(Self::ranked_candidate_view(&candidate_id, &candidate));
+            views_by_match_key.insert(candidate.match_key.clone(), candidate_id.clone());
+            views.push(Self::advisor_candidate_view(&candidate_id, &candidate));
             cached.insert(candidate_id, candidate);
         }
         let find_view = |wanted: &Candidate| {
+            let candidate_id = views_by_match_key.get(&wanted.match_key)?;
             views
                 .iter()
-                .find(|view| {
-                    view.agent_source_id == wanted.card.agent_source_id
-                        && view.model_value == wanted.card.model_value
-                })
+                .find(|view| &view.candidate_id == candidate_id)
                 .cloned()
         };
         let worker_view = recommended_worker.as_ref().and_then(find_view);
         let reviewer_view = recommended_reviewer.as_ref().and_then(find_view);
-        if self.config.require_ranked_candidates
-            && (worker_view.is_none() || reviewer_view.is_none())
-        {
+        let selection_is_complete = match workflow {
+            SelectionWorkflow::Implementation => worker_view.is_some() && reviewer_view.is_some(),
+            SelectionWorkflow::Review => reviewer_view.is_some(),
+        };
+        if self.config.require_advisor_candidates && !selection_is_complete {
             return Err(err(
-                "advisor delegation requires distinct ranked worker and reviewer candidates",
+                "advisor reservation requires the candidates needed by the requested workflow",
             ));
         }
         *self.recommended_worker.lock().await = worker_view
@@ -2035,26 +2047,88 @@ impl McpServer {
         *self.recommended_reviewer.lock().await = reviewer_view
             .as_ref()
             .map(|candidate| candidate.candidate_id.clone());
-        *self.ranked_candidates.lock().await = cached;
-        if self.config.require_ranked_candidates {
+        *self.advisor_candidates.lock().await = cached;
+        if self.config.require_advisor_candidates {
             *self.advisor_task.lock().await = Some(task);
+            *self.advisor_workflow.lock().await = workflow;
         }
 
         json_result(&RankedSelectionResult {
+            workflow,
             recommended_worker: worker_view,
             recommended_reviewer: reviewer_view,
             candidates: views,
         })
     }
 
-    fn ranked_candidate_view(candidate_id: &str, candidate: &Candidate) -> RankedCandidateView {
-        RankedCandidateView {
+    fn configured_advisor_candidate(
+        &self,
+        agent: &ResolvedAgent,
+        purpose: ConnectionPurpose,
+    ) -> Result<Candidate, McpError> {
+        let source_id = agent
+            .source_id
+            .clone()
+            .ok_or_else(|| err("advisor mode requires a configured default agent"))?;
+        Ok(Candidate {
+            card: ragnarok::FighterCard {
+                id: 0,
+                agent_source_id: source_id,
+                model_value: String::new(),
+                model_name: "configured default (model reported by agent)".to_string(),
+                elo: 0,
+                provisional: false,
+            },
+            launch: ragnarok::Launch {
+                program: agent.command.clone(),
+                args: agent.args.clone(),
+                env: agent.env.clone(),
+            },
+            // A reviewer is a fresh, read-only session. Its role-specific
+            // identity lets that independent session audit the worker even
+            // when the host only has one configured ACP backend.
+            match_key: format!("advisor:{}:{}", purpose.label(), agent.identity),
+            vendor: None,
+            bedrock: false,
+        })
+    }
+
+    /// Thor itself is excluded from nested connections. Reserve the configured
+    /// default only when it is safe; otherwise use the first configured custom
+    /// agent. This is intentionally deterministic and process-free: normal
+    /// advisor work is not a Ragnarok model search.
+    fn reserve_advisor_delegate(&self, cfg: &config::Config) -> Result<ResolvedAgent, McpError> {
+        if let Some(default) = &cfg.agent
+            && !self
+                .config
+                .excluded_agent_source_ids
+                .contains(&default.source_id)
+        {
+            return self.resolve_configured_agent(cfg, None).map_err(err);
+        }
+        for custom in &cfg.custom_agents {
+            let source_id = format!("{}{}", config::CUSTOM_AGENT_SOURCE_PREFIX, custom.name);
+            if self.config.excluded_agent_source_ids.contains(&source_id) {
+                continue;
+            }
+            return self
+                .resolve_configured_agent(cfg, Some(&source_id))
+                .map_err(err);
+        }
+        Err(err(
+            "advisor delegation needs one configured non-Thor agent; add a custom agent in mj or choose a different default",
+        ))
+    }
+
+    fn advisor_candidate_view(candidate_id: &str, candidate: &Candidate) -> AdvisorCandidateView {
+        let has_selected_model = !candidate.card.model_value.is_empty();
+        AdvisorCandidateView {
             candidate_id: candidate_id.to_string(),
             agent_source_id: candidate.card.agent_source_id.clone(),
             model_value: candidate.card.model_value.clone(),
             model_name: candidate.card.model_name.clone(),
-            elo: candidate.card.elo,
-            provisional: candidate.card.provisional,
+            elo: has_selected_model.then_some(candidate.card.elo),
+            provisional: has_selected_model.then_some(candidate.card.provisional),
             vendor: candidate.vendor.clone(),
         }
     }
@@ -2069,6 +2143,20 @@ impl McpServer {
         self.check_tool_budget()?;
         let _mutation = self.mutation_lock.lock().await;
         self.ensure_orchestration_open()?;
+        if self.config.require_advisor_candidates {
+            let existing = self
+                .connections
+                .lock()
+                .await
+                .iter()
+                .find_map(|(id, conn)| (conn.purpose == args.purpose).then_some(id.clone()));
+            if let Some(connection_id) = existing {
+                return Err(err(format!(
+                    "advisor policy allows only one live {} connection; use {connection_id} or disconnect it before reconnecting",
+                    args.purpose.label()
+                )));
+            }
+        }
         let connection_limit = self.config.limits.max_connections.min(MAX_CONNECTIONS);
         if self.connections.lock().await.len() >= connection_limit {
             return Err(err(format!(
@@ -2239,7 +2327,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Submit a prompt to the connected agent, optionally applying config overrides first. Returns immediately with a turn_id; use poll_progress and get_result to follow the turn. Advisor-mode reviewer prompts must name the completed worker turn they audit via review_of."
+        description = "Submit a prompt to the connected agent, optionally applying config overrides first. Returns immediately with a turn_id; use poll_progress and get_result to follow the turn. An advisor reviewer uses review_of only for an implementation audit; a review-only selection reviews the branch directly without it."
     )]
     async fn submit_prompt(
         &self,
@@ -2272,28 +2360,49 @@ impl McpServer {
             }
         }
 
-        let review_binding = if self.config.require_ranked_candidates {
+        let (review_binding, review_only_task) = if self.config.require_advisor_candidates {
             self.require_current_advisor_candidate(&conn).await?;
+            let workflow = *self.advisor_workflow.lock().await;
             match conn.purpose {
                 ConnectionPurpose::Worker => {
-                    if self.advisor_task.lock().await.is_none() {
+                    if workflow == SelectionWorkflow::Review {
                         return Err(err(
-                            "advisor worker requires a completed select_ranked_agents selection",
+                            "review-only selection permits only a read-only reviewer connection",
                         ));
                     }
-                    None
+                    if self.advisor_task.lock().await.is_none() {
+                        return Err(err(
+                            "advisor worker requires a completed select_advisor_agents reservation",
+                        ));
+                    }
+                    (None, None)
                 }
                 ConnectionPurpose::Reviewer => {
-                    let review_of = args.review_of.as_ref().ok_or_else(|| {
-                        err(
-                            "advisor reviewer requires review_of with the completed worker connection_id and turn_id",
+                    if workflow == SelectionWorkflow::Review {
+                        if args.review_of.is_some() {
+                            return Err(err(
+                                "review-only reviewer must not include review_of; it is reviewing the user-requested branch directly",
+                            ));
+                        }
+                        let task = self.advisor_task.lock().await.clone().ok_or_else(|| {
+                            err("review-only reviewer requires a completed select_advisor_agents reservation")
+                        })?;
+                        (None, Some(task))
+                    } else {
+                        let review_of = args.review_of.as_ref().ok_or_else(|| {
+                            err(
+                                "advisor reviewer requires review_of with the completed worker connection_id and turn_id",
+                            )
+                        })?;
+                        (
+                            Some(self.bind_advisor_review(&conn, review_of).await?),
+                            None,
                         )
-                    })?;
-                    Some(self.bind_advisor_review(&conn, review_of).await?)
+                    }
                 }
             }
         } else {
-            None
+            (None, None)
         };
 
         for (config_id, value) in &args.config_overrides {
@@ -2341,8 +2450,8 @@ impl McpServer {
         } else {
             explicit_images
         };
-        let prompt_text = match review_binding {
-            Some((_, task)) => format!(
+        let prompt_text = match (review_binding, review_only_task) {
+            (Some((_, task)), _) => format!(
                 "SERVER-BOUND ADVERSARIAL REVIEW CONTRACT\n\
                  You are the independent reviewer for this original user request:\n\
                  {task}\n\n\
@@ -2353,7 +2462,17 @@ impl McpServer {
                  Thor's supplemental review instructions follow:\n{}",
                 args.text
             ),
-            None => args.text,
+            (None, Some(task)) => format!(
+                "SERVER-BOUND READ-ONLY BRANCH/PR REVIEW\n\
+                 The user asked for this review:\n\
+                 {task}\n\n\
+                 Inspect the current workspace and report only concrete, evidence-backed findings. \
+                 Do not edit files, commit, push, or ask another agent to review your review. \
+                 State clearly when no finding is supported by evidence.\n\n\
+                 Thor's supplemental review instructions follow:\n{}",
+                args.text
+            ),
+            (None, None) => args.text,
         };
         if conn
             .cmd_tx
@@ -2529,7 +2648,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Declare the orchestration complete. In embedded Thor advisor mode, final_response is required and is the exact user-facing answer delivered after server validation. Direct mode is accepted only when no nested prompt was submitted. Delegated mode is accepted only after a successful worker turn and a later successful turn on a distinct read-only reviewer connection."
+        description = "Declare the orchestration complete. In embedded Thor advisor mode, final_response is required and is the exact user-facing answer delivered after server validation. Direct mode is accepted only when no nested prompt was submitted. Delegated mode needs a successful worker turn plus a later fresh read-only review. Review mode accepts one successful read-only reviewer after select_advisor_agents with workflow review."
     )]
     async fn complete_orchestration(
         &self,
@@ -2611,7 +2730,7 @@ impl McpServer {
                         "delegated completion rejected: the latest submitted turn did not finish successfully or its connection was disconnected",
                     ));
                 }
-                let pair = if self.config.require_ranked_candidates {
+                let pair = if self.config.require_advisor_candidates {
                     reviewers
                         .iter()
                         .filter(|reviewer| reviewer.5)
@@ -2644,7 +2763,7 @@ impl McpServer {
                 let Some((worker, reviewer)) = pair else {
                     let worker_successes = workers.len();
                     let reviewer_successes = reviewers.len();
-                    let requirement = if self.config.require_ranked_candidates {
+                    let requirement = if self.config.require_advisor_candidates {
                         "a nonempty server-bound review of one exact successful worker turn on a distinct reviewer connection"
                     } else {
                         "a successful worker turn followed by a successful turn on a distinct reviewer connection"
@@ -2665,6 +2784,91 @@ impl McpServer {
                     worker_turn_id: Some(worker.2),
                     reviewer_connection_id: Some(reviewer.1.clone()),
                     reviewer_turn_id: Some(reviewer.2),
+                    final_response,
+                })
+            }
+            CompletionMode::Review => {
+                if !self.config.require_advisor_candidates
+                    || *self.advisor_workflow.lock().await != SelectionWorkflow::Review
+                {
+                    return Err(err(
+                        "review completion is only valid after select_advisor_agents with workflow 'review'",
+                    ));
+                }
+                let connections: Vec<(String, Arc<Connection>)> = self
+                    .connections
+                    .lock()
+                    .await
+                    .iter()
+                    .map(|(id, conn)| (id.clone(), conn.clone()))
+                    .collect();
+                let mut latest_submission: Option<(u64, bool)> = None;
+                let mut completed_review: Option<(u64, String, u64)> = None;
+                for (connection_id, conn) in connections {
+                    self.maintain_connection(&conn).await;
+                    let state = conn.state.lock().await;
+                    if state.turn.status.is_active() || !state.pending_permissions.is_empty() {
+                        return Err(err(format!(
+                            "review completion rejected: {} connection {connection_id} is still active",
+                            conn.purpose.label()
+                        )));
+                    }
+                    if let Some(submission_index) = state.turn.submission_index {
+                        let succeeded = state.turn.status == TurnStatus::Done
+                            && matches!(state.turn.stop_reason, Some(StopReason::EndTurn));
+                        if latest_submission.is_none_or(|(latest, _)| submission_index > latest) {
+                            latest_submission = Some((submission_index, succeeded));
+                        }
+                    }
+                    if conn.purpose == ConnectionPurpose::Reviewer {
+                        for completed in &state.completed_turns {
+                            if !matches!(completed.stop_reason, StopReason::EndTurn)
+                                || !completed.has_response
+                                || completed.review_of.is_some()
+                            {
+                                continue;
+                            }
+                            if completed_review
+                                .as_ref()
+                                .is_none_or(|(latest, _, _)| completed.submission_index > *latest)
+                            {
+                                completed_review = Some((
+                                    completed.submission_index,
+                                    connection_id.clone(),
+                                    completed.turn_id,
+                                ));
+                            }
+                        }
+                    }
+                }
+                if latest_submission != Some((submitted_turns, true)) {
+                    return Err(err(
+                        "review completion rejected: the latest submitted review did not finish successfully or its connection was disconnected",
+                    ));
+                }
+                let Some((submission_index, reviewer_connection_id, reviewer_turn_id)) =
+                    completed_review
+                else {
+                    return Err(err(
+                        "review completion rejected: need one successful read-only reviewer turn",
+                    ));
+                };
+                if submission_index != submitted_turns {
+                    return Err(err(
+                        "review completion rejected: the latest submitted turn was not the read-only reviewer",
+                    ));
+                }
+                self.record_accepted_completion(final_response.as_deref())?;
+                self.completion_accepted.store(true, Ordering::SeqCst);
+                json_result(&CompletionResult {
+                    schema: COMPLETE_ORCHESTRATION_SCHEMA.to_string(),
+                    accepted: true,
+                    mode: "review".to_string(),
+                    submitted_turns,
+                    worker_connection_id: None,
+                    worker_turn_id: None,
+                    reviewer_connection_id: Some(reviewer_connection_id),
+                    reviewer_turn_id: Some(reviewer_turn_id),
                     final_response,
                 })
             }
@@ -2739,7 +2943,7 @@ impl ServerHandler for McpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("mj", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Drive ACP coding agents over MCP. For delegated work: select_ranked_agents -> \
+                "Drive ACP coding agents over MCP. For delegated work: select_advisor_agents -> \
                  connect the recommended worker -> submit_prompt -> poll_progress (answer \
                  permission_requested items) -> connect the distinct reviewer -> review -> \
                  submit_prompt with review_of={worker_connection_id,worker_turn_id} -> \
@@ -2805,6 +3009,7 @@ pub async fn serve(config: McpConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{CustomAgent, SelectedAgent};
     use crate::event::PermissionPrompt;
     use crate::ragnarok::{FighterCard, Launch};
     use agent_client_protocol::schema::v1::{
@@ -2827,7 +3032,7 @@ mod tests {
             config_path: PathBuf::from("/definitely/missing/mj-config.toml"),
             excluded_agent_source_ids: HashSet::new(),
             allow_adhoc_program: false,
-            require_ranked_candidates: false,
+            require_advisor_candidates: false,
             limits: McpLimits::default(),
             inherited_images: Vec::new(),
             completion_marker: None,
@@ -2868,12 +3073,152 @@ mod tests {
         *server.recommended_worker.lock().await = Some(format!("candidate:{worker_identity}"));
         *server.recommended_reviewer.lock().await = Some(format!("candidate:{reviewer_identity}"));
         *server.advisor_task.lock().await = Some("implement the requested change".to_string());
+        *server.advisor_workflow.lock().await = SelectionWorkflow::Implementation;
+    }
+
+    async fn install_strict_review_selection(server: &McpServer, reviewer_identity: &str) {
+        *server.recommended_worker.lock().await = None;
+        *server.recommended_reviewer.lock().await = Some(format!("candidate:{reviewer_identity}"));
+        *server.advisor_task.lock().await = Some("review the current branch".to_string());
+        *server.advisor_workflow.lock().await = SelectionWorkflow::Review;
     }
 
     fn strict_test_config() -> McpConfig {
         let mut config = test_config();
-        config.require_ranked_candidates = true;
+        config.require_advisor_candidates = true;
         config
+    }
+
+    #[tokio::test]
+    async fn strict_selection_rejects_a_duplicate_reroll_before_a_prompt() {
+        let server = McpServer::new(strict_test_config());
+        *server.advisor_task.lock().await = Some("review the current branch".to_string());
+
+        let error = server
+            .select_advisor_agents(Parameters(SelectAdvisorAgentsArgs {
+                task: "review the current branch".to_string(),
+                workflow: SelectionWorkflow::Review,
+                excluded_candidate_ids: Vec::new(),
+            }))
+            .await
+            .expect_err("a second unqualified selection must not reroll the team");
+        assert!(error.message.contains("reservation already exists"));
+    }
+
+    #[tokio::test]
+    async fn advisor_selection_reserves_one_configured_delegate_without_a_model_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        config::Config {
+            agent: Some(SelectedAgent {
+                source_id: "thor".to_string(),
+                program: PathBuf::from("/bin/thor"),
+                args: Vec::new(),
+                env: HashMap::new(),
+            }),
+            custom_agents: vec![
+                CustomAgent {
+                    name: "delegate".to_string(),
+                    program: PathBuf::from("/bin/delegate"),
+                    args: vec!["--acp".to_string()],
+                    description: String::new(),
+                },
+                CustomAgent {
+                    name: "unused".to_string(),
+                    program: PathBuf::from("/bin/unused"),
+                    args: Vec::new(),
+                    description: String::new(),
+                },
+            ],
+            session_config: HashMap::from([(
+                "custom:delegate".to_string(),
+                HashMap::from([("model".to_string(), "delegate-model".to_string())]),
+            )]),
+            ..Default::default()
+        }
+        .save(&path)
+        .expect("save config");
+
+        let mut server_config = strict_test_config();
+        server_config.config_path = path;
+        server_config
+            .excluded_agent_source_ids
+            .insert("thor".to_string());
+        let server = McpServer::new(server_config);
+
+        server
+            .select_advisor_agents(Parameters(SelectAdvisorAgentsArgs {
+                task: "implement a small change".to_string(),
+                workflow: SelectionWorkflow::Implementation,
+                excluded_candidate_ids: Vec::new(),
+            }))
+            .await
+            .expect("reserve delegate");
+
+        let candidates = server.advisor_candidates.lock().await;
+        assert_eq!(candidates.len(), 2, "worker plus fresh reviewer only");
+        assert!(candidates.values().all(|candidate| {
+            candidate.card.agent_source_id == "custom:delegate"
+                && candidate.card.model_value.is_empty()
+                && candidate.card.elo == 0
+        }));
+        let worker_id = server
+            .recommended_worker
+            .lock()
+            .await
+            .clone()
+            .expect("worker reservation");
+        assert_ne!(
+            Some(worker_id.clone()),
+            server.recommended_reviewer.lock().await.clone(),
+            "role reservations must be distinct even when they use one backend"
+        );
+        assert!(
+            server.connections.lock().await.is_empty(),
+            "reservation must not start an ACP connection"
+        );
+        drop(candidates);
+
+        let built = server
+            .build_runtime_config(&ConnectArgs {
+                candidate_id: Some(worker_id),
+                purpose: ConnectionPurpose::Worker,
+                agent: None,
+                program: None,
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: None,
+                additional_directories: Vec::new(),
+                resume_session: None,
+            })
+            .await
+            .expect("build worker runtime");
+        assert_eq!(built.model_value.as_deref(), Some("delegate-model"));
+        assert_eq!(built.model_name.as_deref(), Some("delegate-model"));
+    }
+
+    #[test]
+    fn advisor_delegate_refuses_to_recurse_into_thor_without_a_custom_agent() {
+        let mut server_config = strict_test_config();
+        server_config
+            .excluded_agent_source_ids
+            .insert("thor".to_string());
+        let server = McpServer::new(server_config);
+        let cfg = config::Config {
+            agent: Some(SelectedAgent {
+                source_id: "thor".to_string(),
+                program: PathBuf::from("/bin/thor"),
+                args: Vec::new(),
+                env: HashMap::new(),
+            }),
+            ..Default::default()
+        };
+
+        let error = match server.reserve_advisor_delegate(&cfg) {
+            Ok(_) => panic!("Thor must never reserve itself as a nested worker"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("non-Thor agent"));
     }
 
     #[test]
@@ -3311,9 +3656,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ranked_reviewer_candidate_builds_read_only_nested_runtime() {
+    async fn advisor_reviewer_candidate_builds_read_only_nested_runtime() {
         let server = McpServer::new(test_config());
-        server.ranked_candidates.lock().await.insert(
+        server.advisor_candidates.lock().await.insert(
             "candidate-1".to_string(),
             Candidate {
                 card: FighterCard {
@@ -3347,11 +3692,64 @@ mod tests {
                 resume_session: None,
             })
             .await
-            .expect("ranked candidate resolves");
+            .expect("advisor candidate resolves");
         assert_eq!(built.runtime.access_mode, acp::RuntimeAccessMode::ReadOnly);
         assert_eq!(built.model_value.as_deref(), Some("model-a"));
         assert_eq!(built.source_id.as_deref(), Some("agent-a"));
         assert!(built.runtime.mcp_servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn review_only_selection_rejects_a_worker_connection_before_spawn() {
+        let server = McpServer::new(strict_test_config());
+        install_strict_review_selection(&server, "reviewer").await;
+
+        let error = match server
+            .build_runtime_config(&ConnectArgs {
+                candidate_id: Some("candidate:reviewer".to_string()),
+                purpose: ConnectionPurpose::Worker,
+                agent: None,
+                program: None,
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: None,
+                additional_directories: Vec::new(),
+                resume_session: None,
+            })
+            .await
+        {
+            Ok(_) => panic!("review-only workflow must never spawn a full-access worker"),
+            Err(error) => error,
+        };
+        assert!(error.contains("read-only reviewer"));
+    }
+
+    #[tokio::test]
+    async fn strict_advisor_rejects_a_second_live_worker_connection() {
+        let server = McpServer::new(strict_test_config());
+        let (worker, _worker_rx) = fake_connection(ConnectionPurpose::Worker, "worker");
+        server
+            .connections
+            .lock()
+            .await
+            .insert("conn-1".to_string(), worker);
+
+        let error = server
+            .connect(Parameters(ConnectArgs {
+                candidate_id: Some("candidate:another-worker".to_string()),
+                purpose: ConnectionPurpose::Worker,
+                agent: None,
+                program: None,
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: None,
+                additional_directories: Vec::new(),
+                resume_session: None,
+            }))
+            .await
+            .expect_err("advisor mode permits one live worker only");
+        assert!(error.message.contains("one live worker connection"));
+        assert!(error.message.contains("conn-1"));
     }
 
     #[tokio::test]
@@ -3565,6 +3963,76 @@ mod tests {
         let structured = result.structured_content.expect("structured");
         assert_eq!(structured["accepted"], true);
         assert_eq!(structured["final_response"], "implementation is complete");
+    }
+
+    #[tokio::test]
+    async fn review_completion_accepts_one_read_only_reviewer_turn() {
+        let server = McpServer::new(strict_test_config());
+        install_strict_review_selection(&server, "reviewer").await;
+        let (reviewer, _reviewer_rx) = fake_connection(ConnectionPurpose::Reviewer, "reviewer");
+        {
+            let mut state = reviewer.state.lock().await;
+            state.completed_turns.push(CompletedTurn {
+                turn_id: 3,
+                submission_index: 1,
+                stop_reason: StopReason::EndTurn,
+                review_of: None,
+                has_response: true,
+            });
+            state.turn.submission_index = Some(1);
+            state.turn.status = TurnStatus::Done;
+            state.turn.stop_reason = Some(StopReason::EndTurn);
+        }
+        server
+            .connections
+            .lock()
+            .await
+            .insert("reviewer".to_string(), reviewer);
+        server.submitted_turns.store(1, Ordering::SeqCst);
+
+        let result = server
+            .complete_orchestration(Parameters(CompleteOrchestrationArgs {
+                mode: CompletionMode::Review,
+                final_response: Some("No evidence-backed findings.".to_string()),
+            }))
+            .await
+            .expect("one successful read-only review is enough");
+        let structured = result.structured_content.expect("structured result");
+        assert_eq!(structured["mode"], "review");
+        assert!(structured["worker_connection_id"].is_null());
+        assert_eq!(structured["reviewer_connection_id"], "reviewer");
+    }
+
+    #[tokio::test]
+    async fn review_only_reviewer_needs_no_worker_or_review_provenance() {
+        let server = McpServer::new(strict_test_config());
+        install_strict_review_selection(&server, "reviewer").await;
+        let (reviewer, mut reviewer_rx) = fake_connection(ConnectionPurpose::Reviewer, "reviewer");
+        server
+            .connections
+            .lock()
+            .await
+            .insert("reviewer".to_string(), reviewer.clone());
+
+        server
+            .submit_prompt(Parameters(SubmitPromptArgs {
+                connection_id: "reviewer".to_string(),
+                text: "Review the branch and report only concrete findings.".to_string(),
+                config_overrides: HashMap::new(),
+                images: Vec::new(),
+                review_of: None,
+            }))
+            .await
+            .expect("review-only selection authorizes one standalone reviewer");
+        match reviewer_rx.recv().await.expect("review prompt") {
+            UiCommand::SendPrompt { text, .. } => {
+                assert!(text.contains("SERVER-BOUND READ-ONLY BRANCH/PR REVIEW"));
+                assert!(text.contains("review the current branch"));
+                assert!(!text.contains("ADVERSARIAL REVIEW CONTRACT"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(reviewer.state.lock().await.turn.review_of.is_none());
     }
 
     #[tokio::test]

@@ -5,9 +5,10 @@ Source: `src/advisor.rs`, `src/mcp.rs`, `src/acp.rs`
 Thor advisor mode is the orchestrator for an ordinary `mj` turn. Rather than
 having Rust prescribe a fixed route → worker → review → judge → fix sequence,
 `mj` opens one read-only ACP session for Thor and gives that session an
-`mj mcp` stdio server. Thor uses MCP tools to choose a ranked worker, delegate
-work, observe progress, answer permissions, interrupt or redirect the worker,
-obtain an independent review, and write the final answer.
+`mj mcp` stdio server. Thor uses MCP tools to reserve one configured delegate,
+delegate work, observe progress, answer permissions, interrupt or redirect that
+worker, obtain a fresh read-only review when appropriate, and write the final
+answer.
 
 The split of responsibility is deliberate:
 
@@ -16,7 +17,7 @@ The split of responsibility is deliberate:
   review finding warrants a fix, and what to tell the user.
 - **Rust owns the primitive and the safety envelope.** It starts ACP processes,
   attaches the MCP server during session creation, streams the transcript,
-  preserves ranking and review rules, enforces limits, and independently proves
+  preserves connection and review rules, enforces limits, and independently proves
   that orchestration completed through the server.
 
 It remains transcript-first: Thor's own MCP calls are visible as expandable
@@ -26,8 +27,8 @@ back into the same transcript the user is watching.
 > **Not the arena.** This is distinct from Ragnarok in `src/ragnarok.rs`.
 > Ragnarok runs a tournament between multiple competitors in disposable
 > worktrees and uses its score catalog to rank fighters. Thor advisor supervises
-> one normal turn in the user's real workspace. It reads Ragnarok's ranked pool
-> to choose agents, but it does not record a match or change the score catalog.
+> one normal turn in the user's real workspace. It does not probe or rank the
+> Ragnarok pool, record a match, or change the score catalog.
 
 ---
 
@@ -59,9 +60,16 @@ pub(crate) struct AdvisorConfig {
 }
 ```
 
-Thor is the user's configured default agent. The worker and reviewer are not
-hardcoded in this structure: they are selected through the attached MCP server
-at runtime.
+Thor is the user's configured default agent. Its own source is excluded from
+nested connections to prevent recursion. The attached MCP server reserves one
+configured non-Thor agent (a custom agent when the default is Thor) for normal
+delegation. A branch/PR review reserves only one read-only reviewer; it does
+not first create an implementation worker or a second review.
+
+Normal delegation therefore needs one configured non-Thor agent. If the default
+agent is Thor and there is no configured custom agent, Thor answers direct
+questions but reports a setup blocker for delegated work instead of spawning
+itself or discovering a pool of installed agents.
 
 ---
 
@@ -84,8 +92,8 @@ child:
 
 | Value | Purpose |
 |---|---|
-| parent Thor source id | Excludes Thor from the nested candidate pool and blocks recursive self-connection. |
-| advisor-mode flag | Enables the strict ranked-candidate and completion policy. |
+| parent Thor source id | Excludes Thor from nested connections and blocks recursive self-connection. |
+| advisor-mode flag | Enables the strict reservation and completion policy. |
 | optional image manifest | Lets worker prompts inherit the user's original attachments when Thor does not explicitly supply images. |
 | completion-marker path and random token | Lets the parent verify server-accepted completion independently of Thor's text. |
 
@@ -106,31 +114,35 @@ MCP tools in a loop of its own design, within server-side caps.
                    ┌──────────▼──────────┐
                    │ Thor ACP session    │  ReadOnly + `mj mcp`
                    │ decides the workflow│
-                   └──────┬──────────┬───┘
-             direct answer│          │delegate
-                           │          ▼
-             complete(direct)  select_ranked_agents
-                           │          │
-                           │   ┌──────▼───────────────────┐
-                           │   │ connect worker (Full)    │
-                           │   │ submit → poll → steer    │
-                           │   └──────┬───────────────────┘
-                           │          │
-                           │   ┌──────▼───────────────────┐
-                           │   │ connect reviewer          │
-                           │   │ (ReadOnly, bound review)  │
-                           │   └──────┬───────────────────┘
-                           │          │
-                           │     Thor judges findings,
-                           │     optionally directs a fix,
-                           │     then summarizes for user
-                           │          │
-                           └──────────▼──────────────────────┐
-                              complete(delegated, final_response)
-                              stdio close tears down children   │
-                              parent verifies receipt           │
-                              renders final_response            │
-                              └────────────────────────────────┘
+                   └──────┬─────────┬──────────┘
+                    direct │   review-only      │ implementation
+                           │         │           │
+              complete(direct)      │           │
+                           │   select(workflow=review)
+                           │         │           │
+                           │   ┌─────▼────────┐  │
+                           │   │ one reviewer │  │
+                           │   │ ReadOnly     │  │
+                           │   └─────┬────────┘  │
+                           │         │           │
+                           │  complete(review)  │
+                           │                     │
+                           │        select(workflow=implementation)
+                           │                     │
+                           │             ┌───────▼───────────────┐
+                           │             │ worker (Full)          │
+                           │             │ submit → poll → steer  │
+                           │             └───────┬───────────────┘
+                           │                     │
+                           │             ┌───────▼───────────────┐
+                           │             │ fresh reviewer         │
+                           │             │ ReadOnly, bound audit  │
+                           │             └───────┬───────────────┘
+                           │                     │
+                           └─────────────────────▼────────────────┐
+                              complete(delegated, final_response)  │
+                              parent verifies receipt and renders it│
+                              └───────────────────────────────────┘
 ```
 
 ### Thor's operating contract
@@ -141,21 +153,30 @@ MCP tools in a loop of its own design, within server-side caps.
    exact answer, then call `complete_orchestration` with `mode: "direct"` and
    that text in `final_response`. That tool call is the answer-delivery
    contract; Thor must not send user-facing prose before or after it.
-2. For implementation, repair, or substantial repository work, call
-   `select_ranked_agents` with the original task and use the recommended
-   worker and reviewer candidates.
-3. Connect a worker, submit a precise implementation prompt, and poll from the
-   returned `since_seq` cursor. Thor must advance its cursor and act on actual
-   progress rather than blind-polling.
-4. Resolve a pending permission using only the option ids returned by the
+2. For a branch, PR, diff, or code review that must not modify files, call
+   `select_advisor_agents` once with `workflow: "review"`. It returns one
+   recommended reviewer. Connect only that read-only reviewer, submit the
+   review without `review_of`, monitor it, and complete with `mode: "review"`.
+   Do not open an implementation worker or ask a second agent to review this
+   review.
+3. For implementation, repair, or substantial repository work, call
+   `select_advisor_agents` once with `workflow: "implementation"` and use the
+   reserved worker and reviewer connections. Reuse that reservation rather
+   than opening another worker.
+4. Connect the one worker, submit a precise implementation prompt, and poll
+   from the returned `since_seq` cursor. Thor must advance its cursor and act
+   on actual progress rather than blind-polling. It must steer or re-prompt
+   that connection rather than open another worker.
+5. Resolve a pending permission using only the option ids returned by the
    server. On drift, a stall, excess scope, or unsupported completion claim,
    cancel the worker, wait for terminal state, and re-prompt or adjust an
    advertised session setting with a concrete correction.
-5. Connect the distinct reviewer and submit an adversarial read-only review
-   bound to the exact worker `connection_id` and `turn_id` being audited.
-6. Judge the review itself. It may reject speculation, ask the worker to fix
+6. After implementation, connect the fresh reviewer session and submit an
+   adversarial read-only review bound to the exact worker `connection_id` and
+   `turn_id` being audited.
+7. Judge the implementation review itself. It may reject speculation, ask the worker to fix
    evidence-backed findings, and repeat its monitoring loop where useful.
-7. Call `complete_orchestration` with `mode: "delegated"` and the exact
+8. Call `complete_orchestration` with `mode: "delegated"` and the exact
    user-facing result in `final_response` as its final tool call. It must not
    send user-facing prose before or after completion; the MCP server tears down
    any remaining nested connections when its stdio session closes.
@@ -164,10 +185,10 @@ Thor is explicitly told not to expose MCP JSON to the user. It must explain the
 result, validation, review/fixes, and any remaining risk in ordinary prose.
 
 There is no Rust requirement that Thor run every optional phase in every turn.
-For example, a direct answer submits no nested prompt, while a delegated turn
-may need multiple worker prompts before it asks for review. The mandatory
-review and completion conditions are enforced by the MCP server rather than a
-hardcoded phase list.
+For example, a direct answer submits no nested prompt, a review-only turn has
+one read-only reviewer, and an implementation turn may need multiple worker
+prompts before it asks for an independent review. The relevant completion
+conditions are enforced by the MCP server rather than a hardcoded phase list.
 
 ---
 
@@ -181,15 +202,15 @@ same connection.
 | Tool | Thor uses it to |
 |---|---|
 | `list_agents` | Inspect ordinary configured/default ACP agents in standalone use. |
-| `select_ranked_agents` | Probe the Ragnarok pool, apply Elo/diversity selection, and obtain opaque worker/reviewer candidate ids. |
-| `connect` | Open a nested ACP session with a `worker` or `reviewer` purpose. |
+| `select_advisor_agents` | Reserve one configured non-Thor delegate without probing or ranking agents. `workflow: "implementation"` returns a worker plus a fresh reviewer reservation; `workflow: "review"` returns one reviewer reservation. |
+| `connect` | Open a nested ACP session with a `worker` or read-only `reviewer` purpose. |
 | `list_config_options` / `set_config_option` | Inspect and change an advertised session setting between prompts. |
 | `submit_prompt` | Start a non-blocking nested prompt, optionally with config overrides, images, or reviewer provenance. |
 | `poll_progress` | Read cursor-addressable messages, thoughts, tool updates, turn status, usage, and pending permissions. |
 | `respond_permission` | Choose one option advertised by a pending permission request, or reject it. |
 | `cancel_prompt` | Interrupt an in-flight nested turn and reject its pending permissions. |
 | `get_result` | Retrieve final text, stop reason, usage, or wait briefly for a terminal result. |
-| `complete_orchestration` | Submit the exact `final_response`, validate direct/delegated completion, seal further orchestration changes, and deliver the accepted response. |
+| `complete_orchestration` | Submit the exact `final_response`, validate direct, implementation, or review-only completion, seal further orchestration changes, and deliver the accepted response. |
 | `disconnect` / `list_connections` | Clean up or inspect nested ACP sessions. |
 
 `poll_progress` returns the stable structured envelope
@@ -201,31 +222,40 @@ single text response.
 
 ---
 
-## Ranked role selection
+## Single-agent reservation
 
-`select_ranked_agents` builds its pool with `ragnarok::muster_excluding`.
-Excluding Thor occurs *before* model probes start, so the system never opens a
-second nested Thor session merely to reject it later.
+`select_advisor_agents` does not call `ragnarok::muster_excluding`, inspect the
+registry, probe installed agents, or apply Elo selection. Ragnarok retains all
+of that multi-agent behavior; it is not part of a normal advisor turn.
 
-The pool is ranked with the existing Ragnarok Elo and diversity policy:
+The server instead chooses the first safe configured delegate deterministically:
 
-1. `ensure_scores` and `muster_excluding` load configured agents, probe their
-   available models, and join them to the score store.
-2. `select_fighters` recommends the worker from the ranked pool.
-3. `select_judge_only_reviewer` recommends an independent reviewer, preferring
-   a different model and vendor where possible.
-4. The server returns opaque `candidate-*` ids together with model, vendor,
-   Elo, and provisional status. Thor must pass those ids back to `connect`.
+1. Use the configured default agent if it is not Thor.
+2. Otherwise use the first configured custom agent that is not Thor.
+3. If no such agent exists, refuse delegation with a clear setup error rather
+   than recursively launching Thor or fanning out through installed agents.
 
-In advisor mode this selection is strict:
+The reservation returns opaque `candidate-*` ids. It does not claim a model or
+an Elo score before the ACP session starts; the connected agent is the source
+of truth for its actual model and reported identity.
 
-- A worker or reviewer connection must use its currently recommended candidate
+In advisor mode this reservation is strict:
+
+- A worker or reviewer connection must use its currently reserved candidate
   id; arbitrary `agent` and `program` launches are disabled.
-- The selected candidate's model is armed from the ranked record, and Thor
-  cannot change it to a different model through `set_config_option`.
-- The first nested prompt freezes the selection. A later re-ranking cannot
-  quietly replace a connection that is being used to satisfy the audit.
-- The reviewer must have a distinct server identity from the worker.
+- A review-only selection rejects a worker connection. Its sole reviewer is
+  read-only and cannot carry `review_of`, because it is reviewing the user's
+  branch/PR directly rather than another agent's work.
+- Advisor mode permits one live connection per role: one worker and, for an
+  implementation workflow, one fresh reviewer session. It is not a Ragnarok
+  fan-out; Thor must steer the existing worker or disconnect it before a
+  replacement connection can open.
+- A duplicate reservation is rejected. The first nested prompt freezes it
+  completely; Thor cannot reroll a model or replace a connection that is being
+  used to satisfy the audit.
+- The reviewer is a distinct ACP session and read-only. With only one configured
+  delegate it can be the same backend as the worker, but never the same
+  connection or turn.
 
 Workers receive `RuntimeAccessMode::Full`; reviewers receive
 `RuntimeAccessMode::ReadOnly`. Nested worker and reviewer sessions get no MCP
@@ -235,7 +265,7 @@ servers of their own, preventing recursive delegation.
 
 ## Review provenance and completion
 
-A reviewer prompt in advisor mode must include:
+An **implementation** reviewer prompt in advisor mode must include:
 
 ```json
 {
@@ -246,11 +276,14 @@ A reviewer prompt in advisor mode must include:
 }
 ```
 
-The MCP server validates that reference against a successful completed worker
-turn from the current ranked selection. It then prepends its own immutable
-adversarial-review contract with the original user task and records the binding
-outside model-authored text. The reviewer is read-only and must be independent
-from the worker it audits.
+For implementation work, the MCP server validates that reference against a
+successful completed worker turn from the current advisor reservation. It then
+prepends its own immutable adversarial-review contract with the original user
+task and records the binding outside model-authored text. The reviewer is
+read-only and runs in a fresh ACP session rather than the worker connection.
+Review-only
+requests deliberately omit `review_of`: their one reviewer receives a
+server-bound read-only branch/PR review contract instead.
 
 In advisor mode, `complete_orchestration` also requires a nonblank,
 64 KiB-or-smaller `final_response`. The server echoes that value only after all
@@ -259,12 +292,16 @@ receipt. The parent renders only that token-verified receipt, once. This avoids
 relying on a particular Thor binary to resume speaking after its final tool
 call or trusting JSON that merely resembles a completion result.
 
-`complete_orchestration` has two modes:
+`complete_orchestration` has three modes:
 
 - **`direct`** is accepted only when no nested prompt was submitted.
 - **`delegated`** is accepted only when the most recently submitted nested turn
   completed successfully and the server has a nonempty, successful,
-  server-bound review of an exact earlier worker turn by a distinct reviewer.
+  server-bound review of an exact earlier worker turn by a fresh reviewer
+  session.
+- **`review`** is accepted only after a `workflow: "review"` selection and one
+  successful, read-only reviewer turn. It has no implementation worker and no
+  second reviewer.
 
 After accepted completion, state-changing orchestration tools are sealed;
 polling and connection cleanup remain available for generic MCP clients. In
@@ -290,8 +327,9 @@ Thor's `poll_progress` calls. `AdvisorTranscriptBridge` recognizes the
 
 - Thor itself is shown with its configured source and Model option (when the
   ACP agent advertised one; otherwise an exact saved `model` setting);
-- the selected worker and reviewer are shown with their source, model, Elo,
-  and provisional status before either connection begins work;
+- the reserved worker/reviewer connections (or sole review-only reviewer) are
+  shown with their configured source before work; a saved `model` setting is
+  shown on connection, followed by the ACP agent's reported identity;
 - each connection identifies its actual ACP agent/version, selected model, and
   connection id;
 - worker/reviewer messages and thoughts retain role/model provenance instead
@@ -355,8 +393,8 @@ completion from the cancelled turn.
 
 The entire MCP server also constrains requested working directories to the
 operator's `--cwd` and `--additional-directory` roots. In advisor mode, it
-refuses ad-hoc executables, excluded Thor identities, stale candidates, and
-model changes that contradict the ranked candidate.
+refuses ad-hoc executables, excluded Thor identities, stale reservations, and
+model changes that contradict a model explicitly reserved for the connection.
 
 ---
 
@@ -367,7 +405,7 @@ model changes that contradict the ranked candidate.
 - **Nested worker/reviewer fails, times out, or needs a denied permission** —
   `poll_progress` exposes the state. Thor may steer, retry within the caps, or
   stop and explain the blocker; Rust does not invent a replacement phase plan.
-- **A reviewer lacks valid provenance or independence** — `submit_prompt` or
+- **A reviewer lacks valid provenance or a fresh connection** — `submit_prompt` or
   delegated completion is rejected by the MCP server.
 - **A cap or whole-turn deadline is reached** — further orchestration calls are
   rejected. Thor is instructed to clean up and report the concrete blocker
@@ -392,9 +430,9 @@ inspection, poll it, obtain a bound review, and complete the turn.
 |---|---|---|
 | Purpose | Supervise one normal user turn | Tournament between competing agents |
 | Workflow owner | Thor via MCP tools | Rust battle state machine |
-| Agents | Thor plus Thor-chosen worker/reviewer connections | Multiple fighters and a judge |
+| Agents | Thor plus one reserved worker and optional fresh reviewer | Multiple fighters and a judge |
 | Workspace | User's real cwd, in place | Disposable git worktrees |
-| Elo scores | Read to rank candidates | Read to rank fighters |
-| Review | Server-bound, independent, read-only reviewer | Judge/ranking outcome for battle results |
+| Elo scores | Not consulted | Read to rank fighters |
+| Review | Server-bound, fresh read-only reviewer | Judge/ranking outcome for battle results |
 | Transcript | Thor cards plus projected nested progress | Arena/event feed |
-| Shared machinery | ACP runtime, `AgentHandle`, `muster_excluding`, candidate selection, score store | ACP runtime, agent probing, candidates, score store |
+| Shared machinery | ACP runtime and connection management | ACP runtime, agent probing, candidates, score store |
