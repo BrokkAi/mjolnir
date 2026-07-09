@@ -172,28 +172,74 @@ struct TranscriptCache {
 #[derive(Debug, Default)]
 struct TranscriptSink {
     emitted_entries: usize,
+    /// A tool call was flushed while it was the last transcript entry, so its
+    /// trailing separator blank is held back until we know what follows. The
+    /// tool *content* still flushes immediately (streaming promptness); only
+    /// the one blank row waits, so a following tool call can abut instead of
+    /// being pushed off by a separator that scrollback can never retract.
+    deferred_tool_separator: bool,
 }
 
 impl TranscriptSink {
     fn pending_lines(&mut self, state: &AppState, width: u16) -> Vec<Line<'static>> {
-        let stable_entries = stable_transcript_entry_count(state);
-        if stable_entries <= self.emitted_entries {
-            return Vec::new();
+        let mut out = Vec::new();
+
+        // Resolve a separator held back from an earlier flush now that we can
+        // see (or wait for) what follows the trailing tool call.
+        if self.deferred_tool_separator {
+            let successor = state.transcript.get(self.emitted_entries);
+            let successor_is_tool_call = successor.is_some_and(
+                |entry| matches!(entry, Entry::ToolCall(id) if state.tool_calls.contains_key(id)),
+            );
+            if successor_is_tool_call {
+                // The next entry is a tool call: let the rails abut.
+                self.deferred_tool_separator = false;
+            } else if successor.is_some() || !state.is_streaming() {
+                // A non-tool entry follows, or the turn ended with nothing
+                // after the tool call — the separator is owed now.
+                out.push(Line::from(""));
+                self.deferred_tool_separator = false;
+            }
+            // Otherwise still streaming with nothing new yet: keep holding it.
         }
-        let lines = render_transcript_entry_range(
-            state,
-            width,
-            self.emitted_entries..stable_entries,
-            transcript_collapse_limit(state),
-            state.theme,
-        );
-        self.emitted_entries = stable_entries;
-        lines
+
+        let stable_entries = stable_transcript_entry_count(state);
+        if stable_entries > self.emitted_entries {
+            let mut lines = render_transcript_entry_range(
+                state,
+                width,
+                self.emitted_entries..stable_entries,
+                transcript_collapse_limit(state),
+                state.theme,
+            );
+            // If the batch ends on a tool call that is (for now) the last
+            // transcript entry, its successor is unknown, so hold its trailing
+            // blank back rather than commit a separator we can't take back.
+            if state.is_streaming()
+                && stable_entries == state.transcript.len()
+                && matches!(state.transcript.last(), Some(Entry::ToolCall(_)))
+                && lines.last().is_some_and(is_blank_line)
+            {
+                lines.pop();
+                self.deferred_tool_separator = true;
+            }
+            out.append(&mut lines);
+            self.emitted_entries = stable_entries;
+        }
+
+        out
     }
 
     fn mark_emitted(&mut self, entries: usize) {
         self.emitted_entries = entries;
+        // The resize rebuild re-renders the whole stable range in one pass,
+        // trailing blank included, so nothing is owed afterward.
+        self.deferred_tool_separator = false;
     }
+}
+
+fn is_blank_line(line: &Line<'static>) -> bool {
+    line.spans.iter().all(|span| span.content.trim().is_empty())
 }
 
 #[derive(Debug, Default)]
@@ -4792,7 +4838,7 @@ fn render_transcript_entry_range(
                 push_markdown_lines(&mut body, text.clone(), 0, theme);
                 // Without the old "thought:" label line, the body color is
                 // what tells reasoning apart from the real reply.
-                dim_unstyled_lines(&mut body, theme.thought);
+                dim_lines(&mut body, theme.thought);
                 push_role_block(&mut out, THOUGHT_GLYPH, theme.thought, body, width);
             }
             Entry::Plan(entries) => {
@@ -4940,23 +4986,30 @@ fn push_role_block(
     body: Vec<Line<'static>>,
     width: u16,
 ) {
+    debug_assert_eq!(
+        glyph.width() + 1,
+        ROLE_GUTTER_WIDTH as usize,
+        "role glyph marker must be exactly ROLE_GUTTER_WIDTH cells wide"
+    );
     let content_width = usize::from(width.saturating_sub(ROLE_GUTTER_WIDTH)).max(1);
-    let mut first = true;
+    let mut glyph_pending = true;
     for line in body {
         for row in wrap_tool_line(line, content_width) {
             let row_is_empty = row.spans.iter().all(|span| span.content.trim().is_empty());
-            if row_is_empty && !first {
-                // Keep paragraph breaks as truly empty rows rather than
-                // gutter-only whitespace.
+            if row_is_empty {
+                // Leading blanks (before the glyph is placed) and interior
+                // paragraph breaks both render as truly empty rows; the glyph
+                // waits for the first row that carries content so it never
+                // lands on an empty line with the text detached below it.
                 out.push(Line::from(""));
                 continue;
             }
-            let marker = if first {
+            let marker = if glyph_pending {
                 format!("{glyph} ")
             } else {
                 " ".repeat(ROLE_GUTTER_WIDTH as usize)
             };
-            first = false;
+            glyph_pending = false;
             let mut spans = vec![Span::styled(
                 marker,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -4968,15 +5021,17 @@ fn push_role_block(
     out.push(Line::from(""));
 }
 
-/// Re-tint spans that use the default foreground so thought bodies read as
-/// secondary text; explicitly colored spans (inline code, quotes, headings)
-/// keep their color.
-fn dim_unstyled_lines(lines: &mut [Line<'static>], color: Color) {
+/// Re-tint every span in a thought body to the reasoning color so it reads
+/// uniformly as secondary text. This used to skip explicitly-colored spans, but
+/// markdown headings carry `theme.text` — the very primary color a real reply
+/// uses — so a heading inside reasoning rendered identically to a reply heading
+/// (and inline/fenced code kept its own color too). Flattening the whole body
+/// to the thought color is what actually keeps reasoning distinct from the
+/// answer; structure still reads from the indent and list/heading markers.
+fn dim_lines(lines: &mut [Line<'static>], color: Color) {
     for line in lines {
         for span in &mut line.spans {
-            if span.style.fg.is_none() {
-                span.style.fg = Some(color);
-            }
+            span.style.fg = Some(color);
         }
     }
 }
@@ -5020,13 +5075,10 @@ fn push_markdown_lines_limited_inner(
     let mut code_lang = String::new();
     let lines: Vec<&str> = text.split('\n').collect();
     // Collapse keeps the *tail*: for tool output the end is where the signal
-    // lives (the error, the test summary, the exit status), so hiding the
-    // tail buried exactly the lines the user wanted. The hint sits on top,
-    // standing in for the elided head.
-    let hidden = match collapse_limit {
-        Some(limit) if lines.len() > limit => lines.len() - limit,
-        _ => 0,
-    };
+    // lives (the error, the test summary, the exit status), so hiding the head
+    // keeps exactly the lines the user wanted. The hint sits on top, standing
+    // in for the elided head.
+    let hidden = collapsed_head_len(lines.len(), collapse_limit);
     // Replay fence toggles across the hidden head so a tail that starts
     // inside a code block still renders as code.
     for raw in &lines[..hidden] {
@@ -5500,10 +5552,7 @@ fn push_tool_text_lines(
     let prefix = " ".repeat(indent);
     let lines: Vec<&str> = text.split('\n').collect();
     // Keep the tail, not the head — see push_markdown_lines_limited_inner.
-    let hidden = match collapse_limit {
-        Some(limit) if lines.len() > limit => lines.len() - limit,
-        _ => 0,
-    };
+    let hidden = collapsed_head_len(lines.len(), collapse_limit);
     if hidden > 0 {
         push_collapse_hint(out, indent, hidden, theme);
     }
@@ -5513,6 +5562,16 @@ fn push_tool_text_lines(
             line,
             tool_output_line_style(raw, theme),
         )));
+    }
+}
+
+/// Number of leading lines to hide so a collapsed block keeps its last `limit`
+/// lines — the tail, where errors, summaries, and exit status live. Returns `0`
+/// when there is no limit or the block already fits.
+fn collapsed_head_len(total_lines: usize, collapse_limit: Option<usize>) -> usize {
+    match collapse_limit {
+        Some(limit) if total_lines > limit => total_lines - limit,
+        _ => 0,
     }
 }
 
@@ -11589,6 +11648,80 @@ mod tests {
     }
 
     #[test]
+    fn transcript_sink_abuts_sequential_tool_calls_like_full_render() {
+        // Regression: the streaming scrollback used to commit a trailing blank
+        // after a completed tool call before the next one existed, so two
+        // sequentially-run tool calls got a permanent blank between their rails
+        // — the opposite of the abutment the full render produces.
+        fn push_completed_tool_call(state: &mut AppState, id: &str, title: &str) {
+            state.tool_calls.insert(
+                id.to_string(),
+                crate::app::ToolCallView {
+                    title: title.to_string(),
+                    kind: ToolKind::Execute,
+                    status: ToolCallStatus::Completed,
+                    body: Vec::new(),
+                },
+            );
+            state.transcript.push(Entry::ToolCall(id.to_string()));
+        }
+
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+        state.record_user_prompt("go".to_string()); // turn in flight (streaming)
+
+        let mut emitted: Vec<String> = Vec::new();
+
+        // First tool call completes while it is still the last entry: its
+        // content flushes right away (promptness), but its trailing separator
+        // is held back until we know a following tool call could abut it.
+        push_completed_tool_call(&mut state, "call-1", "first");
+        emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
+        assert!(
+            emitted.iter().any(|l| l.contains("first")),
+            "tool output must flush promptly, not wait for the next entry: {emitted:?}"
+        );
+        assert_ne!(
+            emitted.last().map(String::as_str),
+            Some(""),
+            "the trailing separator must be held back: {emitted:?}"
+        );
+
+        // Second tool call arrives; now call-1's held separator is dropped so
+        // the rails abut.
+        push_completed_tool_call(&mut state, "call-2", "second");
+        emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
+
+        // Turn ends; the final held separator is emitted.
+        state.set_connection_state(ConnectionState::Ready);
+        emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
+
+        // The incremental scrollback must match a single full render.
+        let full: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(
+            emitted, full,
+            "incremental flush diverged from full render: {emitted:?} vs {full:?}"
+        );
+
+        let first = emitted
+            .iter()
+            .position(|l| l.contains("first"))
+            .expect("first tool row");
+        let second = emitted
+            .iter()
+            .position(|l| l.contains("second"))
+            .expect("second tool row");
+        assert_eq!(
+            second,
+            first + 1,
+            "sequential tool calls must abut in scrollback: {emitted:?}"
+        );
+    }
+
+    #[test]
     fn inline_resize_reflow_debounces_until_terminal_size_settles() {
         let mut reflow = InlineResizeReflow::default();
         let start = Instant::now();
@@ -11735,13 +11868,26 @@ mod tests {
         view.status = ToolCallStatus::Completed;
         view.body = vec![ToolCallOutput::Text("ok".to_string())];
 
+        // The tool content flushes immediately (streaming promptness); its
+        // trailing separator is held back until the successor is known so a
+        // following tool call could abut it.
         let rendered: Vec<String> = sink
             .pending_lines(&state, 80)
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(rendered, vec!["│ tool exec cargo test", "│   ok", ""]);
+        assert_eq!(rendered, vec!["│ tool exec cargo test", "│   ok"]);
         assert!(sink.pending_lines(&state, 80).is_empty());
+
+        // When the turn ends with nothing after the tool call, the held
+        // separator is finally emitted.
+        state.set_connection_state(ConnectionState::Ready);
+        let separator: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(separator, vec![""]);
     }
 
     #[test]
@@ -11784,6 +11930,8 @@ mod tests {
             exit_status: Some(TerminalExitStatus::new().exit_code(0)),
         }));
 
+        // Content flushes on the exit snapshot; the trailing separator is
+        // held back (streaming) until the successor is known.
         let rendered: Vec<String> = sink
             .pending_lines(&state, 80)
             .iter()
@@ -11797,7 +11945,6 @@ mod tests {
                 "│     ok",
                 "│     ",
                 "│     exit code 0",
-                ""
             ]
         );
     }
@@ -13277,6 +13424,58 @@ mod tests {
                 "thought body must read as secondary text: {row:?}"
             );
         }
+    }
+
+    #[test]
+    fn thought_markdown_heading_is_dimmed_not_left_at_reply_contrast() {
+        // A heading carries theme.text (the primary reply color); inside a
+        // thought it must still read as dimmed reasoning, not like a real
+        // reply heading.
+        let mut state = AppState::new();
+        let theme = state.theme;
+        state
+            .transcript
+            .push(Entry::AgentThought("# Plan\nthen do it".to_string()));
+
+        let lines = render_transcript_lines(&state, 80);
+        let heading = lines
+            .iter()
+            .find(|l| line_text(l).contains("Plan"))
+            .expect("heading row");
+        // Before the fix the heading kept theme.text (White in the default
+        // Dark theme, != theme.thought DarkGray), so this catches the regress.
+        assert!(
+            heading
+                .spans
+                .iter()
+                .all(|span| span.style.fg == Some(theme.thought)),
+            "thought heading must be dimmed, not left at reply contrast: {heading:?}"
+        );
+    }
+
+    #[test]
+    fn role_block_defers_glyph_past_a_leading_blank_line() {
+        // A body that begins with a blank line must not strand the glyph on an
+        // empty row while the first real content renders as a gutter-less
+        // continuation; the glyph belongs on the first line that has content.
+        let mut state = AppState::new();
+        state
+            .transcript
+            .push(Entry::AgentMessage("\nhello".to_string()));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert!(
+            rendered.iter().any(|line| line == "● hello"),
+            "glyph must sit on the first content row: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.trim() == AGENT_GLYPH),
+            "glyph must never sit alone on a blank row: {rendered:?}"
+        );
     }
 
     #[test]
