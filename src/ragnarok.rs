@@ -1314,6 +1314,7 @@ pub(crate) enum TurnEvent {
         status: Option<ToolCallStatus>,
         started: bool,
     },
+    Permission(Box<crate::event::PermissionPrompt>),
     Note(String),
 }
 
@@ -1629,8 +1630,7 @@ impl AgentHandle {
                     self.store_config(options, targets)
                 }
                 UiEvent::PermissionRequest(p) => {
-                    on_event(TurnEvent::Note("permission auto-answered".to_string()));
-                    self.answer_permission(p);
+                    on_event(TurnEvent::Permission(Box::new(p)));
                 }
                 UiEvent::ElicitationRequest(e) => {
                     let _ = e.responder.send(ElicitationOutcome::Decline);
@@ -2375,6 +2375,17 @@ fn forward_turn_event(
                     ),
                 });
             }
+        }
+        TurnEvent::Permission(prompt) => {
+            let _ = prompt.responder.send(
+                choose_allow_option(&prompt.options)
+                    .map(PermissionDecision::Selected)
+                    .unwrap_or(PermissionDecision::Cancelled),
+            );
+            let _ = tx.send(RagnarokEvent::Log {
+                fighter: Some(id),
+                text: format!("🛡 {fighter_name} permission auto-answered"),
+            });
         }
         TurnEvent::Note(note) => {
             let shown = first_line(&note, 90);

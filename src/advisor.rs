@@ -27,7 +27,8 @@ const THOR_FINAL_TIMEOUT: Duration = Duration::from_secs(180);
 const WORKER_TIMEOUT: Duration = Duration::from_secs(900);
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(420);
 const FIX_TIMEOUT: Duration = Duration::from_secs(600);
-const DIFF_LIMIT: usize = 60_000;
+const SNAPSHOT_LIMIT: usize = 20_000;
+pub(crate) const ADVISOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SUMMARY_LIMIT: usize = 20_000;
 
 #[derive(Debug, Clone)]
@@ -172,7 +173,7 @@ pub(crate) async fn run_turn(
         ),
     );
 
-    let before = capture_workspace_snapshot(&cfg.cwd).await;
+    let before = capture_workspace_snapshot(&cfg).await;
     let mut worker_handle = connect_role(
         worker.clone(),
         &cfg,
@@ -197,7 +198,7 @@ pub(crate) async fn run_turn(
         );
     }
 
-    let after_worker = capture_workspace_snapshot(&cfg.cwd).await;
+    let after_worker = capture_workspace_snapshot(&cfg).await;
     emit_info(&ui_tx, format!("adversarial reviewer: {}", reviewer.tag()));
     let mut reviewer_handle = connect_role(
         reviewer.clone(),
@@ -270,7 +271,7 @@ pub(crate) async fn run_turn(
         outcome.text
     };
 
-    let after_fix = capture_workspace_snapshot(&cfg.cwd).await;
+    let after_fix = capture_workspace_snapshot(&cfg).await;
     emit_info(&ui_tx, "Thor advisor: final response");
     let final_result = thor
         .prompt(
@@ -420,7 +421,8 @@ fn review_prompt(
 ) -> String {
     format!(
         "THOR ADVISOR ADVERSARIAL REVIEW. You are {reviewer}. Review the work \
-         produced by {worker}. You are analysis-only: do not modify files.\n\n\
+         produced by {worker}. You are analysis-only: do not modify files. \
+         No raw diffs are included; inspect the repository directly when you need details.\n\n\
          Check the implementation against the task, inspect files if needed, \
          and be adversarial but honest. Thor will judge whether your findings \
          are valid before sending fixes back to the worker.\n\n\
@@ -509,7 +511,7 @@ fn final_prompt(
          REVIEW:\n{review}\n\n\
          THOR JUDGMENT:\n{judgment}\n\n\
          FIX SUMMARY:\n{fix_summary}\n\n\
-         FINAL WORKSPACE SNAPSHOT:\n{final_snapshot}",
+         FINAL WORKSPACE SNAPSHOT (status/stat summary only):\n{final_snapshot}",
         worker_summary = truncate_middle(worker_summary, SUMMARY_LIMIT),
         review = truncate_middle(review, SUMMARY_LIMIT),
         judgment = judgment_summary(judgment),
@@ -570,6 +572,9 @@ fn forward_turn_event(ui_tx: &mpsc::UnboundedSender<UiEvent>, role: &str, ev: Tu
                 );
             }
         }
+        TurnEvent::Permission(prompt) => {
+            let _ = ui_tx.send(UiEvent::PermissionRequest(*prompt));
+        }
         TurnEvent::Note(note) => emit_info(ui_tx, format!("{role}: {note}")),
     }
 }
@@ -601,17 +606,34 @@ fn parse_json_object<T: for<'de> Deserialize<'de>>(text: &str) -> Option<T> {
     serde_json::from_str(&text[start..=end]).ok()
 }
 
-async fn capture_workspace_snapshot(cwd: &PathBuf) -> Option<String> {
+async fn capture_workspace_snapshot(cfg: &AdvisorConfig) -> Option<String> {
+    let mut roots = Vec::with_capacity(cfg.additional_directories.len() + 1);
+    roots.push(cfg.cwd.clone());
+    roots.extend(cfg.additional_directories.iter().cloned());
+
+    let mut sections = Vec::new();
+    for root in roots {
+        if let Some(section) = capture_root_snapshot(&root).await {
+            sections.push(section);
+        }
+    }
+    if sections.is_empty() {
+        None
+    } else {
+        Some(truncate_middle(&sections.join("\n\n"), SNAPSHOT_LIMIT))
+    }
+}
+
+async fn capture_root_snapshot(cwd: &PathBuf) -> Option<String> {
     let status = git_capture(cwd, &["status", "--short"]).await.ok()?;
     let diffstat = git_capture(cwd, &["diff", "--stat"])
         .await
         .unwrap_or_default();
-    let diff = git_capture(cwd, &["diff"]).await.unwrap_or_default();
-    Some(truncate_middle(
-        &format!(
-            "git status --short:\n{status}\n\ngit diff --stat:\n{diffstat}\n\ngit diff:\n{diff}"
-        ),
-        DIFF_LIMIT,
+    Some(format!(
+        "workspace root: {}\ngit status --short:\n{}\n\ngit diff --stat:\n{}",
+        cwd.display(),
+        status.trim_end(),
+        diffstat.trim_end()
     ))
 }
 
