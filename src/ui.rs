@@ -50,7 +50,10 @@ use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
 };
 use crate::config;
-use crate::event::{PermissionDecision, PermissionPrompt, PromptImage, UiCommand, UiEvent};
+use crate::event::{
+    AdvisorActivity, AdvisorActor, AdvisorCandidate, PermissionDecision, PermissionPrompt,
+    PromptImage, UiCommand, UiEvent,
+};
 use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
 use crate::ragnarok;
@@ -248,6 +251,15 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
         Entry::AgentMessage(_) | Entry::AgentThought(_) => {
             !(state.is_streaming() && idx + 1 == state.transcript.len())
         }
+        Entry::AdvisorActivity(activity)
+            if matches!(
+                activity.as_ref(),
+                AdvisorActivity::Message { .. } | AdvisorActivity::Thought { .. }
+            ) =>
+        {
+            !(state.is_streaming() && idx + 1 == state.transcript.len())
+        }
+        Entry::AdvisorActivity(_) => true,
         Entry::ToolCall(id) => state.tool_calls.get(id).is_some_and(|view| {
             matches!(
                 view.status,
@@ -502,7 +514,9 @@ fn streaming_redraw_budget(mode: UiMode) -> Duration {
 
 fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
     match event {
-        UiEvent::SessionUpdate(_) | UiEvent::TerminalOutput(_) => RedrawCause::Stream,
+        UiEvent::SessionUpdate(_) | UiEvent::TerminalOutput(_) | UiEvent::AdvisorActivity(_) => {
+            RedrawCause::Stream
+        }
         UiEvent::Connected { .. }
         | UiEvent::SessionStarted { .. }
         | UiEvent::SessionConfigOptions { .. }
@@ -3449,6 +3463,11 @@ fn transcript_export_markdown(state: &AppState) -> String {
             Entry::UserPrompt(text) => push_export_text(&mut out, "You", text),
             Entry::AgentMessage(text) => push_export_text(&mut out, "Agent", text),
             Entry::AgentThought(text) => push_export_text(&mut out, "Thought", text),
+            Entry::AdvisorActivity(activity) => {
+                let label = advisor_activity_label(activity);
+                let text = advisor_activity_text(activity);
+                push_export_text(&mut out, &label, &text);
+            }
             Entry::System(text) => push_export_text(&mut out, "System", text),
             Entry::SessionBoundary(text) => push_export_text(&mut out, "Session", text),
             Entry::Plan(entries) => {
@@ -4783,6 +4802,17 @@ fn render_transcript_entry_range(
             Entry::AgentThought(text) => {
                 push_markdown_block(&mut out, "thought", theme.thought, text.clone(), theme)
             }
+            Entry::AdvisorActivity(activity) => {
+                let label = advisor_activity_label(activity);
+                let text = advisor_activity_text(activity);
+                let color = advisor_activity_color(activity, theme);
+                match activity.as_ref() {
+                    AdvisorActivity::Message { .. } | AdvisorActivity::Thought { .. } => {
+                        push_markdown_block(&mut out, &label, color, text, theme)
+                    }
+                    _ => push_plain_block(&mut out, &label, color, text),
+                }
+            }
             Entry::Plan(entries) => {
                 out.push(Line::from(Span::styled(
                     "plan",
@@ -4920,6 +4950,170 @@ fn push_plain_block(out: &mut Vec<Line<'static>>, label: &str, color: Color, tex
     )));
     push_plain_lines(out, text, 0);
     out.push(Line::from(""));
+}
+
+fn advisor_actor_label(actor: &AdvisorActor) -> String {
+    let role = match actor.role.as_str() {
+        "thor" => "Thor",
+        "worker" => "Worker",
+        "reviewer" => "Reviewer",
+        "" => "Agent",
+        other => other,
+    };
+    let model = actor
+        .model_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            actor
+                .model_value
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            actor
+                .agent_name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            actor
+                .source_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or("unknown agent");
+    let mut label = format!("{role} · {model}");
+    if let Some(source) = actor
+        .source_id
+        .as_deref()
+        .filter(|source| !source.trim().is_empty() && *source != model)
+    {
+        label.push_str(&format!(" via {source}"));
+    }
+    label
+}
+
+fn advisor_candidate_label(candidate: &AdvisorCandidate) -> String {
+    let role = match candidate.role.as_str() {
+        "worker" => "Worker",
+        "reviewer" => "Reviewer",
+        "" => "Agent",
+        other => other,
+    };
+    let model = if candidate.model_name.trim().is_empty() {
+        candidate.model_value.as_str()
+    } else {
+        candidate.model_name.as_str()
+    };
+    let provisional = if candidate.provisional {
+        " provisional"
+    } else {
+        ""
+    };
+    format!(
+        "{role}: {model} via {} (Elo {}{provisional})",
+        candidate.source_id, candidate.elo
+    )
+}
+
+fn advisor_activity_label(activity: &AdvisorActivity) -> String {
+    match activity {
+        AdvisorActivity::TeamSelected { .. } => "Thor team".to_string(),
+        AdvisorActivity::Connected { actor } | AdvisorActivity::Status { actor, .. } => {
+            advisor_actor_label(actor)
+        }
+        AdvisorActivity::Message { actor, .. } => advisor_actor_label(actor),
+        AdvisorActivity::Thought { actor, .. } => {
+            format!("{} · thought", advisor_actor_label(actor))
+        }
+        AdvisorActivity::Tool { actor, .. } => format!("{} · tool", advisor_actor_label(actor)),
+        AdvisorActivity::PermissionRequested { actor, .. } => {
+            format!("{} · permission", advisor_actor_label(actor))
+        }
+        AdvisorActivity::Warning { actor, .. } => {
+            format!("{} · warning", advisor_actor_label(actor))
+        }
+        AdvisorActivity::Info { actor, .. } => advisor_actor_label(actor),
+    }
+}
+
+fn advisor_activity_text(activity: &AdvisorActivity) -> String {
+    match activity {
+        AdvisorActivity::TeamSelected { worker, reviewer } => [worker, reviewer]
+            .into_iter()
+            .flatten()
+            .map(advisor_candidate_label)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        AdvisorActivity::Connected { actor } => {
+            let mut details = vec![format!("connection: {}", actor.connection_id)];
+            if let Some(agent_name) = actor.agent_name.as_deref().filter(|name| !name.is_empty()) {
+                let version = actor
+                    .agent_version
+                    .as_deref()
+                    .filter(|version| !version.is_empty())
+                    .map(|version| format!(" {version}"))
+                    .unwrap_or_default();
+                details.push(format!("ACP agent: {agent_name}{version}"));
+            }
+            details.join(" · ")
+        }
+        AdvisorActivity::Status {
+            actor,
+            connection_status,
+            turn_id,
+            turn_status,
+        } => {
+            let mut details = vec![format!("connection: {}", actor.connection_id)];
+            if let Some(status) = connection_status {
+                details.push(format!("session: {status}"));
+            }
+            if let Some(turn_id) = turn_id {
+                let turn_status = turn_status.as_deref().unwrap_or("unknown");
+                details.push(format!("turn {turn_id}: {turn_status}"));
+            } else if let Some(turn_status) = turn_status {
+                details.push(format!("turn: {turn_status}"));
+            }
+            details.join(" · ")
+        }
+        AdvisorActivity::Message { text, .. } | AdvisorActivity::Thought { text, .. } => {
+            text.clone()
+        }
+        AdvisorActivity::Tool {
+            title,
+            kind,
+            status,
+            ..
+        } => {
+            let kind = kind.as_deref().filter(|kind| !kind.is_empty());
+            let status = status.as_deref().unwrap_or("updated");
+            match kind {
+                Some(kind) => format!("{kind}: {title} ({status})"),
+                None => format!("{title} ({status})"),
+            }
+        }
+        AdvisorActivity::PermissionRequested { title, .. } => {
+            format!("awaits permission · {title}")
+        }
+        AdvisorActivity::Warning { message, .. } | AdvisorActivity::Info { message, .. } => {
+            message.clone()
+        }
+    }
+}
+
+fn advisor_activity_color(activity: &AdvisorActivity, theme: TerminalTheme) -> Color {
+    match activity {
+        AdvisorActivity::Message { .. } => theme.agent,
+        AdvisorActivity::Thought { .. } => theme.thought,
+        AdvisorActivity::Warning { .. } => theme.warning,
+        AdvisorActivity::PermissionRequested { .. } => theme.warning,
+        AdvisorActivity::Tool { .. } => theme.tool,
+        AdvisorActivity::TeamSelected { .. }
+        | AdvisorActivity::Connected { .. }
+        | AdvisorActivity::Status { .. }
+        | AdvisorActivity::Info { .. } => theme.muted,
+    }
 }
 
 fn push_plain_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize) {
@@ -12810,6 +13004,89 @@ mod tests {
         assert!(rendered.iter().any(|line| line == "- bold item"));
         assert!(rendered.iter().any(|line| line == "code rs"));
         assert!(rendered.iter().any(|line| line == "  let x = 1;"));
+    }
+
+    #[test]
+    fn transcript_renders_nested_agent_role_model_and_current_tool() {
+        let actor = AdvisorActor {
+            role: "worker".to_string(),
+            connection_id: "conn-7".to_string(),
+            source_id: Some("claude-acp".to_string()),
+            agent_name: Some("Claude Code".to_string()),
+            agent_version: Some("1.2.3".to_string()),
+            model_name: Some("Claude Sonnet 4.5".to_string()),
+            model_value: Some("claude-sonnet-4-5".to_string()),
+        };
+        let mut state = AppState::new();
+        state.transcript.push(Entry::AdvisorActivity(Box::new(
+            AdvisorActivity::TeamSelected {
+                worker: Some(AdvisorCandidate {
+                    role: "worker".to_string(),
+                    source_id: "claude-acp".to_string(),
+                    model_name: "Claude Sonnet 4.5".to_string(),
+                    model_value: "claude-sonnet-4-5".to_string(),
+                    elo: 1320,
+                    provisional: false,
+                }),
+                reviewer: Some(AdvisorCandidate {
+                    role: "reviewer".to_string(),
+                    source_id: "codex-acp".to_string(),
+                    model_name: "GPT-5 Codex".to_string(),
+                    model_value: "gpt-5-codex".to_string(),
+                    elo: 1290,
+                    provisional: true,
+                }),
+            },
+        )));
+        state
+            .transcript
+            .push(Entry::AdvisorActivity(Box::new(AdvisorActivity::Status {
+                actor: actor.clone(),
+                connection_status: Some("ready".to_string()),
+                turn_id: Some(3),
+                turn_status: Some("running".to_string()),
+            })));
+        state
+            .transcript
+            .push(Entry::AdvisorActivity(Box::new(AdvisorActivity::Tool {
+                actor,
+                tool_id: "3:tool-1".to_string(),
+                title: "gh pr list --state open".to_string(),
+                kind: Some("execute".to_string()),
+                status: Some("running".to_string()),
+            })));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 120)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert!(rendered.iter().any(|line| line == "Thor team:"));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Worker: Claude Sonnet 4.5 via claude-acp (Elo 1320)"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| { line == "Worker · Claude Sonnet 4.5 via claude-acp:" })
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("connection: conn-7 · session: ready · turn 3: running"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| { line == "Worker · Claude Sonnet 4.5 via claude-acp · tool:" })
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "execute: gh pr list --state open (running)")
+        );
     }
 
     #[test]

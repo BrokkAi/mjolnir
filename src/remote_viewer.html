@@ -1305,6 +1305,7 @@
         &[data-kind="agent"] { --kind-color: var(--agent); }
         &[data-kind="thought"] { --kind-color: var(--thought); }
         &[data-kind="tool"] { --kind-color: var(--tool); }
+        &[data-kind="advisor"] { --kind-color: var(--tool); }
       }
 
       @keyframes entry-in {
@@ -4459,6 +4460,8 @@
             return "Thought";
           case "tool":
             return "Tool";
+          case "advisor":
+            return "Advisor";
           default:
             return "System";
         }
@@ -4554,7 +4557,7 @@
           }
         });
         refs.body.replaceChildren();
-        const voice = refs.kind === "agent" || refs.kind === "thought" ? "prose" : "mono";
+        const voice = refs.kind === "agent" || refs.kind === "thought" || refs.kind === "advisor" ? "prose" : "mono";
         const text = entry.text || "";
         if (refs.kind === "tool" && entry.tool_kind === "execute" && text.trim()) {
           appendExecuteToolBody(refs.body, entry);

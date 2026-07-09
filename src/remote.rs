@@ -48,8 +48,8 @@ use crate::acp::{self, AcpRuntimeConfig};
 use crate::advisor::{self, AdvisorConfig};
 use crate::config::{self, SelectedAgent};
 use crate::event::{
-    PermissionDecision, PermissionPrompt, SessionConfigTarget, TerminalOutputSnapshot, UiCommand,
-    UiEvent,
+    AdvisorActivity, PermissionDecision, PermissionPrompt, SessionConfigTarget,
+    TerminalOutputSnapshot, UiCommand, UiEvent,
 };
 use crate::ragnarok::Launch;
 
@@ -648,6 +648,7 @@ struct TrackerState {
     transcript: Vec<TranscriptEntry>,
     terminal_outputs: HashMap<String, TerminalOutputSnapshot>,
     tool_transcript_entries: HashMap<usize, ToolTranscriptEntry>,
+    advisor_tool_entries: HashMap<String, usize>,
     pending_permissions: Vec<PendingPermissionRecord>,
     session_config: Vec<SessionConfigOptionRecord>,
     available_commands: Vec<CommandRecord>,
@@ -773,6 +774,7 @@ impl TrackerState {
             transcript: Vec::new(),
             terminal_outputs: HashMap::new(),
             tool_transcript_entries: HashMap::new(),
+            advisor_tool_entries: HashMap::new(),
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: remote_builtin_command_records(false),
@@ -799,6 +801,7 @@ impl TrackerState {
         self.transcript.clear();
         self.terminal_outputs.clear();
         self.tool_transcript_entries.clear();
+        self.advisor_tool_entries.clear();
         self.pending_permissions.clear();
         self.session_config.clear();
         self.available_commands = available_command_records(&[], self.session_fork_supported);
@@ -850,6 +853,7 @@ impl TrackerState {
             UiEvent::TerminalOutput(snapshot) => {
                 self.observe_terminal_output(snapshot);
             }
+            UiEvent::AdvisorActivity(activity) => self.observe_advisor_activity(activity),
             UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } | UiEvent::Fatal(_) => {
                 self.agent_message_open = false;
                 self.prompt_in_flight = false;
@@ -947,6 +951,33 @@ impl TrackerState {
                 self.touch();
             }
         }
+    }
+
+    fn observe_advisor_activity(&mut self, activity: &AdvisorActivity) {
+        self.agent_message_open = false;
+        if matches!(activity, AdvisorActivity::Connected { actor } if actor.role == "thor") {
+            // Nested connection ids are scoped to a Thor MCP server. A new
+            // Thor connection can reuse `conn-1`, so stop its update from
+            // rewriting an action from a prior advisor turn.
+            self.advisor_tool_entries.clear();
+        }
+        if let AdvisorActivity::Tool { actor, tool_id, .. } = activity {
+            let key = format!("{}:{tool_id}", actor.connection_id);
+            let text = remote_advisor_activity_text(activity);
+            if let Some(&index) = self.advisor_tool_entries.get(&key)
+                && let Some(entry) = self.transcript.get_mut(index)
+                && entry.kind == "advisor"
+            {
+                entry.text = text;
+                self.touch();
+                return;
+            }
+            let index = self.push_transcript_entry("advisor", text);
+            self.advisor_tool_entries.insert(key, index);
+        } else {
+            self.push_transcript_entry("advisor", remote_advisor_activity_text(activity));
+        }
+        self.touch();
     }
 
     fn observe_terminal_output(&mut self, snapshot: &TerminalOutputSnapshot) {
@@ -1167,6 +1198,146 @@ impl TrackerState {
             self.session_id.clone()?,
             self.prompt_turn_started_at.clone()?,
         ))
+    }
+}
+
+fn remote_advisor_actor_label(actor: &crate::event::AdvisorActor) -> String {
+    let role = match actor.role.as_str() {
+        "thor" => "Thor",
+        "worker" => "Worker",
+        "reviewer" => "Reviewer",
+        "" => "Agent",
+        other => other,
+    };
+    let model = actor
+        .model_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            actor
+                .model_value
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            actor
+                .agent_name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            actor
+                .source_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or("unknown agent");
+    match actor
+        .source_id
+        .as_deref()
+        .filter(|source| !source.trim().is_empty() && *source != model)
+    {
+        Some(source) => format!("{role} · {model} via {source}"),
+        None => format!("{role} · {model}"),
+    }
+}
+
+fn remote_advisor_candidate_label(candidate: &crate::event::AdvisorCandidate) -> String {
+    let role = match candidate.role.as_str() {
+        "worker" => "Worker",
+        "reviewer" => "Reviewer",
+        "" => "Agent",
+        other => other,
+    };
+    let model = if candidate.model_name.trim().is_empty() {
+        candidate.model_value.as_str()
+    } else {
+        candidate.model_name.as_str()
+    };
+    let provisional = if candidate.provisional {
+        " provisional"
+    } else {
+        ""
+    };
+    format!(
+        "{role}: {model} via {} (Elo {}{provisional})",
+        candidate.source_id, candidate.elo
+    )
+}
+
+fn remote_advisor_activity_text(activity: &AdvisorActivity) -> String {
+    match activity {
+        AdvisorActivity::TeamSelected { worker, reviewer } => {
+            let team = [worker, reviewer]
+                .into_iter()
+                .flatten()
+                .map(remote_advisor_candidate_label)
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("Thor team\n{team}")
+        }
+        AdvisorActivity::Connected { actor } => {
+            let mut details = vec![format!("{} connected", remote_advisor_actor_label(actor))];
+            details.push(format!("connection: {}", actor.connection_id));
+            if let Some(name) = actor.agent_name.as_deref().filter(|name| !name.is_empty()) {
+                let version = actor
+                    .agent_version
+                    .as_deref()
+                    .filter(|version| !version.is_empty())
+                    .map(|version| format!(" {version}"))
+                    .unwrap_or_default();
+                details.push(format!("ACP agent: {name}{version}"));
+            }
+            details.join(" · ")
+        }
+        AdvisorActivity::Status {
+            actor,
+            connection_status,
+            turn_id,
+            turn_status,
+        } => {
+            let mut details = vec![remote_advisor_actor_label(actor)];
+            if let Some(status) = connection_status {
+                details.push(format!("session: {status}"));
+            }
+            if let Some(turn_id) = turn_id {
+                details.push(format!(
+                    "turn {turn_id}: {}",
+                    turn_status.as_deref().unwrap_or("unknown")
+                ));
+            }
+            details.join(" · ")
+        }
+        AdvisorActivity::Message { actor, text } | AdvisorActivity::Thought { actor, text } => {
+            format!("{}\n{text}", remote_advisor_actor_label(actor))
+        }
+        AdvisorActivity::Tool {
+            actor,
+            title,
+            kind,
+            status,
+            ..
+        } => {
+            let kind = kind.as_deref().filter(|kind| !kind.is_empty());
+            let status = status.as_deref().unwrap_or("updated");
+            let action = match kind {
+                Some(kind) => format!("{kind}: {title} ({status})"),
+                None => format!("{title} ({status})"),
+            };
+            format!("{} · {action}", remote_advisor_actor_label(actor))
+        }
+        AdvisorActivity::PermissionRequested { actor, title } => {
+            format!(
+                "{} · awaits permission: {title}",
+                remote_advisor_actor_label(actor)
+            )
+        }
+        AdvisorActivity::Warning { actor, message } => {
+            format!("{} · warning: {message}", remote_advisor_actor_label(actor))
+        }
+        AdvisorActivity::Info { actor, message } => {
+            format!("{} · {message}", remote_advisor_actor_label(actor))
+        }
     }
 }
 
@@ -4688,6 +4859,66 @@ mod tests {
     };
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
+
+    #[test]
+    fn tracker_records_role_and_model_attributed_advisor_activity() {
+        let mut state = TrackerState::new("project".to_string(), "thor".to_string());
+        state.observe_event(&UiEvent::AdvisorActivity(AdvisorActivity::Tool {
+            actor: crate::event::AdvisorActor {
+                role: "worker".to_string(),
+                connection_id: "conn-1".to_string(),
+                source_id: Some("claude-acp".to_string()),
+                agent_name: Some("Claude Code".to_string()),
+                agent_version: Some("1.2.3".to_string()),
+                model_name: Some("Claude Sonnet 4.5".to_string()),
+                model_value: Some("claude-sonnet-4-5".to_string()),
+            },
+            tool_id: "1:tool-1".to_string(),
+            title: "gh pr list --state open".to_string(),
+            kind: Some("execute".to_string()),
+            status: Some("running".to_string()),
+        }));
+
+        assert_eq!(state.transcript.len(), 1);
+        assert_eq!(state.transcript[0].kind, "advisor");
+        assert!(
+            state.transcript[0]
+                .text
+                .contains("Worker · Claude Sonnet 4.5 via claude-acp")
+        );
+        assert!(
+            state.transcript[0]
+                .text
+                .contains("execute: gh pr list --state open (running)")
+        );
+
+        state.observe_event(&UiEvent::AdvisorActivity(AdvisorActivity::Tool {
+            actor: crate::event::AdvisorActor {
+                role: "worker".to_string(),
+                connection_id: "conn-1".to_string(),
+                source_id: Some("claude-acp".to_string()),
+                agent_name: Some("Claude Code".to_string()),
+                agent_version: Some("1.2.3".to_string()),
+                model_name: Some("Claude Sonnet 4.5".to_string()),
+                model_value: Some("claude-sonnet-4-5".to_string()),
+            },
+            tool_id: "1:tool-1".to_string(),
+            title: "gh pr list --state open".to_string(),
+            kind: Some("execute".to_string()),
+            status: Some("completed".to_string()),
+        }));
+
+        assert_eq!(
+            state.transcript.len(),
+            1,
+            "the remote card updates in place"
+        );
+        assert!(
+            state.transcript[0]
+                .text
+                .contains("execute: gh pr list --state open (completed)")
+        );
+    }
 
     use crate::event::PermissionDecision;
 

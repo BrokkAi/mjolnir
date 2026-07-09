@@ -288,10 +288,23 @@ Thor's `poll_progress` calls. `AdvisorTranscriptBridge` recognizes the
 `mj.poll_progress.v1` payload, de-duplicates each
 `(connection_id, turn_id, seq)` item, and projects it back into the transcript:
 
-- worker/reviewer messages become ordinary agent text;
-- thoughts remain thought chunks;
-- tool calls and updates become role-labelled transcript information;
+- Thor itself is shown with its configured source and Model option (when the
+  ACP agent advertised one; otherwise an exact saved `model` setting);
+- the selected worker and reviewer are shown with their source, model, Elo,
+  and provisional status before either connection begins work;
+- each connection identifies its actual ACP agent/version, selected model, and
+  connection id;
+- worker/reviewer messages and thoughts retain role/model provenance instead
+  of being rendered as anonymous `agent` text;
+- status updates show the nested session and turn state;
+- tool calls and title-less updates retain the original action title, so a
+  completion says what finished rather than merely `tool update`;
 - permission requests, warnings, and server information remain visible.
+
+Nested tool input and raw output are not duplicated into the transcript by
+default because they may contain credentials or other sensitive values. The
+safe title, kind, and status show the current action while the surrounding MCP
+tool card remains available for inspection.
 
 After the parent sees a token-verified completion receipt, it suppresses later
 Thor message and thought chunks while retaining tool cards. The receipt is the

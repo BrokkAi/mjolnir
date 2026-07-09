@@ -5,14 +5,14 @@
 //! completion guardrails. Thor owns the actual orchestration: choosing whether
 //! to delegate, steering workers, judging reviews, and writing the answer.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, EnvVariable, McpServer, McpServerStdio, SessionUpdate, StopReason,
-    TextContent, ToolCallContent, ToolCallId, Usage,
+    EnvVariable, McpServer, McpServerStdio, SessionUpdate, StopReason, ToolCallContent, ToolCallId,
+    Usage,
 };
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -23,7 +23,9 @@ use tokio::sync::{mpsc, watch};
 
 use crate::acp;
 use crate::config::Config;
-use crate::event::{PromptImage, UiEvent, content_block_text};
+use crate::event::{
+    AdvisorActivity, AdvisorActor, AdvisorCandidate, PromptImage, UiEvent, content_block_text,
+};
 use crate::ragnarok::{AgentHandle, Launch, TurnEvent};
 
 const THOR_ORCHESTRATION_TIMEOUT: Duration = Duration::from_secs(40 * 60);
@@ -114,6 +116,7 @@ pub(crate) async fn run_turn(
         &completion_marker.token,
     )?;
     let saved_session_config = saved_session_config(&cfg.config_path, &cfg.thor_agent_source_id);
+    let thor_model = configured_model_value(&saved_session_config);
 
     let mut thor = AgentHandle::connect_with_saved_session_config(
         &cfg.thor_launch,
@@ -126,6 +129,26 @@ pub(crate) async fn run_turn(
     )
     .await
     .context("Thor could not start")?;
+    let (agent_name, agent_version) = thor.agent_identity();
+    let (model_name, model_value) = thor
+        .configured_model()
+        .map(|(name, value)| (Some(name), Some(value)))
+        .unwrap_or((None, thor_model));
+    let thor_actor = AdvisorActor {
+        role: "thor".to_string(),
+        connection_id: "thor".to_string(),
+        source_id: Some(cfg.thor_agent_source_id.clone()),
+        agent_name,
+        agent_version,
+        model_name,
+        model_value,
+    };
+    emit_activity(
+        &ui_tx,
+        AdvisorActivity::Connected {
+            actor: thor_actor.clone(),
+        },
+    );
 
     let mut bridge = AdvisorTranscriptBridge::default();
     let result = thor
@@ -133,7 +156,7 @@ pub(crate) async fn run_turn(
             thor_prompt(&user_prompt, !images.is_empty()),
             images,
             THOR_ORCHESTRATION_TIMEOUT,
-            |event| forward_thor_event(&ui_tx, &mut bridge, &completion_marker, event),
+            |event| forward_thor_event(&ui_tx, &mut bridge, &thor_actor, &completion_marker, event),
         )
         .await;
     thor.dismiss().await;
@@ -151,7 +174,13 @@ pub(crate) async fn run_turn(
              delegated work is not accepted without a completed independent review"
         );
     };
-    emit_agent_text(&ui_tx, final_response);
+    emit_activity(
+        &ui_tx,
+        AdvisorActivity::Message {
+            actor: thor_actor,
+            text: final_response,
+        },
+    );
 
     Ok(AdvisorTurnResult {
         stop_reason: result.stop,
@@ -167,6 +196,13 @@ fn saved_session_config(
         .ok()
         .and_then(|cfg| cfg.session_config.get(agent_source_id).cloned())
         .unwrap_or_default()
+}
+
+fn configured_model_value(saved_session_config: &HashMap<String, String>) -> Option<String> {
+    saved_session_config
+        .get("model")
+        .cloned()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn thor_mcp_server(
@@ -275,6 +311,7 @@ fn thor_prompt(user_prompt: &str, has_images: bool) -> String {
 fn forward_thor_event(
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     bridge: &mut AdvisorTranscriptBridge,
+    thor_actor: &AdvisorActor,
     completion_marker: &CompletionMarker,
     event: TurnEvent,
 ) {
@@ -284,7 +321,28 @@ fn forward_thor_event(
             // nested progress into visible worker/reviewer transcript data.
             let raw = *update;
             let completion_accepted = completion_marker.accepted_response().is_some();
-            if should_forward_thor_session_update(&raw, completion_accepted) {
+            if !completion_accepted {
+                match &raw {
+                    SessionUpdate::AgentMessageChunk(chunk) => emit_activity(
+                        ui_tx,
+                        AdvisorActivity::Message {
+                            actor: thor_actor.clone(),
+                            text: content_block_text(&chunk.content),
+                        },
+                    ),
+                    SessionUpdate::AgentThoughtChunk(chunk) => emit_activity(
+                        ui_tx,
+                        AdvisorActivity::Thought {
+                            actor: thor_actor.clone(),
+                            text: content_block_text(&chunk.content),
+                        },
+                    ),
+                    _ if should_forward_thor_session_update(&raw, false) => {
+                        let _ = ui_tx.send(UiEvent::SessionUpdate(namespace_tool_ids(raw.clone())));
+                    }
+                    _ => {}
+                }
+            } else if should_forward_thor_session_update(&raw, true) {
                 let _ = ui_tx.send(UiEvent::SessionUpdate(namespace_tool_ids(raw.clone())));
             }
             bridge.observe_session_update(ui_tx, &raw);
@@ -339,6 +397,11 @@ fn namespace_tool_ids(update: SessionUpdate) -> SessionUpdate {
 #[derive(Default)]
 struct AdvisorTranscriptBridge {
     seen_progress: HashSet<(String, u64, u64)>,
+    seen_selections: HashSet<String>,
+    seen_connections: HashSet<String>,
+    actors: HashMap<String, AdvisorActor>,
+    connection_states: HashMap<String, NestedConnectionState>,
+    tool_states: HashMap<(String, u64, String), NestedToolState>,
 }
 
 impl AdvisorTranscriptBridge {
@@ -353,6 +416,12 @@ impl AdvisorTranscriptBridge {
     }
 
     fn observe_value(&mut self, ui_tx: &mpsc::UnboundedSender<UiEvent>, value: &Value) {
+        if let Some(selection) = value_to_selection(value) {
+            self.project_selection(ui_tx, selection);
+        }
+        if let Some(connection) = value_to_connection(value) {
+            self.project_connection(ui_tx, connection);
+        }
         if let Some(poll) = value_to_poll(value) {
             self.project_poll(ui_tx, poll);
         }
@@ -363,7 +432,91 @@ impl AdvisorTranscriptBridge {
         }
     }
 
+    fn project_selection(
+        &mut self,
+        ui_tx: &mpsc::UnboundedSender<UiEvent>,
+        selection: NestedSelection,
+    ) {
+        let key = format!(
+            "{}|{}",
+            selection
+                .recommended_worker
+                .as_ref()
+                .map(|candidate| candidate.candidate_id.as_str())
+                .unwrap_or_default(),
+            selection
+                .recommended_reviewer
+                .as_ref()
+                .map(|candidate| candidate.candidate_id.as_str())
+                .unwrap_or_default(),
+        );
+        if !self.seen_selections.insert(key) {
+            return;
+        }
+        let worker = selection
+            .recommended_worker
+            .map(|candidate| candidate.into_activity_candidate("worker"));
+        let reviewer = selection
+            .recommended_reviewer
+            .map(|candidate| candidate.into_activity_candidate("reviewer"));
+        if worker.is_some() || reviewer.is_some() {
+            emit_activity(ui_tx, AdvisorActivity::TeamSelected { worker, reviewer });
+        }
+    }
+
+    fn project_connection(
+        &mut self,
+        ui_tx: &mpsc::UnboundedSender<UiEvent>,
+        connection: NestedConnection,
+    ) {
+        let connection_id = connection.connection_id.clone();
+        let actor = self.merge_actor(
+            &connection_id,
+            &connection.purpose,
+            connection.source_id.as_deref(),
+            connection.model_name.as_deref(),
+            connection.model_value.as_deref(),
+            connection.agent_name.as_deref(),
+            connection.agent_version.as_deref(),
+        );
+        if self.seen_connections.insert(connection_id) {
+            emit_activity(ui_tx, AdvisorActivity::Connected { actor });
+        }
+    }
+
     fn project_poll(&mut self, ui_tx: &mpsc::UnboundedSender<UiEvent>, poll: NestedPoll) {
+        let connection_id = poll.connection_id.clone();
+        let actor = self.merge_actor(
+            &connection_id,
+            &poll.purpose,
+            poll.source_id.as_deref(),
+            poll.model_name.as_deref(),
+            poll.model_value.as_deref(),
+            None,
+            None,
+        );
+        let state = NestedConnectionState {
+            connection_status: poll.connection_status.clone(),
+            turn_id: poll.turn_id,
+            turn_status: poll.turn_status.clone(),
+        };
+        if state.has_visible_value()
+            && self
+                .connection_states
+                .insert(connection_id.clone(), state.clone())
+                .as_ref()
+                != Some(&state)
+        {
+            emit_activity(
+                ui_tx,
+                AdvisorActivity::Status {
+                    actor: actor.clone(),
+                    connection_status: state.connection_status,
+                    turn_id: state.turn_id,
+                    turn_status: state.turn_status,
+                },
+            );
+        }
         let fresh: Vec<NestedProgressEntry> = poll
             .items
             .into_iter()
@@ -376,63 +529,150 @@ impl AdvisorTranscriptBridge {
             return;
         }
 
-        let identity = poll
-            .source_id
-            .as_deref()
-            .or(poll.candidate_id.as_deref())
-            .unwrap_or(poll.connection_id.as_str());
-        emit_info(ui_tx, format!("{} progress · {identity}", poll.purpose));
         for entry in fresh {
+            let turn_id = entry.turn_id;
             match entry.item {
-                NestedProgressItem::AgentMessage { text } => emit_agent_text(ui_tx, text),
-                NestedProgressItem::AgentThought { text } => {
-                    let _ = ui_tx.send(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-                        text_chunk(text),
-                    )));
-                }
-                NestedProgressItem::ToolCall { title, status, .. }
-                | NestedProgressItem::ToolCallUpdate {
-                    title: Some(title),
-                    status,
-                    ..
-                } => {
-                    emit_info(
+                NestedProgressItem::AgentMessage { text } => {
+                    emit_activity(
                         ui_tx,
-                        format!(
-                            "{} tool · {title} ({})",
-                            poll.purpose,
-                            status.unwrap_or_else(|| "updated".to_string())
-                        ),
+                        AdvisorActivity::Message {
+                            actor: actor.clone(),
+                            text,
+                        },
+                    );
+                }
+                NestedProgressItem::AgentThought { text } => {
+                    emit_activity(
+                        ui_tx,
+                        AdvisorActivity::Thought {
+                            actor: actor.clone(),
+                            text,
+                        },
+                    );
+                }
+                NestedProgressItem::ToolCall {
+                    id,
+                    title,
+                    kind,
+                    status,
+                } => {
+                    let state = NestedToolState {
+                        title,
+                        kind: Some(kind),
+                        status,
+                    };
+                    self.tool_states
+                        .insert((connection_id.clone(), turn_id, id.clone()), state.clone());
+                    emit_activity(
+                        ui_tx,
+                        AdvisorActivity::Tool {
+                            actor: actor.clone(),
+                            tool_id: format!("{turn_id}:{id}"),
+                            title: state.title,
+                            kind: state.kind,
+                            status: state.status,
+                        },
                     );
                 }
                 NestedProgressItem::ToolCallUpdate {
-                    title: None,
+                    id,
+                    title,
+                    kind,
                     status,
                     ..
                 } => {
-                    emit_info(
+                    let key = (connection_id.clone(), turn_id, id.clone());
+                    let state = self
+                        .tool_states
+                        .entry(key)
+                        .or_insert_with(|| NestedToolState {
+                            title: "tool".to_string(),
+                            kind: None,
+                            status: None,
+                        });
+                    if let Some(title) = title {
+                        state.title = title;
+                    }
+                    if let Some(kind) = kind {
+                        state.kind = Some(kind);
+                    }
+                    if let Some(status) = status {
+                        state.status = Some(status);
+                    }
+                    emit_activity(
                         ui_tx,
-                        format!(
-                            "{} tool update ({})",
-                            poll.purpose,
-                            status.unwrap_or_else(|| "updated".to_string())
-                        ),
+                        AdvisorActivity::Tool {
+                            actor: actor.clone(),
+                            tool_id: format!("{turn_id}:{id}"),
+                            title: state.title.clone(),
+                            kind: state.kind.clone(),
+                            status: state.status.clone(),
+                        },
                     );
                 }
                 NestedProgressItem::PermissionRequested { title, .. } => {
-                    emit_info(
+                    emit_activity(
                         ui_tx,
-                        format!("{} awaits permission · {title}", poll.purpose),
+                        AdvisorActivity::PermissionRequested {
+                            actor: actor.clone(),
+                            title,
+                        },
                     );
                 }
                 NestedProgressItem::Warning { message } => {
-                    let _ = ui_tx.send(UiEvent::Warning(format!("{} · {message}", poll.purpose)));
+                    emit_activity(
+                        ui_tx,
+                        AdvisorActivity::Warning {
+                            actor: actor.clone(),
+                            message,
+                        },
+                    );
                 }
                 NestedProgressItem::Info { message } => {
-                    emit_info(ui_tx, format!("{} · {message}", poll.purpose));
+                    emit_activity(
+                        ui_tx,
+                        AdvisorActivity::Info {
+                            actor: actor.clone(),
+                            message,
+                        },
+                    );
                 }
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn merge_actor(
+        &mut self,
+        connection_id: &str,
+        role: &str,
+        source_id: Option<&str>,
+        model_name: Option<&str>,
+        model_value: Option<&str>,
+        agent_name: Option<&str>,
+        agent_version: Option<&str>,
+    ) -> AdvisorActor {
+        let actor = self
+            .actors
+            .entry(connection_id.to_string())
+            .or_insert_with(|| AdvisorActor {
+                role: role.to_string(),
+                connection_id: connection_id.to_string(),
+                source_id: None,
+                agent_name: None,
+                agent_version: None,
+                model_name: None,
+                model_value: None,
+            });
+        if !role.trim().is_empty() {
+            actor.role = role.to_string();
+        }
+        remember_text(&mut actor.source_id, source_id);
+        remember_text(&mut actor.model_name, model_name);
+        remember_text(&mut actor.model_value, model_value);
+        remember_text(&mut actor.agent_name, agent_name);
+        remember_text(&mut actor.agent_version, agent_version);
+        actor.clone()
     }
 }
 
@@ -475,15 +715,120 @@ fn value_to_poll(value: &Value) -> Option<NestedPoll> {
     (poll.schema == "mj.poll_progress.v1").then_some(poll)
 }
 
+fn value_to_selection(value: &Value) -> Option<NestedSelection> {
+    if value.get("recommended_worker").is_none() && value.get("recommended_reviewer").is_none() {
+        return None;
+    }
+    serde_json::from_value(value.clone()).ok()
+}
+
+fn value_to_connection(value: &Value) -> Option<NestedConnection> {
+    if value.get("prompt_images_supported").is_none()
+        || value.get("session_fork_supported").is_none()
+    {
+        return None;
+    }
+    serde_json::from_value(value.clone()).ok()
+}
+
+fn remember_text(target: &mut Option<String>, value: Option<&str>) {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        *target = Some(value.to_string());
+    }
+}
+
+fn emit_activity(ui_tx: &mpsc::UnboundedSender<UiEvent>, activity: AdvisorActivity) {
+    let _ = ui_tx.send(UiEvent::AdvisorActivity(activity));
+}
+
+#[derive(Debug, Deserialize)]
+struct NestedSelection {
+    #[serde(default)]
+    recommended_worker: Option<NestedCandidate>,
+    #[serde(default)]
+    recommended_reviewer: Option<NestedCandidate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NestedCandidate {
+    candidate_id: String,
+    agent_source_id: String,
+    model_value: String,
+    model_name: String,
+    elo: u32,
+    #[serde(default)]
+    provisional: bool,
+}
+
+impl NestedCandidate {
+    fn into_activity_candidate(self, role: &str) -> AdvisorCandidate {
+        AdvisorCandidate {
+            role: role.to_string(),
+            source_id: self.agent_source_id,
+            model_name: self.model_name,
+            model_value: self.model_value,
+            elo: self.elo,
+            provisional: self.provisional,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct NestedConnection {
+    connection_id: String,
+    purpose: String,
+    #[serde(default)]
+    source_id: Option<String>,
+    #[serde(default)]
+    model_value: Option<String>,
+    #[serde(default)]
+    model_name: Option<String>,
+    #[serde(default)]
+    agent_name: Option<String>,
+    #[serde(default)]
+    agent_version: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct NestedPoll {
     schema: String,
     connection_id: String,
     purpose: String,
     source_id: Option<String>,
-    candidate_id: Option<String>,
+    #[serde(default)]
+    model_value: Option<String>,
+    #[serde(default)]
+    model_name: Option<String>,
+    #[serde(default)]
+    connection_status: Option<String>,
+    #[serde(default)]
+    turn_id: Option<u64>,
+    #[serde(default)]
+    turn_status: Option<String>,
     #[serde(default)]
     items: Vec<NestedProgressEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NestedConnectionState {
+    connection_status: Option<String>,
+    turn_id: Option<u64>,
+    turn_status: Option<String>,
+}
+
+/// The last known safe summary of one nested ACP tool call. MCP sends sparse
+/// updates, so each new update must retain fields it did not repeat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NestedToolState {
+    title: String,
+    kind: Option<String>,
+    status: Option<String>,
+}
+
+impl NestedConnectionState {
+    fn has_visible_value(&self) -> bool {
+        self.connection_status.is_some() || self.turn_id.is_some() || self.turn_status.is_some()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -504,18 +849,14 @@ enum NestedProgressItem {
         text: String,
     },
     ToolCall {
-        #[allow(dead_code)]
         id: String,
         title: String,
-        #[allow(dead_code)]
         kind: String,
         status: Option<String>,
     },
     ToolCallUpdate {
-        #[allow(dead_code)]
         id: String,
         title: Option<String>,
-        #[allow(dead_code)]
         kind: Option<String>,
         status: Option<String>,
     },
@@ -532,18 +873,8 @@ enum NestedProgressItem {
     },
 }
 
-fn emit_agent_text(ui_tx: &mpsc::UnboundedSender<UiEvent>, text: impl Into<String>) {
-    let _ = ui_tx.send(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-        text_chunk(text),
-    )));
-}
-
 fn emit_info(ui_tx: &mpsc::UnboundedSender<UiEvent>, text: impl Into<String>) {
     let _ = ui_tx.send(UiEvent::Info(text.into()));
-}
-
-fn text_chunk(text: impl Into<String>) -> ContentChunk {
-    ContentChunk::new(ContentBlock::Text(TextContent::new(text.into())))
 }
 
 fn turn_succeeded(stop: StopReason) -> bool {
@@ -556,6 +887,11 @@ fn turn_succeeded(stop: StopReason) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+
+    fn text_chunk(text: impl Into<String>) -> ContentChunk {
+        ContentChunk::new(ContentBlock::Text(TextContent::new(text.into())))
+    }
 
     #[test]
     fn thor_prompt_describes_the_tool_control_loop_without_json_routing() {
@@ -612,6 +948,25 @@ mod tests {
     }
 
     #[test]
+    fn configured_model_value_uses_the_saved_model_option() {
+        let config = HashMap::from([
+            ("reasoning_effort".to_string(), "high".to_string()),
+            ("model".to_string(), "gpt-5-codex".to_string()),
+        ]);
+        assert_eq!(
+            configured_model_value(&config).as_deref(),
+            Some("gpt-5-codex")
+        );
+        assert_eq!(
+            configured_model_value(&HashMap::from([(
+                "review_model".to_string(),
+                "not-authoritative".to_string(),
+            )])),
+            None
+        );
+    }
+
+    #[test]
     fn image_manifest_round_trips_prompt_images() {
         let images = vec![PromptImage {
             data_base64: "aGVsbG8=".to_string(),
@@ -638,6 +993,11 @@ mod tests {
             "purpose": "worker",
             "source_id": "worker-agent",
             "candidate_id": "candidate-1",
+            "model_name": "Claude Sonnet 4.5",
+            "model_value": "claude-sonnet-4-5",
+            "connection_status": "ready",
+            "turn_id": 1,
+            "turn_status": "running",
             "items": [{
                 "seq": 1,
                 "turn_id": 1,
@@ -648,7 +1008,24 @@ mod tests {
         bridge.observe_value(&tx, &value);
         bridge.observe_value(&tx, &value);
         let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-        assert_eq!(events.len(), 2, "one header and one message only");
+        assert_eq!(events.len(), 2, "one status and one message only");
+        assert!(matches!(
+            &events[0],
+            UiEvent::AdvisorActivity(AdvisorActivity::Status {
+                actor,
+                connection_status: Some(status),
+                turn_id: Some(1),
+                turn_status: Some(turn_status),
+            }) if actor.role == "worker"
+                && actor.model_name.as_deref() == Some("Claude Sonnet 4.5")
+                && status == "ready"
+                && turn_status == "running"
+        ));
+        assert!(matches!(
+            &events[1],
+            UiEvent::AdvisorActivity(AdvisorActivity::Message { actor, text })
+                if actor.model_value.as_deref() == Some("claude-sonnet-4-5") && text == "working"
+        ));
     }
 
     #[test]
@@ -673,7 +1050,189 @@ mod tests {
             ))]);
         bridge.observe_session_update(&tx, &SessionUpdate::ToolCall(call));
         let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-        assert_eq!(events.len(), 2, "header and nested worker message");
+        assert_eq!(events.len(), 1, "nested worker message");
+        assert!(matches!(
+            &events[0],
+            UiEvent::AdvisorActivity(AdvisorActivity::Message { actor, text })
+                if actor.role == "worker" && text == "implemented the change"
+        ));
+    }
+
+    #[test]
+    fn selection_connection_and_tool_updates_keep_nested_agent_identity() {
+        let mut bridge = AdvisorTranscriptBridge::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        bridge.observe_value(
+            &tx,
+            &serde_json::json!({
+                "recommended_worker": {
+                    "candidate_id": "candidate-worker",
+                    "agent_source_id": "claude-acp",
+                    "model_value": "claude-sonnet-4-5",
+                    "model_name": "Claude Sonnet 4.5",
+                    "elo": 1320,
+                    "provisional": false
+                },
+                "recommended_reviewer": {
+                    "candidate_id": "candidate-reviewer",
+                    "agent_source_id": "codex-acp",
+                    "model_value": "gpt-5-codex",
+                    "model_name": "GPT-5 Codex",
+                    "elo": 1290,
+                    "provisional": true
+                }
+            }),
+        );
+        bridge.observe_value(
+            &tx,
+            &serde_json::json!({
+                "connection_id": "conn-1",
+                "purpose": "worker",
+                "source_id": "claude-acp",
+                "model_value": "claude-sonnet-4-5",
+                "model_name": "Claude Sonnet 4.5",
+                "agent_name": "Claude Code",
+                "agent_version": "1.2.3",
+                "prompt_images_supported": true,
+                "session_fork_supported": false
+            }),
+        );
+        bridge.observe_value(
+            &tx,
+            &serde_json::json!({
+                "schema": "mj.poll_progress.v1",
+                "connection_id": "conn-1",
+                "purpose": "worker",
+                "source_id": "claude-acp",
+                "model_value": "claude-sonnet-4-5",
+                "model_name": "Claude Sonnet 4.5",
+                "connection_status": "ready",
+                "turn_id": 7,
+                "turn_status": "running",
+                "items": [{
+                    "seq": 1,
+                    "turn_id": 7,
+                    "type": "tool_call",
+                    "id": "tool-1",
+                    "title": "gh pr list --state open",
+                    "kind": "execute",
+                    "status": "pending"
+                }]
+            }),
+        );
+        bridge.observe_value(
+            &tx,
+            &serde_json::json!({
+                "schema": "mj.poll_progress.v1",
+                "connection_id": "conn-1",
+                "purpose": "worker",
+                "source_id": "claude-acp",
+                "model_value": "claude-sonnet-4-5",
+                "model_name": "Claude Sonnet 4.5",
+                "connection_status": "ready",
+                "turn_id": 7,
+                "turn_status": "running",
+                "items": [{
+                    "seq": 2,
+                    "turn_id": 7,
+                    "type": "tool_call_update",
+                    "id": "tool-1",
+                    "status": "completed"
+                }]
+            }),
+        );
+        bridge.observe_value(
+            &tx,
+            &serde_json::json!({
+                "schema": "mj.poll_progress.v1",
+                "connection_id": "conn-1",
+                "purpose": "worker",
+                "source_id": "claude-acp",
+                "model_value": "claude-sonnet-4-5",
+                "model_name": "Claude Sonnet 4.5",
+                "connection_status": "ready",
+                "turn_id": 7,
+                "turn_status": "running",
+                "items": [{
+                    "seq": 3,
+                    "turn_id": 7,
+                    "type": "tool_call_update",
+                    "id": "tool-1"
+                }]
+            }),
+        );
+
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(matches!(
+            &events[0],
+            UiEvent::AdvisorActivity(AdvisorActivity::TeamSelected {
+                worker: Some(worker),
+                reviewer: Some(reviewer),
+            }) if worker.model_name == "Claude Sonnet 4.5"
+                && reviewer.model_name == "GPT-5 Codex"
+        ));
+        assert!(matches!(
+            &events[1],
+            UiEvent::AdvisorActivity(AdvisorActivity::Connected { actor })
+                if actor.agent_name.as_deref() == Some("Claude Code")
+                    && actor.model_name.as_deref() == Some("Claude Sonnet 4.5")
+        ));
+        assert!(matches!(
+            &events[3],
+            UiEvent::AdvisorActivity(AdvisorActivity::Tool { actor, title, kind, status, .. })
+                if actor.role == "worker"
+                    && title == "gh pr list --state open"
+                    && kind.as_deref() == Some("execute")
+                    && status.as_deref() == Some("pending")
+        ));
+        assert!(matches!(
+            &events[4],
+            UiEvent::AdvisorActivity(AdvisorActivity::Tool { title, kind, status, .. })
+                if title == "gh pr list --state open"
+                    && kind.as_deref() == Some("execute")
+                    && status.as_deref() == Some("completed")
+        ));
+        assert!(matches!(
+            &events[5],
+            UiEvent::AdvisorActivity(AdvisorActivity::Tool { title, kind, status, .. })
+                if title == "gh pr list --state open"
+                    && kind.as_deref() == Some("execute")
+                    && status.as_deref() == Some("completed")
+        ));
+    }
+
+    #[test]
+    fn thor_messages_are_role_attributed_instead_of_generic_session_chunks() {
+        let marker = CompletionMarker::new().expect("marker");
+        let thor = AdvisorActor {
+            role: "thor".to_string(),
+            connection_id: "thor".to_string(),
+            source_id: Some("codex-acp".to_string()),
+            agent_name: Some("Codex".to_string()),
+            agent_version: Some("1.0".to_string()),
+            model_name: Some("GPT-5 Codex".to_string()),
+            model_value: Some("gpt-5-codex".to_string()),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        forward_thor_event(
+            &tx,
+            &mut AdvisorTranscriptBridge::default(),
+            &thor,
+            &marker,
+            TurnEvent::RawSessionUpdate(Box::new(SessionUpdate::AgentThoughtChunk(text_chunk(
+                "Selecting a worker.",
+            )))),
+        );
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(UiEvent::AdvisorActivity(AdvisorActivity::Thought { actor, text }))
+                if actor.role == "thor" && text == "Selecting a worker."
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "no generic thought chunk should remain"
+        );
     }
 
     #[test]

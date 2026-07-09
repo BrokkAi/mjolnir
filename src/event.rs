@@ -23,6 +23,84 @@ pub struct PromptImage {
     pub height: u32,
 }
 
+/// Identifies one ACP actor participating in a Thor-advised turn.
+///
+/// These fields are deliberately separate from the outer session's agent
+/// label: the advisor transcript must make it clear which worker or reviewer
+/// produced a particular message or tool action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdvisorActor {
+    pub role: String,
+    pub connection_id: String,
+    pub source_id: Option<String>,
+    pub agent_name: Option<String>,
+    pub agent_version: Option<String>,
+    pub model_name: Option<String>,
+    pub model_value: Option<String>,
+}
+
+/// One ranked model recommendation made before Thor connects a nested agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdvisorCandidate {
+    pub role: String,
+    pub source_id: String,
+    pub model_name: String,
+    pub model_value: String,
+    pub elo: u32,
+    pub provisional: bool,
+}
+
+/// Transcript-safe activity from Thor and its nested worker/reviewer connections.
+///
+/// Tool input/output is intentionally not duplicated here because it can
+/// contain secrets. The title, kind, and status still reveal what the agent is
+/// doing, while the outer MCP tool card retains inspectable structured data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum AdvisorActivity {
+    TeamSelected {
+        worker: Option<AdvisorCandidate>,
+        reviewer: Option<AdvisorCandidate>,
+    },
+    Connected {
+        actor: AdvisorActor,
+    },
+    Status {
+        actor: AdvisorActor,
+        connection_status: Option<String>,
+        turn_id: Option<u64>,
+        turn_status: Option<String>,
+    },
+    Message {
+        actor: AdvisorActor,
+        text: String,
+    },
+    Thought {
+        actor: AdvisorActor,
+        text: String,
+    },
+    Tool {
+        actor: AdvisorActor,
+        /// Namespaced by the nested turn so an ACP agent's reused local tool
+        /// id cannot update an action from an earlier turn.
+        tool_id: String,
+        title: String,
+        kind: Option<String>,
+        status: Option<String>,
+    },
+    PermissionRequested {
+        actor: AdvisorActor,
+        title: String,
+    },
+    Warning {
+        actor: AdvisorActor,
+        message: String,
+    },
+    Info {
+        actor: AdvisorActor,
+        message: String,
+    },
+}
+
 /// Events flowing from the ACP runtime into the UI task.
 #[derive(Debug)]
 pub enum UiEvent {
@@ -51,6 +129,10 @@ pub enum UiEvent {
         options: Vec<SessionConfigOption>,
         targets: Vec<SessionConfigTarget>,
     },
+    /// Role- and model-attributed activity from Thor's nested MCP agents.
+    /// Unlike ordinary ACP session updates, this retains the worker/reviewer
+    /// identity all the way to the transcript renderer.
+    AdvisorActivity(AdvisorActivity),
     /// `session/request_permission` from the agent. The UI is expected to
     /// render a modal and answer through `responder` exactly once.
     PermissionRequest(PermissionPrompt),

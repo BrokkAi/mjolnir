@@ -64,6 +64,9 @@ enum StreamRecord<'a> {
     AgentThought {
         text: &'a str,
     },
+    AdvisorActivity {
+        activity: &'a crate::event::AdvisorActivity,
+    },
     ToolCall {
         id: &'a str,
         title: &'a str,
@@ -270,7 +273,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     eprintln!("warning: {message}");
                 }
             }
-            UiEvent::Info(_) => {}
+            UiEvent::Info(_) | UiEvent::AdvisorActivity(_) => {}
             UiEvent::CancelPendingPermissions => {}
             UiEvent::ClaudeUsage(_) => {}
             // Headless runs never receive remote decisions (no UI event
@@ -397,6 +400,9 @@ fn emit_stream_event(event: &UiEvent, state: &HeadlessState) -> Result<()> {
         UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(chunk)) => {
             let text = content_block_text(&chunk.content);
             emit_json(&StreamRecord::AgentThought { text: &text })?;
+        }
+        UiEvent::AdvisorActivity(activity) => {
+            emit_json(&StreamRecord::AdvisorActivity { activity })?;
         }
         UiEvent::SessionUpdate(SessionUpdate::ToolCall(tool_call)) => {
             emit_json(&StreamRecord::ToolCall {

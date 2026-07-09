@@ -22,8 +22,8 @@ use crate::claude_usage::ClaudeUsageReport;
 use crate::clipboard::ClipboardLease;
 
 use crate::event::{
-    ElicitationOutcome, ElicitationPrompt, PermissionDecision, PermissionPrompt, PromptImage,
-    SessionConfigTarget, TerminalOutputSnapshot, UiEvent, content_block_text,
+    AdvisorActivity, ElicitationOutcome, ElicitationPrompt, PermissionDecision, PermissionPrompt,
+    PromptImage, SessionConfigTarget, TerminalOutputSnapshot, UiEvent, content_block_text,
 };
 use crate::palette::TerminalTheme;
 use crate::ragnarok;
@@ -124,6 +124,8 @@ pub enum Entry {
     AgentMessage(String),
     /// Streaming agent reasoning ("thoughts").
     AgentThought(String),
+    /// Role- and model-attributed output from a nested Thor worker or reviewer.
+    AdvisorActivity(Box<AdvisorActivity>),
     /// A tool call slot identified by id. The body is rendered from
     /// `tool_calls[id]`; we keep an entry pointer so it shows up in order.
     ToolCall(String),
@@ -543,6 +545,9 @@ pub struct AppState {
     pub session_fork_supported: bool,
     pub transcript: Vec<Entry>,
     pub tool_calls: HashMap<String, ToolCallView>,
+    /// Latest transcript entry for each nested advisor tool. Kept separate
+    /// from outer ACP tool calls because nested progress arrives through MCP.
+    advisor_tool_entries: HashMap<String, usize>,
     terminal_outputs: HashMap<String, TerminalOutputSnapshot>,
     /// Bumped whenever `transcript` or `tool_calls` change in a way that
     /// affects rendering. The UI layer uses this as a cache key so it can
@@ -874,6 +879,7 @@ impl AppState {
             session_fork_supported: false,
             transcript: Vec::new(),
             tool_calls: HashMap::new(),
+            advisor_tool_entries: HashMap::new(),
             terminal_outputs: HashMap::new(),
             transcript_revision: 0,
             input: String::new(),
@@ -1171,6 +1177,10 @@ impl AppState {
     pub fn last_agent_message(&self) -> Option<String> {
         self.transcript.iter().rev().find_map(|entry| match entry {
             Entry::AgentMessage(text) => Some(text.clone()),
+            Entry::AdvisorActivity(activity) => match activity.as_ref() {
+                AdvisorActivity::Message { text, .. } => Some(text.clone()),
+                _ => None,
+            },
             Entry::UserPrompt(_)
             | Entry::AgentThought(_)
             | Entry::ToolCall(_)
@@ -1822,6 +1832,7 @@ impl AppState {
             UiEvent::SessionConfigOptions { options, targets } => {
                 self.apply_session_config_options(options, targets);
             }
+            UiEvent::AdvisorActivity(activity) => self.apply_advisor_activity(activity),
             UiEvent::PermissionRequest(prompt) => {
                 // Append to the queue rather than replacing the current
                 // pending prompt: overwriting would drop the prior
@@ -2075,6 +2086,66 @@ impl AppState {
                 self.bump_transcript_revision();
             }
         }
+    }
+
+    fn apply_advisor_activity(&mut self, activity: AdvisorActivity) {
+        if matches!(
+            &activity,
+            AdvisorActivity::Connected { actor } if actor.role == "thor"
+        ) {
+            // A new Thor connection means a new MCP server and a new nested
+            // connection-id namespace. Do not let an old `conn-1` tool update
+            // rewrite a prior advisor turn's transcript card.
+            self.advisor_tool_entries.clear();
+        }
+        if let AdvisorActivity::Tool { actor, tool_id, .. } = &activity {
+            let key = format!("{}:{tool_id}", actor.connection_id);
+            if let Some(&index) = self.advisor_tool_entries.get(&key)
+                && let Some(Entry::AdvisorActivity(previous)) = self.transcript.get_mut(index)
+                && matches!(previous.as_ref(), AdvisorActivity::Tool { .. })
+            {
+                **previous = activity;
+                self.bump_transcript_revision();
+                return;
+            }
+            let index = self.transcript.len();
+            self.transcript
+                .push(Entry::AdvisorActivity(Box::new(activity)));
+            self.advisor_tool_entries.insert(key, index);
+            self.bump_transcript_revision();
+            return;
+        }
+        let appended = match self.transcript.last_mut() {
+            Some(Entry::AdvisorActivity(previous)) => match (&activity, previous.as_mut()) {
+                (
+                    AdvisorActivity::Message { actor, text },
+                    AdvisorActivity::Message {
+                        actor: previous_actor,
+                        text: previous_text,
+                    },
+                ) if actor == previous_actor => {
+                    previous_text.push_str(text);
+                    true
+                }
+                (
+                    AdvisorActivity::Thought { actor, text },
+                    AdvisorActivity::Thought {
+                        actor: previous_actor,
+                        text: previous_text,
+                    },
+                ) if actor == previous_actor => {
+                    previous_text.push_str(text);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if !appended {
+            self.transcript
+                .push(Entry::AdvisorActivity(Box::new(activity)));
+        }
+        self.bump_transcript_revision();
     }
 
     fn refresh_config_picker(&mut self) {
@@ -2884,6 +2955,77 @@ mod tests {
         assert_eq!(s.transcript.len(), 1);
         match &s.transcript[0] {
             Entry::AgentMessage(s) => assert_eq!(s, "hello world"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advisor_activity_keeps_actor_provenance_and_coalesces_chunks() {
+        let actor = crate::event::AdvisorActor {
+            role: "worker".to_string(),
+            connection_id: "conn-1".to_string(),
+            source_id: Some("claude-acp".to_string()),
+            agent_name: Some("Claude Code".to_string()),
+            agent_version: Some("1.2.3".to_string()),
+            model_name: Some("Claude Sonnet 4.5".to_string()),
+            model_value: Some("claude-sonnet-4-5".to_string()),
+        };
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::AdvisorActivity(AdvisorActivity::Message {
+            actor: actor.clone(),
+            text: "checking ".to_string(),
+        }));
+        state.apply_event(UiEvent::AdvisorActivity(AdvisorActivity::Message {
+            actor,
+            text: "open PRs".to_string(),
+        }));
+
+        assert_eq!(state.transcript.len(), 1);
+        match &state.transcript[0] {
+            Entry::AdvisorActivity(activity) => assert!(matches!(
+                activity.as_ref(),
+                AdvisorActivity::Message { actor, text }
+                    if actor.role == "worker"
+                        && actor.model_name.as_deref() == Some("Claude Sonnet 4.5")
+                        && text == "checking open PRs"
+            )),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advisor_tool_updates_replace_the_current_action_card() {
+        let actor = crate::event::AdvisorActor {
+            role: "worker".to_string(),
+            connection_id: "conn-1".to_string(),
+            source_id: Some("claude-acp".to_string()),
+            agent_name: None,
+            agent_version: None,
+            model_name: Some("Claude Sonnet 4.5".to_string()),
+            model_value: Some("claude-sonnet-4-5".to_string()),
+        };
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::AdvisorActivity(AdvisorActivity::Tool {
+            actor: actor.clone(),
+            tool_id: "1:tool-1".to_string(),
+            title: "gh pr list --state open".to_string(),
+            kind: Some("execute".to_string()),
+            status: Some("pending".to_string()),
+        }));
+        state.apply_event(UiEvent::AdvisorActivity(AdvisorActivity::Tool {
+            actor,
+            tool_id: "1:tool-1".to_string(),
+            title: "gh pr list --state open".to_string(),
+            kind: Some("execute".to_string()),
+            status: Some("completed".to_string()),
+        }));
+
+        assert_eq!(state.transcript.len(), 1);
+        match &state.transcript[0] {
+            Entry::AdvisorActivity(activity) => assert!(matches!(
+                activity.as_ref(),
+                AdvisorActivity::Tool { status, .. } if status.as_deref() == Some("completed")
+            )),
             other => panic!("unexpected entry: {other:?}"),
         }
     }

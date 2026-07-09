@@ -1360,6 +1360,8 @@ pub(crate) struct AgentHandle {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     events: mpsc::UnboundedReceiver<UiEvent>,
     runtime: tokio::task::JoinHandle<Result<()>>,
+    agent_name: Option<String>,
+    agent_version: Option<String>,
     config_options: Vec<SessionConfigOption>,
     config_targets: Vec<SessionConfigTarget>,
     abort: watch::Receiver<bool>,
@@ -1417,6 +1419,8 @@ impl AgentHandle {
             cmd_tx,
             events,
             runtime,
+            agent_name: None,
+            agent_version: None,
             config_options: Vec::new(),
             config_targets: Vec::new(),
             abort,
@@ -1438,7 +1442,23 @@ impl AgentHandle {
                 bail!("agent runtime closed before a session started");
             };
             match ev {
-                UiEvent::SessionStarted { .. } => return Ok(()),
+                UiEvent::SessionStarted { .. } => {
+                    // ACP emits its initial config table immediately after
+                    // SessionStarted. Let the runtime finish that send and
+                    // drain the queued startup metadata before callers
+                    // snapshot the agent's identity/model for a transcript.
+                    tokio::task::yield_now().await;
+                    self.capture_queued_startup_metadata()?;
+                    return Ok(());
+                }
+                UiEvent::Connected {
+                    agent_name,
+                    agent_version,
+                    ..
+                } => {
+                    self.agent_name = agent_name;
+                    self.agent_version = agent_version;
+                }
                 UiEvent::SessionConfigOptions { options, targets } => {
                     self.store_config(options, targets);
                 }
@@ -1453,6 +1473,39 @@ impl AgentHandle {
         }
     }
 
+    fn capture_queued_startup_metadata(&mut self) -> Result<()> {
+        while let Ok(event) = self.events.try_recv() {
+            match event {
+                UiEvent::Connected {
+                    agent_name,
+                    agent_version,
+                    ..
+                } => {
+                    self.agent_name = agent_name;
+                    self.agent_version = agent_version;
+                }
+                UiEvent::SessionConfigOptions { options, targets } => {
+                    self.store_config(options, targets);
+                    // The ACP runtime sends no startup event after this
+                    // table, so leave any later turn events in the channel.
+                    return Ok(());
+                }
+                UiEvent::PermissionRequest(p) => self.answer_permission(p),
+                UiEvent::ElicitationRequest(e) => {
+                    let _ = e.responder.send(ElicitationOutcome::Decline);
+                }
+                UiEvent::Fatal(m) => bail!("agent failed: {m}"),
+                UiEvent::PromptFailed { message } => bail!("agent failed: {message}"),
+                _ => {
+                    // No turn exists before the initial configuration table;
+                    // do not consume a surprising later event out of order.
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn store_config(
         &mut self,
         options: Vec<SessionConfigOption>,
@@ -1462,6 +1515,27 @@ impl AgentHandle {
             self.config_options = options;
             self.config_targets = targets;
         }
+    }
+
+    /// ACP-reported process identity captured during session startup.
+    pub(crate) fn agent_identity(&self) -> (Option<String>, Option<String>) {
+        (self.agent_name.clone(), self.agent_version.clone())
+    }
+
+    /// Current Model-category option, when the agent advertised it before the
+    /// session became ready. Returns display label then stable value id.
+    pub(crate) fn configured_model(&self) -> Option<(String, String)> {
+        self.config_options
+            .iter()
+            .find(|option| crate::app::is_model_config_option(option))
+            .and_then(|option| {
+                crate::app::config_option_current_value_id(option).map(|value| {
+                    (
+                        crate::app::config_option_current_value_label(option),
+                        value.to_string(),
+                    )
+                })
+            })
     }
 
     fn answer_permission(&self, prompt: crate::event::PermissionPrompt) {
@@ -1625,6 +1699,14 @@ impl AgentHandle {
                 bail!("agent runtime closed mid-turn");
             };
             match ev {
+                UiEvent::Connected {
+                    agent_name,
+                    agent_version,
+                    ..
+                } => {
+                    self.agent_name = agent_name;
+                    self.agent_version = agent_version;
+                }
                 UiEvent::SessionUpdate(update) => {
                     on_event(TurnEvent::RawSessionUpdate(Box::new(update.clone())));
                     match update {
@@ -4398,6 +4480,8 @@ mod tests {
             cmd_tx,
             events,
             runtime: tokio::spawn(async { Ok(()) }),
+            agent_name: None,
+            agent_version: None,
             config_options: Vec::new(),
             config_targets: Vec::new(),
             abort,
@@ -4426,6 +4510,69 @@ mod tests {
             config_id: option.id.clone(),
         };
         (vec![option], vec![target])
+    }
+
+    #[tokio::test]
+    async fn wait_session_started_retains_acp_agent_identity() {
+        let mut rig = test_rig();
+        rig.event_tx
+            .send(UiEvent::Connected {
+                agent_name: Some("Claude Code".to_string()),
+                agent_version: Some("1.2.3".to_string()),
+                prompt_images_supported: true,
+                session_fork_supported: false,
+            })
+            .expect("connected event");
+        rig.event_tx
+            .send(UiEvent::SessionStarted {
+                session_id: "session-1".to_string(),
+                resumed: false,
+            })
+            .expect("session event");
+
+        rig.handle
+            .wait_session_started()
+            .await
+            .expect("session starts");
+        assert_eq!(
+            rig.handle.agent_identity(),
+            (Some("Claude Code".to_string()), Some("1.2.3".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_session_started_captures_queued_model_options() {
+        let mut rig = test_rig();
+        rig.event_tx
+            .send(UiEvent::SessionStarted {
+                session_id: "session-1".to_string(),
+                resumed: false,
+            })
+            .expect("session event");
+        let (options, targets) = model_options("sonnet");
+        rig.event_tx
+            .send(UiEvent::SessionConfigOptions { options, targets })
+            .expect("model options");
+
+        rig.handle
+            .wait_session_started()
+            .await
+            .expect("session starts");
+        assert_eq!(
+            rig.handle.configured_model(),
+            Some(("Sonnet".to_string(), "sonnet".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_model_uses_the_advertised_model_option() {
+        let mut rig = test_rig();
+        let (options, targets) = model_options("sonnet");
+        rig.handle.store_config(options, targets);
+        assert_eq!(
+            rig.handle.configured_model(),
+            Some(("Sonnet".to_string(), "sonnet".to_string()))
+        );
     }
 
     #[tokio::test]
