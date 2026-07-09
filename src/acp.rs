@@ -427,6 +427,18 @@ fn require_resume_or_load_session(
     }
 }
 
+fn require_interactive_load_session(
+    capabilities: &AgentCapabilities,
+) -> std::result::Result<(), LaunchError> {
+    if capabilities.load_session {
+        Ok(())
+    } else {
+        Err(LaunchError::UnsupportedCapability {
+            capability: "loadSession",
+        })
+    }
+}
+
 fn require_additional_directories(
     capabilities: &AgentCapabilities,
     additional_directories: &[PathBuf],
@@ -483,27 +495,38 @@ async fn resume_existing_session(
     auth_methods: &[AuthMethod],
 ) -> std::result::Result<Option<(Vec<SessionConfigOption>, Vec<SessionConfigTarget>)>, LaunchError>
 {
+    require_resume_or_load_session(capabilities)?;
     if capabilities.session_capabilities.resume.is_some() {
-        let resume_req = resume_session_request(session_id, cwd, additional_directories);
-        let resumed = match conn.send_request(resume_req.clone()).block_task().await {
-            Ok(s) => s,
-            Err(source) => match auth_required_detail(&source) {
-                Some(detail) => {
-                    authenticate_after_auth_required(conn, auth_methods, detail).await?;
-                    conn.send_request(resume_req)
-                        .block_task()
-                        .await
-                        .map_err(classify_session_error)?
-                }
-                None => return Err(classify_session_error(source)),
-            },
-        };
-        return Ok(session_config_from_parts(
-            resumed.config_options,
-            resumed.modes,
-        ));
+        return send_resume_session_request(
+            conn,
+            session_id,
+            cwd,
+            additional_directories,
+            auth_methods,
+        )
+        .await;
     }
 
+    load_existing_session(
+        conn,
+        session_id,
+        cwd,
+        additional_directories,
+        capabilities,
+        auth_methods,
+    )
+    .await
+}
+
+async fn load_existing_session(
+    conn: &ConnectionTo<Agent>,
+    session_id: SessionId,
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+    capabilities: &AgentCapabilities,
+    auth_methods: &[AuthMethod],
+) -> std::result::Result<Option<(Vec<SessionConfigOption>, Vec<SessionConfigTarget>)>, LaunchError>
+{
     require_load_session(capabilities)?;
     let load_req = load_session_request(session_id, cwd, additional_directories);
     let loaded = match conn.send_request(load_req.clone()).block_task().await {
@@ -522,6 +545,34 @@ async fn resume_existing_session(
     Ok(session_config_from_parts(
         loaded.config_options,
         loaded.modes,
+    ))
+}
+
+async fn send_resume_session_request(
+    conn: &ConnectionTo<Agent>,
+    session_id: SessionId,
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+    auth_methods: &[AuthMethod],
+) -> std::result::Result<Option<(Vec<SessionConfigOption>, Vec<SessionConfigTarget>)>, LaunchError>
+{
+    let resume_req = resume_session_request(session_id, cwd, additional_directories);
+    let resumed = match conn.send_request(resume_req.clone()).block_task().await {
+        Ok(s) => s,
+        Err(source) => match auth_required_detail(&source) {
+            Some(detail) => {
+                authenticate_after_auth_required(conn, auth_methods, detail).await?;
+                conn.send_request(resume_req)
+                    .block_task()
+                    .await
+                    .map_err(classify_session_error)?
+            }
+            None => return Err(classify_session_error(source)),
+        },
+    };
+    Ok(session_config_from_parts(
+        resumed.config_options,
+        resumed.modes,
     ))
 }
 
@@ -1662,34 +1713,30 @@ async fn drive_session(
             } => {
                 let target_session_id = SessionId::from(requested_session_id);
                 if target_session_id == session_id {
-                    if let Err(e) = session_state
-                        .set_active_session_with_roots(
-                            session_id.clone(),
-                            &requested_cwd,
-                            &additional_directories,
-                        )
-                        .await
+                    match reload_active_session(
+                        &conn,
+                        session_id.clone(),
+                        requested_cwd,
+                        &additional_directories,
+                        title,
+                        &init_resp.agent_capabilities,
+                        &init_resp.auth_methods,
+                        &mut session_config,
+                        &session_state,
+                        &connected_fields,
+                        ui_tx,
+                    )
+                    .await
                     {
-                        let _ = responder.send(LoadSessionResult::Fallback {
-                            message: e.to_string(),
-                        });
-                        continue;
+                        Ok(()) => {
+                            let _ = responder.send(LoadSessionResult::Switched);
+                        }
+                        Err(launch_err) => {
+                            let _ = responder.send(LoadSessionResult::Fallback {
+                                message: launch_err.to_string(),
+                            });
+                        }
                     }
-                    emit_connected(ui_tx, &connected_fields);
-                    let _ = ui_tx.send(UiEvent::SessionStarted {
-                        session_id: session_id.to_string(),
-                        resumed: true,
-                    });
-                    let _ = ui_tx.send(UiEvent::SessionConfigOptions {
-                        options: session_config.options.clone(),
-                        targets: session_config.targets.clone(),
-                    });
-                    if let Some(title) = title {
-                        let _ = ui_tx.send(UiEvent::SessionUpdate(
-                            SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title(title)),
-                        ));
-                    }
-                    let _ = responder.send(LoadSessionResult::Switched);
                     continue;
                 }
                 if init_resp
@@ -1751,6 +1798,58 @@ fn emit_connected(ui_tx: &mpsc::UnboundedSender<UiEvent>, fields: &ConnectedEven
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn reload_active_session(
+    conn: &ConnectionTo<Agent>,
+    session_id: SessionId,
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+    title: Option<String>,
+    capabilities: &AgentCapabilities,
+    auth_methods: &[AuthMethod],
+    session_config: &mut SessionConfigCache,
+    session_state: &RuntimeSessionState,
+    connected_fields: &ConnectedEventFields,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) -> std::result::Result<(), LaunchError> {
+    require_interactive_load_session(capabilities)?;
+    session_state
+        .set_active_session_with_roots(session_id.clone(), &cwd, additional_directories)
+        .await
+        .map_err(|source| LaunchError::SessionCreateFailed { source })?;
+    let loaded_config = load_existing_session(
+        conn,
+        session_id.clone(),
+        cwd,
+        additional_directories,
+        capabilities,
+        auth_methods,
+    )
+    .await?;
+    *session_config = loaded_config
+        .map(|(options, targets)| SessionConfigCache { options, targets })
+        .unwrap_or_else(|| SessionConfigCache {
+            options: Vec::new(),
+            targets: Vec::new(),
+        });
+    emit_connected(ui_tx, connected_fields);
+    let _ = ui_tx.send(UiEvent::SessionStarted {
+        session_id: session_id.to_string(),
+        resumed: true,
+    });
+    let _ = ui_tx.send(UiEvent::SessionConfigOptions {
+        options: session_config.options.clone(),
+        targets: session_config.targets.clone(),
+    });
+    if let Some(title) = title {
+        let _ = ui_tx.send(UiEvent::SessionUpdate(SessionUpdate::SessionInfoUpdate(
+            SessionInfoUpdate::new().title(title),
+        )));
+    }
+    let _ = ui_tx.send(UiEvent::Info("session loaded".to_string()));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn switch_existing_session(
     conn: &ConnectionTo<Agent>,
     current_session_id: &SessionId,
@@ -1766,14 +1865,18 @@ async fn switch_existing_session(
     connected_fields: &ConnectedEventFields,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
 ) -> std::result::Result<SessionId, LaunchError> {
-    require_resume_or_load_session(capabilities)?;
+    require_interactive_load_session(capabilities)?;
     close_session(conn, current_session_id.clone(), auth_methods).await?;
     session_state
         .mark_permissions_cancelled(current_session_id)
         .await;
     terminals.shutdown_session(current_session_id).await;
     session_state.clear_active_session().await;
-    let loaded_config = resume_existing_session(
+    session_state
+        .set_active_session_with_roots(target_session_id.clone(), &cwd, additional_directories)
+        .await
+        .map_err(|source| LaunchError::SessionCreateFailed { source })?;
+    let loaded_config = load_existing_session(
         conn,
         target_session_id.clone(),
         cwd.clone(),
@@ -1782,10 +1885,6 @@ async fn switch_existing_session(
         auth_methods,
     )
     .await?;
-    session_state
-        .set_active_session_with_roots(target_session_id.clone(), &cwd, additional_directories)
-        .await
-        .map_err(|source| LaunchError::SessionCreateFailed { source })?;
 
     *session_config = loaded_config
         .map(|(options, targets)| SessionConfigCache { options, targets })
@@ -5701,12 +5800,15 @@ mod tests {
     async fn run_mock_agent_inline_session_switch(
         stream: tokio::io::DuplexStream,
         close_seen: Arc<StdAtomicBool>,
+        load_seen: Arc<StdAtomicBool>,
         resume_seen: Arc<StdAtomicBool>,
         stale_permission_cancelled: Arc<StdAtomicBool>,
     ) {
         let close_seen_for_req = close_seen.clone();
+        let load_seen_for_req = load_seen.clone();
         let resume_seen_for_req = resume_seen.clone();
-        let stale_permission_cancelled_for_req = stale_permission_cancelled.clone();
+        let stale_permission_cancelled_for_load_req = stale_permission_cancelled.clone();
+        let stale_permission_cancelled_for_resume_req = stale_permission_cancelled.clone();
         let (r, w) = split(stream);
         let transport = ByteStreams::new(w.compat_write(), r.compat());
         let _ = AgentRole
@@ -5717,11 +5819,13 @@ mod tests {
                             _cx| {
                     responder.respond(
                         InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
-                            AgentCapabilities::new().session_capabilities(
-                                SessionCapabilities::new()
-                                    .close(SessionCloseCapabilities::new())
-                                    .resume(SessionResumeCapabilities::new()),
-                            ),
+                            AgentCapabilities::new()
+                                .load_session(true)
+                                .session_capabilities(
+                                    SessionCapabilities::new()
+                                        .close(SessionCloseCapabilities::new())
+                                        .resume(SessionResumeCapabilities::new()),
+                                ),
                         ),
                     )
                 },
@@ -5744,13 +5848,57 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
+                async move |req: LoadSessionRequest,
+                            responder,
+                            cx: ConnectionTo<agent_client_protocol::Client>| {
+                    assert_eq!(req.session_id.to_string(), "target-session");
+                    load_seen_for_req.store(true, Ordering::SeqCst);
+                    let target_session_id = req.session_id.clone();
+                    let target_cx = cx.clone();
+                    let stale_permission_cx = cx.clone();
+                    let stale_permission_cancelled_for_req =
+                        stale_permission_cancelled_for_load_req.clone();
+                    let response = responder.respond(LoadSessionResponse::new());
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        let _ = target_cx.send_notification(SessionNotification::new(
+                            target_session_id,
+                            SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                ContentBlock::Text(TextContent::new("target load replay")),
+                            )),
+                        ));
+                        let permission_response = stale_permission_cx
+                            .send_request(RequestPermissionRequest::new(
+                                SessionId::new("old-session"),
+                                ToolCallUpdate::new("stale-call", ToolCallUpdateFields::default()),
+                                vec![PermissionOption::new(
+                                    "allow",
+                                    "Allow",
+                                    PermissionOptionKind::AllowOnce,
+                                )],
+                            ))
+                            .block_task()
+                            .await
+                            .expect("stale permission response");
+                        if matches!(
+                            permission_response.outcome,
+                            RequestPermissionOutcome::Cancelled
+                        ) {
+                            stale_permission_cancelled_for_req.store(true, Ordering::SeqCst);
+                        }
+                    });
+                    response
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
                 async move |req: ResumeSessionRequest,
                             responder,
                             cx: ConnectionTo<agent_client_protocol::Client>| {
                     assert_eq!(req.session_id.to_string(), "target-session");
                     let resume_seen_for_req = resume_seen_for_req.clone();
                     let stale_permission_cancelled_for_req =
-                        stale_permission_cancelled_for_req.clone();
+                        stale_permission_cancelled_for_resume_req.clone();
                     resume_seen_for_req.store(true, Ordering::SeqCst);
                     let stale_permission_cx = cx.clone();
                     tokio::spawn(async move {
@@ -5774,15 +5922,59 @@ mod tests {
                             stale_permission_cancelled_for_req.store(true, Ordering::SeqCst);
                         }
                     });
-                    let target_session_id = req.session_id.clone();
-                    let target_cx = cx.clone();
-                    let response = responder.respond(ResumeSessionResponse::new());
+                    responder.respond(ResumeSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_same_session_reload(
+        stream: tokio::io::DuplexStream,
+        load_seen: Arc<StdAtomicBool>,
+    ) {
+        let load_seen_for_req = load_seen.clone();
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1)
+                            .agent_capabilities(AgentCapabilities::new().load_session(true)),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(NewSessionResponse::new(SessionId::new("same-session")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: LoadSessionRequest,
+                            responder,
+                            cx: ConnectionTo<agent_client_protocol::Client>| {
+                    assert_eq!(req.session_id.to_string(), "same-session");
+                    load_seen_for_req.store(true, Ordering::SeqCst);
+                    let session_id = req.session_id.clone();
+                    let response = responder.respond(LoadSessionResponse::new());
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(10)).await;
-                        let _ = target_cx.send_notification(SessionNotification::new(
-                            target_session_id,
+                        let _ = cx.send_notification(SessionNotification::new(
+                            session_id,
                             SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                ContentBlock::Text(TextContent::new("target resume update")),
+                                ContentBlock::Text(TextContent::new("same session replay")),
                             )),
                         ));
                     });
@@ -7723,12 +7915,14 @@ mod tests {
         let (cr, cw) = split(client_side);
         let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
         let close_seen = Arc::new(StdAtomicBool::new(false));
+        let load_seen = Arc::new(StdAtomicBool::new(false));
         let resume_seen = Arc::new(StdAtomicBool::new(false));
         let stale_permission_cancelled = Arc::new(StdAtomicBool::new(false));
 
         let agent_task = tokio::spawn(run_mock_agent_inline_session_switch(
             agent_side,
             close_seen.clone(),
+            load_seen.clone(),
             resume_seen.clone(),
             stale_permission_cancelled.clone(),
         ));
@@ -7761,11 +7955,60 @@ mod tests {
             LoadSessionResult::Switched
         );
         wait_for_session_started(&mut ui_rx, "target-session").await;
-        wait_for_agent_message_chunk(&mut ui_rx, "target resume update").await;
+        wait_for_agent_message_chunk(&mut ui_rx, "target load replay").await;
 
         assert!(close_seen.load(Ordering::SeqCst));
-        assert!(resume_seen.load(Ordering::SeqCst));
+        assert!(load_seen.load(Ordering::SeqCst));
+        assert!(!resume_seen.load(Ordering::SeqCst));
         wait_for_atomic_bool(&stale_permission_cancelled).await;
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        client_task.abort();
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_session_command_replays_current_session() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let load_seen = Arc::new(StdAtomicBool::new(false));
+
+        let agent_task = tokio::spawn(run_mock_agent_same_session_reload(
+            agent_side,
+            load_seen.clone(),
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "same-session").await;
+
+        let (responder, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::LoadSession {
+                session_id: "same-session".to_string(),
+                cwd: std::env::temp_dir(),
+                title: None,
+                responder,
+            })
+            .expect("send load session");
+
+        assert_eq!(
+            response.await.expect("load response"),
+            LoadSessionResult::Switched
+        );
+        wait_for_session_started(&mut ui_rx, "same-session").await;
+        wait_for_agent_message_chunk(&mut ui_rx, "same session replay").await;
+        assert!(load_seen.load(Ordering::SeqCst));
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         client_task.abort();
@@ -7852,7 +8095,7 @@ mod tests {
 
         match response.await.expect("load response") {
             LoadSessionResult::Fallback { message } => {
-                assert!(message.contains("sessionCapabilities.resume or loadSession"));
+                assert!(message.contains("loadSession"));
             }
             other => panic!("expected fallback, got {other:?}"),
         }

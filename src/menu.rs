@@ -14,6 +14,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
 use crossterm::style::{Attribute, Color, Print, SetAttribute, SetForegroundColor};
 use crossterm::terminal::{self, Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use crossterm::{execute, queue};
+use unicode_width::UnicodeWidthStr;
 
 use crate::text::truncate_text_to_width;
 
@@ -63,7 +64,7 @@ pub fn select_inline(
 
     // Erase the menu block whether selection succeeded or failed, so the
     // scrollback is left clean for the caller's outcome line.
-    let height = options.len() as u16 + 2;
+    let height = menu_height(options.len());
     let _ = queue!(
         out,
         cursor::MoveUp(height),
@@ -146,45 +147,82 @@ fn draw(
     width: u16,
     redraw: bool,
 ) -> Result<()> {
-    let height = options.len() as u16 + 2;
+    let height = menu_height(options.len());
     if redraw {
         queue!(out, cursor::MoveUp(height))?;
     }
     queue!(out, Clear(ClearType::FromCursorDown))?;
 
+    let inner_width = width.saturating_sub(4).max(1);
+    let title_width = inner_width.saturating_sub(2);
     queue!(
         out,
+        SetForegroundColor(Color::DarkGrey),
+        Print("╭"),
+        Print(rule(title_width as usize)),
+        Print("╮"),
+        SetAttribute(Attribute::Reset),
+        Print("\r\n"),
+        SetForegroundColor(Color::DarkGrey),
+        Print("│ "),
+        SetForegroundColor(Color::White),
         SetAttribute(Attribute::Bold),
-        Print(truncate_text_to_width(question.to_string(), width)),
+        Print(pad_to_width(
+            &truncate_text_to_width(question.to_string(), title_width),
+            title_width as usize
+        )),
+        SetAttribute(Attribute::Reset),
+        SetForegroundColor(Color::DarkGrey),
+        Print(" │"),
+        SetAttribute(Attribute::Reset),
+        Print("\r\n"),
+        SetForegroundColor(Color::DarkGrey),
+        Print("├"),
+        Print(rule(title_width as usize)),
+        Print("┤"),
         SetAttribute(Attribute::Reset),
         Print("\r\n"),
     )?;
 
-    let label_width = options.iter().map(|o| o.label.len()).max().unwrap_or(0);
+    let label_width = options
+        .iter()
+        .map(|o| UnicodeWidthStr::width(o.label))
+        .max()
+        .unwrap_or(0);
     for (i, option) in options.iter().enumerate() {
-        let head = if i == selected {
-            format!("❯ {:label_width$}", option.label)
-        } else {
-            format!("  {:label_width$}", option.label)
-        };
-        let hint_width = width.saturating_sub(head.len() as u16 + 3);
+        let marker = if i == selected { "❯" } else { " " };
+        let label = pad_to_width(option.label, label_width);
+        let prefix = format!("{marker} {label}");
+        let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+        let hint_width = title_width.saturating_sub((prefix_width + 3) as u16);
         let hint = truncate_text_to_width(option.hint.clone(), hint_width);
+        let hint_width = UnicodeWidthStr::width(hint.as_str());
+        queue!(out, SetForegroundColor(Color::DarkGrey), Print("│ "))?;
         if i == selected {
             queue!(
                 out,
                 SetForegroundColor(Color::Cyan),
                 SetAttribute(Attribute::Bold),
-                Print(head),
+                Print(prefix),
                 SetAttribute(Attribute::Reset),
             )?;
         } else {
-            queue!(out, Print(head))?;
+            queue!(out, SetForegroundColor(Color::Grey), Print(prefix))?;
         }
+        let used = prefix_width + 3 + hint_width;
         queue!(
             out,
-            Print("  "),
+            SetAttribute(Attribute::Reset),
             SetAttribute(Attribute::Dim),
+            Print("   "),
             Print(hint),
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(Color::DarkGrey),
+            Print(pad_to_width(
+                "",
+                title_width.saturating_sub(used as u16) as usize
+            )),
+            Print(" │"),
             SetAttribute(Attribute::Reset),
             Print("\r\n"),
         )?;
@@ -192,12 +230,49 @@ fn draw(
 
     queue!(
         out,
+        SetForegroundColor(Color::DarkGrey),
+        Print("├"),
+        Print(rule(title_width as usize)),
+        Print("┤"),
+        SetAttribute(Attribute::Reset),
+        Print("\r\n"),
+        SetForegroundColor(Color::DarkGrey),
+        Print("│ "),
         SetAttribute(Attribute::Dim),
-        Print(truncate_text_to_width(footer.to_string(), width)),
+        Print(pad_to_width(
+            &truncate_text_to_width(footer.to_string(), title_width),
+            title_width as usize
+        )),
+        SetAttribute(Attribute::Reset),
+        SetForegroundColor(Color::DarkGrey),
+        Print(" │"),
+        SetAttribute(Attribute::Reset),
+        Print("\r\n"),
+        SetForegroundColor(Color::DarkGrey),
+        Print("╰"),
+        Print(rule(title_width as usize)),
+        Print("╯"),
         SetAttribute(Attribute::Reset),
         Print("\r\n"),
     )?;
     out.flush().context("flush inline menu")
+}
+
+fn menu_height(option_count: usize) -> u16 {
+    option_count as u16 + 5
+}
+
+fn rule(width: usize) -> String {
+    "─".repeat(width)
+}
+
+fn pad_to_width(text: &str, width: usize) -> String {
+    let used = UnicodeWidthStr::width(text);
+    if used >= width {
+        text.to_string()
+    } else {
+        format!("{text}{}", " ".repeat(width - used))
+    }
 }
 
 /// Puts the terminal in raw mode with the cursor hidden, restoring both on
