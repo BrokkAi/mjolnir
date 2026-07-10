@@ -18,6 +18,8 @@ use sha2::{Digest, Sha256};
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/BrokkAi/mjolnir/releases/latest";
 const BIN_NAME: &str = "mj";
 const WINDOWS_BIN_NAME: &str = "mj.exe";
+const VOICE_WORKER_NAME: &str = "mj-voice-worker";
+const WINDOWS_VOICE_WORKER_NAME: &str = "mj-voice-worker.exe";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupUpdateResult {
@@ -166,6 +168,11 @@ async fn download_apply_and_restart(update: &UpdateInfo) -> Result<()> {
     let new_binary =
         extract_mj_binary(&update.asset.name, &archive).context("extract mj binary")?;
     let current_exe = std::env::current_exe().context("resolve current executable")?;
+    if !cfg!(target_os = "android") {
+        let worker = extract_voice_worker_binary(&update.asset.name, &archive)
+            .context("extract voice worker")?;
+        install_voice_worker(&current_exe, &worker).context("install voice worker")?;
+    }
     let replacement =
         replace_current_exe(&current_exe, &new_binary).context("replace current executable")?;
 
@@ -225,19 +232,37 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn extract_mj_binary(archive_name: &str, archive_bytes: &[u8]) -> Result<Vec<u8>> {
-    if archive_name.ends_with(".zip") {
-        return extract_mj_binary_from_zip(archive_bytes);
-    }
-    extract_mj_binary_from_tar_gz(archive_bytes)
+    extract_named_binary(archive_name, archive_bytes, BIN_NAME, WINDOWS_BIN_NAME)
 }
 
-fn extract_mj_binary_from_tar_gz(archive_bytes: &[u8]) -> Result<Vec<u8>> {
+fn extract_voice_worker_binary(archive_name: &str, archive_bytes: &[u8]) -> Result<Vec<u8>> {
+    extract_named_binary(
+        archive_name,
+        archive_bytes,
+        VOICE_WORKER_NAME,
+        WINDOWS_VOICE_WORKER_NAME,
+    )
+}
+
+fn extract_named_binary(
+    archive_name: &str,
+    archive_bytes: &[u8],
+    unix_name: &str,
+    windows_name: &str,
+) -> Result<Vec<u8>> {
+    if archive_name.ends_with(".zip") {
+        return extract_named_binary_from_zip(archive_bytes, windows_name);
+    }
+    extract_named_binary_from_tar_gz(archive_bytes, unix_name)
+}
+
+fn extract_named_binary_from_tar_gz(archive_bytes: &[u8], expected_name: &str) -> Result<Vec<u8>> {
     let gz = GzDecoder::new(archive_bytes);
     let mut archive = tar::Archive::new(gz);
     for entry in archive.entries().context("read tar entries")? {
         let mut entry = entry.context("read tar entry")?;
         let path = entry.path().context("read tar entry path")?;
-        if path.file_name().and_then(|name| name.to_str()) != Some(BIN_NAME) {
+        if path.file_name().and_then(|name| name.to_str()) != Some(expected_name) {
             continue;
         }
         let mut bytes = Vec::new();
@@ -245,14 +270,14 @@ fn extract_mj_binary_from_tar_gz(archive_bytes: &[u8]) -> Result<Vec<u8>> {
             .read_to_end(&mut bytes)
             .context("read mj binary from archive")?;
         if bytes.is_empty() {
-            anyhow::bail!("archive contained an empty mj binary");
+            anyhow::bail!("archive contained an empty {expected_name} binary");
         }
         return Ok(bytes);
     }
-    anyhow::bail!("archive did not contain expected binary: {BIN_NAME}");
+    anyhow::bail!("archive did not contain expected binary: {expected_name}");
 }
 
-fn extract_mj_binary_from_zip(archive_bytes: &[u8]) -> Result<Vec<u8>> {
+fn extract_named_binary_from_zip(archive_bytes: &[u8], expected_name: &str) -> Result<Vec<u8>> {
     let cursor = Cursor::new(archive_bytes);
     let mut archive = zip::ZipArchive::new(cursor).context("open zip archive")?;
     for index in 0..archive.len() {
@@ -262,18 +287,50 @@ fn extract_mj_binary_from_zip(archive_bytes: &[u8]) -> Result<Vec<u8>> {
         let path = file
             .enclosed_name()
             .ok_or_else(|| anyhow::anyhow!("zip entry escapes destination: {}", file.name()))?;
-        if path.file_name().and_then(|name| name.to_str()) != Some(WINDOWS_BIN_NAME) {
+        if path.file_name().and_then(|name| name.to_str()) != Some(expected_name) {
             continue;
         }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
-            .context("read mj.exe binary from archive")?;
+            .with_context(|| format!("read {expected_name} binary from archive"))?;
         if bytes.is_empty() {
-            anyhow::bail!("archive contained an empty mj.exe binary");
+            anyhow::bail!("archive contained an empty {expected_name} binary");
         }
         return Ok(bytes);
     }
-    anyhow::bail!("archive did not contain expected binary: {WINDOWS_BIN_NAME}");
+    anyhow::bail!("archive did not contain expected binary: {expected_name}");
+}
+
+fn install_voice_worker(current_exe: &Path, bytes: &[u8]) -> Result<()> {
+    let current_exe = current_exe
+        .canonicalize()
+        .with_context(|| format!("resolve executable target {}", current_exe.display()))?;
+    let parent = current_exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("executable has no parent: {}", current_exe.display()))?;
+    let name = if cfg!(windows) {
+        WINDOWS_VOICE_WORKER_NAME
+    } else {
+        VOICE_WORKER_NAME
+    };
+    let target = parent.join(name);
+    let tmp = parent.join(format!(".{name}.self-update.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("chmod {}", tmp.display()))?;
+    }
+    if cfg!(windows) && target.exists() {
+        std::fs::remove_file(&target)
+            .with_context(|| format!("remove old {}", target.display()))?;
+    }
+    std::fs::rename(&tmp, &target)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;
+    #[cfg(unix)]
+    strip_quarantine(&target);
+    Ok(())
 }
 
 enum Replacement {
@@ -732,6 +789,57 @@ mod tests {
             .expect("extract");
 
         assert_eq!(binary, b"windows binary bytes");
+    }
+
+    #[test]
+    fn extract_voice_worker_finds_unix_sidecar() {
+        let archive = make_tar_gz("brokk-mjolnir/bin/mj-voice-worker", b"voice worker bytes");
+
+        let binary = extract_voice_worker_binary(
+            "brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
+            &archive,
+        )
+        .expect("extract voice worker");
+
+        assert_eq!(binary, b"voice worker bytes");
+    }
+
+    #[test]
+    fn extract_voice_worker_finds_windows_sidecar() {
+        let archive = make_zip(
+            "brokk-mjolnir/mj-voice-worker.exe",
+            b"windows voice worker bytes",
+        );
+
+        let binary = extract_voice_worker_binary(
+            "brokk-mjolnir-v0.5.0-x86_64-pc-windows-msvc.zip",
+            &archive,
+        )
+        .expect("extract voice worker");
+
+        assert_eq!(binary, b"windows voice worker bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_voice_worker_writes_executable_beside_mj() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mj = dir.path().join("mj");
+        std::fs::write(&mj, b"main").expect("write mj");
+        install_voice_worker(&mj, b"worker").expect("install worker");
+
+        let worker = dir.path().join(VOICE_WORKER_NAME);
+        assert_eq!(std::fs::read(&worker).expect("read worker"), b"worker");
+        assert_ne!(
+            std::fs::metadata(worker)
+                .expect("worker metadata")
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
     }
 
     #[test]

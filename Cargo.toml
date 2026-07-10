@@ -7,6 +7,10 @@ license = "GPL-3.0"
 repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 
+[workspace]
+members = ["voice-worker"]
+default-members = ["."]
+
 [[bin]]
 name = "mj"
 path = "src/main.rs"
@@ -78,8 +82,3 @@ http-body-util = "0.1"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = "3.4"
-# In-process speech recognition. Statically linked; the build script downloads
-# a matching prebuilt sherpa-onnx library when SHERPA_ONNX_LIB_DIR is unset.
-# Gated off Android: no prebuilt static libs for aarch64-linux-android.
-sherpa-onnx = { version = "1.13.2", default-features = false, features = ["static"] }
-cpal = "0.16"

@@ -197,7 +197,8 @@ Keyboard basics:
 - `Ctrl-C`: cancel an in-flight prompt; when idle with an empty input, quit.
 - `Ctrl-D`: quit when the input is empty.
 - `🎙 Ctrl-R` (non-Android): start/stop microphone dictation into the prompt.
-  Dictation uses in-process sherpa-onnx speech recognition with Silero VAD and
+  Official desktop releases include the `mj-voice-worker` sidecar, which uses
+  sherpa-onnx speech recognition with Silero VAD and
   the multilingual Parakeet TDT v3 model; the model (~0.7 GB) is downloaded and
   cached under `~/.cache/mj/voice/` on first use.
 
@@ -217,13 +218,21 @@ the input.
 
 ## Development
 
-You only need Rust when building from source or contributing. On Linux,
-microphone dictation links against ALSA, so install its development headers
-first (e.g. `sudo apt-get install libasound2-dev` on Debian/Ubuntu).
+You only need Rust when building from source or contributing. Ordinary `mj`
+builds do not compile the native speech stack. To build the optional voice
+worker on Linux, install the ALSA development headers first (e.g.
+`sudo apt-get install libasound2-dev` on Debian/Ubuntu).
 
 ```bash
 cargo build --release
 ./target/release/mj
+```
+
+For local dictation development, build the sidecar into the same target
+directory:
+
+```bash
+cargo build --release -p mj-voice-worker
 ```
 
 Use the same checks as CI before submitting changes:

@@ -55,7 +55,7 @@ use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
 use crate::ragnarok;
 use crate::ragnarok_sprites::{self, SpriteKind};
-use crate::speech::{dictation_error_message, run_dictation};
+use crate::speech::{dictation_error_message, run_dictation, voice_input_supported};
 use crate::spinner::SpinnerStyle;
 use crate::term::TrackedBackend;
 use crate::text::truncate_text_to_width;
@@ -79,7 +79,6 @@ const PASTE_BURST_CHAR_INTERVAL: Duration = Duration::from_millis(8);
 const PASTE_BURST_IDLE_TIMEOUT: Duration = Duration::from_millis(16);
 const PASTE_BURST_MIN_CHARS: usize = 3;
 const NOTIFICATION_PREVIEW_CHARS: usize = 80;
-const VOICE_INPUT_SUPPORTED: bool = cfg!(not(target_os = "android"));
 const INLINE_RESIZE_REFLOW_DEBOUNCE: Duration = Duration::from_millis(75);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1873,7 +1872,7 @@ fn handle_crossterm(
             copy_last_agent_message(state);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
-            return dictation_request_for_state(state, VOICE_INPUT_SUPPORTED);
+            return dictation_request_for_state(state, voice_input_supported());
         }
         (modifiers, KeyCode::Char('v'))
             if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -6830,7 +6829,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     } else if state.voice_input_active {
         dictation_prompt_title(state)
     } else {
-        idle_prompt_title(state, VOICE_INPUT_SUPPORTED, &text_selection_hint)
+        idle_prompt_title(state, voice_input_supported(), &text_selection_hint)
     };
     let style = if state.runtime_closed {
         Style::default().fg(state.theme.muted)
@@ -7714,7 +7713,7 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect, mode: UiMode, theme: Term
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let lines = help_modal_lines(mode, VOICE_INPUT_SUPPORTED, theme);
+    let lines = help_modal_lines(mode, voice_input_supported(), theme);
 
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.text))
@@ -14205,32 +14204,24 @@ mod tests {
 
     #[test]
     fn ctrl_r_requests_voice_dictation_start() {
-        let mut state = AppState::new();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        let request = handle_crossterm(
-            &mut state,
-            &cmd_tx,
-            key_with_modifiers(KeyCode::Char('r'), KeyModifiers::CONTROL),
-        );
+        let state = AppState::new();
 
         assert!(state.input.is_empty());
-        assert_eq!(request, TerminalRequest::StartDictation);
+        assert_eq!(
+            dictation_request_for_state(&state, true),
+            TerminalRequest::StartDictation
+        );
     }
 
     #[test]
     fn ctrl_r_requests_voice_dictation_stop_when_active() {
         let mut state = AppState::new();
         state.voice_input_active = true;
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        let request = handle_crossterm(
-            &mut state,
-            &cmd_tx,
-            key_with_modifiers(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        assert_eq!(
+            dictation_request_for_state(&state, true),
+            TerminalRequest::StopDictation
         );
-
-        assert_eq!(request, TerminalRequest::StopDictation);
     }
 
     #[test]
