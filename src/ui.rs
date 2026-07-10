@@ -5072,6 +5072,7 @@ fn push_markdown_lines_limited_inner(
 ) {
     let prefix = " ".repeat(indent);
     let mut in_code_block = false;
+    let mut in_html_comment = false;
     let mut code_lang = String::new();
     let lines: Vec<&str> = text.split('\n').collect();
     // Collapse keeps the *tail*: for tool output the end is where the signal
@@ -5082,6 +5083,13 @@ fn push_markdown_lines_limited_inner(
     // Replay fence toggles across the hidden head so a tail that starts
     // inside a code block still renders as code.
     for raw in &lines[..hidden] {
+        let filtered;
+        let raw = if in_code_block {
+            *raw
+        } else {
+            filtered = strip_html_comments(raw, &mut in_html_comment);
+            filtered.as_str()
+        };
         if raw.trim_start().starts_with("```") {
             in_code_block = !in_code_block;
         }
@@ -5089,7 +5097,17 @@ fn push_markdown_lines_limited_inner(
     if hidden > 0 {
         push_collapse_hint(out, indent, hidden, theme);
     }
-    for raw in &lines[hidden..] {
+    for original in &lines[hidden..] {
+        let filtered;
+        let raw = if in_code_block {
+            *original
+        } else {
+            filtered = strip_html_comments(original, &mut in_html_comment);
+            if filtered.trim().is_empty() && !original.trim().is_empty() {
+                continue;
+            }
+            filtered.as_str()
+        };
         let trimmed = raw.trim_start();
         if trimmed.starts_with("```") {
             in_code_block = !in_code_block;
@@ -5185,6 +5203,41 @@ fn push_markdown_lines_limited_inner(
         let mut spans = vec![Span::styled(prefix.clone(), base_style)];
         spans.extend(inline_markdown_spans_with_style(raw, theme, base_style));
         out.push(Line::from(spans));
+    }
+}
+
+fn strip_html_comments(raw: &str, in_comment: &mut bool) -> String {
+    let mut visible = String::with_capacity(raw.len());
+    let mut rest = raw;
+
+    loop {
+        if *in_comment {
+            let Some(end) = rest.find("-->") else {
+                return visible;
+            };
+            *in_comment = false;
+            rest = &rest[end + 3..];
+        } else if let Some(start) = rest.find("<!--") {
+            if let Some(tick) = rest.find('`')
+                && tick < start
+            {
+                visible.push_str(&rest[..tick + 1]);
+                rest = &rest[tick + 1..];
+                if let Some(end_tick) = rest.find('`') {
+                    visible.push_str(&rest[..end_tick + 1]);
+                    rest = &rest[end_tick + 1..];
+                    continue;
+                }
+                visible.push_str(rest);
+                return visible;
+            }
+            visible.push_str(&rest[..start]);
+            *in_comment = true;
+            rest = &rest[start + 4..];
+        } else {
+            visible.push_str(rest);
+            return visible;
+        }
     }
 }
 
@@ -13451,6 +13504,36 @@ mod tests {
                 .all(|span| span.style.fg == Some(theme.thought)),
             "thought heading must be dimmed, not left at reply contrast: {heading:?}"
         );
+    }
+
+    #[test]
+    fn agent_markdown_hides_html_comments_but_keeps_them_in_code() {
+        let mut state = AppState::new();
+        state.transcript.push(Entry::AgentThought(
+            "before <!-- inline --> after\n`<!-- inline code -->`\n<!-- standalone -->\n<!-- multiline\nstill hidden -->visible\n```html\n<!-- literal -->\n```"
+                .to_string(),
+        ));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert!(rendered.iter().any(|line| line == "○ before  after"));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("<!-- inline code -->"))
+        );
+        assert!(rendered.iter().any(|line| line == "  visible"));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("<!-- literal -->"))
+        );
+        assert!(!rendered.iter().any(|line| line.contains("standalone")));
+        assert!(!rendered.iter().any(|line| line.contains("multiline")));
+        assert!(!rendered.iter().any(|line| line.contains("still hidden")));
     }
 
     #[test]
