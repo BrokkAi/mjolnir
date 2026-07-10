@@ -9,6 +9,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::claude_usage::ClaudeUsageReport;
+use crate::clipboard::ClipboardLease;
+use crate::codex_usage::CodexUsageStatus;
 use agent_client_protocol::schema::v1::{
     AvailableCommand, Diff, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
     EnumOption, Plan, PlanEntry, SessionConfigKind, SessionConfigOption,
@@ -16,11 +19,6 @@ use agent_client_protocol::schema::v1::{
     SessionConfigValueId, SessionUpdate, StopReason, TerminalExitStatus, ToolCall, ToolCallContent,
     ToolCallStatus, ToolCallUpdate, ToolKind, Usage, UsageUpdate,
 };
-use chrono::{DateTime, FixedOffset, Local, TimeZone};
-
-use crate::claude_usage::ClaudeUsageReport;
-use crate::clipboard::ClipboardLease;
-use crate::codex_usage::CodexUsageStatus;
 
 use crate::event::{
     ElicitationOutcome, ElicitationPrompt, PermissionDecision, PermissionPrompt, PromptImage,
@@ -401,7 +399,7 @@ fn format_claude_rate_limit(value: &serde_json::Value) -> Option<String> {
         .map(|util| format!("{}% used", util.round().clamp(0.0, 100.0) as u64));
     let reset = number_field(object, "resetsAt", "resets_at")
         .or_else(|| number_field(object, "overageResetsAt", "overage_resets_at"))
-        .and_then(format_reset_local)
+        .and_then(crate::usage_format::format_reset_local)
         .map(|reset| format!("resets {reset}"));
 
     let detail = [utilization, reset]
@@ -427,33 +425,6 @@ fn rate_limit_window_label(kind: Option<&str>) -> &'static str {
         Some("seven_day_sonnet") => "Current week (Sonnet)",
         Some("overage") => "Extra usage",
         _ => "Usage limit",
-    }
-}
-
-/// Format a unix reset timestamp as wall-clock time in the machine's local
-/// time zone, e.g. `Jun 17 at 4:49pm (Europe/Paris)`. Accepts seconds or
-/// milliseconds; returns `None` if the timestamp is out of range.
-fn format_reset_local(epoch: f64) -> Option<String> {
-    if !epoch.is_finite() {
-        return None;
-    }
-    let seconds = if epoch.abs() >= 1_000_000_000_000.0 {
-        (epoch / 1000.0).trunc() as i64
-    } else {
-        epoch.trunc() as i64
-    };
-    let local = Local.timestamp_opt(seconds, 0).single()?;
-    let zone = iana_time_zone::get_timezone().ok();
-    Some(format_reset_label(local.fixed_offset(), zone.as_deref()))
-}
-
-/// Pure formatter for a reset instant, split out from the `Local` and
-/// `get_timezone` lookups so it can be unit-tested deterministically.
-fn format_reset_label(reset: DateTime<FixedOffset>, zone: Option<&str>) -> String {
-    let when = reset.format("%b %-d at %-I:%M%P").to_string();
-    match zone {
-        Some(zone) if !zone.is_empty() => format!("{when} ({zone})"),
-        _ => when,
     }
 }
 
@@ -3749,31 +3720,6 @@ mod tests {
         assert!(
             line.starts_with("Current session: 8% used · resets "),
             "unexpected line: {line}"
-        );
-    }
-
-    #[test]
-    fn format_reset_label_renders_local_wall_clock() {
-        let paris = FixedOffset::east_opt(2 * 3600).expect("offset");
-        let reset = paris
-            .with_ymd_and_hms(2026, 6, 17, 16, 49, 0)
-            .single()
-            .expect("instant");
-        assert_eq!(
-            format_reset_label(reset, Some("Europe/Paris")),
-            "Jun 17 at 4:49pm (Europe/Paris)"
-        );
-        // No zone name available → bare wall-clock time.
-        assert_eq!(format_reset_label(reset, None), "Jun 17 at 4:49pm");
-
-        // Past midnight exercises the 12-hour/am formatting (12:59am, not 0:59).
-        let midnight = paris
-            .with_ymd_and_hms(2026, 6, 18, 0, 59, 0)
-            .single()
-            .expect("instant");
-        assert_eq!(
-            format_reset_label(midnight, Some("Europe/Paris")),
-            "Jun 18 at 12:59am (Europe/Paris)"
         );
     }
 

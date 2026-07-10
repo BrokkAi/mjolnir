@@ -2052,6 +2052,55 @@ pub(crate) enum SpawnIsolation {
     DetachedSession,
 }
 
+/// Apply the stdio and process-group contract required by [`kill_agent_tree`].
+///
+/// Keep this shared by every long-lived child that delegates teardown to
+/// `kill_agent_tree`; otherwise a platform-specific spawn fix can silently
+/// diverge from the cleanup path that depends on it.
+pub(crate) fn configure_isolated_child(cmd: &mut Command, isolation: SpawnIsolation) {
+    // If the runtime task is aborted, dropping the child should still terminate it.
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    // Place the child into a new process group / Windows process group
+    // so `kill_agent_tree` can reach every descendant on shutdown.
+    #[cfg(unix)]
+    {
+        match isolation {
+            SpawnIsolation::ProcessGroup => {
+                cmd.process_group(0);
+            }
+            SpawnIsolation::DetachedSession => {
+                // `setsid` (in the forked child, pre-exec) gives the child a
+                // brand-new session with no controlling terminal. It also
+                // makes the child its own process-group leader (pgid == pid),
+                // so `kill_agent_tree`'s killpg(pid) reaches the whole subtree.
+                //
+                // SAFETY: `setsid` is async-signal-safe and touches no Rust
+                // state; the closure captures nothing.
+                unsafe {
+                    cmd.pre_exec(|| {
+                        if libc::setsid() == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no controlling-terminal / SIGTTIN semantics to detach
+        // from, so both isolation modes use the same process group.
+        let _ = isolation;
+        // CREATE_NEW_PROCESS_GROUP from winbase.h. The child becomes the root
+        // of a new group; `taskkill /T` walks the tree from there.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+}
+
 pub(crate) fn spawn_agent(
     command: &Path,
     args: &[String],
@@ -2072,55 +2121,7 @@ pub(crate) fn spawn_agent(
     for (k, v) in env {
         cmd.env(k, v);
     }
-    // If the runtime task is aborted, dropping the child should still terminate it.
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    // Place the agent into a new process group / Windows process group
-    // so `kill_agent_tree` can reach every descendant on shutdown.
-    // Without this, wrappers like `uvx brokk acp` (which fork a Python
-    // interpreter to host the actual agent) leave that grandchild as
-    // an orphan when mjolnir kills only the immediate child PID.
-    #[cfg(unix)]
-    {
-        match isolation {
-            SpawnIsolation::ProcessGroup => {
-                cmd.process_group(0);
-            }
-            SpawnIsolation::DetachedSession => {
-                // `setsid` (in the forked child, pre-exec) gives the agent a
-                // brand-new session with no controlling terminal, so any
-                // /dev/tty access — auth prompts, progress bars, job-control
-                // tcsetpgrp — fails cleanly instead of stealing the user's
-                // terminal input (SIGTTIN) or scribbling over the picker.
-                // It also makes the child its own process-group leader
-                // (pgid == pid), so `kill_agent_tree`'s killpg(pid) still
-                // reaches the whole subtree.
-                //
-                // SAFETY: `setsid` is async-signal-safe and touches no Rust
-                // state; the closure captures nothing.
-                unsafe {
-                    cmd.pre_exec(|| {
-                        if libc::setsid() == -1 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
-                    });
-                }
-            }
-        }
-    }
-    #[cfg(windows)]
-    {
-        // Windows has no controlling-terminal / SIGTTIN semantics to detach
-        // from, so both isolation modes use the same process group.
-        let _ = isolation;
-        // CREATE_NEW_PROCESS_GROUP from winbase.h. The child becomes
-        // the root of a new group; `taskkill /T` walks the tree from
-        // there.
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
-    }
+    configure_isolated_child(&mut cmd, isolation);
     match stderr_path {
         Some(path) => {
             let file = std::fs::OpenOptions::new()

@@ -41,6 +41,7 @@ mod text;
 mod theme;
 mod theme_picker;
 mod ui;
+mod usage_format;
 mod version;
 mod worktree;
 
@@ -1897,15 +1898,21 @@ async fn run_session(
         }
     }
 
-    wait_for_task("remote-control event proxy", event_proxy).await;
-    wait_for_task("remote-control command proxy", cmd_proxy).await;
     if let Some(tx) = usage_shutdown_tx {
         let _ = tx.try_send(());
     }
     drop(claude_usage_turn_tx);
     drop(codex_usage_turn_tx);
+    let event_proxy_wait = wait_for_task("remote-control event proxy", event_proxy);
+    let cmd_proxy_wait = wait_for_task("remote-control command proxy", cmd_proxy);
     if let Some(task) = usage_task {
-        wait_for_task("subscription usage poller", task).await;
+        tokio::join!(
+            event_proxy_wait,
+            cmd_proxy_wait,
+            wait_for_task("subscription usage poller", task),
+        );
+    } else {
+        tokio::join!(event_proxy_wait, cmd_proxy_wait);
     }
 
     // Restore the terminal only now, after the runtime has finished tearing
@@ -2012,13 +2019,13 @@ async fn request_inline_session_load(
 
 async fn wait_for_task(label: &str, handle: tokio::task::JoinHandle<()>) {
     let abort_handle = handle.abort_handle();
-    match tokio::time::timeout(Duration::from_secs(4), handle).await {
+    match tokio::time::timeout(Duration::from_secs(2), handle).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::warn!("{label} join failed: {error}");
         }
         Err(_) => {
-            tracing::warn!("{label} did not exit within 4s; aborting");
+            tracing::warn!("{label} did not exit within 2s; aborting");
             abort_handle.abort();
         }
     }

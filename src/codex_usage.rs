@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use chrono::{Local, TimeZone};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -59,7 +58,10 @@ pub struct CodexUsageWindow {
 impl CodexUsageWindow {
     fn compact_label(&self) -> String {
         let mut label = format!("{} {}% left", self.label, self.remaining_percent);
-        if let Some(reset) = self.resets_at.and_then(format_reset_local) {
+        if let Some(reset) = self
+            .resets_at
+            .and_then(crate::usage_format::format_reset_local_seconds)
+        {
             label.push_str(" · resets ");
             label.push_str(&reset);
         }
@@ -173,14 +175,10 @@ impl CodexUsageClient {
 
     pub async fn shutdown(mut self) {
         drop(self.stdin);
-        match tokio::time::timeout(Duration::from_millis(500), self.child.wait()).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                tracing::warn!("wait for Codex app-server: {error}");
-                crate::acp::kill_agent_tree(&mut self.child, self.pid).await;
-            }
-            Err(_) => crate::acp::kill_agent_tree(&mut self.child, self.pid).await,
-        }
+        // Closing stdin asks app-server to stop; always follow with process-tree
+        // cleanup so a wrapper cannot exit successfully while leaving a helper
+        // behind. `kill_agent_tree` sends SIGTERM before escalating on Unix.
+        crate::acp::kill_agent_tree(&mut self.child, self.pid).await;
     }
 }
 
@@ -286,17 +284,11 @@ fn spawn_codex(cwd: PathBuf, env: HashMap<String, String>) -> Result<Child, Quer
             .args(["app-server", "--stdio"])
             .current_dir(&cwd)
             .envs(&env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
-        #[cfg(windows)]
-        {
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-            command.creation_flags(CREATE_NEW_PROCESS_GROUP);
-        }
+            .stderr(Stdio::null());
+        crate::acp::configure_isolated_child(
+            &mut command,
+            crate::acp::SpawnIsolation::ProcessGroup,
+        );
         match command.spawn() {
             Ok(child) => return Ok(child),
             Err(error)
@@ -412,11 +404,6 @@ fn window_label(minutes: Option<i64>) -> String {
         Some(value) if value > 0 && value % 60 == 0 => format!("{}H", value / 60),
         _ => "limit".to_string(),
     }
-}
-
-fn format_reset_local(epoch: i64) -> Option<String> {
-    let local = Local.timestamp_opt(epoch, 0).single()?;
-    Some(local.format("%b %-d at %-I:%M%P").to_string())
 }
 
 #[cfg(test)]
