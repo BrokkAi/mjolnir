@@ -36,6 +36,16 @@ The installer writes to `~/.local/bin` by default and offers to add that
 directory to your shell profile when needed. Set `INSTALL_DIR` or
 `MJOLNIR_INSTALL_DIR` to install somewhere else.
 
+Desktop users can instead install both executables from crates.io. The worker
+must be installed with `mj` for Ctrl-R dictation to be available:
+
+```bash
+cargo install --locked brokk-mjolnir mj-voice-worker
+```
+
+Installing only `brokk-mjolnir` is supported, but leaves voice dictation
+disabled. Android installs should omit `mj-voice-worker`.
+
 Then open a repo and run `mj`. The short binary name is intentional; nobody
 wants to type `mjolnir` every time they ask an agent to look at a diff.
 

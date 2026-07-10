@@ -2,7 +2,10 @@
 name = "mj-voice-worker"
 version = "1.0.2"
 edition = "2024"
-publish = false
+description = "Native local speech-recognition sidecar for brokk-mjolnir"
+license = "GPL-3.0"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
 
 [dependencies]
 anyhow = "1"
