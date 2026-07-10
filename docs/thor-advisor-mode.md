@@ -60,16 +60,12 @@ pub(crate) struct AdvisorConfig {
 }
 ```
 
-Thor is the user's configured default agent. Its own source is excluded from
-nested connections to prevent recursion. The attached MCP server reserves one
-configured non-Thor agent (a custom agent when the default is Thor) for normal
-delegation. A branch/PR review reserves only one read-only reviewer; it does
-not first create an implementation worker or a second review.
-
-Normal delegation therefore needs one configured non-Thor agent. If the default
-agent is Thor and there is no configured custom agent, Thor answers direct
-questions but reports a setup blocker for delegated work instead of spawning
-itself or discovering a pool of installed agents.
+Thor is the user's configured default agent. The attached MCP server may reserve
+that same ACP backend for a worker or reviewer, but every reservation opens a
+fresh session and nested sessions receive no MCP servers. Reusing the backend
+therefore does not create recursive orchestration. A branch/PR review reserves
+only one read-only reviewer; it does not first create an implementation worker
+or a second review.
 
 ---
 
@@ -92,7 +88,7 @@ child:
 
 | Value | Purpose |
 |---|---|
-| parent Thor source id | Excludes Thor from nested connections and blocks recursive self-connection. |
+| parent Thor source id | Blocks ad-hoc self-connections; guarded advisor reservations may reuse the backend in a fresh session without MCP tools. |
 | advisor-mode flag | Enables the strict reservation and completion policy. |
 | optional image manifest | Lets worker prompts inherit the user's original attachments when Thor does not explicitly supply images. |
 | completion-marker path and random token | Lets the parent verify server-accepted completion independently of Thor's text. |
@@ -202,7 +198,7 @@ same connection.
 | Tool | Thor uses it to |
 |---|---|
 | `list_agents` | Inspect ordinary configured/default ACP agents in standalone use. |
-| `select_advisor_agents` | Reserve one configured non-Thor delegate without probing or ranking agents. `workflow: "implementation"` returns a worker plus a fresh reviewer reservation; `workflow: "review"` returns one reviewer reservation. |
+| `select_advisor_agents` | Reserve one configured backend without probing or ranking agents. It may reuse Thor's backend in a fresh session without MCP tools. `workflow: "implementation"` returns a worker plus a fresh reviewer reservation; `workflow: "review"` returns one reviewer reservation. |
 | `connect` | Open a nested ACP session with a `worker` or read-only `reviewer` purpose. |
 | `list_config_options` / `set_config_option` | Inspect and change an advertised session setting between prompts. |
 | `submit_prompt` | Start a non-blocking nested prompt, optionally with config overrides, images, or reviewer provenance. |
@@ -220,6 +216,11 @@ turn status, accumulated text, usage, errors, and pending permission options.
 This lets Thor make an informed decision without having to infer state from a
 single text response.
 
+All routed MCP handler errors are returned as `isError: true` tool results with
+the concrete error message in content. ACP hosts therefore have an error body
+to render in the failed tool card; the transcript never has to rely on Thor's
+later paraphrase to explain why a tool failed.
+
 ---
 
 ## Single-agent reservation
@@ -228,12 +229,12 @@ single text response.
 registry, probe installed agents, or apply Elo selection. Ragnarok retains all
 of that multi-agent behavior; it is not part of a normal advisor turn.
 
-The server instead chooses the first safe configured delegate deterministically:
+The server instead chooses a configured backend deterministically:
 
-1. Use the configured default agent if it is not Thor.
-2. Otherwise use the first configured custom agent that is not Thor.
-3. If no such agent exists, refuse delegation with a clear setup error rather
-   than recursively launching Thor or fanning out through installed agents.
+1. Use the configured default agent, including when it is the backend running
+   Thor.
+2. If there is no default, use the first configured custom agent.
+3. Open only the requested worker/reviewer session; do not probe other agents.
 
 The reservation returns opaque `candidate-*` ids. It does not claim a model or
 an Elo score before the ACP session starts; the connected agent is the source
@@ -393,13 +394,16 @@ completion from the cancelled turn.
 
 The entire MCP server also constrains requested working directories to the
 operator's `--cwd` and `--additional-directory` roots. In advisor mode, it
-refuses ad-hoc executables, excluded Thor identities, stale reservations, and
-model changes that contradict a model explicitly reserved for the connection.
+refuses ad-hoc executables, unreserved self-connections, stale reservations,
+and model changes that contradict a model explicitly reserved for the
+connection.
 
 ---
 
 ## Failure behavior
 
+- **An MCP tool fails validation or execution** — the failed tool card contains
+  the concrete server error message as visible tool-result content.
 - **Thor exits without a valid completion marker or accepted final response** —
   the advisor turn fails, even if Thor wrote an otherwise plausible message.
 - **Nested worker/reviewer fails, times out, or needs a denied permission** —

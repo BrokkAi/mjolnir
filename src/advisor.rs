@@ -288,7 +288,8 @@ fn thor_prompt(user_prompt: &str, has_images: bool) -> String {
          user-facing review in final_response.\n\n\
          For implementation, edits, test repair, or substantial repository work:\n\
          1. Call select_advisor_agents once with workflow `implementation` and the original task. \
-         Use its recommended worker and reviewer; never choose the Thor identity or re-run \
+         Use its recommended worker and reviewer; the reserved ACP backend may be the same one \
+         running Thor, but each connection is a fresh session without MCP tools. Do not re-run \
          selection to reroll a team.\n\
          2. Connect the worker with purpose `worker`, then submit a precise implementation \
          prompt. Preserve unrelated changes, do not commit or push unless requested, and \
@@ -312,9 +313,6 @@ fn thor_prompt(user_prompt: &str, has_images: bool) -> String {
          fresh read-only reviewer completed successfully. Do not send user-facing prose before or \
          after the call. mj renders final_response after server validation and tears down nested \
          connections when this session closes.\n\n\
-         If select_advisor_agents reports that no configured non-Thor delegate exists, do not \
-         retry or connect Thor to itself. Explain that setup blocker and tell the user to add a \
-         custom agent in mj.\n\n\
          Do not expose MCP JSON to the user. Give a concise final response describing the \
          result, validation, review/fixes, and any remaining risk. If bounded execution makes \
          completion unsafe, clean up and explain the concrete blocker instead of looping.\n\
@@ -918,7 +916,7 @@ mod tests {
         assert!(prompt.contains("review_of"));
         assert!(prompt.contains("workflow `review`"));
         assert!(prompt.contains("mode `review`"));
-        assert!(prompt.contains("no configured non-Thor delegate"));
+        assert!(prompt.contains("same one running Thor"));
         assert!(prompt.contains("cancel it"));
         assert!(prompt.contains("final tool call"));
         assert!(prompt.contains("Do not send user-facing prose before or after"));

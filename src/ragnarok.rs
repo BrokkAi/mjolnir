@@ -949,9 +949,8 @@ pub(crate) async fn muster(
 
 /// Like [`muster`], but omits sources before launching their model probes.
 ///
-/// The advisor MCP child uses this to keep Thor out of its nested candidate
-/// pool: rejecting a later `connect` is not enough because probing Thor would
-/// already have opened another ACP session.
+/// Callers that need a restricted arena can avoid opening probe sessions for
+/// excluded sources. Normal Thor advisor mode does not use Ragnarok muster.
 pub(crate) async fn muster_excluding(
     cfg: &BattleConfig,
     user_cfg: &Config,

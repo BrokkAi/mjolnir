@@ -212,8 +212,9 @@ pub struct McpConfig {
     pub fs_max_text_bytes: u64,
     /// Exact config file that supplies configured agents and Ragnarok scores.
     pub config_path: PathBuf,
-    /// Agent identities hidden from and rejected for nested connections. Thor's
-    /// own source id is placed here to prevent recursive self-delegation.
+    /// Agent identities rejected for ad-hoc nested connections. Advisor-issued
+    /// candidate reservations may reuse Thor's backend because those fresh
+    /// sessions receive no MCP servers and cannot recursively orchestrate.
     pub excluded_agent_source_ids: HashSet<String>,
     /// Whether this server accepts an arbitrary executable in `connect`.
     pub allow_adhoc_program: bool,
@@ -1256,6 +1257,21 @@ fn err(msg: impl Into<String>) -> McpError {
     McpError::invalid_params(msg.into(), None)
 }
 
+/// MCP clients consistently render tool-result content, while protocol-level
+/// JSON-RPC errors are not guaranteed to appear in ACP tool-call transcripts.
+/// Preserve the failure status and put the concrete reason in visible content.
+fn visible_tool_result(
+    result: Result<CallToolResult, McpError>,
+) -> Result<CallToolResult, McpError> {
+    match result {
+        Ok(result) => Ok(result),
+        Err(error) => Ok(CallToolResult::error(vec![Content::text(format!(
+            "error: {}",
+            error.message
+        ))])),
+    }
+}
+
 fn json_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
     let serialized =
         serde_json::to_value(value).map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -1765,10 +1781,13 @@ impl McpServer {
             self.resolve_configured_agent(&cfg, args.agent.as_deref())?
         };
 
+        let is_guarded_advisor_reservation =
+            self.config.require_advisor_candidates && resolved.candidate_id.is_some();
         if resolved
             .source_id
             .as_ref()
             .is_some_and(|source_id| self.config.excluded_agent_source_ids.contains(source_id))
+            && !is_guarded_advisor_reservation
         {
             return Err(format!(
                 "agent '{}' is excluded by the server recursion policy",
@@ -1927,7 +1946,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "List ACP agents this server can connect to: the configured default agent and any named custom agents from ~/.config/mj/config.toml."
+        description = "List ACP agents this server can connect to: the configured default agent and any named custom agents from ~/.config/mj/config.toml. Advisor mode may reuse Thor's configured backend in a fresh session without MCP tools."
     )]
     async fn list_agents(
         &self,
@@ -1938,7 +1957,8 @@ impl McpServer {
             .map_err(|e| err(format!("load config: {e}")))?;
         let mut agents = Vec::new();
         if let Some(a) = &cfg.agent
-            && !self.config.excluded_agent_source_ids.contains(&a.source_id)
+            && (self.config.require_advisor_candidates
+                || !self.config.excluded_agent_source_ids.contains(&a.source_id))
         {
             agents.push(AgentInfo {
                 source_id: a.source_id.clone(),
@@ -1950,7 +1970,9 @@ impl McpServer {
         }
         for c in &cfg.custom_agents {
             let source_id = format!("{}{}", config::CUSTOM_AGENT_SOURCE_PREFIX, c.name);
-            if self.config.excluded_agent_source_ids.contains(&source_id) {
+            if !self.config.require_advisor_candidates
+                && self.config.excluded_agent_source_ids.contains(&source_id)
+            {
                 continue;
             }
             agents.push(AgentInfo {
@@ -1965,7 +1987,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Reserve one configured non-Thor ACP delegate for this Thor advisor turn without probing, ranking, or launching a pool. Implementation returns one full-access worker reservation plus one fresh read-only reviewer reservation. Review returns one read-only reviewer reservation."
+        description = "Reserve one configured ACP backend for this Thor advisor turn without probing, ranking, or launching a pool. The backend may be the same one running Thor; nested sessions receive no MCP servers. Implementation returns one full-access worker reservation plus one fresh read-only reviewer reservation. Review returns one read-only reviewer reservation."
     )]
     async fn select_advisor_agents(
         &self,
@@ -2093,30 +2115,23 @@ impl McpServer {
         })
     }
 
-    /// Thor itself is excluded from nested connections. Reserve the configured
-    /// default only when it is safe; otherwise use the first configured custom
-    /// agent. This is intentionally deterministic and process-free: normal
-    /// advisor work is not a Ragnarok model search.
+    /// Reserve the configured default, even when it is the same ACP backend as
+    /// Thor. The resulting worker/reviewer is a new session with no MCP servers,
+    /// so it cannot recursively orchestrate. If no default exists, fall back to
+    /// the first configured custom agent. This is intentionally deterministic
+    /// and process-free: normal advisor work is not a Ragnarok model search.
     fn reserve_advisor_delegate(&self, cfg: &config::Config) -> Result<ResolvedAgent, McpError> {
-        if let Some(default) = &cfg.agent
-            && !self
-                .config
-                .excluded_agent_source_ids
-                .contains(&default.source_id)
-        {
+        if cfg.agent.is_some() {
             return self.resolve_configured_agent(cfg, None).map_err(err);
         }
-        for custom in &cfg.custom_agents {
+        if let Some(custom) = cfg.custom_agents.first() {
             let source_id = format!("{}{}", config::CUSTOM_AGENT_SOURCE_PREFIX, custom.name);
-            if self.config.excluded_agent_source_ids.contains(&source_id) {
-                continue;
-            }
             return self
                 .resolve_configured_agent(cfg, Some(&source_id))
                 .map_err(err);
         }
         Err(err(
-            "advisor delegation needs one configured non-Thor agent; add a custom agent in mj or choose a different default",
+            "advisor delegation needs a configured default or custom agent",
         ))
     }
 
@@ -2937,6 +2952,15 @@ impl McpServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        visible_tool_result(self.tool_router.call(call).await)
+    }
+
     fn get_info(&self) -> ServerInfo {
         // `Implementation::from_build_env()` would report rmcp's own crate name;
         // identify as mj so MCP hosts label the server correctly.
@@ -3106,7 +3130,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advisor_selection_reserves_one_configured_delegate_without_a_model_probe() {
+    async fn advisor_selection_can_reuse_thors_backend_without_a_model_probe() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         config::Config {
@@ -3131,8 +3155,8 @@ mod tests {
                 },
             ],
             session_config: HashMap::from([(
-                "custom:delegate".to_string(),
-                HashMap::from([("model".to_string(), "delegate-model".to_string())]),
+                "thor".to_string(),
+                HashMap::from([("model".to_string(), "thor-model".to_string())]),
             )]),
             ..Default::default()
         }
@@ -3158,7 +3182,7 @@ mod tests {
         let candidates = server.advisor_candidates.lock().await;
         assert_eq!(candidates.len(), 2, "worker plus fresh reviewer only");
         assert!(candidates.values().all(|candidate| {
-            candidate.card.agent_source_id == "custom:delegate"
+            candidate.card.agent_source_id == "thor"
                 && candidate.card.model_value.is_empty()
                 && candidate.card.elo == 0
         }));
@@ -3193,12 +3217,17 @@ mod tests {
             })
             .await
             .expect("build worker runtime");
-        assert_eq!(built.model_value.as_deref(), Some("delegate-model"));
-        assert_eq!(built.model_name.as_deref(), Some("delegate-model"));
+        assert_eq!(built.source_id.as_deref(), Some("thor"));
+        assert_eq!(built.model_value.as_deref(), Some("thor-model"));
+        assert_eq!(built.model_name.as_deref(), Some("thor-model"));
+        assert!(
+            built.runtime.mcp_servers.is_empty(),
+            "same-backend worker must not inherit Thor's orchestration tools"
+        );
     }
 
     #[test]
-    fn advisor_delegate_refuses_to_recurse_into_thor_without_a_custom_agent() {
+    fn advisor_delegate_prefers_the_configured_default_even_when_it_is_thor() {
         let mut server_config = strict_test_config();
         server_config
             .excluded_agent_source_ids
@@ -3214,11 +3243,21 @@ mod tests {
             ..Default::default()
         };
 
-        let error = match server.reserve_advisor_delegate(&cfg) {
-            Ok(_) => panic!("Thor must never reserve itself as a nested worker"),
-            Err(error) => error,
-        };
-        assert!(error.message.contains("non-Thor agent"));
+        let delegate = server
+            .reserve_advisor_delegate(&cfg)
+            .expect("same ACP backend is valid for a fresh nested session");
+        assert_eq!(delegate.source_id.as_deref(), Some("thor"));
+        assert_eq!(delegate.command, PathBuf::from("/bin/thor"));
+    }
+
+    #[test]
+    fn protocol_tool_errors_become_visible_error_results() {
+        let result = visible_tool_result(Err(err("specific failure reason")))
+            .expect("protocol error becomes a tool result");
+        let value = serde_json::to_value(result).expect("serialize tool result");
+
+        assert_eq!(value.get("isError"), Some(&serde_json::Value::Bool(true)));
+        assert!(value.to_string().contains("specific failure reason"));
     }
 
     #[test]
