@@ -69,10 +69,10 @@ jobs:
         sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
 
     - name: Check voice worker
-      run: cargo clippy -p mj-voice-worker --all-targets -- -D warnings
+      run: cargo clippy -p brokk-mj-voice-worker --all-targets -- -D warnings
 
     - name: Test voice worker
-      run: cargo test -p mj-voice-worker
+      run: cargo test -p brokk-mj-voice-worker
 
   android:
     name: Android aarch64-linux-android

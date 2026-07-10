@@ -565,7 +565,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "downloads ~0.7 GB of models; run with: cargo test -p mj-voice-worker -- --ignored"]
+    #[ignore = "downloads ~0.7 GB of models; run with: cargo test -p brokk-mj-voice-worker -- --ignored"]
     fn models_install_and_decode_test_wav() {
         let paths = model_paths().expect("resolve model paths");
         ensure_models_installed(&paths, &mut |status| eprintln!("{status}"))

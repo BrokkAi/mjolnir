@@ -1,11 +1,15 @@
 [package]
-name = "mj-voice-worker"
+name = "brokk-mj-voice-worker"
 version = "1.0.2"
 edition = "2024"
 description = "Native local speech-recognition sidecar for brokk-mjolnir"
 license = "GPL-3.0"
 repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
+
+[[bin]]
+name = "mj-voice-worker"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

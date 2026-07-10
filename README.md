@@ -40,11 +40,11 @@ Desktop users can instead install both executables from crates.io. The worker
 must be installed with `mj` for Ctrl-R dictation to be available:
 
 ```bash
-cargo install --locked brokk-mjolnir mj-voice-worker
+cargo install --locked brokk-mjolnir brokk-mj-voice-worker
 ```
 
 Installing only `brokk-mjolnir` is supported, but leaves voice dictation
-disabled. Android installs should omit `mj-voice-worker`.
+disabled. Android installs should omit `brokk-mj-voice-worker`.
 
 Then open a repo and run `mj`. The short binary name is intentional; nobody
 wants to type `mjolnir` every time they ask an agent to look at a diff.
@@ -242,7 +242,7 @@ For local dictation development, build the sidecar into the same target
 directory:
 
 ```bash
-cargo build --release -p mj-voice-worker
+cargo build --release -p brokk-mj-voice-worker
 ```
 
 Use the same checks as CI before submitting changes:
