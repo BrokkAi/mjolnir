@@ -51,12 +51,17 @@ parquet = { version = "55", default-features = false, features = ["arrow", "brot
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
+# rmcp's streamable-http client implements its transport trait for reqwest
+# 0.13 (already in the tree via rmcp itself). Alias that version for the
+# `mj mcp-proxy` bridge only; the rest of mj stays on reqwest 0.12.
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false }
 qrcode = { version = "0.14", default-features = false }
-# Official Rust MCP SDK. Powers the `mj mcp` stdio server that exposes mj's
-# ACP-client capabilities (connect, config, prompt, poll, cancel, result) as
-# MCP tools. `transport-io` adds the stdio transport; `server`/`macros` are
-# default features but listed for clarity. MIT-licensed (GPL-3.0-compatible).
-rmcp = { version = "1", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+# Official Rust MCP SDK. Powers the council's in-process loopback MCP servers
+# (code_agent, Loki advise) and the `mj mcp-proxy` stdio bridge that ACP
+# adapters spawn to reach them. `transport-io` adds the stdio transport;
+# `transport-streamable-http-client-reqwest` is the proxy's client side.
+# MIT-licensed (GPL-3.0-compatible).
+rmcp = { version = "1", features = ["server", "client", "macros", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # Parses the tailscale-issued certificate/key PEMs for the SNI resolver in

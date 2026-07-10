@@ -22,7 +22,8 @@ pub struct PromptImage {
     pub height: u32,
 }
 
-/// One actor discovered through structured nested MCP progress.
+/// Identity of a council actor whose out-of-band activity reaches the
+/// transcript (role plus optional agent/model attribution).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorIdentity {
     pub role: String,
@@ -32,42 +33,10 @@ pub struct ActorIdentity {
     pub model_value: Option<String>,
 }
 
-/// Transcript-safe projection of an actor controlled through `mj mcp`.
+/// Transcript-safe projection of a council actor's out-of-band activity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActorActivity {
-    Connected {
-        actor: ActorIdentity,
-    },
-    Status {
-        actor: ActorIdentity,
-        connection_status: String,
-        turn_id: u64,
-        turn_status: String,
-    },
-    Message {
-        actor: ActorIdentity,
-        text: String,
-    },
-    Thought {
-        actor: ActorIdentity,
-        text: String,
-    },
-    Tool {
-        actor: ActorIdentity,
-        tool_id: String,
-        title: String,
-        kind: Option<String>,
-        status: Option<String>,
-    },
-    PermissionRequested {
-        actor: ActorIdentity,
-        title: String,
-    },
     Warning {
-        actor: ActorIdentity,
-        message: String,
-    },
-    Info {
         actor: ActorIdentity,
         message: String,
     },
@@ -118,7 +87,7 @@ pub enum UiEvent {
         options: Vec<SessionConfigOption>,
         targets: Vec<SessionConfigTarget>,
     },
-    /// Structured nested-agent activity projected from an MCP tool result.
+    /// Out-of-band council actor activity (e.g. Loki warnings).
     ActorActivity(ActorActivity),
     /// Hidden council coordination made inspectable in the shared transcript.
     InternalMessage(InternalMessage),

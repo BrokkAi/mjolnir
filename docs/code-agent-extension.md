@@ -1,8 +1,12 @@
 # Mjolnir Code-Agent MCP Tool
 
-Interactive Mjolnir sessions automatically start an authenticated Streamable
-HTTP MCP server on a random loopback port and include it in the primary ACP
-session's `mcpServers`. The server exposes one model-visible tool:
+Interactive Mjolnir sessions serve the tool from an in-process, bearer-token
+authenticated loopback HTTP endpoint, but advertise it in the primary ACP
+session's `mcpServers` as a **stdio** server — the one MCP transport every ACP
+agent must support. The advertised command is `mj mcp-proxy --url <loopback>`,
+a thin bridge the adapter spawns; the bearer token travels in the
+`MJ_MCP_PROXY_TOKEN` environment variable, never on argv. The server exposes
+one model-visible tool:
 
 ```json
 {
@@ -24,8 +28,9 @@ next user turn whenever `usage_update.used` drops, indicating that the primary
 replaced its context with a compacted history. The same bootstrap is installed
 when a session is resumed, loaded, or forked.
 
-Primary ACP adapters must advertise `mcpCapabilities.http`; Mjolnir fails
-clearly before opening a session when they do not.
+Because the advertisement is a stdio command, no optional `mcpCapabilities`
+(http/sse) are required of the primary adapter. Loki's `advise` tool uses the
+same loopback-plus-proxy mechanism.
 
 When called, Mjolnir starts `npx -y @agentclientprotocol/codex-acp`, opens a
 fresh ACP session in the primary session's workspace, streams the nested turn

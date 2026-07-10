@@ -11,13 +11,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{HttpHeader, McpServer, McpServerHttp};
-use anyhow::{Context, Result, anyhow};
-use axum::extract::{Request as HttpRequest, State};
-use axum::http::{StatusCode, header::AUTHORIZATION};
-use axum::middleware::Next;
-use axum::response::Response;
-use base64::Engine;
+use agent_client_protocol::schema::v1::McpServer;
+use anyhow::Result;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
@@ -27,16 +22,10 @@ use rmcp::{
     },
     service::RequestContext,
     tool, tool_router,
-    transport::{
-        StreamableHttpServerConfig, StreamableHttpService,
-        streamable_http_server::session::local::LocalSessionManager,
-    },
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use crate::acp::{RuntimeAccessMode, RuntimeRoleConfig};
 use crate::council::ResolvedRole;
@@ -46,7 +35,6 @@ use crate::ragnarok::{AgentHandle, Launch, TurnEvent};
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_CONTEXT_BYTES: usize = 96 * 1024;
 const MAX_DELTA_ITEM_BYTES: usize = 16 * 1024;
-const MCP_PATH: &str = "/mcp";
 const MCP_SERVER_NAME: &str = "mj-loki-advisor";
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -189,95 +177,16 @@ impl ServerHandler for McpHandler {
     }
 }
 
-struct HttpServer {
-    advertised: McpServer,
-    tools_listed: watch::Receiver<bool>,
-    cancellation: CancellationToken,
-    task: JoinHandle<()>,
-}
-
-impl HttpServer {
-    async fn start(advice: AdviceSlot, decisions: broadcast::Sender<Decision>) -> Result<Self> {
-        let mut token_bytes = [0_u8; 32];
-        getrandom::fill(&mut token_bytes)
-            .map_err(|error| anyhow!("generate Loki advisor MCP bearer token: {error}"))?;
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes);
-        let authorization = format!("Bearer {token}");
-        let (tools_listed_tx, tools_listed) = watch::channel(false);
-        let handler = McpHandler::new(advice, decisions, tools_listed_tx);
-        let cancellation = CancellationToken::new();
-        let mut config = StreamableHttpServerConfig::default();
-        config.cancellation_token = cancellation.clone();
-        let service = StreamableHttpService::new(
-            move || Ok(handler.clone()),
-            Arc::new(LocalSessionManager::default()),
-            config,
-        );
-        let protected = axum::Router::new().nest_service(MCP_PATH, service).layer(
-            axum::middleware::from_fn_with_state(authorization.clone(), require_bearer),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("bind Loki advisor MCP listener")?;
-        let addr = listener
-            .local_addr()
-            .context("read Loki advisor MCP listener address")?;
-        let task_cancellation = cancellation.clone();
-        let task = tokio::spawn(async move {
-            if let Err(error) = axum::serve(listener, protected)
-                .with_graceful_shutdown(task_cancellation.cancelled_owned())
-                .await
-            {
-                tracing::warn!("Loki advisor MCP listener stopped: {error}");
-            }
-        });
-        let advertised = McpServer::Http(
-            McpServerHttp::new(MCP_SERVER_NAME, format!("http://{addr}{MCP_PATH}"))
-                .headers(vec![HttpHeader::new("Authorization", authorization)]),
-        );
-        Ok(Self {
-            advertised,
-            tools_listed,
-            cancellation,
-            task,
-        })
-    }
-
-    async fn wait_until_tools_listed(&self) -> Result<()> {
-        let mut listed = self.tools_listed.clone();
-        if *listed.borrow() {
-            return Ok(());
-        }
-        tokio::time::timeout(Duration::from_secs(30), listed.changed())
-            .await
-            .map_err(|_| anyhow!("Loki timed out loading the advise MCP tool"))?
-            .map_err(|_| anyhow!("Loki advisor MCP server closed before tools/list"))?;
-        Ok(())
-    }
-}
-
-impl Drop for HttpServer {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-        self.task.abort();
-    }
-}
-
-async fn require_bearer(
-    State(expected): State<String>,
-    request: HttpRequest,
-    next: Next,
-) -> std::result::Result<Response, (StatusCode, &'static str)> {
-    let authorized = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.as_bytes() == expected.as_bytes());
-    if authorized {
-        Ok(next.run(request).await)
-    } else {
-        Err((StatusCode::UNAUTHORIZED, "unauthorized"))
-    }
+/// Serve the `advise` tool on an in-process loopback endpoint, advertised to
+/// Loki's ACP session as a stdio `mj mcp-proxy` server.
+async fn start_server(
+    advice: AdviceSlot,
+    decisions: broadcast::Sender<Decision>,
+) -> Result<crate::loopback_mcp::LoopbackServer> {
+    let (tools_listed_tx, tools_listed) = watch::channel(false);
+    let handler = McpHandler::new(advice, decisions, tools_listed_tx);
+    crate::loopback_mcp::LoopbackServer::start(MCP_SERVER_NAME, "Loki advisor", handler, tools_listed)
+        .await
 }
 
 /// Loki critiques waiting to be delivered to a target at a safe step boundary.
@@ -685,7 +594,7 @@ async fn worker(
     let mut deferred = VecDeque::new();
     let mut session: Option<AgentHandle> = None;
     let advice = AdviceSlot::default();
-    let server = match HttpServer::start(advice.clone(), decisions.clone()).await {
+    let server = match start_server(advice.clone(), decisions.clone()).await {
         Ok(server) => Some(server),
         Err(error) => {
             emit_warning(
@@ -786,13 +695,20 @@ async fn worker(
                         &cwd,
                         &additional_directories,
                         abort_rx.clone(),
-                        server.advertised.clone(),
+                        server.advertised().clone(),
                     )
                     .await
                     {
                         Ok(agent) => {
                             session = Some(agent);
-                            if let Err(error) = server.wait_until_tools_listed().await {
+                            if let Err(error) = server
+                                .wait_until_tools_listed(
+                                    Duration::from_secs(30),
+                                    "Loki timed out loading the advise MCP tool",
+                                    "Loki advisor MCP server closed before tools/list",
+                                )
+                                .await
+                            {
                                 emit_warning(
                                     &ui_tx,
                                     &role,

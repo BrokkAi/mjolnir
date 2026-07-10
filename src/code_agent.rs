@@ -7,15 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{
-    HttpHeader, McpServer, McpServerHttp, SessionUpdate, StopReason,
-};
+use agent_client_protocol::schema::v1::{SessionUpdate, StopReason};
 use anyhow::{Context, Result, anyhow, bail};
-use axum::extract::{Request, State};
-use axum::http::{StatusCode, header::AUTHORIZATION};
-use axum::middleware::Next;
-use axum::response::Response;
-use base64::Engine;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
@@ -25,16 +18,10 @@ use rmcp::{
     },
     service::RequestContext,
     tool, tool_router,
-    transport::{
-        StreamableHttpServerConfig, StreamableHttpService,
-        streamable_http_server::session::local::LocalSessionManager,
-    },
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc, watch};
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use crate::acp::{self, AcpRuntimeConfig, RuntimeAccessMode};
 use crate::event::{
@@ -48,7 +35,6 @@ pub const MCP_SERVER_NAME: &str = "mj-code-agent";
 pub const PRIMARY_SESSION_DIRECTIVE: &str = "<mj-code-agent-policy>\nYou are Thor, the primary coordinator and owner of the user's outcome. You are responsible for understanding the request, doing necessary research and context gathering, forming the plan, coordinating implementation, reviewing and verifying the result, and delivering the final answer. You are not a thin handoff between the user and Eitri. Eitri is the implementation agent exposed as the code_agent MCP tool. This policy applies to every subsequent user request in this ACP session. Delegate substantial implementation chunks to Eitri after you have investigated and planned enough to give useful direction. You may personally make small, local code changes when describing and delegating them would take more effort than simply doing them; use judgment rather than delegating mechanically. Eitri starts a brand-new ACP process and session for every code_agent call. Eitri has no conversation context and no memory of the user's request, your research, or any previous Eitri call—even the immediately preceding call. Every invocation must therefore contain complete standalone instructions with the task, relevant findings, your plan, current workspace state, and acceptance criteria. After Eitri returns, independently review its result, inspect or verify the work as needed, and delegate a substantial corrective follow-up if implementation changes remain. If a request requires no code changes, handle it yourself. Do not call any tool now. Acknowledge this policy with exactly MJ_CODE_AGENT_POLICY_READY.\n</mj-code-agent-policy>";
 
 const FRESH_CONTEXT_PREAMBLE: &str = "You are Eitri, the implementation agent. This is a fresh ACP process and session. You have no memory of the user conversation or of any earlier Eitri call, including an immediately preceding call. Treat the standalone instructions below and the current workspace as your only task context.\n\n";
-const MCP_PATH: &str = "/mcp";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -224,107 +210,18 @@ impl ServerHandler for McpHandler {
     }
 }
 
-/// In-process, loopback-only MCP endpoint advertised to the primary ACP agent.
-/// Dropping it cancels the listener and every open MCP session.
-pub struct HttpServer {
-    advertised: McpServer,
-    tools_listed: watch::Receiver<bool>,
-    cancellation: CancellationToken,
-    task: JoinHandle<()>,
-}
-
-impl HttpServer {
-    pub async fn start(
-        config: Config,
-        context: RunContext,
-        ui_tx: mpsc::UnboundedSender<UiEvent>,
-        controller: Controller,
-    ) -> Result<Self> {
-        let mut token_bytes = [0_u8; 32];
-        getrandom::fill(&mut token_bytes)
-            .map_err(|error| anyhow!("generate code-agent MCP bearer token: {error}"))?;
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes);
-        let authorization = format!("Bearer {token}");
-
-        let (tools_listed_tx, tools_listed) = watch::channel(false);
-        let handler = McpHandler::new(config, context, ui_tx, controller, tools_listed_tx);
-        let cancellation = CancellationToken::new();
-        let mut server_config = StreamableHttpServerConfig::default();
-        server_config.cancellation_token = cancellation.clone();
-        let service = StreamableHttpService::new(
-            move || Ok(handler.clone()),
-            Arc::new(LocalSessionManager::default()),
-            server_config,
-        );
-        let protected = axum::Router::new().nest_service(MCP_PATH, service).layer(
-            axum::middleware::from_fn_with_state(authorization.clone(), require_bearer),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("bind code-agent MCP listener")?;
-        let addr = listener
-            .local_addr()
-            .context("read code-agent MCP listener address")?;
-        let task_cancellation = cancellation.clone();
-        let task = tokio::spawn(async move {
-            if let Err(error) = axum::serve(listener, protected)
-                .with_graceful_shutdown(task_cancellation.cancelled_owned())
-                .await
-            {
-                tracing::warn!("code-agent MCP listener stopped: {error}");
-            }
-        });
-        let advertised = McpServer::Http(
-            McpServerHttp::new(MCP_SERVER_NAME, format!("http://{addr}{MCP_PATH}"))
-                .headers(vec![HttpHeader::new("Authorization", authorization)]),
-        );
-        Ok(Self {
-            advertised,
-            tools_listed,
-            cancellation,
-            task,
-        })
-    }
-
-    pub fn advertised(&self) -> &McpServer {
-        &self.advertised
-    }
-
-    pub async fn wait_until_tools_listed(&self, timeout: Duration) -> Result<()> {
-        let mut tools_listed = self.tools_listed.clone();
-        if *tools_listed.borrow() {
-            return Ok(());
-        }
-        tokio::time::timeout(timeout, tools_listed.changed())
-            .await
-            .map_err(|_| anyhow!("primary agent timed out loading the code_agent MCP tool"))?
-            .map_err(|_| anyhow!("code-agent MCP server closed before tools/list"))?;
-        Ok(())
-    }
-}
-
-impl Drop for HttpServer {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-        self.task.abort();
-    }
-}
-
-async fn require_bearer(
-    State(expected): State<String>,
-    request: Request,
-    next: Next,
-) -> std::result::Result<Response, (StatusCode, &'static str)> {
-    let authorized = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.as_bytes() == expected.as_bytes());
-    if authorized {
-        Ok(next.run(request).await)
-    } else {
-        Err((StatusCode::UNAUTHORIZED, "unauthorized"))
-    }
+/// Serve the `code_agent` tool on an in-process loopback endpoint, advertised
+/// to the primary ACP agent as a stdio `mj mcp-proxy` server.
+pub async fn start_server(
+    config: Config,
+    context: RunContext,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+    controller: Controller,
+) -> Result<crate::loopback_mcp::LoopbackServer> {
+    let (tools_listed_tx, tools_listed) = watch::channel(false);
+    let handler = McpHandler::new(config, context, ui_tx, controller, tools_listed_tx);
+    crate::loopback_mcp::LoopbackServer::start(MCP_SERVER_NAME, "code-agent", handler, tools_listed)
+        .await
 }
 
 #[derive(Debug, Default)]

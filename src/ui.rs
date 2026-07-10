@@ -279,12 +279,6 @@ struct TurnToolSummary {
     changed_paths: BTreeSet<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActorToolDisposition {
-    Successful,
-    Failed,
-    Visible,
-}
 
 fn transcript_turns(state: &AppState) -> Vec<TranscriptTurn> {
     let prompt_indexes = state
@@ -347,43 +341,12 @@ fn turn_final_response_index(state: &AppState, start: usize, end: usize) -> Opti
         .rev()
         .find(|&index| matches!(state.transcript[index], Entry::AgentMessage(_)))
         .or_else(|| {
-            (start..end).rev().find(|&index| {
-                matches!(&state.transcript[index], Entry::CodeAgentMessage(_))
-                    || matches!(
-                        &state.transcript[index],
-                        Entry::ActorActivity(activity)
-                            if matches!(activity.as_ref(), ActorActivity::Message { .. })
-                    )
-            })
+            (start..end)
+                .rev()
+                .find(|&index| matches!(&state.transcript[index], Entry::CodeAgentMessage(_)))
         })
 }
 
-fn actor_tool_disposition(status: Option<&str>) -> ActorToolDisposition {
-    let status = status.map(str::trim).filter(|status| !status.is_empty());
-    match status.map(|status| status.to_ascii_lowercase()) {
-        Some(status) if matches!(status.as_str(), "completed" | "success" | "succeeded") => {
-            ActorToolDisposition::Successful
-        }
-        Some(status)
-            if matches!(
-                status.as_str(),
-                "failed"
-                    | "failure"
-                    | "error"
-                    | "interrupted"
-                    | "cancelled"
-                    | "canceled"
-                    | "blocked"
-                    | "denied"
-            ) =>
-        {
-            ActorToolDisposition::Failed
-        }
-        // A structured actor snapshot is stable, but non-terminal or unknown
-        // status is still important context and must remain individually shown.
-        _ => ActorToolDisposition::Visible,
-    }
-}
 
 fn turn_tool_summary(state: &AppState, start: usize, end: usize) -> Option<TurnToolSummary> {
     let mut summary = TurnToolSummary {
@@ -409,14 +372,6 @@ fn turn_tool_summary(state: &AppState, start: usize, end: usize) -> Option<TurnT
                                 summary.changed_paths.insert(path.clone());
                             }
                         }
-                    }
-                }
-            }
-            Entry::ActorActivity(activity) => {
-                if let ActorActivity::Tool { status, .. } = activity.as_ref() {
-                    summary.tools += 1;
-                    if actor_tool_disposition(status.as_deref()) == ActorToolDisposition::Failed {
-                        summary.failures += 1;
                     }
                 }
             }
@@ -3652,50 +3607,15 @@ fn actor_role_name(actor: &ActorIdentity) -> String {
 
 fn actor_activity_label(activity: &ActorActivity) -> String {
     match activity {
-        ActorActivity::Connected { actor } | ActorActivity::Status { actor, .. } => {
-            actor_identity_label(actor)
-        }
-        ActorActivity::Message { actor, .. } => actor_identity_label(actor),
-        ActorActivity::Thought { actor, .. } => actor_role_name(actor),
-        ActorActivity::Tool { actor, .. } => {
-            format!("{} · tool", actor_identity_label(actor))
-        }
-        ActorActivity::PermissionRequested { actor, .. } => {
-            format!("{} · permission", actor_identity_label(actor))
-        }
         ActorActivity::Warning { actor, .. } => {
             format!("{} · warning", actor_identity_label(actor))
         }
-        ActorActivity::Info { actor, .. } => actor_identity_label(actor),
     }
 }
 
 fn actor_activity_text(activity: &ActorActivity) -> String {
     match activity {
-        ActorActivity::Connected { .. } => "connected".to_string(),
-        ActorActivity::Status {
-            connection_status,
-            turn_id,
-            turn_status,
-            ..
-        } => format!("{connection_status} · turn {turn_id} · {turn_status}"),
-        ActorActivity::Message { text, .. } | ActorActivity::Thought { text, .. } => text.clone(),
-        ActorActivity::Tool {
-            title,
-            kind,
-            status,
-            ..
-        } => {
-            let kind = kind.as_deref().unwrap_or("tool");
-            let status = status.as_deref().unwrap_or("pending");
-            format!("[{status}] {kind} · {title}")
-        }
-        ActorActivity::PermissionRequested { title, .. } => {
-            format!("permission requested · {title}")
-        }
-        ActorActivity::Warning { message, .. } | ActorActivity::Info { message, .. } => {
-            message.clone()
-        }
+        ActorActivity::Warning { message, .. } => message.clone(),
     }
 }
 
@@ -5228,11 +5148,6 @@ fn render_transcript_entry_range(
         {
             continue;
         }
-        if matches!(entry, Entry::ActorActivity(activity) if actor_tool_is_successful(activity))
-            && compact_turn.is_some()
-        {
-            continue;
-        }
         let collapse_message =
             collapse_limit.is_some() && transcript_entry_is_stable(state, entry_index, entry);
         if let Some(next) = entry_speaker(entry)
@@ -5270,22 +5185,8 @@ fn render_transcript_entry_range(
             Entry::ActorActivity(activity) => {
                 let text = actor_activity_text(activity);
                 match activity.as_ref() {
-                    ActorActivity::Message { .. } => {
-                        push_markdown_message(&mut out, &text, collapse_message, theme)
-                    }
-                    ActorActivity::Thought { .. } => push_thinking(&mut out, &text, theme),
                     ActorActivity::Warning { .. } => {
                         push_styled_message(&mut out, &text, theme.warning, collapse_message, theme)
-                    }
-                    ActorActivity::PermissionRequested { .. } => {
-                        push_styled_content(&mut out, text, theme.warning)
-                    }
-                    ActorActivity::Tool { .. } => push_italic_tool_call(&mut out, text, theme),
-                    ActorActivity::Connected { .. } | ActorActivity::Status { .. } => {
-                        push_styled_message(&mut out, &text, theme.muted, collapse_message, theme)
-                    }
-                    ActorActivity::Info { .. } => {
-                        push_styled_message(&mut out, &text, theme.muted, collapse_message, theme)
                     }
                 }
             }
@@ -5408,14 +5309,6 @@ fn tool_entry_is_successful(state: &AppState, entry: &Entry) -> bool {
         .is_some_and(|view| view.status == ToolCallStatus::Completed)
 }
 
-fn actor_tool_is_successful(activity: &ActorActivity) -> bool {
-    matches!(
-        activity,
-        ActorActivity::Tool { status, .. }
-            if actor_tool_disposition(status.as_deref()) == ActorToolDisposition::Successful
-    )
-}
-
 fn push_turn_header(out: &mut Vec<Line<'static>>, elapsed: Option<Duration>, theme: TerminalTheme) {
     let label = elapsed
         .map(|elapsed| format!("Thor · {}", format_duration(elapsed)))
@@ -5469,14 +5362,7 @@ fn push_turn_final_response_label(out: &mut Vec<Line<'static>>, theme: TerminalT
 
 fn actor_for_activity(activity: &ActorActivity) -> &ActorIdentity {
     match activity {
-        ActorActivity::Connected { actor }
-        | ActorActivity::Status { actor, .. }
-        | ActorActivity::Message { actor, .. }
-        | ActorActivity::Thought { actor, .. }
-        | ActorActivity::Tool { actor, .. }
-        | ActorActivity::PermissionRequested { actor, .. }
-        | ActorActivity::Warning { actor, .. }
-        | ActorActivity::Info { actor, .. } => actor,
+        ActorActivity::Warning { actor, .. } => actor,
     }
 }
 
@@ -5568,28 +5454,6 @@ fn push_plain_message(
     }
     if collapsed {
         push_message_collapse_hint(out, theme);
-    }
-    out.push(Line::from(""));
-}
-
-fn push_styled_content(out: &mut Vec<Line<'static>>, text: String, color: Color) {
-    for raw in text.split('\n') {
-        out.push(Line::from(Span::styled(
-            raw.to_string(),
-            Style::default().fg(color),
-        )));
-    }
-    out.push(Line::from(""));
-}
-
-fn push_italic_tool_call(out: &mut Vec<Line<'static>>, text: String, theme: TerminalTheme) {
-    for raw in text.split('\n') {
-        out.push(Line::from(Span::styled(
-            raw.to_string(),
-            Style::default()
-                .fg(theme.muted)
-                .add_modifier(Modifier::ITALIC),
-        )));
     }
     out.push(Line::from(""));
 }
@@ -13325,15 +13189,7 @@ mod tests {
             Entry::UserPrompt(long.clone()),
             Entry::AgentMessage(long.clone()),
             Entry::CodeAgentMessage(long.clone()),
-            Entry::ActorActivity(Box::new(ActorActivity::Message {
-                actor: actor.clone(),
-                text: long.clone(),
-            })),
             Entry::ActorActivity(Box::new(ActorActivity::Warning {
-                actor: actor.clone(),
-                message: long.clone(),
-            })),
-            Entry::ActorActivity(Box::new(ActorActivity::Info {
                 actor,
                 message: long.clone(),
             })),
@@ -13355,7 +13211,7 @@ mod tests {
                 .iter()
                 .filter(|line| line.as_str() == "… details hidden (Ctrl-T to expand)")
                 .count(),
-            8,
+            6,
             "rendered: {rendered:?}"
         );
         assert!(!rendered.iter().any(|line| line == "line 7"));
@@ -14153,7 +14009,7 @@ mod tests {
         ));
         state
             .transcript
-            .push(Entry::ActorActivity(Box::new(ActorActivity::Thought {
+            .push(Entry::ActorActivity(Box::new(ActorActivity::Warning {
                 actor: ActorIdentity {
                     role: "Loki".to_string(),
                     connection_id: "loki".to_string(),
@@ -14161,7 +14017,7 @@ mod tests {
                     model_name: None,
                     model_value: None,
                 },
-                text: "Reviewing the boundary".to_string(),
+                message: "Loki review failed open".to_string(),
             })));
 
         let rendered = render_transcript_lines(&state, 80);
@@ -14174,15 +14030,17 @@ mod tests {
                 "Eitri",
                 "Checking the implementation",
                 "Loki",
-                "Reviewing the boundary",
+                "Loki review failed open",
+                "",
             ]
         );
         assert_eq!(rendered[0].spans[0].style.fg, Some(theme.primary));
         assert_eq!(rendered[2].spans[0].style.fg, Some(theme.code));
         assert_eq!(rendered[4].spans[0].style.fg, Some(theme.secondary));
-        for line in [&rendered[1], &rendered[3], &rendered[5]] {
+        for line in [&rendered[1], &rendered[3]] {
             assert_eq!(line.spans[0].style.fg, Some(theme.thought));
         }
+        assert_eq!(rendered[5].spans[0].style.fg, Some(theme.warning));
     }
 
     #[test]

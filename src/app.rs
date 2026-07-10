@@ -646,7 +646,6 @@ pub struct AppState {
     /// state remains available, but the redundant parent row is omitted from
     /// the transcript so it cannot pin nested activity behind a pending tool.
     suppressed_tool_calls: HashSet<String>,
-    actor_tool_entries: HashMap<String, usize>,
     terminal_outputs: HashMap<String, TerminalOutputSnapshot>,
     /// Bumped whenever `transcript` or `tool_calls` change in a way that
     /// affects rendering. The UI layer uses this as a cache key so it can
@@ -994,7 +993,6 @@ impl AppState {
             transcript: Vec::new(),
             tool_calls: HashMap::new(),
             suppressed_tool_calls: HashSet::new(),
-            actor_tool_entries: HashMap::new(),
             terminal_outputs: HashMap::new(),
             transcript_revision: 0,
             input: String::new(),
@@ -2071,7 +2069,6 @@ impl AppState {
                 | UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
                     SessionUpdate::AgentThoughtChunk(_)
                 ))
-                | UiEvent::ActorActivity(ActorActivity::Thought { .. })
         );
         if !is_thinking_update && remove_trailing_thinking(&mut self.transcript) {
             self.bump_transcript_revision();
@@ -2384,59 +2381,7 @@ impl AppState {
     }
 
     fn apply_actor_activity(&mut self, activity: ActorActivity) {
-        if let ActorActivity::Thought { actor, text } = &activity {
-            if let Some(Entry::ActorActivity(previous)) = self.transcript.last_mut()
-                && let ActorActivity::Thought {
-                    actor: previous_actor,
-                    text: previous_text,
-                } = previous.as_mut()
-                && actor.connection_id == previous_actor.connection_id
-            {
-                *previous_text = text.clone();
-                self.bump_transcript_revision();
-                return;
-            }
-            remove_trailing_thinking(&mut self.transcript);
-            self.transcript
-                .push(Entry::ActorActivity(Box::new(activity)));
-            self.bump_transcript_revision();
-            return;
-        }
         remove_trailing_thinking(&mut self.transcript);
-        if let ActorActivity::Tool { actor, tool_id, .. } = &activity {
-            let key = format!("{}:{tool_id}", actor.connection_id);
-            if let Some(&index) = self.actor_tool_entries.get(&key)
-                && let Some(Entry::ActorActivity(previous)) = self.transcript.get_mut(index)
-                && matches!(previous.as_ref(), ActorActivity::Tool { .. })
-            {
-                **previous = activity;
-                self.bump_transcript_revision();
-                return;
-            }
-            let index = self.transcript.len();
-            self.transcript
-                .push(Entry::ActorActivity(Box::new(activity)));
-            self.actor_tool_entries.insert(key, index);
-            self.bump_transcript_revision();
-            return;
-        }
-
-        if let Some(Entry::ActorActivity(previous)) = self.transcript.last_mut() {
-            match (&activity, previous.as_mut()) {
-                (
-                    ActorActivity::Message { actor, text },
-                    ActorActivity::Message {
-                        actor: previous_actor,
-                        text: previous_text,
-                    },
-                ) if actor.connection_id == previous_actor.connection_id => {
-                    previous_text.push_str(text);
-                    self.bump_transcript_revision();
-                    return;
-                }
-                _ => {}
-            }
-        }
         self.transcript
             .push(Entry::ActorActivity(Box::new(activity)));
         self.bump_transcript_revision();
@@ -2827,13 +2772,10 @@ fn replace_thinking(transcript: &mut Vec<Entry>, kind: EntryKind, text: String) 
 }
 
 fn remove_trailing_thinking(transcript: &mut Vec<Entry>) -> bool {
-    let thinking = match transcript.last() {
-        Some(Entry::AgentThought(_) | Entry::CodeAgentThought(_)) => true,
-        Some(Entry::ActorActivity(activity)) => {
-            matches!(activity.as_ref(), ActorActivity::Thought { .. })
-        }
-        _ => false,
-    };
+    let thinking = matches!(
+        transcript.last(),
+        Some(Entry::AgentThought(_) | Entry::CodeAgentThought(_))
+    );
     if thinking {
         transcript.pop();
         true

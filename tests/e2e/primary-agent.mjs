@@ -2,6 +2,7 @@
 
 import fs from "node:fs";
 import readline from "node:readline";
+import { initializeMcp, spawnMcpServer, verifyWrongTokenIsRejected } from "./mcp-stdio-client.mjs";
 
 const resultPath = process.env.MJ_E2E_PRIMARY_RESULT;
 const logPath = process.env.MJ_E2E_PRIMARY_LOG;
@@ -9,9 +10,10 @@ const instructions = process.env.MJ_E2E_CODE_AGENT_INSTRUCTIONS ?? "Return CODEA
 if (process.env.MJ_E2E_PRIMARY_PID) fs.writeFileSync(process.env.MJ_E2E_PRIMARY_PID, String(process.pid));
 let promptRequestId = null;
 let mcpServer = null;
-let mcpSessionId = null;
+let mcp = null;
 let mcpReady = null;
 let directiveCount = 0;
+process.on("exit", () => mcp?.kill());
 
 function send(message) {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
@@ -19,45 +21,6 @@ function send(message) {
 
 function appendLog(value) {
   if (logPath) fs.appendFileSync(logPath, `${value}\n`);
-}
-
-function mcpHeaders(includeAuth = true, sessionId = null) {
-  const headers = {
-    "content-type": "application/json",
-    accept: "application/json, text/event-stream",
-  };
-  if (includeAuth) {
-    for (const header of mcpServer.headers ?? []) headers[header.name] = header.value;
-  }
-  if (sessionId) headers["mcp-session-id"] = sessionId;
-  return headers;
-}
-
-function parseMcpResponse(text) {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  if (trimmed.startsWith("{")) return JSON.parse(trimmed);
-  const messages = trimmed
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trim())
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
-  return messages.at(-1) ?? null;
-}
-
-async function postMcp(body, { includeAuth = true, sessionId = null } = {}) {
-  const response = await fetch(mcpServer.url, {
-    method: "POST",
-    headers: mcpHeaders(includeAuth, sessionId),
-    body: JSON.stringify(body),
-  });
-  const text = await response.text();
-  return {
-    status: response.status,
-    sessionId: response.headers.get("mcp-session-id") ?? sessionId,
-    message: parseMcpResponse(text),
-  };
 }
 
 function writeResult(value) {
@@ -90,45 +53,14 @@ function updatePrimaryTool(update) {
 }
 
 async function prepareMcp() {
-  const unauthorized = await postMcp(
-    {
-      jsonrpc: "2.0",
-      id: "unauthorized",
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-06-18",
-        capabilities: {},
-        clientInfo: { name: "e2e-primary", version: "1" },
-      },
-    },
-    { includeAuth: false },
-  );
-  if (unauthorized.status !== 401) throw new Error(`unauthenticated MCP returned ${unauthorized.status}`);
+  const unauthorizedRejected = await verifyWrongTokenIsRejected(mcpServer);
+  if (!unauthorizedRejected) throw new Error("proxy served tools despite a wrong bearer token");
 
-  const initialized = await postMcp({
-    jsonrpc: "2.0",
-    id: "initialize",
-    method: "initialize",
-    params: {
-      protocolVersion: "2025-06-18",
-      capabilities: {},
-      clientInfo: { name: "e2e-primary", version: "1" },
-    },
-  });
-  if (initialized.status !== 200 || !initialized.sessionId || !initialized.message?.result) {
-    throw new Error(`MCP initialize failed: ${JSON.stringify(initialized)}`);
-  }
-  mcpSessionId = initialized.sessionId;
-  await postMcp(
-    { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
-    { sessionId: mcpSessionId },
-  );
+  mcp = spawnMcpServer(mcpServer);
+  await initializeMcp(mcp);
 
-  const listed = await postMcp(
-    { jsonrpc: "2.0", id: "tools-list", method: "tools/list", params: {} },
-    { sessionId: mcpSessionId },
-  );
-  const tools = listed.message?.result?.tools ?? [];
+  const listed = await mcp.request({ id: "tools-list", method: "tools/list", params: {} });
+  const tools = listed.result?.tools ?? [];
   const tool = tools.find((candidate) => candidate.name === "code_agent");
   if (!tool
       || !tool.description?.includes("IMPLEMENTATION DELEGATE")
@@ -136,11 +68,11 @@ async function prepareMcp() {
       || !tool.description?.includes("fresh ACP process/session")) {
     throw new Error(`code_agent tool missing or weakly described: ${JSON.stringify(tools)}`);
   }
-  return { unauthorizedStatus: unauthorized.status };
+  return { unauthorizedRejected };
 }
 
 async function callCodeAgent() {
-  const { unauthorizedStatus } = await mcpReady;
+  const { unauthorizedRejected } = await mcpReady;
   const toolSentAt = Date.now();
   appendLog(`tool-call-start:${toolSentAt}`);
   updatePrimaryTool({
@@ -155,21 +87,20 @@ async function callCodeAgent() {
       arguments: { instructions },
     },
   });
-  const called = await postMcp(
+  const called = await mcp.request(
     {
-      jsonrpc: "2.0",
       id: "code-agent-call",
       method: "tools/call",
       params: { name: "code_agent", arguments: { instructions } },
     },
-    { sessionId: mcpSessionId },
+    600000,
   );
   const toolReceivedAt = Date.now();
   appendLog(`tool-call-finish:${toolReceivedAt}`);
-  if (called.status !== 200 || !called.message?.result) {
+  if (!called.result) {
     throw new Error(`MCP tool call failed: ${JSON.stringify(called)}`);
   }
-  const result = called.message.result;
+  const result = called.result;
   updatePrimaryTool({
     sessionUpdate: "tool_call_update",
     toolCallId: "primary-code-agent-call",
@@ -180,7 +111,7 @@ async function callCodeAgent() {
     response: result,
     toolSentAt,
     toolReceivedAt,
-    unauthorizedStatus,
+    unauthorizedRejected,
   });
   const text = result.content?.map((content) => content.text ?? "").join("") ?? "";
   if (result.isError) finishPrimary(`PRIMARY CANCELLED: ${text || "error"}`);
@@ -202,8 +133,10 @@ input.on("line", (line) => {
       result: {
         protocolVersion: 1,
         agentCapabilities: {
+          // No optional MCP transports: the council must reach its servers
+          // through the mandatory stdio transport alone.
           mcpCapabilities: {
-            http: process.env.MJ_E2E_HTTP_UNSUPPORTED !== "1",
+            http: false,
             sse: false,
           },
         },
@@ -214,13 +147,13 @@ input.on("line", (line) => {
   }
   if (message.method === "session/new") {
     const servers = message.params?.mcpServers ?? [];
-    mcpServer = servers.find((server) => server.name === "mj-code-agent" && server.type === "http");
-    if (!mcpServer || !mcpServer.url?.startsWith("http://127.0.0.1:")) {
-      send({ id: message.id, error: { code: -32602, message: "missing loopback HTTP code-agent MCP server" } });
+    mcpServer = servers.find((server) => server.name === "mj-code-agent" && !server.type);
+    if (!mcpServer || typeof mcpServer.command !== "string" || mcpServer.args?.[0] !== "mcp-proxy") {
+      send({ id: message.id, error: { code: -32602, message: "missing stdio code-agent MCP proxy command" } });
       return;
     }
-    if (!(mcpServer.headers ?? []).some((header) => header.name.toLowerCase() === "authorization" && header.value.startsWith("Bearer "))) {
-      send({ id: message.id, error: { code: -32602, message: "missing code-agent bearer header" } });
+    if (!(mcpServer.env ?? []).some((variable) => variable.name === "MJ_MCP_PROXY_TOKEN" && variable.value)) {
+      send({ id: message.id, error: { code: -32602, message: "missing code-agent proxy bearer token env" } });
       return;
     }
     send({ id: message.id, result: { sessionId: "primary-session" } });

@@ -19,7 +19,8 @@ mod headless;
 mod install;
 mod labels;
 mod loki;
-mod mcp;
+mod loopback_mcp;
+mod mcp_proxy;
 mod menu;
 mod model_resolve;
 mod notifications;
@@ -43,7 +44,6 @@ mod term;
 mod text;
 mod theme;
 mod theme_picker;
-mod transcript_bridge;
 mod ui;
 mod version;
 mod worktree;
@@ -171,14 +171,14 @@ enum Commands {
     Resume(ResumeArgs),
     /// Start the local remote-control server.
     Server(ServerArgs),
-    /// Run as a Model Context Protocol (MCP) stdio server.
+    /// Internal: stdio bridge for the council's in-process MCP servers.
     ///
-    /// Exposes mj's ACP-client capabilities as MCP tools (connect to an agent,
-    /// inspect session config, submit prompts, poll progress, answer permission
-    /// requests, cancel, read results) over stdin/stdout. Reuses the top-level
-    /// `--cwd`, `--agent-stderr`, `--fs-max-text-bytes`, and `--debug-file`
-    /// flags. Logs go only to `--debug-file`; stdout carries MCP frames.
-    Mcp(McpArgs),
+    /// Spawned by ACP adapters as an MCP stdio server; forwards every frame to
+    /// the loopback streamable-HTTP endpoint given by `--url`, authenticating
+    /// with the bearer token in `MJ_MCP_PROXY_TOKEN`. Logs go only to
+    /// `--debug-file`; stdout carries MCP frames.
+    #[command(hide = true)]
+    McpProxy(McpProxyArgs),
     /// Debug: dump each configured agent's selectable models as JSON.
     ///
     /// Launches the picker's default-view agents (curated + favorites +
@@ -200,7 +200,11 @@ enum Commands {
 struct VoiceWorkerArgs {}
 
 #[derive(Debug, clap::Args, Default)]
-struct McpArgs {}
+struct McpProxyArgs {
+    /// Loopback streamable-HTTP MCP endpoint to forward to.
+    #[arg(long)]
+    url: String,
+}
 
 #[derive(Debug, clap::Args, Default)]
 struct DumpModelsArgs {
@@ -355,7 +359,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     match &cli.command {
         Some(Commands::Resume(args)) => !args.list,
         Some(Commands::Server(_)) => false,
-        Some(Commands::Mcp(_)) => false,
+        Some(Commands::McpProxy(_)) => false,
         Some(Commands::DumpModels(_)) => false,
         Some(Commands::VoiceWorker(_)) => false,
         None => true,
@@ -404,18 +408,7 @@ async fn main() -> Result<()> {
                 })
                 .await
             }
-            Commands::Mcp(_) => {
-                let workspace_roots =
-                    validate_workspace_roots(&cwd, &top_level_additional_directories)?;
-                mcp::serve(mcp::McpConfig {
-                    default_cwd: cwd,
-                    additional_directories: workspace_roots.additional_directories().to_vec(),
-                    agent_stderr: cli.agent_stderr,
-                    fs_max_text_bytes,
-                    config_path: config::default_config_path(),
-                })
-                .await
-            }
+            Commands::McpProxy(args) => mcp_proxy::serve(&args.url).await,
             Commands::DumpModels(args) => {
                 run_dump_models(args.agent, args.program, args.args).await
             }

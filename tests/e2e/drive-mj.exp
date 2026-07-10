@@ -25,16 +25,8 @@ if {$mode eq "inline-stream" || $mode eq "details"} {
 }
 
 expect {
-    -re {waiting for Codex} {}
+    -re {Waiting for Codex} {}
     timeout { exit 36 }
-}
-
-if {$mode eq "unsupported"} {
-    expect {
-        -re {does not support HTTP MCP servers required for code-agent delegation} { after 500 }
-        timeout { exit 18 }
-    }
-    exit 0
 }
 
 expect {

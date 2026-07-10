@@ -4,6 +4,7 @@
 // Mjolnir selects before the first prompt. It also makes probe sessions cheap.
 import fs from "node:fs";
 import readline from "node:readline";
+import { initializeMcp, spawnMcpServer, verifyWrongTokenIsRejected } from "./mcp-stdio-client.mjs";
 
 const resultPath = process.env.MJ_E2E_PRIMARY_RESULT;
 const primaryLog = process.env.MJ_E2E_PRIMARY_LOG;
@@ -17,12 +18,13 @@ let selectedModel = "gpt-5.6-sol";
 let reasoning = "medium";
 let mcpServer = null;
 let mcpToolName = null;
-let mcpSessionId = null;
+let mcp = null;
 let mcpReady = null;
 let promptRequestId = null;
 let terminalRequestId = null;
 let directiveCount = 0;
 let lokiIntervened = false;
+process.on("exit", () => mcp?.kill());
 
 const modelOptions = [
   ["gpt-5.6-sol", "GPT-5.6-Sol"],
@@ -50,37 +52,13 @@ function isEitri() { return selectedModel === "gpt-5.6-luna"; }
 function isLoki() { return selectedModel === "fable"; }
 function log(value) { append(isEitri() ? nestedLog : primaryLog, value); }
 
-function mcpHeaders(includeAuth = true, sessionId = null) {
-  const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
-  if (includeAuth) for (const header of mcpServer.headers ?? []) headers[header.name] = header.value;
-  if (sessionId) headers["mcp-session-id"] = sessionId;
-  return headers;
-}
-
-function parseMcpResponse(text) {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  if (trimmed.startsWith("{")) return JSON.parse(trimmed);
-  return trimmed.split(/\r?\n/).filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trim()).filter(Boolean)
-    .map((line) => JSON.parse(line)).at(-1) ?? null;
-}
-
-async function postMcp(body, includeAuth = true) {
-  const response = await fetch(mcpServer.url, { method: "POST", headers: mcpHeaders(includeAuth, mcpSessionId), body: JSON.stringify(body) });
-  const message = parseMcpResponse(await response.text());
-  mcpSessionId = response.headers.get("mcp-session-id") ?? mcpSessionId;
-  return { status: response.status, message };
-}
-
 async function prepareMcp() {
-  const unauthorized = await postMcp({ jsonrpc: "2.0", id: "bad", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } }, false);
-  const initialized = await postMcp({ jsonrpc: "2.0", id: "init", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } });
-  if (initialized.status !== 200 || !mcpSessionId) throw new Error("MCP initialize failed");
-  await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
-  const listed = await postMcp({ jsonrpc: "2.0", id: "list", method: "tools/list", params: {} });
-  if (!(listed.message?.result?.tools ?? []).some((tool) => tool.name === mcpToolName)) throw new Error(`${mcpToolName} missing`);
-  return unauthorized.status;
+  const unauthorizedRejected = await verifyWrongTokenIsRejected(mcpServer);
+  mcp = spawnMcpServer(mcpServer);
+  await initializeMcp(mcp);
+  const listed = await mcp.request({ id: "list", method: "tools/list", params: {} });
+  if (!(listed.result?.tools ?? []).some((tool) => tool.name === mcpToolName)) throw new Error(`${mcpToolName} missing`);
+  return unauthorizedRejected;
 }
 
 function finishPrimary(text) {
@@ -101,12 +79,12 @@ function thorReviewResult() {
 }
 
 async function callEitri() {
-  const unauthorizedStatus = await mcpReady;
+  const unauthorizedRejected = await mcpReady;
   const toolSentAt = Date.now();
-  const called = await postMcp({ jsonrpc: "2.0", id: "call", method: "tools/call", params: { name: "code_agent", arguments: { instructions } } });
+  const called = await mcp.request({ id: "call", method: "tools/call", params: { name: "code_agent", arguments: { instructions } } }, 600000);
   const toolReceivedAt = Date.now();
-  const response = called.message?.result;
-  if (resultPath) fs.writeFileSync(resultPath, JSON.stringify({ response, toolSentAt, toolReceivedAt, unauthorizedStatus }));
+  const response = called.result;
+  if (resultPath) fs.writeFileSync(resultPath, JSON.stringify({ response, toolSentAt, toolReceivedAt, unauthorizedRejected }));
   const text = response?.content?.map((item) => item.text ?? "").join("") ?? "";
   finishPrimary(response?.isError ? `PRIMARY CANCELLED: ${text}` : `PRIMARY RECEIVED: ${text}`);
 }
@@ -138,8 +116,8 @@ async function runLokiTurn(text) {
   }
   if (critique) {
     await mcpReady;
-    const advised = await postMcp({ jsonrpc: "2.0", id: `advise-${Date.now()}`, method: "tools/call", params: { name: "advise", arguments: { note: critique } } });
-    append(process.env.MJ_E2E_LOKI_LOG, `advise:${critique}:${JSON.stringify(advised.message?.result ?? advised.message)}`);
+    const advised = await mcp.request({ id: `advise-${Date.now()}`, method: "tools/call", params: { name: "advise", arguments: { note: critique } } });
+    append(process.env.MJ_E2E_LOKI_LOG, `advise:${critique}:${JSON.stringify(advised.result ?? advised)}`);
   } else {
     append(process.env.MJ_E2E_LOKI_LOG, "no-advice");
   }
@@ -152,9 +130,15 @@ input.on("close", () => process.exit(0));
 input.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
-    send({ id: message.id, result: { protocolVersion: 1, agentCapabilities: { mcpCapabilities: { http: process.env.MJ_E2E_HTTP_UNSUPPORTED !== "1", sse: false } }, agentInfo: { name: "council-fixture", version: "1" } } });
+    // Advertising no optional MCP transports proves the council only needs
+    // the mandatory stdio one.
+    send({ id: message.id, result: { protocolVersion: 1, agentCapabilities: { mcpCapabilities: { http: false, sse: false } }, agentInfo: { name: "council-fixture", version: "1" } } });
   } else if (message.method === "session/new") {
     mcpServer = (message.params?.mcpServers ?? []).find((server) => server.name === "mj-code-agent" || server.name === "mj-loki-advisor");
+    if (mcpServer && (mcpServer.type || mcpServer.args?.[0] !== "mcp-proxy")) {
+      send({ id: message.id, error: { code: -32602, message: "council MCP server must be a stdio mcp-proxy command" } });
+      return;
+    }
     mcpToolName = mcpServer?.name === "mj-loki-advisor" ? "advise" : "code_agent";
     send({ id: message.id, result: { sessionId: "fixture-session", configOptions: configOptions() } });
     if (mcpServer) mcpReady = prepareMcp();

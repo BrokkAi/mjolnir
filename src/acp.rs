@@ -325,9 +325,6 @@ pub enum LaunchError {
     UnsupportedProtocolVersion { negotiated: ProtocolVersion },
     /// The user requested a lifecycle method the agent did not advertise.
     UnsupportedCapability { capability: &'static str },
-    /// Interactive code-agent delegation requires the primary agent to accept
-    /// client-provided Streamable HTTP MCP servers.
-    CodeAgentHttpUnsupported,
     /// `session/new` failed for some other reason (bad cwd, agent-side
     /// crash, ...).
     SessionCreateFailed {
@@ -381,11 +378,6 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "agent does not advertise ACP capability {capability}\n\
                  hint: choose an agent that supports {capability}, or avoid the command that requires it"
-            ),
-            LaunchError::CodeAgentHttpUnsupported => write!(
-                f,
-                "configured ACP agent does not support HTTP MCP servers required for code-agent delegation\n\
-                 hint: update or choose an ACP adapter that advertises mcpCapabilities.http"
             ),
             LaunchError::SessionCreateFailed { source } => write!(
                 f,
@@ -1308,10 +1300,6 @@ where
     let notif_session_state = session_state.clone();
     let primary_updates_suppressed = Arc::new(AtomicBool::new(false));
     let notif_primary_updates_suppressed = primary_updates_suppressed.clone();
-    let transcript_bridge = Arc::new(Mutex::new(
-        crate::transcript_bridge::TranscriptBridge::default(),
-    ));
-    let notif_transcript_bridge = transcript_bridge.clone();
     let terminal_metadata_bridge = Arc::new(Mutex::new(TerminalMetadataBridge::default()));
     let notif_terminal_metadata_bridge = terminal_metadata_bridge.clone();
     let context_usage = Arc::new(ContextUsageTracker::default());
@@ -1344,13 +1332,6 @@ where
                     if !notif_primary_updates_suppressed.load(Ordering::Acquire) {
                         for snapshot in terminal_snapshots {
                             let _ = notif_ui_tx.send(UiEvent::TerminalOutput(snapshot));
-                        }
-                        for activity in notif_transcript_bridge
-                            .lock()
-                            .await
-                            .observe_session_update(&notification.update)
-                        {
-                            let _ = notif_ui_tx.send(UiEvent::ActorActivity(activity));
                         }
                         let _ = notif_ui_tx.send(UiEvent::SessionUpdate(notification.update));
                     }
@@ -1591,30 +1572,19 @@ async fn drive_session(
         emit_fatal(ui_tx, &fatal_emitted, text.clone());
         return Err(anyhow::anyhow!(text));
     }
-    let code_agent_http = if let Some(config) = code_agent {
-        if !init_resp.agent_capabilities.mcp_capabilities.http {
-            let launch_err = LaunchError::CodeAgentHttpUnsupported;
-            let text = launch_err.to_string();
-            emit_fatal(ui_tx, &fatal_emitted, text.clone());
-            return Err(anyhow::anyhow!(text));
-        }
+    let code_agent_server = if let Some(config) = code_agent {
         let context = code_agent::RunContext {
             cwd: cwd.clone(),
             additional_directories: additional_directories.clone(),
             fs_max_text_bytes,
             access_mode,
         };
-        match code_agent::HttpServer::start(
-            config,
-            context,
-            ui_tx.clone(),
-            code_agent_controller.clone(),
-        )
-        .await
+        match code_agent::start_server(config, context, ui_tx.clone(), code_agent_controller.clone())
+            .await
         {
             Ok(server) => Some(server),
             Err(error) => {
-                let text = format!("could not start code-agent HTTP MCP server: {error:#}");
+                let text = format!("could not start code-agent MCP server: {error:#}");
                 emit_fatal(ui_tx, &fatal_emitted, text.clone());
                 return Err(anyhow::anyhow!(text));
             }
@@ -1622,7 +1592,7 @@ async fn drive_session(
     } else {
         None
     };
-    if let Some(server) = code_agent_http.as_ref() {
+    if let Some(server) = code_agent_server.as_ref() {
         mcp_servers.push(server.advertised().clone());
     }
     let connected_fields = ConnectedEventFields {
@@ -1748,16 +1718,20 @@ async fn drive_session(
         emit_fatal(ui_tx, &fatal_emitted, text.clone());
         return Err(anyhow::anyhow!(text));
     }
-    if let Some(server) = &code_agent_http
+    if let Some(server) = &code_agent_server
         && let Err(error) = server
-            .wait_until_tools_listed(Duration::from_secs(30))
+            .wait_until_tools_listed(
+                Duration::from_secs(30),
+                "primary agent timed out loading the code_agent MCP tool",
+                "code-agent MCP server closed before tools/list",
+            )
             .await
     {
         let text = format!("primary agent did not load the injected code-agent MCP tool: {error}");
         emit_fatal(ui_tx, &fatal_emitted, text.clone());
         return Err(anyhow::anyhow!(text));
     }
-    if code_agent_http.is_some() {
+    if code_agent_server.is_some() {
         context_usage.reset_for_session();
         if let Err(error) =
             send_primary_session_directive(&conn, &session_id, &primary_updates_suppressed).await
@@ -1802,7 +1776,7 @@ async fn drive_session(
                     &session_config,
                 );
                 session_state.clear_permissions_cancelled(&session_id).await;
-                if code_agent_http.is_some()
+                if code_agent_server.is_some()
                     && context_usage.take_directive_needed()
                     && let Err(error) = send_primary_session_directive(
                         &conn,
@@ -1881,7 +1855,7 @@ async fn drive_session(
                 {
                     break;
                 }
-                if code_agent_http.is_some() {
+                if code_agent_server.is_some() {
                     context_usage.reset_for_session();
                     if let Err(error) = send_primary_session_directive(
                         &conn,
@@ -1969,7 +1943,7 @@ async fn drive_session(
                 {
                     Ok(switched_session_id) => {
                         session_id = switched_session_id;
-                        if code_agent_http.is_some() {
+                        if code_agent_server.is_some() {
                             context_usage.reset_for_session();
                             if let Err(error) = send_primary_session_directive(
                                 &conn,
@@ -8648,10 +8622,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn missing_http_mcp_capability_has_actionable_error() {
-        let message = LaunchError::CodeAgentHttpUnsupported.to_string();
-        assert!(message.contains("mcpCapabilities.http"));
-        assert!(message.contains("code-agent delegation"));
-    }
 }
