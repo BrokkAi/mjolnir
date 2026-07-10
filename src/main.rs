@@ -178,17 +178,7 @@ enum Commands {
     /// key. Used to verify model-score matching against real agent output.
     #[command(hide = true)]
     DumpModels(DumpModelsArgs),
-    /// Internal: voice dictation worker spawned by the TUI.
-    ///
-    /// Runs the native speech pipeline in its own process so a crash in the
-    /// speech stack (incompatible system libraries, corrupt models) cannot
-    /// abort the TUI. Speaks JSON-line events on stdout; stdin EOF cancels.
-    #[command(hide = true)]
-    VoiceWorker(VoiceWorkerArgs),
 }
-
-#[derive(Debug, clap::Args, Default)]
-struct VoiceWorkerArgs {}
 
 #[derive(Debug, clap::Args, Default)]
 struct McpArgs {}
@@ -348,7 +338,6 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
         Some(Commands::Server(_)) => false,
         Some(Commands::Mcp(_)) => false,
         Some(Commands::DumpModels(_)) => false,
-        Some(Commands::VoiceWorker(_)) => false,
         None => true,
     }
 }
@@ -408,14 +397,6 @@ async fn main() -> Result<()> {
             }
             Commands::DumpModels(args) => {
                 run_dump_models(args.agent, args.program, args.args).await
-            }
-            Commands::VoiceWorker(_) => {
-                // The pipeline is fully blocking (native model load, mic
-                // capture loop); keep it off the async runtime's core thread.
-                let code = tokio::task::spawn_blocking(speech::run_voice_worker)
-                    .await
-                    .context("voice worker task")?;
-                std::process::exit(code);
             }
         };
     }

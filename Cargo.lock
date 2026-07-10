@@ -453,6 +453,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-voice-worker"
+version = "1.0.2"
+dependencies = [
+ "anyhow",
+ "bzip2 0.6.1",
+ "cpal",
+ "dirs",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sherpa-onnx",
+ "tar",
+ "tempfile",
+]
+
+[[package]]
 name = "brokk-mjolnir"
 version = "1.0.2"
 dependencies = [
@@ -465,7 +481,6 @@ dependencies = [
  "bzip2 0.6.1",
  "chrono",
  "clap",
- "cpal",
  "crossterm",
  "dirs",
  "flate2",
@@ -490,7 +505,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "shell-words",
- "sherpa-onnx",
  "tar",
  "tempfile",
  "time",

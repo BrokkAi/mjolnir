@@ -36,6 +36,16 @@ The installer writes to `~/.local/bin` by default and offers to add that
 directory to your shell profile when needed. Set `INSTALL_DIR` or
 `MJOLNIR_INSTALL_DIR` to install somewhere else.
 
+Desktop users can instead install both executables from crates.io. The worker
+must be installed with `mj` for Ctrl-R dictation to be available:
+
+```bash
+cargo install --locked brokk-mjolnir brokk-mj-voice-worker
+```
+
+Installing only `brokk-mjolnir` is supported, but leaves voice dictation
+disabled. Android installs should omit `brokk-mj-voice-worker`.
+
 Then open a repo and run `mj`. The short binary name is intentional; nobody
 wants to type `mjolnir` every time they ask an agent to look at a diff.
 
@@ -197,7 +207,8 @@ Keyboard basics:
 - `Ctrl-C`: cancel an in-flight prompt; when idle with an empty input, quit.
 - `Ctrl-D`: quit when the input is empty.
 - `🎙 Ctrl-R` (non-Android): start/stop microphone dictation into the prompt.
-  Dictation uses in-process sherpa-onnx speech recognition with Silero VAD and
+  Official desktop releases include the `mj-voice-worker` sidecar, which uses
+  sherpa-onnx speech recognition with Silero VAD and
   the multilingual Parakeet TDT v3 model; the model (~0.7 GB) is downloaded and
   cached under `~/.cache/mj/voice/` on first use.
 
@@ -217,13 +228,21 @@ the input.
 
 ## Development
 
-You only need Rust when building from source or contributing. On Linux,
-microphone dictation links against ALSA, so install its development headers
-first (e.g. `sudo apt-get install libasound2-dev` on Debian/Ubuntu).
+You only need Rust when building from source or contributing. Ordinary `mj`
+builds do not compile the native speech stack. To build the optional voice
+worker on Linux, install the ALSA development headers first (e.g.
+`sudo apt-get install libasound2-dev` on Debian/Ubuntu).
 
 ```bash
 cargo build --release
 ./target/release/mj
+```
+
+For local dictation development, build the sidecar into the same target
+directory:
+
+```bash
+cargo build --release -p brokk-mj-voice-worker
 ```
 
 Use the same checks as CI before submitting changes:

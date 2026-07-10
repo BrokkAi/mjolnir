@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 
 OWNER="${MJOLNIR_GITHUB_OWNER:-BrokkAi}"
 INSTALL_DIR="${MJOLNIR_INSTALL_DIR:-${INSTALL_DIR:-$HOME/.local/bin}}"
@@ -437,7 +437,8 @@ install_from_asset() {
   local repo="$2"
   local bin_name="$3"
   local version="$4"
-  shift 4
+  local companion_name="$5"
+  shift 5
   local release_file="${TMP_DIR}/${repo}-release.json"
   local tag
   local asset_url
@@ -458,7 +459,7 @@ install_from_asset() {
 
   # Skip download when the stored archive checksum matches the remote one
   expected="$(fetch_checksum "$release_file" "$asset_name" || true)"
-  if [[ -n "$expected" && -f "$dest" ]]; then
+  if [[ -n "$expected" && -f "$dest" && ( -z "$companion_name" || -f "${INSTALL_DIR}/${companion_name}" ) ]]; then
     local stored_checksum_file
     stored_checksum_file="$(stored_checksum_path "$bin_name")"
     if [[ -f "$stored_checksum_file" ]]; then
@@ -492,6 +493,10 @@ install_from_asset() {
       strip_quarantine "$extract_dir"
       src="$(find_extracted_binary "$extract_dir" "$bin_name")"
       install_binary "$src" "$bin_name"
+      if [[ -n "$companion_name" ]]; then
+        src="$(find_extracted_binary "$extract_dir" "$companion_name")"
+        install_binary "$src" "$companion_name"
+      fi
       ;;
     *.zip)
       require_command unzip
@@ -500,6 +505,10 @@ install_from_asset() {
       strip_quarantine "$extract_dir"
       src="$(find_extracted_binary "$extract_dir" "$bin_name")"
       install_binary "$src" "$bin_name"
+      if [[ -n "$companion_name" ]]; then
+        src="$(find_extracted_binary "$extract_dir" "$companion_name")"
+        install_binary "$src" "$companion_name"
+      fi
       ;;
     *)
       install_binary "$asset_file" "$bin_name"
@@ -515,7 +524,7 @@ install_bifrost() {
   fi
   patterns+=("^bifrost-.*-${RUST_TARGET}[.]tar[.]gz$")
 
-  install_from_asset "bifrost" "bifrost" "bifrost" "${BIFROST_VERSION:-}" "${patterns[@]}"
+  install_from_asset "bifrost" "bifrost" "bifrost" "${BIFROST_VERSION:-}" "" "${patterns[@]}"
 }
 
 install_mjolnir() {
@@ -526,7 +535,11 @@ install_mjolnir() {
   fi
   patterns+=("^brokk-mjolnir-.*-${RUST_TARGET}[.]tar[.]gz$")
 
-  install_from_asset "mjolnir" "mjolnir" "mj" "${MJOLNIR_VERSION:-}" "${patterns[@]}"
+  local companion="mj-voice-worker"
+  if [[ "$OS_FAMILY" == "android" ]]; then
+    companion=""
+  fi
+  install_from_asset "mjolnir" "mjolnir" "mj" "${MJOLNIR_VERSION:-}" "$companion" "${patterns[@]}"
 }
 
 main() {

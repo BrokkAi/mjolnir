@@ -52,6 +52,28 @@ jobs:
     - name: Run tests
       run: cargo test
 
+  voice-worker:
+    name: Voice worker (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+
+    - name: Install Linux audio dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
+
+    - name: Check voice worker
+      run: cargo clippy -p brokk-mj-voice-worker --all-targets -- -D warnings
+
+    - name: Test voice worker
+      run: cargo test -p brokk-mj-voice-worker
+
   android:
     name: Android aarch64-linux-android
     runs-on: ubuntu-latest
