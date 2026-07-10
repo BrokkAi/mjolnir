@@ -1,5 +1,5 @@
 {
-  "_note": "Offline seed of the LMArena overall leaderboard (Elo), compiled into the binary so the model picker shows scores before the first successful fetch and fully offline. Refreshed at runtime from the official HuggingFace parquet (see scores.rs); live data is authoritative. Values are the real 'overall' board as published on the date below.",
+  "_note": "Offline seed of the LMArena overall leaderboard (Elo), compiled into the binary so the model picker shows scores before the first successful fetch and fully offline. Refreshed at runtime from the official Hugging Face dataset viewer JSON API (see scores.rs); live data is authoritative. Values are the real 'overall' board as published on the date below.",
   "as_of": "2026-06-25",
   "models": [
     { "name": "claude-opus-4-6", "vendor": "anthropic", "elo": 1498, "votes": 55027 },

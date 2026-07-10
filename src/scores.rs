@@ -7,10 +7,10 @@
 //! → stale cache → **bundled snapshot** compiled into the binary, so the picker
 //! always has *something* to show.
 //!
-//! The runtime source is the **official LMArena leaderboard dataset** on
-//! HuggingFace ([`DEFAULT_SCORES_URL`]) — a parquet file fetched over plain
-//! HTTPS, no auth, redistributable. It is parsed to our small JSON schema and
-//! that is what gets cached.
+//! The runtime source is the **official LMArena leaderboard dataset** through
+//! Hugging Face's dataset viewer JSON API ([`DEFAULT_SCORES_URL`]). The API
+//! filters the upstream dataset to the overall board and serves bounded pages;
+//! mj normalizes those rows to the small JSON schema used by the cache.
 //!
 //! Scores are joined onto an agent's selectable models via [`crate::model_resolve`]:
 //! each leaderboard row and each model option are reduced to the same normalized
@@ -22,7 +22,6 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use arrow_array::{Array, Float64Array, RecordBatch, StringArray};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -33,10 +32,11 @@ use crate::model_resolve::{self, MatchKey, MatchSpecificity};
 /// LMArena within ~24–48h; weekly polling is ample for "new models show up".
 pub const CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Official LMArena leaderboard dataset (HuggingFace), `text` subset / `latest`
-/// split — the overall Chatbot Arena board. Parquet over HTTPS, no auth,
-/// redistributable. Overridable via config (`[scores] url = …`).
-pub const DEFAULT_SCORES_URL: &str = "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset/resolve/main/text/latest-00000-of-00001.parquet";
+/// Official LMArena leaderboard dataset, `text` subset / `latest` split,
+/// filtered to the overall Chatbot Arena board by Hugging Face's dataset
+/// viewer. JSON over HTTPS, no auth, redistributable. Overridable with a URL
+/// serving mj's normalized [`ScoresFile`] schema (`[scores] url = …`).
+pub const DEFAULT_SCORES_URL: &str = "https://datasets-server.huggingface.co/filter?dataset=lmarena-ai%2Fleaderboard-dataset&config=text&split=latest&where=%22category%22%3D%27overall%27";
 
 /// The leaderboard category we score against (the dataset has one row per model
 /// per category; `overall` is the headline Arena board).
@@ -51,6 +51,7 @@ const PROVISIONAL_VOTE_THRESHOLD: u64 = 3000;
 const MAX_SCORES_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SCORE_ROWS: usize = 20_000;
 const MAX_SCORE_FIELD_BYTES: usize = 256;
+const DATASET_PAGE_ROWS: usize = 100;
 
 /// Bundled fallback so scores render offline / before the first successful fetch.
 const BUNDLED_SNAPSHOT: &str = include_str!("scores_snapshot.json");
@@ -82,9 +83,9 @@ pub struct ModelScore {
     pub provisional: bool,
 }
 
-/// Default on-disk cache location. The `-v2` suffix versions the source/schema
-/// (parquet leaderboard); bumping it abandons caches written by an older build
-/// so a format change can't be masked by a still-fresh stale cache.
+/// Default on-disk cache location. The `-v2` suffix versions the normalized
+/// JSON schema; the live transport can change without invalidating compatible
+/// cached score rows.
 pub fn default_cache_path() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from(".cache"))
@@ -167,36 +168,35 @@ pub async fn load_scores_file(cache_path: &Path, ttl: Duration, url: &str) -> Sc
     }
 }
 
-/// Fetch and parse the leaderboard. The official source is parquet; if a config
-/// override points at our own JSON schema instead, accept that too.
+/// Fetch and parse the leaderboard. The official URL uses the paginated
+/// Hugging Face dataset API; configured overrides serve mj's normalized JSON.
 async fn fetch_leaderboard(url: &str) -> Result<ScoresFile> {
-    let body = fetch_bytes(url).await?;
-    let parquet_body = body.clone();
-    match tokio::task::spawn_blocking(move || parse_parquet(parquet_body)).await {
-        Ok(Ok(file)) => return Ok(file),
-        Ok(Err(_)) => {}
-        Err(e) => anyhow::bail!("scores parquet parser task failed: {e}"),
+    let client = scores_http_client()?;
+    if url == DEFAULT_SCORES_URL {
+        return fetch_dataset_leaderboard(&client, url).await;
     }
-    // Fallback: a URL serving our normalized JSON schema directly.
-    let text = std::str::from_utf8(&body).context("scores body not parquet and not utf-8")?;
+
+    let body = fetch_bytes(&client, Url::parse(url).context("parse scores URL")?).await?;
+    let text = std::str::from_utf8(&body).context("scores JSON body is not utf-8")?;
     parse_scores(text)
 }
 
-/// GET the raw bytes of a leaderboard file (async; reqwest is already a dep).
-async fn fetch_bytes(url: &str) -> Result<bytes::Bytes> {
-    let parsed =
-        Url::parse(url).with_context(|| format!("parse scores URL {}", redact_url(url)))?;
-    anyhow::ensure!(
-        matches!(parsed.scheme(), "http" | "https"),
-        "scores URL must use http or https"
-    );
-    let safe_url = redact_url(url);
-    let client = reqwest::Client::builder()
+fn scores_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::limited(5))
         .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
         .build()
-        .context("build http client")?;
+        .context("build scores http client")
+}
+
+/// GET one bounded JSON response (async; reqwest is already a dependency).
+async fn fetch_bytes(client: &reqwest::Client, parsed: Url) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https"),
+        "scores URL must use http or https"
+    );
+    let safe_url = redact_url(parsed.as_str());
     let resp = client
         .get(parsed)
         .send()
@@ -211,7 +211,7 @@ async fn fetch_bytes(url: &str) -> Result<bytes::Bytes> {
         );
     }
 
-    let mut body = bytes::BytesMut::new();
+    let mut body = Vec::new();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.with_context(|| format!("read scores body from {safe_url}"))?;
@@ -221,7 +221,144 @@ async fn fetch_bytes(url: &str) -> Result<bytes::Bytes> {
         );
         body.extend_from_slice(&chunk);
     }
-    Ok(body.freeze())
+    Ok(body)
+}
+
+#[derive(Debug, Deserialize)]
+struct DatasetRowsPage {
+    rows: Vec<DatasetRowEnvelope>,
+    num_rows_total: usize,
+    #[serde(default)]
+    partial: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DatasetRowEnvelope {
+    row: DatasetScoreRow,
+}
+
+#[derive(Debug, Deserialize)]
+struct DatasetScoreRow {
+    #[serde(default)]
+    model_name: Option<String>,
+    #[serde(default)]
+    organization: Option<String>,
+    rating: Option<f64>,
+    vote_count: Option<f64>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    leaderboard_publish_date: Option<String>,
+}
+
+async fn fetch_dataset_leaderboard(client: &reqwest::Client, base_url: &str) -> Result<ScoresFile> {
+    let mut offset = 0;
+    let mut total = None;
+    let mut models = Vec::new();
+    let mut as_of = String::new();
+
+    loop {
+        let page_url = dataset_page_url(base_url, offset)?;
+        let body = fetch_bytes(client, page_url).await?;
+        let page = parse_dataset_page(&body, offset)?;
+        anyhow::ensure!(
+            page.num_rows_total <= MAX_SCORE_ROWS,
+            "scores dataset has more than {MAX_SCORE_ROWS} rows"
+        );
+        if let Some(expected) = total {
+            anyhow::ensure!(
+                page.num_rows_total == expected,
+                "scores dataset size changed during pagination"
+            );
+        } else {
+            total = Some(page.num_rows_total);
+        }
+
+        let page_len = page.rows.len();
+        append_dataset_rows(page.rows, &mut models, &mut as_of)?;
+        offset += page_len;
+        if offset >= page.num_rows_total {
+            break;
+        }
+        anyhow::ensure!(page_len != 0, "scores dataset pagination made no progress");
+    }
+
+    anyhow::ensure!(!models.is_empty(), "scores dataset has no overall models");
+    Ok(ScoresFile { as_of, models })
+}
+
+fn parse_dataset_page(body: &[u8], offset: usize) -> Result<DatasetRowsPage> {
+    let page: DatasetRowsPage = serde_json::from_slice(body)
+        .with_context(|| format!("parse scores dataset page at offset {offset}"))?;
+    anyhow::ensure!(
+        !page.partial,
+        "scores dataset API returned a partial result"
+    );
+    Ok(page)
+}
+
+fn dataset_page_url(base_url: &str, offset: usize) -> Result<Url> {
+    let mut url = Url::parse(base_url)
+        .with_context(|| format!("parse scores URL {}", redact_url(base_url)))?;
+    let retained = url
+        .query_pairs()
+        .filter(|(key, _)| key != "offset" && key != "length")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    url.set_query(None);
+    url.query_pairs_mut()
+        .extend_pairs(retained)
+        .append_pair("offset", &offset.to_string())
+        .append_pair("length", &DATASET_PAGE_ROWS.to_string());
+    Ok(url)
+}
+
+fn append_dataset_rows(
+    rows: Vec<DatasetRowEnvelope>,
+    models: &mut Vec<ScoreRow>,
+    as_of: &mut String,
+) -> Result<()> {
+    for envelope in rows {
+        let row = envelope.row;
+        if row.category.as_deref() != Some(OVERALL_CATEGORY) {
+            continue;
+        }
+        let Some(name) = row.model_name.filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        let vendor = row.organization.unwrap_or_default();
+        let Some(rating) = row.rating.filter(|value| value.is_finite()) else {
+            continue;
+        };
+        anyhow::ensure!(
+            name.len() <= MAX_SCORE_FIELD_BYTES,
+            "scores dataset model name too large"
+        );
+        anyhow::ensure!(
+            vendor.len() <= MAX_SCORE_FIELD_BYTES,
+            "scores dataset vendor too large"
+        );
+        anyhow::ensure!(
+            models.len() < MAX_SCORE_ROWS,
+            "scores dataset has more than {MAX_SCORE_ROWS} rows"
+        );
+        if let Some(publish_date) = row.leaderboard_publish_date
+            && publish_date > *as_of
+        {
+            *as_of = publish_date;
+        }
+        models.push(ScoreRow {
+            name,
+            vendor,
+            elo: rating.round().max(0.0) as u32,
+            votes: row
+                .vote_count
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.0)
+                .max(0.0) as u64,
+        });
+    }
+    Ok(())
 }
 
 fn redact_url(url: &str) -> String {
@@ -233,93 +370,6 @@ fn redact_url(url: &str) -> String {
     parsed.set_query(None);
     parsed.set_fragment(None);
     parsed.to_string()
-}
-
-/// Parse the official LMArena parquet, keeping only the `overall` category and
-/// mapping `model_name` / `organization` / `rating` / `vote_count`.
-fn parse_parquet(body: bytes::Bytes) -> Result<ScoresFile> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-    let reader = ParquetRecordBatchReaderBuilder::try_new(body)
-        .context("open scores parquet")?
-        .build()
-        .context("build parquet reader")?;
-
-    let mut models = Vec::new();
-    for batch in reader {
-        let batch = batch.context("read parquet batch")?;
-        let names = col_str(&batch, "model_name")?;
-        let orgs = col_str(&batch, "organization")?;
-        let cats = col_str(&batch, "category")?;
-        let ratings = col_f64(&batch, "rating")?;
-        let votes = col_f64(&batch, "vote_count")?;
-        for i in 0..batch.num_rows() {
-            if cats.is_null(i) || cats.value(i) != OVERALL_CATEGORY {
-                continue;
-            }
-            if names.is_null(i) || ratings.is_null(i) {
-                continue;
-            }
-            let name = names.value(i).to_string();
-            if name.is_empty() {
-                continue;
-            }
-            anyhow::ensure!(
-                name.len() <= MAX_SCORE_FIELD_BYTES,
-                "scores parquet model name too large"
-            );
-            let vendor = (!orgs.is_null(i)).then(|| orgs.value(i).to_string());
-            if let Some(vendor) = &vendor {
-                anyhow::ensure!(
-                    vendor.len() <= MAX_SCORE_FIELD_BYTES,
-                    "scores parquet vendor too large"
-                );
-            }
-            let vote_count = if votes.is_null(i) {
-                0.0
-            } else {
-                votes.value(i)
-            };
-            anyhow::ensure!(
-                models.len() < MAX_SCORE_ROWS,
-                "scores parquet has more than {MAX_SCORE_ROWS} rows"
-            );
-            models.push(ScoreRow {
-                name,
-                vendor: vendor.unwrap_or_default(),
-                elo: ratings.value(i).round().max(0.0) as u32,
-                votes: vote_count.max(0.0) as u64,
-            });
-        }
-    }
-    anyhow::ensure!(
-        !models.is_empty(),
-        "no `{OVERALL_CATEGORY}` rows in parquet"
-    );
-    Ok(ScoresFile {
-        as_of: String::new(),
-        models,
-    })
-}
-
-fn col_str<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
-    let col = batch
-        .column_by_name(name)
-        .with_context(|| format!("scores parquet missing column `{name}`"))?;
-    (**col)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .with_context(|| format!("scores parquet column `{name}` is not Utf8"))
-}
-
-fn col_f64<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Float64Array> {
-    let col = batch
-        .column_by_name(name)
-        .with_context(|| format!("scores parquet missing column `{name}`"))?;
-    (**col)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .with_context(|| format!("scores parquet column `{name}` is not Float64"))
 }
 
 /// Parse our normalized JSON schema (used for the on-disk cache, the bundled
@@ -690,65 +740,79 @@ mod tests {
     #[test]
     fn redacted_url_removes_credentials_query_and_fragment() {
         assert_eq!(
-            redact_url("https://user:secret@example.com/private/feed.parquet?token=abc#frag"),
-            "https://example.com/private/feed.parquet"
+            redact_url("https://user:secret@example.com/private/scores.json?token=abc#frag"),
+            "https://example.com/private/scores.json"
         );
     }
 
     #[test]
-    fn parse_parquet_keeps_overall_and_maps_columns() {
-        use arrow_schema::{DataType, Field, Schema};
-        use parquet::arrow::ArrowWriter;
-        use std::sync::Arc;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("model_name", DataType::Utf8, false),
-            Field::new("organization", DataType::Utf8, true),
-            Field::new("rating", DataType::Float64, false),
-            Field::new("vote_count", DataType::Float64, false),
-            Field::new("category", DataType::Utf8, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec![
-                    "claude-opus-4-8",
-                    "claude-opus-4-8",
-                    "glm-5",
-                ])),
-                Arc::new(StringArray::from(vec![
-                    Some("anthropic"),
-                    Some("anthropic"),
-                    Some("zai"),
-                ])),
-                Arc::new(Float64Array::from(vec![1456.4, 999.0, 1446.0])),
-                Arc::new(Float64Array::from(vec![19038.0, 5.0, 26794.0])),
-                Arc::new(StringArray::from(vec!["overall", "chinese", "overall"])),
+    fn dataset_rows_keep_overall_models_and_map_fields() {
+        let body = r#"{
+            "rows": [
+                {"row":{"model_name":"claude-opus-4-8","organization":"anthropic","rating":1456.4,"vote_count":19038.0,"category":"overall","leaderboard_publish_date":"2026-07-02"}},
+                {"row":{"model_name":"claude-opus-4-8","organization":"anthropic","rating":999.0,"vote_count":5.0,"category":"chinese","leaderboard_publish_date":"2026-07-02"}},
+                {"row":{"model_name":"glm-5","organization":"zai","rating":1446.0,"vote_count":26794.0,"category":"overall","leaderboard_publish_date":"2026-06-25"}}
             ],
-        )
-        .unwrap();
+            "num_rows_total": 3,
+            "partial": false
+        }"#;
+        let page: DatasetRowsPage = serde_json::from_str(body).expect("dataset page");
+        let mut models = Vec::new();
+        let mut as_of = String::new();
+        append_dataset_rows(page.rows, &mut models, &mut as_of).expect("map rows");
 
-        let mut buf = Vec::new();
-        {
-            let mut w = ArrowWriter::try_new(&mut buf, schema, None).unwrap();
-            w.write(&batch).unwrap();
-            w.close().unwrap();
-        }
-
-        let file = parse_parquet(bytes::Bytes::from(buf)).expect("parse parquet");
-        // Only the two `overall` rows survive; the `chinese` row is dropped.
-        assert_eq!(file.models.len(), 2);
-        let opus = file
-            .models
+        assert_eq!(models.len(), 2);
+        assert_eq!(as_of, "2026-07-02");
+        let opus = models
             .iter()
-            .find(|m| m.name == "claude-opus-4-8")
+            .find(|model| model.name == "claude-opus-4-8")
             .unwrap();
-        assert_eq!(opus.elo, 1456); // 1456.4 rounded
+        assert_eq!(opus.elo, 1456);
         assert_eq!(opus.vendor, "anthropic");
         assert_eq!(opus.votes, 19038);
-        // And the parsed parquet resolves end-to-end for an Anvil id.
+
+        let file = ScoresFile { as_of, models };
         let cat = ScoreCatalog::build(&file, HashMap::new(), true);
         let id = "bedrock::us.anthropic.claude-opus-4-8";
         assert_eq!(cat.lookup("anvil", id, id, "").map(|s| s.elo), Some(1456));
+    }
+
+    #[test]
+    fn dataset_page_url_replaces_pagination_parameters() {
+        let url = dataset_page_url(
+            "https://datasets-server.huggingface.co/filter?dataset=arena&offset=9&length=1",
+            200,
+        )
+        .expect("page url");
+        let pairs = url.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(
+            pairs.get("dataset").map(|value| value.as_ref()),
+            Some("arena")
+        );
+        assert_eq!(pairs.get("offset").map(|value| value.as_ref()), Some("200"));
+        assert_eq!(pairs.get("length").map(|value| value.as_ref()), Some("100"));
+    }
+
+    #[test]
+    fn dataset_page_rejects_partial_results() {
+        assert!(
+            parse_dataset_page(
+                r#"{"rows":[],"num_rows_total":1,"partial":true}"#.as_bytes(),
+                0
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the live Hugging Face dataset API"]
+    async fn default_dataset_api_loads_current_overall_scores() {
+        let client = scores_http_client().expect("http client");
+        let file = fetch_dataset_leaderboard(&client, DEFAULT_SCORES_URL)
+            .await
+            .expect("live leaderboard");
+        assert!(file.models.len() > DATASET_PAGE_ROWS);
+        assert!(!file.as_of.is_empty());
+        assert!(file.models.iter().any(|model| model.vendor == "anthropic"));
     }
 }
