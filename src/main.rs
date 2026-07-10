@@ -7,7 +7,6 @@
 //! renders the session in a ratatui chat UI.
 
 mod acp;
-mod advisor;
 mod app;
 mod claude_usage;
 mod clipboard;
@@ -1663,18 +1662,10 @@ async fn run_session(
         Some(ui_event_tx.clone()),
     );
 
-    let (advisor_event_tx, mut advisor_event_rx) = mpsc::unbounded_channel();
     let event_tracker = remote_tracker.clone();
     let event_proxy = tokio::spawn(async move {
         let mut runtime_event_rx = runtime_event_rx;
-        loop {
-            let event = tokio::select! {
-                event = runtime_event_rx.recv() => event,
-                event = advisor_event_rx.recv() => event,
-            };
-            let Some(event) = event else {
-                break;
-            };
+        while let Some(event) = runtime_event_rx.recv().await {
             // Intercept before observing: permission prompts get their
             // responder wrapped so remote viewers see (and can answer)
             // the pending request.
@@ -1691,106 +1682,12 @@ async fn run_session(
         }
     });
 
-    let advisor_cfg = advisor::AdvisorConfig {
-        cwd: cwd.clone(),
-        additional_directories: runtime_options.additional_directories.clone(),
-        config_path: config::default_config_path(),
-        score_store: score_store.clone(),
-        thor_agent_source_id: agent.source_id.clone(),
-        thor_launch: ragnarok::Launch {
-            program: agent.program.clone(),
-            args: agent.args.clone(),
-            env: agent.env.clone(),
-        },
-    };
     let cmd_tracker = remote_tracker.clone();
     let cmd_proxy = tokio::spawn(async move {
-        let mut advisor_abort: Option<tokio::sync::watch::Sender<bool>> = None;
-        let mut advisor_task: Option<tokio::task::JoinHandle<()>> = None;
         while let Some(command) = ui_cmd_rx.recv().await {
             cmd_tracker.observe_command(&command);
-            if advisor_task
-                .as_ref()
-                .is_some_and(tokio::task::JoinHandle::is_finished)
-            {
-                advisor_task.take();
-                advisor_abort = None;
-            }
-
-            match command {
-                UiCommand::SendPrompt { text, images } => {
-                    if advisor_task.is_some() {
-                        let _ = advisor_event_tx.send(crate::event::UiEvent::Warning(
-                            "Thor advisor is already running a turn".to_string(),
-                        ));
-                        continue;
-                    }
-                    let (abort_tx, abort_rx) = tokio::sync::watch::channel(false);
-                    advisor_abort = Some(abort_tx);
-                    let cfg = advisor_cfg.clone();
-                    let ui_tx = advisor_event_tx.clone();
-                    advisor_task = Some(tokio::spawn(async move {
-                        let result =
-                            advisor::run_turn(cfg, text, images, ui_tx.clone(), abort_rx.clone())
-                                .await;
-                        if *abort_rx.borrow() {
-                            let _ = ui_tx.send(crate::event::UiEvent::PromptDone {
-                                stop_reason:
-                                    agent_client_protocol::schema::v1::StopReason::Cancelled,
-                                usage: None,
-                            });
-                            return;
-                        }
-                        match result {
-                            Ok(()) => {
-                                let _ = ui_tx.send(crate::event::UiEvent::PromptDone {
-                                    stop_reason:
-                                        agent_client_protocol::schema::v1::StopReason::EndTurn,
-                                    usage: None,
-                                });
-                            }
-                            Err(e) => {
-                                let _ = ui_tx.send(crate::event::UiEvent::PromptFailed {
-                                    message: format!("Thor advisor failed: {e:#}"),
-                                });
-                            }
-                        }
-                    }));
-                }
-                UiCommand::CancelPrompt => {
-                    if let Some(abort) = &advisor_abort {
-                        let _ = abort.send(true);
-                    } else if runtime_cmd_tx.send(UiCommand::CancelPrompt).is_err() {
-                        break;
-                    }
-                }
-                UiCommand::Shutdown => {
-                    if let Some(abort) = &advisor_abort {
-                        let _ = abort.send(true);
-                    }
-                    if let Some(task) = advisor_task.take() {
-                        let abort_handle = task.abort_handle();
-                        match tokio::time::timeout(advisor::ADVISOR_SHUTDOWN_TIMEOUT, task).await {
-                            Ok(Ok(())) => {}
-                            Ok(Err(e)) => tracing::warn!("advisor task join failed: {e}"),
-                            Err(_) => {
-                                tracing::warn!(
-                                    "advisor task did not exit before shutdown; aborting"
-                                );
-                                abort_handle.abort();
-                            }
-                        }
-                    }
-                    advisor_abort = None;
-                    if runtime_cmd_tx.send(UiCommand::Shutdown).is_err() {
-                        break;
-                    }
-                }
-                other => {
-                    if runtime_cmd_tx.send(other).is_err() {
-                        break;
-                    }
-                }
+            if runtime_cmd_tx.send(command).is_err() {
+                break;
             }
         }
     });
