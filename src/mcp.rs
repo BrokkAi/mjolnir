@@ -398,7 +398,8 @@ impl ConnState {
             // surface Claude Code's local quota scrape.
             UiEvent::TerminalOutput(_)
             | UiEvent::RemotePermissionDecision { .. }
-            | UiEvent::ClaudeUsage(_) => {}
+            | UiEvent::ClaudeUsage(_)
+            | UiEvent::CodexUsage(_) => {}
         }
     }
 

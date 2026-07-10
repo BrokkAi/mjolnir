@@ -20,6 +20,7 @@ use chrono::{DateTime, FixedOffset, Local, TimeZone};
 
 use crate::claude_usage::ClaudeUsageReport;
 use crate::clipboard::ClipboardLease;
+use crate::codex_usage::CodexUsageStatus;
 
 use crate::event::{
     ElicitationOutcome, ElicitationPrompt, PermissionDecision, PermissionPrompt, PromptImage,
@@ -626,6 +627,8 @@ pub struct AppState {
     pub token_usage: TokenUsage,
     /// Last Claude Code `/usage` quota scrape, when the active agent is Claude.
     pub claude_usage: Option<ClaudeUsageReport>,
+    /// Last Codex app-server quota query, including explicit unavailable states.
+    pub codex_usage: Option<CodexUsageStatus>,
     /// Slash-command autocomplete state, recomputed on every input edit.
     pub autocomplete: Autocomplete,
     /// True while the keyboard help overlay is visible.
@@ -903,6 +906,7 @@ impl AppState {
             connection_state_started_at: now,
             token_usage: TokenUsage::default(),
             claude_usage: None,
+            codex_usage: None,
             autocomplete: Autocomplete::default(),
             help_overlay: false,
             text_selection_mode: false,
@@ -1878,6 +1882,9 @@ impl AppState {
             }
             UiEvent::ClaudeUsage(report) => {
                 self.claude_usage = Some(report);
+            }
+            UiEvent::CodexUsage(status) => {
+                self.codex_usage = Some(status);
             }
             UiEvent::PromptFailed { message } => {
                 self.finish_prompt_turn(true);
@@ -3847,6 +3854,33 @@ mod tests {
                 .as_ref()
                 .map(ClaudeUsageReport::compact_label),
             Some("Claude usage: 5H 88% left · week 63% left".to_string())
+        );
+    }
+
+    #[test]
+    fn codex_usage_event_replaces_available_with_unavailable() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::CodexUsage(CodexUsageStatus::Available(
+            crate::codex_usage::CodexUsageReport {
+                primary: Some(crate::codex_usage::CodexUsageWindow {
+                    label: "5H".to_string(),
+                    remaining_percent: 75,
+                    resets_at: None,
+                }),
+                secondary: None,
+            },
+        )));
+        assert!(matches!(
+            state.codex_usage,
+            Some(CodexUsageStatus::Available(_))
+        ));
+
+        state.apply_event(UiEvent::CodexUsage(CodexUsageStatus::Unavailable(
+            "not signed in".to_string(),
+        )));
+        assert_eq!(
+            state.codex_usage,
+            Some(CodexUsageStatus::Unavailable("not signed in".to_string()))
         );
     }
 

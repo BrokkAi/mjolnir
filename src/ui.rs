@@ -557,6 +557,7 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
         | UiEvent::CancelPendingPermissions
         | UiEvent::PromptDone { .. }
         | UiEvent::ClaudeUsage(_)
+        | UiEvent::CodexUsage(_)
         | UiEvent::PromptFailed { .. }
         | UiEvent::SessionForkFailed { .. }
         | UiEvent::RemotePermissionDecision { .. }
@@ -1573,7 +1574,7 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
         // the input box keeps its full height while the queue is visible.
         usize::from(INLINE_CHAT_HEIGHT)
             + usize::from(queued_prompt_row_count(state))
-            + usize::from(state.claude_usage.is_some())
+            + usize::from(usage_quota_label(state).is_some())
     };
 
     (desired.min(usize::from(u16::MAX)) as u16).clamp(INLINE_CHAT_HEIGHT, max_height)
@@ -4178,7 +4179,7 @@ fn draw(
     }
 
     let has_config_options = !state.selectable_config_options().is_empty();
-    let has_usage_quota = state.claude_usage.is_some();
+    let has_usage_quota = usage_quota_label(state).is_some();
 
     // Dynamic input height: borders (2) + chip rows + text lines, clamped.
     let chip_rows = attachment_count(state);
@@ -4292,7 +4293,7 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     }
 
     let has_config_options = !state.selectable_config_options().is_empty();
-    let has_usage_quota = state.claude_usage.is_some();
+    let has_usage_quota = usage_quota_label(state).is_some();
     let queued_row = queued_prompt_row_count(state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -6929,16 +6930,29 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
 }
 
 fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let Some(report) = state.claude_usage.as_ref() else {
+    let Some(label) = usage_quota_label(state) else {
         return;
     };
     if area.height == 0 || area.width == 0 {
         return;
     }
 
-    let label = truncate_text_to_width(report.compact_label(), area.width);
+    let label = truncate_text_to_width(label, area.width);
     let paragraph = Paragraph::new(label).style(Style::default().fg(state.theme.warning));
     f.render_widget(paragraph, area);
+}
+
+fn usage_quota_label(state: &AppState) -> Option<String> {
+    state
+        .codex_usage
+        .as_ref()
+        .map(crate::codex_usage::CodexUsageStatus::compact_label)
+        .or_else(|| {
+            state
+                .claude_usage
+                .as_ref()
+                .map(crate::claude_usage::ClaudeUsageReport::compact_label)
+        })
 }
 
 fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -13889,6 +13903,46 @@ mod tests {
         let lines = buffer_lines(terminal.backend().buffer());
         assert!(lines[0].contains("Claude usage: 5H 88% left · week 63% left"));
         assert!(lines[1].contains("[F1 Model: Model 1]"));
+    }
+
+    #[test]
+    fn codex_usage_quota_row_renders_available_and_unavailable_states() {
+        let mut state = AppState::new();
+        state.codex_usage = Some(crate::codex_usage::CodexUsageStatus::Available(
+            crate::codex_usage::CodexUsageReport {
+                primary: Some(crate::codex_usage::CodexUsageWindow {
+                    label: "5H".to_string(),
+                    remaining_percent: 75,
+                    resets_at: None,
+                }),
+                secondary: Some(crate::codex_usage::CodexUsageWindow {
+                    label: "week".to_string(),
+                    remaining_percent: 82,
+                    resets_at: None,
+                }),
+            },
+        ));
+
+        let backend = TestBackend::new(100, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
+            .expect("draw available");
+        assert!(
+            buffer_lines(terminal.backend().buffer())[0]
+                .contains("Codex usage: 5H 75% left · week 82% left")
+        );
+
+        state.codex_usage = Some(crate::codex_usage::CodexUsageStatus::Unavailable(
+            "not signed in with ChatGPT".to_string(),
+        ));
+        terminal
+            .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
+            .expect("draw unavailable");
+        assert!(
+            buffer_lines(terminal.backend().buffer())[0]
+                .contains("Codex usage unavailable: not signed in with ChatGPT")
+        );
     }
 
     #[test]
