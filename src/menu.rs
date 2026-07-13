@@ -38,11 +38,13 @@ enum KeyOutcome {
 }
 
 /// Show `question` with one selectable row per option plus a dimmed
-/// `footer` hint line. Arrows/Tab move, Enter confirms, Esc/Ctrl-C picks
-/// `initial` (the safe default), and option shortcut keys or digits pick
-/// directly. The menu erases itself before returning so callers can print
-/// a plain outcome line in its place. Returns `None` without drawing
-/// anything when stdin/stdout is not an interactive terminal.
+/// `footer` hint line. Arrows/Tab move, Enter confirms, Esc picks `initial`
+/// (the safe default), and option shortcut keys or digits pick directly. Ctrl-C
+/// is ignored so a stray buffered interrupt from the just-ended TUI session
+/// cannot immediately dismiss the cleanup prompt. The menu erases itself before
+/// returning so callers can print a plain outcome line in its place. Returns
+/// `None` without drawing anything when stdin/stdout is not an interactive
+/// terminal.
 pub fn select_inline(
     question: &str,
     footer: &str,
@@ -119,7 +121,7 @@ fn key_outcome(
         KeyCode::End => KeyOutcome::Select(len - 1),
         KeyCode::Enter | KeyCode::Char(' ') => KeyOutcome::Choose(selected),
         KeyCode::Esc => KeyOutcome::Cancel,
-        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => KeyOutcome::Cancel,
+        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => KeyOutcome::Ignored,
         KeyCode::Char(c) => {
             if let Some(i) = c.to_digit(10).map(|d| d as usize)
                 && (1..=len).contains(&i)
@@ -259,7 +261,7 @@ fn draw(
 }
 
 fn menu_height(option_count: usize) -> u16 {
-    option_count as u16 + 5
+    option_count as u16 + 6
 }
 
 fn rule(width: usize) -> String {
@@ -344,9 +346,14 @@ mod tests {
             key_outcome(KeyCode::Esc, KeyModifiers::NONE, 1, &opts),
             KeyOutcome::Cancel
         );
+    }
+
+    #[test]
+    fn ctrl_c_is_ignored_to_avoid_stale_tui_interrupts() {
+        let opts = options();
         assert_eq!(
             key_outcome(KeyCode::Char('c'), KeyModifiers::CONTROL, 1, &opts),
-            KeyOutcome::Cancel
+            KeyOutcome::Ignored
         );
     }
 
