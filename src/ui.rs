@@ -4903,9 +4903,10 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let agent_label = state
         .code_agent_label
         .as_deref()
-        .unwrap_or(&state.agent_label)
-        .trim();
-    if !agent_label.is_empty() {
+        .or_else(|| (!state.agent_label.starts_with("Thor · ")).then_some(&state.agent_label))
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
+    if let Some(agent_label) = agent_label {
         spans.push(Span::styled(
             agent_label.to_string(),
             Style::default().fg(state.theme.primary),
@@ -4946,7 +4947,7 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         let title = title.trim();
         if !title.is_empty() {
             // The session title is appended LAST and consumes whatever width
-            // remains after the preceding spans (version/agent/project/token
+            // remains after the preceding spans (version/project/token
             // usage) plus a 3-cell separator. This relies on every other
             // width-consuming span having already been pushed above.
             let separator_width = 3;
@@ -12790,7 +12791,7 @@ mod tests {
             .draw(|frame| draw_header(frame, frame.area(), &state))
             .expect("draw restored header");
         let restored = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(restored.contains("Thor · gpt-primary"), "{restored}");
+        assert!(!restored.contains("Thor · gpt-primary"), "{restored}");
     }
 
     #[test]
