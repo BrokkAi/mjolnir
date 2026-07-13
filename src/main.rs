@@ -478,6 +478,14 @@ fn primary_session_routes(council: &council::ResolvedCouncil) -> Vec<council::Re
     routes
 }
 
+fn select_primary_agent(council: &mut council::ResolvedCouncil, role_index: usize) -> bool {
+    let Some(role) = council.available.get(role_index) else {
+        return false;
+    };
+    council.thor = role.clone();
+    true
+}
+
 async fn list_council_sessions(
     council: &council::ResolvedCouncil,
     cwd: &Path,
@@ -916,6 +924,7 @@ struct RunSessionResult {
     session_title: Option<String>,
     theme_kind: theme::TerminalThemeKind,
     spinner_style: spinner::SpinnerStyle,
+    selected_agent_role: Option<usize>,
 }
 
 impl From<ui::UiRunResult> for RunSessionResult {
@@ -926,6 +935,7 @@ impl From<ui::UiRunResult> for RunSessionResult {
             session_title: result.session_title,
             theme_kind: result.theme_kind,
             spinner_style: result.spinner_style,
+            selected_agent_role: result.selected_agent_role,
         }
     }
 }
@@ -963,16 +973,19 @@ async fn run_app(
     let mut initial_resume = resume_target;
     let mut initial_agent = initial_agent.or_else(|| Some(council_agent.clone()));
     let mut pending_new_session_boundary = false;
+    let mut pending_agent_switch_boundary = None;
     loop {
         let resume = initial_resume.take();
         let agent = initial_agent
             .take()
             .unwrap_or_else(|| council_agent.clone());
 
-        let session_boundary = new_session_boundary_for_agent(
-            std::mem::take(&mut pending_new_session_boundary),
-            &agent,
-        );
+        let session_boundary = pending_agent_switch_boundary.take().or_else(|| {
+            new_session_boundary_for_agent(
+                std::mem::take(&mut pending_new_session_boundary),
+                &agent,
+            )
+        });
 
         let session_result = run_session(
             &agent,
@@ -1007,6 +1020,22 @@ async fn run_app(
             }
             UiExitReason::ClearSession => {
                 initial_agent = Some(agent);
+                continue;
+            }
+            UiExitReason::CycleAgent => {
+                if session_result
+                    .selected_agent_role
+                    .is_some_and(|index| select_primary_agent(&mut council, index))
+                {
+                    pending_agent_switch_boundary = Some(format!(
+                        "Thor switched to {} via {}",
+                        council.thor.model.model, council.thor.launch.source_id
+                    ));
+                    council_agent = selected_agent_for_role(&council.thor);
+                    initial_agent = Some(council_agent.clone());
+                } else {
+                    initial_agent = Some(agent);
+                }
                 continue;
             }
             UiExitReason::SwitchSession => {
@@ -1869,6 +1898,7 @@ async fn run_session(
                 session_title: current_session_title,
                 theme_kind,
                 spinner_style,
+                selected_agent_role: None,
             });
         };
 
@@ -1883,6 +1913,7 @@ async fn run_session(
                 session_title: target_title,
                 theme_kind,
                 spinner_style,
+                selected_agent_role: None,
             });
         }
 
@@ -1916,6 +1947,7 @@ async fn run_session(
                     session_title: target_title,
                     theme_kind,
                     spinner_style,
+                    selected_agent_role: None,
                 });
             }
         }
@@ -2286,6 +2318,44 @@ mod tests {
         assert!(!should_start_discrete_review(true, true, 2, true));
     }
 
+    fn test_council_role(model: &str, agent: &str) -> council::ResolvedRole {
+        council::ResolvedRole {
+            model: deepswe::Row {
+                model: model.to_string(),
+                reasoning_effort: None,
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+            },
+            model_value: model.to_string(),
+            launch: council::AdapterLaunch {
+                kind: council::AdapterKind::Custom,
+                source_id: agent.to_string(),
+                command: PathBuf::from(agent),
+                args: Vec::new(),
+                env: Default::default(),
+            },
+            ranked: true,
+        }
+    }
+
+    #[test]
+    fn select_primary_agent_uses_the_picker_role_index() {
+        let codex = test_council_role("gpt-test", "codex-acp");
+        let claude = test_council_role("claude-test", "claude-acp");
+        let mut council = council::ResolvedCouncil {
+            thor: codex.clone(),
+            loki: None,
+            eitri: codex.clone(),
+            available: vec![codex, claude],
+            choices: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        assert!(select_primary_agent(&mut council, 1));
+        assert_eq!(council.thor.launch.source_id, "claude-acp");
+        assert!(!select_primary_agent(&mut council, 2));
+    }
+
     #[test]
     fn agent_header_label_uses_adapter_source_id() {
         let agent = SelectedAgent {
@@ -2395,6 +2465,7 @@ mod tests {
             session_title: Some("Current".to_string()),
             theme_kind: theme::TerminalThemeKind::AnsiLight,
             spinner_style: spinner::SpinnerStyle::Bars,
+            selected_agent_role: None,
         };
 
         apply_session_result_to_config(&mut cfg, &result);

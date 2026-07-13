@@ -496,6 +496,7 @@ pub struct UiRunResult {
     pub session_title: Option<String>,
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
+    pub selected_agent_role: Option<usize>,
 }
 
 struct UiInitialState {
@@ -527,6 +528,7 @@ struct UiLoopOutcome {
     session_title: Option<String>,
     theme_kind: TerminalThemeKind,
     spinner_style: SpinnerStyle,
+    selected_agent_role: Option<usize>,
     history: Vec<String>,
 }
 
@@ -550,6 +552,7 @@ pub async fn run(
         session_title,
         theme_kind,
         spinner_style,
+        selected_agent_role,
         history,
     } = ui_loop(
         terminal,
@@ -592,6 +595,7 @@ pub async fn run(
         session_title,
         theme_kind,
         spinner_style,
+        selected_agent_role,
     })
 }
 
@@ -1051,6 +1055,7 @@ async fn ui_loop(
                 session_title: state.session_title.clone(),
                 theme_kind: state.theme_kind,
                 spinner_style: state.spinner_style,
+                selected_agent_role: state.selected_agent_role,
                 history: state.prompt_history(),
             });
         }
@@ -1132,6 +1137,7 @@ async fn ui_loop(
         session_title: None,
         theme_kind: state.theme_kind,
         spinner_style: state.spinner_style,
+        selected_agent_role: state.selected_agent_role,
         history: state.prompt_history(),
     })
 }
@@ -1334,6 +1340,7 @@ fn inline_repair_heartbeat_active(state: &AppState) -> bool {
         || state.help_overlay
         || state.has_pending_permission()
         || state.has_pending_elicitation()
+        || state.agent_picker.is_some()
         || state.config_picker.is_some()
         || state.mjconfig_menu.is_some()
         || matches!(
@@ -1725,6 +1732,8 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
         usize::from(INLINE_HELP_HEIGHT)
     } else if state.mjconfig_menu.is_some() {
         usize::from(INLINE_MJCONFIG_HEIGHT)
+    } else if let Some(picker) = state.agent_picker.as_ref() {
+        picker.role_indices.len() + 4
     } else if let Some(pending) = state.pending_permission() {
         permission_view_lines(
             pending,
@@ -1785,6 +1794,7 @@ fn handle_crossterm(
             if state.help_overlay
                 || state.has_pending_permission()
                 || state.has_pending_elicitation()
+                || state.agent_picker.is_some()
                 || state.config_picker.is_some()
                 || state.mjconfig_menu.is_some()
                 || state.ragnarok.is_some()
@@ -1935,11 +1945,32 @@ fn handle_crossterm(
         return handle_ragnarok_key(state, key.modifiers, key.code, mode);
     }
 
+    if state.agent_picker.is_some() {
+        return handle_agent_picker_key(state, key.modifiers, key.code, mode);
+    }
+
     if state.config_picker.is_some() {
         return handle_config_picker_key(state, cmd_tx, key.modifiers, key.code, mode);
     }
 
     if open_config_value_picker_for_shortcut(state, key.modifiers, key.code) {
+        return TerminalRequest::None;
+    }
+
+    if matches!(key.code, KeyCode::BackTab) {
+        if state.runtime_closed {
+            state.status_line = Some(StatusMessage::warning(
+                "the ACP runtime is closed; start a new session to switch agents",
+            ));
+        } else if state.is_busy() {
+            state.status_line = Some(StatusMessage::warning(
+                "wait for the current turn to finish before switching agents",
+            ));
+        } else if !state.open_agent_picker() {
+            state.status_line = Some(StatusMessage::info(
+                "no other ACP agent is currently available",
+            ));
+        }
         return TerminalRequest::None;
     }
 
@@ -2195,6 +2226,7 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
         || state.help_overlay
         || state.has_pending_permission()
         || state.has_pending_elicitation()
+        || state.agent_picker.is_some()
         || state.config_picker.is_some()
     {
         return;
@@ -4154,6 +4186,35 @@ fn inline_repair_request(mode: UiMode) -> TerminalRequest {
     }
 }
 
+fn handle_agent_picker_key(
+    state: &mut AppState,
+    modifiers: KeyModifiers,
+    code: KeyCode,
+    mode: UiMode,
+) -> TerminalRequest {
+    match (modifiers, code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
+            state.agent_picker = None;
+            inline_repair_request(mode)
+        }
+        (_, KeyCode::Enter) => {
+            if state.agent_picker_accept() {
+                state.exit_reason = Some(UiExitReason::CycleAgent);
+            }
+            inline_repair_request(mode)
+        }
+        (_, KeyCode::Up) | (_, KeyCode::Char('k')) | (_, KeyCode::BackTab) => {
+            state.agent_picker_move(-1);
+            TerminalRequest::None
+        }
+        (_, KeyCode::Down) | (_, KeyCode::Char('j')) | (_, KeyCode::Tab) => {
+            state.agent_picker_move(1);
+            TerminalRequest::None
+        }
+        _ => TerminalRequest::None,
+    }
+}
+
 fn handle_config_picker_key(
     state: &mut AppState,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
@@ -4517,6 +4578,10 @@ fn draw(
         draw_autocomplete_popover(f, chunks[1], state);
     }
 
+    if state.agent_picker.is_some() {
+        draw_agent_picker_modal(f, f.area(), state);
+    }
+
     if state.config_picker.is_some() {
         draw_config_value_picker_modal(f, f.area(), state);
     }
@@ -4626,6 +4691,11 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
         return;
     }
 
+    if state.agent_picker.is_some() {
+        draw_inline_agent_picker(f, f.area(), state);
+        return;
+    }
+
     if state.config_picker.is_some() {
         draw_inline_config_value_picker(f, f.area(), state);
         return;
@@ -4713,6 +4783,67 @@ fn draw_inline_permission_view(
         Paragraph::new("Up/Down choose | PgUp/PgDn read | Enter to confirm | Esc cancel")
             .style(Style::default().fg(theme.muted)),
         layout[1],
+    );
+}
+
+fn agent_picker_items(state: &AppState, width: u16) -> Vec<ListItem<'static>> {
+    let Some(picker) = state.agent_picker.as_ref() else {
+        return Vec::new();
+    };
+    picker
+        .role_indices
+        .iter()
+        .enumerate()
+        .filter_map(|(position, &role_index)| {
+            let role = state.ragnarok_models.get(role_index)?;
+            let current = role.launch.source_id == state.agent_source_id;
+            let suffix = if current { "  current" } else { "" };
+            Some(truncate_line(
+                format!("{}{suffix}", role.launch.source_id),
+                width,
+                position == picker.selected,
+                state.theme,
+            ))
+        })
+        .collect()
+}
+
+fn draw_inline_agent_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    f.render_widget(Clear, area);
+    let content = inline_content_rect(area);
+    if content.width == 0 || content.height < 4 {
+        return;
+    }
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(content);
+    f.render_widget(
+        Paragraph::new("Select Thor's ACP agent").style(
+            Style::default()
+                .fg(state.theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        layout[0],
+    );
+    f.render_widget(
+        Paragraph::new("Choosing an agent starts a fresh Thor session")
+            .style(Style::default().fg(state.theme.muted)),
+        layout[1],
+    );
+    f.render_widget(
+        List::new(agent_picker_items(state, layout[2].width)),
+        layout[2],
+    );
+    f.render_widget(
+        Paragraph::new("Up/Down choose | Enter switch | Esc cancel")
+            .style(Style::default().fg(state.theme.muted)),
+        layout[3],
     );
 }
 
@@ -8341,6 +8472,7 @@ fn general_help_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<
         help_section_line("General", theme),
         help_binding_line("Ctrl-N", "new session", theme),
         help_binding_line("Ctrl-O", "load session", theme),
+        help_binding_line("Shift-Tab", "choose Thor's ACP agent", theme),
         help_binding_line("Enter", "send prompt / accept selected item", theme),
         help_binding_line(PROMPT_NEWLINE_HINT, "insert a newline in the prompt", theme),
         help_binding_line("Left/Right", "move the prompt cursor", theme),
@@ -8454,6 +8586,55 @@ fn help_command_line(
 
 fn help_blank_line() -> Line<'static> {
     Line::from(Span::styled("", Style::default()))
+}
+
+fn draw_agent_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let Some(picker) = state.agent_picker.as_ref() else {
+        return;
+    };
+    let rows = (picker.role_indices.len() as u16).min(8);
+    let height = (rows + 5).min(area.height.saturating_sub(2));
+    let width = area.width.saturating_sub(8).min(72);
+    if height < 6 || width < 20 {
+        return;
+    }
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Select Thor's ACP agent ")
+        .style(Style::default().fg(state.theme.primary));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from("Choosing an agent starts a fresh Thor session."),
+            Line::from("Enter to switch | Esc cancel"),
+        ]),
+        layout[0],
+    );
+    f.render_widget(
+        List::new(agent_picker_items(state, layout[1].width)),
+        layout[1],
+    );
+    f.render_widget(
+        Paragraph::new("Up/Down or Tab/Shift-Tab to choose")
+            .style(Style::default().fg(state.theme.muted)),
+        layout[2],
+    );
 }
 
 fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -11723,6 +11904,88 @@ mod tests {
 
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(10)));
         assert!(!state.help_overlay);
+    }
+
+    #[test]
+    fn shift_tab_opens_primary_agent_selector_when_idle() {
+        let mut state = AppState::new();
+        state.agent_source_id = "codex-acp".to_string();
+        state.ragnarok_models = [
+            (crate::council::AdapterKind::Codex, "codex-acp"),
+            (crate::council::AdapterKind::Claude, "claude-acp"),
+        ]
+        .into_iter()
+        .map(|(kind, source_id)| crate::council::ResolvedRole {
+            model: crate::deepswe::Row {
+                model: source_id.to_string(),
+                reasoning_effort: None,
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+            },
+            model_value: source_id.to_string(),
+            launch: crate::council::AdapterLaunch {
+                kind,
+                source_id: source_id.to_string(),
+                command: PathBuf::from(source_id),
+                args: Vec::new(),
+                env: Default::default(),
+            },
+            ranked: true,
+        })
+        .collect();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::BackTab));
+
+        let picker = state.agent_picker.as_ref().expect("agent selector");
+        assert_eq!(picker.role_indices, vec![0, 1]);
+        assert_eq!(picker.selected, 0);
+        assert_eq!(state.exit_reason, None);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(state.agent_picker.is_none());
+        assert_eq!(state.selected_agent_role, Some(1));
+        assert_eq!(state.exit_reason, Some(UiExitReason::CycleAgent));
+    }
+
+    #[test]
+    fn shift_tab_does_not_switch_agents_during_a_turn() {
+        let mut state = AppState::new();
+        state.ragnarok_models = ["codex-acp", "claude-acp"]
+            .into_iter()
+            .map(|source_id| crate::council::ResolvedRole {
+                model: crate::deepswe::Row {
+                    model: source_id.to_string(),
+                    reasoning_effort: None,
+                    pass_at_1: 0.5,
+                    mean_cost_usd: 1.0,
+                },
+                model_value: source_id.to_string(),
+                launch: crate::council::AdapterLaunch {
+                    kind: crate::council::AdapterKind::Custom,
+                    source_id: source_id.to_string(),
+                    command: PathBuf::from(source_id),
+                    args: Vec::new(),
+                    env: Default::default(),
+                },
+                ranked: true,
+            })
+            .collect();
+        state.set_connection_state(ConnectionState::Streaming);
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::BackTab));
+
+        assert_eq!(state.exit_reason, None);
+        assert_eq!(
+            state
+                .status_line
+                .as_ref()
+                .map(|status| status.text.as_str()),
+            Some("wait for the current turn to finish before switching agents")
+        );
     }
 
     #[test]
