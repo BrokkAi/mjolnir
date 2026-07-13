@@ -27,18 +27,25 @@ jobs:
       - name: Verify tag matches Cargo.toml version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          crate_version="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "brokk-mjolnir") | .version')"
-          if [ "$tag" != "$crate_version" ]; then
-            echo "Tag version ($tag) does not match Cargo.toml version ($crate_version)" >&2
-            exit 1
-          fi
+          cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "brokk-mjolnir" or .name == "brokk-mj-voice-worker") | [.name, .version] | @tsv' \
+            | while IFS=$'\t' read -r crate version; do
+                if [ "$tag" != "$version" ]; then
+                  echo "Tag version ($tag) does not match $crate version ($version)" >&2
+                  exit 1
+                fi
+              done
 
       - name: Authenticate to crates.io
         uses: rust-lang/crates-io-auth-action@v1
         id: auth
 
-      - name: Publish
+      - name: Publish voice worker
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish
+        run: cargo publish -p brokk-mj-voice-worker
+
+      - name: Publish mjolnir
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish -p brokk-mjolnir

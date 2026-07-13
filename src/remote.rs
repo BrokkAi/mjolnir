@@ -50,6 +50,7 @@ use crate::event::{
     PermissionDecision, PermissionPrompt, SessionConfigTarget, TerminalOutputSnapshot, UiCommand,
     UiEvent,
 };
+use crate::{code_agent, council, loki};
 
 const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
 const REMOTE_CONTROL_LOCAL_ADDR_V6: &str = "[::1]:11921";
@@ -309,6 +310,15 @@ fn config_option_records(
         .iter()
         .zip(targets.iter())
         .filter_map(|(option, target)| {
+            if matches!(
+                option.category,
+                Some(
+                    agent_client_protocol::schema::v1::SessionConfigOptionCategory::Model
+                        | agent_client_protocol::schema::v1::SessionConfigOptionCategory::ThoughtLevel
+                )
+            ) {
+                return None;
+            }
             let SessionConfigKind::Select(select) = &option.kind else {
                 return None;
             };
@@ -437,6 +447,8 @@ pub struct TranscriptDiff {
 pub struct TranscriptEntry {
     pub kind: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
     #[serde(default)]
     pub timestamp: String,
     /// Stable ACP tool-call kind label (`execute`, `read`, `edit`, ...) for
@@ -708,12 +720,14 @@ struct ServerAgentSession {
 #[derive(Debug)]
 struct ServerSessionManager {
     agent: SelectedAgent,
+    council: Option<council::ResolvedCouncil>,
     additional_directories: Vec<PathBuf>,
     fs_max_text_bytes: u64,
     sessions: Mutex<Vec<ServerAgentSession>>,
 }
 
 impl ServerSessionManager {
+    #[cfg(test)]
     fn new(
         agent: SelectedAgent,
         additional_directories: Vec<PathBuf>,
@@ -721,6 +735,27 @@ impl ServerSessionManager {
     ) -> Self {
         Self {
             agent,
+            council: None,
+            additional_directories,
+            fs_max_text_bytes,
+            sessions: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn new_council(
+        council: council::ResolvedCouncil,
+        additional_directories: Vec<PathBuf>,
+        fs_max_text_bytes: u64,
+    ) -> Self {
+        let thor = &council.thor;
+        Self {
+            agent: SelectedAgent {
+                source_id: format!("council:{}", thor.model.model),
+                program: thor.launch.command.clone(),
+                args: thor.launch.args.clone(),
+                env: thor.launch.env.clone(),
+            },
+            council: Some(council),
             additional_directories,
             fs_max_text_bytes,
             sessions: Mutex::new(Vec::new()),
@@ -730,6 +765,7 @@ impl ServerSessionManager {
     fn start_session(&self, cwd: PathBuf) {
         let session = start_server_agent_session(
             self.agent.clone(),
+            self.council.clone(),
             cwd,
             self.additional_directories.clone(),
             self.fs_max_text_bytes,
@@ -872,8 +908,26 @@ impl TrackerState {
             // remote viewer is a read-only mirror and has nothing to track.
             | UiEvent::ElicitationRequest(_)
             | UiEvent::RemotePermissionDecision { .. }
+            | UiEvent::CodeAgent(_)
             | UiEvent::Info(_)
             | UiEvent::Warning(_) => {}
+            UiEvent::LokiActivity(activity) => {
+                let (kind, text) = match activity {
+                    crate::event::LokiActivity::Warning { message, .. } => {
+                        ("system", message.clone())
+                    }
+                };
+                self.push_actor_transcript_entry(kind, "loki", text);
+                self.touch();
+            }
+            UiEvent::InternalMessage(message) => {
+                self.push_actor_transcript_entry(
+                    "system",
+                    &message.source.to_ascii_lowercase(),
+                    message.text.clone(),
+                );
+                self.touch();
+            }
         }
     }
 
@@ -882,45 +936,64 @@ impl TrackerState {
     }
 
     fn observe_session_update(&mut self, update: &SessionUpdate) {
+        self.observe_session_update_as(update, "thor", None);
+    }
+
+    fn observe_session_update_as(
+        &mut self,
+        update: &SessionUpdate,
+        actor: &str,
+        id_prefix: Option<&str>,
+    ) {
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if !self.agent_message_open {
                     self.total_messages = self.total_messages.saturating_add(1);
                     self.agent_message_open = true;
                 }
-                self.append_transcript_text("agent", content_block_text(&chunk.content));
+                self.append_transcript_text("agent", actor, content_block_text(&chunk.content));
                 self.touch();
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 self.agent_message_open = false;
-                self.append_transcript_text("thought", content_block_text(&chunk.content));
+                self.append_transcript_text("thought", actor, content_block_text(&chunk.content));
                 self.touch();
             }
             SessionUpdate::ToolCall(tool_call) => {
+                if actor == "thor" && crate::app::is_code_agent_transport_call(tool_call) {
+                    return;
+                }
                 self.agent_message_open = false;
+                let mut content = tool_call.content.clone();
+                namespace_remote_terminals(&mut content, id_prefix);
                 self.push_tool_transcript_entry(
-                    tool_call.tool_call_id.to_string(),
+                    namespace_remote_id(id_prefix, &tool_call.tool_call_id.to_string()),
+                    actor,
                     tool_call.title.clone(),
-                    tool_call.content.clone(),
+                    content,
                     tool_call.status,
                     tool_call.kind,
                 );
                 self.touch();
             }
             SessionUpdate::ToolCallUpdate(update) => {
+                if actor == "thor" && crate::app::is_code_agent_transport_update(update) {
+                    return;
+                }
                 self.agent_message_open = false;
-                let tool_call_id = update.tool_call_id.to_string();
-                if !self.update_tool_transcript_entry(&tool_call_id, &update.fields) {
+                let tool_call_id = namespace_remote_id(id_prefix, &update.tool_call_id.to_string());
+                let mut fields = update.fields.clone();
+                if let Some(content) = fields.content.as_mut() {
+                    namespace_remote_terminals(content, id_prefix);
+                }
+                if !self.update_tool_transcript_entry(&tool_call_id, &fields) {
                     self.push_tool_transcript_entry(
                         tool_call_id,
-                        update
-                            .fields
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| "tool".to_string()),
-                        update.fields.content.clone().unwrap_or_default(),
-                        update.fields.status.unwrap_or(ToolCallStatus::Pending),
-                        update.fields.kind.unwrap_or(ToolKind::Other),
+                        actor,
+                        fields.title.clone().unwrap_or_else(|| "tool".to_string()),
+                        fields.content.clone().unwrap_or_default(),
+                        fields.status.unwrap_or(ToolCallStatus::Pending),
+                        fields.kind.unwrap_or(ToolKind::Other),
                     );
                 }
                 self.touch();
@@ -966,14 +1039,15 @@ impl TrackerState {
         }
     }
 
-    fn append_transcript_text(&mut self, kind: &str, text: String) {
+    fn append_transcript_text(&mut self, kind: &str, actor: &str, text: String) {
         if let Some(last) = self.transcript.last_mut()
             && last.kind == kind
+            && last.actor.as_deref() == Some(actor)
         {
             last.text.push_str(&text);
             return;
         }
-        self.push_transcript_entry(kind, text);
+        self.push_actor_transcript_entry(kind, actor, text);
     }
 
     fn push_transcript_entry(&mut self, kind: &str, text: String) -> usize {
@@ -981,10 +1055,25 @@ impl TrackerState {
     }
 
     fn push_transcript_entry_at(&mut self, kind: &str, text: String, timestamp: String) -> usize {
+        self.push_transcript_entry_at_with_actor(kind, text, timestamp, None)
+    }
+
+    fn push_actor_transcript_entry(&mut self, kind: &str, actor: &str, text: String) -> usize {
+        self.push_transcript_entry_at_with_actor(kind, text, now_rfc3339(), Some(actor.to_string()))
+    }
+
+    fn push_transcript_entry_at_with_actor(
+        &mut self,
+        kind: &str,
+        text: String,
+        timestamp: String,
+        actor: Option<String>,
+    ) -> usize {
         let index = self.transcript.len();
         self.transcript.push(TranscriptEntry {
             kind: kind.to_string(),
             text,
+            actor,
             timestamp,
             tool_kind: None,
             tool_title: None,
@@ -1022,12 +1111,13 @@ impl TrackerState {
     fn push_tool_transcript_entry(
         &mut self,
         tool_call_id: String,
+        actor: &str,
         title: String,
         content: Vec<ToolCallContent>,
         status: ToolCallStatus,
         kind: ToolKind,
     ) {
-        let index = self.push_transcript_entry("tool", String::new());
+        let index = self.push_actor_transcript_entry("tool", actor, String::new());
         let tool_entry = ToolTranscriptEntry {
             tool_call_id,
             title,
@@ -1305,6 +1395,21 @@ impl RemoteSessionTracker {
         }
         if let Ok(mut state) = self.state.lock() {
             state.observe_event(event);
+        }
+        self.request_flush();
+    }
+
+    fn observe_actor_session_update(
+        &self,
+        update: &SessionUpdate,
+        actor: &str,
+        id_prefix: Option<&str>,
+    ) {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.observe_session_update_as(update, actor, id_prefix);
         }
         self.request_flush();
     }
@@ -1779,11 +1884,7 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
     let config_path = config::default_config_path();
     let cfg = config::Config::load(&config_path)
         .with_context(|| format!("load {}", config_path.display()))?;
-    let agent = cfg.agent.ok_or_else(|| {
-        anyhow!(
-            "no default agent configured; run `mj` once to pick an agent before starting `mj server`"
-        )
-    })?;
+    let resolved = council::resolve(&cfg, &cwd).await?;
 
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
     let tailscale_tls = if tailscale {
@@ -1805,8 +1906,8 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
     };
     let workspace_roots =
         crate::paths::WorkspaceRoots::new(&cwd, &additional_directories)?.active_roots();
-    let session_manager = Arc::new(ServerSessionManager::new(
-        agent,
+    let session_manager = Arc::new(ServerSessionManager::new_council(
+        resolved,
         additional_directories,
         fs_max_text_bytes,
     ));
@@ -1928,6 +2029,7 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
 
 fn start_server_agent_session(
     agent: SelectedAgent,
+    council: Option<council::ResolvedCouncil>,
     cwd: PathBuf,
     additional_directories: Vec<PathBuf>,
     fs_max_text_bytes: u64,
@@ -1938,10 +2040,7 @@ fn start_server_agent_session(
     let (remote_event_tx, mut remote_event_rx) = mpsc::unbounded_channel();
     let agent_source_id = agent.source_id.clone();
     let config_path = config::default_config_path();
-    let saved_session_config = config::Config::load(&config_path)
-        .ok()
-        .and_then(|cfg| cfg.session_config.get(&agent_source_id).cloned())
-        .unwrap_or_default();
+    let app_config = config::Config::load(&config_path).unwrap_or_default();
     let agent_label = agent_display_label(&agent);
     let project_label = crate::paths::project_label_from_cwd(&cwd);
     let worktree_label = crate::paths::worktree_name_from_cwd(&cwd);
@@ -1952,11 +2051,75 @@ fn start_server_agent_session(
         Some(server_cmd_tx.clone()),
         Some(remote_event_tx),
     );
+    let mut council_setup_error = None;
+    let (isolated_loki, loki_codex_home) = match app_config
+        .loki
+        .streaming_review
+        .then(|| council.as_ref().and_then(|resolved| resolved.loki.clone()))
+        .flatten()
+    {
+        Some(role) => match crate::isolated_council_role(role, "loki") {
+            Ok(pair) => (Some(pair.0), pair.1),
+            Err(error) => {
+                council_setup_error = Some(format!("prepare Loki: {error:#}"));
+                (None, None)
+            }
+        },
+        None => (None, None),
+    };
+    let (isolated_eitri, eitri_codex_home) =
+        match council.as_ref().map(|resolved| resolved.eitri.clone()) {
+            Some(role) => match crate::isolated_council_role(role, "eitri") {
+                Ok(pair) => (Some(pair.0), pair.1),
+                Err(error) => {
+                    council_setup_error = Some(format!("prepare Eitri: {error:#}"));
+                    (None, None)
+                }
+            },
+            None => (None, None),
+        };
+    let loki_handle = if app_config.loki.streaming_review {
+        isolated_loki.map(|role| {
+            loki::Handle::start(
+                role,
+                cwd.clone(),
+                additional_directories.clone(),
+                runtime_event_tx.clone(),
+                true,
+            )
+        })
+    } else {
+        None
+    };
+    let role_config = council.as_ref().map(|resolved| acp::RuntimeRoleConfig {
+        label: "Thor".to_string(),
+        model_value: resolved.thor.model_value.clone(),
+        force_high_reasoning: true,
+    });
+    let implementation_handoffs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let code_agent = isolated_eitri.as_ref().map(|eitri| {
+        code_agent::Config::council(
+            eitri.launch.command.clone(),
+            eitri.launch.args.clone(),
+            eitri.launch.env.clone(),
+            None,
+            eitri.model.model.clone(),
+            eitri.model_value.clone(),
+            loki_handle.clone(),
+        )
+        .with_implementation_handoff_counter(implementation_handoffs.clone())
+    });
+    let provenance_thor = council.as_ref().map(|resolved| resolved.thor.clone());
+    let provenance_cwd = cwd.clone();
+    let mut workspace_roots = Vec::with_capacity(1 + additional_directories.len());
+    workspace_roots.push(cwd.clone());
+    workspace_roots.extend(additional_directories.iter().cloned());
     let runtime_cfg = AcpRuntimeConfig {
         command: agent.program,
         args: agent.args,
         cwd,
         additional_directories,
+        mcp_servers: Vec::new(),
         resume_session: None,
         env: agent.env,
         agent_stderr: None,
@@ -1964,12 +2127,25 @@ fn start_server_agent_session(
         access_mode: crate::acp::RuntimeAccessMode::Full,
         agent_source_id: Some(agent_source_id),
         config_path: Some(config_path),
-        saved_session_config,
+        saved_session_config: HashMap::new(),
+        role_config,
+        code_agent,
     };
     let command_tx = server_cmd_tx.clone();
     let shutdown_tx = runtime_cmd_tx.clone();
+    let turn_state = std::sync::Arc::new(tokio::sync::Mutex::new((
+        0_u64,
+        String::new(),
+        None::<crate::workspace_snapshot::WorkspaceSnapshot>,
+    )));
 
     let task = tokio::spawn(async move {
+        let _council_homes = (loki_codex_home, eitri_codex_home);
+        if let Some(error) = council_setup_error {
+            tracker.observe_event(&UiEvent::Fatal(error));
+            tracker.shutdown().await;
+            return;
+        }
         let runtime = tokio::spawn(async move {
             if let Err(error) = acp::run(runtime_cfg, runtime_event_tx, runtime_cmd_rx).await {
                 debug!("server agent session exited: {error:#}");
@@ -1978,9 +2154,25 @@ fn start_server_agent_session(
         let command_proxy = {
             let tracker = tracker.clone();
             let runtime_cmd_tx = runtime_cmd_tx.clone();
+            let loki = loki_handle.clone();
+            let handoffs = implementation_handoffs.clone();
+            let turn_state = turn_state.clone();
+            let workspace_roots = workspace_roots.clone();
             tokio::spawn(async move {
+                let mut local_epoch = 0_u64;
                 while let Some(command) = server_cmd_rx.recv().await {
                     tracker.observe_command(&command);
+                    if let UiCommand::SendPrompt { text, .. } = &command {
+                        local_epoch = local_epoch.saturating_add(1);
+                        handoffs.store(0, std::sync::atomic::Ordering::Release);
+                        let snapshot =
+                            crate::workspace_snapshot::WorkspaceSnapshot::capture(&workspace_roots)
+                                .await;
+                        let epoch = loki
+                            .as_ref()
+                            .map_or(local_epoch, |reviewer| reviewer.begin_turn(text.clone()));
+                        *turn_state.lock().await = (epoch, text.clone(), Some(snapshot));
+                    }
                     let shutdown = matches!(command, UiCommand::Shutdown);
                     if runtime_cmd_tx.send(command).is_err() || shutdown {
                         break;
@@ -1992,6 +2184,12 @@ fn start_server_agent_session(
         tokio::pin!(command_proxy);
         let mut pending_permissions = std::collections::HashMap::new();
         let mut runtime_done = false;
+        let mut decisions = loki_handle.as_ref().map(loki::Handle::subscribe);
+        let mut trajectory = loki::BoundaryTracker::default();
+        let mut pending_reviews = std::collections::HashSet::new();
+        let mut intervention = loki::DeferredIntervention::default();
+        let mut held_completion = None;
+        let mut discrete_review_started = false;
 
         loop {
             tokio::select! {
@@ -1999,7 +2197,130 @@ fn start_server_agent_session(
                     let Some(event) = event else {
                         break;
                     };
-                    handle_server_agent_event(event, &tracker, &mut pending_permissions);
+                    if let (Some(thor), UiEvent::SessionStarted { session_id, .. }) =
+                        (provenance_thor.as_ref(), &event)
+                    {
+                        crate::session_provenance::record(crate::session_provenance::Record {
+                            session_id: session_id.clone(),
+                            cwd: provenance_cwd.clone(),
+                            adapter_source_id: thor.launch.source_id.clone(),
+                            model: thor.model.model.clone(),
+                            model_value: thor.model_value.clone(),
+                        });
+                    }
+                    let (epoch, task, _) = turn_state.lock().await.clone();
+                    let boundary = (epoch > 0).then(|| trajectory.observe(&event)).flatten();
+                    let target_completed = crate::council_target_completed(&event);
+                    let interrupting = boundary.is_some()
+                        && !target_completed
+                        && intervention.interrupt_at_boundary();
+                    if interrupting {
+                        let _ = runtime_cmd_tx.send(UiCommand::CancelPrompt);
+                    }
+                    if let Some(boundary) = boundary
+                        && !interrupting
+                        && !(target_completed && intervention.is_pending())
+                        && let Some(reviewer) = loki_handle.as_ref()
+                        && let Some(id) = reviewer.observe(epoch, loki::Target::Thor, boundary).await
+                    {
+                        pending_reviews.insert(id);
+                    }
+                    if let UiEvent::PromptDone { stop_reason, .. } = &event {
+                        let cancelled = matches!(
+                            stop_reason,
+                            agent_client_protocol::schema::v1::StopReason::Cancelled
+                        );
+                        if cancelled && intervention.is_pending() {
+                            if intervention.cancellation_was_requested() {
+                                pending_reviews.clear();
+                                held_completion = None;
+                                trajectory.reset_attempt();
+                                let critique = intervention.take().expect("queued intervention");
+                                observe_remote_review(
+                                    &tracker,
+                                    "Loki",
+                                    "Thor",
+                                    crate::event::InternalMessageKind::Continuation,
+                                    &critique,
+                                );
+                                let _ = runtime_cmd_tx.send(UiCommand::SendPrompt {
+                                    text: crate::council_continuation_prompt(
+                                        &task,
+                                        &critique,
+                                        &trajectory.trajectory(),
+                                    ),
+                                    images: Vec::new(),
+                                });
+                                continue;
+                            }
+                            intervention.clear();
+                            pending_reviews.clear();
+                        }
+                        held_completion = Some(event);
+                    } else if matches!(event, UiEvent::PromptFailed { .. })
+                        && intervention.is_pending()
+                    {
+                        pending_reviews.clear();
+                        held_completion = None;
+                        trajectory.reset_attempt();
+                        let critique = intervention.take().expect("queued intervention");
+                        observe_remote_review(
+                            &tracker,
+                            "Loki",
+                            "Thor",
+                            crate::event::InternalMessageKind::Continuation,
+                            &critique,
+                        );
+                        let _ = runtime_cmd_tx.send(UiCommand::SendPrompt {
+                            text: crate::council_continuation_prompt(
+                                &task,
+                                &critique,
+                                &trajectory.trajectory(),
+                            ),
+                            images: Vec::new(),
+                        });
+                        continue;
+                    } else {
+                        handle_server_agent_event(event, &tracker, &mut pending_permissions);
+                    }
+                }
+                decision = async {
+                    match decisions.as_mut() {
+                        Some(rx) => rx.recv().await.ok(),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let Some(decision) = decision else { continue; };
+                    let (epoch, task, _) = turn_state.lock().await.clone();
+                    if decision.epoch != epoch
+                        || decision.target != loki::Target::Thor
+                        || !pending_reviews.remove(&decision.id)
+                    {
+                        continue;
+                    }
+                    if let loki::Verdict::Intervention(critique) = decision.verdict {
+                        intervention.push(decision.id, critique);
+                        if held_completion.take().is_some() {
+                            pending_reviews.clear();
+                            trajectory.reset_attempt();
+                            let critique = intervention.take().expect("queued intervention");
+                            observe_remote_review(
+                                &tracker,
+                                "Loki",
+                                "Thor",
+                                crate::event::InternalMessageKind::Continuation,
+                                &critique,
+                            );
+                            let _ = runtime_cmd_tx.send(UiCommand::SendPrompt {
+                                text: crate::council_continuation_prompt(
+                                    &task,
+                                    &critique,
+                                    &trajectory.trajectory(),
+                                ),
+                                images: Vec::new(),
+                            });
+                        }
+                    }
                 }
                 event = remote_event_rx.recv() => {
                     let Some(event) = event else {
@@ -2021,6 +2342,59 @@ fn start_server_agent_session(
                     break;
                 }
             }
+
+            if held_completion.is_some() && pending_reviews.is_empty() && !intervention.is_pending()
+            {
+                let handoffs = implementation_handoffs.load(std::sync::atomic::Ordering::Acquire);
+                let delta = if app_config.thor.discrete_review
+                    && handoffs > 1
+                    && !discrete_review_started
+                {
+                    let (_, _, snapshot) = turn_state.lock().await.clone();
+                    match snapshot {
+                        Some(snapshot) => Some(snapshot.delta().await),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let workspace_changed = delta
+                    .as_ref()
+                    .is_some_and(crate::workspace_snapshot::WorkspaceDelta::changed);
+                if crate::should_start_discrete_review(
+                    app_config.thor.discrete_review,
+                    discrete_review_started,
+                    handoffs,
+                    workspace_changed,
+                ) {
+                    let (_, task, _) = turn_state.lock().await.clone();
+                    let initial_result = trajectory.final_message();
+                    let context =
+                        crate::discrete_review_context(delta.as_ref(), trajectory.trajectory());
+                    held_completion = None;
+                    discrete_review_started = true;
+                    trajectory.reset_attempt();
+                    let review_prompt =
+                        crate::thor_discrete_review_prompt(&task, &initial_result, &context);
+                    observe_remote_review(
+                        &tracker,
+                        "Thor",
+                        "Thor",
+                        crate::event::InternalMessageKind::DiscreteReview,
+                        &review_prompt,
+                    );
+                    let _ = runtime_cmd_tx.send(UiCommand::SendPrompt {
+                        text: review_prompt,
+                        images: Vec::new(),
+                    });
+                    continue;
+                }
+                let event = held_completion.take().expect("held completion");
+                handle_server_agent_event(event, &tracker, &mut pending_permissions);
+                *turn_state.lock().await = (0, String::new(), None);
+                discrete_review_started = false;
+                trajectory = loki::BoundaryTracker::default();
+            }
         }
 
         if !runtime_done {
@@ -2036,6 +2410,9 @@ fn start_server_agent_session(
             }
         }
         pending_permissions.clear();
+        if let Some(reviewer) = loki_handle.as_ref() {
+            reviewer.shutdown_and_wait().await;
+        }
         tracker.shutdown().await;
     });
 
@@ -2062,6 +2439,36 @@ fn handle_server_agent_event(
     tracker: &RemoteSessionTracker,
     pending_permissions: &mut std::collections::HashMap<String, PermissionPrompt>,
 ) {
+    if let UiEvent::CodeAgent(code_event) = event {
+        match code_event {
+            crate::event::CodeAgentEvent::PermissionRequest(mut prompt) => {
+                let local_id = prompt.tool_call.tool_call_id.to_string();
+                prompt.tool_call.tool_call_id = format!("eitri:{local_id}").into();
+                let event = tracker.intercept_event(UiEvent::PermissionRequest(prompt));
+                tracker.observe_event(&event);
+                if let UiEvent::PermissionRequest(prompt) = event {
+                    pending_permissions.insert(prompt.tool_call.tool_call_id.to_string(), prompt);
+                }
+            }
+            crate::event::CodeAgentEvent::SessionUpdate(update) => {
+                tracker.observe_actor_session_update(&update, "eitri", Some("eitri"));
+            }
+            crate::event::CodeAgentEvent::TerminalOutput(mut snapshot) => {
+                snapshot.terminal_id = namespace_remote_id(Some("eitri"), &snapshot.terminal_id);
+                tracker.observe_event(&UiEvent::TerminalOutput(snapshot));
+            }
+            crate::event::CodeAgentEvent::Finished { .. } => {
+                pending_permissions.retain(|id, _| !id.starts_with("eitri:"));
+            }
+            crate::event::CodeAgentEvent::ElicitationRequest(prompt) => {
+                let _ = prompt
+                    .responder
+                    .send(crate::event::ElicitationOutcome::Decline);
+            }
+            _ => {}
+        }
+        return;
+    }
     let event = tracker.intercept_event(event);
     tracker.observe_event(&event);
     match event {
@@ -2072,6 +2479,37 @@ fn handle_server_agent_event(
             pending_permissions.clear();
         }
         _ => {}
+    }
+}
+
+fn namespace_remote_id(prefix: Option<&str>, id: &str) -> String {
+    prefix.map_or_else(|| id.to_string(), |prefix| format!("{prefix}:{id}"))
+}
+
+fn observe_remote_review(
+    tracker: &RemoteSessionTracker,
+    source: &str,
+    target: &str,
+    kind: crate::event::InternalMessageKind,
+    text: &str,
+) {
+    tracker.observe_event(&UiEvent::InternalMessage(crate::event::InternalMessage {
+        source: source.to_string(),
+        target: target.to_string(),
+        kind,
+        text: text.to_string(),
+    }));
+}
+
+fn namespace_remote_terminals(content: &mut [ToolCallContent], prefix: Option<&str>) {
+    let Some(prefix) = prefix else {
+        return;
+    };
+    for item in content {
+        if let ToolCallContent::Terminal(terminal) = item {
+            terminal.terminal_id =
+                namespace_remote_id(Some(prefix), &terminal.terminal_id.to_string()).into();
+        }
     }
 }
 
@@ -5131,6 +5569,7 @@ mod tests {
                 TranscriptEntry {
                     kind: "user".to_string(),
                     text: "hello".to_string(),
+                    actor: None,
                     timestamp: "2026-06-03T10:00:05Z".to_string(),
                     tool_kind: None,
                     tool_title: None,
@@ -5140,6 +5579,7 @@ mod tests {
                 TranscriptEntry {
                     kind: "agent".to_string(),
                     text: "hi".to_string(),
+                    actor: Some("thor".to_string()),
                     timestamp: "2026-06-03T10:00:06Z".to_string(),
                     tool_kind: None,
                     tool_title: None,
@@ -5169,6 +5609,7 @@ mod tests {
                     TranscriptEntry {
                         kind: "user".to_string(),
                         text: "hello".to_string(),
+                        actor: None,
                         timestamp: "2026-06-03T10:00:05Z".to_string(),
                         tool_kind: None,
                         tool_title: None,
@@ -5178,6 +5619,7 @@ mod tests {
                     TranscriptEntry {
                         kind: "agent".to_string(),
                         text: "hi there".to_string(),
+                        actor: Some("thor".to_string()),
                         timestamp: "2026-06-03T10:00:06Z".to_string(),
                         tool_kind: None,
                         tool_title: None,
@@ -6028,6 +6470,51 @@ mod tests {
         assert_eq!(snapshot.worktree.as_deref(), Some("bold-fox"));
     }
 
+    #[test]
+    fn nested_session_updates_preserve_actor_and_namespace_tool_ids() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "Thor".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        tracker.observe_actor_session_update(
+            &SessionUpdate::AgentMessageChunk(
+                agent_client_protocol::schema::v1::ContentChunk::new(
+                    agent_client_protocol::schema::v1::ContentBlock::Text(
+                        agent_client_protocol::schema::v1::TextContent::new("nested reply"),
+                    ),
+                ),
+            ),
+            "eitri",
+            Some("eitri"),
+        );
+        tracker.observe_actor_session_update(
+            &SessionUpdate::ToolCall(ToolCall::new("call-1", "search")),
+            "eitri",
+            Some("eitri"),
+        );
+
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(snapshot.transcript[0].actor.as_deref(), Some("eitri"));
+        assert_eq!(snapshot.transcript[0].text, "nested reply");
+        assert_eq!(snapshot.transcript[1].actor.as_deref(), Some("eitri"));
+        assert!(
+            tracker
+                .state
+                .lock()
+                .expect("state")
+                .tool_transcript_entries
+                .values()
+                .any(|tool| tool.tool_call_id == "eitri:call-1")
+        );
+    }
+
     #[tokio::test]
     async fn intercept_publishes_pending_permission_and_clears_on_answer() {
         let tracker =
@@ -6623,36 +7110,61 @@ mod tests {
     fn config_option_records_projects_select_options_with_targets() {
         let options = vec![
             SessionConfigOption::select(
-                "model",
-                "Model",
-                "gpt-5",
+                "mode",
+                "Mode",
+                "code",
                 vec![
-                    SessionConfigSelectOption::new("gpt-5", "GPT-5"),
-                    SessionConfigSelectOption::new("gpt-4", "GPT-4").description("older"),
+                    SessionConfigSelectOption::new("code", "Code"),
+                    SessionConfigSelectOption::new("ask", "Ask").description("read-only"),
                 ],
             )
-            .category(SessionConfigOptionCategory::Model),
+            .category(SessionConfigOptionCategory::Mode),
         ];
         let targets = vec![SessionConfigTarget::ConfigOption {
-            config_id: SessionConfigId::from("model".to_string()),
+            config_id: SessionConfigId::from("mode".to_string()),
         }];
 
         let records = config_option_records(&options, &targets);
         assert_eq!(records.len(), 1);
         let record = &records[0];
         assert_eq!(record.target_kind, "config_option");
-        assert_eq!(record.config_id.as_deref(), Some("model"));
-        assert_eq!(record.name, "Model");
-        assert_eq!(record.category.as_deref(), Some("model"));
-        assert_eq!(record.current_value, "gpt-5");
+        assert_eq!(record.config_id.as_deref(), Some("mode"));
+        assert_eq!(record.name, "Mode");
+        assert_eq!(record.category.as_deref(), Some("mode"));
+        assert_eq!(record.current_value, "code");
         assert_eq!(record.choices.len(), 2);
-        assert_eq!(record.choices[1].value, "gpt-4");
-        assert_eq!(record.choices[1].description.as_deref(), Some("older"));
+        assert_eq!(record.choices[1].value, "ask");
+        assert_eq!(record.choices[1].description.as_deref(), Some("read-only"));
 
         // The published pair round-trips back into the target to drive.
         let target = config_target_from_parts(&record.target_kind, record.config_id.as_deref())
             .expect("target reconstructs");
         assert_eq!(target, targets[0]);
+    }
+
+    #[test]
+    fn remote_config_hides_council_owned_model_and_reasoning_controls() {
+        let options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "gpt-5",
+                vec![SessionConfigSelectOption::new("gpt-5", "GPT-5")],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "reasoning",
+                "Reasoning",
+                "high",
+                vec![SessionConfigSelectOption::new("high", "High")],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        let targets = vec![
+            SessionConfigTarget::LegacyModel,
+            SessionConfigTarget::LegacyMode,
+        ];
+        assert!(config_option_records(&options, &targets).is_empty());
     }
 
     #[test]

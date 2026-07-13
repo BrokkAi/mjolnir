@@ -49,16 +49,6 @@ impl SpinnerStyle {
         }
     }
 
-    /// Short human description, shown in the first-run picker and `/mjconfig`.
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Pulse => "a bright dot glides across a faint row",
-            Self::Wave => "an undulating braille ribbon",
-            Self::Bars => "bouncing equalizer bars",
-            Self::Shimmer => "the whole row breathes in unison",
-        }
-    }
-
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }

@@ -1,0 +1,165 @@
+#!/usr/bin/expect -f
+
+set timeout 90
+set stty_init "rows 40 columns 120"
+set mode $env(MJ_E2E_MODE)
+set transcript $env(MJ_E2E_TRANSCRIPT)
+set inline_mode [expr {$mode eq "inline-stream" || $mode eq "details" || $mode eq "explore" || $mode eq "explore-cancel"}]
+log_file -noappend $transcript
+
+proc send_ctrl_c {} {
+    global spawn_id
+    send -i $spawn_id -- "\003"
+}
+
+set command [list $env(MJ_E2E_BIN) --no-update-check --debug-file $env(MJ_E2E_DEBUG_LOG) --agent-stderr $env(MJ_E2E_AGENT_STDERR)]
+if {!$inline_mode} {
+    lappend command --fullscreen-tui
+}
+lappend command --cwd $env(MJ_E2E_WORKSPACE)
+spawn {*}$command
+if {$inline_mode} {
+    expect_before -re {\x1b\[6n} {
+        send -- "\x1b\[1;1R"
+        exp_continue
+    }
+}
+
+if {$mode eq "unsupported"} {
+    expect {
+        -re {no Council model is launchable.*mcpCapabilities.http} {}
+        timeout { exit 18 }
+    }
+    exit 0
+}
+
+expect {
+    -nocase -re {waiting for Codex} {}
+    timeout { exit 36 }
+}
+
+expect {
+    -nocase -re {Connected to Codex} {}
+    timeout { exit 37 }
+}
+
+set user_prompt "write a hello world program in Python"
+if {$mode eq "details"} {
+    set user_prompt "USER_LONG_PREFIX [string repeat u 720] USER_LONG_SUFFIX"
+}
+after 300
+send -- "$user_prompt\r"
+
+if {$mode eq "explore"} {
+    expect {
+        -re {Thor.*Eitri.*explore} { exp_continue }
+        -re {fixture exploration reasoning} { exp_continue }
+        -re {search fixture architecture} { exp_continue }
+        -re {PRIMARY.*RECEIVED.*EXPLORE_E2E_OK} { after 500; send_ctrl_c }
+        timeout { exit 39 }
+    }
+} elseif {$mode eq "explore-cancel"} {
+    expect {
+        -re {search fixture architecture} {
+            if {[file exists $env(MJ_E2E_PRIMARY_RESULT)]} { exit 40 }
+            after 300
+            send_ctrl_c
+        }
+        timeout { exit 41 }
+    }
+    expect {
+        -re {PRIMARY.*CANCELLED} { after 500; send_ctrl_c }
+        timeout { exit 42 }
+    }
+} elseif {$mode eq "inline-stream"} {
+    expect {
+        -re {fixture reasoning} {
+            if {[file exists $env(MJ_E2E_PRIMARY_RESULT)]} { exit 25 }
+            send_ctrl_c
+        }
+        timeout { exit 26 }
+    }
+    expect {
+        -re {PRIMARY.*CANCELLED} { after 500; send_ctrl_c }
+        timeout { exit 27 }
+    }
+} elseif {$mode eq "cancel"} {
+    expect {
+        -re {Eitri.*gpt-5-6-luna} { after 500; send_ctrl_c }
+        timeout { exit 20 }
+    }
+    expect {
+        -re {PRIMARY.*CANCELLED} { after 500; send_ctrl_c }
+        timeout { exit 21 }
+    }
+} elseif {$mode eq "failed"} {
+    expect {
+        -re {PRIMARY.*CANCELLED} { after 500; send_ctrl_c }
+        timeout { exit 38 }
+    }
+} elseif {$mode eq "no-change"} {
+    expect {
+        -re {PRIMARY.*NO.*CHANGE} { after 500; send_ctrl_c }
+        timeout { exit 35 }
+    }
+} elseif {$mode eq "details"} {
+    expect {
+        -re {details hidden} {}
+        timeout { exit 28 }
+    }
+    for {set handoff 0} {$handoff < 2} {incr handoff} {
+        expect {
+            -re {Eitri permission} { send -- "\r" }
+            timeout { exit 29 }
+        }
+    }
+    expect {
+        -re {discrete review brief} {}
+        timeout { exit 30 }
+    }
+    expect {
+        -re {Enter.*send} { after 500; send -- "\024" }
+        timeout { exit 31 }
+    }
+    expect {
+        -re {THOR_LONG_SUFFIX} { send -- "\033\[H" }
+        timeout { exit 32 }
+    }
+    set user_seen 0
+    set delegation_seen 0
+    while {!$user_seen || !$delegation_seen} {
+        expect {
+            -re {USER_LONG_SUFFIX} { set user_seen 1 }
+            -re {DELEGATION_LONG_SUFFIX} { set delegation_seen 1 }
+            timeout { exit 33 }
+        }
+    }
+    set previous_timeout $timeout
+    set timeout 2
+    set eitri_seen 0
+    for {set page 0} {$page < 12 && !$eitri_seen} {incr page} {
+        send -- "\033\[6~"
+        expect {
+            -re {EITRI_LONG_SUFFIX} { set eitri_seen 1 }
+            timeout {}
+        }
+    }
+    set timeout $previous_timeout
+    if {!$eitri_seen} { exit 34 }
+    send -- "\024"
+    after 500
+    send_ctrl_c
+} elseif {$mode eq "complete" || $mode eq "loki-eitri"} {
+    expect {
+        -re {Eitri permission} { send -- "\r"; exp_continue }
+        -re {PRIMARY.*RECEIVED.*CODEAGENT_E2E_OK} { after 500; send_ctrl_c }
+        timeout { exit 43 }
+    }
+} else {
+    expect {
+        -re {Eitri permission} { send -- "\r"; exp_continue }
+        -re {PRIMARY.*FINAL.*REVIEWED} { after 500; send_ctrl_c }
+        timeout { exit 23 }
+    }
+}
+expect eof

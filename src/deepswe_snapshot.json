@@ -1,0 +1,16 @@
+{
+  "generated_at": "2026-07-09T20:23:14.264468+00:00",
+  "rows": [
+    {"model":"gpt-5-6-sol","reasoning_effort":"high","pass_at_1":0.6940133037694013,"mean_cost_usd":3.4698331108647453},
+    {"model":"claude-fable-5","reasoning_effort":"high","pass_at_1":0.686046511627907,"mean_cost_usd":9.177638214788733},
+    {"model":"gpt-5-5","reasoning_effort":"high","pass_at_1":0.6438053097345132,"mean_cost_usd":5.100437004424779},
+    {"model":"gpt-5-6-terra","reasoning_effort":"high","pass_at_1":0.5376106194690266,"mean_cost_usd":1.1343762765486725},
+    {"model":"claude-opus-4-8","reasoning_effort":"high","pass_at_1":0.5176991150442478,"mean_cost_usd":4.281940017699115},
+    {"model":"claude-sonnet-5","reasoning_effort":"high","pass_at_1":0.4823008849557522,"mean_cost_usd":7.425560161197339},
+    {"model":"gpt-5-6-luna","reasoning_effort":"high","pass_at_1":0.4424778761061947,"mean_cost_usd":0.7779007499999999},
+    {"model":"glm-5-2","reasoning_effort":"high","pass_at_1":0.36283185840707965,"mean_cost_usd":2.8355164725663715},
+    {"model":"kimi-k2-7-code","reasoning_effort":null,"pass_at_1":0.3053097345132743,"mean_cost_usd":2.815536243274336},
+    {"model":"claude-sonnet-4-6","reasoning_effort":"high","pass_at_1":0.29933481152993346,"mean_cost_usd":5.5223517987804875},
+    {"model":"gemini-3-1-pro-preview","reasoning_effort":"high","pass_at_1":0.11751662971175167,"mean_cost_usd":9.48151874855876}
+  ]
+}

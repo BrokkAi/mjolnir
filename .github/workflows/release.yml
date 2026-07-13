@@ -28,12 +28,16 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target x86_64-unknown-linux-gnu
 
+      - name: Build voice worker
+        run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-unknown-linux-gnu
+
       - name: Package archive
         shell: bash
         run: |
           name="brokk-mjolnir-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
           mkdir "$name"
           cp "target/x86_64-unknown-linux-gnu/release/mj" "$name/"
+          cp "target/x86_64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
           cp README.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
@@ -73,12 +77,16 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target aarch64-unknown-linux-gnu
 
+      - name: Build voice worker
+        run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-unknown-linux-gnu
+
       - name: Package archive
         shell: bash
         run: |
           name="brokk-mjolnir-${GITHUB_REF_NAME}-aarch64-unknown-linux-gnu"
           mkdir "$name"
           cp "target/aarch64-unknown-linux-gnu/release/mj" "$name/"
+          cp "target/aarch64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
           cp README.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
@@ -155,12 +163,16 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
 
+      - name: Build voice worker
+        run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-pc-windows-msvc
+
       - name: Package archive
         shell: pwsh
         run: |
           $name = "brokk-mjolnir-${env:GITHUB_REF_NAME}-x86_64-pc-windows-msvc"
           New-Item -ItemType Directory -Path $name | Out-Null
           Copy-Item "target\x86_64-pc-windows-msvc\release\mj.exe" -Destination $name
+          Copy-Item "target\x86_64-pc-windows-msvc\release\mj-voice-worker.exe" -Destination $name
           Copy-Item "README.md" -Destination $name
           Copy-Item "LICENSE" -Destination $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
@@ -190,8 +202,14 @@ jobs:
       - name: Build x86_64 binary
         run: cargo build --release --locked --target x86_64-apple-darwin
 
+      - name: Build x86_64 voice worker
+        run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-apple-darwin
+
       - name: Build aarch64 binary
         run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Build aarch64 voice worker
+        run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-apple-darwin
 
       - name: Create universal binary
         run: |
@@ -201,12 +219,18 @@ jobs:
             target/aarch64-apple-darwin/release/mj \
             -output target/universal-apple-darwin/release/mj
           lipo -info target/universal-apple-darwin/release/mj
+          lipo -create \
+            target/x86_64-apple-darwin/release/mj-voice-worker \
+            target/aarch64-apple-darwin/release/mj-voice-worker \
+            -output target/universal-apple-darwin/release/mj-voice-worker
+          lipo -info target/universal-apple-darwin/release/mj-voice-worker
 
       - name: Package archive
         run: |
           name="brokk-mjolnir-${GITHUB_REF_NAME}-universal-apple-darwin"
           mkdir "$name"
           cp target/universal-apple-darwin/release/mj "$name/"
+          cp target/universal-apple-darwin/release/mj-voice-worker "$name/"
           cp README.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"

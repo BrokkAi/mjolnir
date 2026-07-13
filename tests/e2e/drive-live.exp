@@ -1,0 +1,47 @@
+#!/usr/bin/expect -f
+
+set timeout 600
+set stty_init "rows 40 columns 120"
+log_file -noappend $env(MJ_E2E_TRANSCRIPT)
+spawn $env(MJ_E2E_BIN) --no-update-check --debug-file $env(MJ_E2E_DEBUG_LOG) --agent-stderr $env(MJ_E2E_AGENT_STDERR) --cwd $env(MJ_E2E_WORKSPACE)
+expect_before -re {\x1b\[6n} {
+    send -- "\x1b\[1;1R"
+    exp_continue
+}
+expect {
+    -re {Connected to Codex} {}
+    timeout { exit 29 }
+}
+expect {
+    -re {F1 Mode} {
+        after 300
+        send -- "$env(MJ_E2E_LIVE_PROMPT)\r"
+    }
+    timeout { exit 34 }
+}
+
+expect {
+    -re {permission request} { send -- "\r"; exp_continue }
+    -re {Eitri.*gpt} {}
+    timeout { exit 30 }
+}
+
+expect {
+    -re {permission request} { send -- "\r"; exp_continue }
+    -re {Thor.*gpt} {}
+    timeout { exit 31 }
+}
+
+expect {
+    -re "$env(MJ_E2E_LIVE_TOKEN)" {}
+    timeout { exit 32 }
+}
+expect {
+    -re {Enter.*send} { after 500; send -- "\003" }
+    timeout { exit 35 }
+}
+
+expect {
+    eof {}
+    timeout { exit 33 }
+}
