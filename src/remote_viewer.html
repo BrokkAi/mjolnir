@@ -4449,7 +4449,10 @@
         return entry && typeof entry.kind === "string" && entry.kind ? entry.kind : "system";
       }
 
-      function entryLabel(kind) {
+      function entryLabel(kind, actor) {
+        if (typeof actor === "string" && actor) {
+          return actor.charAt(0).toUpperCase() + actor.slice(1);
+        }
         switch (kind) {
           case "user":
             return "User";
@@ -4529,6 +4532,7 @@
           entry.tool_kind || "",
           entry.tool_title || "",
           entry.tool_body || "",
+          entry.actor || "",
           JSON.stringify(entryToolDiffs(entry)),
           showTranscriptDiffs ? "diffs-on" : "diffs-off",
         ].join("\u0000");
@@ -4540,6 +4544,7 @@
           entry.tool_kind || "",
           (entry.tool_title || "").length,
           (entry.tool_body || "").length,
+          entry.actor || "",
           JSON.stringify(entryToolDiffs(entry)).length,
         ].join(":");
       }
@@ -4618,7 +4623,7 @@
         const el = cloneTemplate(entryTpl);
         const kind = entryKind(entry);
         el.dataset.kind = kind;
-        el.querySelector(".entry-kind").textContent = entryLabel(kind);
+        el.querySelector(".entry-kind").textContent = entryLabel(kind, entry.actor);
         setTimestamp(el.querySelector(".entry-time"), entry.timestamp || "");
         const refs = {
           kind,
@@ -4913,7 +4918,9 @@
           const body = entry.tool_body || entry.text || "";
           return [`### Tool: ${title}`, "", body].join("\n").trim();
         }
-        const label = kind === "user" ? "You" : kind === "agent" ? "Agent" : kind;
+        const label = entry.actor
+          ? entry.actor.charAt(0).toUpperCase() + entry.actor.slice(1)
+          : kind === "user" ? "You" : kind === "agent" ? "Agent" : kind;
         return [`### ${label}`, "", entry.text || ""].join("\n").trim();
       }
 

@@ -5,7 +5,7 @@
 //! ACP event is folded in through `apply_event`; ratatui then renders from
 //! this state.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -22,8 +22,9 @@ use crate::claude_usage::ClaudeUsageReport;
 use crate::clipboard::ClipboardLease;
 
 use crate::event::{
-    ElicitationOutcome, ElicitationPrompt, PermissionDecision, PermissionPrompt, PromptImage,
-    SessionConfigTarget, TerminalOutputSnapshot, UiEvent, content_block_text,
+    CodeAgentEvent, CodeAgentOutcome, ElicitationOutcome, ElicitationPrompt, InternalMessage,
+    LokiActivity, PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget,
+    TerminalOutputSnapshot, UiEvent, content_block_text,
 };
 use crate::palette::TerminalTheme;
 use crate::ragnarok;
@@ -40,6 +41,8 @@ const BUILTIN_LOAD_COMMAND: &str = "load";
 const BUILTIN_FORK_COMMAND: &str = "fork";
 const BUILTIN_EXPORT_COMMAND: &str = "export";
 const BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
+const BUILTIN_MODELS_COMMAND: &str = "models";
+const BUILTIN_REVIEWS_COMMAND: &str = "reviews";
 const BUILTIN_RAGNAROK_COMMAND: &str = "ragnarok";
 const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
 
@@ -76,6 +79,20 @@ fn builtin_mjconfig_command() -> AvailableCommand {
     )
 }
 
+fn builtin_models_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_MODELS_COMMAND,
+        "show or select Thor/Loki/Eitri models (usage: /models [role model|auto])",
+    )
+}
+
+fn builtin_reviews_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_REVIEWS_COMMAND,
+        "show or change Council reviews (usage: /reviews [thor|loki on|off])",
+    )
+}
+
 fn builtin_ragnarok_command() -> AvailableCommand {
     AvailableCommand::new(
         BUILTIN_RAGNAROK_COMMAND,
@@ -91,6 +108,8 @@ fn install_builtin_commands(commands: &mut Vec<AvailableCommand>, include_fork: 
             && command.name != BUILTIN_FORK_COMMAND
             && command.name != BUILTIN_EXPORT_COMMAND
             && command.name != BUILTIN_MJCONFIG_COMMAND
+            && command.name != BUILTIN_MODELS_COMMAND
+            && command.name != BUILTIN_REVIEWS_COMMAND
             && command.name != BUILTIN_RAGNAROK_COMMAND
     });
     if include_fork {
@@ -98,6 +117,8 @@ fn install_builtin_commands(commands: &mut Vec<AvailableCommand>, include_fork: 
     }
     commands.insert(0, builtin_ragnarok_command());
     commands.insert(0, builtin_mjconfig_command());
+    commands.insert(0, builtin_reviews_command());
+    commands.insert(0, builtin_models_command());
     commands.insert(0, builtin_export_command());
     commands.insert(0, builtin_load_command());
     commands.insert(0, builtin_clear_command());
@@ -105,7 +126,7 @@ fn install_builtin_commands(commands: &mut Vec<AvailableCommand>, include_fork: 
 }
 
 /// How the UI loop ends, so `main` can decide whether to quit entirely
-/// or start a fresh session through the agent picker.
+/// or start a fresh session from the saved Council preferences.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum UiExitReason {
     Quit,
@@ -124,13 +145,24 @@ pub enum Entry {
     AgentMessage(String),
     /// Streaming agent reasoning ("thoughts").
     AgentThought(String),
+    /// Nested agent response and reasoning, kept visually distinct from the primary.
+    CodeAgentMessage(String),
+    CodeAgentThought(String),
     /// A tool call slot identified by id. The body is rendered from
     /// `tool_calls[id]`; we keep an entry pointer so it shows up in order.
     ToolCall(String),
+    CodeAgentToolCall(String),
     /// Latest plan posted by the agent.
     Plan(Vec<PlanEntry>),
+    CodeAgentPlan(Vec<PlanEntry>),
+    /// Role/model-attributed Loki reviewer activity.
+    LokiActivity(Box<LokiActivity>),
+    /// Council coordination prompt retained in full but normally rendered compactly.
+    InternalMessage(InternalMessage),
     /// System-level note (errors, warnings, mode changes).
     System(String),
+    /// Live system note that becomes durable once its text is finalized.
+    EphemeralSystem(String),
     /// Visual separator inserted at local session boundaries so a freshly
     /// started session is not confused with the previous transcript.
     SessionBoundary(String),
@@ -151,6 +183,16 @@ pub struct ToolCallView {
     pub kind: ToolKind,
     pub status: ToolCallStatus,
     pub body: Vec<ToolCallOutput>,
+}
+
+/// Durable facts about one locally submitted prompt turn.  Entries remain the
+/// source-of-truth transcript; this only records lifecycle data which would
+/// otherwise be lost once a later turn starts.
+#[derive(Debug, Clone, Copy)]
+struct PromptTurn {
+    prompt_index: usize,
+    elapsed: Option<Duration>,
+    completed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +297,69 @@ impl ToolCallView {
         }
         changed
     }
+
+    fn namespace_terminal_ids(&mut self, prefix: &str) {
+        for output in &mut self.body {
+            if let ToolCallOutput::Terminal { terminal_id, .. } = output
+                && !terminal_id.starts_with(prefix)
+            {
+                *terminal_id = format!("{prefix}{terminal_id}");
+            }
+        }
+    }
+}
+
+pub(crate) fn is_code_agent_transport_call(tool_call: &ToolCall) -> bool {
+    code_agent_identity_from_raw_input(tool_call.raw_input.as_ref())
+        || code_agent_identity_from_name(&tool_call.title)
+        || code_agent_identity_from_meta(tool_call.meta.as_ref())
+}
+
+pub(crate) fn is_code_agent_transport_update(update: &ToolCallUpdate) -> bool {
+    code_agent_identity_from_raw_input(update.fields.raw_input.as_ref())
+        || update
+            .fields
+            .title
+            .as_deref()
+            .is_some_and(code_agent_identity_from_name)
+        || code_agent_identity_from_meta(update.meta.as_ref())
+}
+
+fn code_agent_identity_from_raw_input(raw_input: Option<&serde_json::Value>) -> bool {
+    let Some(object) = raw_input.and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    object
+        .get("server")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|server| server == "mj-code-agent")
+        && object
+            .get("tool")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|tool| matches!(tool, "code_agent" | "explore_agent"))
+}
+
+fn code_agent_identity_from_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("mj-code-agent")
+        && (name.contains("code_agent") || name.contains("explore_agent"))
+}
+
+fn code_agent_identity_from_meta(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    let Some(meta) = meta else {
+        return false;
+    };
+    meta.get("toolName")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(code_agent_identity_from_name)
+        || meta
+            .get("claudeCode")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|claude| claude.get("toolName"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(code_agent_identity_from_name)
 }
 
 /// Lifecycle of the ACP connection from launch through shutdown.
@@ -516,6 +621,11 @@ pub struct AppState {
     /// directory's git project.
     pub session_cwd: PathBuf,
     pub agent_label: String,
+    /// Human-readable ACP adapter backing the primary model, such as Codex or
+    /// Claude Code. Kept separate from the role/model label in the header.
+    primary_acp_name: String,
+    primary_connection_announcement: Option<usize>,
+    primary_connected_announced: bool,
     /// Registry `source_id` of the launched agent (e.g. `claude-acp`,
     /// `opencode`, `custom:foo`, `anvil`). Distinct from `agent_label`,
     /// which is a *display* string; this is the stable id the model-score
@@ -528,7 +638,6 @@ pub struct AppState {
     /// Score catalog for this UI run. It may be populated asynchronously after
     /// startup; render code reads through this explicit state rather than a
     /// process-global catalog.
-    pub score_store: crate::scores::ScoreStore,
     pub session_id: Option<String>,
     pub session_title: Option<String>,
     /// Current connection lifecycle state. Private to enforce the invariant
@@ -543,6 +652,10 @@ pub struct AppState {
     pub session_fork_supported: bool,
     pub transcript: Vec<Entry>,
     pub tool_calls: HashMap<String, ToolCallView>,
+    /// Primary-agent MCP calls that transport an Eitri turn. Their protocol
+    /// state remains available, but the redundant parent row is omitted from
+    /// the transcript so it cannot pin nested activity behind a pending tool.
+    suppressed_tool_calls: HashSet<String>,
     terminal_outputs: HashMap<String, TerminalOutputSnapshot>,
     /// Bumped whenever `transcript` or `tool_calls` change in a way that
     /// affects rendering. The UI layer uses this as a cache key so it can
@@ -596,19 +709,22 @@ pub struct AppState {
     /// Scroll offset measured in rendered lines from the bottom of the
     /// transcript. `0` keeps the view pinned to the newest line.
     pub scroll_offset: usize,
-    /// When false, tool-call outputs are truncated to a small line budget
-    /// in the transcript so streaming bursts don't push the conversation
-    /// off-screen. In the fullscreen TUI, Ctrl-T flips this for the whole
-    /// session.
-    pub expand_tool_outputs: bool,
+    /// When false, stable long messages and tool-call outputs are compacted in
+    /// the transcript. In the fullscreen TUI, Ctrl-T flips this globally.
+    pub expand_transcript_details: bool,
     /// When true (inline mode only), the compact chat view is replaced by a
     /// full-height, scrollable reader showing the entire transcript with
-    /// tool outputs fully expanded. Inline scrollback is immutable once
+    /// messages and tool outputs fully expanded. Inline scrollback is immutable once
     /// flushed, so this reader is how users re-read earlier output in full.
     pub transcript_viewer: bool,
     pub exit_reason: Option<UiExitReason>,
     /// True once the runtime has stopped accepting commands.
     pub runtime_closed: bool,
+    /// Eitri currently owns the foreground ACP lane while Thor is suspended in
+    /// the `code_agent` MCP request.
+    pub code_agent_active: bool,
+    /// Eitri identity currently holding the interactive UI/control lane.
+    pub code_agent_label: Option<String>,
     /// Transient status line with severity.
     pub status_line: Option<StatusMessage>,
     /// True while the local microphone dictation helper is running.
@@ -620,10 +736,15 @@ pub struct AppState {
     /// Timing for the active or most recently completed prompt turn.
     turn_started_at: Option<Instant>,
     last_turn_elapsed: Option<Duration>,
+    prompt_turns: Vec<PromptTurn>,
+    active_prompt_turn: Option<usize>,
     /// Time since the current connection lifecycle state was entered.
     connection_state_started_at: Instant,
     /// Last token/context usage reported by the agent.
     pub token_usage: TokenUsage,
+    /// Usage for the fresh nested Eitri session currently holding the wheel.
+    /// Kept separate so the header never presents Thor's context as Eitri's.
+    code_agent_token_usage: TokenUsage,
     /// Last Claude Code `/usage` quota scrape, when the active agent is Claude.
     pub claude_usage: Option<ClaudeUsageReport>,
     /// Slash-command autocomplete state, recomputed on every input edit.
@@ -644,6 +765,15 @@ pub struct AppState {
     pub transcript_export_dir: Option<PathBuf>,
     /// Config file used by local UI-only settings such as `/mjconfig`.
     pub config_path: Option<PathBuf>,
+    /// DeepSWE model catalog and current model-first council selectors.
+    pub council_choices: Vec<crate::council::ModelChoice>,
+    /// Preferences saved for the next session and immutable resolutions used
+    /// by the current session are deliberately shown separately.
+    pub council_models: crate::config::ModelsConfig,
+    pub active_council_models: crate::config::ModelsConfig,
+    pub thor_review_enabled: bool,
+    pub loki_review_enabled: bool,
+    pub ragnarok_models: Vec<crate::council::ResolvedRole>,
     /// Holds the platform clipboard lease so copied text remains available
     /// on Linux/X11 where the owning process must stay alive.
     #[allow(dead_code)]
@@ -675,6 +805,7 @@ pub struct PendingPermission {
     pub scroll_offset: Option<usize>,
     pub opened_at: Instant,
     pub repair_attempts: usize,
+    pub code_agent: bool,
 }
 
 #[derive(Debug)]
@@ -690,6 +821,7 @@ pub struct PendingElicitation {
     /// append/backspace at the end (the cursor renders after the last char);
     /// empty for every other view.
     pub input: String,
+    pub code_agent: bool,
 }
 
 /// How a pending elicitation should be rendered and resolved, derived once
@@ -856,9 +988,11 @@ impl AppState {
             ragnarok_launch: None,
             session_cwd: PathBuf::from("."),
             agent_label: String::new(),
+            primary_acp_name: "ACP server".to_string(),
+            primary_connection_announcement: None,
+            primary_connected_announced: false,
             agent_source_id: String::new(),
             active_agent_launch: None,
-            score_store: crate::scores::ScoreStore::default(),
             session_id: None,
             session_title: None,
             connection_state: ConnectionState::Launching,
@@ -874,6 +1008,7 @@ impl AppState {
             session_fork_supported: false,
             transcript: Vec::new(),
             tool_calls: HashMap::new(),
+            suppressed_tool_calls: HashSet::new(),
             terminal_outputs: HashMap::new(),
             transcript_revision: 0,
             input: String::new(),
@@ -890,18 +1025,23 @@ impl AppState {
             elicitation_queue: VecDeque::new(),
             config_picker: None,
             scroll_offset: 0,
-            expand_tool_outputs: false,
+            expand_transcript_details: false,
             transcript_viewer: false,
             exit_reason: None,
             runtime_closed: false,
+            code_agent_active: false,
+            code_agent_label: None,
             status_line: None,
             voice_input_active: false,
             voice_input_range: None,
             voice_input_level: None,
             turn_started_at: None,
             last_turn_elapsed: None,
+            prompt_turns: Vec::new(),
+            active_prompt_turn: None,
             connection_state_started_at: now,
             token_usage: TokenUsage::default(),
+            code_agent_token_usage: TokenUsage::default(),
             claude_usage: None,
             autocomplete: Autocomplete::default(),
             help_overlay: false,
@@ -911,6 +1051,12 @@ impl AppState {
             additional_roots: 0,
             transcript_export_dir: None,
             config_path: None,
+            council_choices: Vec::new(),
+            council_models: crate::config::ModelsConfig::default(),
+            active_council_models: crate::config::ModelsConfig::default(),
+            thor_review_enabled: true,
+            loki_review_enabled: true,
+            ragnarok_models: Vec::new(),
             clipboard_lease: None,
             queued_prompts: VecDeque::new(),
         }
@@ -999,6 +1145,123 @@ impl AppState {
             self.set_theme(menu.orig_theme);
             self.set_spinner_style(menu.orig_spinner);
         }
+    }
+
+    pub fn council_summary(&self) -> String {
+        let mut text = format!(
+            "Council models\n\nChange with: /models <thor|loki|eitri> <auto|model-id>\nChanges apply to the next session.\n\nSaved preference\n  Thor   {}\n  Loki   {}\n  Eitri  {}\n\nActive session\n  Thor   {}\n  Loki   {}\n  Eitri  {}\n\nAuto selection · DeepSWE\n  Loki chooses the best launchable model from a provider other than Thor's.\n  Eitri chooses the cheapest Pareto model meeting the Sonnet High quality floor.\n\nAvailable models\n",
+            self.council_models.thor,
+            self.council_models.loki,
+            self.council_models.eitri,
+            self.active_council_models.thor,
+            self.active_council_models.loki,
+            self.active_council_models.eitri,
+        );
+        for choice in &self.council_choices {
+            if choice.available && choice.ranked {
+                text.push_str(&format!(
+                    "  ✓ {} · Pass@1 {:.1}% · ${:.2} · {}\n",
+                    choice.model,
+                    choice.pass_at_1 * 100.0,
+                    choice.mean_cost_usd,
+                    choice.adapter.as_deref().unwrap_or("adapter unknown")
+                ));
+            } else if choice.available {
+                text.push_str(&format!(
+                    "  ✓ {} · Unranked · {}\n",
+                    choice.model,
+                    choice.adapter.as_deref().unwrap_or("custom ACP")
+                ));
+            } else {
+                text.push_str(&format!(
+                    "  × {} · {}\n",
+                    choice.model,
+                    choice.disabled_reason.as_deref().unwrap_or("unavailable")
+                ));
+            }
+        }
+        text
+    }
+
+    pub fn set_council_model(&mut self, role: &str, model: &str) -> Result<String, String> {
+        if model != "auto" {
+            let choice = self
+                .council_choices
+                .iter()
+                .find(|choice| choice.model == model)
+                .ok_or_else(|| format!("unknown Council model '{model}'"))?;
+            if !choice.available {
+                return Err(format!(
+                    "model '{model}' is unavailable: {}",
+                    choice
+                        .disabled_reason
+                        .as_deref()
+                        .unwrap_or("not launchable")
+                ));
+            }
+        }
+        let mut next = self.council_models.clone();
+        match role.to_ascii_lowercase().as_str() {
+            "thor" => next.thor = model.to_string(),
+            "loki" => next.loki = model.to_string(),
+            "eitri" => next.eitri = model.to_string(),
+            _ => return Err("role must be thor, loki, or eitri".to_string()),
+        }
+        if next.thor != "auto" && next.loki == next.thor {
+            return Err("Loki must use a model distinct from Thor".to_string());
+        }
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| "config path is unavailable".to_string())?;
+        let mut config =
+            crate::config::Config::load(path).map_err(|error| format!("load config: {error:#}"))?;
+        config.set_role_models(&next);
+        config
+            .save(path)
+            .map_err(|error| format!("save config: {error:#}"))?;
+        self.council_models = next;
+        Ok(format!(
+            "{role} model set to {model}; starts with the next session"
+        ))
+    }
+
+    pub fn review_summary(&self) -> String {
+        format!(
+            "Council reviews · Thor discrete {} · Loki streaming {}",
+            on_off(self.thor_review_enabled),
+            on_off(self.loki_review_enabled)
+        )
+    }
+
+    pub fn set_review_policy(
+        &mut self,
+        role: &str,
+        enabled: bool,
+    ) -> Result<crate::event::ReviewRole, String> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| "config path is unavailable".to_string())?;
+        let mut config =
+            crate::config::Config::load(path).map_err(|error| format!("load config: {error:#}"))?;
+        let review_role = match role.to_ascii_lowercase().as_str() {
+            "thor" => {
+                config.thor.discrete_review = enabled;
+                self.thor_review_enabled = enabled;
+                crate::event::ReviewRole::Thor
+            }
+            "loki" => {
+                config.loki.streaming_review = enabled;
+                self.loki_review_enabled = enabled;
+                crate::event::ReviewRole::Loki
+            }
+            _ => return Err("review role must be thor or loki".to_string()),
+        };
+        config
+            .save(path)
+            .map_err(|error| format!("save config: {error:#}"))?;
+        Ok(review_role)
     }
 
     /// Stage a prompt to fire when the current turn completes.
@@ -1144,11 +1407,11 @@ impl AppState {
         }
     }
 
-    /// Flip the global tool-output collapse setting. Bumps the transcript
+    /// Flip the global transcript-detail collapse setting. Bumps the transcript
     /// revision so the renderer rebuilds its cached `Vec<Line>` with the
     /// new line budget.
-    pub fn toggle_expand_tool_outputs(&mut self) {
-        self.expand_tool_outputs = !self.expand_tool_outputs;
+    pub fn toggle_expand_transcript_details(&mut self) {
+        self.expand_transcript_details = !self.expand_transcript_details;
         self.bump_transcript_revision();
     }
 
@@ -1173,9 +1436,16 @@ impl AppState {
             Entry::AgentMessage(text) => Some(text.clone()),
             Entry::UserPrompt(_)
             | Entry::AgentThought(_)
+            | Entry::CodeAgentMessage(_)
+            | Entry::CodeAgentThought(_)
             | Entry::ToolCall(_)
+            | Entry::CodeAgentToolCall(_)
             | Entry::Plan(_)
+            | Entry::CodeAgentPlan(_)
+            | Entry::LokiActivity(_)
+            | Entry::InternalMessage(_)
             | Entry::System(_)
+            | Entry::EphemeralSystem(_)
             | Entry::SessionBoundary(_) => None,
         })
     }
@@ -1216,8 +1486,43 @@ impl AppState {
         self.last_turn_elapsed
     }
 
+    /// Whether the locally submitted prompt at `prompt_index` has received a
+    /// terminal prompt result. Replayed transcript prompts intentionally have
+    /// no such lifecycle fact and are therefore not considered complete.
+    pub fn prompt_turn_completed(&self, prompt_index: usize) -> bool {
+        self.prompt_turns
+            .iter()
+            .find(|turn| turn.prompt_index == prompt_index)
+            .is_some_and(|turn| turn.completed)
+    }
+
+    /// Whether `prompt_index` belongs to a locally submitted prompt whose
+    /// lifecycle is tracked by this UI instance. Replayed prompts deliberately
+    /// have no record here.
+    pub fn has_prompt_turn(&self, prompt_index: usize) -> bool {
+        self.prompt_turns
+            .iter()
+            .any(|turn| turn.prompt_index == prompt_index)
+    }
+
+    /// Recorded elapsed time for a completed locally submitted prompt turn.
+    pub fn prompt_turn_elapsed(&self, prompt_index: usize) -> Option<Duration> {
+        self.prompt_turns
+            .iter()
+            .find(|turn| turn.prompt_index == prompt_index)
+            .and_then(|turn| turn.elapsed)
+    }
+
     pub fn connection_state_elapsed(&self) -> Duration {
         self.connection_state_started_at.elapsed()
+    }
+
+    pub fn displayed_token_usage(&self) -> &TokenUsage {
+        if self.code_agent_active {
+            &self.code_agent_token_usage
+        } else {
+            &self.token_usage
+        }
     }
 
     pub fn connection_state(&self) -> ConnectionState {
@@ -1242,6 +1547,35 @@ impl AppState {
         if self.connection_state != state {
             self.connection_state = state;
             self.connection_state_started_at = Instant::now();
+        }
+    }
+
+    pub fn set_primary_acp_name(&mut self, name: impl Into<String>) {
+        self.primary_acp_name = name.into();
+    }
+
+    pub fn announce_waiting_for_primary(&mut self) {
+        if self.primary_connected_announced {
+            return;
+        }
+        let message = format!("Waiting for {}", self.primary_acp_name);
+        self.set_status_line(StatusKind::Info, message.clone());
+        if self.primary_connection_announcement.is_none() {
+            self.primary_connection_announcement = Some(self.transcript.len());
+            self.transcript.push(Entry::EphemeralSystem(message));
+            self.bump_transcript_revision();
+        }
+    }
+
+    fn announce_connected_to_primary(&mut self) {
+        let message = format!("Connected to {}", self.primary_acp_name);
+        self.set_status_line(StatusKind::Info, message.clone());
+        self.primary_connected_announced = true;
+        if let Some(index) = self.primary_connection_announcement.take()
+            && let Some(entry @ Entry::EphemeralSystem(_)) = self.transcript.get_mut(index)
+        {
+            *entry = Entry::System(message);
+            self.bump_transcript_revision();
         }
     }
 
@@ -1309,6 +1643,9 @@ impl AppState {
     /// Note that the user has requested cancellation of the in-flight
     /// prompt. Idempotent and only meaningful while `Streaming`.
     pub fn mark_cancelling(&mut self) {
+        if self.code_agent_active {
+            return;
+        }
         if self.connection_state == ConnectionState::Streaming {
             self.set_connection_state(ConnectionState::Cancelling);
         }
@@ -1318,6 +1655,7 @@ impl AppState {
         self.set_connection_state(ConnectionState::Forking);
         self.turn_started_at = Some(Instant::now());
         self.last_turn_elapsed = None;
+        self.active_prompt_turn = None;
         self.autocomplete = Autocomplete::default();
     }
 
@@ -1523,7 +1861,14 @@ impl AppState {
     /// Push a user prompt into the transcript immediately, before the
     /// command reaches the runtime. Keeps the UI responsive.
     pub fn record_user_prompt(&mut self, text: String) {
+        let prompt_index = self.transcript.len();
         self.transcript.push(Entry::UserPrompt(text.clone()));
+        self.prompt_turns.push(PromptTurn {
+            prompt_index,
+            elapsed: None,
+            completed: false,
+        });
+        self.active_prompt_turn = Some(prompt_index);
         self.record_prompt_history(text);
         self.bump_transcript_revision();
         self.set_connection_state(ConnectionState::Streaming);
@@ -1788,6 +2133,17 @@ impl AppState {
     }
 
     pub fn apply_event(&mut self, event: UiEvent) {
+        let is_thinking_update = matches!(
+            &event,
+            UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(_))
+                | UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+                    SessionUpdate::AgentThoughtChunk(_)
+                ))
+        );
+        if !is_thinking_update && remove_trailing_thinking(&mut self.transcript) {
+            self.bump_transcript_revision();
+        }
+
         match event {
             UiEvent::Connected {
                 prompt_images_supported,
@@ -1802,6 +2158,7 @@ impl AppState {
                 self.session_fork_supported = session_fork_supported;
                 install_builtin_commands(&mut self.available_commands, session_fork_supported);
                 self.set_connection_state(ConnectionState::Initializing);
+                self.announce_connected_to_primary();
             }
             UiEvent::SessionStarted { session_id, .. } => {
                 if self.connection_state == ConnectionState::Forking {
@@ -1822,6 +2179,11 @@ impl AppState {
             UiEvent::SessionConfigOptions { options, targets } => {
                 self.apply_session_config_options(options, targets);
             }
+            UiEvent::LokiActivity(activity) => self.apply_loki_activity(activity),
+            UiEvent::InternalMessage(message) => {
+                self.transcript.push(Entry::InternalMessage(message));
+                self.bump_transcript_revision();
+            }
             UiEvent::PermissionRequest(prompt) => {
                 // Append to the queue rather than replacing the current
                 // pending prompt: overwriting would drop the prior
@@ -1834,6 +2196,7 @@ impl AppState {
                     scroll_offset: None,
                     opened_at: Instant::now(),
                     repair_attempts: 0,
+                    code_agent: false,
                 });
                 self.update_autocomplete();
             }
@@ -1853,9 +2216,11 @@ impl AppState {
                     selected: 0,
                     scroll_offset: None,
                     input: String::new(),
+                    code_agent: false,
                 });
                 self.update_autocomplete();
             }
+            UiEvent::CodeAgent(event) => self.apply_code_agent_event(event),
             UiEvent::RemotePermissionDecision {
                 request_id,
                 option_id,
@@ -1863,6 +2228,9 @@ impl AppState {
                 self.resolve_permission_remotely(&request_id, &option_id);
             }
             UiEvent::PromptDone { stop_reason, usage } => {
+                if remove_trailing_thinking(&mut self.transcript) {
+                    self.bump_transcript_revision();
+                }
                 self.finish_prompt_turn(matches!(stop_reason, StopReason::Cancelled));
                 if let Some(usage) = usage {
                     self.token_usage.apply_prompt_usage(usage);
@@ -1880,6 +2248,9 @@ impl AppState {
                 self.claude_usage = Some(report);
             }
             UiEvent::PromptFailed { message } => {
+                if remove_trailing_thinking(&mut self.transcript) {
+                    self.bump_transcript_revision();
+                }
                 self.finish_prompt_turn(true);
                 // Drop queued prompts: finish_prompt_turn flips back to
                 // Ready, which the next drain pass would otherwise read as
@@ -1918,6 +2289,216 @@ impl AppState {
         }
     }
 
+    fn apply_code_agent_event(&mut self, event: CodeAgentEvent) {
+        const PREFIX: &str = "codeagent:";
+        match event {
+            CodeAgentEvent::Started { label } => {
+                self.code_agent_active = true;
+                self.code_agent_label = Some(label.clone());
+                self.code_agent_token_usage = TokenUsage::default();
+                self.set_status_line(StatusKind::Info, label);
+            }
+            CodeAgentEvent::SessionUpdate(update) => self.apply_code_agent_update(update),
+            CodeAgentEvent::TerminalOutput(mut snapshot) => {
+                if remove_trailing_thinking(&mut self.transcript) {
+                    self.bump_transcript_revision();
+                }
+                snapshot.terminal_id = format!("{PREFIX}{}", snapshot.terminal_id);
+                self.terminal_outputs
+                    .insert(snapshot.terminal_id.clone(), snapshot);
+                self.apply_known_terminal_outputs();
+            }
+            CodeAgentEvent::PermissionRequest(prompt) => {
+                if remove_trailing_thinking(&mut self.transcript) {
+                    self.bump_transcript_revision();
+                }
+                self.help_overlay = false;
+                self.permission_queue.push_back(PendingPermission {
+                    prompt,
+                    selected: 0,
+                    scroll_offset: None,
+                    opened_at: Instant::now(),
+                    repair_attempts: 0,
+                    code_agent: true,
+                });
+                self.update_autocomplete();
+            }
+            CodeAgentEvent::ElicitationRequest(prompt) => {
+                if remove_trailing_thinking(&mut self.transcript) {
+                    self.bump_transcript_revision();
+                }
+                self.help_overlay = false;
+                self.elicitation_queue.push_back(PendingElicitation {
+                    prompt,
+                    selected: 0,
+                    scroll_offset: None,
+                    input: String::new(),
+                    code_agent: true,
+                });
+                self.update_autocomplete();
+            }
+            CodeAgentEvent::CancelPendingPermissions => {
+                self.cancel_code_agent_prompts();
+                self.mark_code_agent_tools_failed("tool call cancelled");
+            }
+            CodeAgentEvent::Status(message) => {
+                remove_trailing_thinking(&mut self.transcript);
+                self.push_system_message(format!("Eitri · {message}"));
+            }
+            CodeAgentEvent::Finished { outcome } => {
+                if remove_trailing_thinking(&mut self.transcript) {
+                    self.bump_transcript_revision();
+                }
+                self.code_agent_active = false;
+                self.code_agent_label = None;
+                self.cancel_code_agent_prompts();
+                match outcome {
+                    CodeAgentOutcome::Completed => {
+                        self.set_status_line(StatusKind::Info, "Eitri complete")
+                    }
+                    CodeAgentOutcome::Cancelled => {
+                        self.mark_code_agent_tools_failed("tool call cancelled");
+                        self.set_status_line(StatusKind::Info, "Eitri cancelled");
+                    }
+                    CodeAgentOutcome::Failed(message) => {
+                        self.mark_code_agent_tools_failed("tool call failed");
+                        self.record_status_message(
+                            StatusKind::Warning,
+                            format!("Eitri failed · {message}"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_code_agent_update(&mut self, update: SessionUpdate) {
+        const PREFIX: &str = "codeagent:";
+        match update {
+            SessionUpdate::UserMessageChunk(_) => {}
+            SessionUpdate::AgentMessageChunk(chunk) => {
+                remove_trailing_thinking(&mut self.transcript);
+                append_or_start(
+                    &mut self.transcript,
+                    EntryKind::CodeAgent,
+                    content_block_text(&chunk.content),
+                );
+                self.bump_transcript_revision();
+            }
+            SessionUpdate::AgentThoughtChunk(chunk) => {
+                replace_thinking(
+                    &mut self.transcript,
+                    EntryKind::CodeAgentThought,
+                    content_block_text(&chunk.content),
+                );
+                self.bump_transcript_revision();
+            }
+            SessionUpdate::ToolCall(tool_call) => {
+                remove_trailing_thinking(&mut self.transcript);
+                let key = format!("{PREFIX}{}", tool_call.tool_call_id);
+                let mut view = ToolCallView::from_tool_call(&tool_call);
+                view.namespace_terminal_ids(PREFIX);
+                self.tool_calls.insert(key.clone(), view);
+                self.transcript.push(Entry::CodeAgentToolCall(key));
+                self.bump_transcript_revision();
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                remove_trailing_thinking(&mut self.transcript);
+                let key = format!("{PREFIX}{}", update.tool_call_id);
+                if let Some(view) = self.tool_calls.get_mut(&key) {
+                    view.apply_update(&update);
+                    view.namespace_terminal_ids(PREFIX);
+                } else {
+                    let mut view = ToolCallView {
+                        title: update
+                            .fields
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| "tool".to_string()),
+                        kind: update.fields.kind.unwrap_or(ToolKind::Other),
+                        status: update.fields.status.unwrap_or(ToolCallStatus::Pending),
+                        body: Vec::new(),
+                    };
+                    if let Some(content) = &update.fields.content {
+                        view.set_content(content);
+                        view.namespace_terminal_ids(PREFIX);
+                    }
+                    self.tool_calls.insert(key.clone(), view);
+                    self.transcript.push(Entry::CodeAgentToolCall(key));
+                }
+                self.bump_transcript_revision();
+            }
+            SessionUpdate::Plan(Plan { entries, .. }) => {
+                remove_trailing_thinking(&mut self.transcript);
+                if let Some(Entry::CodeAgentPlan(existing)) = self
+                    .transcript
+                    .iter_mut()
+                    .rev()
+                    .find(|entry| matches!(entry, Entry::CodeAgentPlan(_)))
+                {
+                    *existing = entries;
+                } else {
+                    self.transcript.push(Entry::CodeAgentPlan(entries));
+                }
+                self.bump_transcript_revision();
+            }
+            SessionUpdate::UsageUpdate(update) => {
+                let _ = self.code_agent_token_usage.apply_usage_update(update);
+            }
+            _ => {}
+        }
+        self.apply_known_terminal_outputs();
+    }
+
+    fn apply_loki_activity(&mut self, activity: LokiActivity) {
+        remove_trailing_thinking(&mut self.transcript);
+        self.transcript
+            .push(Entry::LokiActivity(Box::new(activity)));
+        self.bump_transcript_revision();
+    }
+
+    fn cancel_code_agent_prompts(&mut self) {
+        let mut primary_permissions = VecDeque::new();
+        while let Some(pending) = self.permission_queue.pop_front() {
+            if pending.code_agent {
+                let _ = pending.prompt.responder.send(PermissionDecision::Cancelled);
+            } else {
+                primary_permissions.push_back(pending);
+            }
+        }
+        self.permission_queue = primary_permissions;
+
+        let mut primary_elicitations = VecDeque::new();
+        while let Some(pending) = self.elicitation_queue.pop_front() {
+            if pending.code_agent {
+                let _ = pending.prompt.responder.send(ElicitationOutcome::Cancel);
+            } else {
+                primary_elicitations.push_back(pending);
+            }
+        }
+        self.elicitation_queue = primary_elicitations;
+        self.update_autocomplete();
+    }
+
+    fn mark_code_agent_tools_failed(&mut self, note: &str) {
+        let mut changed = false;
+        for (id, view) in &mut self.tool_calls {
+            if id.starts_with("codeagent:")
+                && matches!(
+                    view.status,
+                    ToolCallStatus::Pending | ToolCallStatus::InProgress
+                )
+            {
+                view.status = ToolCallStatus::Failed;
+                view.body.push(ToolCallOutput::Note(note.to_string()));
+                changed = true;
+            }
+        }
+        if changed {
+            self.bump_transcript_revision();
+        }
+    }
+
     fn finish_prompt_turn(&mut self, fail_unfinished_tools: bool) {
         self.finish_turn_timer();
         if fail_unfinished_tools {
@@ -1932,6 +2513,9 @@ impl AppState {
         ) {
             self.set_connection_state(ConnectionState::Ready);
         }
+        // Completion changes the derived turn projection even when no entry
+        // or tool body changed, so invalidate the transcript render cache.
+        self.bump_transcript_revision();
     }
 
     fn fail_unfinished_tool_calls(&mut self) {
@@ -1960,7 +2544,17 @@ impl AppState {
 
     fn finish_turn_timer(&mut self) {
         if let Some(started_at) = self.turn_started_at.take() {
-            self.last_turn_elapsed = Some(started_at.elapsed());
+            let elapsed = started_at.elapsed();
+            self.last_turn_elapsed = Some(elapsed);
+            if let Some(prompt_index) = self.active_prompt_turn.take()
+                && let Some(turn) = self
+                    .prompt_turns
+                    .iter_mut()
+                    .find(|turn| turn.prompt_index == prompt_index)
+            {
+                turn.elapsed = Some(elapsed);
+                turn.completed = true;
+            }
         }
     }
 
@@ -1984,24 +2578,41 @@ impl AppState {
                 self.bump_transcript_revision();
             }
             SessionUpdate::AgentMessageChunk(c) => {
+                remove_trailing_thinking(&mut self.transcript);
                 let text = content_block_text(&c.content);
                 append_or_start(&mut self.transcript, EntryKind::Agent, text);
                 self.bump_transcript_revision();
             }
             SessionUpdate::AgentThoughtChunk(c) => {
                 let text = content_block_text(&c.content);
-                append_or_start(&mut self.transcript, EntryKind::Thought, text);
+                replace_thinking(&mut self.transcript, EntryKind::Thought, text);
                 self.bump_transcript_revision();
             }
             SessionUpdate::ToolCall(tc) => {
+                remove_trailing_thinking(&mut self.transcript);
                 let id = tc.tool_call_id.to_string();
+                let suppressed = is_code_agent_transport_call(&tc);
                 self.tool_calls
                     .insert(id.clone(), ToolCallView::from_tool_call(&tc));
-                self.transcript.push(Entry::ToolCall(id));
+                if suppressed {
+                    self.suppressed_tool_calls.insert(id);
+                } else {
+                    self.transcript.push(Entry::ToolCall(id));
+                }
                 self.bump_transcript_revision();
             }
             SessionUpdate::ToolCallUpdate(u) => {
+                remove_trailing_thinking(&mut self.transcript);
                 let id = u.tool_call_id.to_string();
+                let suppressed =
+                    self.suppressed_tool_calls.contains(&id) || is_code_agent_transport_update(&u);
+                if suppressed {
+                    self.suppressed_tool_calls.insert(id.clone());
+                    if matches!(self.transcript.last(), Some(Entry::ToolCall(entry_id)) if entry_id == &id)
+                    {
+                        self.transcript.pop();
+                    }
+                }
                 if let Some(view) = self.tool_calls.get_mut(&id) {
                     view.apply_update(&u);
                 } else {
@@ -2016,11 +2627,14 @@ impl AppState {
                         view.set_content(content);
                     }
                     self.tool_calls.insert(id.clone(), view);
-                    self.transcript.push(Entry::ToolCall(id));
+                    if !suppressed {
+                        self.transcript.push(Entry::ToolCall(id));
+                    }
                 }
                 self.bump_transcript_revision();
             }
             SessionUpdate::Plan(Plan { entries, .. }) => {
+                remove_trailing_thinking(&mut self.transcript);
                 // Replace the most recent Plan entry if present, else push.
                 if let Some(Entry::Plan(existing)) = self
                     .transcript
@@ -2134,11 +2748,25 @@ impl AppState {
         options: Vec<SessionConfigOption>,
         targets: Vec<SessionConfigTarget>,
     ) {
-        self.session_config_targets = if targets.len() == options.len() {
+        let targets = if targets.len() == options.len() {
             targets
         } else {
             config_option_targets(&options)
         };
+        let (options, targets): (Vec<_>, Vec<_>) = options
+            .into_iter()
+            .zip(targets)
+            .filter(|(option, _)| {
+                !matches!(
+                    option.category,
+                    Some(
+                        SessionConfigOptionCategory::Model
+                            | SessionConfigOptionCategory::ThoughtLevel
+                    )
+                )
+            })
+            .unzip();
+        self.session_config_targets = targets;
         self.session_config_options = options;
         self.refresh_config_picker();
 
@@ -2168,6 +2796,10 @@ impl AppState {
     }
 }
 
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
+}
+
 fn config_option_targets(options: &[SessionConfigOption]) -> Vec<SessionConfigTarget> {
     options
         .iter()
@@ -2182,6 +2814,8 @@ enum EntryKind {
     User,
     Agent,
     Thought,
+    CodeAgent,
+    CodeAgentThought,
 }
 
 /// Append `text` to the trailing entry of the same kind, or start a new
@@ -2191,7 +2825,7 @@ fn append_or_start(transcript: &mut Vec<Entry>, kind: EntryKind, text: String) {
         match (&kind, last) {
             (EntryKind::User, Entry::UserPrompt(s))
             | (EntryKind::Agent, Entry::AgentMessage(s))
-            | (EntryKind::Thought, Entry::AgentThought(s)) => {
+            | (EntryKind::CodeAgent, Entry::CodeAgentMessage(s)) => {
                 s.push_str(&text);
                 return;
             }
@@ -2202,7 +2836,40 @@ fn append_or_start(transcript: &mut Vec<Entry>, kind: EntryKind, text: String) {
         EntryKind::User => Entry::UserPrompt(text),
         EntryKind::Agent => Entry::AgentMessage(text),
         EntryKind::Thought => Entry::AgentThought(text),
+        EntryKind::CodeAgent => Entry::CodeAgentMessage(text),
+        EntryKind::CodeAgentThought => Entry::CodeAgentThought(text),
     });
+}
+
+fn replace_thinking(transcript: &mut Vec<Entry>, kind: EntryKind, text: String) {
+    match (kind, transcript.last_mut()) {
+        (EntryKind::Thought, Some(Entry::AgentThought(existing)))
+        | (EntryKind::CodeAgentThought, Some(Entry::CodeAgentThought(existing))) => {
+            *existing = text;
+        }
+        (EntryKind::Thought, _) => {
+            remove_trailing_thinking(transcript);
+            transcript.push(Entry::AgentThought(text));
+        }
+        (EntryKind::CodeAgentThought, _) => {
+            remove_trailing_thinking(transcript);
+            transcript.push(Entry::CodeAgentThought(text));
+        }
+        _ => unreachable!("replace_thinking requires a thought entry kind"),
+    }
+}
+
+fn remove_trailing_thinking(transcript: &mut Vec<Entry>) -> bool {
+    let thinking = matches!(
+        transcript.last(),
+        Some(Entry::AgentThought(_) | Entry::CodeAgentThought(_))
+    );
+    if thinking {
+        transcript.pop();
+        true
+    } else {
+        false
+    }
 }
 
 /// Return the current value identifier for a select-style session config option.
@@ -2889,6 +3556,86 @@ mod tests {
     }
 
     #[test]
+    fn thinking_updates_replace_and_non_thinking_activity_removes_them() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk("first thought"),
+        )));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk("replacement thought"),
+        )));
+
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::AgentThought(text)] if text == "replacement thought"
+        ));
+
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("call-1", "work"),
+        )));
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::ToolCall(id)] if id == "call-1"
+        ));
+    }
+
+    #[test]
+    fn code_agent_handoff_has_no_transcript_boundary_or_prompt_block() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Started {
+            label: "Eitri · builder".to_string(),
+        }));
+        assert!(state.transcript.is_empty());
+
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::AgentThoughtChunk(text_chunk("forging")),
+        )));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::AgentMessageChunk(text_chunk("done")),
+        )));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Finished {
+            outcome: CodeAgentOutcome::Completed,
+        }));
+
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::CodeAgentMessage(text)] if text == "done"
+        ));
+    }
+
+    #[test]
+    fn internal_coordination_stays_inline_in_transcript_order() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::InternalMessage(InternalMessage {
+            source: "Thor".to_string(),
+            target: "Eitri".to_string(),
+            kind: crate::event::InternalMessageKind::Delegation,
+            text: "implementation brief".to_string(),
+        }));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Started {
+            label: "Eitri · builder".to_string(),
+        }));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::AgentMessageChunk(text_chunk("working")),
+        )));
+
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::InternalMessage(message), Entry::CodeAgentMessage(text)]
+                if message.source == "Thor"
+                    && message.target == "Eitri"
+                    && message.text == "implementation brief"
+                    && text == "working"
+        ));
+        assert!(
+            !state
+                .transcript
+                .iter()
+                .any(|entry| matches!(entry, Entry::SessionBoundary(_)))
+        );
+    }
+
+    #[test]
     fn tool_call_update_merges() {
         let mut s = AppState::new();
         let tc = ToolCall::new("call-1", "running ls");
@@ -2902,6 +3649,111 @@ mod tests {
         let view = s.tool_calls.get("call-1").expect("view");
         assert_eq!(view.status, ToolCallStatus::Completed);
         assert_eq!(view.title, "running ls");
+    }
+
+    #[test]
+    fn primary_code_agent_transport_call_is_tracked_but_not_transcribed() {
+        let mut state = AppState::new();
+        let call = ToolCall::new("bridge-call", "mcp.mj-code-agent.code_agent")
+            .status(ToolCallStatus::InProgress)
+            .raw_input(serde_json::json!({
+                "server": "mj-code-agent",
+                "tool": "code_agent",
+                "arguments": { "instructions": "build it" }
+            }));
+
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(call)));
+
+        assert!(state.tool_calls.contains_key("bridge-call"));
+        assert!(state.transcript.is_empty());
+
+        let fields = agent_client_protocol::schema::v1::ToolCallUpdateFields::default()
+            .status(ToolCallStatus::Completed);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("bridge-call", fields),
+        )));
+
+        assert_eq!(
+            state.tool_calls.get("bridge-call").expect("bridge").status,
+            ToolCallStatus::Completed
+        );
+        assert!(state.transcript.is_empty());
+    }
+
+    #[test]
+    fn primary_explore_agent_transport_call_is_tracked_but_not_transcribed() {
+        let mut state = AppState::new();
+        let call = ToolCall::new("explore-bridge", "mcp.mj-code-agent.explore_agent")
+            .status(ToolCallStatus::InProgress)
+            .raw_input(serde_json::json!({
+                "server": "mj-code-agent",
+                "tool": "explore_agent",
+                "arguments": { "prompt": "very thorough: trace startup" }
+            }));
+
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(call)));
+
+        assert!(state.tool_calls.contains_key("explore-bridge"));
+        assert!(state.transcript.is_empty());
+    }
+
+    #[test]
+    fn claude_code_agent_transport_update_before_create_is_not_transcribed() {
+        let mut state = AppState::new();
+        let fields = agent_client_protocol::schema::v1::ToolCallUpdateFields::default()
+            .title("Running MCP tool")
+            .status(ToolCallStatus::InProgress);
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "claudeCode".to_string(),
+            serde_json::json!({ "toolName": "mcp__mj-code-agent__code_agent" }),
+        );
+        let mut update = ToolCallUpdate::new("claude-bridge", fields);
+        update.meta = Some(meta);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            update,
+        )));
+
+        assert!(state.tool_calls.contains_key("claude-bridge"));
+        assert!(state.transcript.is_empty());
+    }
+
+    #[test]
+    fn code_agent_tool_ids_are_isolated_from_primary_tools() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("shared-id", "primary tool"),
+        )));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Started {
+            label: "codex".to_string(),
+        }));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::ToolCall(ToolCall::new("shared-id", "nested tool")),
+        )));
+
+        assert_eq!(
+            state.tool_calls.get("shared-id").expect("primary").title,
+            "primary tool"
+        );
+        assert_eq!(
+            state
+                .tool_calls
+                .get("codeagent:shared-id")
+                .expect("nested")
+                .title,
+            "nested tool"
+        );
+    }
+
+    #[test]
+    fn primary_turn_does_not_enter_cancelling_while_code_agent_is_active() {
+        let mut state = AppState::new();
+        state.record_user_prompt("delegate".to_string());
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Started {
+            label: "codex".to_string(),
+        }));
+        state.mark_cancelling();
+        assert_eq!(state.connection_state, ConnectionState::Streaming);
     }
 
     #[test]
@@ -3211,13 +4063,13 @@ mod tests {
             ConfigOptionUpdate::new(options),
         )));
 
-        assert_eq!(s.session_config_options.len(), 2);
+        assert_eq!(s.session_config_options.len(), 1);
         assert_eq!(s.current_mode.as_deref(), Some("ask"));
         assert!(s.status_line.is_none());
     }
 
     #[test]
-    fn config_option_update_uses_thought_level_as_current_mode() {
+    fn config_option_update_hides_thought_level_from_primary_shortcuts() {
         let mut s = AppState::new();
         let options = vec![
             SessionConfigOption::select(
@@ -3236,7 +4088,8 @@ mod tests {
             ConfigOptionUpdate::new(options),
         )));
 
-        assert_eq!(s.current_mode.as_deref(), Some("medium"));
+        assert!(s.session_config_options.is_empty());
+        assert!(s.current_mode.is_none());
     }
 
     #[test]
@@ -3521,6 +4374,39 @@ mod tests {
         });
         assert_eq!(s.connection_state, ConnectionState::Ready);
         assert!(!s.is_streaming());
+    }
+
+    #[test]
+    fn primary_acp_connection_lifecycle_is_named_and_announced_once() {
+        let mut state = AppState::new();
+        state.set_primary_acp_name("Claude Code");
+
+        state.announce_waiting_for_primary();
+        state.announce_waiting_for_primary();
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::EphemeralSystem(text)] if text == "Waiting for Claude Code"
+        ));
+        assert_eq!(
+            state.status_line.as_ref().expect("waiting status").kind,
+            StatusKind::Info
+        );
+
+        state.apply_event(UiEvent::Connected {
+            agent_name: Some("claude-agent-acp".into()),
+            agent_version: Some("1.0".into()),
+            prompt_images_supported: false,
+            session_fork_supported: false,
+        });
+        state.announce_waiting_for_primary();
+
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::System(connected)] if connected == "Connected to Claude Code"
+        ));
+        let status = state.status_line.as_ref().expect("connected status");
+        assert_eq!(status.kind, StatusKind::Info);
+        assert_eq!(status.text, "Connected to Claude Code");
     }
 
     #[test]
@@ -4627,7 +5513,9 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["new", "clear", "load", "export", "mjconfig", "ragnarok"]
+            vec![
+                "new", "clear", "load", "export", "models", "reviews", "mjconfig", "ragnarok"
+            ]
         );
     }
 
@@ -4653,7 +5541,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "new", "clear", "load", "export", "mjconfig", "ragnarok", "fork"
+                "new", "clear", "load", "export", "models", "reviews", "mjconfig", "ragnarok",
+                "fork"
             ]
         );
     }
@@ -4689,6 +5578,8 @@ mod tests {
                 "clear",
                 "load",
                 "export",
+                "models",
+                "reviews",
                 "mjconfig",
                 "ragnarok",
                 "fork",
@@ -4710,10 +5601,10 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[4].description,
-            "open the mj config menu (theme + spinner)"
+            "show or select Thor/Loki/Eitri models (usage: /models [role model|auto])"
         );
         assert_eq!(
-            s.available_commands[6].description,
+            s.available_commands[8].description,
             "fork the current session (unstable ACP extension)"
         );
     }
@@ -4740,6 +5631,8 @@ mod tests {
                 "clear",
                 "load",
                 "export",
+                "models",
+                "reviews",
                 "mjconfig",
                 "ragnarok",
                 "review_pr"
@@ -5137,8 +6030,8 @@ mod tests {
             agent_source_id: format!("agent-{id}"),
             model_value: name.to_lowercase(),
             model_name: name.to_string(),
-            elo: 1400 + id as u32,
-            provisional: false,
+            pass_at_1_bps: 1400 + id as u32,
+            mean_cost_usd: 0.0,
         }
     }
 
@@ -5430,4 +6323,44 @@ mod tests {
         arena.scroll_feed(-99);
         assert_eq!(arena.feed_scroll_for_rows(2), 0);
     }
+}
+#[cfg(test)]
+#[test]
+fn council_model_selection_persists_and_rejects_disabled_choice() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    crate::config::Config::default().save(&path).expect("save");
+    let mut state = AppState::new();
+    state.config_path = Some(path.clone());
+    state.council_choices = vec![
+        crate::council::ModelChoice {
+            model: "gpt-test".to_string(),
+            pass_at_1: 0.5,
+            mean_cost_usd: 1.0,
+            available: true,
+            disabled_reason: None,
+            adapter: Some("codex-acp".to_string()),
+            ranked: true,
+        },
+        crate::council::ModelChoice {
+            model: "claude-disabled".to_string(),
+            pass_at_1: 0.4,
+            mean_cost_usd: 2.0,
+            available: false,
+            disabled_reason: Some("claude executable not found on PATH".to_string()),
+            adapter: None,
+            ranked: true,
+        },
+    ];
+
+    state.set_council_model("thor", "gpt-test").expect("select");
+    assert_eq!(
+        crate::config::Config::load(&path).unwrap().thor.model,
+        "gpt-test"
+    );
+    let error = state
+        .set_council_model("eitri", "claude-disabled")
+        .expect_err("disabled model");
+    assert!(error.contains("claude executable not found on PATH"));
+    assert!(state.council_summary().contains("× claude-disabled"));
 }

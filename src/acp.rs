@@ -15,7 +15,7 @@ use agent_client_protocol::schema::v1::{
     ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
     ElicitationFormCapabilities, ElicitationUrlCapabilities, ErrorCode, FileSystemCapabilities,
     ForkSessionRequest, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, NewSessionRequest, PermissionOption,
+    KillTerminalResponse, LoadSessionRequest, McpServer, NewSessionRequest, PermissionOption,
     PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
@@ -37,12 +37,12 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::config;
+use crate::archive;
+use crate::code_agent;
 use crate::event::{
     ElicitationOutcome, ElicitationPrompt, LoadSessionResult, PermissionDecision, PermissionPrompt,
     PromptImage, SessionConfigTarget, TerminalOutputSnapshot, UiCommand, UiEvent,
 };
-use crate::install;
 use crate::paths::{WorkspaceRoots, normalize_spawn_program, path_is_under_any_root};
 
 pub struct AcpRuntimeConfig {
@@ -52,6 +52,9 @@ pub struct AcpRuntimeConfig {
     /// Additional absolute workspace roots to pass to ACP session lifecycle
     /// requests. These expand workspace scope but do not imply trust.
     pub additional_directories: Vec<PathBuf>,
+    /// MCP servers provisioned for every session lifecycle request made by
+    /// this runtime. Runtime-owned services (currently Eitri) are appended.
+    pub mcp_servers: Vec<McpServer>,
     pub resume_session: Option<String>,
     /// Environment variables to inject into the spawned agent process.
     /// Used for agents that require knobs like `AUGMENT_DISABLE_AUTO_UPDATE=1`.
@@ -72,6 +75,18 @@ pub struct AcpRuntimeConfig {
     pub config_path: Option<PathBuf>,
     /// Values remembered from the last prompt submitted for this agent.
     pub saved_session_config: HashMap<String, String>,
+    /// Council role configuration applied before the first substantive prompt.
+    pub role_config: Option<RuntimeRoleConfig>,
+    /// Optional model-visible code-agent MCP service. Interactive TUI sessions
+    /// set this; nested and non-interactive runtimes leave it absent.
+    pub code_agent: Option<code_agent::Config>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeRoleConfig {
+    pub label: String,
+    pub model_value: String,
+    pub force_high_reasoning: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +248,27 @@ impl RuntimeSessionState {
     }
 }
 
+#[derive(Debug)]
+struct PrimaryPolicyState {
+    append_to_next_prompt: bool,
+}
+
+impl PrimaryPolicyState {
+    fn new(code_agent_enabled: bool, resumed: bool) -> Self {
+        Self {
+            append_to_next_prompt: code_agent_enabled && !resumed,
+        }
+    }
+
+    fn take_for_prompt(&mut self) -> bool {
+        std::mem::take(&mut self.append_to_next_prompt)
+    }
+
+    fn loaded_existing_session(&mut self) {
+        self.append_to_next_prompt = false;
+    }
+}
+
 /// User-facing classification of launch-phase failures. Each variant
 /// renders as a one-line headline plus an action hint on the next line;
 /// `UiEvent::Fatal` carries that text through to the transcript so users
@@ -266,6 +302,9 @@ pub enum LaunchError {
     UnsupportedProtocolVersion { negotiated: ProtocolVersion },
     /// The user requested a lifecycle method the agent did not advertise.
     UnsupportedCapability { capability: &'static str },
+    /// Interactive code-agent delegation requires the primary agent to accept
+    /// client-provided Streamable HTTP MCP servers.
+    CodeAgentHttpUnsupported,
     /// `session/new` failed for some other reason (bad cwd, agent-side
     /// crash, ...).
     SessionCreateFailed {
@@ -319,6 +358,11 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "agent does not advertise ACP capability {capability}\n\
                  hint: choose an agent that supports {capability}, or avoid the command that requires it"
+            ),
+            LaunchError::CodeAgentHttpUnsupported => write!(
+                f,
+                "configured ACP agent does not support HTTP MCP servers required for code-agent delegation\n\
+                 hint: update or choose an ACP adapter that advertises mcpCapabilities.http"
             ),
             LaunchError::SessionCreateFailed { source } => write!(
                 f,
@@ -457,33 +501,47 @@ fn require_additional_directories(
     }
 }
 
-fn new_session_request(cwd: PathBuf, additional_directories: &[PathBuf]) -> NewSessionRequest {
-    NewSessionRequest::new(cwd).additional_directories(additional_directories.to_vec())
+fn new_session_request(
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
+) -> NewSessionRequest {
+    NewSessionRequest::new(cwd)
+        .additional_directories(additional_directories.to_vec())
+        .mcp_servers(mcp_servers.to_vec())
 }
 
 fn resume_session_request(
     session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
 ) -> ResumeSessionRequest {
     ResumeSessionRequest::new(session_id, cwd)
         .additional_directories(additional_directories.to_vec())
+        .mcp_servers(mcp_servers.to_vec())
 }
 
 fn load_session_request(
     session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
 ) -> LoadSessionRequest {
-    LoadSessionRequest::new(session_id, cwd).additional_directories(additional_directories.to_vec())
+    LoadSessionRequest::new(session_id, cwd)
+        .additional_directories(additional_directories.to_vec())
+        .mcp_servers(mcp_servers.to_vec())
 }
 
 fn fork_session_request(
     session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
 ) -> ForkSessionRequest {
-    ForkSessionRequest::new(session_id, cwd).additional_directories(additional_directories.to_vec())
+    ForkSessionRequest::new(session_id, cwd)
+        .additional_directories(additional_directories.to_vec())
+        .mcp_servers(mcp_servers.to_vec())
 }
 
 async fn resume_existing_session(
@@ -491,6 +549,7 @@ async fn resume_existing_session(
     session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
     capabilities: &AgentCapabilities,
     auth_methods: &[AuthMethod],
 ) -> std::result::Result<Option<(Vec<SessionConfigOption>, Vec<SessionConfigTarget>)>, LaunchError>
@@ -502,6 +561,7 @@ async fn resume_existing_session(
             session_id,
             cwd,
             additional_directories,
+            mcp_servers,
             auth_methods,
         )
         .await;
@@ -512,6 +572,7 @@ async fn resume_existing_session(
         session_id,
         cwd,
         additional_directories,
+        mcp_servers,
         capabilities,
         auth_methods,
     )
@@ -523,12 +584,13 @@ async fn load_existing_session(
     session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
     capabilities: &AgentCapabilities,
     auth_methods: &[AuthMethod],
 ) -> std::result::Result<Option<(Vec<SessionConfigOption>, Vec<SessionConfigTarget>)>, LaunchError>
 {
     require_load_session(capabilities)?;
-    let load_req = load_session_request(session_id, cwd, additional_directories);
+    let load_req = load_session_request(session_id, cwd, additional_directories, mcp_servers);
     let loaded = match conn.send_request(load_req.clone()).block_task().await {
         Ok(s) => s,
         Err(source) => match auth_required_detail(&source) {
@@ -553,10 +615,11 @@ async fn send_resume_session_request(
     session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
     auth_methods: &[AuthMethod],
 ) -> std::result::Result<Option<(Vec<SessionConfigOption>, Vec<SessionConfigTarget>)>, LaunchError>
 {
-    let resume_req = resume_session_request(session_id, cwd, additional_directories);
+    let resume_req = resume_session_request(session_id, cwd, additional_directories, mcp_servers);
     let resumed = match conn.send_request(resume_req.clone()).block_task().await {
         Ok(s) => s,
         Err(source) => match auth_required_detail(&source) {
@@ -663,6 +726,7 @@ pub async fn run(
             transport,
             cfg.cwd.clone(),
             cfg.additional_directories.clone(),
+            cfg.mcp_servers.clone(),
             cfg.resume_session.clone(),
             ui_tx.clone(),
             ui_rx,
@@ -672,6 +736,8 @@ pub async fn run(
             cfg.agent_source_id.clone(),
             cfg.config_path.clone(),
             cfg.saved_session_config.clone(),
+            cfg.role_config.clone(),
+            cfg.code_agent.clone(),
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -1073,8 +1139,7 @@ async fn install_node24() -> std::result::Result<(), LaunchError> {
             source: format!("failed to create {}: {e}", root.display()),
         })?;
     let archive_url = node24_archive_url().await?;
-    let (tx, _rx) = mpsc::unbounded_channel::<install::Progress>();
-    install::download_and_extract(&archive_url, &root, &tx)
+    archive::download_and_extract(&archive_url, &root)
         .await
         .map_err(|e| LaunchError::NodeInstallFailed {
             source: e.to_string(),
@@ -1181,6 +1246,7 @@ where
         transport,
         cwd,
         Vec::new(),
+        Vec::new(),
         resume_session,
         ui_tx,
         ui_rx,
@@ -1190,6 +1256,8 @@ where
         None,
         None,
         HashMap::new(),
+        None,
+        None,
     )
     .await
 }
@@ -1211,6 +1279,7 @@ where
         transport,
         cwd,
         additional_directories,
+        Vec::new(),
         resume_session,
         ui_tx,
         ui_rx,
@@ -1220,6 +1289,8 @@ where
         None,
         None,
         HashMap::new(),
+        None,
+        None,
     )
     .await
 }
@@ -1229,6 +1300,7 @@ async fn drive_client_with_fs_limit<T>(
     transport: T,
     cwd: PathBuf,
     additional_directories: Vec<PathBuf>,
+    mcp_servers: Vec<McpServer>,
     resume_session: Option<String>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     mut ui_rx: mpsc::UnboundedReceiver<UiCommand>,
@@ -1238,6 +1310,8 @@ async fn drive_client_with_fs_limit<T>(
     agent_source_id: Option<String>,
     config_path: Option<PathBuf>,
     saved_session_config: HashMap<String, String>,
+    role_config: Option<RuntimeRoleConfig>,
+    code_agent: Option<code_agent::Config>,
 ) -> Result<()>
 where
     T: ConnectTo<Client>,
@@ -1262,6 +1336,8 @@ where
     let perm_session_state = session_state.clone();
     let notif_ui_tx = ui_tx.clone();
     let notif_session_state = session_state.clone();
+    let terminal_metadata_bridge = Arc::new(Mutex::new(TerminalMetadataBridge::default()));
+    let notif_terminal_metadata_bridge = terminal_metadata_bridge.clone();
     let read_filesystem = filesystem.clone();
     let write_filesystem = filesystem.clone();
     let create_terminals = terminals.clone();
@@ -1270,6 +1346,8 @@ where
     let wait_terminals = terminals.clone();
     let kill_terminals = terminals.clone();
     let drive_terminals = terminals.clone();
+    let code_agent_controller = code_agent::Controller::default();
+    let drive_code_agent_controller = code_agent_controller.clone();
     let result = Client
         .builder()
         .on_receive_notification(
@@ -1278,6 +1356,13 @@ where
                     .is_active_session(&notification.session_id)
                     .await
                 {
+                    let terminal_snapshots = notif_terminal_metadata_bridge
+                        .lock()
+                        .await
+                        .observe(&notification.session_id, &notification.update);
+                    for snapshot in terminal_snapshots {
+                        let _ = notif_ui_tx.send(UiEvent::TerminalOutput(snapshot));
+                    }
                     let _ = notif_ui_tx.send(UiEvent::SessionUpdate(notification.update));
                 }
                 Ok(())
@@ -1414,6 +1499,7 @@ where
                 conn,
                 cwd,
                 additional_directories,
+                mcp_servers,
                 resume_session,
                 &ui_tx,
                 &mut ui_rx,
@@ -1425,6 +1511,9 @@ where
                 agent_source_id,
                 config_path,
                 saved_session_config,
+                role_config,
+                code_agent,
+                drive_code_agent_controller,
             )
             .await
             {
@@ -1436,6 +1525,7 @@ where
         })
         .await;
 
+    code_agent_controller.shutdown().await;
     terminals.shutdown_all().await;
     result.map_err(|e| anyhow::anyhow!("acp client error: {e}"))?;
     Ok(())
@@ -1449,6 +1539,7 @@ async fn drive_session(
     conn: ConnectionTo<Agent>,
     cwd: PathBuf,
     additional_directories: Vec<PathBuf>,
+    mut mcp_servers: Vec<McpServer>,
     resume_session: Option<String>,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
@@ -1457,31 +1548,34 @@ async fn drive_session(
     terminals: Arc<ManagedTerminals>,
     access_mode: RuntimeAccessMode,
     fs_max_text_bytes: u64,
-    agent_source_id: Option<String>,
-    config_path: Option<PathBuf>,
+    _agent_source_id: Option<String>,
+    _config_path: Option<PathBuf>,
     saved_session_config: HashMap<String, String>,
+    role_config: Option<RuntimeRoleConfig>,
+    code_agent: Option<code_agent::Config>,
+    code_agent_controller: code_agent::Controller,
 ) -> Result<()> {
     // Advertise the client capabilities backed by handlers registered in
     // `drive_client` above.
+    let mut client_meta = serde_json::Map::new();
+    // codex-acp uses this ACP extension to stream command output through
+    // tool-call metadata instead of terminal/create. Request full snapshots;
+    // the receiver also accepts deltas for older adapters.
+    client_meta.insert("terminal_output".to_string(), serde_json::Value::Bool(true));
+    let client_capabilities = ClientCapabilities::new()
+        .fs(FileSystemCapabilities::new()
+            .read_text_file(true)
+            .write_text_file(access_mode.allows_filesystem_writes()))
+        .terminal(access_mode.allows_terminals())
+        .elicitation(
+            ElicitationCapabilities::new()
+                .form(ElicitationFormCapabilities::new())
+                .url(ElicitationUrlCapabilities::new()),
+        )
+        .meta(client_meta);
     let init_req = InitializeRequest::new(ProtocolVersion::V1)
         .client_info(client_implementation())
-        .client_capabilities(
-            ClientCapabilities::new()
-                .fs(FileSystemCapabilities::new()
-                    .read_text_file(true)
-                    .write_text_file(access_mode.allows_filesystem_writes()))
-                .terminal(access_mode.allows_terminals())
-                // Advertise both elicitation modes. `form` covers single-select
-                // `/setup` menus and `url` covers OAuth-login steps. v1 fully
-                // implements single-select forms and URL/QR; any richer form
-                // shape degrades to a `decline` response (a valid answer), so
-                // advertising `form` does not over-promise.
-                .elicitation(
-                    ElicitationCapabilities::new()
-                        .form(ElicitationFormCapabilities::new())
-                        .url(ElicitationUrlCapabilities::new()),
-                ),
-        );
+        .client_capabilities(client_capabilities);
     let init_resp = match conn.send_request(init_req).block_task().await {
         Ok(r) => r,
         Err(source) => {
@@ -1502,6 +1596,40 @@ async fn drive_session(
         let text = launch_err.to_string();
         emit_fatal(ui_tx, &fatal_emitted, text.clone());
         return Err(anyhow::anyhow!(text));
+    }
+    let code_agent_http = if let Some(config) = code_agent {
+        if !init_resp.agent_capabilities.mcp_capabilities.http {
+            let launch_err = LaunchError::CodeAgentHttpUnsupported;
+            let text = launch_err.to_string();
+            emit_fatal(ui_tx, &fatal_emitted, text.clone());
+            return Err(anyhow::anyhow!(text));
+        }
+        let context = code_agent::RunContext {
+            cwd: cwd.clone(),
+            additional_directories: additional_directories.clone(),
+            fs_max_text_bytes,
+            access_mode,
+        };
+        match code_agent::HttpServer::start(
+            config,
+            context,
+            ui_tx.clone(),
+            code_agent_controller.clone(),
+        )
+        .await
+        {
+            Ok(server) => Some(server),
+            Err(error) => {
+                let text = format!("could not start code-agent HTTP MCP server: {error:#}");
+                emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                return Err(anyhow::anyhow!(text));
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(server) = code_agent_http.as_ref() {
+        mcp_servers.push(server.advertised().clone());
     }
     let connected_fields = ConnectedEventFields {
         agent_name: init_resp.agent_info.as_ref().map(|i| i.name.clone()),
@@ -1525,6 +1653,7 @@ async fn drive_session(
                 session_id.clone(),
                 cwd.clone(),
                 &additional_directories,
+                &mcp_servers,
                 &init_resp.agent_capabilities,
                 &init_resp.auth_methods,
             )
@@ -1544,7 +1673,11 @@ async fn drive_session(
             (session_id, initial_config, true)
         }
         None => match conn
-            .send_request(new_session_request(cwd.clone(), &additional_directories))
+            .send_request(new_session_request(
+                cwd.clone(),
+                &additional_directories,
+                &mcp_servers,
+            ))
             .block_task()
             .await
         {
@@ -1571,7 +1704,11 @@ async fn drive_session(
                         return Err(anyhow::anyhow!(text));
                     }
                     match conn
-                        .send_request(new_session_request(cwd.clone(), &additional_directories))
+                        .send_request(new_session_request(
+                            cwd.clone(),
+                            &additional_directories,
+                            &mcp_servers,
+                        ))
                         .block_task()
                         .await
                     {
@@ -1609,6 +1746,26 @@ async fn drive_session(
         options: session_config_options,
         targets: session_config_targets,
     };
+    if let Some(role) = role_config.as_ref()
+        && let Err(error) =
+            apply_runtime_role_config(&conn, &session_id, &mut session_config, role, ui_tx).await
+    {
+        let text = format!("{} configuration failed: {error}", role.label);
+        emit_fatal(ui_tx, &fatal_emitted, text.clone());
+        return Err(anyhow::anyhow!(text));
+    }
+    if let Some(server) = &code_agent_http
+        && let Err(error) = server
+            .wait_until_tools_listed(Duration::from_secs(30))
+            .await
+    {
+        let text = format!("primary agent did not load the injected code-agent MCP tool: {error}");
+        emit_fatal(ui_tx, &fatal_emitted, text.clone());
+        return Err(anyhow::anyhow!(text));
+    }
+    // A new Thor session receives its policy as a suffix on the first real
+    // user message. A resumed/loaded session is never modified implicitly.
+    let mut primary_policy = PrimaryPolicyState::new(code_agent_http.is_some(), resumed);
     if !resumed && !saved_session_config.is_empty() {
         apply_saved_session_config(
             &conn,
@@ -1638,14 +1795,9 @@ async fn drive_session(
     while let Some(cmd) = ui_rx.recv().await {
         match cmd {
             UiCommand::SendPrompt { text, images } => {
-                persist_current_session_config(
-                    config_path.as_deref(),
-                    agent_source_id.as_deref(),
-                    &session_config,
-                );
                 session_state.clear_permissions_cancelled(&session_id).await;
-                let req =
-                    PromptRequest::new(session_id.clone(), prompt_content_blocks(text, images));
+                let prompt = prompt_content_blocks(text, images, primary_policy.take_for_prompt());
+                let req = PromptRequest::new(session_id.clone(), prompt);
                 if !drive_prompt_turn(
                     &conn,
                     &session_id,
@@ -1658,6 +1810,7 @@ async fn drive_session(
                         max_text_bytes: fs_max_text_bytes,
                         turn_id: next_turn_diff_id,
                     },
+                    &code_agent_controller,
                 )
                 .await?
                 {
@@ -1694,6 +1847,7 @@ async fn drive_session(
                     &conn,
                     cwd.clone(),
                     &additional_directories,
+                    &mcp_servers,
                     &mut session_id,
                     &mut session_config,
                     &session_state,
@@ -1718,6 +1872,7 @@ async fn drive_session(
                         session_id.clone(),
                         requested_cwd,
                         &additional_directories,
+                        &mcp_servers,
                         title,
                         &init_resp.agent_capabilities,
                         &init_resp.auth_methods,
@@ -1730,6 +1885,7 @@ async fn drive_session(
                     {
                         Ok(()) => {
                             let _ = responder.send(LoadSessionResult::Switched);
+                            primary_policy.loaded_existing_session();
                         }
                         Err(launch_err) => {
                             let _ = responder.send(LoadSessionResult::Fallback {
@@ -1759,6 +1915,7 @@ async fn drive_session(
                     target_session_id,
                     requested_cwd,
                     &additional_directories,
+                    &mcp_servers,
                     title,
                     &init_resp.agent_capabilities,
                     &init_resp.auth_methods,
@@ -1772,6 +1929,7 @@ async fn drive_session(
                 {
                     Ok(switched_session_id) => {
                         session_id = switched_session_id;
+                        primary_policy.loaded_existing_session();
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(launch_err) => {
@@ -1781,6 +1939,7 @@ async fn drive_session(
                     }
                 }
             }
+            UiCommand::SetReviewPolicy { .. } => {}
             UiCommand::CancelPrompt => {}
             UiCommand::Shutdown => break,
         }
@@ -1803,6 +1962,7 @@ async fn reload_active_session(
     session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
     title: Option<String>,
     capabilities: &AgentCapabilities,
     auth_methods: &[AuthMethod],
@@ -1821,6 +1981,7 @@ async fn reload_active_session(
         session_id.clone(),
         cwd,
         additional_directories,
+        mcp_servers,
         capabilities,
         auth_methods,
     )
@@ -1856,6 +2017,7 @@ async fn switch_existing_session(
     target_session_id: SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
     title: Option<String>,
     capabilities: &AgentCapabilities,
     auth_methods: &[AuthMethod],
@@ -1881,6 +2043,7 @@ async fn switch_existing_session(
         target_session_id.clone(),
         cwd.clone(),
         additional_directories,
+        mcp_servers,
         capabilities,
         auth_methods,
     )
@@ -1937,6 +2100,7 @@ async fn drive_fork_session(
     conn: &ConnectionTo<Agent>,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
     session_id: &mut SessionId,
     session_config: &mut SessionConfigCache,
     session_state: &RuntimeSessionState,
@@ -1949,6 +2113,7 @@ async fn drive_fork_session(
         &source_session_id,
         cwd.clone(),
         additional_directories,
+        mcp_servers,
     );
     tokio::pin!(fork);
 
@@ -2014,6 +2179,7 @@ async fn drive_fork_session(
                         });
                     }
                     Some(UiCommand::CancelPrompt) => {}
+                    Some(UiCommand::SetReviewPolicy { .. }) => {}
                 }
             }
         }
@@ -2025,12 +2191,14 @@ async fn fork_session(
     session_id: &SessionId,
     cwd: PathBuf,
     additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
 ) -> std::result::Result<(SessionId, Option<SessionConfigCache>), agent_client_protocol::Error> {
     let resp = conn
         .send_request(fork_session_request(
             session_id.clone(),
             cwd,
             additional_directories,
+            mcp_servers,
         ))
         .block_task()
         .await?;
@@ -2798,6 +2966,13 @@ impl TerminalOutputBuffer {
         self.truncate_to_limit();
     }
 
+    fn replace(&mut self, text: &str) {
+        self.output.clear();
+        self.output.push_str(text);
+        self.truncated = false;
+        self.truncate_to_limit();
+    }
+
     fn truncate_to_limit(&mut self) {
         if self.output.len() <= self.limit {
             return;
@@ -2814,6 +2989,112 @@ impl TerminalOutputBuffer {
         }
         self.output.drain(..start);
     }
+}
+
+#[derive(Default)]
+struct TerminalMetadataBridge {
+    terminals: HashMap<(String, String), MetadataTerminalState>,
+}
+
+struct MetadataTerminalState {
+    output: TerminalOutputBuffer,
+    exit_status: Option<TerminalExitStatus>,
+}
+
+impl Default for MetadataTerminalState {
+    fn default() -> Self {
+        Self {
+            output: TerminalOutputBuffer::new(DEFAULT_TERMINAL_OUTPUT_LIMIT),
+            exit_status: None,
+        }
+    }
+}
+
+impl TerminalMetadataBridge {
+    fn observe(
+        &mut self,
+        session_id: &SessionId,
+        update: &SessionUpdate,
+    ) -> Vec<TerminalOutputSnapshot> {
+        let meta = match update {
+            SessionUpdate::ToolCall(tool_call) => tool_call.meta.as_ref(),
+            SessionUpdate::ToolCallUpdate(update) => update.meta.as_ref(),
+            _ => None,
+        };
+        let Some(meta) = meta else {
+            return Vec::new();
+        };
+
+        let session_id = session_id.to_string();
+        let mut touched = BTreeSet::new();
+        if let Some((terminal_id, data)) = terminal_metadata_output(meta, "terminal_output") {
+            let state = self
+                .terminals
+                .entry((session_id.clone(), terminal_id.clone()))
+                .or_default();
+            state.output.replace(data);
+            touched.insert(terminal_id);
+        }
+        if let Some((terminal_id, data)) = terminal_metadata_output(meta, "terminal_output_delta") {
+            let state = self
+                .terminals
+                .entry((session_id.clone(), terminal_id.clone()))
+                .or_default();
+            state.output.append(data.as_bytes());
+            touched.insert(terminal_id);
+        }
+        if let Some((terminal_id, exit_status)) = terminal_metadata_exit(meta) {
+            let state = self
+                .terminals
+                .entry((session_id.clone(), terminal_id.clone()))
+                .or_default();
+            state.exit_status = Some(exit_status);
+            touched.insert(terminal_id);
+        }
+
+        touched
+            .into_iter()
+            .filter_map(|terminal_id| {
+                self.terminals
+                    .get(&(session_id.clone(), terminal_id.clone()))
+                    .map(|state| TerminalOutputSnapshot {
+                        terminal_id,
+                        output: state.output.output.clone(),
+                        truncated: state.output.truncated,
+                        exit_status: state.exit_status.clone(),
+                    })
+            })
+            .collect()
+    }
+}
+
+fn terminal_metadata_output<'a>(
+    meta: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<(String, &'a str)> {
+    let value = meta.get(key)?.as_object()?;
+    let terminal_id = value.get("terminal_id")?.as_str()?.to_string();
+    let data = value.get("data")?.as_str()?;
+    Some((terminal_id, data))
+}
+
+fn terminal_metadata_exit(
+    meta: &serde_json::Map<String, serde_json::Value>,
+) -> Option<(String, TerminalExitStatus)> {
+    let value = meta.get("terminal_exit")?.as_object()?;
+    let terminal_id = value.get("terminal_id")?.as_str()?.to_string();
+    let mut status = TerminalExitStatus::new();
+    if let Some(exit_code) = value
+        .get("exit_code")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|code| u32::try_from(code).ok())
+    {
+        status = status.exit_code(exit_code);
+    }
+    if let Some(signal) = value.get("signal").and_then(serde_json::Value::as_str) {
+        status = status.signal(signal.to_string());
+    }
+    Some((terminal_id, status))
 }
 
 impl ManagedTerminals {
@@ -3417,6 +3698,7 @@ fn session_config_target_key(target: &SessionConfigTarget) -> String {
     }
 }
 
+#[cfg(test)]
 fn current_session_config_values(session_config: &SessionConfigCache) -> HashMap<String, String> {
     session_config
         .options
@@ -3499,31 +3781,117 @@ async fn apply_saved_session_config(
     }
 }
 
-fn config_option_current_value(option: &SessionConfigOption) -> Option<&SessionConfigValueId> {
-    match &option.kind {
-        SessionConfigKind::Select(select) => Some(&select.current_value),
+fn select_option_named(
+    option: &SessionConfigOption,
+    wanted_value: Option<&str>,
+    wanted_name: &str,
+) -> Option<SessionConfigValueId> {
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    let matches = |choice: &SessionConfigSelectOption| {
+        wanted_value.is_some_and(|wanted| choice.value.to_string() == wanted)
+            || choice.name.eq_ignore_ascii_case(wanted_name)
+            || choice.value.to_string().eq_ignore_ascii_case(wanted_name)
+    };
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .find(|choice| matches(choice))
+            .map(|choice| choice.value.clone()),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .find(|choice| matches(choice))
+            .map(|choice| choice.value.clone()),
         _ => None,
     }
 }
 
-fn persist_current_session_config(
-    config_path: Option<&Path>,
-    agent_source_id: Option<&str>,
-    session_config: &SessionConfigCache,
-) {
-    let (Some(config_path), Some(agent_source_id)) = (config_path, agent_source_id) else {
-        return;
+async fn apply_runtime_role_config(
+    conn: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    session_config: &mut SessionConfigCache,
+    role: &RuntimeRoleConfig,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) -> Result<()> {
+    let model_index = session_config
+        .options
+        .iter()
+        .position(|option| matches!(option.category, Some(SessionConfigOptionCategory::Model)));
+    let Some(model_index) = model_index else {
+        anyhow::bail!("ACP adapter did not advertise a model configuration control");
     };
-    let values = current_session_config_values(session_config);
-    if values.is_empty() {
-        return;
+    let model_value = select_option_named(
+        &session_config.options[model_index],
+        Some(&role.model_value),
+        &role.model_value,
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "ACP adapter no longer advertises selected model '{}'",
+            role.model_value
+        )
+    })?;
+    let target = session_config.targets[model_index].clone();
+    if config_option_current_value(&session_config.options[model_index]) != Some(&model_value) {
+        match send_config_update(conn, session_id, target.clone(), model_value.clone()).await? {
+            Some(options) => {
+                session_config.targets = config_option_targets(&options);
+                session_config.options = options;
+            }
+            None => set_current_config_value(
+                &mut session_config.options,
+                &session_config.targets,
+                &target,
+                &model_value,
+            ),
+        }
     }
-    if let Err(error) = config::Config::load(config_path).and_then(|mut cfg| {
-        cfg.session_config
-            .insert(agent_source_id.to_string(), values);
-        cfg.save(config_path)
-    }) {
-        tracing::warn!("persist session config for {agent_source_id}: {error:#}");
+
+    if role.force_high_reasoning {
+        let high = session_config
+            .options
+            .iter()
+            .enumerate()
+            .find_map(|(index, option)| {
+                matches!(
+                    option.category,
+                    Some(SessionConfigOptionCategory::ThoughtLevel)
+                )
+                .then(|| select_option_named(option, None, "High").map(|value| (index, value)))
+                .flatten()
+            });
+        if let Some((index, value)) = high {
+            let target = session_config.targets[index].clone();
+            if config_option_current_value(&session_config.options[index]) != Some(&value) {
+                match send_config_update(conn, session_id, target.clone(), value.clone()).await? {
+                    Some(options) => {
+                        session_config.targets = config_option_targets(&options);
+                        session_config.options = options;
+                    }
+                    None => set_current_config_value(
+                        &mut session_config.options,
+                        &session_config.targets,
+                        &target,
+                        &value,
+                    ),
+                }
+            }
+        } else {
+            let _ = ui_tx.send(UiEvent::Warning(format!(
+                "{} · {} does not advertise a High reasoning control; retaining its native setting",
+                role.label, role.model_value
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn config_option_current_value(option: &SessionConfigOption) -> Option<&SessionConfigValueId> {
+    match &option.kind {
+        SessionConfigKind::Select(select) => Some(&select.current_value),
+        _ => None,
     }
 }
 
@@ -3597,6 +3965,7 @@ async fn drive_config_update(
                         });
                     }
                     Some(UiCommand::CancelPrompt) => {}
+                    Some(UiCommand::SetReviewPolicy { .. }) => {}
                 }
             }
         }
@@ -3654,6 +4023,7 @@ fn anvil_turn_failure_message(
     Some(format!("agent turn failed ({class}): {message}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive_prompt_turn(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -3662,6 +4032,7 @@ async fn drive_prompt_turn(
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     session_state: &RuntimeSessionState,
     diff_config: PromptTurnDiffConfig<'_>,
+    code_agent_controller: &code_agent::Controller,
 ) -> Result<bool> {
     let turn_diff_tracker =
         TurnDiffTracker::snapshot(diff_config.workspace_roots, diff_config.max_text_bytes).await;
@@ -3700,6 +4071,9 @@ async fn drive_prompt_turn(
             maybe_cmd = ui_rx.recv() => {
                 match maybe_cmd {
                     Some(UiCommand::CancelPrompt) => {
+                        if code_agent_controller.cancel().await {
+                            continue;
+                        }
                         if !cancel_sent {
                             session_state.mark_permissions_cancelled(session_id).await;
                             let _ = ui_tx.send(UiEvent::CancelPendingPermissions);
@@ -3710,6 +4084,7 @@ async fn drive_prompt_turn(
                         }
                     }
                     Some(UiCommand::Shutdown) | None => {
+                        code_agent_controller.shutdown().await;
                         return Ok(false);
                     }
                     Some(UiCommand::SendPrompt { .. }) => {
@@ -3732,6 +4107,7 @@ async fn drive_prompt_turn(
                             message: "prompt already in flight".to_string(),
                         });
                     }
+                    Some(UiCommand::SetReviewPolicy { .. }) => {}
                 }
             }
         }
@@ -4015,7 +4391,16 @@ fn git_head_object_spec(rel_path: &Path) -> Option<String> {
     Some(format!("HEAD:{path}"))
 }
 
-fn prompt_content_blocks(text: String, images: Vec<PromptImage>) -> Vec<ContentBlock> {
+fn prompt_content_blocks(
+    mut text: String,
+    images: Vec<PromptImage>,
+    append_primary_policy: bool,
+) -> Vec<ContentBlock> {
+    let policy_after_images = append_primary_policy && text.is_empty();
+    if append_primary_policy && !text.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(code_agent::PRIMARY_SESSION_DIRECTIVE);
+    }
     let mut content = Vec::new();
     if !text.is_empty() {
         content.push(ContentBlock::Text(TextContent::new(text)));
@@ -4025,6 +4410,11 @@ fn prompt_content_blocks(text: String, images: Vec<PromptImage>) -> Vec<ContentB
             ContentBlock::Image(ImageContent::new(image.data_base64, image.mime_type))
         }),
     );
+    if policy_after_images {
+        content.push(ContentBlock::Text(TextContent::new(
+            code_agent::PRIMARY_SESSION_DIRECTIVE,
+        )));
+    }
     content
 }
 
@@ -4066,6 +4456,29 @@ mod tests {
             anvil_turn_failure_message(Some(meta)).as_deref(),
             Some("agent turn failed (retryable): stream read error")
         );
+    }
+
+    #[test]
+    fn primary_policy_is_appended_once_for_a_new_session() {
+        let mut policy = PrimaryPolicyState::new(true, false);
+
+        assert!(policy.take_for_prompt());
+        assert!(!policy.take_for_prompt());
+    }
+
+    #[test]
+    fn primary_policy_is_not_appended_when_resuming() {
+        let mut policy = PrimaryPolicyState::new(true, true);
+
+        assert!(!policy.take_for_prompt());
+    }
+
+    #[test]
+    fn loading_an_existing_session_clears_a_pending_policy() {
+        let mut policy = PrimaryPolicyState::new(true, false);
+
+        policy.loaded_existing_session();
+        assert!(!policy.take_for_prompt());
     }
 
     #[test]
@@ -4154,6 +4567,7 @@ mod tests {
                 width: 640,
                 height: 480,
             }],
+            false,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -4168,6 +4582,42 @@ mod tests {
             }
             other => panic!("unexpected image block: {other:?}"),
         }
+    }
+
+    #[test]
+    fn first_prompt_appends_primary_policy_after_user_text() {
+        let blocks = prompt_content_blocks("build the thing".to_string(), Vec::new(), true);
+
+        assert_eq!(blocks.len(), 1);
+        let ContentBlock::Text(text) = &blocks[0] else {
+            panic!("expected text block");
+        };
+        assert!(
+            text.text
+                .starts_with("build the thing\n\n<mj-code-agent-policy>")
+        );
+        assert!(text.text.ends_with("</mj-code-agent-policy>"));
+        assert!(!text.text.contains("MJ_CODE_AGENT_POLICY_READY"));
+    }
+
+    #[test]
+    fn image_only_first_prompt_puts_primary_policy_last() {
+        let blocks = prompt_content_blocks(
+            String::new(),
+            vec![PromptImage {
+                data_base64: "aW1hZ2U=".to_string(),
+                mime_type: "image/png".to_string(),
+                width: 1,
+                height: 1,
+            }],
+            true,
+        );
+
+        assert!(matches!(blocks[0], ContentBlock::Image(_)));
+        let ContentBlock::Text(policy) = &blocks[1] else {
+            panic!("expected policy text after image");
+        };
+        assert!(policy.text.starts_with("<mj-code-agent-policy>"));
     }
 
     #[test]
@@ -4645,6 +5095,67 @@ mod tests {
         assert!(buffer.output.is_char_boundary(0));
     }
 
+    #[test]
+    fn terminal_metadata_bridge_merges_deltas_and_exit_status() {
+        fn update(meta: serde_json::Value) -> SessionUpdate {
+            SessionUpdate::ToolCallUpdate(
+                ToolCallUpdate::new("tool-1", ToolCallUpdateFields::new())
+                    .meta(meta.as_object().expect("metadata object").clone()),
+            )
+        }
+
+        let session_id = SessionId::new("session-1");
+        let mut bridge = TerminalMetadataBridge::default();
+        let first = bridge.observe(
+            &session_id,
+            &update(serde_json::json!({
+                "terminal_output_delta": {"terminal_id": "tool-1", "data": "hello"}
+            })),
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].output, "hello");
+        assert!(first[0].exit_status.is_none());
+
+        let completed = bridge.observe(
+            &session_id,
+            &update(serde_json::json!({
+                "terminal_output_delta": {"terminal_id": "tool-1", "data": " world"},
+                "terminal_exit": {"terminal_id": "tool-1", "exit_code": 7, "signal": null}
+            })),
+        );
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].output, "hello world");
+        let status = completed[0].exit_status.as_ref().expect("exit status");
+        assert_eq!(status.exit_code, Some(7));
+        assert_eq!(status.signal, None);
+    }
+
+    #[test]
+    fn terminal_metadata_bridge_full_output_replaces_prior_snapshot() {
+        fn update(data: &str) -> SessionUpdate {
+            SessionUpdate::ToolCallUpdate(
+                ToolCallUpdate::new("tool-1", ToolCallUpdateFields::new()).meta(
+                    serde_json::json!({
+                        "terminal_output": {"terminal_id": "tool-1", "data": data}
+                    })
+                    .as_object()
+                    .expect("metadata object")
+                    .clone(),
+                ),
+            )
+        }
+
+        let session_id = SessionId::new("session-1");
+        let mut bridge = TerminalMetadataBridge::default();
+        bridge.observe(&session_id, &update("first"));
+        let snapshots = bridge.observe(&session_id, &update("replacement"));
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].terminal_id, "tool-1");
+        assert_eq!(snapshots[0].output, "replacement");
+        assert!(!snapshots[0].truncated);
+    }
+
     #[tokio::test]
     async fn managed_terminal_runs_command_and_releases() {
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
@@ -5060,34 +5571,6 @@ mod tests {
     }
 
     #[test]
-    fn persist_current_session_config_saves_values_by_agent() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        let session_config = SessionConfigCache {
-            options: vec![SessionConfigOption::select(
-                "model",
-                "Model",
-                "gpt-5",
-                vec![SessionConfigSelectOption::new("gpt-5", "GPT-5")],
-            )],
-            targets: vec![SessionConfigTarget::ConfigOption {
-                config_id: "model".into(),
-            }],
-        };
-
-        persist_current_session_config(Some(&path), Some("codex-acp"), &session_config);
-
-        let cfg = crate::config::Config::load(&path).expect("load config");
-        assert_eq!(
-            cfg.session_config
-                .get("codex-acp")
-                .and_then(|values| values.get("config:model"))
-                .map(String::as_str),
-            Some("gpt-5")
-        );
-    }
-
-    #[test]
     fn legacy_model_config_update_error_is_explicit() {
         let error = legacy_model_config_update_error();
 
@@ -5123,6 +5606,13 @@ mod tests {
                     assert!(req.client_capabilities.terminal);
                     assert!(req.client_capabilities.fs.read_text_file);
                     assert!(req.client_capabilities.fs.write_text_file);
+                    assert_eq!(
+                        req.client_capabilities
+                            .meta
+                            .as_ref()
+                            .and_then(|meta| meta.get("terminal_output")),
+                        Some(&serde_json::Value::Bool(true))
+                    );
                     let client_info = req.client_info.expect("clientInfo");
                     assert_eq!(client_info.name, env!("CARGO_PKG_NAME"));
                     assert_eq!(client_info.version, env!("CARGO_PKG_VERSION"));
@@ -7381,6 +7871,7 @@ mod tests {
             args: Vec::new(),
             cwd: std::env::temp_dir(),
             additional_directories: Vec::new(),
+            mcp_servers: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,
@@ -7389,6 +7880,8 @@ mod tests {
             agent_source_id: None,
             config_path: None,
             saved_session_config: HashMap::new(),
+            role_config: None,
+            code_agent: None,
         };
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
@@ -7437,6 +7930,7 @@ mod tests {
             args: Vec::new(),
             cwd: std::env::temp_dir(),
             additional_directories: Vec::new(),
+            mcp_servers: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: Some(bad_stderr),
@@ -7445,6 +7939,8 @@ mod tests {
             agent_source_id: None,
             config_path: None,
             saved_session_config: HashMap::new(),
+            role_config: None,
+            code_agent: None,
         };
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
@@ -7572,6 +8068,7 @@ mod tests {
             args,
             cwd: std::env::temp_dir(),
             additional_directories: Vec::new(),
+            mcp_servers: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,
@@ -7580,6 +8077,8 @@ mod tests {
             agent_source_id: None,
             config_path: None,
             saved_session_config: HashMap::new(),
+            role_config: None,
+            code_agent: None,
         };
         assert_run_reports_agent_exited(cfg).await;
     }
@@ -7597,6 +8096,7 @@ mod tests {
             args,
             cwd: std::env::temp_dir(),
             additional_directories: Vec::new(),
+            mcp_servers: Vec::new(),
             resume_session: None,
             env: HashMap::new(),
             agent_stderr: None,
@@ -7605,6 +8105,8 @@ mod tests {
             agent_source_id: None,
             config_path: None,
             saved_session_config: HashMap::new(),
+            role_config: None,
+            code_agent: None,
         };
         assert_run_reports_agent_exited(cfg).await;
     }
@@ -8227,5 +8729,45 @@ mod tests {
 
         let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
         agent_task.abort();
+    }
+
+    #[test]
+    fn lifecycle_requests_include_client_mcp_servers() {
+        use agent_client_protocol::schema::v1::McpServerHttp;
+
+        let server = McpServer::Http(McpServerHttp::new(
+            code_agent::MCP_SERVER_NAME,
+            "http://127.0.0.1:1234/mcp",
+        ));
+        let servers = vec![server.clone()];
+        let cwd = PathBuf::from("/tmp/workspace");
+        let additional = vec![PathBuf::from("/tmp/other")];
+        let session_id = SessionId::from("session-1");
+
+        assert_eq!(
+            new_session_request(cwd.clone(), &additional, &servers).mcp_servers,
+            servers
+        );
+        assert_eq!(
+            resume_session_request(session_id.clone(), cwd.clone(), &additional, &servers)
+                .mcp_servers,
+            servers
+        );
+        assert_eq!(
+            load_session_request(session_id.clone(), cwd.clone(), &additional, &servers)
+                .mcp_servers,
+            servers
+        );
+        assert_eq!(
+            fork_session_request(session_id, cwd, &additional, &servers).mcp_servers,
+            servers
+        );
+    }
+
+    #[test]
+    fn missing_http_mcp_capability_has_actionable_error() {
+        let message = LaunchError::CodeAgentHttpUnsupported.to_string();
+        assert!(message.contains("mcpCapabilities.http"));
+        assert!(message.contains("code-agent delegation"));
     }
 }

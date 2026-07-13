@@ -1,32 +1,22 @@
 # mjolnir
 
-Mjolnir lets you use nearly every coding-agent harness from one fast,
-consistent, featureful Rust TUI.
+Mjolnir (`mj`) is a native Rust ACP client with a model-first coding Council:
 
-Claude Code for the corporate repo. Codex for the OpenAI workflow. OpenCode or
-Goose for local and open-source setups. Amp, Cursor, Cline, Copilot, Junie,
-Qwen, Kimi, or Pi when a project or model family calls for it. Mjolnir keeps the
-harnesses and gives them one terminal workflow: same transcript, same tool
-cards, same permission prompts, same session resume.
+- **Thor** coordinates the user turn.
+- **Eitri** implements delegated, forgeable coding tasks or explores a codebase.
+- **Loki** optionally reviews Thor and Eitri at streaming step boundaries.
 
-The harness still matters. It may own the auth your company approved, the model
-picker your team standardized on, the runtime you trust, or the policy layer
-that keeps a repo safe. Mjolnir just removes the part where choosing the right
-agent also means switching UIs, keyboard habits, and session history.
-
-It is native and small-footprint: no Electron shell, no browser runtime, no
-agent-specific frontend.
-
-Each session chooses its own harness from the official
-[ACP registry](https://github.com/agentclientprotocol/registry), the `anvil`
-default (`uvx brokk acp`), or a custom command. The agent changes. The working
-rhythm does not.
+Models are ranked with the public DeepSWE Pass@1 and average-cost data. Mjolnir
+selects models first, then routes them through locally available ACP adapters.
+The active adapter remains an implementation detail, so the transcript,
+permissions, tools, terminals, session handling, and keyboard workflow stay
+consistent.
 
 ![Mjolnir inline chat showing streaming agent output and tool activity](docs/readme-images/default-ui.png)
 
-## Getting Started
+## Install and run
 
-Install the latest `mj` and `bifrost` release binaries:
+Install the latest `mj` release:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash
@@ -53,178 +43,164 @@ wants to type `mjolnir` every time they ask an agent to look at a diff.
 mj
 ```
 
-Network access is needed the first time `mj` fetches the ACP registry unless you
-only use a custom command or an already-cached registry copy. The default
-`anvil` entry runs `uvx brokk acp`, and registry agents distributed through
-`npx` or `uvx` require the matching runtime on `PATH`.
+Mjolnir discovers these built-in routes automatically:
 
-## Quick Start
+- `codex` on `PATH` enables OpenAI models through `codex-acp`.
+- `claude` on `PATH` enables Anthropic models through `claude-agent-acp`.
+- a non-empty `OPENROUTER_API_KEY` enables Anvil through `uvx brokk acp`.
+- `opencode` on `PATH` enables OpenCode through `opencode acp`.
 
-By default, `mj` starts an interactive session with the configured default agent.
-If no usable agent is configured yet, it opens the agent picker so you can choose
-an agent from the ACP registry, the `anvil` default, or a custom ACP command.
+Council adapters must advertise ACP HTTP MCP support because Thor invokes
+Eitri through Mjolnir's embedded `code_agent` and `explore_agent` MCP tools.
+Mjolnir probes each route once per process, never logs API-key values, and
+selects High reasoning when the adapter advertises that control.
 
+## Council configuration
+
+The default is automatic model selection for every role:
+
+```toml
+[thor]
+model = "auto"
+discrete_review = true
+
+[loki]
+model = "auto"
+streaming_review = true
+
+[eitri]
+model = "auto"
 ```
- mj | choose an agent
-+--- agents -------------------------------------------------+
-| > anvil [current]    -- uvx brokk acp                      |
-|   Claude              -- npx v0.36.1                       |
-|   Codex               -- npx v0.14.0                       |
-|   ...                                                      |
-|   Custom command...   -- type your own command             |
-+------------------------------------------------------------+
+
+Put this in `~/.config/mj/config.toml`. Automatic Thor selection chooses the
+strongest launchable DeepSWE High/default row. Loki chooses the strongest
+launchable model from a different provider. Eitri chooses a cost-efficient
+model on the DeepSWE Pass@1/cost Pareto frontier at the current Sonnet High
+quality floor.
+
+Use `/models` to see saved preferences, active resolved models, benchmark data,
+adapter routes, custom unranked models, and disabled reasons. Changes made with
+`/models <thor|loki|eitri> <auto|model-id>` apply to the next session. Use
+`/reviews`, `/reviews thor on|off`, and `/reviews loki on|off` to inspect or
+change review policy.
+
+Thor's remaining ACP session controls appear on F1–F9. Model and Thought Level
+are owned by the Council and therefore omitted from those controls; the other
+values are session-only and are not persisted.
+
+### Custom ACP servers
+
+Custom servers are launched directly without a shell, inherit Mjolnir's
+environment, and run in the workspace directory:
+
+```toml
+[[acp.servers]]
+name = "company"
+command = "/opt/company/bin/acp-server"
+args = ["--stdio"]
 ```
 
-Registry agents selected through a binary-only distribution are downloaded to
-`~/.cache/mj/agents/<id>/<version>/` and reused. Picker preferences and the
-configured default agent are stored in `~/.config/mj/config.toml`.
+Custom routes take precedence over built-ins in configuration order. Their
+DeepSWE-matched models participate normally. Additional advertised models are
+shown as `Unranked` and can be selected explicitly with an ID such as
+`custom/company/provider/model`, but never participate in Auto or Ragnarok.
+Configured servers without HTTP MCP support remain in the config and are
+reported as unavailable.
 
-Use `/new` inside the TUI when you want to end the current chat and choose a
-harness again. The agent picker stays open for that explicit new-session flow
-until you select an agent or cancel it. Use `/load` to open the session picker
-for the current agent.
+## Delegation and review
 
-In the agent picker, `f` toggles a favorite, `d` sets the default, `e` edits a
-custom agent, and `x` or Delete removes a custom agent after confirmation.
+Mjolnir appends Thor's session-level coordinator policy to the first user
+message of a new session. It is not sent as a standalone turn or injected into
+resumed or compacted sessions. Thor should use direct tools for small, tightly
+coupled edits and delegate self-contained implementation tasks with clear inputs
+and acceptance criteria to `code_agent`. It uses `explore_agent` for open-ended,
+multi-file research where locations or execution flow are not yet known.
 
-## Why Multiple Harnesses
+During a handoff, Thor's foreground ACP lane is detached and Eitri's fresh ACP
+session streams directly through the normal Mjolnir UI. Ctrl-C cancels the
+currently active Eitri request, not the paused Thor request. Eitri's final
+message and invocation diff return to Thor through MCP, then Thor resumes.
 
-`mj` is not a lowest-common-denominator model picker. The point is to keep each
-agent in the harness where it is strongest while giving all of them the same
-terminal workflow.
+Loki runs in its own fresh, best-effort read-only ACP session. A streaming Loki
+intervention is intentionally expensive: it causes Mjolnir to cancel at the next
+safe step boundary and re-prompt the target with the critique. Loki's prompt
+therefore requires intervention only for material correctness, safety, scope,
+or strategy problems. Thor performs the optional discrete workspace review at
+the end of a turn; a turn containing only one implementation handoff skips that
+extra review.
 
-- Use Claude Code when a company repo already depends on that auth, policy, or
-  review style.
-- Use Codex when you want the OpenAI coding-agent workflow for edit/test/fix
-  loops.
-- Use Qwen, Kimi, Pi, or Copilot when a different model family should inspect a
-  design, explain a failure, or challenge a patch.
-- Use OpenCode, Goose, or a custom ACP command for open-source, local, or
-  Ollama-backed work.
-- Use Amp, Cursor, Cline, Junie, or another registry harness when a project
-  already has a preferred agent.
+## Worktrees and resume
 
-Without `mj`, those choices usually mean several interfaces. With `mj`, they are
-different sessions in the same TUI.
-
-## Parallel Workspaces
-
-Use `--worktree` to run multiple agents against the same project without sharing
-one checkout:
+Use `--worktree` to create an isolated linked Git worktree below
+`<project>/.mjolnir/worktrees/`, or pass a prior worktree name:
 
 ```bash
 mj --worktree
-```
-
-With no value, `mj` creates a linked Git worktree below
-`<project>/.mjolnir/worktrees/` and runs the ACP session from the matching
-directory inside it. Keep worktrees around and start more sessions in parallel:
-
-```bash
-mj --worktree swift-dawn
 mj --worktree quiet-forge
+mj resume <session-id> --worktree quiet-forge
 ```
 
-Each terminal can choose a different registry agent or custom command. Use one
-agent to implement, another to review, and a local harness to experiment. Resume
-a kept worktree session with:
-
-```bash
-mj resume <session-id> --worktree swift-dawn
-```
-
-## Resume Sessions
-
-`mj resume` opens a searchable session picker for the selected agent, so you can
-jump back into previous ACP sessions without remembering IDs.
+Mjolnir stores session provenance atomically in its state directory so a resume
+returns to the original adapter and model even if Auto later resolves
+differently. `mj resume` opens the searchable session picker;
+`mj resume --list --format json` provides machine-readable output.
 
 ![Mjolnir resume picker listing prior ACP sessions](docs/readme-images/session-picker.png)
 
-Useful forms:
+## Headless and remote use
 
-- `mj resume`: choose an agent, list its sessions, and resume one
-  interactively.
-- `mj resume <session-id>`: choose an agent, then resume that session ID.
-- `mj resume --list`: list sessions from the configured default agent.
-- `mj resume --list --format json`: print the session list as JSON.
-
-## Permissions And Config
-
-Permission prompts stay in the same terminal flow and keep the requested command
-visible while you choose whether to allow, always allow, or reject it.
-
-![Mjolnir permission prompt for a shell command](docs/readme-images/permission-request.png)
-
-Agents can expose session-specific configuration through ACP. `mj` renders those
-options as searchable terminal pickers, so model and mode changes do not require
-leaving the chat.
-
-![Mjolnir searchable model configuration picker](docs/readme-images/searchable-config-options.png)
-
-## Automation
-
-Use `--print` for one-shot prompts with the same configured ACP agent:
+Use `--print` for one-shot prompts with the same Council runtime:
 
 ```bash
 mj --print "summarize the current diff"
 git diff | mj --print -
 ```
 
-Use `--output-format json` or `--output-format stream-json` when another tool
-needs structured output. `--permission-mode` controls how headless runs respond
-to permission prompts; the default rejects prompts so automation does not hang.
+`--output-format json` returns Thor's final result. `stream-json` additionally
+labels Thor, Loki, and Eitri activity. `--permission-mode` controls permissions
+for both Thor and Eitri; its default rejects prompts so automation cannot hang.
+
+`mj server` starts Mjolnir's remote-control server with the same resolved
+Council. Nested permission IDs are namespaced so remote clients can safely
+answer the active Thor or Eitri prompt.
 
 ## Reference
 
 Common options:
 
-- `--cwd`: workspace directory used for the ACP session. Defaults to the current
-  directory.
-- `-p, --print [PROMPT]`: run one prompt non-interactively and print the result.
-  Omit the value or pass `-` to read stdin.
-- `--output-format`: output format for `--print`. Values: `text`, `json`,
-  `stream-json`.
-- `-w, --worktree`: create a linked Git worktree, or reuse an existing worktree
-  by short name or path when a value is provided.
-- `--debug-file` (alias: `--log-file`): write TUI logs to a file. Equivalent
-  env var: `BROKK_TUI_LOG`.
-- `--agent-stderr`: capture the agent subprocess stderr to a file. Equivalent
-  env var: `BROKK_TUI_AGENT_STDERR`.
-- `--fullscreen-tui`: use the legacy alternate-screen full-screen chat UI. The
-  default is inline chat.
-- `--permission-mode`: controls headless `--print` permission handling. Values:
-  `default`, `acceptEdits`, `bypassPermissions`.
+- `--cwd PATH`: primary workspace directory.
+- `--additional-directory PATH`: expose another workspace root; repeatable.
+- `-p, --print [PROMPT]`: run once; omit the value or pass `-` to read stdin.
+- `--output-format text|json|stream-json`: headless output format.
+- `--permission-mode default|acceptEdits|bypassPermissions`: headless policy.
+- `-w, --worktree [NAME]`: create or reuse a linked worktree.
+- `--debug-file PATH`: capture Mjolnir diagnostics.
+- `--agent-stderr PATH`: capture ACP adapter stderr.
+- `--fullscreen-tui`: use the alternate-screen UI instead of inline chat.
 
 Keyboard basics:
 
-- `Enter`: send the current prompt, or accept the selected slash command.
-- `Tab`: accept the selected slash command.
-- `Up` / `Down`: move within slash-command autocomplete or permission prompts.
+- `Enter`: send a prompt or accept the selected action.
+- `Up` / `Down`: navigate autocomplete and permission choices.
 - `PageUp` / `PageDown`: scroll the transcript.
-- `F10`: show or hide the help overlay.
-- `F1`..`F9`: edit visible session config options.
+- `F1`-`F9`: edit visible Thor session controls.
+- `F10`: toggle help.
 - `Esc`: dismiss autocomplete, clear input, or cancel a permission prompt.
-- `Ctrl-C`: cancel an in-flight prompt; when idle with an empty input, quit.
-- `Ctrl-D`: quit when the input is empty.
-- `🎙 Ctrl-R` (non-Android): start/stop microphone dictation into the prompt.
+- `Ctrl-C`: cancel the active Thor or Eitri prompt; idle Ctrl-C quits.
+- `Ctrl-D`: quit when input is empty.
+- `Ctrl-R` (non-Android): start or stop microphone dictation into the prompt.
   Official desktop releases include the `mj-voice-worker` sidecar, which uses
   sherpa-onnx speech recognition with Silero VAD and
   the multilingual Parakeet TDT v3 model; the model (~0.7 GB) is downloaded and
   cached under `~/.cache/mj/voice/` on first use.
 
-On-disk files:
+Persistent data includes:
 
-- `~/.config/mj/config.toml`: picker preferences and the default selected agent
-  (program + args + env).
-- `~/.cache/mj/registry.json`: cached registry index, refreshed every 24h.
-- `~/.cache/mj/agents/<id>/<version>/`: extracted binary distributions.
-- `<project>/.mjolnir/worktrees/`: linked Git worktrees created by
-  `mj --worktree`.
-
-Paste text with more than 3 lines into the prompt and it appears as a compact
-chip instead of raw text. Press `Enter` to send chip contents with your typed
-prompt, `Backspace` on an empty input to remove the last chip, or `Esc` to clear
-the input.
+- `~/.config/mj/config.toml`: Council, review, theme, spinner, and custom ACP
+  preferences.
+- the platform state directory's `mj/session-provenance.json`: resume routing.
+- `~/.cache/mj/deepswe-v1.1.json`: 24-hour DeepSWE cache.
+- `<project>/.mjolnir/worktrees/`: linked worktrees created by Mjolnir.
 
 ## Development
 
@@ -249,15 +225,14 @@ Use the same checks as CI before submitting changes:
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
 cargo test
+cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
-The crate uses inline unit tests under `src/`. Keep runtime, UI state, event,
-rendering, registry, install, and picker concerns separated across the existing
-modules.
+Tests are colocated under `src/`; deterministic PTY fixtures live in
+`tests/e2e/`.
 
 ## License
 
-`mjolnir` is licensed under GPL-3.0. See [LICENSE](LICENSE).
+Mjolnir is licensed under GPL-3.0. See [LICENSE](LICENSE).

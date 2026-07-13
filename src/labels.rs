@@ -1,15 +1,13 @@
 //! Stable string labels for ACP protocol enums.
 //!
-//! Several consumers (the headless `--print` runner and the `mj mcp` server)
+//! Several consumers (including headless and remote sessions)
 //! map the same `agent-client-protocol` enums to machine-readable strings for
 //! their JSON output. Those enums are `#[non_exhaustive]`, so each mapping needs
 //! a catch-all and must be updated when upstream adds a variant. Keeping the
 //! mappers here means there is exactly one place to update rather than several
 //! copies that can silently drift apart.
 
-use agent_client_protocol::schema::v1::{
-    PermissionOptionKind, StopReason, ToolCallStatus, ToolKind,
-};
+use agent_client_protocol::schema::v1::{StopReason, ToolCallStatus, ToolKind};
 
 /// Stable label for a tool-call kind.
 pub fn tool_kind_label(kind: ToolKind) -> &'static str {
@@ -47,17 +45,6 @@ pub fn stop_reason_label(reason: StopReason) -> &'static str {
         StopReason::MaxTurnRequests => "max_turn_requests",
         StopReason::Refusal => "refusal",
         StopReason::Cancelled => "cancelled",
-        _ => "other",
-    }
-}
-
-/// Stable label for a permission-option kind.
-pub fn permission_option_kind_label(kind: PermissionOptionKind) -> &'static str {
-    match kind {
-        PermissionOptionKind::AllowOnce => "allow_once",
-        PermissionOptionKind::AllowAlways => "allow_always",
-        PermissionOptionKind::RejectOnce => "reject_once",
-        PermissionOptionKind::RejectAlways => "reject_always",
         _ => "other",
     }
 }

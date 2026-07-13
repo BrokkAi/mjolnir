@@ -1,62 +1,61 @@
 //! mjolnir: an interactive terminal client for any ACP-speaking agent.
 //!
-//! Starts sessions with the configured default ACP agent, falling back to the
-//! picker only when no default exists or when the user explicitly requests a
-//! new agent with `/new`. It persists global picker preferences to
-//! `~/.config/mj/config.toml`, then spawns the agent as a child process and
-//! renders the session in a ratatui chat UI.
+//! Resolves a model-first Thor/Loki/Eitri Council from DeepSWE and locally
+//! launchable ACP adapters, then renders the active foreground ACP session in
+//! a ratatui chat UI.
 
 mod acp;
 mod app;
+mod archive;
 mod claude_usage;
 mod clipboard;
+mod code_agent;
 mod config;
+mod council;
+mod deepswe;
 mod event;
 mod headless;
-mod install;
 mod labels;
-mod mcp;
+mod loki;
 mod menu;
 mod model_resolve;
 mod notifications;
 mod palette;
 mod paths;
-mod picker;
 mod probe;
 mod qr;
 mod ragnarok;
 mod ragnarok_sprites;
-mod registry;
 mod remote;
-mod scores;
 mod self_update;
 mod session;
+mod session_provenance;
 mod speech;
 mod spinner;
-mod spinner_picker;
 mod tailscale;
 mod term;
 mod text;
 mod theme;
-mod theme_picker;
 mod ui;
 mod version;
+mod workspace_snapshot;
 mod worktree;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::app::UiExitReason;
-use crate::config::{
-    Config, CustomAgent as ConfigCustomAgent, SelectedAgent, history_path, transcript_export_dir,
-};
-use crate::event::{LoadSessionResult, UiCommand};
-use crate::picker::{
-    CustomAgent as PickerCustomAgent, PickerOutcome, PickerPreferences, PickerResult,
+use crate::config::{Config, SelectedAgent, history_path, transcript_export_dir};
+use crate::event::{
+    InternalMessage, InternalMessageKind, LoadSessionResult, ReviewRole, UiCommand, UiEvent,
 };
 use crate::session::SessionEntryJson;
 use crate::ui::{HeaderLabels, UiMode};
@@ -153,48 +152,14 @@ struct Cli {
 enum Commands {
     /// Resume an existing ACP session.
     ///
-    /// Opens the agent picker first so the session is listed or loaded
-    /// from the agent that owns it. Without a session ID, opens an
-    /// interactive session picker for the chosen agent.
+    /// Uses saved provenance to route the session back to its original ACP
+    /// adapter and model. Without an ID, opens an interactive session picker.
     ///
     /// Use `--list` to print sessions from the configured default agent
     /// in headless mode (no TUI).
     Resume(ResumeArgs),
     /// Start the local remote-control server.
     Server(ServerArgs),
-    /// Run as a Model Context Protocol (MCP) stdio server.
-    ///
-    /// Exposes mj's ACP-client capabilities as MCP tools (connect to an agent,
-    /// inspect session config, submit prompts, poll progress, answer permission
-    /// requests, cancel, read results) over stdin/stdout. Reuses the top-level
-    /// `--cwd`, `--agent-stderr`, `--fs-max-text-bytes`, and `--debug-file`
-    /// flags. Logs go only to `--debug-file`; stdout carries MCP frames.
-    Mcp(McpArgs),
-    /// Debug: dump each configured agent's selectable models as JSON.
-    ///
-    /// Launches the picker's default-view agents (curated + favorites +
-    /// default), opens a session on each, and prints the Model-category config
-    /// options (`value`/`name`/`description`) plus the resolved LMArena score
-    /// key. Used to verify model-score matching against real agent output.
-    #[command(hide = true)]
-    DumpModels(DumpModelsArgs),
-}
-
-#[derive(Debug, clap::Args, Default)]
-struct McpArgs {}
-
-#[derive(Debug, clap::Args, Default)]
-struct DumpModelsArgs {
-    /// Only dump this agent (by `source_id`, e.g. `claude-acp`). With
-    /// `--program`, this is just the label used for score resolution.
-    agent: Option<String>,
-    /// Probe this explicit program instead of registry resolution (e.g. an
-    /// agent installed outside mj, like `~/.opencode/bin/opencode`).
-    #[arg(long)]
-    program: Option<PathBuf>,
-    /// Argument for `--program` (repeatable), e.g. `--arg acp`.
-    #[arg(long = "arg")]
-    args: Vec<String>,
 }
 
 fn parse_fs_max_text_bytes(value: &str) -> std::result::Result<u64, String> {
@@ -336,8 +301,6 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     match &cli.command {
         Some(Commands::Resume(args)) => !args.list,
         Some(Commands::Server(_)) => false,
-        Some(Commands::Mcp(_)) => false,
-        Some(Commands::DumpModels(_)) => false,
         None => true,
     }
 }
@@ -384,20 +347,6 @@ async fn main() -> Result<()> {
                 })
                 .await
             }
-            Commands::Mcp(_) => {
-                let workspace_roots =
-                    validate_workspace_roots(&cwd, &top_level_additional_directories)?;
-                mcp::serve(mcp::McpConfig {
-                    default_cwd: cwd,
-                    additional_directories: workspace_roots.additional_directories().to_vec(),
-                    agent_stderr: cli.agent_stderr,
-                    fs_max_text_bytes,
-                })
-                .await
-            }
-            Commands::DumpModels(args) => {
-                run_dump_models(args.agent, args.program, args.args).await
-            }
         };
     }
 
@@ -421,7 +370,6 @@ async fn main() -> Result<()> {
     let workspace_roots = validate_workspace_roots(&cwd, &top_level_additional_directories)?;
     let worktree_label = worktree_label(worktree.as_ref());
     let project_label = project_label(&cwd);
-
     let result = run_app(
         cwd,
         RuntimeOptions {
@@ -519,6 +467,79 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn primary_session_routes(council: &council::ResolvedCouncil) -> Vec<council::ResolvedRole> {
+    let mut routes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for role in std::iter::once(&council.thor).chain(council.available.iter()) {
+        if role.ranked && seen.insert(role.launch.source_id.clone()) {
+            routes.push(role.clone());
+        }
+    }
+    routes
+}
+
+async fn list_council_sessions(
+    council: &council::ResolvedCouncil,
+    cwd: &Path,
+    agent_stderr: Option<&Path>,
+) -> Vec<session::SessionEntry> {
+    let mut sessions = Vec::new();
+    for role in primary_session_routes(council) {
+        let agent = selected_agent_for_role(&role);
+        match session::list_sessions_with_capabilities(&agent, cwd.to_path_buf(), agent_stderr)
+            .await
+        {
+            Ok(mut listing) => {
+                for entry in &mut listing.sessions {
+                    entry.adapter_source_id = Some(role.launch.source_id.clone());
+                    if let Some(record) = session_provenance::find(&entry.session_id, &entry.cwd)
+                        && record.adapter_source_id == role.launch.source_id
+                    {
+                        entry.model = Some(record.model);
+                    } else {
+                        entry.model = Some(role.model.model.clone());
+                    }
+                    entry.delete_supported = listing.delete_supported;
+                }
+                sessions.extend(listing.sessions);
+            }
+            Err(error) => tracing::warn!(
+                adapter = %role.launch.source_id,
+                "list Council sessions: {error:#}"
+            ),
+        }
+    }
+    sessions.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+            .then_with(|| a.adapter_source_id.cmp(&b.adapter_source_id))
+    });
+    sessions
+}
+
+fn role_for_session_entry<'a>(
+    council: &'a council::ResolvedCouncil,
+    entry: &session::SessionEntry,
+) -> Option<&'a council::ResolvedRole> {
+    let adapter = entry.adapter_source_id.as_deref()?;
+    entry
+        .model
+        .as_deref()
+        .and_then(|model| {
+            council
+                .available
+                .iter()
+                .find(|role| role.launch.source_id == adapter && role.model.model == model)
+        })
+        .or_else(|| {
+            council
+                .available
+                .iter()
+                .find(|role| role.launch.source_id == adapter && role.ranked)
+        })
+}
+
 /// Handle the `mj resume` subcommand: pick the agent to resume from, list
 /// sessions, pick one interactively, or resume directly by ID.
 async fn run_resume(
@@ -538,19 +559,61 @@ async fn run_resume(
     let additional_directories = workspace_roots.additional_directories().to_vec();
     let worktree_label = worktree_label(worktree.as_ref());
     let project_label = project_label(&cwd);
+    let cfg = Config::load(&config::default_config_path())?;
+    let mut resume_council = council::resolve(&cfg, &cwd).await?;
+    let mut agent = selected_agent_for_role(&resume_council.thor);
+    if let Some(session_id) = args.session_id.as_deref()
+        && let Some(record) = session_provenance::find(session_id, &cwd)
+    {
+        let pinned = resume_council
+            .available
+            .iter()
+            .find(|role| {
+                role.model.model == record.model
+                    && role.model_value == record.model_value
+                    && role.launch.source_id == record.adapter_source_id
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "session {session_id} belongs to {} via {}, which is not currently launchable",
+                    record.model,
+                    record.adapter_source_id
+                )
+            })?;
+        resume_council.thor = pinned.clone();
+        agent = selected_agent_for_role(pinned);
+    } else if let Some(session_id) = args.session_id.as_deref() {
+        let matches = list_council_sessions(&resume_council, &cwd, args.agent_stderr.as_deref())
+            .await
+            .into_iter()
+            .filter(|entry| entry.session_id == session_id)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [entry] => {
+                let role = role_for_session_entry(&resume_council, entry)
+                    .ok_or_else(|| anyhow::anyhow!("session {session_id} has no launchable route"))?
+                    .clone();
+                session_provenance::record(session_provenance::Record {
+                    session_id: session_id.to_string(),
+                    cwd: entry.cwd.clone(),
+                    adapter_source_id: role.launch.source_id.clone(),
+                    model: role.model.model.clone(),
+                    model_value: role.model_value.clone(),
+                });
+                agent = selected_agent_for_role(&role);
+                resume_council.thor = role;
+            }
+            [] => {}
+            _ => anyhow::bail!(
+                "legacy session ID {session_id} is ambiguous across Council adapters; select it with `mj resume` first"
+            ),
+        }
+    }
 
     // `--list`: headless listing, print and exit.
     if args.list {
-        // Load the configured agent (same as headless mode).
-        let config_path = config::default_config_path();
-        let cfg = Config::load(&config_path)
-            .with_context(|| format!("load {}", config_path.display()))?;
-        let agent = cfg.agent.ok_or_else(|| {
-            anyhow::anyhow!(
-                "no default agent configured; run `mj` once to pick an agent before listing sessions"
-            )
-        })?;
-        let sessions = session::list_sessions(&agent, cwd, args.agent_stderr.as_deref()).await?;
+        let sessions =
+            list_council_sessions(&resume_council, &cwd, args.agent_stderr.as_deref()).await;
         match args.format {
             HeadlessOutputFormat::Json | HeadlessOutputFormat::StreamJson => {
                 let json: Vec<SessionEntryJson> =
@@ -575,13 +638,6 @@ async fn run_resume(
         }
         return Ok(());
     }
-
-    let agent = pick_agent_for_resume().await;
-    let Some(agent) = agent? else {
-        eprintln!("Cancelled.");
-        let _ = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
-        return Ok(());
-    };
 
     // Direct ID: launch the TUI with the chosen agent and session.
     if let Some(session_id) = args.session_id.clone() {
@@ -638,21 +694,17 @@ async fn run_resume(
         // killed after listing), then set up the TUI to show the session picker,
         // then launch the chosen session with a fresh process for the same agent.
         eprintln!("Fetching sessions from agent...");
-        let listing = session::list_sessions_with_capabilities(
-            &agent,
-            cwd.clone(),
-            args.agent_stderr.as_deref(),
-        )
-        .await?;
-        if listing.sessions.is_empty() {
+        let sessions =
+            list_council_sessions(&resume_council, &cwd, args.agent_stderr.as_deref()).await;
+        if sessions.is_empty() {
             eprintln!("No sessions available.");
             let _ = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
             return Ok(());
         }
 
         let outcome = run_session_picker_once(
-            listing.sessions,
-            listing.delete_supported,
+            sessions,
+            true,
             notice.take(),
             Config::load(&config::default_config_path())
                 .map(|cfg| cfg.theme.palette())
@@ -666,12 +718,29 @@ async fn run_resume(
                 return Ok(());
             }
             session::ResumeOutcome::DeleteRequested(entry) => {
-                notice =
-                    Some(delete_session_notice(&agent, entry, args.agent_stderr.as_deref()).await);
+                notice = if entry.delete_supported {
+                    match role_for_session_entry(&resume_council, &entry) {
+                        Some(role) => {
+                            let route = selected_agent_for_role(role);
+                            Some(
+                                delete_session_notice(&route, entry, args.agent_stderr.as_deref())
+                                    .await,
+                            )
+                        }
+                        None => Some("Delete failed: session route is unavailable".to_string()),
+                    }
+                } else {
+                    Some("This ACP adapter does not support session deletion".to_string())
+                };
             }
             session::ResumeOutcome::Selected(entry) => {
                 eprintln!("Resuming session: {}", entry.session_id);
                 let session_title = entry.title.clone();
+                let role = role_for_session_entry(&resume_council, &entry)
+                    .ok_or_else(|| anyhow::anyhow!("selected session route is unavailable"))?
+                    .clone();
+                agent = selected_agent_for_role(&role);
+                resume_council.thor = role;
                 let result = run_app(
                     cwd,
                     RuntimeOptions {
@@ -705,25 +774,6 @@ async fn run_resume(
             }
         }
     }
-}
-
-async fn pick_agent_for_resume() -> Result<Option<SelectedAgent>> {
-    let config_path = config::default_config_path();
-    let mut cfg =
-        Config::load(&config_path).with_context(|| format!("load {}", config_path.display()))?;
-
-    kick_off_agent_probes(&cfg);
-    let picker_result = run_agent_picker_once(&cfg).await?;
-    apply_picker_preferences(&mut cfg, picker_result.preferences);
-    let selected = picker_result.outcome.map(picker_outcome_to_selected);
-    if cfg.agent.is_none()
-        && let Some(agent) = selected.as_ref()
-    {
-        cfg.agent = Some(agent.clone());
-    }
-    cfg.save(&config_path)
-        .with_context(|| format!("save {}", config_path.display()))?;
-    Ok(selected)
 }
 
 fn read_headless_prompt(prompt_arg: String) -> Result<String> {
@@ -853,18 +903,6 @@ fn prepare_existing_worktree(cwd: &std::path::Path, name_or_path: &str) -> Resul
     Ok(opened)
 }
 
-fn should_open_initial_agent_picker(cfg: &Config, initial_agent: Option<&SelectedAgent>) -> bool {
-    cfg.agent.is_none() && initial_agent.is_none()
-}
-
-fn should_open_first_run_setup(
-    config_exists: bool,
-    cfg: &Config,
-    initial_agent: Option<&SelectedAgent>,
-) -> bool {
-    !config_exists && cfg.agent.is_none() && initial_agent.is_none()
-}
-
 #[derive(Debug, Clone)]
 struct RuntimeOptions {
     agent_stderr: Option<PathBuf>,
@@ -907,55 +945,29 @@ async fn run_app(
     mode: UiMode,
 ) -> Result<Option<String>> {
     let config_path = config::default_config_path();
-    let config_exists = config_path.exists();
     let mut cfg = Config::load(&config_path)?;
+    let mut council = council::resolve(&cfg, &cwd).await?;
+    if let Some(agent) = initial_agent.as_ref()
+        && let Some(pinned) = council.available.iter().find(|role| {
+            role.launch.command == agent.program
+                && role.launch.args == agent.args
+                && role.model.model == agent.source_id.trim_start_matches("council:")
+        })
+    {
+        council.thor = pinned.clone();
+    }
+    let mut council_agent = selected_agent_for_role(&council.thor);
 
-    // Validate agents in the background once, up front. Results land in the
-    // global probe store; every agent picker shown during this run just pulls
-    // from it.
-    kick_off_agent_probes(&cfg);
-    let score_store = scores::ScoreStore::default();
-    kick_off_score_load(&cfg, score_store.clone());
-
-    // Supervisor loop. Initial sessions use the configured default agent when
-    // available. The picker is reserved for first-run setup and explicit
-    // new-session requests (`/new` / Ctrl-N), while resumed sessions may provide
-    // the agent chosen by `mj resume` or fall back to the configured default.
-    // Consume resume_session and initial_agent on the first iteration only.
+    // Consume resume_session and any pinned resume launch on the first
+    // iteration only. Fresh sessions always use the resolved Thor role.
     let mut initial_resume = resume_target;
-    let mut initial_agent = initial_agent;
-    let mut first_run_setup =
-        should_open_first_run_setup(config_exists, &cfg, initial_agent.as_ref());
-    let mut pick_agent = should_open_initial_agent_picker(&cfg, initial_agent.as_ref());
+    let mut initial_agent = initial_agent.or_else(|| Some(council_agent.clone()));
     let mut pending_new_session_boundary = false;
     loop {
         let resume = initial_resume.take();
-        let agent = if let Some(agent) = initial_agent.take() {
-            agent
-        } else if first_run_setup {
-            first_run_setup = false;
-            pick_agent = false;
-            match run_first_run_setup(&mut cfg, &config_path).await? {
-                Some(agent) => agent,
-                None => return Ok(None),
-            }
-        } else if pick_agent {
-            pick_agent = false;
-            match run_agent_picker_and_update_config(&mut cfg, &config_path).await? {
-                Some(agent) => agent,
-                None => {
-                    cfg.save(&config_path)
-                        .with_context(|| format!("save {}", config_path.display()))?;
-                    return Ok(None);
-                }
-            }
-        } else {
-            cfg.agent.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no default agent configured; run `mj` once to pick an agent before resuming sessions"
-                )
-            })?
-        };
+        let agent = initial_agent
+            .take()
+            .unwrap_or_else(|| council_agent.clone());
 
         let session_boundary = new_session_boundary_for_agent(
             std::mem::take(&mut pending_new_session_boundary),
@@ -976,32 +988,21 @@ async fn run_app(
             mode,
             cfg.theme,
             cfg.spinner,
-            score_store.clone(),
             session_boundary,
+            council.clone(),
+            cfg.thor.clone(),
+            cfg.loki.clone(),
         )
         .await?;
         apply_session_result_to_config(&mut cfg, &session_result);
         match session_result.reason {
             UiExitReason::Quit => return Ok(session_result.session_id),
             UiExitReason::NewSession => {
-                match run_agent_picker_and_update_config(&mut cfg, &config_path).await? {
-                    Some(selected_agent) => {
-                        initial_agent = Some(selected_agent);
-                        pending_new_session_boundary = true;
-                    }
-                    None => {
-                        cfg.save(&config_path)
-                            .with_context(|| format!("save {}", config_path.display()))?;
-                        let (agent, resume) = resume_target_after_cancelled_new_session(
-                            agent,
-                            session_result.session_id,
-                            session_result.session_title,
-                        );
-                        initial_agent = Some(agent);
-                        initial_resume = resume;
-                        pending_new_session_boundary = false;
-                    }
-                }
+                cfg = Config::load(&config_path)?;
+                council = council::resolve(&cfg, &cwd).await?;
+                council_agent = selected_agent_for_role(&council.thor);
+                initial_agent = Some(council_agent.clone());
+                pending_new_session_boundary = true;
                 continue;
             }
             UiExitReason::ClearSession => {
@@ -1010,11 +1011,21 @@ async fn run_app(
             }
             UiExitReason::SwitchSession => {
                 if let Some(session_id) = session_result.session_id {
+                    let resume_agent = session_provenance::find(&session_id, &cwd)
+                        .and_then(|record| {
+                            council.available.iter().find(|role| {
+                                role.model.model == record.model
+                                    && role.model_value == record.model_value
+                                    && role.launch.source_id == record.adapter_source_id
+                            })
+                        })
+                        .map(selected_agent_for_role)
+                        .unwrap_or(agent);
                     initial_resume = Some(ResumeTarget {
                         session_id,
                         title: session_result.session_title,
                     });
-                    initial_agent = Some(agent);
+                    initial_agent = Some(resume_agent);
                     continue;
                 }
                 return Ok(None);
@@ -1040,59 +1051,6 @@ async fn run_app(
             }
         }
     }
-}
-
-async fn run_first_run_setup(
-    cfg: &mut Config,
-    config_path: &Path,
-) -> Result<Option<SelectedAgent>> {
-    let Some(theme_kind) = run_theme_picker_once(cfg.theme).await? else {
-        return Ok(None);
-    };
-    cfg.theme = theme_kind;
-    cfg.save(config_path)
-        .with_context(|| format!("save {}", config_path.display()))?;
-
-    let Some(spinner_style) = run_spinner_picker_once(cfg.theme.palette(), cfg.spinner).await?
-    else {
-        return Ok(None);
-    };
-    cfg.spinner = spinner_style;
-    cfg.save(config_path)
-        .with_context(|| format!("save {}", config_path.display()))?;
-
-    let agent = run_agent_picker_and_update_config(cfg, config_path).await?;
-    if agent.is_none() {
-        cfg.save(config_path)
-            .with_context(|| format!("save {}", config_path.display()))?;
-    }
-    Ok(agent)
-}
-
-async fn run_agent_picker_and_update_config(
-    cfg: &mut Config,
-    config_path: &Path,
-) -> Result<Option<SelectedAgent>> {
-    let picker_result = run_agent_picker_once(cfg).await?;
-    let selected = apply_picker_result_to_config(cfg, picker_result);
-    if selected.is_some() {
-        cfg.save(config_path)
-            .with_context(|| format!("save {}", config_path.display()))?;
-    }
-    Ok(selected)
-}
-
-fn apply_picker_result_to_config(
-    cfg: &mut Config,
-    picker_result: PickerResult,
-) -> Option<SelectedAgent> {
-    apply_picker_preferences(cfg, picker_result.preferences);
-    let outcome = picker_result.outcome?;
-    let selected = picker_outcome_to_selected(outcome);
-    if cfg.agent.is_none() {
-        cfg.agent = Some(selected.clone());
-    }
-    Some(selected)
 }
 
 async fn run_session_picker_action_for_agent(
@@ -1137,6 +1095,77 @@ async fn run_session_picker_action_for_agent(
     }
 }
 
+async fn run_session_picker_action_for_council(
+    council: &council::ResolvedCouncil,
+    cwd: PathBuf,
+    agent_stderr: Option<&Path>,
+    current_session_id: Option<String>,
+    current_session_title: Option<String>,
+    theme: palette::TerminalTheme,
+) -> Result<(SessionPickerAction, Option<council::ResolvedRole>)> {
+    let mut notice = None;
+    loop {
+        let sessions = list_council_sessions(council, &cwd, agent_stderr).await;
+        if sessions.is_empty() {
+            return Ok((
+                session_picker_empty_action(current_session_id, current_session_title),
+                None,
+            ));
+        }
+        let outcome = run_session_picker_once(sessions, true, notice.take(), theme).await?;
+        match outcome {
+            session::ResumeOutcome::Cancelled => {
+                return Ok((
+                    session_picker_action(
+                        session::ResumeOutcome::Cancelled,
+                        current_session_id,
+                        current_session_title,
+                    )?,
+                    None,
+                ));
+            }
+            session::ResumeOutcome::DeleteRequested(entry) => {
+                if current_session_id.as_deref() == Some(entry.session_id.as_str()) {
+                    notice = Some(
+                        "Cannot delete the active session from the session picker. Close it first."
+                            .to_string(),
+                    );
+                    continue;
+                }
+                notice = match role_for_session_entry(council, &entry) {
+                    Some(role) if entry.delete_supported => {
+                        let route = selected_agent_for_role(role);
+                        Some(delete_session_notice(&route, entry, agent_stderr).await)
+                    }
+                    Some(_) => {
+                        Some("This ACP adapter does not support session deletion".to_string())
+                    }
+                    None => Some("Delete failed: session route is unavailable".to_string()),
+                };
+            }
+            session::ResumeOutcome::Selected(entry) => {
+                let role = role_for_session_entry(council, &entry)
+                    .ok_or_else(|| anyhow::anyhow!("selected session route is unavailable"))?
+                    .clone();
+                session_provenance::record(session_provenance::Record {
+                    session_id: entry.session_id.clone(),
+                    cwd: entry.cwd.clone(),
+                    adapter_source_id: role.launch.source_id.clone(),
+                    model: role.model.model.clone(),
+                    model_value: role.model_value.clone(),
+                });
+                return Ok((
+                    SessionPickerAction::Resume {
+                        session_id: entry.session_id,
+                        title: entry.title,
+                    },
+                    Some(role),
+                ));
+            }
+        }
+    }
+}
+
 fn in_app_session_delete_supported(
     agent_delete_supported: bool,
     current_session_id: Option<&str>,
@@ -1167,8 +1196,14 @@ async fn delete_session_notice(
         .as_deref()
         .unwrap_or(entry.session_id.as_str())
         .to_string();
-    match session::delete_session(agent, entry.session_id, agent_stderr).await {
-        Ok(()) => format!("Deleted session: {label}"),
+    let cwd = entry.cwd.clone();
+    let adapter_source_id = entry.adapter_source_id.clone();
+    let session_id = entry.session_id;
+    match session::delete_session(agent, session_id.clone(), agent_stderr).await {
+        Ok(()) => {
+            session_provenance::remove(&session_id, &cwd, adapter_source_id.as_deref());
+            format!("Deleted session: {label}")
+        }
         Err(err) => format!("Delete failed for {label}: {err:#}"),
     }
 }
@@ -1196,6 +1231,7 @@ fn new_session_boundary_for_agent(
         .then(|| format!("new {} session started", agent_header_label(agent)))
 }
 
+#[cfg(test)]
 fn resume_target_after_cancelled_new_session(
     agent: SelectedAgent,
     session_id: Option<String>,
@@ -1234,41 +1270,6 @@ fn session_picker_action(
     }
 }
 
-async fn run_agent_picker_once(cfg: &Config) -> Result<PickerResult> {
-    let mut terminal = ui::setup_fullscreen_terminal().context("setup terminal")?;
-    let result = run_picker_with_registry(&mut terminal, cfg).await;
-    if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
-        tracing::warn!("restore terminal (agent picker) failed: {e}");
-    }
-    settle_after_fullscreen_picker_restore().await;
-    result
-}
-
-async fn run_theme_picker_once(
-    initial: theme::TerminalThemeKind,
-) -> Result<Option<theme::TerminalThemeKind>> {
-    let mut terminal = ui::setup_fullscreen_terminal().context("setup terminal")?;
-    let result = theme_picker::run_theme_picker(&mut terminal, initial).await;
-    if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
-        tracing::warn!("restore terminal (theme picker) failed: {e}");
-    }
-    settle_after_fullscreen_picker_restore().await;
-    result
-}
-
-async fn run_spinner_picker_once(
-    theme: palette::TerminalTheme,
-    initial: spinner::SpinnerStyle,
-) -> Result<Option<spinner::SpinnerStyle>> {
-    let mut terminal = ui::setup_fullscreen_terminal().context("setup terminal")?;
-    let result = spinner_picker::run_spinner_picker(&mut terminal, theme, initial).await;
-    if let Err(e) = ui::restore_fullscreen_terminal(&mut terminal) {
-        tracing::warn!("restore terminal (spinner picker) failed: {e}");
-    }
-    settle_after_fullscreen_picker_restore().await;
-    result
-}
-
 async fn run_session_picker_once(
     sessions: Vec<session::SessionEntry>,
     delete_supported: bool,
@@ -1293,253 +1294,17 @@ async fn settle_after_fullscreen_picker_restore() {
     tokio::time::sleep(Duration::from_millis(75)).await;
 }
 
-/// Load the agent registry from cache (refreshing per its TTL), falling back
-/// to a built-in default (anvil + custom only) when it cannot be loaded.
-async fn load_agent_registry() -> registry::Registry {
-    let cache_path = registry::default_cache_path();
-    match registry::load_with_cache(&cache_path, registry::CACHE_TTL, registry::REGISTRY_URL).await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("registry load failed, offering anvil + custom only: {e:#}");
-            registry::Registry::default()
-        }
-    }
-}
-
-/// Kick off background validation of the default-view agents so the picker's
-/// "configured" checkmarks are ready (or settling) by the time it opens. No-op
-/// to the terminal; safe to call before any TUI is set up. Best-effort: if the
-/// registry never loads, the picker simply shows no checkmarks.
-fn kick_off_agent_probes(cfg: &Config) {
-    let preferences = picker_preferences_from_config(cfg);
-    tokio::spawn(async move {
-        let registry = load_agent_registry().await;
-        picker::spawn_startup_probes(
-            &registry,
-            &registry::current_platform(),
-            &install::default_install_root(),
-            preferences,
-        );
-    });
-}
-
-/// Load the model strength-score catalog (LMArena Elo) in the background and
-/// install it for the picker. Best-effort and offline-safe: the loader falls
-/// back through stale cache to the bundled snapshot, so the catalog is always
-/// populated. Skipped entirely when the user disabled scores.
-fn kick_off_score_load(cfg: &Config, score_store: scores::ScoreStore) {
-    if !cfg.scores.enabled {
-        return;
-    }
-    let scores_cfg = cfg.scores.clone();
-    tokio::spawn(async move {
-        let cache_path = scores::default_cache_path();
-        let url = scores_cfg
-            .url
-            .as_deref()
-            .unwrap_or(scores::DEFAULT_SCORES_URL)
-            .to_string();
-        let file = scores::load_scores_file(&cache_path, scores::CACHE_TTL, &url).await;
-        let catalog = scores::ScoreCatalog::build(&file, scores_cfg.overrides, scores_cfg.enabled);
-        score_store.install(catalog);
-    });
-}
-
-/// Debug command (`mj dump-models`): launch each configured agent, read its
-/// real selectable models, and print them — with the score the picker would
-/// render — as JSON. Lets us verify model-score matching against real agent
-/// output instead of assumed id formats.
-async fn run_dump_models(
-    filter: Option<String>,
-    program: Option<PathBuf>,
-    program_args: Vec<String>,
-) -> Result<()> {
-    let cfg = Config::load(&config::default_config_path()).unwrap_or_default();
-
-    // Install the score catalog so we can show the resolved score per model.
-    let scores_file = scores::load_scores_file(
-        &scores::default_cache_path(),
-        scores::CACHE_TTL,
-        cfg.scores
-            .url
-            .as_deref()
-            .unwrap_or(scores::DEFAULT_SCORES_URL),
-    )
-    .await;
-    let score_store = scores::ScoreStore::default();
-    score_store.install(scores::ScoreCatalog::build(
-        &scores_file,
-        cfg.scores.overrides.clone(),
-        true,
-    ));
-
-    // Either probe one explicit command, or the picker's default-view agents.
-    let explicit = program.is_some();
-    let plan: Vec<(String, Option<picker::LaunchCommand>)> = if let Some(program) = program {
-        let source_id = filter.clone().unwrap_or_else(|| "explicit".to_string());
-        vec![(
-            source_id,
-            Some(picker::LaunchCommand {
-                program,
-                args: program_args,
-                env: std::collections::HashMap::new(),
-            }),
-        )]
-    } else {
-        let registry = load_agent_registry().await;
-        picker::launch_plan(
-            &registry,
-            &registry::current_platform(),
-            &install::default_install_root(),
-            picker_preferences_from_config(&cfg),
-        )
-    };
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-    let mut report = Vec::new();
-    for (source_id, command) in plan {
-        if !explicit
-            && let Some(f) = &filter
-            && &source_id != f
-        {
-            continue;
-        }
-        eprintln!("probing {source_id} …");
-        let entry = match command {
-            None => serde_json::json!({ "agent": source_id, "error": "not installed" }),
-            Some(cmd) => match probe::session_models(
-                cmd.program,
-                cmd.args,
-                cmd.env,
-                cwd.clone(),
-                Duration::from_secs(60),
-            )
-            .await
-            {
-                Ok(models) => {
-                    let models: Vec<_> = models
-                        .into_iter()
-                        .map(|m| {
-                            let score = score_store.score_suffix(
-                                &source_id,
-                                &m.value,
-                                &m.name,
-                                m.description.as_deref().unwrap_or_default(),
-                            );
-                            serde_json::json!({
-                                "value": m.value,
-                                "name": m.name,
-                                "description": m.description,
-                                "score": score,
-                            })
-                        })
-                        .collect();
-                    serde_json::json!({ "agent": source_id, "models": models })
-                }
-                Err(e) => serde_json::json!({ "agent": source_id, "error": e }),
-            },
-        };
-        report.push(entry);
-    }
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    Ok(())
-}
-
-async fn run_picker_with_registry(
-    terminal: &mut ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>,
-    cfg: &Config,
-) -> Result<PickerResult> {
-    let registry = load_agent_registry().await;
-    picker::run_picker(
-        terminal,
-        &registry,
-        &install::default_install_root(),
-        &registry::current_platform(),
-        picker_preferences_from_config(cfg),
-        cfg.theme.palette(),
-    )
-    .await
-}
-
-fn picker_preferences_from_config(cfg: &Config) -> PickerPreferences {
-    PickerPreferences {
-        default_agent: cfg.agent.as_ref().map(selected_to_picker_outcome),
-        favorite_source_ids: cfg.favorite_agents.clone(),
-        custom_agents: cfg
-            .custom_agents
-            .iter()
-            .map(config_custom_to_picker_custom)
-            .collect(),
-    }
-}
-
-fn apply_picker_preferences(cfg: &mut Config, preferences: PickerPreferences) {
-    cfg.agent = preferences.default_agent.map(picker_outcome_to_selected);
-    cfg.favorite_agents = preferences.favorite_source_ids;
-    cfg.custom_agents = preferences
-        .custom_agents
-        .into_iter()
-        .map(picker_custom_to_config_custom)
-        .collect();
-    prune_removed_custom_agent_session_config(cfg);
-}
-
-fn prune_removed_custom_agent_session_config(cfg: &mut Config) {
-    let custom_source_ids: Vec<String> = cfg
-        .custom_agents
-        .iter()
-        .map(|agent| format!("{}{}", config::CUSTOM_AGENT_SOURCE_PREFIX, agent.name))
-        .collect();
-    let selected_source_id = cfg.agent.as_ref().map(|agent| agent.source_id.clone());
-
-    cfg.session_config.retain(|source_id, _| {
-        !source_id.starts_with(config::CUSTOM_AGENT_SOURCE_PREFIX)
-            || custom_source_ids.iter().any(|id| id == source_id)
-            || selected_source_id
-                .as_ref()
-                .is_some_and(|id| id == source_id)
-    });
-}
-
-fn config_custom_to_picker_custom(c: &ConfigCustomAgent) -> PickerCustomAgent {
-    PickerCustomAgent {
-        name: c.name.clone(),
-        program: c.program.clone(),
-        args: c.args.clone(),
-        description: c.description.clone(),
-    }
-}
-
-fn picker_custom_to_config_custom(c: PickerCustomAgent) -> ConfigCustomAgent {
-    ConfigCustomAgent {
-        name: c.name,
-        program: c.program,
-        args: c.args,
-        description: c.description,
-    }
-}
-
-fn picker_outcome_to_selected(o: PickerOutcome) -> SelectedAgent {
-    SelectedAgent {
-        source_id: o.source_id,
-        program: o.program,
-        args: o.args,
-        env: o.env,
-    }
-}
-
-fn selected_to_picker_outcome(agent: &SelectedAgent) -> PickerOutcome {
-    PickerOutcome {
-        source_id: agent.source_id.clone(),
-        program: agent.program.clone(),
-        args: agent.args.clone(),
-        env: agent.env.clone(),
-    }
-}
-
 fn agent_header_label(agent: &SelectedAgent) -> String {
     remote::agent_display_label(agent)
+}
+
+fn selected_agent_for_role(role: &council::ResolvedRole) -> SelectedAgent {
+    SelectedAgent {
+        source_id: format!("council:{}", role.model.model),
+        program: role.launch.command.clone(),
+        args: role.launch.args.clone(),
+        env: role.launch.env.clone(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1552,15 +1317,55 @@ async fn run_session(
     mode: UiMode,
     mut theme_kind: theme::TerminalThemeKind,
     mut spinner_style: spinner::SpinnerStyle,
-    score_store: scores::ScoreStore,
     mut session_boundary: Option<String>,
+    council: council::ResolvedCouncil,
+    thor_config: config::ThorConfig,
+    loki_config: config::LokiConfig,
 ) -> Result<RunSessionResult> {
     let mut terminal = SessionTerminal::fresh(mode)?;
+    let (eitri_role, _eitri_codex_home) = isolated_council_role(council.eitri.clone(), "eitri")?;
+    let (loki_role, _loki_codex_home) = match council.loki.clone() {
+        Some(role) => {
+            let (role, guard) = isolated_council_role(role, "loki")?;
+            (Some(role), guard)
+        }
+        None => (None, None),
+    };
 
     let (event_tx, runtime_event_rx) = mpsc::unbounded_channel();
     let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
     let (runtime_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (cmd_tx, mut ui_cmd_rx) = mpsc::unbounded_channel();
+    let implementation_handoffs_this_turn = Arc::new(AtomicUsize::new(0));
+    let _ = ui_event_tx.send(crate::event::UiEvent::Info(format!(
+        "Council · Thor {} · Loki {} · Eitri {} · {} launchable models",
+        council.thor.model.model,
+        council
+            .loki
+            .as_ref()
+            .map(|role| role.model.model.as_str())
+            .unwrap_or("off"),
+        council.eitri.model.model,
+        council.available.len(),
+    )));
+    for warning in &council.warnings {
+        let _ = ui_event_tx.send(crate::event::UiEvent::Warning(warning.clone()));
+    }
+    let loki_handle = loki_role.map(|role| {
+        loki::Handle::start(
+            role,
+            cwd.clone(),
+            runtime_options.additional_directories.clone(),
+            ui_event_tx.clone(),
+            loki_config.streaming_review,
+        )
+    });
+    if loki_config.streaming_review && loki_handle.is_none() {
+        let _ = ui_event_tx.send(crate::event::UiEvent::Warning(
+            "Loki review is enabled, but no launchable model from a provider other than Thor's is available"
+                .to_string(),
+        ));
+    }
     let (usage_turn_tx, usage_task) = if agent.source_id == "claude-acp" {
         let (tx, mut rx) = mpsc::unbounded_channel::<()>();
         let usage_ui_tx = ui_event_tx.clone();
@@ -1594,6 +1399,7 @@ async fn run_session(
         args: agent.args.clone(),
         cwd: cwd.clone(),
         additional_directories: runtime_options.additional_directories.clone(),
+        mcp_servers: Vec::new(),
         resume_session,
         env: agent.env.clone(),
         agent_stderr: runtime_options.agent_stderr.clone(),
@@ -1601,10 +1407,24 @@ async fn run_session(
         access_mode: acp::RuntimeAccessMode::Full,
         agent_source_id: Some(agent.source_id.clone()),
         config_path: Some(config::default_config_path()),
-        saved_session_config: config::Config::load(&config::default_config_path())
-            .ok()
-            .and_then(|cfg| cfg.session_config.get(&agent.source_id).cloned())
-            .unwrap_or_default(),
+        saved_session_config: std::collections::HashMap::new(),
+        role_config: Some(acp::RuntimeRoleConfig {
+            label: "Thor".to_string(),
+            model_value: council.thor.model_value.clone(),
+            force_high_reasoning: true,
+        }),
+        code_agent: Some(
+            code_agent::Config::council(
+                eitri_role.launch.command.clone(),
+                eitri_role.launch.args.clone(),
+                eitri_role.launch.env.clone(),
+                runtime_options.agent_stderr.clone(),
+                eitri_role.model.model.clone(),
+                eitri_role.model_value.clone(),
+                loki_handle.clone(),
+            )
+            .with_implementation_handoff_counter(implementation_handoffs_this_turn.clone()),
+        ),
     };
 
     // Drive the ACP runtime on its own task so the UI can own the
@@ -1620,12 +1440,9 @@ async fn run_session(
     let hist_path = history_path();
     let export_dir = transcript_export_dir();
     let config_path = config::default_config_path();
-    // Pre-fill the UI header with the configured agent identity. Registry
-    // agents use their source id so the header matches the picker/config,
-    // while custom agents show the exact command line being launched.
-    let agent_display_name = Some(agent_header_label(agent));
-    // Stable registry id for the model-score resolver (distinct from the
-    // display label above, which is a command line for custom agents).
+    // Pre-fill the UI header with the immutable model selected for this session.
+    let agent_display_name = Some(format!("Thor · {}", council.thor.model.model));
+    // Stable runtime route identifier used by remote session state.
     let agent_source_id = Some(agent.source_id.clone());
     let tracker_project_label = header_labels.project.clone();
     // `-w` sessions carry the worktree name in the header; sessions launched
@@ -1638,36 +1455,316 @@ async fn run_session(
     let remote_tracker = remote::RemoteSessionTracker::new(
         tracker_project_label,
         tracker_worktree_label,
-        agent_header_label(agent),
+        format!("Thor · {}", council.thor.model.model),
         Some(cmd_tx.clone()),
         Some(ui_event_tx.clone()),
     );
 
     let event_tracker = remote_tracker.clone();
+    let review_commands = runtime_cmd_tx.clone();
+    let turn_state = std::sync::Arc::new(tokio::sync::Mutex::new((
+        0_u64,
+        String::new(),
+        None::<workspace_snapshot::WorkspaceSnapshot>,
+    )));
+    let event_turn_state = turn_state.clone();
+    let event_loki = loki_handle.clone();
+    let event_handoffs = implementation_handoffs_this_turn.clone();
+    let event_thor = council.thor.clone();
+    let event_cwd = cwd.clone();
+    let thor_review_enabled = Arc::new(AtomicBool::new(thor_config.discrete_review));
+    let event_thor_review_enabled = thor_review_enabled.clone();
     let event_proxy = tokio::spawn(async move {
         let mut runtime_event_rx = runtime_event_rx;
-        while let Some(event) = runtime_event_rx.recv().await {
-            // Intercept before observing: permission prompts get their
-            // responder wrapped so remote viewers see (and can answer)
-            // the pending request.
-            let event = event_tracker.intercept_event(event);
-            event_tracker.observe_event(&event);
-            if matches!(event, crate::event::UiEvent::PromptDone { .. })
-                && let Some(tx) = usage_turn_tx.as_ref()
-            {
-                let _ = tx.send(());
+        let mut decisions = event_loki.as_ref().map(loki::Handle::subscribe);
+        let mut trajectory = loki::BoundaryTracker::default();
+        let mut pending = std::collections::HashSet::new();
+        let mut held_completion = None;
+        let mut intervention = loki::DeferredIntervention::default();
+        let mut discrete_review_started = false;
+        loop {
+            tokio::select! {
+                event = runtime_event_rx.recv() => {
+                    let Some(event) = event else { break; };
+                    if let UiEvent::SessionStarted { session_id, .. } = &event {
+                        session_provenance::record(session_provenance::Record {
+                            session_id: session_id.clone(),
+                            cwd: event_cwd.clone(),
+                            adapter_source_id: event_thor.launch.source_id.clone(),
+                            model: event_thor.model.model.clone(),
+                            model_value: event_thor.model_value.clone(),
+                        });
+                    }
+                    // Intercept before rendering: permission prompts get their
+                    // responder wrapped so remote viewers can answer them.
+                    let event = event_tracker.intercept_event(event);
+                    let (epoch, task, _) = event_turn_state.lock().await.clone();
+                    let boundary = (epoch > 0).then(|| trajectory.observe(&event)).flatten();
+                    let boundary_observed = boundary.is_some();
+                    let target_completed = council_target_completed(&event);
+                    let interrupting = boundary_observed
+                        && !target_completed
+                        && intervention.interrupt_at_boundary();
+                    if interrupting {
+                        let _ = ui_event_tx.send(crate::event::UiEvent::Info(
+                            "Thor · interrupting at step boundary for Loki review".to_string(),
+                        ));
+                        let _ = review_commands.send(UiCommand::CancelPrompt);
+                    }
+                    if let Some(boundary) = boundary
+                        && !interrupting
+                        && !(target_completed && intervention.is_pending())
+                        && let Some(reviewer) = event_loki.as_ref()
+                        && let Some(id) = reviewer
+                            .observe(epoch, loki::Target::Thor, boundary)
+                            .await
+                    {
+                        pending.insert(id);
+                    }
+
+                    if let crate::event::UiEvent::PromptDone { stop_reason, .. } = &event {
+                        let cancelled = matches!(
+                            stop_reason,
+                            agent_client_protocol::schema::v1::StopReason::Cancelled
+                        );
+                        if cancelled
+                            && intervention.is_pending()
+                            && !intervention.cancellation_was_requested()
+                        {
+                            // Do not turn a user's cancellation into a Loki
+                            // continuation before the deferred boundary arrives.
+                            intervention.clear();
+                            pending.clear();
+                        } else if let Some(critique) = intervention.take() {
+                            pending.clear();
+                            held_completion = None;
+                            trajectory.reset_attempt();
+                            let _ = ui_event_tx.send(crate::event::UiEvent::Info(
+                                "Thor · resumed after Loki intervention".to_string(),
+                            ));
+                            let continuation = council_continuation_prompt(
+                                &task,
+                                &critique,
+                                &trajectory.trajectory(),
+                            );
+                            emit_internal_message(
+                                &ui_event_tx,
+                                "Loki",
+                                "Thor",
+                                InternalMessageKind::Continuation,
+                                &critique,
+                            );
+                            let _ = review_commands.send(UiCommand::SendPrompt {
+                                text: continuation,
+                                images: Vec::new(),
+                            });
+                            continue;
+                        }
+                        if cancelled {
+                            event_tracker.observe_event(&event);
+                            if ui_event_tx.send(event).is_err() { break; }
+                            event_turn_state.lock().await.2 = None;
+                            discrete_review_started = false;
+                            trajectory = loki::BoundaryTracker::default();
+                            continue;
+                        }
+                        held_completion = Some(event);
+                    } else if let Some(critique) =
+                        take_failed_prompt_intervention(&event, &mut intervention)
+                    {
+                        pending.clear();
+                        held_completion = None;
+                        trajectory.reset_attempt();
+                        let _ = ui_event_tx.send(crate::event::UiEvent::Info(
+                            "Thor · resumed after Loki intervention".to_string(),
+                        ));
+                        let continuation = council_continuation_prompt(
+                            &task,
+                            &critique,
+                            &trajectory.trajectory(),
+                        );
+                        emit_internal_message(
+                            &ui_event_tx,
+                            "Loki",
+                            "Thor",
+                            InternalMessageKind::Continuation,
+                            &critique,
+                        );
+                        let _ = review_commands.send(UiCommand::SendPrompt {
+                            text: continuation,
+                            images: Vec::new(),
+                        });
+                        continue;
+                    } else {
+                        event_tracker.observe_event(&event);
+                        if ui_event_tx.send(event).is_err() { break; }
+                        if target_completed {
+                            event_turn_state.lock().await.2 = None;
+                            discrete_review_started = false;
+                            intervention.clear();
+                            trajectory = loki::BoundaryTracker::default();
+                        }
+                    }
+                }
+                decision = async {
+                    match decisions.as_mut() {
+                        Some(rx) => rx.recv().await.ok(),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let Some(decision) = decision else { continue; };
+                    let (epoch, task, _) = event_turn_state.lock().await.clone();
+                    if decision.epoch != epoch || decision.target != loki::Target::Thor || !pending.remove(&decision.id) {
+                        continue;
+                    }
+                    if let loki::Verdict::Intervention(critique) = decision.verdict {
+                        intervention.push(decision.id, critique);
+                        if held_completion.is_some() {
+                            held_completion = None;
+                            pending.clear();
+                            trajectory.reset_attempt();
+                            let critique = intervention.take().expect("intervention queued");
+                            let _ = ui_event_tx.send(crate::event::UiEvent::Info(
+                                "Thor · re-prompted after Loki intervention".to_string(),
+                            ));
+                            let continuation = council_continuation_prompt(
+                                &task,
+                                &critique,
+                                &trajectory.trajectory(),
+                            );
+                            emit_internal_message(
+                                &ui_event_tx,
+                                "Loki",
+                                "Thor",
+                                InternalMessageKind::Continuation,
+                                &critique,
+                            );
+                            let _ = review_commands.send(UiCommand::SendPrompt {
+                                text: continuation,
+                                images: Vec::new(),
+                            });
+                        } else {
+                            let _ = ui_event_tx.send(crate::event::UiEvent::Info(
+                                "Thor · Loki intervention queued for the next step boundary".to_string(),
+                            ));
+                        }
+                    }
+                }
             }
-            if ui_event_tx.send(event).is_err() {
-                break;
+
+            if held_completion.is_some() && pending.is_empty() && !intervention.is_pending() {
+                let implementation_handoffs = event_handoffs.load(Ordering::Acquire);
+                let discrete_review_enabled = event_thor_review_enabled.load(Ordering::Acquire);
+                let workspace_delta = if discrete_review_enabled
+                    && implementation_handoffs > 1
+                    && !discrete_review_started
+                {
+                    let (_, _, snapshot) = event_turn_state.lock().await.clone();
+                    match snapshot {
+                        Some(snapshot) => Some(snapshot.delta().await),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let workspace_changed = workspace_delta
+                    .as_ref()
+                    .is_some_and(workspace_snapshot::WorkspaceDelta::changed);
+                if should_start_discrete_review(
+                    discrete_review_enabled,
+                    discrete_review_started,
+                    implementation_handoffs,
+                    workspace_changed,
+                ) {
+                    let (epoch, task, _) = event_turn_state.lock().await.clone();
+                    if epoch == 0 {
+                        continue;
+                    }
+                    let initial_result = trajectory.final_message();
+                    let context =
+                        discrete_review_context(workspace_delta.as_ref(), trajectory.trajectory());
+                    held_completion = None;
+                    trajectory.reset_attempt();
+                    discrete_review_started = true;
+                    let _ = ui_event_tx.send(crate::event::UiEvent::Info(
+                        "reviewing the completed work…".to_string(),
+                    ));
+                    let review_prompt =
+                        thor_discrete_review_prompt(&task, &initial_result, &context);
+                    emit_internal_message(
+                        &ui_event_tx,
+                        "Thor",
+                        "Thor",
+                        InternalMessageKind::DiscreteReview,
+                        &review_prompt,
+                    );
+                    let _ = review_commands.send(UiCommand::SendPrompt {
+                        text: review_prompt,
+                        images: Vec::new(),
+                    });
+                    continue;
+                }
+                let event = held_completion.take().expect("completion held");
+                event_tracker.observe_event(&event);
+                if let Some(tx) = usage_turn_tx.as_ref() {
+                    let _ = tx.send(());
+                }
+                if ui_event_tx.send(event).is_err() {
+                    break;
+                }
+                event_turn_state.lock().await.2 = None;
+                discrete_review_started = false;
+                intervention.clear();
+                trajectory = loki::BoundaryTracker::default();
             }
         }
     });
 
     let cmd_tracker = remote_tracker.clone();
+    let cmd_loki = loki_handle.clone();
+    let cmd_thor_review_enabled = thor_review_enabled.clone();
+    let cmd_turn_state = turn_state.clone();
+    let mut cmd_workspace_roots =
+        Vec::with_capacity(1 + runtime_options.additional_directories.len());
+    cmd_workspace_roots.push(cwd.clone());
+    cmd_workspace_roots.extend(runtime_options.additional_directories.iter().cloned());
     let cmd_proxy = tokio::spawn(async move {
+        let mut local_epoch = 0_u64;
         while let Some(command) = ui_cmd_rx.recv().await {
             cmd_tracker.observe_command(&command);
-            if runtime_cmd_tx.send(command).is_err() {
+            if let UiCommand::SetReviewPolicy { role, enabled } = &command {
+                match role {
+                    ReviewRole::Thor => {
+                        cmd_thor_review_enabled.store(*enabled, Ordering::Release);
+                    }
+                    ReviewRole::Loki => {
+                        if let Some(reviewer) = cmd_loki.as_ref() {
+                            reviewer.set_streaming_enabled(*enabled);
+                            if !*enabled {
+                                reviewer.cancel_turn();
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            if let UiCommand::SendPrompt { text, .. } = &command {
+                local_epoch = local_epoch.saturating_add(1);
+                implementation_handoffs_this_turn.store(0, Ordering::Release);
+                let snapshot =
+                    workspace_snapshot::WorkspaceSnapshot::capture(&cmd_workspace_roots).await;
+                let epoch = cmd_loki
+                    .as_ref()
+                    .map_or(local_epoch, |reviewer| reviewer.begin_turn(text.clone()));
+                *cmd_turn_state.lock().await = (epoch, text.clone(), Some(snapshot));
+            }
+            if matches!(command, UiCommand::CancelPrompt)
+                && let Some(reviewer) = cmd_loki.as_ref()
+            {
+                reviewer.cancel_turn();
+            }
+            let shutdown = matches!(command, UiCommand::Shutdown);
+            if runtime_cmd_tx.send(command).is_err() || shutdown {
                 break;
             }
         }
@@ -1691,7 +1788,6 @@ async fn run_session(
                 mode,
                 theme_kind,
                 spinner_style,
-                score_store: score_store.clone(),
                 active_agent_launch: Some(ragnarok::Launch {
                     program: agent.program.clone(),
                     args: agent.args.clone(),
@@ -1699,6 +1795,23 @@ async fn run_session(
                 }),
                 session_boundary: session_boundary.take(),
                 session_cwd: cwd.clone(),
+                council_choices: council.choices.clone(),
+                council_models: config::Config::load(&config_path)
+                    .map(|config| config.role_models())
+                    .unwrap_or_default(),
+                active_council_models: config::ModelsConfig {
+                    thor: council.thor.model.model.clone(),
+                    loki: council
+                        .loki
+                        .as_ref()
+                        .map(|role| role.model.model.clone())
+                        .unwrap_or_else(|| "off".to_string()),
+                    eitri: council.eitri.model.model.clone(),
+                },
+                thor_review_enabled: thor_config.discrete_review,
+                loki_review_enabled: loki_config.streaming_review,
+                ragnarok_models: council.available.clone(),
+                primary_acp_name: council.thor.launch.kind.display_name().to_string(),
             },
         )
         .await;
@@ -1728,8 +1841,8 @@ async fn run_session(
         let current_session_id = result.session_id;
         let current_session_title = result.session_title;
 
-        let action = match run_session_picker_action_for_agent(
-            agent,
+        let (action, selected_role) = match run_session_picker_action_for_council(
+            &council,
             cwd.clone(),
             runtime_options.agent_stderr.as_deref(),
             current_session_id.clone(),
@@ -1758,6 +1871,20 @@ async fn run_session(
                 spinner_style,
             });
         };
+
+        if selected_role.as_ref().is_some_and(|role| {
+            role.launch.source_id != council.thor.launch.source_id
+                || role.model.model != council.thor.model.model
+        }) {
+            let _ = cmd_tx.send(UiCommand::Shutdown);
+            break Ok(RunSessionResult {
+                reason: UiExitReason::SwitchSession,
+                session_id: Some(target_session_id),
+                session_title: target_title,
+                theme_kind,
+                spinner_style,
+            });
+        }
 
         match request_inline_session_load(
             &cmd_tx,
@@ -1817,6 +1944,9 @@ async fn run_session(
     //    task. `kill_on_drop(true)` on the `Command` then signals the
     //    child when the `Child` value is dropped during unwind.
     remote_tracker.shutdown().await;
+    if let Some(reviewer) = loki_handle.as_ref() {
+        reviewer.shutdown_and_wait().await;
+    }
 
     let abort_handle = acp_handle.abort_handle();
     match tokio::time::timeout(Duration::from_secs(2), acp_handle).await {
@@ -1854,6 +1984,119 @@ async fn run_session(
     }
 
     ui_result
+}
+
+fn isolated_council_role(
+    mut role: council::ResolvedRole,
+    label: &str,
+) -> Result<(council::ResolvedRole, Option<tempfile::TempDir>)> {
+    if role.launch.kind != council::AdapterKind::Codex {
+        return Ok((role, None));
+    }
+    let source = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+        .ok_or_else(|| anyhow::anyhow!("could not locate CODEX_HOME for {label}"))?;
+    let isolated = tempfile::Builder::new()
+        .prefix(&format!("mj-{label}-codex-"))
+        .tempdir()
+        .with_context(|| format!("create isolated Codex home for {label}"))?;
+    for name in [
+        "auth.json",
+        "config.toml",
+        "models_cache.json",
+        "version.json",
+    ] {
+        let from = source.join(name);
+        if from.is_file() {
+            std::fs::copy(&from, isolated.path().join(name)).with_context(|| {
+                format!("copy {} into isolated {label} Codex home", from.display())
+            })?;
+        }
+    }
+    if !isolated.path().join("auth.json").exists() {
+        anyhow::bail!(
+            "Codex is available but {} has no auth.json; run `codex login`",
+            source.display()
+        );
+    }
+    role.launch.env.insert(
+        "CODEX_HOME".to_string(),
+        isolated.path().display().to_string(),
+    );
+    Ok((role, Some(isolated)))
+}
+
+fn council_continuation_prompt(_task: &str, critique: &str, _trajectory: &str) -> String {
+    format!(
+        "<advisory guidance=\"weigh, don't blindly obey\">\n{critique}\n</advisory>\n\nContinue the interrupted turn. Address the material advice, then finish the existing task. Please continue from where you left off."
+    )
+}
+
+fn should_start_discrete_review(
+    enabled: bool,
+    already_started: bool,
+    implementation_handoffs: usize,
+    workspace_changed: bool,
+) -> bool {
+    enabled && !already_started && implementation_handoffs > 1 && workspace_changed
+}
+
+fn emit_internal_message(
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+    source: &str,
+    target: &str,
+    kind: InternalMessageKind,
+    text: &str,
+) {
+    let _ = ui_tx.send(UiEvent::InternalMessage(InternalMessage {
+        source: source.to_string(),
+        target: target.to_string(),
+        kind,
+        text: text.to_string(),
+    }));
+}
+
+fn council_target_completed(event: &crate::event::UiEvent) -> bool {
+    matches!(
+        event,
+        crate::event::UiEvent::PromptDone { .. } | crate::event::UiEvent::PromptFailed { .. }
+    )
+}
+
+fn take_failed_prompt_intervention(
+    event: &crate::event::UiEvent,
+    intervention: &mut loki::DeferredIntervention,
+) -> Option<String> {
+    matches!(event, crate::event::UiEvent::PromptFailed { .. })
+        .then(|| intervention.take())
+        .flatten()
+}
+
+fn thor_discrete_review_prompt(task: &str, initial_result: &str, context: &str) -> String {
+    format!(
+        "Perform Thor's discrete review for this same user turn. You own the research, planning, coordination, review, verification, and final response; do not act as a thin relay for Eitri. Re-read the original task, critically review the initial result and implementation evidence, investigate or verify anything necessary, and correct material issues. If code changes are still needed, delegate them to Eitri with code_agent and then review the new result. Return the final user-facing answer when the work is genuinely complete.\n\nOriginal task:\n{task}\n\nInitial result:\n{initial_result}\n\nBounded trajectory and workspace context:\n{context}"
+    )
+}
+
+fn discrete_review_context(
+    delta: Option<&workspace_snapshot::WorkspaceDelta>,
+    trajectory: String,
+) -> String {
+    let diff = match delta {
+        Some(delta) => delta
+            .review_patch()
+            .map(str::to_string)
+            .unwrap_or_else(|| "[no workspace changes attributable to this user turn]".to_string()),
+        None => "[workspace turn snapshot unavailable]".to_string(),
+    };
+    let mut context = format!("Trajectory:\n{trajectory}\n\nWorkspace diff:\n{diff}");
+    const LIMIT: usize = 128 * 1024;
+    if context.len() > LIMIT {
+        let split = context.ceil_char_boundary(context.len() - LIMIT);
+        context = format!("…[earlier review context omitted]\n{}", &context[split..]);
+    }
+    context
 }
 
 fn setup_session_terminal(
@@ -1987,7 +2230,64 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn agent_header_label_uses_registry_source_id() {
+    fn prompt_failure_resolves_deferred_intervention_for_current_turn() {
+        let event = crate::event::UiEvent::PromptFailed {
+            message: "prompt transport failed".to_string(),
+        };
+        let mut trajectory = loki::BoundaryTracker::default();
+        let mut intervention = loki::DeferredIntervention::default();
+        intervention.push(7, "retry with the corrected result".to_string());
+
+        let boundary_observed = trajectory.observe(&event).is_some();
+        let target_completed = council_target_completed(&event);
+        let interrupting =
+            boundary_observed && !target_completed && intervention.interrupt_at_boundary();
+
+        assert!(target_completed);
+        assert!(!interrupting);
+        assert!(!intervention.cancellation_was_requested());
+
+        let critique = take_failed_prompt_intervention(&event, &mut intervention)
+            .expect("queued intervention should resolve at prompt failure");
+        let continuation =
+            council_continuation_prompt("current user turn", &critique, &trajectory.trajectory());
+
+        assert!(!intervention.is_pending());
+        assert!(continuation.contains("<advisory"));
+        assert!(continuation.contains("retry with the corrected result"));
+        assert!(continuation.contains("Please continue from where you left off."));
+        assert!(!continuation.contains("current user turn"));
+        assert!(!continuation.contains("Bounded prior trajectory"));
+    }
+
+    #[test]
+    fn discrete_review_is_thors_review_and_preserves_eitri_delegation() {
+        let prompt = thor_discrete_review_prompt(
+            "implement the feature",
+            "Eitri says it is complete",
+            "Trajectory and diff",
+        );
+
+        assert!(prompt.contains("Perform Thor's discrete review"));
+        assert!(prompt.contains("do not act as a thin relay for Eitri"));
+        assert!(prompt.contains("research, planning, coordination, review, verification"));
+        assert!(prompt.contains("delegate them to Eitri with code_agent"));
+        assert!(prompt.contains("Initial result:\nEitri says it is complete"));
+        assert!(!prompt.contains("Loki verdict"));
+    }
+
+    #[test]
+    fn discrete_review_requires_multiple_eitri_handoffs_and_workspace_changes() {
+        assert!(should_start_discrete_review(true, false, 2, true));
+        assert!(!should_start_discrete_review(true, false, 0, true));
+        assert!(!should_start_discrete_review(true, false, 1, true));
+        assert!(!should_start_discrete_review(true, false, 2, false));
+        assert!(!should_start_discrete_review(false, false, 2, true));
+        assert!(!should_start_discrete_review(true, true, 2, true));
+    }
+
+    #[test]
+    fn agent_header_label_uses_adapter_source_id() {
         let agent = SelectedAgent {
             source_id: "claude-acp".to_string(),
             program: PathBuf::from("npx"),
@@ -2087,137 +2387,6 @@ mod tests {
     }
 
     #[test]
-    fn initial_agent_picker_opens_only_without_default_or_initial_agent() {
-        let configured = SelectedAgent {
-            source_id: "claude-acp".to_string(),
-            program: PathBuf::from("npx"),
-            args: vec!["-y".to_string(), "@x/claude".to_string()],
-            env: Default::default(),
-        };
-        let initial = SelectedAgent {
-            source_id: "anvil".to_string(),
-            program: PathBuf::from("uvx"),
-            args: vec!["brokk".to_string(), "acp".to_string()],
-            env: Default::default(),
-        };
-
-        assert!(should_open_initial_agent_picker(&Config::default(), None));
-        assert!(!should_open_initial_agent_picker(
-            &Config {
-                theme: Default::default(),
-                spinner: Default::default(),
-                agent: Some(configured),
-                favorite_agents: Vec::new(),
-                custom_agents: Vec::new(),
-                session_config: Default::default(),
-                scores: config::ScoresConfig::default(),
-                ragnarok: config::RagnarokConfig::default(),
-            },
-            None
-        ));
-        assert!(!should_open_initial_agent_picker(
-            &Config::default(),
-            Some(&initial)
-        ));
-
-        // A named custom agent set as default skips the picker exactly like any
-        // other configured default; the launch reads program/args from cfg.agent.
-        let custom_default = SelectedAgent {
-            source_id: "custom:my-agent".to_string(),
-            program: PathBuf::from("/usr/local/bin/agent"),
-            args: vec!["--flag".to_string()],
-            env: Default::default(),
-        };
-        assert!(!should_open_initial_agent_picker(
-            &Config {
-                theme: Default::default(),
-                spinner: Default::default(),
-                agent: Some(custom_default),
-                favorite_agents: Vec::new(),
-                custom_agents: Vec::new(),
-                session_config: Default::default(),
-                scores: config::ScoresConfig::default(),
-                ragnarok: config::RagnarokConfig::default(),
-            },
-            None
-        ));
-    }
-
-    #[test]
-    fn first_run_setup_opens_only_for_missing_config_without_agent() {
-        let configured = SelectedAgent {
-            source_id: "claude-acp".to_string(),
-            program: PathBuf::from("npx"),
-            args: vec!["-y".to_string(), "@x/claude".to_string()],
-            env: Default::default(),
-        };
-        let initial = SelectedAgent {
-            source_id: "anvil".to_string(),
-            program: PathBuf::from("uvx"),
-            args: vec!["brokk".to_string(), "acp".to_string()],
-            env: Default::default(),
-        };
-
-        assert!(should_open_first_run_setup(false, &Config::default(), None));
-        assert!(!should_open_first_run_setup(true, &Config::default(), None));
-        assert!(!should_open_first_run_setup(
-            false,
-            &Config {
-                theme: Default::default(),
-                spinner: Default::default(),
-                agent: Some(configured),
-                favorite_agents: Vec::new(),
-                custom_agents: Vec::new(),
-                session_config: Default::default(),
-                scores: config::ScoresConfig::default(),
-                ragnarok: config::RagnarokConfig::default(),
-            },
-            None
-        ));
-        assert!(!should_open_first_run_setup(
-            false,
-            &Config::default(),
-            Some(&initial)
-        ));
-    }
-
-    #[test]
-    fn picker_result_keeps_explicit_default_while_launching_selection() {
-        let explicit_default = PickerOutcome {
-            source_id: "claude-acp".to_string(),
-            program: PathBuf::from("npx"),
-            args: vec!["-y".to_string(), "@x/claude".to_string()],
-            env: Default::default(),
-        };
-        let selected = PickerOutcome {
-            source_id: "anvil".to_string(),
-            program: PathBuf::from("uvx"),
-            args: vec!["brokk".to_string(), "acp".to_string()],
-            env: Default::default(),
-        };
-        let mut cfg = Config::default();
-
-        let launch_agent = apply_picker_result_to_config(
-            &mut cfg,
-            PickerResult {
-                outcome: Some(selected.clone()),
-                preferences: PickerPreferences {
-                    default_agent: Some(explicit_default.clone()),
-                    favorite_source_ids: Vec::new(),
-                    custom_agents: Vec::new(),
-                },
-            },
-        )
-        .expect("launch selection");
-
-        assert_eq!(launch_agent, picker_outcome_to_selected(selected));
-        assert_eq!(
-            cfg.agent.as_ref(),
-            Some(&picker_outcome_to_selected(explicit_default))
-        );
-    }
-
-    #[test]
     fn session_result_updates_supervisor_theme_before_next_action() {
         let mut cfg = Config::default();
         let result = RunSessionResult {
@@ -2257,89 +2426,6 @@ mod tests {
                 title: Some("Current title".to_string()),
             })
         );
-    }
-
-    #[test]
-    fn picker_preferences_round_trip_custom_agents() {
-        let cfg = Config {
-            theme: Default::default(),
-            spinner: Default::default(),
-            agent: None,
-            favorite_agents: Vec::new(),
-            custom_agents: vec![ConfigCustomAgent {
-                name: "my-agent".to_string(),
-                program: PathBuf::from("/usr/local/bin/agent"),
-                args: vec!["--flag".to_string()],
-                description: "test".to_string(),
-            }],
-            session_config: Default::default(),
-            scores: config::ScoresConfig::default(),
-            ragnarok: config::RagnarokConfig::default(),
-        };
-        let prefs = picker_preferences_from_config(&cfg);
-        assert_eq!(prefs.custom_agents.len(), 1);
-        assert_eq!(prefs.custom_agents[0].name, "my-agent");
-
-        let mut roundtripped = Config::default();
-        apply_picker_preferences(&mut roundtripped, prefs);
-        assert_eq!(roundtripped.custom_agents.len(), 1);
-        assert_eq!(roundtripped.custom_agents[0].name, "my-agent");
-        assert_eq!(roundtripped.custom_agents[0].description, "test");
-    }
-
-    #[test]
-    fn picker_preferences_prune_removed_custom_agent_session_config() {
-        let mut cfg = Config {
-            theme: Default::default(),
-            spinner: Default::default(),
-            agent: Some(SelectedAgent {
-                source_id: "custom:old-agent".to_string(),
-                program: PathBuf::from("/tmp/old"),
-                args: Vec::new(),
-                env: Default::default(),
-            }),
-            favorite_agents: vec!["custom:old-agent".to_string()],
-            custom_agents: vec![ConfigCustomAgent {
-                name: "old-agent".to_string(),
-                program: PathBuf::from("/tmp/old"),
-                args: Vec::new(),
-                description: String::new(),
-            }],
-            session_config: std::collections::HashMap::from([
-                (
-                    "custom:old-agent".to_string(),
-                    std::collections::HashMap::from([("model".to_string(), "old".to_string())]),
-                ),
-                (
-                    "custom:kept-agent".to_string(),
-                    std::collections::HashMap::from([("model".to_string(), "kept".to_string())]),
-                ),
-                (
-                    "claude-acp".to_string(),
-                    std::collections::HashMap::from([("model".to_string(), "sonnet".to_string())]),
-                ),
-            ]),
-            scores: config::ScoresConfig::default(),
-            ragnarok: config::RagnarokConfig::default(),
-        };
-
-        apply_picker_preferences(
-            &mut cfg,
-            PickerPreferences {
-                default_agent: None,
-                favorite_source_ids: Vec::new(),
-                custom_agents: vec![PickerCustomAgent {
-                    name: "kept-agent".to_string(),
-                    program: PathBuf::from("/tmp/kept"),
-                    args: Vec::new(),
-                    description: String::new(),
-                }],
-            },
-        );
-
-        assert!(!cfg.session_config.contains_key("custom:old-agent"));
-        assert!(cfg.session_config.contains_key("custom:kept-agent"));
-        assert!(cfg.session_config.contains_key("claude-acp"));
     }
 
     #[test]
@@ -2831,6 +2917,9 @@ mod tests {
                 cwd: PathBuf::from("/tmp/project"),
                 title: None,
                 updated_at: None,
+                adapter_source_id: None,
+                model: None,
+                delete_supported: false,
             }),
             Some("current-session".to_string()),
             Some("Current title".to_string()),
@@ -2871,6 +2960,9 @@ mod tests {
                 cwd: PathBuf::from("/tmp/project"),
                 title: Some("My selected session".to_string()),
                 updated_at: None,
+                adapter_source_id: None,
+                model: None,
+                delete_supported: false,
             }),
             Some("current-session".to_string()),
             Some("ignored current title".to_string()),

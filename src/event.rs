@@ -22,6 +22,44 @@ pub struct PromptImage {
     pub height: u32,
 }
 
+/// Loki identity attached to reviewer activity rendered in the transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LokiIdentity {
+    pub role: String,
+    pub connection_id: String,
+    pub source_id: Option<String>,
+    pub model_name: Option<String>,
+    pub model_value: Option<String>,
+}
+
+/// Explicit reviewer activity. Eitri uses the foreground ACP lane instead of
+/// projecting through these events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LokiActivity {
+    Warning {
+        actor: LokiIdentity,
+        message: String,
+    },
+}
+
+/// A council coordination prompt shown as ordinary transcript prose while
+/// retaining its complete text for expansion and export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalMessage {
+    pub source: String,
+    pub target: String,
+    pub kind: InternalMessageKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InternalMessageKind {
+    Delegation,
+    Exploration,
+    DiscreteReview,
+    Continuation,
+}
+
 /// Events flowing from the ACP runtime into the UI task.
 #[derive(Debug)]
 pub enum UiEvent {
@@ -50,6 +88,10 @@ pub enum UiEvent {
         options: Vec<SessionConfigOption>,
         targets: Vec<SessionConfigTarget>,
     },
+    /// Structured nested-agent activity projected from an MCP tool result.
+    LokiActivity(LokiActivity),
+    /// Hidden council coordination made inspectable in the shared transcript.
+    InternalMessage(InternalMessage),
     /// `session/request_permission` from the agent. The UI is expected to
     /// render a modal and answer through `responder` exactly once.
     PermissionRequest(PermissionPrompt),
@@ -58,6 +100,10 @@ pub enum UiEvent {
     /// by agent-driven `/setup` menus, which are global (not per-session) and
     /// therefore must NOT be routed through `session/set_config_option`.
     ElicitationRequest(ElicitationPrompt),
+    /// Activity from a temporary ACP agent launched through the injected MCP tool.
+    /// Kept under one wrapper so nested lifecycle/config state cannot be
+    /// mistaken for the primary session's state.
+    CodeAgent(CodeAgentEvent),
     /// The runtime sent `session/cancel`; queued permission prompts for the
     /// cancelled turn must answer with `cancelled` and disappear.
     CancelPendingPermissions,
@@ -91,6 +137,25 @@ pub enum UiEvent {
     /// Fatal error; the runtime is shutting down. UI should display the
     /// message and exit.
     Fatal(String),
+}
+
+#[derive(Debug)]
+pub enum CodeAgentEvent {
+    Started { label: String },
+    SessionUpdate(SessionUpdate),
+    TerminalOutput(TerminalOutputSnapshot),
+    PermissionRequest(PermissionPrompt),
+    ElicitationRequest(ElicitationPrompt),
+    CancelPendingPermissions,
+    Status(String),
+    Finished { outcome: CodeAgentOutcome },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeAgentOutcome {
+    Completed,
+    Cancelled,
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +232,8 @@ pub enum UiCommand {
         target: SessionConfigTarget,
         value: SessionConfigValueId,
     },
+    /// Change Council review policy without replacing Thor's ACP session.
+    SetReviewPolicy { role: ReviewRole, enabled: bool },
     /// Fork the current ACP session and continue in the forked session.
     ForkSession,
     /// Load another session on the existing ACP connection when supported.
@@ -180,6 +247,12 @@ pub enum UiCommand {
     CancelPrompt,
     /// Tear down: kill the agent child and exit.
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewRole {
+    Thor,
+    Loki,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

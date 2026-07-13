@@ -1,11 +1,10 @@
 //! ⚡ Ragnarok: model-vs-model combat for one implementation task.
 //!
 //! `/ragnarok <task>` summons THOR, a router agent running on the
-//! strongest Elo-rated model available. Thor sizes up the task and decrees
+//! strongest DeepSWE-ranked model available. Thor sizes up the task and decrees
 //! how many champions battle (2–10). Each champion is a distinct model —
-//! ideally on a distinct ACP agent — chosen best-Elo-first from the agents
-//! that are already configured and ready to use (models without an LMArena
-//! Elo score are not eligible). Every champion implements the task in
+//! ideally from distinct providers — chosen by Pass@1 from the shared Council
+//! catalog. Unranked models are not eligible. Every champion implements the task in
 //! parallel inside its own git worktree with permissions bypassed, then each
 //! is assigned a rival's implementation to adversarially review (never their
 //! own). Thor judges the reviews for honesty and validity, ranks the
@@ -14,7 +13,7 @@
 //!
 //! Architecture: [`run_battle`] is a background tokio task owning one ACP
 //! connection per champion/reviewer plus one for Thor (the same in-process
-//! `acp::run` runtime the TUI and `mj mcp` use). It streams [`RagnarokEvent`]s
+//! `acp::run` runtime the TUI uses). It streams [`RagnarokEvent`]s
 //! to the UI over an unbounded channel; the arena view in `ui.rs` renders the
 //! battle. Dropping the UI receiver or firing the abort watch ends the battle
 //! and tears down every agent subprocess.
@@ -28,38 +27,29 @@ use agent_client_protocol::schema::v1::{
     SessionConfigOption, SessionUpdate, StopReason, ToolCallStatus, ToolKind,
 };
 use anyhow::{Context, Result, anyhow, bail};
-use futures::StreamExt;
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{mpsc, watch};
 
 use crate::acp;
-use crate::config::Config;
+use crate::council;
 use crate::event::{
     ElicitationOutcome, PermissionDecision, SessionConfigTarget, UiCommand, UiEvent,
     content_block_text,
 };
 use crate::headless::choose_allow_option;
 use crate::labels::stop_reason_label;
-use crate::scores::{ScoreCatalog, ScoreStore};
-use crate::{install, model_resolve, picker, probe, registry, scores, worktree};
+use crate::worktree;
 
 /// Thor may field at most this many champions.
 pub const MAX_FIGHTERS: usize = 10;
 /// ... and no fewer than this many.
 pub const MIN_FIGHTERS: usize = 2;
 
-/// Per-agent budget for the muster probe (spawn + `session/new` + model list).
-const MUSTER_TIMEOUT: Duration = Duration::from_secs(60);
-/// Bedrock models are useful, but slow enough to lose one concrete selection tier.
-const BEDROCK_SELECTION_PENALTY: i32 = 100;
 /// Diversity bonus for a model vendor not already represented in the roster.
 const NEW_VENDOR_SELECTION_BONUS: i32 = 50;
-/// Diversity bonus for an ACP agent not already represented in the roster.
-const NEW_AGENT_SELECTION_BONUS: i32 = 50;
 /// Judge-only replacements should be especially unlike the sole survivor.
 const JUDGE_ONLY_VENDOR_SELECTION_BONUS: i32 = NEW_VENDOR_SELECTION_BONUS * 2;
-const JUDGE_ONLY_AGENT_SELECTION_BONUS: i32 = NEW_AGENT_SELECTION_BONUS * 2;
 /// After scoring with penalties/bonuses, pick randomly from this many top rows.
 const SELECTION_RANDOM_TOP_N: usize = 4;
 /// Budget for an agent to reach `SessionStarted` (covers cold npx/uvx runs).
@@ -108,7 +98,7 @@ const DIFF_FOR_JUDGMENT_LIMIT: usize = 10 * 1024;
 const REVIEW_FOR_JUDGMENT_LIMIT: usize = 8 * 1024;
 /// Per-champion closing-summary budget inside prompts.
 const SUMMARY_LIMIT: usize = 4 * 1024;
-/// Cap on accumulated agent text per turn (mirrors `mj mcp`).
+/// Cap on accumulated agent text per turn.
 const FINAL_TEXT_LIMIT: usize = 1024 * 1024;
 /// Keep synthetic outbound prompt markers readable in fighter transcripts.
 const PROMPT_MARKER_TASK_LIMIT: usize = 800;
@@ -153,17 +143,19 @@ pub struct FighterCard {
     pub agent_source_id: String,
     pub model_value: String,
     pub model_name: String,
-    pub elo: u32,
-    pub provisional: bool,
+    pub pass_at_1_bps: u32,
+    pub mean_cost_usd: f64,
 }
 
 impl FighterCard {
-    /// `Opus [claude-acp] ⚡1456`
+    /// `Opus [claude-acp] ⚡51.8% · $4.28`
     pub fn tag(&self) -> String {
-        let star = if self.provisional { "*" } else { "" };
         format!(
-            "{} [{}] ⚡{}{}",
-            self.model_name, self.agent_source_id, self.elo, star
+            "{} [{}] ⚡{:.1}% · ${:.2}",
+            self.model_name,
+            self.agent_source_id,
+            self.pass_at_1_bps as f64 / 100.0,
+            self.mean_cost_usd
         )
     }
 }
@@ -237,7 +229,7 @@ pub struct Verdict {
     pub ranking: Vec<FighterId>,
     pub review_verdicts: Vec<ReviewVerdict>,
     pub reasoning: String,
-    /// True when Thor's judgment was unusable and Elo order decided instead.
+    /// True when Thor's judgment was unusable and Pass@1 order decided instead.
     pub thor_fallback: bool,
 }
 
@@ -315,10 +307,8 @@ pub struct BattleConfig {
     pub task: String,
     /// The current session cwd; worktrees are forged off its git project.
     pub cwd: PathBuf,
-    /// Path to `config.toml` (agents roster source).
-    pub config_path: PathBuf,
-    /// The UI's score store; when it has no catalog Ragnarok loads its own.
-    pub score_store: ScoreStore,
+    /// Ranked launchable models from the session's unified Council catalog.
+    pub available_models: Vec<council::ResolvedRole>,
     /// Active session agent/model used for Thor. Competitors are selected from
     /// the scored pool; Thor follows the user's current session config.
     pub thor_host: Option<ThorHost>,
@@ -463,21 +453,18 @@ async fn battle(
     emit(tx, RagnarokEvent::Phase(Phase::Mustering))?;
     feed(tx, None, "⚡ The Gjallarhorn sounds. Ragnarok begins.")?;
 
-    let user_cfg = Config::load(&cfg.config_path)
-        .with_context(|| format!("load {}", cfg.config_path.display()))?;
     let clean_cwd = cfg.cwd.clone();
     tokio::task::spawn_blocking(move || worktree::ensure_clean_for_automation(&clean_cwd))
         .await
         .context("source tree cleanliness check failed")??;
-    let store = ensure_scores(&cfg.score_store, &user_cfg).await;
     let pool = tokio::select! {
-        pool = muster(cfg, &user_cfg, &store, tx) => pool?,
+        pool = muster(cfg, tx) => pool?,
         _ = wait_abort(abort.clone()) => bail!("the battle was called off"),
     };
     if pool.len() < MIN_FIGHTERS {
         bail!(
             "only {} eligible champion(s) mustered — Ragnarok needs at least {MIN_FIGHTERS} \
-             distinct Elo-rated models on configured, ready-to-use ACP agents",
+             distinct ranked models on ready-to-use ACP adapters",
             pool.len()
         );
     }
@@ -485,7 +472,7 @@ async fn battle(
         tx,
         None,
         format!(
-            "🛡 {} Elo-rated models stand in the candidate pool (across the ready agents; \
+            "🛡 {} DeepSWE-ranked models stand in the candidate pool (across the ready adapters; \
              only the chosen few will fight).",
             pool.len()
         ),
@@ -518,7 +505,9 @@ async fn battle(
     let battle_result: Result<()> = async {
     emit(tx, RagnarokEvent::ThorAction(ThorAction::Deciding))?;
     let route = thor.route(&cfg.task, tx).await?;
-    let cap = user_cfg.ragnarok.max_competitors;
+    let cap = crate::config::Config::load(&crate::config::default_config_path())
+        .map(|config| config.ragnarok.max_competitors)
+        .unwrap_or_else(|_| crate::config::RagnarokConfig::default().max_competitors);
     let bounded_route = route.competitors.clamp(MIN_FIGHTERS, MAX_FIGHTERS);
     let complexity_cap = complexity_field_ceiling(&route.complexity);
     let want = field_size_for_route(&route, cap);
@@ -803,9 +792,9 @@ async fn battle(
             feed(
                 tx,
                 None,
-                format!("🌩 Thor's judgment was garbled ({e:#}); the runes fall back to Elo order."),
+                format!("🌩 Thor's judgment was garbled ({e:#}); the runes fall back to Pass@1 order."),
             )?;
-            elo_fallback_verdict(&survivor_ids, &cards)
+            strength_fallback_verdict(&survivor_ids, &cards)
         }
     };
 
@@ -839,10 +828,10 @@ async fn battle(
 
 /// Deterministic fallback when Thor cannot deliver a parseable judgment:
 /// no honest quality signal exists, so present the two strongest champions
-/// (by Elo) as finalists and let the user decide.
-fn elo_fallback_verdict(survivors: &[FighterId], cards: &[FighterCard]) -> Verdict {
+/// (by Pass@1) as finalists and let the user decide.
+fn strength_fallback_verdict(survivors: &[FighterId], cards: &[FighterCard]) -> Verdict {
     let mut ranking: Vec<FighterId> = survivors.to_vec();
-    ranking.sort_by_key(|id| std::cmp::Reverse(cards[*id].elo));
+    ranking.sort_by_key(|id| std::cmp::Reverse(cards[*id].pass_at_1_bps));
     let clear_winner = (ranking.len() == 1).then(|| ranking[0]);
     let finalists = (ranking.len() >= 2).then(|| (ranking[0], ranking[1]));
     Verdict {
@@ -850,7 +839,7 @@ fn elo_fallback_verdict(survivors: &[FighterId], cards: &[FighterCard]) -> Verdi
         finalists,
         ranking,
         review_verdicts: Vec::new(),
-        reasoning: "Thor's judgment could not be parsed; finalists are presented in Elo order. \
+        reasoning: "Thor's judgment could not be parsed; finalists are presented in Pass@1 order. \
                     Read the adversarial reviews in the transcripts and choose."
             .to_string(),
         thor_fallback: true,
@@ -861,14 +850,13 @@ fn elo_fallback_verdict(survivors: &[FighterId], cards: &[FighterCard]) -> Verdi
 // Muster: which (agent, model) pairs may fight?
 // ---------------------------------------------------------------------------
 
-/// A battle-ready (agent, model) pair with an Elo rating.
+/// A battle-ready adapter/model pair with a DeepSWE rating.
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub card: FighterCard,
     pub launch: Launch,
     pub match_key: String,
     pub vendor: Option<String>,
-    pub bedrock: bool,
 }
 
 /// The active session's agent/model used for Thor's router/judge role.
@@ -908,211 +896,72 @@ pub struct Launch {
     pub env: HashMap<String, String>,
 }
 
-/// Use the session's score store when it has a catalog; otherwise load one
-/// (cache → network → bundled snapshot; never fails) so Ragnarok works even
-/// when the picker's score display is disabled.
-pub(crate) async fn ensure_scores(store: &ScoreStore, user_cfg: &Config) -> ScoreStore {
-    if store.has_catalog() {
-        return store.clone();
-    }
-    let file = scores::load_scores_file(
-        &scores::default_cache_path(),
-        scores::CACHE_TTL,
-        user_cfg
-            .scores
-            .url
-            .as_deref()
-            .unwrap_or(scores::DEFAULT_SCORES_URL),
-    )
-    .await;
-    let fresh = ScoreStore::default();
-    fresh.install(ScoreCatalog::build(
-        &file,
-        user_cfg.scores.overrides.clone(),
-        true,
-    ));
-    fresh
-}
-
-/// Probe every configured agent (the picker's default view: default +
-/// favorites + curated + custom), read each one's real model list, and keep
-/// the Elo-rated models. Result is sorted best-Elo-first.
+/// Convert the shared launchable DeepSWE catalog into battle candidates.
 pub(crate) async fn muster(
     cfg: &BattleConfig,
-    user_cfg: &Config,
-    store: &ScoreStore,
     tx: &mpsc::UnboundedSender<RagnarokEvent>,
 ) -> Result<Vec<Candidate>> {
-    let reg = registry::load_with_cache(
-        &registry::default_cache_path(),
-        registry::CACHE_TTL,
-        registry::REGISTRY_URL,
-    )
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("ragnarok: registry unavailable ({e:#}); using configured agents only");
-        registry::Registry::default()
-    });
-    let preferences = picker::PickerPreferences {
-        default_agent: user_cfg.agent.as_ref().map(|a| picker::PickerOutcome {
-            source_id: a.source_id.clone(),
-            program: a.program.clone(),
-            args: a.args.clone(),
-            env: a.env.clone(),
-        }),
-        favorite_source_ids: user_cfg.favorite_agents.clone(),
-        custom_agents: user_cfg
-            .custom_agents
-            .iter()
-            .map(|c| picker::CustomAgent {
-                name: c.name.clone(),
-                program: c.program.clone(),
-                args: c.args.clone(),
-                description: c.description.clone(),
-            })
-            .collect(),
-    };
-    let plan = picker::launch_plan(
-        &reg,
-        &registry::current_platform(),
-        &install::default_install_root(),
-        preferences,
-    );
-
-    let cwd = cfg.cwd.clone();
-    let mut probes = futures::stream::iter(plan.into_iter().map(|(source_id, command)| {
-        let cwd = cwd.clone();
-        async move {
-            match command {
-                None => (source_id, None, Err("not installed".to_string())),
-                Some(cmd) => {
-                    let launch = Launch {
-                        program: cmd.program.clone(),
-                        args: cmd.args.clone(),
-                        env: cmd.env.clone(),
-                    };
-                    let models =
-                        probe::session_models(cmd.program, cmd.args, cmd.env, cwd, MUSTER_TIMEOUT)
-                            .await;
-                    (source_id, Some(launch), models)
-                }
-            }
-        }
-    }))
-    .buffer_unordered(probe::PROBE_CONCURRENCY);
-
-    let mut pool: Vec<Candidate> = Vec::new();
-    while let Some((source_id, launch, outcome)) = probes.next().await {
-        match (launch, outcome) {
-            (Some(launch), Ok(models)) => {
-                let mut rated = 0usize;
-                for m in &models {
-                    let description = m.description.clone().unwrap_or_default();
-                    if let Some((key, score)) =
-                        store.model_score_with_key(&source_id, &m.value, &m.name, &description)
-                    {
-                        rated += 1;
-                        pool.push(Candidate {
-                            card: FighterCard {
-                                id: 0, // assigned at selection time
-                                agent_source_id: source_id.clone(),
-                                model_value: m.value.clone(),
-                                model_name: m.name.clone(),
-                                elo: score.elo,
-                                provisional: score.provisional,
-                            },
-                            launch: launch.clone(),
-                            vendor: selection_vendor(
-                                &source_id,
-                                &m.value,
-                                &m.name,
-                                &description,
-                                &key,
-                            ),
-                            bedrock: is_bedrock_model(&m.value) || is_bedrock_model(&m.name),
-                            match_key: key,
-                        });
-                    }
-                }
-                feed(
-                    tx,
-                    None,
-                    format!(
-                        "🏹 {source_id} answers the call: {} models, {} worthy of the arena.",
-                        models.len(),
-                        rated
-                    ),
-                )?;
-            }
-            (_, outcome) => {
-                let reason = match outcome {
-                    Err(r) => r,
-                    Ok(_) => "not installed".to_string(),
-                };
-                feed(
-                    tx,
-                    None,
-                    format!("🌫 {source_id} is questing elsewhere ({reason})."),
-                )?;
-            }
-        }
-    }
+    let mut pool = cfg
+        .available_models
+        .iter()
+        .filter(|role| role.ranked)
+        .map(|role| Candidate {
+            card: FighterCard {
+                id: 0,
+                agent_source_id: role.launch.source_id.clone(),
+                model_value: role.model_value.clone(),
+                model_name: role.model.model.clone(),
+                pass_at_1_bps: (role.model.pass_at_1 * 10_000.0).round() as u32,
+                mean_cost_usd: role.model.mean_cost_usd,
+            },
+            launch: Launch {
+                program: role.launch.command.clone(),
+                args: role.launch.args.clone(),
+                env: role.launch.env.clone(),
+            },
+            vendor: Some(council_provider(&role.model.model)),
+            match_key: role.model.model.clone(),
+        })
+        .collect::<Vec<_>>();
 
     pool.sort_by(|a, b| {
         b.card
-            .elo
-            .cmp(&a.card.elo)
+            .pass_at_1_bps
+            .cmp(&a.card.pass_at_1_bps)
+            .then_with(|| a.card.mean_cost_usd.total_cmp(&b.card.mean_cost_usd))
             .then_with(|| a.card.model_name.cmp(&b.card.model_name))
-            .then_with(|| a.card.agent_source_id.cmp(&b.card.agent_source_id))
     });
+    feed(
+        tx,
+        None,
+        format!("🏹 {} ranked models answer the call.", pool.len()),
+    )?;
     Ok(pool)
 }
 
-fn selection_vendor(
-    agent_id: &str,
-    value: &str,
-    name: &str,
-    description: &str,
-    match_key: &str,
-) -> Option<String> {
-    match_key
-        .split_once('/')
-        .and_then(|(provider, _)| model_resolve::canonical_provider_id(provider))
-        .or_else(|| model_resolve::agent_provider(agent_id, value, name, description))
+fn council_provider(model: &str) -> String {
+    let provider = crate::deepswe::model_provider(model);
+    if provider.is_empty() {
+        model
+            .split_once('-')
+            .map_or(model, |(head, _)| head)
+            .to_string()
+    } else {
+        provider.to_string()
+    }
 }
 
-fn is_bedrock_model(model_id: &str) -> bool {
-    model_id
-        .split_once("::")
-        .is_some_and(|(backend, _)| backend.eq_ignore_ascii_case("bedrock"))
-}
-
-fn adjusted_selection_score(
-    candidate: &Candidate,
-    used_agents: &HashSet<String>,
-    used_vendors: &HashSet<String>,
-) -> i32 {
-    adjusted_selection_score_with_bonuses(
-        candidate,
-        used_agents,
-        used_vendors,
-        NEW_VENDOR_SELECTION_BONUS,
-        NEW_AGENT_SELECTION_BONUS,
-    )
+fn adjusted_selection_score(candidate: &Candidate, used_vendors: &HashSet<String>) -> i32 {
+    adjusted_selection_score_with_bonuses(candidate, used_vendors, NEW_VENDOR_SELECTION_BONUS)
 }
 
 fn adjusted_selection_score_with_bonuses(
     candidate: &Candidate,
-    used_agents: &HashSet<String>,
     used_vendors: &HashSet<String>,
     vendor_bonus: i32,
-    agent_bonus: i32,
 ) -> i32 {
-    let mut score = candidate.card.elo as i32;
-    if candidate.bedrock {
-        score -= BEDROCK_SELECTION_PENALTY;
-    }
-    let diversity_applies = !used_agents.is_empty();
+    let mut score = candidate.card.pass_at_1_bps as i32;
+    let diversity_applies = !used_vendors.is_empty();
     if diversity_applies
         && candidate
             .vendor
@@ -1120,9 +969,6 @@ fn adjusted_selection_score_with_bonuses(
             .is_some_and(|vendor| !used_vendors.contains(vendor))
     {
         score += vendor_bonus;
-    }
-    if diversity_applies && !used_agents.contains(&candidate.card.agent_source_id) {
-        score += agent_bonus;
     }
     score
 }
@@ -1141,8 +987,6 @@ where
         .iter()
         .map(|c| c.match_key.as_str())
         .collect();
-    let mut used_agents = HashSet::new();
-    used_agents.insert(survivor.card.agent_source_id.clone());
     let mut used_vendors = HashSet::new();
     if let Some(vendor) = &survivor.vendor {
         used_vendors.insert(vendor.clone());
@@ -1157,10 +1001,8 @@ where
                 idx,
                 adjusted_selection_score_with_bonuses(
                     candidate,
-                    &used_agents,
                     &used_vendors,
                     JUDGE_ONLY_VENDOR_SELECTION_BONUS,
-                    JUDGE_ONLY_AGENT_SELECTION_BONUS,
                 ),
             )
         })
@@ -1173,7 +1015,7 @@ where
         let b = &pool[*b_idx];
         b_score
             .cmp(a_score)
-            .then_with(|| b.card.elo.cmp(&a.card.elo))
+            .then_with(|| b.card.pass_at_1_bps.cmp(&a.card.pass_at_1_bps))
             .then_with(|| a.card.model_name.cmp(&b.card.model_name))
             .then_with(|| a.card.agent_source_id.cmp(&b.card.agent_source_id))
     });
@@ -1239,7 +1081,6 @@ where
 {
     let mut picked: Vec<Candidate> = Vec::new();
     let mut used_keys: HashSet<String> = HashSet::new();
-    let mut used_agents: HashSet<String> = HashSet::new();
     let mut used_vendors: HashSet<String> = HashSet::new();
 
     while picked.len() < want {
@@ -1247,12 +1088,7 @@ where
             .iter()
             .enumerate()
             .filter(|(_, candidate)| !used_keys.contains(&candidate.match_key))
-            .map(|(idx, candidate)| {
-                (
-                    idx,
-                    adjusted_selection_score(candidate, &used_agents, &used_vendors),
-                )
-            })
+            .map(|(idx, candidate)| (idx, adjusted_selection_score(candidate, &used_vendors)))
             .collect();
         if ranked.is_empty() {
             break;
@@ -1262,7 +1098,7 @@ where
             let b = &pool[*b_idx];
             b_score
                 .cmp(a_score)
-                .then_with(|| b.card.elo.cmp(&a.card.elo))
+                .then_with(|| b.card.pass_at_1_bps.cmp(&a.card.pass_at_1_bps))
                 .then_with(|| a.card.model_name.cmp(&b.card.model_name))
                 .then_with(|| a.card.agent_source_id.cmp(&b.card.agent_source_id))
         });
@@ -1275,7 +1111,6 @@ where
         let choice = pick_index(top_len).min(top_len.saturating_sub(1));
         let selected = pool[ranked[choice].0].clone();
         used_keys.insert(selected.match_key.clone());
-        used_agents.insert(selected.card.agent_source_id.clone());
         if let Some(vendor) = &selected.vendor {
             used_vendors.insert(vendor.clone());
         }
@@ -1286,9 +1121,9 @@ where
 }
 
 /// Pick `want` champions from the pool. Models must be genuinely distinct
-/// (dedup by leaderboard match key). Selection is greedy on adjusted Elo:
-/// Bedrock takes a concrete speed penalty, new vendors and agents get diversity
-/// bonuses, then the final choice is randomized within the top ranked window.
+/// (dedup by leaderboard match key). Selection is greedy on adjusted Pass@1:
+/// New providers receive the configured diversity bonus, then the final choice
+/// is randomized within the top ranked window. Adapter identity is irrelevant.
 pub fn select_fighters(pool: &[Candidate], want: usize) -> Vec<Candidate> {
     select_fighters_with_picker(pool, want, selection_random_index)
 }
@@ -1366,6 +1201,51 @@ impl AgentHandle {
         access_mode: acp::RuntimeAccessMode,
         saved_session_config: HashMap<String, String>,
     ) -> Result<Self> {
+        Self::connect_with_role_config(
+            launch,
+            cwd,
+            additional_directories,
+            abort,
+            access_mode,
+            saved_session_config,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_with_role_config(
+        launch: &Launch,
+        cwd: &Path,
+        additional_directories: &[PathBuf],
+        abort: watch::Receiver<bool>,
+        access_mode: acp::RuntimeAccessMode,
+        saved_session_config: HashMap<String, String>,
+        role_config: Option<acp::RuntimeRoleConfig>,
+    ) -> Result<Self> {
+        Self::connect_with_role_config_and_mcp(
+            launch,
+            cwd,
+            additional_directories,
+            abort,
+            access_mode,
+            saved_session_config,
+            role_config,
+            Vec::new(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn connect_with_role_config_and_mcp(
+        launch: &Launch,
+        cwd: &Path,
+        additional_directories: &[PathBuf],
+        abort: watch::Receiver<bool>,
+        access_mode: acp::RuntimeAccessMode,
+        saved_session_config: HashMap<String, String>,
+        role_config: Option<acp::RuntimeRoleConfig>,
+        mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer>,
+    ) -> Result<Self> {
         let (event_tx, events) = mpsc::unbounded_channel();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let runtime_cfg = acp::AcpRuntimeConfig {
@@ -1373,6 +1253,7 @@ impl AgentHandle {
             args: launch.args.clone(),
             cwd: cwd.to_path_buf(),
             additional_directories: additional_directories.to_vec(),
+            mcp_servers,
             resume_session: None,
             env: launch.env.clone(),
             agent_stderr: None,
@@ -1381,6 +1262,8 @@ impl AgentHandle {
             agent_source_id: None,
             config_path: None,
             saved_session_config,
+            role_config,
+            code_agent: None,
         };
         let runtime = tokio::spawn(acp::run(runtime_cfg, event_tx, cmd_rx));
         let mut handle = Self {
@@ -1717,7 +1600,7 @@ fn prompt_rejected_transiently(message: &str) -> bool {
         || message.contains("prompt already in flight")
 }
 
-fn permission_decision_for_access(
+pub(crate) fn permission_decision_for_access(
     access_mode: acp::RuntimeAccessMode,
     prompt: &crate::event::PermissionPrompt,
 ) -> PermissionDecision {
@@ -3603,66 +3486,29 @@ pub fn battle_cry(fighter: &str, action: ActionKind, detail: &str, roll: usize) 
 mod tests {
     use super::*;
 
-    fn candidate(agent: &str, model: &str, elo: u32, key: &str) -> Candidate {
+    fn candidate(agent: &str, model: &str, pass_at_1_bps: u32, key: &str) -> Candidate {
         Candidate {
             card: FighterCard {
                 id: 0,
                 agent_source_id: agent.to_string(),
                 model_value: model.to_string(),
                 model_name: model.to_string(),
-                elo,
-                provisional: false,
+                pass_at_1_bps,
+                mean_cost_usd: 0.0,
             },
             launch: Launch {
                 program: PathBuf::from("true"),
                 args: vec![],
                 env: HashMap::new(),
             },
-            vendor: selection_vendor(agent, model, model, "", key),
-            bedrock: is_bedrock_model(model),
+            vendor: Some(council_provider(model)),
             match_key: key.to_string(),
         }
     }
 
     fn sorted(mut pool: Vec<Candidate>) -> Vec<Candidate> {
-        pool.sort_by_key(|c| std::cmp::Reverse(c.card.elo));
+        pool.sort_by_key(|c| std::cmp::Reverse(c.card.pass_at_1_bps));
         pool
-    }
-
-    #[tokio::test]
-    async fn battle_surfaces_config_parse_errors() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-        std::fs::write(&config_path, "not = valid = toml = @@@").expect("write config");
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let (_abort_tx, abort_rx) = watch::channel(false);
-        let (_proceed_tx, proceed_rx) = watch::channel(false);
-
-        run_battle(
-            BattleConfig {
-                task: "fix the config".to_string(),
-                cwd: dir.path().to_path_buf(),
-                config_path,
-                score_store: ScoreStore::default(),
-                thor_host: None,
-            },
-            tx,
-            abort_rx,
-            proceed_rx,
-        )
-        .await;
-
-        let mut failed = None;
-        while let Some(ev) = rx.recv().await {
-            match ev {
-                RagnarokEvent::Failed(message) => failed = Some(message),
-                RagnarokEvent::Done => break,
-                _ => {}
-            }
-        }
-        let failed = failed.expect("failure event");
-        assert!(failed.contains("parse"), "failure: {failed}");
-        assert!(failed.contains("config.toml"), "failure: {failed}");
     }
 
     fn init_git_repo_with_commit(path: &Path) {
@@ -3733,7 +3579,7 @@ mod tests {
     }
 
     #[test]
-    fn select_uses_agent_diversity_as_weight_not_hard_rule() {
+    fn select_does_not_reward_adapter_diversity() {
         let pool = sorted(vec![
             candidate("agent-a", "alpha", 1500, "openai/alpha"),
             candidate("agent-a", "beta", 1490, "anthropic/beta"),
@@ -3745,8 +3591,8 @@ mod tests {
             .map(|c| c.card.agent_source_id.as_str())
             .collect();
         assert_eq!(picked.len(), 2);
-        // beta keeps enough raw Elo edge to beat gamma even though gamma has a
-        // new-agent bonus. This is intentionally not a hard one-agent pass.
+        // Adapter identity is not part of the score, so beta's raw Pass@1 edge
+        // beats gamma.
         assert_eq!(agents, vec!["agent-a", "agent-a"]);
         assert_eq!(picked[1].card.model_name, "beta");
     }
@@ -3766,7 +3612,7 @@ mod tests {
     }
 
     #[test]
-    fn select_rewards_new_vendor_and_agent_together() {
+    fn select_rewards_new_provider_only() {
         let pool = sorted(vec![
             candidate("agent-a", "alpha", 1500, "openai/alpha"),
             candidate("agent-a", "beta", 1490, "anthropic/beta"),
@@ -3776,13 +3622,13 @@ mod tests {
         let picked = select_fighters_with_picker(&pool, 2, |_| 0);
 
         assert_eq!(picked[0].card.model_name, "alpha");
-        // delta is 45 Elo lower than beta/gamma, but gets both +50 diversity
-        // bonuses after alpha is selected. beta and gamma get only one bonus.
-        assert_eq!(picked[1].card.model_name, "delta");
+        // beta is the strongest model from a provider not represented by alpha.
+        // Adapter identity no longer affects selection.
+        assert_eq!(picked[1].card.model_name, "beta");
     }
 
     #[test]
-    fn select_penalizes_bedrock_models() {
+    fn select_does_not_apply_adapter_specific_penalties() {
         let pool = sorted(vec![
             candidate(
                 "anvil",
@@ -3794,8 +3640,11 @@ mod tests {
         ]);
         let picked = select_fighters_with_picker(&pool, 1, |_| 0);
 
-        assert_eq!(picked[0].card.agent_source_id, "claude-acp");
-        assert_eq!(picked[0].card.model_name, "opus");
+        assert_eq!(picked[0].card.agent_source_id, "anvil");
+        assert_eq!(
+            picked[0].card.model_name,
+            "bedrock::us.anthropic.claude-opus-4-8"
+        );
     }
 
     #[test]
@@ -3811,10 +3660,7 @@ mod tests {
         });
 
         assert_eq!(picked[0].card.model_name, "alpha");
-        assert_eq!(
-            adjusted_selection_score(&pool[0], &HashSet::new(), &HashSet::new()),
-            1500
-        );
+        assert_eq!(adjusted_selection_score(&pool[0], &HashSet::new()), 1500);
     }
 
     #[test]
@@ -3852,23 +3698,23 @@ mod tests {
     }
 
     #[test]
-    fn judge_only_reviewer_uses_double_diversity_and_skips_roster_models() {
-        let mut survivor = candidate("agent-a", "alpha", 1500, "openai/alpha");
+    fn judge_only_reviewer_uses_provider_bonus_and_skips_roster_models() {
+        let mut survivor = candidate("agent-a", "gpt-alpha", 1500, "openai/alpha");
         survivor.card.id = 0;
-        let mut original_rival = candidate("agent-c", "delta", 1700, "google/delta");
+        let mut original_rival = candidate("agent-c", "gemini-delta", 1700, "google/delta");
         original_rival.card.id = 1;
         let pool = sorted(vec![
             survivor.clone(),
             original_rival.clone(),
-            candidate("agent-a", "beta", 1490, "openai/beta"),
-            candidate("agent-b", "gamma", 1375, "anthropic/gamma"),
+            candidate("agent-a", "gpt-beta", 1490, "openai/beta"),
+            candidate("agent-b", "claude-gamma", 1400, "anthropic/gamma"),
         ]);
 
         let picked =
             select_judge_only_reviewer_with_picker(&pool, &[survivor, original_rival], 0, |_| 0)
                 .expect("judge-only reviewer");
 
-        assert_eq!(picked.card.model_name, "gamma");
+        assert_eq!(picked.card.model_name, "claude-gamma");
         assert_eq!(picked.card.agent_source_id, "agent-b");
     }
 
@@ -4047,50 +3893,50 @@ mod tests {
     }
 
     #[test]
-    fn elo_fallback_presents_two_strongest_finalists() {
+    fn pass_at_1_fallback_presents_two_strongest_finalists() {
         let cards = vec![
             FighterCard {
                 id: 0,
                 agent_source_id: "a".into(),
                 model_value: "m0".into(),
                 model_name: "m0".into(),
-                elo: 1400,
-                provisional: false,
+                pass_at_1_bps: 1400,
+                mean_cost_usd: 0.0,
             },
             FighterCard {
                 id: 1,
                 agent_source_id: "b".into(),
                 model_value: "m1".into(),
                 model_name: "m1".into(),
-                elo: 1460,
-                provisional: false,
+                pass_at_1_bps: 1460,
+                mean_cost_usd: 0.0,
             },
             FighterCard {
                 id: 2,
                 agent_source_id: "c".into(),
                 model_value: "m2".into(),
                 model_name: "m2".into(),
-                elo: 1430,
-                provisional: false,
+                pass_at_1_bps: 1430,
+                mean_cost_usd: 0.0,
             },
         ];
-        let v = elo_fallback_verdict(&[0, 1, 2], &cards);
+        let v = strength_fallback_verdict(&[0, 1, 2], &cards);
         assert!(v.thor_fallback);
         assert_eq!(v.finalists, Some((1, 2)));
         assert_eq!(v.ranking, vec![1, 2, 0]);
     }
 
     #[test]
-    fn elo_fallback_crowns_the_only_survivor() {
+    fn pass_at_1_fallback_crowns_the_only_survivor() {
         let cards = vec![FighterCard {
             id: 0,
             agent_source_id: "a".into(),
             model_value: "m".into(),
             model_name: "Solo".into(),
-            elo: 1400,
-            provisional: false,
+            pass_at_1_bps: 1400,
+            mean_cost_usd: 0.0,
         }];
-        let v = elo_fallback_verdict(&[0], &cards);
+        let v = strength_fallback_verdict(&[0], &cards);
 
         assert!(v.thor_fallback);
         assert_eq!(v.clear_winner, Some(0));
@@ -4662,15 +4508,15 @@ mod tests {
     }
 
     #[test]
-    fn fighter_tag_includes_elo_and_agent() {
+    fn fighter_tag_includes_pass_at_1_cost_and_agent() {
         let card = FighterCard {
             id: 0,
             agent_source_id: "claude-acp".into(),
             model_value: "opus".into(),
             model_name: "Opus".into(),
-            elo: 1456,
-            provisional: true,
+            pass_at_1_bps: 1456,
+            mean_cost_usd: 4.28,
         };
-        assert_eq!(card.tag(), "Opus [claude-acp] ⚡1456*");
+        assert_eq!(card.tag(), "Opus [claude-acp] ⚡14.6% · $4.28");
     }
 }

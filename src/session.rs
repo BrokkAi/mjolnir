@@ -39,6 +39,9 @@ pub struct SessionEntry {
     pub cwd: PathBuf,
     pub title: Option<String>,
     pub updated_at: Option<String>,
+    pub adapter_source_id: Option<String>,
+    pub model: Option<String>,
+    pub delete_supported: bool,
 }
 
 impl From<SessionInfo> for SessionEntry {
@@ -48,6 +51,9 @@ impl From<SessionInfo> for SessionEntry {
             cwd: info.cwd,
             title: info.title,
             updated_at: info.updated_at,
+            adapter_source_id: None,
+            model: None,
+            delete_supported: false,
         }
     }
 }
@@ -61,6 +67,10 @@ pub struct SessionEntryJson {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl From<&SessionEntry> for SessionEntryJson {
@@ -70,6 +80,8 @@ impl From<&SessionEntry> for SessionEntryJson {
             cwd: e.cwd.display().to_string(),
             title: e.title.clone(),
             updated_at: e.updated_at.clone(),
+            adapter: e.adapter_source_id.clone(),
+            model: e.model.clone(),
         }
     }
 }
@@ -209,6 +221,9 @@ where
                 }
             }
 
+            for session in &mut all_sessions {
+                session.delete_supported = delete_supported;
+            }
             Ok(SessionListResult {
                 sessions: all_sessions,
                 delete_supported,
@@ -590,6 +605,13 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState, theme
                 if let Some(updated) = &session.updated_at {
                     hint_parts.push(updated.clone());
                 }
+                if let Some(adapter) = &session.adapter_source_id {
+                    let route = session
+                        .model
+                        .as_deref()
+                        .map_or_else(|| adapter.clone(), |model| format!("{model} via {adapter}"));
+                    hint_parts.push(route);
+                }
                 let hint = hint_parts.join("  --  ");
 
                 let line = format!("{marker} {label}  -- {hint}");
@@ -711,18 +733,27 @@ mod tests {
                 cwd: PathBuf::from("/home/user/project-a"),
                 title: Some("Refactor auth module".into()),
                 updated_at: Some("2025-01-15T10:30:00Z".into()),
+                adapter_source_id: None,
+                model: None,
+                delete_supported: false,
             },
             SessionEntry {
                 session_id: "sess-2".into(),
                 cwd: PathBuf::from("/home/user/project-b"),
                 title: None,
                 updated_at: Some("2025-01-14T08:00:00Z".into()),
+                adapter_source_id: None,
+                model: None,
+                delete_supported: false,
             },
             SessionEntry {
                 session_id: "sess-3".into(),
                 cwd: PathBuf::from("/tmp/scratch"),
                 title: Some("Quick experiment".into()),
                 updated_at: None,
+                adapter_source_id: None,
+                model: None,
+                delete_supported: false,
             },
         ]
     }
@@ -917,6 +948,9 @@ mod tests {
             cwd: PathBuf::from("/home/user/project"),
             title: Some("My session".into()),
             updated_at: None,
+            adapter_source_id: Some("codex-acp".into()),
+            model: Some("gpt-test".into()),
+            delete_supported: true,
         };
         let json = SessionEntryJson::from(&entry);
         let serialized = serde_json::to_string(&json).unwrap();

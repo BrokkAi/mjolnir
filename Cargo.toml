@@ -46,11 +46,9 @@ ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 qrcode = { version = "0.14", default-features = false }
-# Official Rust MCP SDK. Powers the `mj mcp` stdio server that exposes mj's
-# ACP-client capabilities (connect, config, prompt, poll, cancel, result) as
-# MCP tools. `transport-io` adds the stdio transport; `server`/`macros` are
-# default features but listed for clarity. MIT-licensed (GPL-3.0-compatible).
-rmcp = { version = "1", features = ["server", "macros", "transport-io"] }
+# Official Rust MCP SDK. Powers the embedded Streamable HTTP `code_agent` and
+# Loki review tool servers. MIT-licensed (GPL-3.0-compatible).
+rmcp = { version = "1", features = ["server", "macros", "transport-streamable-http-server"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # Parses the tailscale-issued certificate/key PEMs for the SNI resolver in
@@ -65,6 +63,7 @@ serde_json = "1"
 sha2 = "0.10"
 shell-words = "1"
 tar = "0.4"
+tempfile = "3"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
