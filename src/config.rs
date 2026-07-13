@@ -35,7 +35,7 @@ pub struct Config {
     /// Eitri's model preference.
     #[serde(default, skip_serializing_if = "EitriConfig::is_default")]
     pub eitri: EitriConfig,
-    /// Explicit user-provisioned ACP servers.
+    /// ACP adapter enablement and explicit user-provisioned servers.
     #[serde(default, skip_serializing_if = "AcpConfig::is_default")]
     pub acp: AcpConfig,
     /// `/ragnarok` battle knobs.
@@ -127,15 +127,35 @@ impl EitriConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AcpConfig {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub codex: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub claude: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub anvil: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub opencode: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub servers: Vec<CustomAcpServer>,
 }
 
+impl Default for AcpConfig {
+    fn default() -> Self {
+        Self {
+            codex: true,
+            claude: true,
+            anvil: true,
+            opencode: true,
+            servers: Vec::new(),
+        }
+    }
+}
+
 impl AcpConfig {
     fn is_default(&self) -> bool {
-        self.servers.is_empty()
+        *self == Self::default()
     }
 }
 
@@ -146,6 +166,8 @@ pub struct CustomAcpServer {
     pub command: PathBuf,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
 }
 
 impl LokiConfig {
@@ -183,6 +205,10 @@ impl RagnarokConfig {
 
 fn default_true() -> bool {
     true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// Concrete ACP launch selected by the model catalog for a session.
@@ -273,6 +299,7 @@ impl Config {
                     name: legacy.name.clone(),
                     command: legacy.program.clone(),
                     args: legacy.args.clone(),
+                    enabled: true,
                 });
             }
         }
@@ -521,7 +548,9 @@ mod tests {
                     name: "company".to_string(),
                     command: PathBuf::from("/usr/local/bin/company-acp"),
                     args: vec!["--stdio".to_string()],
+                    enabled: true,
                 }],
+                ..AcpConfig::default()
             },
             ..Config::default()
         };
@@ -721,6 +750,30 @@ mode = "ask"
         config.save(&path).expect("save clean schema");
         let body = std::fs::read_to_string(path).expect("read");
         assert_eq!(body, "");
+    }
+
+    #[test]
+    fn agent_enablement_roundtrips_and_defaults_on() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[acp]\nclaude = false\n\n[[acp.servers]]\nname = 'company'\ncommand = 'company-acp'\nenabled = false\n",
+        )
+        .expect("write");
+
+        let config = Config::load(&path).expect("load");
+        assert!(config.acp.codex);
+        assert!(!config.acp.claude);
+        assert!(config.acp.anvil);
+        assert!(config.acp.opencode);
+        assert!(!config.acp.servers[0].enabled);
+
+        config.save(&path).expect("save");
+        let body = std::fs::read_to_string(path).expect("read");
+        assert!(body.contains("claude = false"), "saved: {body}");
+        assert!(body.contains("enabled = false"), "saved: {body}");
+        assert!(!body.contains("codex = true"), "saved: {body}");
     }
 
     #[test]

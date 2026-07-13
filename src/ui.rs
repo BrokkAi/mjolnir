@@ -74,7 +74,7 @@ const INLINE_EXPANDED_MAX_HEIGHT: u16 = 20;
 const INLINE_TRANSCRIPT_TAIL_MAX_ROWS: usize = 12;
 const INLINE_HELP_HEIGHT: u16 = 18;
 /// Inline viewport height for the `/mjconfig` overlay (border + two sections).
-const INLINE_MJCONFIG_HEIGHT: u16 = 15;
+const INLINE_MJCONFIG_HEIGHT: u16 = 24;
 const QUEUED_PROMPT_VISIBLE_ROWS: usize = 3;
 const CURSOR_POSITION_TIMEOUT_MESSAGE: &str =
     "The cursor position could not be read within a normal duration";
@@ -3522,9 +3522,18 @@ fn handle_mjconfig_menu_key(
             state.mjconfig_menu_cancel();
             inline_repair_request(mode)
         }
+        (_, KeyCode::Char(' '))
+            if state
+                .mjconfig_menu
+                .as_ref()
+                .is_some_and(|menu| menu.section == MjConfigSection::Agents) =>
+        {
+            state.mjconfig_menu_toggle_agent();
+            TerminalRequest::None
+        }
         (_, KeyCode::Enter) => {
-            if let Some((theme, style)) = state.mjconfig_menu_accept() {
-                persist_mjconfig_selection(state, theme, style);
+            if let Some((theme, style, agents)) = state.mjconfig_menu_accept() {
+                persist_mjconfig_selection(state, theme, style, &agents);
             }
             inline_repair_request(mode)
         }
@@ -3551,16 +3560,40 @@ fn handle_mjconfig_menu_key(
 
 /// Persist the theme + spinner accepted in the `/mjconfig` menu. The live UI is
 /// already showing them (preview), so this only writes config and reports.
-fn persist_mjconfig_selection(state: &mut AppState, theme: TerminalThemeKind, style: SpinnerStyle) {
+fn persist_mjconfig_selection(
+    state: &mut AppState,
+    theme: TerminalThemeKind,
+    style: SpinnerStyle,
+    agents: &[(String, bool)],
+) {
     if let Some(path) = state.config_path.clone() {
         match config::Config::load(&path).and_then(|mut cfg| {
             cfg.theme = theme;
             cfg.spinner = style;
+            for (id, enabled) in agents {
+                match id.as_str() {
+                    "codex-acp" => cfg.acp.codex = *enabled,
+                    "claude-acp" => cfg.acp.claude = *enabled,
+                    "anvil" => cfg.acp.anvil = *enabled,
+                    "opencode-acp" => cfg.acp.opencode = *enabled,
+                    custom if custom.starts_with("custom:") => {
+                        if let Some(server) = cfg
+                            .acp
+                            .servers
+                            .iter_mut()
+                            .find(|server| server.name == custom[7..])
+                        {
+                            server.enabled = *enabled;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             cfg.save(&path)
         }) {
             Ok(()) => state.record_status_message(
                 StatusKind::Info,
-                format!("config saved — theme {theme}, spinner {style}"),
+                format!("config saved — theme {theme}, spinner {style}; agent changes apply next session"),
             ),
             Err(e) => state.record_status_message(
                 StatusKind::Warning,
@@ -3609,11 +3642,11 @@ fn draw_mjconfig_menu(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     };
     let theme = state.theme;
 
-    // Bail on terminals too small to render the two sections legibly.
-    if area.width.min(58) < 24 || area.height.min(15) < 8 {
+    if area.width.min(90) < 24 || area.height.min(18) < 8 {
         return;
     }
-    let rect = crate::term::centered_rect(area, 58, 15);
+    let desired_height = (menu.agents.len() as u16).saturating_add(7).max(18);
+    let rect = crate::term::centered_rect(area, 90, desired_height);
     f.render_widget(Clear, rect);
 
     let block = Block::default()
@@ -3632,13 +3665,18 @@ fn draw_mjconfig_menu(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ])
         .split(inner);
 
-    let intro = Paragraph::new("Changes preview live. Enter saves to config; Esc reverts.")
-        .style(Style::default().fg(theme.muted));
+    let intro =
+        Paragraph::new("Changes preview live. In Agents, Space toggles; Enter saves all settings.")
+            .style(Style::default().fg(theme.muted));
     f.render_widget(intro, rows[0]);
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .constraints([
+            Constraint::Percentage(24),
+            Constraint::Percentage(30),
+            Constraint::Percentage(46),
+        ])
         .split(rows[1]);
 
     let theme_focused = menu.section == MjConfigSection::Theme;
@@ -3667,8 +3705,26 @@ fn draw_mjconfig_menu(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     }
     f.render_widget(Paragraph::new(spinner_lines), cols[1]);
 
-    let footer = Paragraph::new("↑/↓ change · Tab switch · Enter save · Esc cancel")
-        .style(Style::default().fg(theme.muted));
+    let agents_focused = menu.section == MjConfigSection::Agents;
+    let mut agent_lines = vec![mjconfig_section_header("Agents", agents_focused, theme)];
+    for (idx, agent) in menu.agents.iter().enumerate() {
+        let enabled = if agent.enabled { "on " } else { "off" };
+        let label = format!("[{enabled}] {} — {}", agent.label, agent.validation);
+        agent_lines.push(mjconfig_option_line(
+            idx == menu.agent_idx,
+            agents_focused,
+            label,
+            theme,
+        ));
+    }
+    f.render_widget(
+        Paragraph::new(agent_lines).wrap(Wrap { trim: false }),
+        cols[2],
+    );
+
+    let footer =
+        Paragraph::new("↑/↓ change · Tab section · Space toggle agent · Enter save · Esc cancel")
+            .style(Style::default().fg(theme.muted));
     f.render_widget(footer, rows[2]);
 }
 
@@ -12278,6 +12334,17 @@ mod tests {
         state.config_path = Some(path.clone());
         state.open_mjconfig_menu();
 
+        // Toggle Codex off, then continue cycling through the appearance sections.
+        state.mjconfig_menu_toggle_section();
+        state.mjconfig_menu_toggle_section();
+        handle_mjconfig_menu_key(
+            &mut state,
+            KeyModifiers::NONE,
+            KeyCode::Char(' '),
+            UiMode::FullscreenTui,
+        );
+        state.mjconfig_menu_toggle_section();
+
         // Spinner section: move once to preview the next style live.
         state.mjconfig_menu_toggle_section();
         let before = state.spinner_style;
@@ -12301,6 +12368,7 @@ mod tests {
         let saved = config::Config::load(&path).expect("load saved config");
         assert_eq!(saved.spinner, previewed);
         assert_eq!(saved.theme, previewed_theme);
+        assert!(!saved.acp.codex);
     }
 
     #[test]
@@ -12384,6 +12452,8 @@ mod tests {
         assert!(rendered.contains("mj config"), "rendered:\n{rendered}");
         assert!(rendered.contains("Theme"), "rendered:\n{rendered}");
         assert!(rendered.contains("Spinner"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Agents"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Codex"), "rendered:\n{rendered}");
         // Every spinner style name is listed as a row.
         for style in SpinnerStyle::ALL {
             assert!(

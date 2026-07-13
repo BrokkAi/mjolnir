@@ -590,7 +590,18 @@ fn number_field(
 pub enum MjConfigSection {
     Theme,
     Spinner,
+    Agents,
 }
+
+#[derive(Debug, Clone)]
+pub struct MjConfigAgent {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+    pub validation: String,
+}
+
+pub type MjConfigSelection = (TerminalThemeKind, SpinnerStyle, Vec<(String, bool)>);
 
 /// In-session `/mjconfig` overlay: pick the terminal theme and spinner style.
 /// Selections preview live against the running UI; the originals are kept so
@@ -600,6 +611,8 @@ pub struct MjConfigMenu {
     pub section: MjConfigSection,
     pub theme_idx: usize,
     pub spinner_idx: usize,
+    pub agent_idx: usize,
+    pub agents: Vec<MjConfigAgent>,
     orig_theme: TerminalThemeKind,
     orig_spinner: SpinnerStyle,
 }
@@ -1160,10 +1173,18 @@ impl AppState {
             .iter()
             .position(|style| *style == self.spinner_style)
             .unwrap_or(0);
+        let config = self
+            .config_path
+            .as_deref()
+            .and_then(|path| crate::config::Config::load(path).ok())
+            .unwrap_or_default();
+        let agents = Self::mjconfig_agents(config, &self.council_choices);
         self.mjconfig_menu = Some(MjConfigMenu {
             section: MjConfigSection::Theme,
             theme_idx,
             spinner_idx,
+            agent_idx: 0,
+            agents,
             orig_theme: self.theme_kind,
             orig_spinner: self.spinner_style,
         });
@@ -1173,7 +1194,8 @@ impl AppState {
         if let Some(menu) = self.mjconfig_menu.as_mut() {
             menu.section = match menu.section {
                 MjConfigSection::Theme => MjConfigSection::Spinner,
-                MjConfigSection::Spinner => MjConfigSection::Theme,
+                MjConfigSection::Spinner => MjConfigSection::Agents,
+                MjConfigSection::Agents => MjConfigSection::Theme,
             };
         }
     }
@@ -1195,6 +1217,9 @@ impl AppState {
                 move_wrapped(&mut menu.spinner_idx, delta, SpinnerStyle::ALL.len());
                 next_spinner = Some(SpinnerStyle::ALL[menu.spinner_idx]);
             }
+            MjConfigSection::Agents => {
+                move_wrapped(&mut menu.agent_idx, delta, menu.agents.len());
+            }
         }
         if let Some(theme) = next_theme {
             self.set_theme(theme);
@@ -1204,12 +1229,27 @@ impl AppState {
         }
     }
 
-    /// Close the menu, keeping the live-previewed theme and spinner. Returns the
-    /// accepted pair so the caller can persist it.
-    pub fn mjconfig_menu_accept(&mut self) -> Option<(TerminalThemeKind, SpinnerStyle)> {
-        self.mjconfig_menu
-            .take()
-            .map(|_| (self.theme_kind, self.spinner_style))
+    pub fn mjconfig_menu_toggle_agent(&mut self) {
+        let Some(menu) = self.mjconfig_menu.as_mut() else {
+            return;
+        };
+        if let Some(agent) = menu.agents.get_mut(menu.agent_idx) {
+            agent.enabled = !agent.enabled;
+        }
+    }
+
+    /// Close the menu, keeping the live-previewed theme, spinner, and agent choices.
+    pub fn mjconfig_menu_accept(&mut self) -> Option<MjConfigSelection> {
+        self.mjconfig_menu.take().map(|menu| {
+            (
+                self.theme_kind,
+                self.spinner_style,
+                menu.agents
+                    .into_iter()
+                    .map(|agent| (agent.id, agent.enabled))
+                    .collect(),
+            )
+        })
     }
 
     /// Close the menu and restore the theme and spinner that were active when
@@ -1219,6 +1259,71 @@ impl AppState {
             self.set_theme(menu.orig_theme);
             self.set_spinner_style(menu.orig_spinner);
         }
+    }
+
+    fn mjconfig_agents(
+        config: crate::config::Config,
+        choices: &[crate::council::ModelChoice],
+    ) -> Vec<MjConfigAgent> {
+        let mut agents = vec![
+            ("codex-acp", "Codex", config.acp.codex),
+            ("claude-acp", "Claude Code", config.acp.claude),
+            ("anvil", "Anvil", config.acp.anvil),
+            ("opencode-acp", "OpenCode", config.acp.opencode),
+        ]
+        .into_iter()
+        .map(|(id, label, enabled)| MjConfigAgent {
+            id: id.to_string(),
+            label: label.to_string(),
+            enabled,
+            validation: "not available in this session".to_string(),
+        })
+        .collect::<Vec<_>>();
+
+        for agent in &mut agents {
+            agent.validation = Self::agent_validation(choices, &agent.id, agent.enabled);
+        }
+        agents.extend(config.acp.servers.into_iter().map(|server| {
+            let id = format!("custom:{}", server.name);
+            let validation = Self::agent_validation(choices, &id, server.enabled);
+            MjConfigAgent {
+                id,
+                label: server.name,
+                enabled: server.enabled,
+                validation,
+            }
+        }));
+        agents
+    }
+
+    fn agent_validation(
+        choices: &[crate::council::ModelChoice],
+        id: &str,
+        enabled: bool,
+    ) -> String {
+        if !enabled {
+            return "disabled · enable to validate next session".to_string();
+        }
+        let available = choices
+            .iter()
+            .filter(|choice| choice.available && choice.adapter.as_deref() == Some(id))
+            .count();
+        if available > 0 {
+            return format!(
+                "ready · {available} model{}",
+                if available == 1 { "" } else { "s" }
+            );
+        }
+        choices
+            .iter()
+            .filter_map(|choice| choice.disabled_reason.as_deref())
+            .find_map(|reason| {
+                reason
+                    .split("; ")
+                    .find(|part| part.starts_with(id) || part.starts_with(&id[7.min(id.len())..]))
+            })
+            .unwrap_or("not detected or no session config models")
+            .to_string()
     }
 
     pub fn council_summary(&self) -> String {

@@ -80,7 +80,6 @@ pub struct Availability {
     pub codex: Option<PathBuf>,
     pub claude: Option<PathBuf>,
     pub opencode: Option<PathBuf>,
-    pub openrouter: bool,
 }
 
 impl Availability {
@@ -89,8 +88,6 @@ impl Availability {
             codex: find_on_path("codex"),
             claude: find_on_path("claude"),
             opencode: find_on_path("opencode"),
-            openrouter: std::env::var_os("OPENROUTER_API_KEY")
-                .is_some_and(|value| !value.is_empty()),
         }
     }
 
@@ -102,7 +99,6 @@ impl Availability {
             AdapterKind::Claude if self.claude.is_none() => {
                 Some("claude executable not found on PATH")
             }
-            AdapterKind::Anvil if !self.openrouter => Some("OPENROUTER_API_KEY is not set"),
             AdapterKind::OpenCode if self.opencode.is_none() => {
                 Some("opencode executable not found on PATH")
             }
@@ -345,6 +341,7 @@ fn configured_launches(config: &Config, availability: &Availability) -> Vec<Adap
         .acp
         .servers
         .iter()
+        .filter(|server| server.enabled)
         .map(|server| AdapterLaunch {
             kind: AdapterKind::Custom,
             source_id: format!("custom:{}", server.name),
@@ -353,16 +350,16 @@ fn configured_launches(config: &Config, availability: &Availability) -> Vec<Adap
             env: HashMap::new(),
         })
         .collect::<Vec<_>>();
-    if availability.codex.is_some() {
+    if config.acp.codex && availability.codex.is_some() {
         launches.push(launch_for(AdapterKind::Codex));
     }
-    if availability.claude.is_some() {
+    if config.acp.claude && availability.claude.is_some() {
         launches.push(launch_for(AdapterKind::Claude));
     }
-    if availability.openrouter {
+    if config.acp.anvil {
         launches.push(launch_for(AdapterKind::Anvil));
     }
-    if availability.opencode.is_some() {
+    if config.acp.opencode && availability.opencode.is_some() {
         launches.push(launch_for(AdapterKind::OpenCode));
     }
     launches
@@ -453,7 +450,7 @@ fn unavailable_reason(
     adapter_errors: &HashMap<String, String>,
 ) -> String {
     let mut reasons = Vec::new();
-    for server in &config.acp.servers {
+    for server in config.acp.servers.iter().filter(|server| server.enabled) {
         let source = format!("custom:{}", server.name);
         reasons.push(match adapter_errors.get(&source) {
             Some(reason) => format!("{}: {reason}", server.name),
@@ -465,10 +462,19 @@ fn unavailable_reason(
     let native_detected = match native {
         AdapterKind::Codex => availability.codex.is_some(),
         AdapterKind::Claude => availability.claude.is_some(),
-        AdapterKind::Anvil => availability.openrouter,
+        AdapterKind::Anvil => true,
         _ => false,
     };
-    if native_detected {
+    let native_enabled = match native {
+        AdapterKind::Codex => config.acp.codex,
+        AdapterKind::Claude => config.acp.claude,
+        AdapterKind::Anvil => config.acp.anvil,
+        AdapterKind::OpenCode => config.acp.opencode,
+        AdapterKind::Custom => true,
+    };
+    if !native_enabled {
+        reasons.push(format!("{native_source} is disabled in config"));
+    } else if native_detected {
         reasons.push(adapter_errors.get(&native_source).map_or_else(
             || format!("{native_source} did not advertise this model"),
             |reason| format!("{native_source}: {reason}"),
@@ -476,23 +482,21 @@ fn unavailable_reason(
     } else if let Some(reason) = availability.missing_reason(&row.model) {
         reasons.push(reason.to_string());
     }
-    if native != AdapterKind::Anvil {
-        if availability.openrouter {
-            reasons.push(adapter_errors.get("anvil").map_or_else(
-                || "anvil did not advertise this model".to_string(),
-                |reason| format!("anvil: {reason}"),
+    if native != AdapterKind::Anvil && config.acp.anvil {
+        reasons.push(adapter_errors.get("anvil").map_or_else(
+            || "anvil did not advertise this model".to_string(),
+            |reason| format!("anvil: {reason}"),
+        ));
+    }
+    if config.acp.opencode {
+        if availability.opencode.is_some() {
+            reasons.push(adapter_errors.get("opencode-acp").map_or_else(
+                || "opencode-acp did not advertise this model".to_string(),
+                |reason| format!("opencode-acp: {reason}"),
             ));
         } else {
-            reasons.push("OPENROUTER_API_KEY is not set".to_string());
+            reasons.push("opencode executable not found on PATH".to_string());
         }
-    }
-    if availability.opencode.is_some() {
-        reasons.push(adapter_errors.get("opencode-acp").map_or_else(
-            || "opencode-acp did not advertise this model".to_string(),
-            |reason| format!("opencode-acp: {reason}"),
-        ));
-    } else {
-        reasons.push("opencode executable not found on PATH".to_string());
     }
     reasons.sort();
     reasons.dedup();
@@ -552,7 +556,7 @@ pub async fn resolve(config: &Config, cwd: &Path) -> Result<ResolvedCouncil> {
             .map(|reason| format!(" ({reason})"))
             .unwrap_or_default();
         bail!(
-            "no Council model is launchable{diagnostic}: install codex, claude, or opencode; set OPENROUTER_API_KEY; or configure an ACP server"
+            "no Council model is launchable{diagnostic}: install or authenticate an ACP adapter, or configure a custom ACP server"
         );
     }
 
@@ -676,6 +680,36 @@ mod tests {
     }
 
     #[test]
+    fn configured_launches_exclude_disabled_adapters() {
+        let mut config = Config::default();
+        config.acp.codex = false;
+        config.acp.opencode = false;
+        config.acp.servers.push(crate::config::CustomAcpServer {
+            name: "disabled".to_string(),
+            command: PathBuf::from("disabled-acp"),
+            args: Vec::new(),
+            enabled: false,
+        });
+        config.acp.servers.push(crate::config::CustomAcpServer {
+            name: "enabled".to_string(),
+            command: PathBuf::from("enabled-acp"),
+            args: Vec::new(),
+            enabled: true,
+        });
+        let availability = Availability {
+            codex: Some(PathBuf::from("codex")),
+            claude: Some(PathBuf::from("claude")),
+            opencode: Some(PathBuf::from("opencode")),
+        };
+
+        let ids = configured_launches(&config, &availability)
+            .into_iter()
+            .map(|launch| launch.source_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["custom:enabled", "claude-acp", "anvil"]);
+    }
+
+    #[test]
     fn route_precedence_is_custom_then_native_then_anvil_then_opencode() {
         let rows = vec![
             role_at("gpt-5-5", 0.6, 5.0).model,
@@ -775,21 +809,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_reasons_never_include_secret_values() {
+    fn missing_reasons_are_based_on_adapter_presence() {
         let availability = Availability {
             codex: None,
             claude: None,
             opencode: None,
-            openrouter: false,
         };
         assert_eq!(
             availability.missing_reason("gpt-5-6-sol"),
             Some("codex executable not found on PATH")
         );
-        assert_eq!(
-            availability.missing_reason("glm-5-2"),
-            Some("OPENROUTER_API_KEY is not set")
-        );
+        assert_eq!(availability.missing_reason("glm-5-2"), None);
     }
 
     #[test]
@@ -804,7 +834,6 @@ mod tests {
             codex: None,
             claude: None,
             opencode: None,
-            openrouter: false,
         };
         let error = explicit("Thor", "gpt-5-6-sol", &rows, &[])
             .expect_err("must reject unavailable explicit model");
