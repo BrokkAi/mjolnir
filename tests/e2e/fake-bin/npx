@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 2 ] || [ "$1" != "-y" ]; then
+  echo "unexpected code-agent launch: npx $*" >&2
+  exit 64
+fi
+
+case $2 in
+  @agentclientprotocol/codex-acp|@agentclientprotocol/claude-agent-acp) ;;
+  *) echo "unexpected council adapter: $2" >&2; exit 64 ;;
+esac
+
+fixture_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec node "$fixture_dir/council-agent.mjs"

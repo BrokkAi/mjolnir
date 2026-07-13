@@ -1,6 +1,6 @@
 //! Persistent user config for `mj`.
 //!
-//! Stores the default launch command and global picker preferences. Lives at
+//! Stores role-owned Council preferences and custom ACP launches. Lives at
 //! `~/.config/mj/config.toml`.
 
 use std::collections::HashMap;
@@ -19,25 +19,139 @@ pub struct Config {
     pub theme: TerminalThemeKind,
     #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
     pub spinner: SpinnerStyle,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<SelectedAgent>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub favorite_agents: Vec<String>,
-    /// Named custom agents shown in the picker alongside registry entries.
-    /// Their `source_id` in [`SelectedAgent`]/`PickerOutcome` is
-    /// `custom:<name>`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Legacy custom-agent entries migrated into `acp.servers` on load.
+    #[serde(default, skip_serializing)]
     pub custom_agents: Vec<CustomAgent>,
-    /// Last session configuration values seen when a prompt was submitted,
-    /// keyed by agent source id and then config option id.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub session_config: HashMap<String, HashMap<String, String>>,
-    /// Model strength score (LMArena Elo) display in the picker.
-    #[serde(default, skip_serializing_if = "ScoresConfig::is_default")]
-    pub scores: ScoresConfig,
+    /// Legacy quick-start Council model table. Values migrate into the role
+    /// tables below and this field is never serialized.
+    #[serde(default, skip_serializing)]
+    pub models: ModelsConfig,
+    /// Thor's coordination and review behavior.
+    #[serde(default, skip_serializing_if = "ThorConfig::is_default")]
+    pub thor: ThorConfig,
+    /// Loki's streaming review behavior.
+    #[serde(default, skip_serializing_if = "LokiConfig::is_default")]
+    pub loki: LokiConfig,
+    /// Eitri's model preference.
+    #[serde(default, skip_serializing_if = "EitriConfig::is_default")]
+    pub eitri: EitriConfig,
+    /// Explicit user-provisioned ACP servers.
+    #[serde(default, skip_serializing_if = "AcpConfig::is_default")]
+    pub acp: AcpConfig,
     /// `/ragnarok` battle knobs.
     #[serde(default, skip_serializing_if = "RagnarokConfig::is_default")]
     pub ragnarok: RagnarokConfig,
+}
+
+fn default_auto() -> String {
+    "auto".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ModelsConfig {
+    #[serde(default = "default_auto")]
+    pub thor: String,
+    #[serde(default = "default_auto")]
+    pub loki: String,
+    #[serde(default = "default_auto")]
+    pub eitri: String,
+}
+
+impl Default for ModelsConfig {
+    fn default() -> Self {
+        Self {
+            thor: default_auto(),
+            loki: default_auto(),
+            eitri: default_auto(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThorConfig {
+    #[serde(default = "default_auto")]
+    pub model: String,
+    #[serde(default = "default_true")]
+    pub discrete_review: bool,
+}
+
+impl Default for ThorConfig {
+    fn default() -> Self {
+        Self {
+            model: default_auto(),
+            discrete_review: true,
+        }
+    }
+}
+
+impl ThorConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LokiConfig {
+    #[serde(default = "default_auto")]
+    pub model: String,
+    #[serde(default = "default_true")]
+    pub streaming_review: bool,
+}
+
+impl Default for LokiConfig {
+    fn default() -> Self {
+        Self {
+            model: default_auto(),
+            streaming_review: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EitriConfig {
+    #[serde(default = "default_auto")]
+    pub model: String,
+}
+
+impl Default for EitriConfig {
+    fn default() -> Self {
+        Self {
+            model: default_auto(),
+        }
+    }
+}
+
+impl EitriConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AcpConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<CustomAcpServer>,
+}
+
+impl AcpConfig {
+    fn is_default(&self) -> bool {
+        self.servers.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomAcpServer {
+    pub name: String,
+    pub command: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+}
+
+impl LokiConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Knobs for `/ragnarok` battles.
@@ -67,47 +181,11 @@ impl RagnarokConfig {
     }
 }
 
-/// Controls the Elo strength scores shown next to selectable models.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ScoresConfig {
-    /// Show Elo scores next to selectable models in the picker.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Override the leaderboard feed URL (defaults to [`crate::scores::DEFAULT_SCORES_URL`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// Manual resolver overrides: `"<agent_id>/<option_id>" -> "<provider>/<model>"`.
-    /// Highest precedence; use for agent-specific tunes or aliases the heuristics miss.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub overrides: HashMap<String, String>,
-}
-
-impl Default for ScoresConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            url: None,
-            overrides: HashMap::new(),
-        }
-    }
-}
-
-impl ScoresConfig {
-    /// True when every field is at its default, so it can be omitted from TOML.
-    fn is_default(&self) -> bool {
-        self.enabled && self.url.is_none() && self.overrides.is_empty()
-    }
-}
-
 fn default_true() -> bool {
     true
 }
 
-/// Launch command resolved by the picker. `source_id` identifies where
-/// the choice came from so the picker can highlight the default row.
-/// `"anvil"` and `"custom"` are reserved (`"custom"` is a legacy shape
-/// for the single ad-hoc custom command); named custom agents use
-/// `custom:<name>`. Everything else is a registry agent id.
+/// Concrete ACP launch selected by the model catalog for a session.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SelectedAgent {
     pub source_id: String,
@@ -118,9 +196,7 @@ pub struct SelectedAgent {
     pub env: HashMap<String, String>,
 }
 
-/// A named, persistent custom agent the user added through the picker.
-/// Shown as a first-class entry in the picker so it never needs to be
-/// re-typed and can be set as the default.
+/// Legacy custom-agent shape retained solely for config migration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CustomAgent {
     pub name: String,
@@ -131,11 +207,21 @@ pub struct CustomAgent {
     pub description: String,
 }
 
-/// Prefix marking a [`SelectedAgent::source_id`] as a named custom agent
-/// (`custom:<name>`).
-pub const CUSTOM_AGENT_SOURCE_PREFIX: &str = "custom:";
-
 impl Config {
+    pub fn role_models(&self) -> ModelsConfig {
+        ModelsConfig {
+            thor: self.thor.model.clone(),
+            loki: self.loki.model.clone(),
+            eitri: self.eitri.model.clone(),
+        }
+    }
+
+    pub fn set_role_models(&mut self, models: &ModelsConfig) {
+        self.thor.model.clone_from(&models.thor);
+        self.loki.model.clone_from(&models.loki);
+        self.eitri.model.clone_from(&models.eitri);
+    }
+
     /// Read the config from `path`. Returns `Config::default()` when the
     /// file does not exist; surfaces a parse error otherwise.
     pub fn load(path: &Path) -> Result<Self> {
@@ -146,7 +232,7 @@ impl Config {
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let mut cfg: Self =
             toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?;
-        cfg.normalize();
+        cfg.normalize()?;
         Ok(cfg)
     }
 
@@ -165,23 +251,32 @@ impl Config {
         Ok(())
     }
 
-    fn normalize(&mut self) {
-        if let Some(agent) = self.agent.as_mut() {
-            if agent.source_id == "anvil" {
-                agent.program = PathBuf::from("uvx");
-                agent.args = vec!["brokk".to_string(), "acp".to_string()];
-            } else if agent.source_id == "custom"
-                || agent.source_id.starts_with(CUSTOM_AGENT_SOURCE_PREFIX)
-            {
-                agent.program = expand_home_shortcut(&agent.program.to_string_lossy());
-                agent.args = agent
-                    .args
-                    .iter()
-                    .map(|arg| expand_home_shortcut(arg).to_string_lossy().into_owned())
-                    .collect();
-            }
-            agent.program = normalize_spawn_program(agent.program.clone());
+    fn normalize(&mut self) -> Result<()> {
+        if self.thor.model == "auto" && self.models.thor != "auto" {
+            self.thor.model.clone_from(&self.models.thor);
         }
+        if self.loki.model == "auto" && self.models.loki != "auto" {
+            self.loki.model.clone_from(&self.models.loki);
+        }
+        if self.eitri.model == "auto" && self.models.eitri != "auto" {
+            self.eitri.model.clone_from(&self.models.eitri);
+        }
+
+        for legacy in &self.custom_agents {
+            if !self
+                .acp
+                .servers
+                .iter()
+                .any(|server| server.name == legacy.name)
+            {
+                self.acp.servers.push(CustomAcpServer {
+                    name: legacy.name.clone(),
+                    command: legacy.program.clone(),
+                    args: legacy.args.clone(),
+                });
+            }
+        }
+
         for custom in self.custom_agents.iter_mut() {
             custom.program = expand_home_shortcut(&custom.program.to_string_lossy());
             custom.program = normalize_spawn_program(custom.program.clone());
@@ -191,6 +286,37 @@ impl Config {
                 .map(|arg| expand_home_shortcut(arg).to_string_lossy().into_owned())
                 .collect();
         }
+        let mut names = std::collections::HashSet::new();
+        for server in &mut self.acp.servers {
+            let valid_name = !server.name.is_empty()
+                && server
+                    .name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+            anyhow::ensure!(
+                valid_name,
+                "custom ACP server name '{}' must contain only letters, digits, '-' or '_'",
+                server.name
+            );
+            anyhow::ensure!(
+                names.insert(server.name.clone()),
+                "duplicate custom ACP server name '{}'",
+                server.name
+            );
+            anyhow::ensure!(
+                !server.command.as_os_str().is_empty(),
+                "custom ACP server '{}' has an empty command",
+                server.name
+            );
+            server.command = expand_home_shortcut(&server.command.to_string_lossy());
+            server.command = normalize_spawn_program(server.command.clone());
+            server.args = server
+                .args
+                .iter()
+                .map(|arg| expand_home_shortcut(arg).to_string_lossy().into_owned())
+                .collect();
+        }
+        Ok(())
     }
 }
 
@@ -352,8 +478,32 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nope.toml");
         let cfg = Config::load(&path).expect("load");
-        assert!(cfg.agent.is_none());
         assert_eq!(cfg.theme, TerminalThemeKind::Dark);
+        assert_eq!(cfg.role_models(), ModelsConfig::default());
+        assert!(cfg.thor.discrete_review);
+        assert!(cfg.loki.streaming_review);
+    }
+
+    #[test]
+    fn council_reviews_default_on_and_can_be_disabled_independently() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[thor]\ndiscrete_review = false\n\n[loki]\nstreaming_review = false\n",
+        )
+        .expect("write config");
+
+        let cfg = Config::load(&path).expect("load config");
+        assert!(!cfg.thor.discrete_review);
+        assert!(!cfg.loki.streaming_review);
+
+        cfg.save(&path).expect("save config");
+        let saved = std::fs::read_to_string(&path).expect("read saved config");
+        assert!(saved.contains("[thor]"), "saved: {saved}");
+        assert!(saved.contains("discrete_review = false"), "saved: {saved}");
+        assert!(saved.contains("[loki]"), "saved: {saved}");
+        assert!(saved.contains("streaming_review = false"), "saved: {saved}");
     }
 
     #[test]
@@ -362,28 +512,26 @@ mod tests {
         let path = dir.path().join("config.toml");
         let cfg = Config {
             theme: TerminalThemeKind::Light,
-            spinner: SpinnerStyle::default(),
-            agent: Some(SelectedAgent {
-                source_id: "claude-acp".to_string(),
-                program: PathBuf::from("/usr/local/bin/claude-acp"),
-                args: vec!["--quiet".to_string()],
-                env: HashMap::from([("FOO".to_string(), "bar".to_string())]),
-            }),
-            favorite_agents: vec!["claude-acp".to_string(), "anvil".to_string()],
-            custom_agents: Vec::new(),
-            session_config: HashMap::new(),
-            scores: ScoresConfig::default(),
-            ragnarok: RagnarokConfig::default(),
+            thor: ThorConfig {
+                model: "gpt-5-6-sol".to_string(),
+                discrete_review: false,
+            },
+            acp: AcpConfig {
+                servers: vec![CustomAcpServer {
+                    name: "company".to_string(),
+                    command: PathBuf::from("/usr/local/bin/company-acp"),
+                    args: vec!["--stdio".to_string()],
+                }],
+            },
+            ..Config::default()
         };
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
         assert_eq!(loaded.theme, TerminalThemeKind::Light);
-        assert_eq!(loaded.favorite_agents, vec!["claude-acp", "anvil"]);
-        let agent = loaded.agent.expect("agent");
-        assert_eq!(agent.source_id, "claude-acp");
-        assert_eq!(agent.program, PathBuf::from("/usr/local/bin/claude-acp"));
-        assert_eq!(agent.args, vec!["--quiet"]);
-        assert_eq!(agent.env.get("FOO"), Some(&"bar".to_string()));
+        assert_eq!(loaded.thor.model, "gpt-5-6-sol");
+        assert!(!loaded.thor.discrete_review);
+        assert_eq!(loaded.acp.servers[0].name, "company");
+        assert_eq!(loaded.acp.servers[0].args, vec!["--stdio"]);
     }
 
     #[test]
@@ -392,74 +540,35 @@ mod tests {
         let path = dir.path().join("nested").join("deep").join("config.toml");
         let cfg = Config {
             theme: TerminalThemeKind::Dark,
-            spinner: SpinnerStyle::default(),
-            agent: Some(SelectedAgent {
-                source_id: "anvil".to_string(),
-                program: PathBuf::from("uvx"),
-                args: vec!["brokk".to_string(), "acp".to_string()],
-                env: HashMap::new(),
-            }),
-            favorite_agents: Vec::new(),
-            custom_agents: Vec::new(),
-            session_config: HashMap::new(),
-            scores: ScoresConfig::default(),
-            ragnarok: RagnarokConfig::default(),
+            ..Config::default()
         };
         cfg.save(&path).expect("save");
         assert!(path.exists());
     }
 
     #[test]
-    fn load_normalizes_legacy_anvil_agent_to_uvx_brokk_acp() {
+    fn legacy_models_migrate_into_role_owned_models() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
             r#"
-[agent]
-source_id = "anvil"
-program = "anvil"
+[models]
+thor = "gpt-5-6-sol"
+loki = "claude-opus-4-8"
+eitri = "gpt-5-6-luna"
 "#,
         )
         .expect("write");
 
         let cfg = Config::load(&path).expect("load");
-        let agent = cfg.agent.expect("agent");
-        assert_eq!(agent.source_id, "anvil");
-        assert_eq!(agent.program, PathBuf::from("uvx"));
-        assert_eq!(agent.args, vec!["brokk", "acp"]);
-    }
-
-    #[test]
-    fn load_expands_custom_agent_home_shortcuts() {
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-[agent]
-source_id = "custom"
-program = "~/bin/agent"
-args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
-"#,
-        )
-        .expect("write");
-
-        let cfg = Config::load(&path).expect("load");
-        let agent = cfg.agent.expect("agent");
-        assert_eq!(agent.source_id, "custom");
-        assert_eq!(agent.program, home.join("bin/agent"));
-        assert_eq!(
-            agent.args,
-            vec![
-                "--config".to_string(),
-                home.join(".config/agent.toml").display().to_string(),
-                "${HOME}/literal".to_string(),
-            ]
-        );
+        assert_eq!(cfg.thor.model, "gpt-5-6-sol");
+        assert_eq!(cfg.loki.model, "claude-opus-4-8");
+        assert_eq!(cfg.eitri.model, "gpt-5-6-luna");
+        cfg.save(&path).expect("save migrated config");
+        let saved = std::fs::read_to_string(path).expect("read migrated config");
+        assert!(!saved.contains("[models]"), "saved: {saved}");
+        assert!(saved.contains("model = \"gpt-5-6-sol\""), "saved: {saved}");
     }
 
     #[test]
@@ -473,14 +582,11 @@ args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
     }
 
     #[test]
-    fn custom_agents_roundtrip_through_save_and_load() {
+    fn legacy_custom_agents_migrate_to_acp_servers_without_serializing_legacy_data() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let cfg = Config {
             theme: TerminalThemeKind::AnsiDark,
-            spinner: SpinnerStyle::default(),
-            agent: None,
-            favorite_agents: Vec::new(),
             custom_agents: vec![
                 CustomAgent {
                     name: "local-claude".to_string(),
@@ -495,42 +601,19 @@ args = ["--config", "$HOME/.config/agent.toml", "${HOME}/literal"]
                     description: String::new(),
                 },
             ],
-            session_config: HashMap::new(),
-            scores: ScoresConfig::default(),
-            ragnarok: RagnarokConfig::default(),
+            ..Config::default()
         };
-        cfg.save(&path).expect("save");
+        let mut migrated = cfg;
+        migrated.normalize().expect("normalize");
+        migrated.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
         assert_eq!(loaded.theme, TerminalThemeKind::AnsiDark);
-        assert_eq!(loaded.custom_agents.len(), 2);
-        assert_eq!(loaded.custom_agents[0].name, "local-claude");
-        assert_eq!(loaded.custom_agents[0].args, vec!["--debug"]);
-        assert_eq!(loaded.custom_agents[1].name, "staging-agent");
-        assert_eq!(loaded.custom_agents[1].description, "");
-    }
-
-    #[test]
-    fn load_normalizes_npx_agent_program_for_spawn() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-[agent]
-source_id = "claude-acp"
-program = "npx"
-args = ["-y", "@example/agent"]
-"#,
-        )
-        .expect("write");
-
-        let cfg = Config::load(&path).expect("load");
-        let agent = cfg.agent.expect("agent");
-        if cfg!(windows) {
-            assert_eq!(agent.program, PathBuf::from("npx.cmd"));
-        } else {
-            assert_eq!(agent.program, PathBuf::from("npx"));
-        }
+        assert!(loaded.custom_agents.is_empty());
+        assert_eq!(loaded.acp.servers.len(), 2);
+        assert_eq!(loaded.acp.servers[0].name, "local-claude");
+        assert_eq!(loaded.acp.servers[0].args, vec!["--debug"]);
+        let body = std::fs::read_to_string(path).expect("read");
+        assert!(!body.contains("custom_agents"), "saved: {body}");
     }
 
     #[test]
@@ -553,11 +636,11 @@ description = "test"
         .expect("write");
 
         let cfg = Config::load(&path).expect("load");
-        assert_eq!(cfg.custom_agents.len(), 1);
-        let agent = &cfg.custom_agents[0];
-        assert_eq!(agent.program, home.join("bin/agent"));
+        assert_eq!(cfg.acp.servers.len(), 1);
+        let server = &cfg.acp.servers[0];
+        assert_eq!(server.command, home.join("bin/agent"));
         assert_eq!(
-            agent.args,
+            server.args,
             vec![
                 "--config".to_string(),
                 home.join(".config/agent.toml").display().to_string(),
@@ -566,34 +649,78 @@ description = "test"
     }
 
     #[test]
-    fn load_expands_home_shortcuts_for_named_custom_default_agent() {
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
+    fn explicit_acp_server_wins_legacy_custom_agent_name_conflict() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
             r#"
-[agent]
-source_id = "custom:my-agent"
-program = "~/bin/agent"
-args = ["--flag", "$HOME/data"]
+[[acp.servers]]
+name = "company"
+command = "/new/acp"
+args = ["--new"]
+
+[[custom_agents]]
+name = "company"
+program = "/legacy/acp"
+args = ["--legacy"]
+description = "old entry"
 "#,
         )
         .expect("write");
 
-        let cfg = Config::load(&path).expect("load");
-        let agent = cfg.agent.expect("agent");
-        assert_eq!(agent.source_id, "custom:my-agent");
-        assert_eq!(agent.program, home.join("bin/agent"));
-        assert_eq!(
-            agent.args,
-            vec![
-                "--flag".to_string(),
-                home.join("data").display().to_string()
-            ]
-        );
+        let config = Config::load(&path).expect("load");
+        assert_eq!(config.acp.servers.len(), 1);
+        assert_eq!(config.acp.servers[0].command, PathBuf::from("/new/acp"));
+        assert_eq!(config.acp.servers[0].args, vec!["--new"]);
+    }
+
+    #[test]
+    fn custom_acp_servers_validate_names_commands_and_duplicates() {
+        for (body, expected) in [
+            (
+                "[[acp.servers]]\nname = 'bad name'\ncommand = 'server'\n",
+                "must contain only",
+            ),
+            (
+                "[[acp.servers]]\nname = 'empty'\ncommand = ''\n",
+                "empty command",
+            ),
+            (
+                "[[acp.servers]]\nname = 'same'\ncommand = 'one'\n[[acp.servers]]\nname = 'same'\ncommand = 'two'\n",
+                "duplicate",
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, body).expect("write");
+            let error = Config::load(&path).expect_err("invalid custom server");
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn saving_legacy_config_drops_obsolete_agent_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+agent = "legacy"
+favorite_agents = ["old"]
+
+[scores]
+source = "arena"
+
+[session_config.old]
+mode = "ask"
+"#,
+        )
+        .expect("write");
+        let config = Config::load(&path).expect("load ignored legacy fields");
+        config.save(&path).expect("save clean schema");
+        let body = std::fs::read_to_string(path).expect("read");
+        assert_eq!(body, "");
     }
 
     #[test]
@@ -602,10 +729,9 @@ args = ["--flag", "$HOME/data"]
         let path = dir.path().join("config.toml");
         Config::default().save(&path).expect("save");
         let body = std::fs::read_to_string(&path).expect("read");
-        // No agent key serialized when None.
         assert!(
-            !body.contains("agent"),
-            "blank config should not write agent: {body:?}"
+            !body.contains("models") && !body.contains("custom_agents"),
+            "blank config should not write legacy fields: {body:?}"
         );
         assert!(
             !body.contains("theme"),

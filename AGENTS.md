@@ -23,7 +23,7 @@ There is no separate `tests/` directory today; tests are colocated in module-lev
 - `cargo clippy --all-targets -- -D warnings` runs lints with warnings treated as errors, matching CI.
 - `cargo test` runs unit tests.
 - `cargo build --release` builds the optimized `mj` binary.
-- `cargo run -- --cwd .` runs the TUI in the current workspace and opens the agent picker when no agent is configured yet.
+- `cargo run -- --cwd .` runs the TUI in the current workspace and resolves the configured Council models through available ACP adapters.
 
 ## Coding Style & Naming Conventions
 

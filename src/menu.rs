@@ -23,7 +23,7 @@ pub struct MenuOption {
     pub label: &'static str,
     /// Dimmed explanation rendered after the label.
     pub hint: String,
-    /// Keys that pick this option immediately (matched case-insensitively).
+    /// Keys that select this option (matched case-insensitively).
     pub shortcuts: &'static [char],
 }
 
@@ -38,10 +38,10 @@ enum KeyOutcome {
 }
 
 /// Show `question` with one selectable row per option plus a dimmed
-/// `footer` hint line. Arrows/Tab move, Enter confirms, Esc picks `initial`
-/// (the safe default), and option shortcut keys or digits pick directly. Ctrl-C
-/// is ignored so a stray buffered interrupt from the just-ended TUI session
-/// cannot immediately dismiss the cleanup prompt. The menu erases itself before
+/// `footer` hint line. Arrows/Tab move, option shortcut keys or digits select,
+/// and Enter confirms. Esc picks `initial` (the safe default). Ctrl-C is ignored
+/// so a stray buffered interrupt from the just-ended TUI session cannot
+/// immediately dismiss the cleanup prompt. The menu erases itself before
 /// returning so callers can print a plain outcome line in its place. Returns
 /// `None` without drawing anything when stdin/stdout is not an interactive
 /// terminal.
@@ -119,19 +119,19 @@ fn key_outcome(
         KeyCode::Down | KeyCode::Right | KeyCode::Tab => KeyOutcome::Select((selected + 1) % len),
         KeyCode::Home => KeyOutcome::Select(0),
         KeyCode::End => KeyOutcome::Select(len - 1),
-        KeyCode::Enter | KeyCode::Char(' ') => KeyOutcome::Choose(selected),
+        KeyCode::Enter => KeyOutcome::Choose(selected),
         KeyCode::Esc => KeyOutcome::Cancel,
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => KeyOutcome::Ignored,
         KeyCode::Char(c) => {
             if let Some(i) = c.to_digit(10).map(|d| d as usize)
                 && (1..=len).contains(&i)
             {
-                return KeyOutcome::Choose(i - 1);
+                return KeyOutcome::Select(i - 1);
             }
             let c = c.to_ascii_lowercase();
             for (i, option) in options.iter().enumerate() {
                 if option.shortcuts.iter().any(|s| s.to_ascii_lowercase() == c) {
-                    return KeyOutcome::Choose(i);
+                    return KeyOutcome::Select(i);
                 }
             }
             KeyOutcome::Ignored
@@ -358,23 +358,58 @@ mod tests {
     }
 
     #[test]
-    fn shortcuts_and_digits_choose_directly() {
+    fn shortcuts_and_digits_only_move_selection() {
         let opts = options();
         assert_eq!(
             key_outcome(KeyCode::Char('y'), KeyModifiers::NONE, 0, &opts),
-            KeyOutcome::Choose(1)
+            KeyOutcome::Select(1)
         );
         assert_eq!(
             key_outcome(KeyCode::Char('N'), KeyModifiers::NONE, 1, &opts),
-            KeyOutcome::Choose(0)
+            KeyOutcome::Select(0)
         );
         assert_eq!(
             key_outcome(KeyCode::Char('2'), KeyModifiers::NONE, 0, &opts),
-            KeyOutcome::Choose(1)
+            KeyOutcome::Select(1)
         );
         assert_eq!(
             key_outcome(KeyCode::Char('x'), KeyModifiers::NONE, 0, &opts),
             KeyOutcome::Ignored
+        );
+    }
+
+    #[test]
+    fn enter_is_the_only_key_that_confirms_a_selection() {
+        let opts = options();
+        let non_confirming_keys = [
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Char(' '),
+            KeyCode::Char('y'),
+            KeyCode::Char('r'),
+            KeyCode::Char('2'),
+        ];
+
+        for key in non_confirming_keys {
+            let outcome = key_outcome(key, KeyModifiers::NONE, 0, &opts);
+            assert!(
+                !matches!(outcome, KeyOutcome::Choose(_)),
+                "{key:?} must not confirm any option, got {outcome:?}"
+            );
+        }
+        assert_eq!(
+            key_outcome(KeyCode::Down, KeyModifiers::NONE, 0, &opts),
+            KeyOutcome::Select(1)
+        );
+        assert_eq!(
+            key_outcome(KeyCode::Enter, KeyModifiers::NONE, 1, &opts),
+            KeyOutcome::Choose(1)
         );
     }
 }

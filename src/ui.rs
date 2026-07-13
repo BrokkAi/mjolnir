@@ -5,6 +5,7 @@
 //! into `AppState`, redraws on every tick, and emits `UiCommand`s back
 //! to the runtime when the user submits prompts or cancels.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::io::{self, Stdout, Write};
 use std::ops::Range;
@@ -50,7 +51,10 @@ use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
 };
 use crate::config;
-use crate::event::{PermissionDecision, PermissionPrompt, PromptImage, UiCommand, UiEvent};
+use crate::event::{
+    LokiActivity, LokiIdentity, PermissionDecision, PermissionPrompt, PromptImage, UiCommand,
+    UiEvent,
+};
 use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
 use crate::ragnarok;
@@ -67,6 +71,7 @@ const TRANSCRIPT_SCROLL_WHEEL_STEP: usize = 3;
 const PROMPT_SIDE_PADDING: u16 = 1;
 pub const INLINE_CHAT_HEIGHT: u16 = 8;
 const INLINE_EXPANDED_MAX_HEIGHT: u16 = 20;
+const INLINE_TRANSCRIPT_TAIL_MAX_ROWS: usize = 12;
 const INLINE_HELP_HEIGHT: u16 = 18;
 /// Inline viewport height for the `/mjconfig` overlay (border + two sections).
 const INLINE_MJCONFIG_HEIGHT: u16 = 15;
@@ -201,7 +206,6 @@ impl TranscriptSink {
             }
             // Otherwise still streaming with nothing new yet: keep holding it.
         }
-
         let stable_entries = stable_transcript_entry_count(state);
         if stable_entries > self.emitted_entries {
             let mut lines = render_transcript_entry_range(
@@ -210,6 +214,7 @@ impl TranscriptSink {
                 self.emitted_entries..stable_entries,
                 transcript_collapse_limit(state),
                 state.theme,
+                false,
             );
             // If the batch ends on a tool call that is (for now) the last
             // transcript entry, its successor is unknown, so hold its trailing
@@ -285,28 +290,148 @@ fn stable_transcript_entry_count(state: &AppState) -> usize {
     stable
 }
 
+/// A derived prompt-bounded view of the source transcript. It deliberately
+/// contains indexes rather than copied entries so the full reader and export
+/// can always render the original ordered activity without reconstruction.
+#[derive(Debug, Clone)]
+struct TranscriptTurn {
+    prompt_index: usize,
+    end: usize,
+    is_compactable: bool,
+    elapsed: Option<Duration>,
+    tool_summary: Option<TurnToolSummary>,
+    final_response_index: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct TurnToolSummary {
+    tools: usize,
+    failures: usize,
+    changed_paths: BTreeSet<String>,
+}
+
+fn transcript_turns(state: &AppState) -> Vec<TranscriptTurn> {
+    let prompt_indexes = state
+        .transcript
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| matches!(entry, Entry::UserPrompt(_)).then_some(index))
+        .collect::<Vec<_>>();
+
+    prompt_indexes
+        .iter()
+        .enumerate()
+        .map(|(position, &prompt_index)| {
+            let end = prompt_indexes
+                .get(position + 1)
+                .copied()
+                .unwrap_or(state.transcript.len());
+            let entries_stable =
+                state.transcript[prompt_index..end]
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, entry)| {
+                        transcript_entry_is_stable(state, prompt_index + offset, entry)
+                    });
+            let has_lifecycle = state.has_prompt_turn(prompt_index);
+            let is_compactable =
+                has_lifecycle && state.prompt_turn_completed(prompt_index) && entries_stable;
+            let tool_summary = is_compactable
+                .then(|| turn_tool_summary(state, prompt_index, end))
+                .flatten();
+            let final_response_index = is_compactable
+                .then(|| turn_final_response_index(state, prompt_index, end))
+                .flatten();
+            TranscriptTurn {
+                prompt_index,
+                end,
+                is_compactable,
+                elapsed: state.prompt_turn_elapsed(prompt_index),
+                tool_summary,
+                final_response_index,
+            }
+        })
+        .collect()
+}
+
+fn turn_final_response_index(state: &AppState, start: usize, end: usize) -> Option<usize> {
+    // The primary agent's last response is the canonical turn conclusion. A
+    // nested actor can report after it, but should not steal this marker.
+    (start..end)
+        .rev()
+        .find(|&index| matches!(state.transcript[index], Entry::AgentMessage(_)))
+        .or_else(|| {
+            (start..end)
+                .rev()
+                .find(|&index| matches!(&state.transcript[index], Entry::CodeAgentMessage(_)))
+        })
+}
+
+fn turn_tool_summary(state: &AppState, start: usize, end: usize) -> Option<TurnToolSummary> {
+    let mut summary = TurnToolSummary {
+        tools: 0,
+        failures: 0,
+        changed_paths: BTreeSet::new(),
+    };
+    for entry in &state.transcript[start..end] {
+        match entry {
+            Entry::ToolCall(id) | Entry::CodeAgentToolCall(id) => {
+                // Count each source entry exactly once, even if a malformed
+                // transcript no longer has its associated live view.
+                summary.tools += 1;
+                if let Some(view) = state.tool_calls.get(id) {
+                    if view.status == ToolCallStatus::Failed {
+                        summary.failures += 1;
+                    }
+                    // A failed call can include a diff-shaped payload, but it
+                    // is not evidence that a file was successfully changed.
+                    if view.status == ToolCallStatus::Completed {
+                        for output in &view.body {
+                            if let ToolCallOutput::Diff { path, .. } = output {
+                                summary.changed_paths.insert(path.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (summary.tools > 0).then_some(summary)
+}
+
 fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bool {
     match entry {
-        Entry::UserPrompt(_) | Entry::System(_) | Entry::SessionBoundary(_) | Entry::Plan(_) => {
-            true
-        }
+        Entry::UserPrompt(_)
+        | Entry::System(_)
+        | Entry::SessionBoundary(_)
+        | Entry::Plan(_)
+        | Entry::CodeAgentPlan(_)
+        | Entry::LokiActivity(_)
+        | Entry::InternalMessage(_) => true,
+        Entry::EphemeralSystem(_) => false,
         Entry::AgentMessage(_) | Entry::AgentThought(_) => {
-            !(state.is_streaming() && idx + 1 == state.transcript.len())
+            state.code_agent_active || !(state.is_streaming() && idx + 1 == state.transcript.len())
         }
-        Entry::ToolCall(id) => state.tool_calls.get(id).is_some_and(|view| {
-            matches!(
-                view.status,
-                ToolCallStatus::Completed | ToolCallStatus::Failed
-            ) && view.body.iter().all(|output| {
-                !matches!(
-                    output,
-                    ToolCallOutput::Terminal {
-                        exit_status: None,
-                        ..
-                    }
-                )
+        Entry::CodeAgentMessage(_) | Entry::CodeAgentThought(_) => {
+            !state.code_agent_active || idx + 1 != state.transcript.len()
+        }
+        Entry::ToolCall(id) | Entry::CodeAgentToolCall(id) => {
+            state.tool_calls.get(id).is_some_and(|view| {
+                matches!(
+                    view.status,
+                    ToolCallStatus::Completed | ToolCallStatus::Failed
+                ) && view.body.iter().all(|output| {
+                    !matches!(
+                        output,
+                        ToolCallOutput::Terminal {
+                            exit_status: None,
+                            ..
+                        }
+                    )
+                })
             })
-        }),
+        }
     }
 }
 
@@ -352,11 +477,17 @@ pub struct UiRunOptions<'a> {
     pub mode: UiMode,
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
-    pub score_store: crate::scores::ScoreStore,
     pub active_agent_launch: Option<ragnarok::Launch>,
     pub session_boundary: Option<String>,
     /// The ACP session cwd; `/ragnarok` battles are rooted here.
     pub session_cwd: PathBuf,
+    pub council_choices: Vec<crate::council::ModelChoice>,
+    pub council_models: crate::config::ModelsConfig,
+    pub active_council_models: crate::config::ModelsConfig,
+    pub thor_review_enabled: bool,
+    pub loki_review_enabled: bool,
+    pub ragnarok_models: Vec<crate::council::ResolvedRole>,
+    pub primary_acp_name: String,
 }
 
 pub struct UiRunResult {
@@ -371,7 +502,6 @@ struct UiInitialState {
     header_labels: HeaderLabels,
     agent_label: Option<String>,
     agent_source_id: Option<String>,
-    score_store: crate::scores::ScoreStore,
     active_agent_launch: Option<ragnarok::Launch>,
     history: Vec<String>,
     transcript_export_dir: Option<PathBuf>,
@@ -380,6 +510,13 @@ struct UiInitialState {
     spinner_style: SpinnerStyle,
     session_boundary: Option<String>,
     session_cwd: PathBuf,
+    council_choices: Vec<crate::council::ModelChoice>,
+    council_models: crate::config::ModelsConfig,
+    active_council_models: crate::config::ModelsConfig,
+    thor_review_enabled: bool,
+    loki_review_enabled: bool,
+    ragnarok_models: Vec<crate::council::ResolvedRole>,
+    primary_acp_name: String,
 }
 
 /// Internal result of [`ui_loop`]. `run` unpacks it into the public
@@ -422,7 +559,6 @@ pub async fn run(
             header_labels,
             agent_label: initial_agent_label,
             agent_source_id: initial_agent_source_id,
-            score_store: options.score_store.clone(),
             active_agent_launch: options.active_agent_launch.clone(),
             history: initial_history,
             transcript_export_dir: options
@@ -434,6 +570,13 @@ pub async fn run(
             spinner_style: options.spinner_style,
             session_boundary: options.session_boundary,
             session_cwd: options.session_cwd,
+            council_choices: options.council_choices,
+            council_models: options.council_models,
+            active_council_models: options.active_council_models,
+            thor_review_enabled: options.thor_review_enabled,
+            loki_review_enabled: options.loki_review_enabled,
+            ragnarok_models: options.ragnarok_models,
+            primary_acp_name: options.primary_acp_name,
         },
         options.mode,
     )
@@ -547,7 +690,13 @@ fn streaming_redraw_budget(mode: UiMode) -> Duration {
 
 fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
     match event {
-        UiEvent::SessionUpdate(_) | UiEvent::TerminalOutput(_) => RedrawCause::Stream,
+        UiEvent::SessionUpdate(_) | UiEvent::TerminalOutput(_) | UiEvent::LokiActivity(_) => {
+            RedrawCause::Stream
+        }
+        UiEvent::CodeAgent(crate::event::CodeAgentEvent::SessionUpdate(_))
+        | UiEvent::CodeAgent(crate::event::CodeAgentEvent::TerminalOutput(_)) => {
+            RedrawCause::Stream
+        }
         UiEvent::Connected { .. }
         | UiEvent::SessionStarted { .. }
         | UiEvent::SessionConfigOptions { .. }
@@ -561,7 +710,9 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
         | UiEvent::RemotePermissionDecision { .. }
         | UiEvent::Warning(_)
         | UiEvent::Info(_)
-        | UiEvent::Fatal(_) => RedrawCause::Interactive,
+        | UiEvent::InternalMessage(_)
+        | UiEvent::Fatal(_)
+        | UiEvent::CodeAgent(_) => RedrawCause::Interactive,
     }
 }
 
@@ -579,10 +730,13 @@ const INLINE_PERMISSION_REPAIR_WINDOW: Duration = Duration::from_secs(2);
 const INLINE_PERMISSION_REPAIR_ATTEMPTS: usize = 3;
 
 /// Maximum number of lines we render from each tool-output entry when
-/// `expand_tool_outputs` is false. Picked to keep the head of long
+/// transcript details are collapsed. Picked to keep the head of long
 /// stdout / diff dumps visible without flushing the surrounding
 /// conversation out of the viewport while a turn is streaming.
 const TOOL_OUTPUT_COLLAPSED_LINES: usize = 6;
+const TOOL_OUTPUT_COLLAPSED_CHARS: usize = 600;
+const MESSAGE_COLLAPSED_LINES: usize = 6;
+const MESSAGE_COLLAPSED_CHARS: usize = 600;
 
 async fn ui_loop(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
@@ -605,9 +759,15 @@ async fn ui_loop(
     if let Some(source_id) = initial.agent_source_id {
         state.agent_source_id = source_id;
     }
-    state.score_store = initial.score_store;
     state.active_agent_launch = initial.active_agent_launch;
     state.session_cwd = initial.session_cwd;
+    state.council_choices = initial.council_choices;
+    state.council_models = initial.council_models;
+    state.active_council_models = initial.active_council_models;
+    state.thor_review_enabled = initial.thor_review_enabled;
+    state.loki_review_enabled = initial.loki_review_enabled;
+    state.ragnarok_models = initial.ragnarok_models;
+    state.set_primary_acp_name(initial.primary_acp_name);
     state.transcript_export_dir = initial.transcript_export_dir;
     state.set_theme(initial.theme_kind);
     state.set_spinner_style(initial.spinner_style);
@@ -615,6 +775,7 @@ async fn ui_loop(
     if let Some(boundary) = initial.session_boundary {
         state.push_session_boundary(boundary);
     }
+    state.announce_waiting_for_primary();
     let mut transcript_scroll = TranscriptScrollState::default();
     let mut transcript_sink = TranscriptSink::default();
     let mut inline_resize_reflow = InlineResizeReflow::default();
@@ -755,6 +916,11 @@ async fn ui_loop(
                             should_force_inline_repair_for_ui_event(mode, &ev);
                         let notification = notification_message_for_event(mode, &state, &ev);
                         state.apply_event(ev);
+                        if state.runtime_closed
+                            && std::env::var_os("MJ_E2E_EXIT_ON_RUNTIME_CLOSE").is_some()
+                        {
+                            state.exit_reason = Some(UiExitReason::Quit);
+                        }
                         drain_queued_prompt(&mut state, cmd_tx);
                         if mode == UiMode::InlineChat
                             && inline_reader_was_active != inline_transcript_viewer_accepts_input(&state)
@@ -797,6 +963,12 @@ async fn ui_loop(
                     }
                     None => {
                         state.mark_runtime_closed();
+                        // Process-level PTY tests use a scripted agent that exits
+                        // after its assertions. Let the normal UI shutdown path
+                        // run without requiring a second synthetic keystroke.
+                        if std::env::var_os("MJ_E2E_EXIT_ON_RUNTIME_CLOSE").is_some() {
+                            state.exit_reason = Some(UiExitReason::Quit);
+                        }
                         pending_redraw.mark_interactive();
                     }
                 }
@@ -992,6 +1164,9 @@ fn notification_message_for_event(
             preview_notification_text(message).unwrap_or_else(|| "agent error".to_string())
         )),
         UiEvent::PermissionRequest(prompt) => Some(permission_request_notification(prompt)),
+        UiEvent::CodeAgent(crate::event::CodeAgentEvent::PermissionRequest(prompt)) => Some(
+            format!("Eitri · {}", permission_request_notification(prompt)),
+        ),
         _ => None,
     }
 }
@@ -1096,6 +1271,9 @@ fn should_force_inline_repair_for_ui_event(mode: UiMode, ev: &UiEvent) -> bool {
                 | UiEvent::CancelPendingPermissions
                 | UiEvent::RemotePermissionDecision { .. }
                 | UiEvent::ElicitationRequest(_)
+                | UiEvent::CodeAgent(crate::event::CodeAgentEvent::PermissionRequest(_))
+                | UiEvent::CodeAgent(crate::event::CodeAgentEvent::ElicitationRequest(_))
+                | UiEvent::CodeAgent(crate::event::CodeAgentEvent::CancelPendingPermissions)
         )
 }
 
@@ -1325,6 +1503,7 @@ fn inline_resize_reflow_snapshot(
         0..stable_entries,
         transcript_collapse_limit(state),
         state.theme,
+        false,
     );
 
     Some(InlineResizeReflowSnapshot {
@@ -1573,6 +1752,7 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
         usize::from(INLINE_CHAT_HEIGHT)
             + usize::from(queued_prompt_row_count(state))
             + usize::from(state.claude_usage.is_some())
+            + inline_transcript_tail_row_count(state, width)
     };
 
     (desired.min(usize::from(u16::MAX)) as u16).clamp(INLINE_CHAT_HEIGHT, max_height)
@@ -1986,6 +2166,10 @@ fn cancel_current_turn(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCo
         return;
     }
     let _ = cmd_tx.send(UiCommand::CancelPrompt);
+    if state.code_agent_active {
+        state.status_line = Some(StatusMessage::info("cancelling Eitri..."));
+        return;
+    }
     state.mark_cancelling();
     let queued = state.queued_prompt_count();
     let msg = if queued > 0 {
@@ -2944,15 +3128,14 @@ fn scroll_to_bottom(state: &mut AppState) {
     state.scroll_offset = 0;
 }
 
-/// Ctrl-T behaviour. The fullscreen TUI re-renders the whole transcript every
-/// frame, so toggling the collapse setting applies retroactively there. Inline
-/// scrollback is immutable once flushed, so the toggle could never reach
-/// already-printed output; instead Ctrl-T opens the full-transcript reader.
+/// Ctrl-T behaviour. The fullscreen TUI can retroactively toggle all compacted
+/// transcript details. Inline scrollback is immutable once flushed, so Ctrl-T
+/// opens a full reader with every message and tool output expanded.
 fn toggle_transcript_expansion(state: &mut AppState, mode: UiMode) {
     if mode == UiMode::InlineChat {
         state.open_transcript_viewer();
     } else {
-        state.toggle_expand_tool_outputs();
+        state.toggle_expand_transcript_details();
     }
 }
 
@@ -3128,6 +3311,54 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
+    if images.is_empty() && (text == "/models" || text.starts_with("/models ")) {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        let args = text["/models".len()..]
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        match args.as_slice() {
+            [] => state.record_status_message(StatusKind::Info, state.council_summary()),
+            [role, model] => match state.set_council_model(role, model) {
+                Ok(message) => state.record_status_message(StatusKind::Info, message),
+                Err(message) => state.record_status_message(StatusKind::Warning, message),
+            },
+            _ => state.record_status_message(
+                StatusKind::Warning,
+                "usage: /models [thor|loki|eitri auto|model-id]",
+            ),
+        }
+        return;
+    }
+
+    if images.is_empty() && (text == "/reviews" || text.starts_with("/reviews ")) {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        let args = text["/reviews".len()..]
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        match args.as_slice() {
+            [] => state.record_status_message(StatusKind::Info, state.review_summary()),
+            [role, value] if matches!(*value, "on" | "off") => {
+                let enabled = *value == "on";
+                match state.set_review_policy(role, enabled) {
+                    Ok(role) => {
+                        let _ = cmd_tx.send(UiCommand::SetReviewPolicy { role, enabled });
+                        state.record_status_message(StatusKind::Info, state.review_summary());
+                    }
+                    Err(message) => state.record_status_message(StatusKind::Warning, message),
+                }
+            }
+            _ => state
+                .record_status_message(StatusKind::Warning, "usage: /reviews [thor|loki on|off]"),
+        }
+        return;
+    }
+
     if images.is_empty() && text == "/export" {
         state.input.clear();
         clear_attachments(state);
@@ -3157,7 +3388,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
                 "acp runtime closed; type /clear for the same agent, /new for the picker, or Ctrl-C to quit",
             );
         } else if state.session_id.is_none() {
-            state.record_status_message(StatusKind::Warning, "waiting for session...");
+            state.announce_waiting_for_primary();
         } else if !state.session_fork_supported {
             state.record_status_message(
                 StatusKind::Warning,
@@ -3220,7 +3451,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
     if state.session_id.is_none() {
-        state.record_status_message(StatusKind::Warning, "waiting for session...");
+        state.announce_waiting_for_primary();
         return;
     }
 
@@ -3409,6 +3640,42 @@ fn draw_mjconfig_menu(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     f.render_widget(footer, rows[2]);
 }
 
+fn loki_identity_label(actor: &LokiIdentity) -> String {
+    let role = loki_role_name(actor);
+    actor
+        .model_name
+        .as_deref()
+        .or(actor.model_value.as_deref())
+        .map(|model| format!("{role} · {model}"))
+        .unwrap_or(role)
+}
+
+fn loki_role_name(actor: &LokiIdentity) -> String {
+    if actor.role == "nested" {
+        "Nested agent".to_string()
+    } else {
+        let mut chars = actor.role.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+            .unwrap_or_else(|| "Agent".to_string())
+    }
+}
+
+fn loki_activity_label(activity: &LokiActivity) -> String {
+    match activity {
+        LokiActivity::Warning { actor, .. } => {
+            format!("{} · warning", loki_identity_label(actor))
+        }
+    }
+}
+
+fn loki_activity_text(activity: &LokiActivity) -> String {
+    match activity {
+        LokiActivity::Warning { message, .. } => message.clone(),
+    }
+}
+
 fn export_transcript(state: &AppState) -> Result<PathBuf> {
     let Some(dir) = &state.transcript_export_dir else {
         anyhow::bail!("transcript export directory is not configured");
@@ -3494,10 +3761,41 @@ fn transcript_export_markdown(state: &AppState) -> String {
             Entry::UserPrompt(text) => push_export_text(&mut out, "You", text),
             Entry::AgentMessage(text) => push_export_text(&mut out, "Agent", text),
             Entry::AgentThought(text) => push_export_text(&mut out, "Thought", text),
-            Entry::System(text) => push_export_text(&mut out, "System", text),
+            Entry::CodeAgentMessage(text) => push_export_text(&mut out, "Eitri", text),
+            Entry::CodeAgentThought(text) => push_export_text(&mut out, "Eitri Thought", text),
+            Entry::LokiActivity(activity) => push_export_text(
+                &mut out,
+                &loki_activity_label(activity),
+                &loki_activity_text(activity),
+            ),
+            Entry::InternalMessage(message) => {
+                let heading = match message.kind {
+                    crate::event::InternalMessageKind::Delegation => {
+                        format!("{} → {} delegation", message.source, message.target)
+                    }
+                    crate::event::InternalMessageKind::Exploration => {
+                        format!("{} → {} · explore", message.source, message.target)
+                    }
+                    crate::event::InternalMessageKind::DiscreteReview => {
+                        format!("{} discrete review", message.source)
+                    }
+                    crate::event::InternalMessageKind::Continuation => {
+                        format!("{} → {} continuation", message.source, message.target)
+                    }
+                };
+                push_export_text(&mut out, &heading, &message.text);
+            }
+            Entry::System(text) | Entry::EphemeralSystem(text) => {
+                push_export_text(&mut out, "System", text)
+            }
             Entry::SessionBoundary(text) => push_export_text(&mut out, "Session", text),
-            Entry::Plan(entries) => {
-                out.push_str("## Plan\n\n");
+            Entry::Plan(entries) | Entry::CodeAgentPlan(entries) => {
+                let heading = if matches!(entry, Entry::CodeAgentPlan(_)) {
+                    "## Eitri Plan\n\n"
+                } else {
+                    "## Plan\n\n"
+                };
+                out.push_str(heading);
                 for entry in entries {
                     out.push_str(&format!(
                         "- {} / {}: {}\n",
@@ -3508,10 +3806,15 @@ fn transcript_export_markdown(state: &AppState) -> String {
                 }
                 out.push('\n');
             }
-            Entry::ToolCall(id) => {
+            Entry::ToolCall(id) | Entry::CodeAgentToolCall(id) => {
                 if let Some(view) = state.tool_calls.get(id) {
+                    let label = if matches!(entry, Entry::CodeAgentToolCall(_)) {
+                        "Eitri Tool"
+                    } else {
+                        "Tool"
+                    };
                     out.push_str(&format!(
-                        "## Tool: {}\n\n- Kind: {}\n- Status: {}\n\n",
+                        "## {label}: {}\n\n- Kind: {}\n- Status: {}\n\n",
                         escape_markdown_text(&view.title),
                         tool_kind_label(view.kind),
                         tool_status_label(view.status)
@@ -3930,7 +4233,7 @@ fn open_config_value_picker_for_shortcut(
         return true;
     }
     if state.session_id.is_none() {
-        state.record_status_message(StatusKind::Warning, "waiting for session...");
+        state.announce_waiting_for_primary();
         return true;
     }
 
@@ -4247,6 +4550,54 @@ fn draw(
     }
 }
 
+fn inline_transcript_tail_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
+    if width == 0 || state.help_overlay {
+        return Vec::new();
+    }
+    let stable_entries = stable_transcript_entry_count(state);
+    render_transcript_entry_range(
+        state,
+        width,
+        stable_entries..state.transcript.len(),
+        transcript_collapse_limit(state),
+        state.theme,
+        false,
+    )
+}
+
+fn inline_transcript_tail_row_count(state: &AppState, width: u16) -> usize {
+    let lines = inline_transcript_tail_lines(state, width);
+    if lines.is_empty() {
+        return 0;
+    }
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .min(INLINE_TRANSCRIPT_TAIL_MAX_ROWS)
+}
+
+fn draw_inline_transcript_tail(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let lines = inline_transcript_tail_lines(state, area.width);
+    if lines.is_empty() {
+        return;
+    }
+    let total = Paragraph::new(lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(area.width);
+    let top = total
+        .saturating_sub(usize::from(area.height))
+        .min(u16::MAX as usize) as u16;
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((top, 0)),
+        area,
+    );
+}
+
 fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     if let Some(pending) = state.pending_permission() {
         draw_inline_permission_view(
@@ -4293,9 +4644,12 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     let has_config_options = !state.selectable_config_options().is_empty();
     let has_usage_quota = state.claude_usage.is_some();
     let queued_row = queued_prompt_row_count(state);
+    let live_rows = inline_transcript_tail_row_count(state, f.area().width)
+        .min(usize::from(f.area().height)) as u16;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(live_rows),
             Constraint::Length(1),
             Constraint::Length(queued_row),
             Constraint::Min(MIN_INPUT_HEIGHT),
@@ -4304,11 +4658,12 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
         ])
         .split(f.area());
 
-    draw_header(f, chunks[0], state);
-    draw_queued_prompt_row(f, chunks[1], state);
-    draw_input(f, chunks[2], state, UiMode::InlineChat);
-    draw_usage_quota_row(f, chunks[3], state);
-    draw_config_shortcuts_row(f, chunks[4], state);
+    draw_inline_transcript_tail(f, chunks[0], state);
+    draw_header(f, chunks[1], state);
+    draw_queued_prompt_row(f, chunks[2], state);
+    draw_input(f, chunks[3], state, UiMode::InlineChat);
+    draw_usage_quota_row(f, chunks[4], state);
+    draw_config_shortcuts_row(f, chunks[5], state);
 
     if state.autocomplete.visible
         && !state.has_pending_permission()
@@ -4475,7 +4830,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
     );
 }
 
-/// Full-screen inline reader for the entire transcript with tool outputs
+/// Full-screen inline reader for the entire transcript with all details
 /// expanded. `scroll_offset` is the index of the top visible line and is
 /// clamped here so End / PageDown can never scroll past the final screen.
 fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
@@ -4487,7 +4842,7 @@ fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" transcript — full history ")
+        .title(" transcript — full history · details expanded ")
         .style(Style::default().fg(state.theme.agent));
     let inner = block.inner(layout[0]);
     f.render_widget(block, layout[0]);
@@ -4509,7 +4864,9 @@ fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut
     }
 
     f.render_widget(
-        Paragraph::new("Up/Down PgUp/PgDn scroll · Home/End top/bottom · Esc or Ctrl-T to close")
+        Paragraph::new(
+            "All details expanded · Up/Down PgUp/PgDn scroll · Home/End top/bottom · Esc or Ctrl-T to close",
+        )
             .style(Style::default().fg(state.theme.muted)),
         layout[1],
     );
@@ -4543,7 +4900,11 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ),
         Span::raw("   "),
     ];
-    let agent_label = state.agent_label.trim();
+    let agent_label = state
+        .code_agent_label
+        .as_deref()
+        .unwrap_or(&state.agent_label)
+        .trim();
     if !agent_label.is_empty() {
         spans.push(Span::styled(
             agent_label.to_string(),
@@ -4674,7 +5035,7 @@ fn format_duration(duration: Duration) -> String {
 }
 
 fn token_usage_label(state: &AppState) -> String {
-    let usage = &state.token_usage;
+    let usage = state.displayed_token_usage();
     let mut parts = Vec::new();
 
     if let Some(input) = usage.input_tokens {
@@ -4768,7 +5129,7 @@ fn draw_transcript(
 /// Block title for the transcript pane. Adds a scroll indicator when
 /// `scroll_offset > 0` so the user knows they're no longer following the
 /// stream and can press End / scroll down to re-attach. The expand
-/// state for tool outputs is appended so Ctrl-T's effect is visible.
+/// state for compacted transcript details is appended so Ctrl-T's effect is visible.
 fn transcript_block_title(state: &AppState) -> String {
     let mut title = String::from(" transcript ");
     if state.scroll_offset > 0 {
@@ -4777,8 +5138,8 @@ fn transcript_block_title(state: &AppState) -> String {
             state.scroll_offset
         ));
     }
-    if state.expand_tool_outputs {
-        title.push_str("[tool output: expanded | Ctrl-T] ");
+    if state.expand_transcript_details {
+        title.push_str("[details: expanded | Ctrl-T] ");
     }
     title
 }
@@ -4790,21 +5151,27 @@ fn render_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
         0..state.transcript.len(),
         transcript_collapse_limit(state),
         state.theme,
+        true,
     )
 }
 
-/// Render the whole transcript with every tool output fully expanded,
-/// regardless of the session collapse setting. Used by the inline
-/// full-transcript reader so users can re-read truncated output in full.
+/// Render the whole transcript with every message and tool output expanded,
+/// regardless of the session collapse setting. Used by the inline reader.
 fn render_full_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
-    render_transcript_entry_range(state, width, 0..state.transcript.len(), None, state.theme)
+    render_transcript_entry_range(
+        state,
+        width,
+        0..state.transcript.len(),
+        None,
+        state.theme,
+        false,
+    )
 }
 
-/// Line budget per tool-output entry for the streaming transcript: `None`
-/// (no limit) when the user expanded outputs, otherwise the collapsed
-/// default that keeps long dumps from flushing the conversation off-screen.
+/// Detail budget for the transcript: `None` when expanded, otherwise the
+/// collapsed default for stable long prose and tool output.
 fn transcript_collapse_limit(state: &AppState) -> Option<usize> {
-    if state.expand_tool_outputs {
+    if state.expand_transcript_details {
         None
     } else {
         Some(TOOL_OUTPUT_COLLAPSED_LINES)
@@ -4817,30 +5184,105 @@ fn render_transcript_entry_range(
     entry_range: Range<usize>,
     collapse_limit: Option<usize>,
     theme: TerminalTheme,
+    compact_completed_turns: bool,
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
+    let turns = compact_completed_turns.then(|| transcript_turns(state));
+    let mut speaker = state.transcript[..entry_range.start]
+        .iter()
+        .filter_map(entry_speaker)
+        .next_back();
     for (offset, entry) in state.transcript[entry_range.clone()].iter().enumerate() {
-        let idx = entry_range.start + offset;
+        let entry_index = entry_range.start + offset;
+        let compact_turn = turns.as_ref().and_then(|turns| {
+            turns.iter().find(|turn| {
+                turn.is_compactable && (turn.prompt_index..turn.end).contains(&entry_index)
+            })
+        });
+        // Completed successful tools are represented by the turn summary.
+        // Do this before speaker grouping so a nested actor with only compacted
+        // tool activity cannot leave behind an empty attribution header.
+        if matches!(entry, Entry::ToolCall(_) | Entry::CodeAgentToolCall(_))
+            && compact_turn.is_some()
+            && tool_entry_is_successful(state, entry)
+        {
+            continue;
+        }
+        let collapse_message =
+            collapse_limit.is_some() && transcript_entry_is_stable(state, entry_index, entry);
+        if let Some(next) = entry_speaker(entry)
+            && speaker.as_deref() != Some(next.as_str())
+        {
+            push_speaker_name(&mut out, &next, theme);
+            speaker = Some(next);
+        }
+        if compact_turn
+            .and_then(|turn| turn.final_response_index)
+            .is_some_and(|index| index == entry_index)
+        {
+            push_turn_final_response_label(&mut out, theme);
+        }
         match entry {
             Entry::UserPrompt(text) => {
-                let mut body = Vec::new();
-                push_plain_lines(&mut body, text.clone(), 0);
-                push_role_block(&mut out, USER_GLYPH, theme.user, body, width);
+                push_plain_message(&mut out, text, collapse_message, theme);
+                if let Some(turn) = compact_turn {
+                    push_turn_header(&mut out, turn.elapsed, theme);
+                    if let Some(summary) = &turn.tool_summary {
+                        push_turn_tool_summary(&mut out, summary, theme);
+                    }
+                    // The turn header is the primary-agent grouping anchor.
+                    // Nested actors still replace it when their visible activity
+                    // appears below.
+                    speaker = Some("Thor".to_string());
+                }
             }
-            Entry::AgentMessage(text) => {
-                let mut body = Vec::new();
-                push_markdown_lines(&mut body, text.clone(), 0, theme);
-                push_role_block(&mut out, AGENT_GLYPH, theme.agent, body, width);
+            Entry::AgentMessage(text) | Entry::CodeAgentMessage(text) => {
+                push_markdown_message(&mut out, text, collapse_message, theme)
             }
-            Entry::AgentThought(text) => {
-                let mut body = Vec::new();
-                push_markdown_lines(&mut body, text.clone(), 0, theme);
-                // Without the old "thought:" label line, the body color is
-                // what tells reasoning apart from the real reply.
-                dim_lines(&mut body, theme.thought);
-                push_role_block(&mut out, THOUGHT_GLYPH, theme.thought, body, width);
+            Entry::AgentThought(text) | Entry::CodeAgentThought(text) => {
+                push_thinking(&mut out, text, theme)
             }
-            Entry::Plan(entries) => {
+            Entry::LokiActivity(activity) => {
+                let text = loki_activity_text(activity);
+                match activity.as_ref() {
+                    LokiActivity::Warning { .. } => {
+                        push_styled_message(&mut out, &text, theme.warning, collapse_message, theme)
+                    }
+                }
+            }
+            Entry::InternalMessage(message) => {
+                let chars = message.text.chars().count();
+                let title = match message.kind {
+                    crate::event::InternalMessageKind::Delegation => {
+                        format!(
+                            "delegated to {} · {}",
+                            message.target,
+                            message_size_label(chars)
+                        )
+                    }
+                    crate::event::InternalMessageKind::Exploration => {
+                        format!("{} → {} · explore", message.source, message.target)
+                    }
+                    crate::event::InternalMessageKind::DiscreteReview => {
+                        format!("discrete review brief · {}", message_size_label(chars))
+                    }
+                    crate::event::InternalMessageKind::Continuation => {
+                        format!(
+                            "continuation for {} · {}",
+                            message.target,
+                            message_size_label(chars)
+                        )
+                    }
+                };
+                out.push(Line::from(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(theme.muted)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                push_markdown_message(&mut out, &message.text, collapse_message, theme);
+            }
+            Entry::Plan(entries) | Entry::CodeAgentPlan(entries) => {
                 out.push(Line::from(Span::styled(
                     "plan",
                     Style::default().fg(theme.tool).add_modifier(Modifier::BOLD),
@@ -4862,36 +5304,22 @@ fn render_transcript_entry_range(
                 }
                 out.push(Line::from(""));
             }
-            Entry::ToolCall(id) => {
+            Entry::ToolCall(id) | Entry::CodeAgentToolCall(id) => {
                 if let Some(view) = state.tool_calls.get(id) {
                     let color = tool_status_color(view.status, theme);
-                    // Successful calls don't need a status marker — the output
-                    // already implies success. Only annotate non-completed states
-                    // (pending/running/failed/interrupted) so they stand out.
-                    let prefix = match view.status {
+                    let status = match view.status {
                         agent_client_protocol::schema::v1::ToolCallStatus::Completed => {
-                            "tool ".to_string()
+                            String::new()
                         }
-                        _ => format!("tool [{}] ", tool_status_label(view.status)),
+                        _ => format!("[{}] ", tool_status_label(view.status)),
                     };
-                    let mut spans = vec![
-                        Span::styled(
-                            prefix,
-                            Style::default().fg(color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("{} ", tool_kind_label(view.kind)),
-                            Style::default().fg(theme.muted),
-                        ),
-                    ];
-                    if matches!(
-                        view.kind,
-                        agent_client_protocol::schema::v1::ToolKind::Execute
-                    ) {
-                        spans.extend(highlight_command(&view.title, theme));
-                    } else {
-                        spans.push(Span::raw(view.title.clone()));
-                    }
+                    let call = format!("{status}{} {}", tool_kind_label(view.kind), view.title);
+                    let spans = vec![Span::styled(
+                        call,
+                        Style::default()
+                            .fg(theme.muted)
+                            .add_modifier(Modifier::ITALIC),
+                    )];
                     // Render the whole tool call — header plus outputs — into a
                     // temporary buffer, wrap each line to the width left of the
                     // gutter, then frame every resulting row with a colored left
@@ -4919,29 +5347,115 @@ fn render_transcript_entry_range(
                     // Consecutive tool calls read as one activity run: let
                     // their rails abut instead of separating every call with
                     // a blank row.
-                    let next_is_tool_call = state.transcript.get(idx + 1).is_some_and(|next| {
-                        matches!(next, Entry::ToolCall(next_id) if state.tool_calls.contains_key(next_id))
-                    });
+                    let next_is_tool_call =
+                        state.transcript.get(entry_index + 1).is_some_and(|next| {
+                            matches!(
+                                next,
+                                Entry::ToolCall(next_id) | Entry::CodeAgentToolCall(next_id)
+                                    if state.tool_calls.contains_key(next_id)
+                            )
+                        });
                     if !next_is_tool_call {
                         out.push(Line::from(""));
                     }
                 }
             }
-            Entry::System(text) => {
-                out.push(Line::from(Span::styled(
-                    text.clone(),
-                    Style::default().fg(theme.accent),
-                )));
-                out.push(Line::from(""));
+            Entry::System(text) | Entry::EphemeralSystem(text) => {
+                push_styled_message(&mut out, text, theme.accent, collapse_message, theme);
             }
             Entry::SessionBoundary(text) => {
-                out.push(Line::from(""));
-                out.push(session_boundary_line(text, width, theme));
-                out.push(Line::from(""));
+                if !text.starts_with("Eitri ·") {
+                    out.push(Line::from(""));
+                    out.push(session_boundary_line(text, width, theme));
+                    out.push(Line::from(""));
+                }
             }
         }
     }
     out
+}
+
+fn tool_entry_is_successful(state: &AppState, entry: &Entry) -> bool {
+    let (Entry::ToolCall(id) | Entry::CodeAgentToolCall(id)) = entry else {
+        return false;
+    };
+    state
+        .tool_calls
+        .get(id)
+        .is_some_and(|view| view.status == ToolCallStatus::Completed)
+}
+
+fn push_turn_header(out: &mut Vec<Line<'static>>, elapsed: Option<Duration>, theme: TerminalTheme) {
+    let label = elapsed
+        .map(|elapsed| format!("Thor · {}", format_duration(elapsed)))
+        .unwrap_or_else(|| "Thor".to_string());
+    out.push(Line::from(Span::styled(
+        label,
+        Style::default()
+            .fg(theme.primary)
+            .add_modifier(Modifier::BOLD),
+    )));
+}
+
+fn push_turn_tool_summary(
+    out: &mut Vec<Line<'static>>,
+    summary: &TurnToolSummary,
+    theme: TerminalTheme,
+) {
+    let mut facts = vec![format!(
+        "{} {}",
+        summary.tools,
+        if summary.tools == 1 { "tool" } else { "tools" }
+    )];
+    if !summary.changed_paths.is_empty() {
+        facts.push(format!(
+            "{} {} changed",
+            summary.changed_paths.len(),
+            if summary.changed_paths.len() == 1 {
+                "file"
+            } else {
+                "files"
+            }
+        ));
+    }
+    if summary.failures > 0 {
+        facts.push(format!("{} failed", summary.failures));
+    }
+    out.push(Line::from(Span::styled(
+        format!("│ {}", facts.join(" · ")),
+        Style::default().fg(theme.muted),
+    )));
+}
+
+fn push_turn_final_response_label(out: &mut Vec<Line<'static>>, theme: TerminalTheme) {
+    out.push(Line::from(Span::styled(
+        "└─ final response",
+        Style::default()
+            .fg(theme.primary)
+            .add_modifier(Modifier::BOLD),
+    )));
+}
+
+fn loki_for_activity(activity: &LokiActivity) -> &LokiIdentity {
+    match activity {
+        LokiActivity::Warning { actor, .. } => actor,
+    }
+}
+
+fn entry_speaker(entry: &Entry) -> Option<String> {
+    match entry {
+        Entry::UserPrompt(_) => Some("You".to_string()),
+        Entry::AgentMessage(_) | Entry::AgentThought(_) | Entry::ToolCall(_) | Entry::Plan(_) => {
+            Some("Thor".to_string())
+        }
+        Entry::CodeAgentMessage(_)
+        | Entry::CodeAgentThought(_)
+        | Entry::CodeAgentToolCall(_)
+        | Entry::CodeAgentPlan(_) => Some("Eitri".to_string()),
+        Entry::LokiActivity(activity) => Some(loki_role_name(loki_for_activity(activity))),
+        Entry::InternalMessage(message) => Some(message.source.clone()),
+        Entry::System(_) | Entry::EphemeralSystem(_) | Entry::SessionBoundary(_) => None,
+    }
 }
 
 fn session_boundary_line(text: &str, width: u16, theme: TerminalTheme) -> Line<'static> {
@@ -4963,82 +5477,146 @@ fn session_boundary_line(text: &str, width: u16, theme: TerminalTheme) -> Line<'
     ])
 }
 
-/// Role glyphs shown in the two-cell gutter that opens every prose block:
-/// `❯` for the user's prompt, `●` for the agent's reply, `○` for reasoning.
-/// They replace the old full-width `you:`/`agent:`/`thought:` label lines,
-/// which cost one row per block and made turn-heavy transcripts read as a
-/// stack of headers.
-const USER_GLYPH: &str = "❯";
-const AGENT_GLYPH: &str = "●";
-const THOUGHT_GLYPH: &str = "○";
-const ROLE_GUTTER_WIDTH: u16 = 2;
+fn push_speaker_name(out: &mut Vec<Line<'static>>, name: &str, theme: TerminalTheme) {
+    out.push(Line::from(Span::styled(
+        name.to_string(),
+        Style::default()
+            .fg(god_name_color(name, theme))
+            .add_modifier(Modifier::BOLD),
+    )));
+}
 
-/// Frame a prose block (user prompt, agent message, thought) with a role
-/// gutter: a colored glyph on the first visual row and a two-space hanging
-/// indent on every continuation row. Wrapping happens here — as with tool
-/// blocks — so the hanging indent survives on wrapped rows; a glyph prepended
-/// to one logical line would leave continuation rows flush-left.
-fn push_role_block(
+fn god_name_color(role: &str, theme: TerminalTheme) -> Color {
+    if role.eq_ignore_ascii_case("You") {
+        theme.user
+    } else if role.eq_ignore_ascii_case("Thor") {
+        theme.primary
+    } else if role.eq_ignore_ascii_case("Loki") {
+        theme.secondary
+    } else if role.eq_ignore_ascii_case("Eitri") {
+        theme.code
+    } else {
+        theme.agent
+    }
+}
+
+fn push_thinking(out: &mut Vec<Line<'static>>, text: &str, theme: TerminalTheme) {
+    let text = text
+        .replace("<!-- -->", " ")
+        .replace("<!---->", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        return;
+    }
+    let thought_style = Style::default().fg(theme.thought);
+    out.push(Line::from(inline_markdown_spans_with_style(
+        &text,
+        theme,
+        thought_style,
+    )));
+}
+
+fn push_plain_message(
     out: &mut Vec<Line<'static>>,
-    glyph: &str,
-    color: Color,
-    body: Vec<Line<'static>>,
-    width: u16,
+    text: &str,
+    collapse: bool,
+    theme: TerminalTheme,
 ) {
-    debug_assert_eq!(
-        glyph.width() + 1,
-        ROLE_GUTTER_WIDTH as usize,
-        "role glyph marker must be exactly ROLE_GUTTER_WIDTH cells wide"
-    );
-    let content_width = usize::from(width.saturating_sub(ROLE_GUTTER_WIDTH)).max(1);
-    let mut glyph_pending = true;
-    for line in body {
-        for row in wrap_tool_line(line, content_width) {
-            let row_is_empty = row.spans.iter().all(|span| span.content.trim().is_empty());
-            if row_is_empty {
-                // Leading blanks (before the glyph is placed) and interior
-                // paragraph breaks both render as truly empty rows; the glyph
-                // waits for the first row that carries content so it never
-                // lands on an empty line with the text detached below it.
-                out.push(Line::from(""));
-                continue;
-            }
-            let marker = if glyph_pending {
-                format!("{glyph} ")
-            } else {
-                " ".repeat(ROLE_GUTTER_WIDTH as usize)
-            };
-            glyph_pending = false;
-            let mut spans = vec![Span::styled(
-                marker,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            )];
-            spans.extend(row.spans);
-            out.push(Line::from(spans));
-        }
+    let (preview, collapsed) = message_preview(text, collapse);
+    for raw in preview.split('\n') {
+        out.push(Line::from(raw.to_string()));
+    }
+    if collapsed {
+        push_message_collapse_hint(out, theme);
     }
     out.push(Line::from(""));
 }
 
-/// Re-tint every span in a thought body to the reasoning color so it reads
-/// uniformly as secondary text. This used to skip explicitly-colored spans, but
-/// markdown headings carry `theme.text` — the very primary color a real reply
-/// uses — so a heading inside reasoning rendered identically to a reply heading
-/// (and inline/fenced code kept its own color too). Flattening the whole body
-/// to the thought color is what actually keeps reasoning distinct from the
-/// answer; structure still reads from the indent and list/heading markers.
-fn dim_lines(lines: &mut [Line<'static>], color: Color) {
-    for line in lines {
-        for span in &mut line.spans {
-            span.style.fg = Some(color);
-        }
+fn push_styled_message(
+    out: &mut Vec<Line<'static>>,
+    text: &str,
+    color: Color,
+    collapse: bool,
+    theme: TerminalTheme,
+) {
+    let (preview, collapsed) = message_preview(text, collapse);
+    for raw in preview.split('\n') {
+        out.push(Line::from(Span::styled(
+            raw.to_string(),
+            Style::default().fg(color),
+        )));
     }
+    if collapsed {
+        push_message_collapse_hint(out, theme);
+    }
+    out.push(Line::from(""));
 }
 
-fn push_plain_lines(out: &mut Vec<Line<'static>>, text: String, indent: usize) {
-    let prefix = " ".repeat(indent);
-    for raw in text.split('\n') {
-        out.push(Line::from(format!("{prefix}{raw}")));
+fn push_markdown_message(
+    out: &mut Vec<Line<'static>>,
+    text: &str,
+    collapse: bool,
+    theme: TerminalTheme,
+) {
+    let (preview, collapsed) = message_preview(text, collapse);
+    push_markdown_lines(out, preview, 0, theme);
+    if collapsed {
+        push_message_collapse_hint(out, theme);
+    }
+    out.push(Line::from(""));
+}
+
+fn message_preview(text: &str, collapse: bool) -> (String, bool) {
+    let total_chars = text.chars().count();
+    let total_lines = text.split('\n').count();
+    let collapsed = collapse
+        && (total_chars > MESSAGE_COLLAPSED_CHARS || total_lines > MESSAGE_COLLAPSED_LINES);
+    if !collapsed {
+        return (text.to_string(), false);
+    }
+
+    let mut preview = String::new();
+    let mut remaining = MESSAGE_COLLAPSED_CHARS;
+    for (index, line) in text.split('\n').take(MESSAGE_COLLAPSED_LINES).enumerate() {
+        if index > 0 {
+            if remaining == 0 {
+                break;
+            }
+            preview.push('\n');
+            remaining -= 1;
+        }
+        if remaining == 0 {
+            break;
+        }
+        let mut taken = 0;
+        for ch in line.chars().take(remaining) {
+            preview.push(ch);
+            taken += 1;
+        }
+        remaining -= taken;
+        if taken < line.chars().count() {
+            break;
+        }
+    }
+    (preview, true)
+}
+
+fn push_message_collapse_hint(out: &mut Vec<Line<'static>>, theme: TerminalTheme) {
+    out.push(Line::from(Span::styled(
+        "… details hidden (Ctrl-T to expand)",
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::ITALIC),
+    )));
+}
+
+fn message_size_label(chars: usize) -> String {
+    if chars >= 1_000 {
+        format!("{:.1}k chars", chars as f64 / 1_000.0)
+    } else {
+        format!("{chars} chars")
     }
 }
 
@@ -5058,7 +5636,71 @@ fn push_tool_markdown_lines_limited(
     collapse_limit: Option<usize>,
     theme: TerminalTheme,
 ) {
-    push_markdown_lines_limited_inner(out, text, indent, collapse_limit, theme, true);
+    let (preview, hidden) = tool_output_preview(&text, collapse_limit);
+    if let Some(ToolOutputHidden::Lines(lines)) = hidden {
+        push_tool_collapse_hint(out, indent, ToolOutputHidden::Lines(lines), theme);
+    }
+    push_markdown_lines_limited_inner(out, preview, indent, None, theme, true);
+    if let Some(ToolOutputHidden::Details) = hidden {
+        push_tool_collapse_hint(out, indent, ToolOutputHidden::Details, theme);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolOutputHidden {
+    Lines(usize),
+    Details,
+}
+
+fn tool_output_preview(
+    text: &str,
+    collapse_limit: Option<usize>,
+) -> (String, Option<ToolOutputHidden>) {
+    let Some(line_limit) = collapse_limit else {
+        return (text.to_string(), None);
+    };
+    let total_chars = text.chars().count();
+    let total_lines = text.split('\n').count();
+    let chars_over = total_chars > TOOL_OUTPUT_COLLAPSED_CHARS;
+    let lines_over = total_lines > line_limit;
+    if !chars_over && !lines_over {
+        return (text.to_string(), None);
+    }
+
+    if lines_over && !chars_over {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let hidden = lines.len().saturating_sub(line_limit);
+        return (
+            lines[hidden..].join("\n"),
+            Some(ToolOutputHidden::Lines(hidden)),
+        );
+    }
+
+    let mut preview = String::new();
+    let mut remaining_chars = TOOL_OUTPUT_COLLAPSED_CHARS;
+    for (index, line) in text.split('\n').take(line_limit).enumerate() {
+        if index > 0 {
+            if remaining_chars == 0 {
+                break;
+            }
+            preview.push('\n');
+            remaining_chars -= 1;
+        }
+        for ch in line.chars().take(remaining_chars) {
+            preview.push(ch);
+            remaining_chars -= 1;
+        }
+        if remaining_chars == 0 {
+            break;
+        }
+    }
+
+    let hidden = if chars_over {
+        ToolOutputHidden::Details
+    } else {
+        ToolOutputHidden::Lines(total_lines.saturating_sub(line_limit))
+    };
+    (preview, Some(hidden))
 }
 
 fn push_markdown_lines_limited_inner(
@@ -5480,35 +6122,29 @@ fn push_tool_outputs(
                 exit_status,
                 ..
             } => {
-                out.push(Line::from(Span::styled(
-                    "  terminal output",
-                    Style::default()
-                        .fg(theme.terminal)
-                        .add_modifier(Modifier::BOLD),
-                )));
                 if *truncated {
                     out.push(Line::from(Span::styled(
-                        "    [output truncated]",
+                        "  [output truncated]",
                         Style::default().fg(theme.muted),
                     )));
                 }
                 if !output.trim().is_empty() {
-                    push_tool_text_lines(out, output.clone(), 4, collapse_limit, theme);
+                    push_tool_text_lines(out, output.clone(), 2, collapse_limit, theme);
                 } else if exit_status.is_some() {
                     out.push(Line::from(Span::styled(
-                        "    no stdout/stderr captured",
+                        "  no stdout/stderr captured",
                         Style::default().fg(theme.muted),
                     )));
                 } else {
                     let state = terminal_empty_state_label(tool_status);
                     out.push(Line::from(Span::styled(
-                        format!("    {state}"),
+                        format!("  {state}"),
                         Style::default().fg(theme.muted),
                     )));
                 }
                 if let Some(status) = exit_status {
                     out.push(Line::from(Span::styled(
-                        format!("    exit {}", terminal_exit_status_label(status)),
+                        format!("  exit {}", terminal_exit_status_label(status)),
                         Style::default().fg(theme.muted),
                     )));
                 }
@@ -5548,25 +6184,42 @@ fn push_tool_text_lines(
     collapse_limit: Option<usize>,
     theme: TerminalTheme,
 ) {
+    let (preview, hidden) = tool_output_preview(&text, collapse_limit);
     let prefix = " ".repeat(indent);
-    let lines: Vec<&str> = text.split('\n').collect();
-    // Keep the tail, not the head — see push_markdown_lines_limited_inner.
-    let hidden = collapsed_head_len(lines.len(), collapse_limit);
-    if hidden > 0 {
-        push_collapse_hint(out, indent, hidden, theme);
-    }
-    for raw in &lines[hidden..] {
+    for raw in preview.split('\n') {
         let line = format!("{prefix}{raw}");
         out.push(Line::from(Span::styled(
             line,
             tool_output_line_style(raw, theme),
         )));
     }
+    if let Some(hidden) = hidden {
+        push_tool_collapse_hint(out, indent, hidden, theme);
+    }
 }
 
-/// Number of leading lines to hide so a collapsed block keeps its last `limit`
-/// lines — the tail, where errors, summaries, and exit status live. Returns `0`
-/// when there is no limit or the block already fits.
+fn push_tool_collapse_hint(
+    out: &mut Vec<Line<'static>>,
+    indent: usize,
+    hidden: ToolOutputHidden,
+    theme: TerminalTheme,
+) {
+    match hidden {
+        ToolOutputHidden::Lines(lines) => push_collapse_hint(out, indent, lines, theme),
+        ToolOutputHidden::Details => {
+            let prefix = " ".repeat(indent);
+            out.push(Line::from(Span::styled(
+                format!("{prefix}… details hidden (Ctrl-T to expand)"),
+                Style::default()
+                    .fg(theme.muted)
+                    .add_modifier(Modifier::ITALIC),
+            )));
+        }
+    }
+}
+
+/// Number of leading lines to hide so a collapsed markdown block keeps its
+/// last `limit` lines. Returns `0` when there is no limit or the block fits.
 fn collapsed_head_len(total_lines: usize, collapse_limit: Option<usize>) -> usize {
     match collapse_limit {
         Some(limit) if total_lines > limit => total_lines - limit,
@@ -5593,29 +6246,8 @@ fn push_collapse_hint(
     )));
 }
 
-fn tool_output_line_style(raw: &str, theme: TerminalTheme) -> Style {
-    let lower = raw.to_ascii_lowercase();
-    if lower.contains("error")
-        || lower.contains("failed")
-        || lower.contains("panic")
-        || lower.contains("denied")
-    {
-        Style::default()
-            .fg(theme.error)
-            .add_modifier(Modifier::BOLD)
-    } else if lower.contains("warning") || lower.contains("warn") {
-        Style::default().fg(theme.warning)
-    } else if lower.contains("success")
-        || lower.contains("passed")
-        || lower == "ok"
-        || lower.ends_with(" ok")
-    {
-        Style::default().fg(theme.success)
-    } else if raw.trim_start().starts_with('$') {
-        Style::default().fg(theme.primary)
-    } else {
-        Style::default().fg(theme.subtle)
-    }
+fn tool_output_line_style(_raw: &str, theme: TerminalTheme) -> Style {
+    Style::default().fg(theme.subtle)
 }
 
 fn push_diff_output(
@@ -6186,91 +6818,6 @@ fn positional_line_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine>
         }
     }
     lines
-}
-
-/// Returns true if `token` is a shell control/redirection operator that
-/// separates distinct commands (so the next word starts a fresh program).
-fn is_shell_operator(token: &str) -> bool {
-    matches!(
-        token,
-        "|" | "||" | "&&" | "&" | ";" | ">" | ">>" | "<" | "<<" | "2>" | "2>&1" | "|&"
-    )
-}
-
-/// Lightweight syntax highlighting for a displayed shell command.
-///
-/// Tokenizes on whitespace (preserving the original spacing) and colors the
-/// program name, subcommand, flags, and shell operators distinctly. This is
-/// intentionally simple — it does not parse quoting or expansions, it just
-/// improves at-a-glance readability of the command line.
-fn highlight_command(cmd: &str, theme: TerminalTheme) -> Vec<Span<'static>> {
-    let program_style = Style::default()
-        .fg(theme.primary)
-        .add_modifier(Modifier::BOLD);
-    let subcommand_style = Style::default().fg(theme.secondary);
-    let flag_style = Style::default().fg(theme.accent);
-    let operator_style = Style::default().fg(theme.muted);
-    let arg_style = Style::default().fg(theme.text);
-
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    // Next word token is expected to be a program name (start of the command
-    // or immediately after a shell operator).
-    let mut expect_program = true;
-    let mut subcommand_seen = false;
-
-    let mut rest = cmd;
-    while !rest.is_empty() {
-        // Emit any leading whitespace run verbatim so spacing is preserved.
-        let ws_len: usize = rest
-            .chars()
-            .take_while(|c| c.is_whitespace())
-            .map(char::len_utf8)
-            .sum();
-        if ws_len > 0 {
-            spans.push(Span::raw(rest[..ws_len].to_string()));
-            rest = &rest[ws_len..];
-            continue;
-        }
-
-        let tok_len: usize = rest
-            .chars()
-            .take_while(|c| !c.is_whitespace())
-            .map(char::len_utf8)
-            .sum();
-        let token = &rest[..tok_len];
-        rest = &rest[tok_len..];
-
-        let style = if is_shell_operator(token) {
-            expect_program = true;
-            subcommand_seen = false;
-            operator_style
-        } else if expect_program {
-            // Leading `FOO=bar` assignments precede the program; keep waiting.
-            if token.contains('=') && !token.starts_with('-') {
-                arg_style
-            } else {
-                expect_program = false;
-                program_style
-            }
-        } else if token.starts_with('-') {
-            flag_style
-        } else if !subcommand_seen
-            && !token.contains('/')
-            && !token.contains('.')
-            && !token.contains('=')
-        {
-            // First plain word after the program reads as a subcommand
-            // (e.g. `status` in `git status`); paths and `key=value` args do not.
-            subcommand_seen = true;
-            subcommand_style
-        } else {
-            arg_style
-        };
-
-        spans.push(Span::styled(token.to_string(), style));
-    }
-
-    spans
 }
 
 fn tool_kind_label(kind: agent_client_protocol::schema::v1::ToolKind) -> &'static str {
@@ -7119,10 +7666,15 @@ fn permission_view_lines(
     theme: TerminalTheme,
 ) -> Vec<Line<'static>> {
     let selected = clamp_permission_selected(pending.selected, pending.prompt.options.len());
-    let title = if queue_len > 1 {
-        format!("permission request (1 of {queue_len})")
+    let source = if pending.code_agent {
+        "Eitri permission"
     } else {
-        "permission request".to_string()
+        "permission request"
+    };
+    let title = if queue_len > 1 {
+        format!("{source} (1 of {queue_len})")
+    } else {
+        source.to_string()
     };
     let mut lines = vec![Line::from(Span::styled(
         title,
@@ -7208,10 +7760,15 @@ fn elicitation_view_lines(
     theme: TerminalTheme,
 ) -> ElicitationContent {
     let view = classify_elicitation(&pending.prompt);
-    let heading = if queue_len > 1 {
-        format!("setup request (1 of {queue_len})")
+    let source = if pending.code_agent {
+        "Eitri setup"
     } else {
-        "setup request".to_string()
+        "setup request"
+    };
+    let heading = if queue_len > 1 {
+        format!("{source} (1 of {queue_len})")
+    } else {
+        source.to_string()
     };
     let mut lines = vec![Line::from(Span::styled(
         heading,
@@ -7771,7 +8328,7 @@ fn help_modal_lines(
         help_blank_line(),
         help_command_line(
             "Built-in commands:",
-            "/clear keeps agent; /new opens agent picker; /load opens session picker",
+            "/clear keeps model; /new applies saved models; /load opens session picker",
             theme,
         ),
     ]);
@@ -8208,28 +8765,18 @@ fn config_value_row_text(choice: &ConfigValueChoice, score: Option<&str>, width:
 /// Attribution shown under a model-selection picker explaining the trailing
 /// number, or `None` when scores aren't being rendered (not a model option, or
 /// scoring disabled). Keeps a blank score readable as "not ranked".
-fn model_score_legend(state: &AppState, option: &SessionConfigOption) -> Option<&'static str> {
-    (crate::app::is_model_config_option(option) && state.score_store.is_active()).then_some(
-        "elo: LMArena text-arena rating, higher is better · https://lmarena.ai · blank = not ranked",
-    )
+fn model_score_legend(_state: &AppState, _option: &SessionConfigOption) -> Option<&'static str> {
+    None
 }
 
 /// The score suffix for one model choice, or `None` when this option isn't a
 /// model option or scoring is disabled/uninstalled (so nothing is appended).
 fn model_choice_score(
-    state: &AppState,
-    option: &SessionConfigOption,
-    choice: &ConfigValueChoice,
+    _state: &AppState,
+    _option: &SessionConfigOption,
+    _choice: &ConfigValueChoice,
 ) -> Option<String> {
-    if !crate::app::is_model_config_option(option) {
-        return None;
-    }
-    state.score_store.score_suffix(
-        &state.agent_source_id,
-        &choice.value.to_string(),
-        &choice.name,
-        choice.description.as_deref().unwrap_or_default(),
-    )
+    None
 }
 
 // ===========================================================================
@@ -8241,7 +8788,7 @@ const RAGNAROK_ACTION_TTL: Duration = Duration::from_secs(12);
 /// Animation frame cadence (shares the spinner heartbeat).
 const RAGNAROK_FRAME_MS: u128 = 250;
 const RAGNAROK_CARD_MIN_WIDTH: u16 = 24;
-// Borders (2) + agent/elo line + 7 half-block sprite rows + vigor bar +
+// Borders (2) + agent/pass_at_1 line + 7 half-block sprite rows + vigor bar +
 // action caption.
 const RAGNAROK_CARD_HEIGHT: u16 = 12;
 const RAGNAROK_THOR_STRIP_HEIGHT: u16 = 3;
@@ -8264,11 +8811,7 @@ fn start_ragnarok(
     let cfg = ragnarok::BattleConfig {
         task: task.clone(),
         cwd: state.session_cwd.clone(),
-        config_path: state
-            .config_path
-            .clone()
-            .unwrap_or_else(config::default_config_path),
-        score_store: state.score_store.clone(),
+        available_models: state.ragnarok_models.clone(),
         thor_host: active_thor_host(state),
     };
     state.ragnarok = Some(RagnarokUi::new(task, abort_tx, proceed_tx));
@@ -9110,13 +9653,14 @@ fn draw_fighter_card(
     }
 
     let inner_width = inner.width as usize;
-    let star = if fighter.card.provisional { "*" } else { "" };
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         fit_width(
             format!(
-                "{} ⚡{}{star}",
-                fighter.card.agent_source_id, fighter.card.elo
+                "{} ⚡{:.1}% · ${:.2}",
+                fighter.card.agent_source_id,
+                fighter.card.pass_at_1_bps as f64 / 100.0,
+                fighter.card.mean_cost_usd
             ),
             inner_width,
         ),
@@ -9364,7 +9908,7 @@ fn draw_ragnarok_verdict(
     if verdict.thor_fallback {
         lines.push(Line::from(Span::styled(
             fit_width(
-                "(Thor's judgment was garbled; finalists stand in Elo order)",
+                "(Thor's judgment was garbled; finalists stand in Pass@1 order)",
                 width,
             ),
             Style::default().fg(theme.muted),
@@ -9567,7 +10111,10 @@ mod tests {
 
     use crate::app::StatusKind;
     use crate::claude_usage::ClaudeUsageReport;
-    use crate::event::{ElicitationPrompt, SessionConfigTarget, TerminalOutputSnapshot};
+    use crate::event::{
+        CodeAgentEvent, CodeAgentOutcome, ElicitationPrompt, InternalMessage, SessionConfigTarget,
+        TerminalOutputSnapshot,
+    };
 
     use super::*;
     use agent_client_protocol::schema::v1::{
@@ -9575,8 +10122,8 @@ mod tests {
         ElicitationMode, ElicitationSchema, ElicitationSessionScope, ElicitationUrlMode,
         EnumOption, PermissionOption, PermissionOptionKind, SessionConfigOption,
         SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId,
-        SessionUpdate, StopReason, StringPropertySchema, TerminalExitStatus, TextContent,
-        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        SessionUpdate, StopReason, StringPropertySchema, TerminalExitStatus, TextContent, ToolCall,
+        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::{Backend, TestBackend};
@@ -9634,9 +10181,9 @@ mod tests {
             group: None,
         };
 
-        let row = config_value_row_text(&choice, Some("1463 elo"), 32);
+        let row = config_value_row_text(&choice, Some("1463 pass_at_1"), 32);
 
-        assert!(row.ends_with("  1463 elo"), "{row}");
+        assert!(row.ends_with("  1463 pass_at_1"), "{row}");
         assert!(row.width() <= 32, "{row}");
     }
 
@@ -9761,6 +10308,29 @@ mod tests {
     fn token_usage_label_uses_dash_format_when_usage_is_missing() {
         let state = AppState::new();
         assert_eq!(token_usage_label(&state), "in: - · out: - · ctx: -");
+    }
+
+    #[test]
+    fn header_switches_to_fresh_eitri_usage_and_restores_thor_afterward() {
+        let mut state = AppState::new();
+        state.token_usage.context_used = Some(42_000);
+        state.token_usage.context_size = Some(128_000);
+        assert_eq!(token_usage_label(&state), "ctx: 42.0k");
+
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Started {
+            label: "Eitri · builder".to_string(),
+        }));
+        assert_eq!(token_usage_label(&state), "in: - · out: - · ctx: -");
+
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::UsageUpdate(UsageUpdate::new(900, 128_000)),
+        )));
+        assert_eq!(token_usage_label(&state), "ctx: 900");
+
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Finished {
+            outcome: CodeAgentOutcome::Completed,
+        }));
+        assert_eq!(token_usage_label(&state), "ctx: 42.0k");
     }
 
     #[test]
@@ -9898,6 +10468,7 @@ mod tests {
             scroll_offset: None,
             opened_at: Instant::now(),
             repair_attempts: 0,
+            code_agent: false,
         }
     }
 
@@ -9945,6 +10516,7 @@ mod tests {
             selected: 0,
             scroll_offset: None,
             input: String::new(),
+            code_agent: false,
         };
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -9978,6 +10550,7 @@ mod tests {
             selected: 0,
             scroll_offset: None,
             input: String::new(),
+            code_agent: false,
         };
         let backend = TestBackend::new(100, 60);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -10132,6 +10705,7 @@ mod tests {
             selected: 0,
             scroll_offset: None,
             input: "sk-or-abc".to_string(),
+            code_agent: false,
         };
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -11627,6 +12201,30 @@ mod tests {
     }
 
     #[test]
+    fn transcript_sink_waits_for_ephemeral_connection_message_to_finalize() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+        state.set_primary_acp_name("Claude Code");
+
+        state.announce_waiting_for_primary();
+        assert!(sink.pending_lines(&state, 80).is_empty());
+
+        state.apply_event(UiEvent::Connected {
+            agent_name: Some("claude-agent-acp".into()),
+            agent_version: Some("1.0".into()),
+            prompt_images_supported: false,
+            session_fork_supported: false,
+        });
+        let connected: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(connected, vec!["Connected to Claude Code", ""]);
+        assert!(sink.pending_lines(&state, 80).is_empty());
+    }
+
+    #[test]
     fn transcript_sink_can_resync_after_resize_replay() {
         let mut state = AppState::new();
         let mut sink = TranscriptSink::default();
@@ -11762,7 +12360,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_resize_reflow_snapshot_replays_stable_entries_at_new_width() {
+    fn inline_resize_reflow_snapshot_replays_streamed_prefix_at_new_width() {
         let mut state = AppState::new();
         state.record_user_prompt("hello from the resize test".to_string());
         state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
@@ -11781,7 +12379,7 @@ mod tests {
         assert_eq!(snapshot.actual_height, 4);
         assert_eq!(snapshot.stable_entries, 1);
         let replayed: Vec<String> = snapshot.lines.iter().map(line_text).collect();
-        assert_eq!(replayed, vec!["❯ hello from", "  the resize", "  test", ""]);
+        assert!(replayed.join("\n").contains("hello from"));
     }
 
     #[test]
@@ -11808,7 +12406,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_sink_emits_stable_prefix_during_streaming_turn() {
+    fn transcript_sink_streams_stable_prefix_during_foreground_turn() {
         let mut state = AppState::new();
         let mut sink = TranscriptSink::default();
 
@@ -11817,13 +12415,12 @@ mod tests {
             text_chunk("world"),
         )));
 
-        let prompt: Vec<String> = sink
+        let pending: Vec<String> = sink
             .pending_lines(&state, 80)
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(prompt, vec!["❯ hello", ""]);
-        assert!(sink.pending_lines(&state, 80).is_empty());
+        assert_eq!(pending, vec!["You", "hello", ""]);
 
         state.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
@@ -11834,8 +12431,458 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(rendered, vec!["● world", ""]);
+        assert_eq!(rendered, vec!["Thor", "world", ""]);
         assert!(sink.pending_lines(&state, 80).is_empty());
+    }
+
+    #[test]
+    fn replayed_and_local_turns_stream_in_order() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        // Session replay uses UserMessageChunk while idle, so it has no local
+        // PromptTurn metadata and must not become an inline flush barrier.
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UserMessageChunk(
+            text_chunk("replayed prompt"),
+        )));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("replayed answer"),
+        )));
+        assert_eq!(
+            stable_transcript_entry_count(&state),
+            state.transcript.len()
+        );
+        let replayed = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replayed,
+            vec!["You", "replayed prompt", "", "Thor", "replayed answer", ""]
+        );
+
+        state.record_user_prompt("local prompt".to_string());
+        state.tool_calls.insert(
+            "local-tool".to_string(),
+            crate::app::ToolCallView {
+                title: "write src/lib.rs".to_string(),
+                kind: ToolKind::Edit,
+                status: ToolCallStatus::Completed,
+                body: Vec::new(),
+            },
+        );
+        state
+            .transcript
+            .push(Entry::ToolCall("local-tool".to_string()));
+        assert_eq!(stable_transcript_entry_count(&state), 4);
+
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        let streamed = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        let streamed = streamed.join("\n");
+        assert!(streamed.contains("local prompt"), "{streamed}");
+        assert!(streamed.contains("write src/lib.rs"), "{streamed}");
+
+        let snapshot = inline_resize_reflow_snapshot(
+            &state,
+            Size {
+                width: 20,
+                height: 4,
+            },
+        )
+        .expect("snapshot");
+        assert_eq!(snapshot.stable_entries, state.transcript.len());
+        let reflowed = snapshot
+            .lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(reflowed.contains("replayed answer"), "{reflowed}");
+        assert!(reflowed.contains("write"), "{reflowed}");
+        assert!(reflowed.contains("src/lib.rs"), "{reflowed}");
+    }
+
+    #[test]
+    fn finalized_turn_summarizes_successes_but_keeps_failures_and_full_reader_data() {
+        let mut state = AppState::new();
+        state.record_user_prompt("make the change".to_string());
+        state.tool_calls.insert(
+            "write-lib".to_string(),
+            crate::app::ToolCallView {
+                title: "write src/lib.rs".to_string(),
+                kind: ToolKind::Edit,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Diff {
+                    path: "src/lib.rs".to_string(),
+                    old_text: Some("old".to_string()),
+                    new_text: "new".to_string(),
+                }],
+            },
+        );
+        state
+            .transcript
+            .push(Entry::ToolCall("write-lib".to_string()));
+        state.tool_calls.insert(
+            "nested-write".to_string(),
+            crate::app::ToolCallView {
+                title: "write src/main.rs".to_string(),
+                kind: ToolKind::Edit,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Diff {
+                    path: "src/main.rs".to_string(),
+                    old_text: None,
+                    new_text: "fn main() {}".to_string(),
+                }],
+            },
+        );
+        state
+            .transcript
+            .push(Entry::CodeAgentToolCall("nested-write".to_string()));
+        state.tool_calls.insert(
+            "failed-test".to_string(),
+            crate::app::ToolCallView {
+                title: "cargo test -p mjolnir".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Failed,
+                body: vec![ToolCallOutput::Text("error: regression".to_string())],
+            },
+        );
+        state
+            .transcript
+            .push(Entry::ToolCall("failed-test".to_string()));
+        state
+            .transcript
+            .push(Entry::AgentMessage("Here is what I changed.".to_string()));
+
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+
+        let compact = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            compact.contains("3 tools · 2 files changed · 1 failed"),
+            "{compact}"
+        );
+        assert!(compact.contains("cargo test -p mjolnir"), "{compact}");
+        assert!(compact.contains("error: regression"), "{compact}");
+        assert!(compact.contains("└─ final response"), "{compact}");
+        assert!(!compact.contains("write src/lib.rs"), "{compact}");
+        assert!(!compact.contains("write src/main.rs"), "{compact}");
+
+        let narrow = render_transcript_lines(&state, 18)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(
+            narrow.iter().any(|line| line.contains("cargo test")),
+            "{narrow:?}"
+        );
+        assert!(
+            narrow.iter().any(|line| line.contains("mjolnir")),
+            "{narrow:?}"
+        );
+        assert!(
+            narrow.iter().any(|line| line.contains("regression")),
+            "{narrow:?}"
+        );
+
+        let full = render_full_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(full.contains("write src/lib.rs"), "{full}");
+        assert!(full.contains("write src/main.rs"), "{full}");
+        assert!(full.contains("src/lib.rs"), "{full}");
+        assert!(full.contains("src/main.rs"), "{full}");
+        assert!(full.contains("Eitri"), "{full}");
+
+        let markdown = transcript_export_markdown(&state);
+        assert!(markdown.contains("write src/lib\\.rs"));
+        assert!(markdown.contains("write src/main\\.rs"));
+        assert!(markdown.contains("src/lib\\.rs"));
+        assert!(markdown.contains("src/main\\.rs"));
+    }
+
+    #[test]
+    fn foreground_handoff_streams_completed_eitri_activity_to_scrollback() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        state.record_user_prompt("delegate this".to_string());
+        let initial: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(initial, vec!["You", "delegate this", ""]);
+
+        let bridge = ToolCall::new("bridge-call", "mcp.mj-code-agent.code_agent")
+            .status(ToolCallStatus::InProgress)
+            .raw_input(serde_json::json!({
+                "server": "mj-code-agent",
+                "tool": "code_agent",
+                "arguments": { "instructions": "forge the change" }
+            }));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(bridge)));
+        state.apply_event(UiEvent::InternalMessage(InternalMessage {
+            source: "Thor".to_string(),
+            target: "Eitri".to_string(),
+            kind: crate::event::InternalMessageKind::Delegation,
+            text: "forge the change".to_string(),
+        }));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Started {
+            label: "Eitri · builder".to_string(),
+        }));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::ToolCall(
+                ToolCall::new("nested-call", "completed nested command")
+                    .status(ToolCallStatus::Completed),
+            ),
+        )));
+
+        assert_eq!(
+            state
+                .tool_calls
+                .get("bridge-call")
+                .expect("parent bridge")
+                .status,
+            ToolCallStatus::InProgress
+        );
+        assert_eq!(
+            stable_transcript_entry_count(&state),
+            state.transcript.len()
+        );
+
+        let streamed = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(streamed.contains("forge the change"), "{streamed}");
+        assert!(streamed.contains("completed nested command"), "{streamed}");
+        assert!(!streamed.contains("mcp.mj-code-agent"), "{streamed}");
+        assert!(inline_transcript_tail_lines(&state, 80).is_empty());
+    }
+
+    #[test]
+    fn foreground_exploration_has_a_distinct_handoff_and_live_eitri_activity() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        state.record_user_prompt("trace startup".to_string());
+        let _ = sink.pending_lines(&state, 80);
+        state.apply_event(UiEvent::InternalMessage(InternalMessage {
+            source: "Thor".to_string(),
+            target: "Eitri".to_string(),
+            kind: crate::event::InternalMessageKind::Exploration,
+            text: "very thorough: trace startup".to_string(),
+        }));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Started {
+            label: "Eitri · explorer".to_string(),
+        }));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::AgentThoughtChunk(text_chunk("searching entry points")),
+        )));
+
+        let streamed = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(streamed.contains("Thor → Eitri · explore"), "{streamed}");
+        let live = inline_transcript_tail_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(live.contains("searching entry points"), "{live}");
+        state.apply_event(UiEvent::LokiActivity(LokiActivity::Warning {
+            actor: LokiIdentity {
+                role: "Loki".to_string(),
+                connection_id: "explore-review".to_string(),
+                source_id: None,
+                model_name: Some("reviewer".to_string()),
+                model_value: None,
+            },
+            message: "trace the fallback path too".to_string(),
+        }));
+        let interjection = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(interjection.contains("Loki"), "{interjection}");
+        assert!(
+            interjection.contains("trace the fallback path too"),
+            "{interjection}"
+        );
+        assert!(transcript_export_markdown(&state).contains("Thor → Eitri · explore"));
+    }
+
+    #[test]
+    fn inline_chat_streams_thor_and_eitri_through_one_transcript_tail() {
+        let mut state = AppState::new();
+        state.agent_label = "Thor · gpt-primary".to_string();
+        state.record_user_prompt("delegate this".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk("planning the handoff"),
+        )));
+        let thor_tail = inline_transcript_tail_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert_eq!(thor_tail, vec!["Thor", "planning the handoff"]);
+
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Started {
+            label: "Eitri · gpt-builder".to_string(),
+        }));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::AgentThoughtChunk(text_chunk("working now")),
+        )));
+
+        let live = inline_transcript_tail_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert_eq!(live, vec!["Eitri", "working now"]);
+        assert!(inline_transcript_tail_row_count(&state, 80) > 0);
+        assert!(
+            desired_inline_height(
+                &state,
+                Size {
+                    width: 80,
+                    height: 40,
+                },
+            ) > INLINE_CHAT_HEIGHT
+        );
+
+        let backend = TestBackend::new(120, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw active header");
+        let active = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(active.contains("Eitri · gpt-builder"), "{active}");
+        assert!(!active.contains("Thor · gpt-primary"), "{active}");
+
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Finished {
+            outcome: CodeAgentOutcome::Completed,
+        }));
+        assert!(inline_transcript_tail_lines(&state, 80).is_empty());
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw restored header");
+        let restored = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(restored.contains("Thor · gpt-primary"), "{restored}");
+    }
+
+    #[test]
+    fn foreground_handoff_detaches_thor_flushes_loki_and_reattaches_thor() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+        state.record_user_prompt("delegate this".to_string());
+        assert_eq!(
+            sink.pending_lines(&state, 80)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>(),
+            vec!["You", "delegate this", ""]
+        );
+
+        state.apply_event(UiEvent::InternalMessage(InternalMessage {
+            source: "Thor".to_string(),
+            target: "Eitri".to_string(),
+            kind: crate::event::InternalMessageKind::Delegation,
+            text: "forge it".to_string(),
+        }));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Started {
+            label: "Eitri · builder".to_string(),
+        }));
+        assert!(state.code_agent_active);
+        let handoff = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(handoff.contains("delegated to Eitri"), "{handoff}");
+
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::AgentMessageChunk(text_chunk("first Eitri segment")),
+        )));
+        assert!(sink.pending_lines(&state, 80).is_empty());
+
+        state.apply_event(UiEvent::LokiActivity(LokiActivity::Warning {
+            actor: LokiIdentity {
+                role: "Loki".to_string(),
+                connection_id: "loki-review".to_string(),
+                source_id: None,
+                model_name: Some("reviewer".to_string()),
+                model_value: None,
+            },
+            message: "material concern".to_string(),
+        }));
+        let interjection = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            interjection.contains("first Eitri segment"),
+            "{interjection}"
+        );
+        assert!(interjection.contains("Loki"), "{interjection}");
+        assert!(interjection.contains("material concern"), "{interjection}");
+
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::AgentMessageChunk(text_chunk("Eitri final")),
+        )));
+        assert!(sink.pending_lines(&state, 80).is_empty());
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Finished {
+            outcome: CodeAgentOutcome::Completed,
+        }));
+        assert!(!state.code_agent_active);
+        let eitri_final = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(eitri_final.contains("Eitri final"), "{eitri_final}");
+
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("Thor resumed"),
+        )));
+        assert!(sink.pending_lines(&state, 80).is_empty());
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        let thor_resumed = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(thor_resumed.contains("Thor resumed"), "{thor_resumed}");
     }
 
     #[test]
@@ -11860,7 +12907,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(prompt, vec!["❯ run tests", ""]);
+        assert_eq!(prompt, vec!["You", "run tests", ""]);
         assert!(sink.pending_lines(&state, 80).is_empty());
 
         let view = state.tool_calls.get_mut("call-1").expect("tool call");
@@ -11875,7 +12922,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(rendered, vec!["│ tool exec cargo test", "│   ok"]);
+        assert_eq!(rendered, vec!["Thor", "│ exec cargo test", "│   ok"]);
         assert!(sink.pending_lines(&state, 80).is_empty());
 
         // When the turn ends with nothing after the tool call, the held
@@ -11916,7 +12963,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(prompt, vec!["❯ run tests", ""]);
+        assert_eq!(prompt, vec!["You", "run tests", ""]);
         assert!(
             sink.pending_lines(&state, 80).is_empty(),
             "completed terminal tool call must not flush before terminal exit status arrives"
@@ -11939,11 +12986,11 @@ mod tests {
         assert_eq!(
             rendered,
             vec![
-                "│ tool exec cargo test",
-                "│   terminal output",
-                "│     ok",
-                "│     ",
-                "│     exit code 0",
+                "Thor",
+                "│ exec cargo test",
+                "│   ok",
+                "│   ",
+                "│   exit code 0",
             ]
         );
     }
@@ -11970,7 +13017,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(first_prompt, vec!["❯ run tests", ""]);
+        assert_eq!(first_prompt, vec!["You", "run tests", ""]);
 
         state.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::Cancelled,
@@ -11981,15 +13028,11 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(
-            cancelled_tool,
-            vec![
-                "│ tool [failed] exec cargo test",
-                "│   running",
-                "│   [tool call ended before completion]",
-                ""
-            ]
-        );
+        let cancelled_tool = cancelled_tool.join("\n");
+        assert!(cancelled_tool.contains("Thor"), "{cancelled_tool}");
+        assert!(cancelled_tool.contains("[failed]"), "{cancelled_tool}");
+        assert!(cancelled_tool.contains("cargo test"), "{cancelled_tool}");
+        assert!(cancelled_tool.contains("running"), "{cancelled_tool}");
 
         state.record_user_prompt("next prompt".to_string());
         let next_prompt: Vec<String> = sink
@@ -11997,7 +13040,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(next_prompt, vec!["❯ next prompt", ""]);
+        assert_eq!(next_prompt, vec!["You", "next prompt", ""]);
     }
 
     #[test]
@@ -12220,7 +13263,7 @@ mod tests {
     #[test]
     fn ctrl_t_toggles_tool_output_expansion() {
         let mut state = AppState::new();
-        assert!(!state.expand_tool_outputs);
+        assert!(!state.expand_transcript_details);
         let starting_revision = state.transcript_revision();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
@@ -12230,7 +13273,7 @@ mod tests {
             key_with_modifiers(KeyCode::Char('t'), KeyModifiers::CONTROL),
         );
 
-        assert!(state.expand_tool_outputs);
+        assert!(state.expand_transcript_details);
         assert_ne!(
             state.transcript_revision(),
             starting_revision,
@@ -12244,13 +13287,13 @@ mod tests {
             &cmd_tx,
             key_with_modifiers(KeyCode::Char('t'), KeyModifiers::CONTROL),
         );
-        assert!(!state.expand_tool_outputs);
+        assert!(!state.expand_transcript_details);
     }
 
     #[test]
     fn ctrl_shift_t_also_toggles_tool_output_expansion() {
         let mut state = AppState::new();
-        assert!(!state.expand_tool_outputs);
+        assert!(!state.expand_transcript_details);
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         handle_crossterm(
@@ -12262,7 +13305,7 @@ mod tests {
             ),
         );
 
-        assert!(state.expand_tool_outputs);
+        assert!(state.expand_transcript_details);
         assert!(state.input.is_empty());
     }
 
@@ -12279,7 +13322,7 @@ mod tests {
 
         assert!(state.transcript_viewer, "inline Ctrl-T opens the reader");
         assert!(
-            !state.expand_tool_outputs,
+            !state.expand_transcript_details,
             "inline Ctrl-T must not flip the collapse setting"
         );
         assert!(state.input.is_empty(), "'t' must not leak into the prompt");
@@ -12377,7 +13420,7 @@ mod tests {
         );
         state.transcript.push(Entry::ToolCall("call-1".to_string()));
         // The session is still in collapsed mode...
-        assert!(!state.expand_tool_outputs);
+        assert!(!state.expand_transcript_details);
         state.open_transcript_viewer();
 
         let backend = TestBackend::new(100, 40);
@@ -12432,6 +13475,156 @@ mod tests {
     }
 
     #[test]
+    fn stable_long_prose_entries_share_one_collapse_policy() {
+        let mut state = AppState::new();
+        let long = (1..=7)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let actor = LokiIdentity {
+            role: "Loki".to_string(),
+            connection_id: "loki".to_string(),
+            source_id: None,
+            model_name: None,
+            model_value: None,
+        };
+        state.transcript.extend([
+            Entry::UserPrompt(long.clone()),
+            Entry::AgentMessage(long.clone()),
+            Entry::CodeAgentMessage(long.clone()),
+            Entry::LokiActivity(Box::new(LokiActivity::Warning {
+                actor,
+                message: long.clone(),
+            })),
+            Entry::System(long.clone()),
+            Entry::InternalMessage(crate::event::InternalMessage {
+                source: "Thor".to_string(),
+                target: "Eitri".to_string(),
+                kind: crate::event::InternalMessageKind::Delegation,
+                text: long,
+            }),
+        ]);
+
+        let rendered = render_transcript_lines(&state, 100)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|line| line.as_str() == "… details hidden (Ctrl-T to expand)")
+                .count(),
+            6,
+            "rendered: {rendered:?}"
+        );
+        assert!(!rendered.iter().any(|line| line == "line 7"));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.starts_with("delegated to Eitri ·"))
+        );
+    }
+
+    #[test]
+    fn message_collapse_thresholds_are_unicode_safe_and_preserve_markdown() {
+        let exact_chars = "λ".repeat(MESSAGE_COLLAPSED_CHARS);
+        assert_eq!(message_preview(&exact_chars, true), (exact_chars, false));
+
+        let over_chars = format!("**important** {}TAIL", "🦀".repeat(MESSAGE_COLLAPSED_CHARS));
+        let (preview, collapsed) = message_preview(&over_chars, true);
+        assert!(collapsed);
+        assert_eq!(preview.chars().count(), MESSAGE_COLLAPSED_CHARS);
+        assert!(!preview.contains("TAIL"));
+
+        let mut state = AppState::new();
+        state.transcript.push(Entry::AgentMessage(over_chars));
+        let rendered = render_transcript_lines(&state, 100);
+        let content = rendered
+            .iter()
+            .find(|line| line_text(line).starts_with("important"))
+            .expect("markdown preview");
+        assert!(
+            content
+                .spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
+        );
+
+        let six_lines = (1..=MESSAGE_COLLAPSED_LINES)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!message_preview(&six_lines, true).1);
+        assert!(message_preview(&format!("{six_lines}\nline 7"), true).1);
+    }
+
+    #[test]
+    fn active_streaming_message_stays_expanded_until_stable() {
+        let mut state = AppState::new();
+        state.record_user_prompt("start".to_string());
+        let long = format!("{}STREAMING_TAIL", "x".repeat(MESSAGE_COLLAPSED_CHARS));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk(&long),
+        )));
+
+        let streaming = render_transcript_lines(&state, 100)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(streaming.iter().any(|line| line.contains("STREAMING_TAIL")));
+        assert!(!streaming.iter().any(|line| line.contains("details hidden")));
+
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        let stable = render_transcript_lines(&state, 100)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(!stable.iter().any(|line| line.contains("STREAMING_TAIL")));
+        assert!(stable.iter().any(|line| line.contains("details hidden")));
+    }
+
+    #[test]
+    fn ctrl_t_reader_and_export_reveal_complete_internal_message() {
+        let mut state = AppState::new();
+        let full = format!("{}INTERNAL_EXACT_SUFFIX", "brief ".repeat(150));
+        state
+            .transcript
+            .push(Entry::InternalMessage(crate::event::InternalMessage {
+                source: "Thor".to_string(),
+                target: "Eitri".to_string(),
+                kind: crate::event::InternalMessageKind::Delegation,
+                text: full.clone(),
+            }));
+
+        let compact = render_transcript_lines(&state, 100)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(
+            !compact
+                .iter()
+                .any(|line| line.contains("INTERNAL_EXACT_SUFFIX"))
+        );
+
+        let expanded = render_full_transcript_lines(&state, 100)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(
+            expanded
+                .iter()
+                .any(|line| line.contains("INTERNAL_EXACT_SUFFIX"))
+        );
+
+        let exported = transcript_export_markdown(&state);
+        assert!(exported.contains("## Thor → Eitri delegation"));
+        assert!(exported.contains("INTERNAL\\_EXACT\\_SUFFIX"));
+    }
+
+    #[test]
     fn tool_output_collapses_long_text_with_hint_by_default() {
         let mut state = AppState::new();
         let long = (1..=20)
@@ -12477,7 +13670,7 @@ mod tests {
         );
 
         // After expanding, every line is rendered and the hint disappears.
-        state.expand_tool_outputs = true;
+        state.expand_transcript_details = true;
         let expanded: Vec<String> = render_transcript_lines(&state, 80)
             .iter()
             .map(line_text)
@@ -12485,6 +13678,58 @@ mod tests {
         assert!(expanded.iter().any(|line| line == "│   line 1"));
         assert!(expanded.iter().any(|line| line == "│   line 20"));
         assert!(!expanded.iter().any(|line| line.contains("lines hidden")));
+    }
+
+    #[test]
+    fn tool_output_collapses_a_single_huge_logical_line_by_character_count() {
+        let unicode = format!("{}SUFFIX", "é".repeat(700));
+        let (unicode_preview, hidden) =
+            tool_output_preview(&unicode, Some(TOOL_OUTPUT_COLLAPSED_LINES));
+        assert_eq!(unicode_preview.chars().count(), TOOL_OUTPUT_COLLAPSED_CHARS);
+        assert_eq!(hidden, Some(ToolOutputHidden::Details));
+        assert!(!unicode_preview.contains("SUFFIX"));
+
+        let mut state = AppState::new();
+        let long = format!("{{\"body\":\"{}ONE_LINE_SUFFIX\"}}", "x".repeat(900));
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "gh issue view 350".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Terminal {
+                    terminal_id: "term-1".to_string(),
+                    output: long,
+                    truncated: false,
+                    exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+                }],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let collapsed = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(
+            !collapsed
+                .iter()
+                .any(|line| line.contains("ONE_LINE_SUFFIX"))
+        );
+        assert!(collapsed.iter().any(|line| line.contains("details hidden")));
+        assert!(
+            !collapsed
+                .iter()
+                .any(|line| line.contains("terminal output"))
+        );
+
+        state.expand_transcript_details = true;
+        let expanded = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(expanded.iter().any(|line| line.contains("ONE_LINE_SUFFIX")));
+        assert!(!expanded.iter().any(|line| line.contains("details hidden")));
     }
 
     #[test]
@@ -12497,8 +13742,8 @@ mod tests {
         assert!(transcript_block_title(&state).contains("End to follow"));
 
         state.scroll_offset = 0;
-        state.expand_tool_outputs = true;
-        assert!(transcript_block_title(&state).contains("tool output: expanded"));
+        state.expand_transcript_details = true;
+        assert!(transcript_block_title(&state).contains("details: expanded"));
     }
 
     #[test]
@@ -13018,10 +14263,129 @@ mod tests {
             .map(line_text)
             .collect();
 
-        assert!(rendered.iter().any(|line| line == "● # Result"));
-        assert!(rendered.iter().any(|line| line == "  - bold item"));
-        assert!(rendered.iter().any(|line| line == "  code rs"));
-        assert!(rendered.iter().any(|line| line == "    let x = 1;"));
+        assert!(rendered.iter().any(|line| line == "Thor"));
+        assert!(rendered.iter().any(|line| line == "# Result"));
+        assert!(rendered.iter().any(|line| line == "- bold item"));
+        assert!(rendered.iter().any(|line| line == "code rs"));
+        assert!(rendered.iter().any(|line| line == "  let x = 1;"));
+    }
+
+    #[test]
+    fn multiline_system_messages_preserve_logical_lines() {
+        let mut state = AppState::new();
+        state.transcript.push(Entry::System(
+            "Council models\n\nConfigured\n  Thor   auto\n  Loki   auto".to_string(),
+        ));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "Council models",
+                "",
+                "Configured",
+                "  Thor   auto",
+                "  Loki   auto",
+                "",
+            ]
+        );
+    }
+
+    #[test]
+    fn thinking_is_compact_and_primary_agent_names_have_distinct_colors() {
+        let mut state = AppState::new();
+        let theme = state.theme;
+        state.transcript.push(Entry::AgentThought(
+            "Planning initial\n\n<!-- -->\n\ncode_agent   invocation".to_string(),
+        ));
+        state.transcript.push(Entry::CodeAgentThought(
+            "Checking the implementation".to_string(),
+        ));
+        let rendered = render_transcript_lines(&state, 80);
+        let text = rendered.iter().map(line_text).collect::<Vec<_>>();
+        assert_eq!(
+            text,
+            vec![
+                "Thor",
+                "Planning initial code_agent invocation",
+                "Eitri",
+                "Checking the implementation",
+            ]
+        );
+        assert_eq!(rendered[0].spans[0].style.fg, Some(theme.primary));
+        assert_eq!(rendered[2].spans[0].style.fg, Some(theme.code));
+        for line in [&rendered[1], &rendered[3]] {
+            assert_eq!(line.spans[0].style.fg, Some(theme.thought));
+        }
+    }
+
+    #[test]
+    fn speaker_name_is_only_rendered_when_the_speaker_changes() {
+        let mut state = AppState::new();
+        state
+            .transcript
+            .push(Entry::UserPrompt("build it".to_string()));
+        state
+            .transcript
+            .push(Entry::AgentMessage("delegating".to_string()));
+        state.tool_calls.insert(
+            "thor-tool".to_string(),
+            crate::app::ToolCallView {
+                title: "call Eitri".to_string(),
+                kind: ToolKind::Other,
+                status: ToolCallStatus::Completed,
+                body: Vec::new(),
+            },
+        );
+        state
+            .transcript
+            .push(Entry::ToolCall("thor-tool".to_string()));
+        state
+            .transcript
+            .push(Entry::AgentMessage("handoff accepted".to_string()));
+        state
+            .transcript
+            .push(Entry::CodeAgentMessage("forging".to_string()));
+        state.tool_calls.insert(
+            "eitri-tool".to_string(),
+            crate::app::ToolCallView {
+                title: "edit file".to_string(),
+                kind: ToolKind::Edit,
+                status: ToolCallStatus::Completed,
+                body: Vec::new(),
+            },
+        );
+        state
+            .transcript
+            .push(Entry::CodeAgentToolCall("eitri-tool".to_string()));
+        state
+            .transcript
+            .push(Entry::CodeAgentMessage("finished".to_string()));
+        state
+            .transcript
+            .push(Entry::AgentMessage("here is the result".to_string()));
+
+        let rendered = render_transcript_lines(&state, 80);
+        let speaker_lines = rendered
+            .iter()
+            .filter(|line| matches!(line_text(line).as_str(), "You" | "Thor" | "Eitri"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            speaker_lines
+                .iter()
+                .map(|line| line_text(line))
+                .collect::<Vec<_>>(),
+            vec!["You", "Thor", "Eitri", "Thor"]
+        );
+        for line in speaker_lines {
+            assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+            assert!(!line_text(line).ends_with(':'));
+        }
     }
 
     #[test]
@@ -13056,7 +14420,7 @@ mod tests {
             .map(line_text)
             .collect();
 
-        assert!(rendered.iter().any(|line| line == "│ tool exec run checks"));
+        assert!(rendered.iter().any(|line| line == "│ exec run checks"));
         assert!(rendered.iter().any(|line| line == "│   ## Output"));
         assert!(rendered.iter().any(|line| line == "│   ok"));
         assert!(
@@ -13066,11 +14430,10 @@ mod tests {
         );
         assert!(rendered.iter().any(|line| line.trim_end() == "│   1 - old"));
         assert!(rendered.iter().any(|line| line.trim_end() == "│   1 + new"));
-        assert!(rendered.iter().any(|line| line == "│   terminal output"));
         assert!(
             rendered
                 .iter()
-                .any(|line| line == "│     no terminal output received")
+                .any(|line| line == "│   no terminal output received")
         );
         assert!(
             !rendered.iter().any(|line| line.contains("term-1")),
@@ -13107,20 +14470,11 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|line| line == "│ tool [failed] exec cargo test")
+                .any(|line| line == "│ [failed] exec cargo test")
         );
-        assert!(rendered.iter().any(|line| line == "│   terminal output"));
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line == "│     [output truncated]")
-        );
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line == "│     error: test failed")
-        );
-        assert!(rendered.iter().any(|line| line == "│     exit code 101"));
+        assert!(rendered.iter().any(|line| line == "│   [output truncated]"));
+        assert!(rendered.iter().any(|line| line == "│   error: test failed"));
+        assert!(rendered.iter().any(|line| line == "│   exit code 101"));
         assert!(
             !rendered.iter().any(|line| line.contains("call_q403")),
             "terminal ids should not leak into user-facing transcript rows: {rendered:?}"
@@ -13201,7 +14555,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_tool_markdown_preserves_log_severity_styles() {
+    fn transcript_tool_markdown_output_is_desaturated() {
         let mut state = AppState::new();
         let theme = state.theme;
         state.tool_calls.insert(
@@ -13231,16 +14585,16 @@ mod tests {
                 .spans
                 .iter()
                 .skip(1)
-                .any(|span| span.style.fg == Some(theme.warning)),
-            "warning line should retain tool-output severity color: {warning_line:?}"
+                .all(|span| span.style.fg == Some(theme.subtle)),
+            "tool output should stay desaturated: {warning_line:?}"
         );
         assert!(
             warning_line.spans.iter().skip(1).any(|span| {
                 span.content.as_ref() == "check"
-                    && span.style.fg == Some(theme.warning)
+                    && span.style.fg == Some(theme.subtle)
                     && span.style.add_modifier.contains(Modifier::BOLD)
             }),
-            "inline markdown should still style the strong segment: {warning_line:?}"
+            "inline markdown should preserve emphasis without recoloring: {warning_line:?}"
         );
     }
 
@@ -13265,10 +14619,16 @@ mod tests {
         let lines = render_transcript_lines(&state, 80);
 
         // Both the tool header and its output are framed by the gutter rail.
+        let call_line = lines
+            .iter()
+            .find(|line| line_text(line) == "│ exec cargo test")
+            .expect("tool call line");
+        assert_eq!(call_line.spans[1].style.fg, Some(theme.muted));
         assert!(
-            lines
-                .iter()
-                .any(|l| line_text(l) == "│ tool exec cargo test")
+            call_line.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::ITALIC)
         );
         assert!(lines.iter().any(|l| line_text(l) == "│   ok"));
 
@@ -13282,9 +14642,10 @@ mod tests {
             assert_eq!(line.spans[0].style.fg, Some(theme.success));
         }
 
-        // The agent message carries the role glyph, not the tool rail; that
-        // contrast is the fix for issue #257.
-        assert!(lines.iter().any(|l| line_text(l) == "● hi there"));
+        // The agent message stays flush-left with no rail; that contrast is
+        // the fix for issue #257.
+        assert!(lines.iter().any(|l| line_text(l) == "Thor"));
+        assert!(lines.iter().any(|l| line_text(l) == "hi there"));
         assert!(
             !lines
                 .iter()
@@ -13316,7 +14677,11 @@ mod tests {
         // wrapped continuation rows never read as flush-left agent prose) and
         // must fit inside the render width (so the transcript Paragraph does
         // not re-wrap it and strip the rail). See issue #257.
-        let block_rows: Vec<&String> = rendered.iter().filter(|l| !l.is_empty()).collect();
+        assert_eq!(rendered.first().map(String::as_str), Some("Thor"));
+        let block_rows: Vec<&String> = rendered
+            .iter()
+            .filter(|line| !line.is_empty() && line.as_str() != "Thor")
+            .collect();
         assert!(
             block_rows.len() > 2,
             "expected the long line to wrap into several rows, got {rendered:?}"
@@ -13358,8 +14723,9 @@ mod tests {
             .map(line_text)
             .collect();
 
-        assert!(rendered.iter().any(|line| line == "❯ # literal"));
-        assert!(rendered.iter().any(|line| line == "  `code` and **bold**"));
+        assert!(rendered.iter().any(|line| line == "You"));
+        assert!(rendered.iter().any(|line| line == "# literal"));
+        assert!(rendered.iter().any(|line| line == "`code` and **bold**"));
         assert!(rendered.iter().any(|line| line == "│   # stdout"));
         assert!(rendered.iter().any(|line| line == "│   ok and bold"));
     }
@@ -13403,7 +14769,7 @@ mod tests {
     }
 
     #[test]
-    fn thought_blocks_render_dimmed_with_role_glyph() {
+    fn thought_blocks_render_dimmed_under_speaker_name() {
         let mut state = AppState::new();
         let theme = state.theme;
         state
@@ -13415,7 +14781,7 @@ mod tests {
             .iter()
             .find(|l| line_text(l).contains("weighing"))
             .expect("thought row");
-        assert!(line_text(row).starts_with(THOUGHT_GLYPH));
+        assert!(lines.iter().any(|line| line_text(line) == "Thor"));
         for span in &row.spans {
             assert_eq!(
                 span.style.fg,
@@ -13453,10 +14819,9 @@ mod tests {
     }
 
     #[test]
-    fn role_block_defers_glyph_past_a_leading_blank_line() {
-        // A body that begins with a blank line must not strand the glyph on an
-        // empty row while the first real content renders as a gutter-less
-        // continuation; the glyph belongs on the first line that has content.
+    fn leading_blank_agent_message_keeps_speaker_separate_from_content() {
+        // A body that begins with a blank line must not strand an attribution
+        // marker on an empty row while the first real content is lost.
         let mut state = AppState::new();
         state
             .transcript
@@ -13468,12 +14833,12 @@ mod tests {
             .collect();
 
         assert!(
-            rendered.iter().any(|line| line == "● hello"),
-            "glyph must sit on the first content row: {rendered:?}"
+            rendered.iter().any(|line| line == "Thor"),
+            "speaker must render before the message: {rendered:?}"
         );
         assert!(
-            !rendered.iter().any(|line| line.trim() == AGENT_GLYPH),
-            "glyph must never sit alone on a blank row: {rendered:?}"
+            rendered.iter().any(|line| line == "hello"),
+            "message content must render after leading blanks: {rendered:?}"
         );
     }
 
@@ -15077,6 +16442,7 @@ mod tests {
     #[test]
     fn submit_preserves_text_and_images_when_session_is_not_ready() {
         let mut state = AppState::new();
+        state.set_primary_acp_name("Codex");
         state
             .image_attachments
             .push(test_image_attachment_with_id(1));
@@ -15089,8 +16455,12 @@ mod tests {
         assert_eq!(state.input, "describe this");
         assert_eq!(state.image_attachments.len(), 1);
         let status = state.status_line.expect("status");
-        assert_eq!(status.kind, StatusKind::Warning);
-        assert_eq!(status.text, "waiting for session...");
+        assert_eq!(status.kind, StatusKind::Info);
+        assert_eq!(status.text, "Waiting for Codex");
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::EphemeralSystem(text)] if text == "Waiting for Codex"
+        ));
     }
 
     #[test]
@@ -15221,16 +16591,16 @@ mod tests {
                 agent_source_id: "a".into(),
                 model_value: "m0".into(),
                 model_name: "M0".into(),
-                elo: 1400,
-                provisional: false,
+                pass_at_1_bps: 1400,
+                mean_cost_usd: 0.0,
             },
             crate::ragnarok::FighterCard {
                 id: 1,
                 agent_source_id: "b".into(),
                 model_value: "m1".into(),
                 model_name: "M1".into(),
-                elo: 1500,
-                provisional: false,
+                pass_at_1_bps: 1500,
+                mean_cost_usd: 0.0,
             },
         ]));
 
@@ -15379,16 +16749,16 @@ mod tests {
                 agent_source_id: "a".into(),
                 model_value: "m0".into(),
                 model_name: "M0".into(),
-                elo: 1400,
-                provisional: false,
+                pass_at_1_bps: 1400,
+                mean_cost_usd: 0.0,
             },
             crate::ragnarok::FighterCard {
                 id: 1,
                 agent_source_id: "b".into(),
                 model_value: "m1".into(),
                 model_name: "M1".into(),
-                elo: 1500,
-                provisional: false,
+                pass_at_1_bps: 1500,
+                mean_cost_usd: 0.0,
             },
         ]));
         state.apply_ragnarok_event(ragnarok::RagnarokEvent::ThorAction(
@@ -15425,8 +16795,8 @@ mod tests {
                 agent_source_id: "a".into(),
                 model_value: "m0".into(),
                 model_name: "M0".into(),
-                elo: 1400,
-                provisional: false,
+                pass_at_1_bps: 1400,
+                mean_cost_usd: 0.0,
             },
         ]));
         state.apply_ragnarok_event(ragnarok::RagnarokEvent::FighterState {
@@ -15453,16 +16823,16 @@ mod tests {
                 agent_source_id: "a".into(),
                 model_value: "m0".into(),
                 model_name: "M0".into(),
-                elo: 1400,
-                provisional: false,
+                pass_at_1_bps: 1400,
+                mean_cost_usd: 0.0,
             },
             crate::ragnarok::FighterCard {
                 id: 1,
                 agent_source_id: "b".into(),
                 model_value: "m1".into(),
                 model_name: "M1".into(),
-                elo: 1500,
-                provisional: false,
+                pass_at_1_bps: 1500,
+                mean_cost_usd: 0.0,
             },
         ]));
         state.apply_ragnarok_event(ragnarok::RagnarokEvent::Verdict(Box::new(
@@ -16125,68 +17495,5 @@ mod tests {
         assert!(!preview.contains('\n'));
         assert!(!preview.contains('\r'));
         assert!(preview.starts_with("line one"));
-    }
-
-    fn command_spans(cmd: &str) -> Vec<(String, Style)> {
-        let theme = TerminalThemeKind::Dark.palette();
-        super::highlight_command(cmd, theme)
-            .into_iter()
-            .map(|s| (s.content.into_owned(), s.style))
-            .collect()
-    }
-
-    fn style_of<'a>(spans: &'a [(String, Style)], token: &str) -> &'a Style {
-        &spans
-            .iter()
-            .find(|(content, _)| content == token)
-            .unwrap_or_else(|| panic!("token {token:?} not found in spans"))
-            .1
-    }
-
-    #[test]
-    fn highlight_command_colors_program_subcommand_and_flags() {
-        let theme = TerminalThemeKind::Dark.palette();
-        let spans = command_spans("git commit --amend -m msg");
-
-        // Reassembling the spans reproduces the original command verbatim.
-        let reassembled: String = spans.iter().map(|(c, _)| c.as_str()).collect();
-        assert_eq!(reassembled, "git commit --amend -m msg");
-
-        let program = style_of(&spans, "git");
-        assert_eq!(program.fg, Some(theme.primary));
-        assert!(program.add_modifier.contains(Modifier::BOLD));
-
-        assert_eq!(style_of(&spans, "commit").fg, Some(theme.secondary));
-        assert_eq!(style_of(&spans, "--amend").fg, Some(theme.accent));
-        assert_eq!(style_of(&spans, "-m").fg, Some(theme.accent));
-        assert_eq!(style_of(&spans, "msg").fg, Some(theme.text));
-    }
-
-    #[test]
-    fn highlight_command_treats_operator_as_new_program() {
-        let theme = TerminalThemeKind::Dark.palette();
-        let spans = command_spans("cat file.txt | grep foo");
-
-        // `cat` is the program; `file.txt` is an arg (has a dot), not a subcommand.
-        assert_eq!(style_of(&spans, "cat").fg, Some(theme.primary));
-        assert_eq!(style_of(&spans, "file.txt").fg, Some(theme.text));
-        assert_eq!(style_of(&spans, "|").fg, Some(theme.muted));
-        // After the pipe, `grep` is treated as a fresh program.
-        let grep = style_of(&spans, "grep");
-        assert_eq!(grep.fg, Some(theme.primary));
-        assert!(grep.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(style_of(&spans, "foo").fg, Some(theme.secondary));
-    }
-
-    #[test]
-    fn highlight_command_skips_leading_env_assignment() {
-        let theme = TerminalThemeKind::Dark.palette();
-        let spans = command_spans("FOO=bar cargo test");
-
-        assert_eq!(style_of(&spans, "FOO=bar").fg, Some(theme.text));
-        let cargo = style_of(&spans, "cargo");
-        assert_eq!(cargo.fg, Some(theme.primary));
-        assert!(cargo.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(style_of(&spans, "test").fg, Some(theme.secondary));
     }
 }

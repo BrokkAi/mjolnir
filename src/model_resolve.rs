@@ -1,11 +1,9 @@
-//! Resolve agent-selectable model options — and LMArena leaderboard rows — to a
-//! common normalized *match key*, so a strength score can be joined onto a model
-//! in the picker.
+//! Resolve ACP-advertised model options and canonical DeepSWE model IDs to a
+//! common normalized match key for the Council catalog.
 //!
 //! Matching is deliberately **exact** on the normalized key: we never
 //! fuzzy-match or substring-match. An option that produces no key present in the
-//! score catalog yields no score (the picker shows `—`), per the design's "if we
-//! don't know, show no score" rule. A wrong number is worse than none.
+//! DeepSWE catalog yields no match. A wrong match is worse than none.
 //!
 //! ## The shape of the problem
 //!
@@ -31,10 +29,10 @@
 //!
 //! - **Progressive suffix stripping** expands a model into candidates
 //!   (`…-20251101-v1` → `…-20251101` → `claude-opus-4-5`), tried most-specific
-//!   first, because version/date suffixes differ between agents and LMArena.
+//!   first, because version/date suffixes differ between adapters and DeepSWE.
 //! - **Brand stripping** also emits a provider-qualified key with the brand word
 //!   removed (`claude-opus-4-8` → `anthropic/opus48`), so an agent that names a
-//!   model just `Opus 4.8` still joins the row LMArena calls `claude-opus-4-8`.
+//!   model just `Opus 4.8` still joins DeepSWE's `claude-opus-4-8` row.
 
 use std::collections::HashMap;
 
@@ -65,8 +63,7 @@ const SINGLE_VENDOR_MAP: &[(&str, &str)] = &[
     ("mistral-vibe", "mistralai"),
 ];
 
-/// Reconcile differing vendor slugs (agent ids / models.dev / LMArena's
-/// `organization` column) to one canonical provider token. Keys are themselves
+/// Reconcile differing provider slugs to one canonical provider token. Keys are themselves
 /// alnum-normalized, so `"Google DeepMind"` matches `googledeepmind`.
 const PROVIDER_ALIAS: &[(&str, &str)] = &[
     ("googledeepmind", "google"),
@@ -155,31 +152,6 @@ fn provider_norm(p: &str) -> String {
     canonical_provider(p).unwrap_or_else(|| alnum_lower(p))
 }
 
-/// Canonical provider token for external callers that need to make decisions
-/// using the same vendor normalization as score matching.
-pub fn canonical_provider_id(provider: &str) -> Option<String> {
-    canonical_provider(provider)
-}
-
-/// Best-effort provider for one agent-selectable model option.
-pub fn agent_provider(
-    agent_id: &str,
-    value: &str,
-    name: &str,
-    _description: &str,
-) -> Option<String> {
-    for raw in [value, name] {
-        if raw.is_empty() {
-            continue;
-        }
-        let (provider, _) = parse_id(agent_id, raw);
-        if provider.is_some() {
-            return provider;
-        }
-    }
-    single_vendor_provider(agent_id).map(str::to_string)
-}
-
 /// Drop a context/variant decoration: a bracketed suffix like `[1m]`, a
 /// parenthetical like `(latest)`/`(Fast)`, and anything after a `:` (e.g.
 /// `:thinking`, the AWS `:0`, an ollama `:4b` tag).
@@ -191,7 +163,7 @@ fn strip_variant(s: &str) -> &str {
 
 /// Remove one trailing non-identity token: an AWS version (`-v1`), a compact
 /// date (`-20251101`), a reasoning-effort word (`-high`/`-low`/…), or a release
-/// qualifier (`-preview`). Lets an agent's `gpt-5.4-mini` reach LMArena's
+/// qualifier (`-preview`). Lets an adapter's `gpt-5.4-mini` reach DeepSWE's
 /// `gpt-5.4-mini-high`, and `qwen3.7-max` reach `qwen3.7-max-preview`. Returns
 /// the input unchanged when none applies.
 fn strip_one_suffix(s: &str) -> &str {
@@ -215,7 +187,7 @@ fn strip_one_suffix(s: &str) -> &str {
 /// Progressively stripped model-name candidates, most-specific first:
 /// `claude-opus-4-5-20251101-v1:0` → `[claude-opus-4-5-20251101-v1,
 /// claude-opus-4-5-20251101, claude-opus-4-5]`. Tried in order so a dated
-/// LMArena row matches before the bare family name.
+/// benchmark row matches before the bare family name.
 fn model_candidates(model: &str) -> Vec<String> {
     let base = strip_variant(model).trim_end_matches('-');
     if base.is_empty() {
@@ -355,8 +327,8 @@ fn parse_id(agent_id: &str, option_id: &str) -> (Option<String>, String) {
 
 /// Ordered candidate match keys for an agent's selectable model option, drawn
 /// from the option id (`value`), the display `name`, and the leading phrase of
-/// the `description`. The caller tries them against the score catalog in order;
-/// the first hit wins. Empty when nothing principled can be formed (→ no score).
+/// the `description`. The caller tries them against the model catalog in order;
+/// the first hit wins. Empty when nothing principled can be formed.
 ///
 /// `overrides` maps `"{agent_id}/{value}"` → canonical `"provider/model"` and
 /// takes precedence over all heuristics.
@@ -408,11 +380,10 @@ pub fn agent_keys(
     dedup_preserving(out)
 }
 
-/// Match keys for an LMArena leaderboard row (`model_name` + `organization`).
-/// Used to index the score catalog.
+/// Match keys for a canonical benchmark model ID and provider.
 #[cfg(test)]
-fn lmarena_keys(name: &str, vendor: &str) -> Vec<MatchKey> {
-    lmarena_keys_ranked(name, vendor)
+fn catalog_keys(name: &str, vendor: &str) -> Vec<MatchKey> {
+    catalog_keys_ranked(name, vendor)
         .into_iter()
         .map(|(key, _)| key)
         .collect()
@@ -420,7 +391,7 @@ fn lmarena_keys(name: &str, vendor: &str) -> Vec<MatchKey> {
 
 /// Match keys for a leaderboard row, annotated with whether they came from the
 /// exact published name or from a stripped fallback alias.
-pub fn lmarena_keys_ranked(name: &str, vendor: &str) -> Vec<(MatchKey, MatchSpecificity)> {
+pub fn catalog_keys_ranked(name: &str, vendor: &str) -> Vec<(MatchKey, MatchSpecificity)> {
     let provider = (!vendor.trim().is_empty()).then_some(vendor);
     dedup_ranked_preserving(
         model_candidates(name)
@@ -448,19 +419,19 @@ mod tests {
         HashMap::new()
     }
 
-    /// Does the agent option resolve to a key the LMArena row also produces?
+    /// Does the ACP option resolve to a key the benchmark row also produces?
     #[allow(clippy::too_many_arguments)]
     fn joins(
         agent_id: &str,
         value: &str,
         name: &str,
         description: &str,
-        arena_name: &str,
+        benchmark_name: &str,
         vendor: &str,
     ) -> bool {
         let agent = agent_keys(agent_id, value, name, description, &no_overrides());
-        let arena = lmarena_keys(arena_name, vendor);
-        agent.iter().any(|k| arena.contains(k))
+        let benchmark = catalog_keys(benchmark_name, vendor);
+        agent.iter().any(|k| benchmark.contains(k))
     }
 
     #[test]
@@ -513,7 +484,7 @@ mod tests {
             "claude-sonnet-4-6",
             "anthropic",
         ));
-        // Haiku is dated on LMArena (claude-haiku-4-5-20251001) — date-strip +
+        // Haiku is dated in the benchmark row — date-strip +
         // brand-strip still bridges it.
         assert!(joins(
             "claude-acp",
@@ -586,8 +557,8 @@ mod tests {
             "anthropic",
         ));
         let devin = agent_keys("devin", "devin-1", "Devin 1", "", &no_overrides());
-        let arena = lmarena_keys("claude-opus-4-8", "anthropic");
-        assert!(!devin.iter().any(|k| arena.contains(k)));
+        let benchmark = catalog_keys("claude-opus-4-8", "anthropic");
+        assert!(!devin.iter().any(|k| benchmark.contains(k)));
     }
 
     #[test]
@@ -627,7 +598,7 @@ mod tests {
 
     #[test]
     fn effort_suffix_stripped_so_mini_matches_mini_high() {
-        // codex exposes `gpt-5.4-mini`; LMArena only has `gpt-5.4-mini-high`.
+        // An adapter can omit an effort suffix present in the benchmark ID.
         assert!(joins(
             "codex-acp",
             "gpt-5.4-mini",
@@ -640,7 +611,7 @@ mod tests {
 
     #[test]
     fn preview_suffix_stripped_so_qwen_max_matches() {
-        // opencode exposes `qwen/qwen3.7-max`; LMArena lists `qwen3.7-max-preview`.
+        // OpenCode can omit a preview suffix present in the benchmark ID.
         assert!(joins(
             "opencode",
             "openrouter/qwen/qwen3.7-max",
@@ -678,7 +649,7 @@ mod tests {
             "openai/gpt-5.5".to_string(),
         );
         let agent = agent_keys("codex-acp", "gpt-5-codex", "GPT-5 Codex", "", &overrides);
-        let arena = lmarena_keys("gpt-5.5", "openai");
-        assert!(agent.iter().any(|k| arena.contains(k)));
+        let benchmark = catalog_keys("gpt-5.5", "openai");
+        assert!(agent.iter().any(|k| benchmark.contains(k)));
     }
 }
