@@ -411,7 +411,7 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
         | Entry::InternalMessage(_) => true,
         Entry::EphemeralSystem(_) => false,
         Entry::AgentMessage(_) | Entry::AgentThought(_) => {
-            state.code_agent_active || !(state.is_streaming() && idx + 1 == state.transcript.len())
+            !(state.is_streaming() && idx + 1 == state.transcript.len())
         }
         Entry::CodeAgentMessage(_) | Entry::CodeAgentThought(_) => {
             !state.code_agent_active || idx + 1 != state.transcript.len()
@@ -12914,6 +12914,40 @@ mod tests {
             .collect();
         assert_eq!(rendered, vec!["Thor", "world", ""]);
         assert!(sink.pending_lines(&state, 80).is_empty());
+    }
+
+    #[test]
+    fn transcript_sink_holds_mutable_thor_thought_during_eitri_activity() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        state.record_user_prompt("delegate this".to_string());
+        let _ = sink.pending_lines(&state, 80);
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Started {
+            label: "Eitri · builder".to_string(),
+        }));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk("I"),
+        )));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk(" need"),
+        )));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk(" to inspect this"),
+        )));
+
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::UserPrompt(_), Entry::AgentThought(text)] if text == "I need to inspect this"
+        ));
+        assert_eq!(stable_transcript_entry_count(&state), 1);
+        assert!(sink.pending_lines(&state, 80).is_empty());
+
+        let tail = inline_transcript_tail_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert_eq!(tail, vec!["Thor", "I need to inspect this"]);
     }
 
     #[test]

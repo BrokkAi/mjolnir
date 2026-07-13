@@ -2458,7 +2458,7 @@ impl AppState {
                 self.bump_transcript_revision();
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
-                replace_thinking(
+                append_thinking_chunk(
                     &mut self.transcript,
                     EntryKind::CodeAgentThought,
                     content_block_text(&chunk.content),
@@ -2657,7 +2657,7 @@ impl AppState {
             }
             SessionUpdate::AgentThoughtChunk(c) => {
                 let text = content_block_text(&c.content);
-                replace_thinking(&mut self.transcript, EntryKind::Thought, text);
+                append_thinking_chunk(&mut self.transcript, EntryKind::Thought, text);
                 self.bump_transcript_revision();
             }
             SessionUpdate::ToolCall(tc) => {
@@ -2919,11 +2919,11 @@ fn append_or_start(transcript: &mut Vec<Entry>, kind: EntryKind, text: String) {
     });
 }
 
-fn replace_thinking(transcript: &mut Vec<Entry>, kind: EntryKind, text: String) {
+fn append_thinking_chunk(transcript: &mut Vec<Entry>, kind: EntryKind, text: String) {
     match (kind, transcript.last_mut()) {
         (EntryKind::Thought, Some(Entry::AgentThought(existing)))
         | (EntryKind::CodeAgentThought, Some(Entry::CodeAgentThought(existing))) => {
-            *existing = text;
+            existing.push_str(&text);
         }
         (EntryKind::Thought, _) => {
             remove_trailing_thinking(transcript);
@@ -2933,7 +2933,7 @@ fn replace_thinking(transcript: &mut Vec<Entry>, kind: EntryKind, text: String) 
             remove_trailing_thinking(transcript);
             transcript.push(Entry::CodeAgentThought(text));
         }
-        _ => unreachable!("replace_thinking requires a thought entry kind"),
+        _ => unreachable!("append_thinking_chunk requires a thought entry kind"),
     }
 }
 
@@ -3634,18 +3634,18 @@ mod tests {
     }
 
     #[test]
-    fn thinking_updates_replace_and_non_thinking_activity_removes_them() {
+    fn thinking_chunks_accumulate_and_non_thinking_activity_removes_them() {
         let mut state = AppState::new();
         state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-            text_chunk("first thought"),
+            text_chunk("first"),
         )));
         state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-            text_chunk("replacement thought"),
+            text_chunk(" thought"),
         )));
 
         assert!(matches!(
             state.transcript.as_slice(),
-            [Entry::AgentThought(text)] if text == "replacement thought"
+            [Entry::AgentThought(text)] if text == "first thought"
         ));
 
         state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
@@ -3654,6 +3654,25 @@ mod tests {
         assert!(matches!(
             state.transcript.as_slice(),
             [Entry::ToolCall(id)] if id == "call-1"
+        ));
+    }
+
+    #[test]
+    fn code_agent_thinking_chunks_accumulate() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::Started {
+            label: "Eitri · builder".to_string(),
+        }));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::AgentThoughtChunk(text_chunk("forging")),
+        )));
+        state.apply_event(UiEvent::CodeAgent(CodeAgentEvent::SessionUpdate(
+            SessionUpdate::AgentThoughtChunk(text_chunk(" now")),
+        )));
+
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::CodeAgentThought(text)] if text == "forging now"
         ));
     }
 
