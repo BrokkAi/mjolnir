@@ -454,14 +454,17 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
             server.launch.command = path;
         }
     }
-    servers.retain(|server| {
-        server.detected
-            || server.installing
-            || server.error.is_some()
-            || server.origin.is_some()
-            || server.id == "anvil"
-    });
+    servers.retain(inventory_server_is_visible);
     AcpInventory { servers }
+}
+
+fn inventory_server_is_visible(server: &AcpServerInfo) -> bool {
+    server.detected
+        || server.installing
+        || server.error.is_some()
+        || server.origin.is_some()
+        || server.id == "anvil"
+        || server.policy != AcpServerPolicy::Auto
 }
 
 type ProbeResult = std::result::Result<probe::AdapterCapabilities, String>;
@@ -1382,6 +1385,30 @@ mod tests {
             .expect("anvil");
         assert!(anvil.selected);
         assert_eq!(anvil.policy, AcpServerPolicy::Enabled);
+    }
+
+    #[test]
+    fn explicit_policy_keeps_undetected_builtin_visible() {
+        let launch = launch_for(AdapterKind::Codex);
+        let mut server = AcpServerInfo {
+            id: launch.source_id.clone(),
+            label: "Codex".to_string(),
+            policy: AcpServerPolicy::Enabled,
+            detected: false,
+            selected: true,
+            evidence: "Codex credentials not found".to_string(),
+            launch,
+            model_count: 0,
+            error: None,
+            installing: false,
+            origin: None,
+        };
+
+        assert!(inventory_server_is_visible(&server));
+        server.policy = AcpServerPolicy::Disabled;
+        assert!(inventory_server_is_visible(&server));
+        server.policy = AcpServerPolicy::Auto;
+        assert!(!inventory_server_is_visible(&server));
     }
 
     #[test]

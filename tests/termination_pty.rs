@@ -49,6 +49,18 @@ fn termios(fd: RawFd) -> libc::termios {
     value
 }
 
+fn stable_local_flags(flags: libc::tcflag_t) -> libc::tcflag_t {
+    #[cfg(target_vendor = "apple")]
+    {
+        // PENDIN is transient kernel state, not a terminal mode preference.
+        flags & !libc::PENDIN
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        flags
+    }
+}
+
 fn duplicate(fd: RawFd) -> File {
     let copy = unsafe { libc::dup(fd) };
     assert!(copy >= 0, "duplicate PTY fd");
@@ -102,7 +114,7 @@ fn wait_for_exit(child: &mut Child, master: &mut File, output: &mut Vec<u8>) -> 
 fn sigterm_restores_real_pty_terminal() {
     let mut master_fd = -1;
     let mut slave_fd = -1;
-    let window_size = libc::winsize {
+    let mut window_size = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
@@ -114,8 +126,8 @@ fn sigterm_restores_real_pty_terminal() {
                 &mut master_fd,
                 &mut slave_fd,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                &window_size,
+                std::ptr::null_mut(),
+                &mut window_size,
             )
         },
         0,
@@ -179,7 +191,11 @@ fn sigterm_restores_real_pty_terminal() {
     let after = termios(slave.as_raw_fd());
     assert_eq!(after.c_iflag, before.c_iflag, "restore input flags");
     assert_eq!(after.c_oflag, before.c_oflag, "restore output flags");
-    assert_eq!(after.c_lflag, before.c_lflag, "restore local flags");
+    assert_eq!(
+        stable_local_flags(after.c_lflag),
+        stable_local_flags(before.c_lflag),
+        "restore local flags"
+    );
 
     let output = String::from_utf8_lossy(&output);
     assert!(
@@ -200,7 +216,7 @@ fn sigterm_restores_real_pty_terminal() {
 fn repeated_sigterm_forces_real_pty_child_exit() {
     let mut master_fd = -1;
     let mut slave_fd = -1;
-    let window_size = libc::winsize {
+    let mut window_size = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
@@ -212,8 +228,8 @@ fn repeated_sigterm_forces_real_pty_child_exit() {
                 &mut master_fd,
                 &mut slave_fd,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                &window_size,
+                std::ptr::null_mut(),
+                &mut window_size,
             )
         },
         0,
