@@ -114,7 +114,7 @@ fn wait_for_exit(child: &mut Child, master: &mut File, output: &mut Vec<u8>) -> 
 fn sigterm_restores_real_pty_terminal() {
     let mut master_fd = -1;
     let mut slave_fd = -1;
-    let mut window_size = libc::winsize {
+    let window_size = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
@@ -127,7 +127,7 @@ fn sigterm_restores_real_pty_terminal() {
                 &mut slave_fd,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut window_size,
+                std::ptr::from_ref(&window_size).cast_mut(),
             )
         },
         0,
@@ -216,7 +216,7 @@ fn sigterm_restores_real_pty_terminal() {
 fn repeated_sigterm_forces_real_pty_child_exit() {
     let mut master_fd = -1;
     let mut slave_fd = -1;
-    let mut window_size = libc::winsize {
+    let window_size = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
@@ -229,7 +229,7 @@ fn repeated_sigterm_forces_real_pty_child_exit() {
                 &mut slave_fd,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut window_size,
+                std::ptr::from_ref(&window_size).cast_mut(),
             )
         },
         0,
