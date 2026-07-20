@@ -1,0 +1,164 @@
+MJOLNIR SUPPLEMENTAL THIRD-PARTY NOTICES
+
+This file supplements THIRD_PARTY_LICENSES.html. Cargo package metadata
+does not enumerate standalone NOTICE files, embedded web fonts, or every
+license in native source and prebuilt static-library payloads.
+
+The sections below are generated from Cargo.lock, exact installed crate
+sources, and a reviewed inventory of the non-Cargo assets shipped by
+official Mjolnir archives.
+
+================================================================================
+cfg_aliases third-party attribution
+================================================================================
+
+Source: https://crates.io/crates/cfg_aliases/0.2.1 (NOTICES.md)
+Inclusion: used while compiling target-specific dependency configuration
+
+# 3rd Party Notices
+
+The `cfg_aliases!` macro uses a lot of the code from [`tectonic_cfg_support::target_cfg!`] macro which is under the following license:
+
+[`tectonic_cfg_support::target_cfg!`]: https://github.com/tectonic-typesetting/tectonic/blob/f2439b936470ad27bdf92882064bc4702ee01899/cfg_support/src/lib.rs#L166
+
+    tectonic_cfg_support is licensed under the MIT License.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the “Software”), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+---
+
+================================================================================
+bzip2/libbzip2 1.0.8
+================================================================================
+
+Source: https://crates.io/crates/bzip2-sys/0.1.13%2B1.0.8 (bzip2-1.0.8/LICENSE)
+Inclusion: used while unpacking sherpa-onnx native libraries during the voice-worker build
+
+
+--------------------------------------------------------------------------
+
+This program, "bzip2", the associated library "libbzip2", and all
+documentation, are copyright (C) 1996-2019 Julian R Seward.  All
+rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. The origin of this software must not be misrepresented; you must 
+   not claim that you wrote the original software.  If you use this 
+   software in a product, an acknowledgment in the product 
+   documentation would be appreciated but is not required.
+
+3. Altered source versions must be plainly marked as such, and must
+   not be misrepresented as being the original software.
+
+4. The name of the author may not be used to endorse or promote 
+   products derived from this software without specific prior written 
+   permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
+OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Julian Seward, jseward@acm.org
+bzip2/libbzip2 version 1.0.8 of 13 July 2019
+
+--------------------------------------------------------------------------
+
+================================================================================
+SQLite 3.46.0
+================================================================================
+
+Source: https://crates.io/crates/libsqlite3-sys/0.30.1 (sqlite3/sqlite3.c)
+Inclusion: compiled from the bundled SQLite amalgamation
+
+The author disclaims copyright to this source code.  In place of
+a legal notice, here is a blessing:
+
+   May you do good and not evil.
+   May you find forgiveness for yourself and forgive others.
+   May you share freely, never taking more than you give.
+
+================================================================================
+sherpa-onnx native static payload 1.13.3
+================================================================================
+
+Source: https://crates.io/crates/sherpa-onnx-sys/1.13.3
+Inclusion: statically linked into mj-voice-worker on Linux, macOS, and Windows
+
+The sherpa-onnx-sys build downloads a native archive that contains only static libraries, without legal files. The linked payload was audited against these exact upstream revisions:
+
+- sherpa-onnx v1.13.3: Apache-2.0
+  https://github.com/k2-fsa/sherpa-onnx/tree/v1.13.3
+- kaldi-decoder v0.3.0: Apache-2.0
+  https://github.com/k2-fsa/kaldi-decoder/tree/v0.3.0
+- OpenFst v1.8.5-2026-04-11: Apache-2.0; Copyright 2005-2026 Google LLC
+  https://github.com/csukuangfj/openfst/tree/v1.8.5-2026-04-11
+- kaldi-native-fbank v1.22.3: Apache-2.0
+  https://github.com/csukuangfj/kaldi-native-fbank/tree/v1.22.3
+- KissFFT febd4caeed32e33ad8b2e0bb5ea77542c40f18ec: BSD-3-Clause
+  https://github.com/mborgerding/kissfft/tree/febd4caeed32e33ad8b2e0bb5ea77542c40f18ec
+- Piper phonemize 78a788e0b719013401572d70fef372e77bff8e43: MIT; Copyright (c) 2023 Michael Hansen
+  https://github.com/csukuangfj/piper-phonemize/tree/78a788e0b719013401572d70fef372e77bff8e43
+- eSpeak NG f6fed6c58b5e0998b8e68c6610125e2d07d595a7: GPL-3.0-or-later, with BSD-2-Clause and Unicode data terms for identified portions
+  https://github.com/csukuangfj/espeak-ng/tree/f6fed6c58b5e0998b8e68c6610125e2d07d595a7
+- uni-algo incorporated by Piper phonemize: public-domain dedication
+- ONNX Runtime v1.24.4: MIT, plus its bundled third-party notices
+  https://github.com/microsoft/onnxruntime/tree/v1.24.4
+- simple-sentencepiece v0.7: Apache-2.0
+  https://github.com/pkufool/simple-sentencepiece/tree/v0.7
+
+The Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, and GPLv3 texts are included in THIRD_PARTY_LICENSES.html or LICENSE. Exact additional terms are shipped in licenses/native/.
+
+================================================================================
+Embedded web fonts
+================================================================================
+
+Source: src/fonts/*.woff2
+Inclusion: embedded in the mj binary and served by the remote viewer
+
+The following font software is licensed under the SIL Open Font License 1.1. The complete terms are in OFL-1.1.md.
+
+- Rajdhani 500, 600, and 700: Copyright (c) 2014, Indian Type Foundry (info@indiantypefoundry.com).
+  https://github.com/google/fonts/tree/main/ofl/rajdhani
+- Staatliches 400: Copyright 2018 The Staatliches Authors (https://github.com/googlefonts/staatliches)
+  https://github.com/google/fonts/tree/main/ofl/staatliches
+- JetBrains Mono: Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
+  https://github.com/JetBrains/JetBrainsMono
+
+================================================================================
+Bundled Anvil 0.22.0
+================================================================================
+
+Source: https://github.com/BrokkAi/anvil/releases/tag/v0.22.0
+Inclusion: separately built binary aggregated into every official Mjolnir archive
+
+Anvil's complete legal bundle is shipped as anvil-licenses/ and maintained in licenses/anvil-v0.22.0/.
+Its SOURCE.md identifies the exact source commit. The bundle includes Anvil's LGPLv3 and incorporated GPLv3 texts, the generated locked Rust dependency report, and supplemental native notices.

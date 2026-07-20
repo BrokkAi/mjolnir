@@ -288,6 +288,25 @@ cargo build --release
 Tests are colocated under `src/`; deterministic PTY fixtures live in
 `tests/e2e/`.
 
-## License
+## License and third-party notices
 
-Mjolnir is licensed under GPL-3.0. See [LICENSE](LICENSE).
+Mjolnir and its voice worker are licensed under `GPL-3.0-only`. See
+[`LICENSE`](LICENSE). Official release archives also include
+[`licenses/SOURCE.md`](licenses/SOURCE.md), a generated Rust dependency report,
+supplemental notices for native libraries and embedded fonts, and the legal
+bundle shipped with the pinned Anvil binary.
+
+The generated report covers the locked production workspace graph across every
+native release target. The supplemental generator also fails when a new
+native-linking crate, standalone Cargo `NOTICE` file, embedded web font, or
+sherpa-onnx native payload version appears without review.
+
+To validate or regenerate the reports after changing `Cargo.lock` or shipped
+assets:
+
+```bash
+cargo deny --workspace --config licenses/deny.toml --locked check licenses
+cargo about generate --workspace --offline --config licenses/about.toml \
+  --locked --fail licenses/about.hbs -o licenses/THIRD_PARTY_LICENSES.html
+node scripts/generate-supplemental-third-party-notices.mjs
+```

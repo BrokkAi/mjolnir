@@ -6,6 +6,49 @@ on:
   pull_request: {}
 
 jobs:
+  licenses:
+    name: Dependency licenses
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Set up Node
+      uses: actions/setup-node@v6
+      with:
+        node-version: 24
+
+    - name: Install pinned license tools
+      run: |
+        cargo install --locked cargo-about --version 0.9.1 --features cli
+        cargo install --locked cargo-deny --version 0.20.2
+
+    - name: Fetch locked dependencies
+      run: cargo fetch --locked
+
+    - name: Check dependency license policy
+      run: cargo deny --workspace --config licenses/deny.toml --locked check licenses
+
+    - name: Check shipped notice reports
+      run: |
+        cargo about generate --workspace --offline --config licenses/about.toml --locked --fail licenses/about.hbs -o /tmp/THIRD_PARTY_LICENSES.html
+        diff -u licenses/THIRD_PARTY_LICENSES.html /tmp/THIRD_PARTY_LICENSES.html
+        node scripts/generate-supplemental-third-party-notices.mjs /tmp/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt
+        diff -u licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt /tmp/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt
+
+    - name: Check crate package license files
+      run: |
+        diff -u LICENSE voice-worker/LICENSE
+        cargo package --locked --allow-dirty --list -p brokk-mjolnir > /tmp/mjolnir-package-files.txt
+        cargo package --locked --allow-dirty --list -p brokk-mj-voice-worker > /tmp/voice-worker-package-files.txt
+        grep -Fx LICENSE /tmp/mjolnir-package-files.txt
+        grep -Fx licenses/THIRD_PARTY_LICENSES.html /tmp/mjolnir-package-files.txt
+        grep -Fx licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt /tmp/mjolnir-package-files.txt
+        grep -Fx licenses/anvil-v0.22.0/SOURCE.md /tmp/mjolnir-package-files.txt
+        grep -Fx LICENSE /tmp/voice-worker-package-files.txt
+
   mjolnir:
     strategy:
       fail-fast: false

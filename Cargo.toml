@@ -3,7 +3,7 @@ name = "brokk-mjolnir"
 version = "1.0.2"
 edition = "2024"
 description = "Forge-grade terminal client for any Agent Client Protocol (ACP) server"
-license = "GPL-3.0"
+license = "GPL-3.0-only"
 repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 

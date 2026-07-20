@@ -52,6 +52,10 @@ jobs:
           cp "target/x86_64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
           cp "target/x86_64-unknown-linux-gnu/release/anvil" "$name/"
           cp README.md LICENSE "$name/"
+          mkdir "$name/licenses"
+          cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
+          cp -R licenses/native "$name/licenses/"
+          cp -R "licenses/anvil-v${ANVIL_VERSION}" "$name/anvil-licenses"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
 
@@ -111,6 +115,10 @@ jobs:
           cp "target/aarch64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
           cp "target/aarch64-unknown-linux-gnu/release/anvil" "$name/"
           cp README.md LICENSE "$name/"
+          mkdir "$name/licenses"
+          cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
+          cp -R licenses/native "$name/licenses/"
+          cp -R "licenses/anvil-v${ANVIL_VERSION}" "$name/anvil-licenses"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
 
@@ -170,6 +178,10 @@ jobs:
           cp "target/aarch64-linux-android/release/mj" "$name/"
           cp "target/aarch64-linux-android/release/anvil" "$name/"
           cp README.md LICENSE "$name/"
+          mkdir "$name/licenses"
+          cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
+          cp -R licenses/native "$name/licenses/"
+          cp -R "licenses/anvil-v${ANVIL_VERSION}" "$name/anvil-licenses"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
 
@@ -222,6 +234,11 @@ jobs:
           Copy-Item "target\x86_64-pc-windows-msvc\release\anvil.exe" -Destination $name
           Copy-Item "README.md" -Destination $name
           Copy-Item "LICENSE" -Destination $name
+          New-Item -ItemType Directory -Path "$name\licenses" | Out-Null
+          $legalFiles = @("licenses\SOURCE.md", "licenses\OFL-1.1.md", "licenses\THIRD_PARTY_LICENSES.html", "licenses\SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt")
+          Copy-Item $legalFiles -Destination "$name\licenses"
+          Copy-Item "licenses\native" -Destination "$name\licenses" -Recurse
+          Copy-Item "licenses\anvil-v${env:ANVIL_VERSION}" -Destination "$name\anvil-licenses" -Recurse
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           $hash = (Get-FileHash -Algorithm SHA256 "$name.zip").Hash.ToLower()
           "$hash  $name.zip" | Set-Content -Path "$name.zip.sha256" -NoNewline
@@ -289,6 +306,10 @@ jobs:
           cp target/universal-apple-darwin/release/mj-voice-worker "$name/"
           cp target/universal-apple-darwin/release/anvil "$name/"
           cp README.md LICENSE "$name/"
+          mkdir "$name/licenses"
+          cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
+          cp -R licenses/native "$name/licenses/"
+          cp -R "licenses/anvil-v${ANVIL_VERSION}" "$name/anvil-licenses"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
 
