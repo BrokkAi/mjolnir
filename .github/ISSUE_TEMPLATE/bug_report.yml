@@ -1,0 +1,63 @@
+name: Other bug
+description: Report a problem with installation, building, packaging, updating, documentation, or other non-session behavior.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use the TUI, session, or remote bug form instead when Mjolnir behaved incorrectly during an interactive, headless, or remote session.
+
+  - type: dropdown
+    id: affected-surface
+    attributes:
+      label: Affected surface
+      description: Where did you encounter the problem?
+      options:
+        - Installer or crates.io installation
+        - Build or development setup
+        - Release archive or checksum
+        - Self-update
+        - Configuration or first-run setup
+        - Voice worker discovery or model download
+        - Managed Anvil installation
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed-behavior
+    attributes:
+      label: What happened?
+      description: Describe the problem and its effect on your workflow.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it?
+      description: List the smallest set of steps you know. If the problem is intermittent, describe when it tends to occur.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: What did you expect?
+      description: Describe the behavior you expected instead.
+    validations:
+      required: true
+
+  - type: input
+    id: version-environment
+    attributes:
+      label: Version and environment
+      description: Optionally include the Mjolnir version or commit, installation method, operating system, shell, and relevant configuration.
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Logs, screenshots, or other context
+      description: Optionally add anything else that may help us understand the problem. Please remove secrets and private data.

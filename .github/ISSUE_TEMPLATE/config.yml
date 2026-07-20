@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Mjolnir documentation
+    url: https://github.com/BrokkAi/mjolnir#readme
+    about: Read the installation, Council, ACP server, session, remote-use, and development documentation.
+  - name: Ask the community on Discord
+    url: https://discord.gg/geYkWUeH
+    about: Ask usage and setup questions or discuss an idea before opening an issue.

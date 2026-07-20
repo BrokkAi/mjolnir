@@ -1,0 +1,80 @@
+name: TUI, session, or remote bug
+description: Report incorrect, inconsistent, unsafe, or unexpectedly slow behavior while using Mjolnir.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A minimal transcript or exact interaction sequence helps us reproduce terminal and ACP behavior. Please remove secrets, credentials, personal information, and private source code.
+
+  - type: dropdown
+    id: affected-surface
+    attributes:
+      label: Affected surface
+      description: Which Mjolnir surface is closest to the problem?
+      options:
+        - Inline terminal UI
+        - Fullscreen TUI
+        - Headless or print mode
+        - Remote server or web viewer
+        - Council routing or role handoff
+        - ACP adapter discovery, startup, or protocol handling
+        - Tools, permissions, terminals, or elicitation
+        - Transcript, Markdown, or diff rendering
+        - Sessions, configuration, resume, or worktrees
+        - Voice dictation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed-behavior
+    attributes:
+      label: What did Mjolnir do?
+      description: Describe the incorrect, inconsistent, unsafe, or unexpectedly slow behavior you observed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: What should it have done?
+      description: Describe the behavior you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest prompt, session state, terminal interaction, or public repository example that demonstrates the behavior.
+      placeholder: |
+        Starting state:
+        Command or prompt:
+        Keys, actions, or tool calls:
+        Result:
+    validations:
+      required: true
+
+  - type: textarea
+    id: session-environment
+    attributes:
+      label: Session and environment
+      description: Include the Mjolnir version or commit, command, UI mode, terminal and shell, operating system, ACP adapter, Council configuration, and permission mode when relevant.
+      placeholder: |
+        Mjolnir version or commit:
+        Command and UI mode:
+        Terminal and shell:
+        Operating system:
+        ACP adapter:
+        Council models or roles:
+        Permission mode:
+    validations:
+      required: true
+
+  - type: textarea
+    id: transcript-logs
+    attributes:
+      label: Transcript, screenshots, or logs
+      description: Optionally include a minimal transcript, screenshot or recording, --debug-file output, or --agent-stderr output. For layout bugs, include the terminal size and any resize steps. Please remove secrets and private data.
