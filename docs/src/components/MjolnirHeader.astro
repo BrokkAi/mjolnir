@@ -10,9 +10,9 @@ const { siteTitleHref } = (Astro.locals as { starlightRoute: StarlightRouteData 
 const root = siteTitleHref.endsWith('/') ? siteTitleHref : `${siteTitleHref}/`;
 const navItems = [
   { label: 'Overview', slug: 'overview/' },
+  { label: 'Evaluate', slug: 'evaluate/' },
   { label: 'Council', slug: 'council/' },
-  { label: 'Configuration', slug: 'configuration/' },
-  { label: 'Remote', slug: 'remote/' },
+  { label: 'Reference', slug: 'cli-reference/' },
 ];
 const currentPath = Astro.url.pathname.replace(/\/+$/, '/');
 ---

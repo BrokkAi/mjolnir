@@ -49,13 +49,35 @@
   --mj-ink: #171221;
   --mj-copy: #4d435c;
   --mj-muted: #71667f;
-  --mj-surface: #f7f5f9;
-  --mj-surface-raised: #fff;
+  --mj-surface: #f5f2f8;
+  --mj-surface-raised: #fcfaff;
   --mj-line: rgb(23 18 33 / 0.1);
   --mj-line-strong: rgb(23 18 33 / 0.18);
   --mj-grid: rgb(23 18 33 / 0.035);
   --mj-grid-strong: rgb(23 18 33 / 0.065);
   --mj-highlight: rgb(255 255 255 / 0.8);
+}
+
+:root[data-theme='light'] body {
+  background-color: var(--mj-surface);
+}
+
+:root[data-theme='light'] .storm-console {
+  background-color: rgb(252 250 255 / 0.94);
+  box-shadow: 0 38px 90px rgb(63 39 91 / 0.16), inset 0 1px white;
+}
+
+:root[data-theme='light'] .ascii-storm {
+  background: radial-gradient(circle, rgb(114 68 204 / 0.12), transparent 65%);
+}
+
+:root[data-theme='light'] .hero-actions .primary,
+:root[data-theme='light'] .docs-callout > a {
+  color: #fff;
+}
+
+:root[data-theme='light'] .page > header.header {
+  background: linear-gradient(180deg, rgb(245 242 248 / 0.98), rgb(245 242 248 / 0.72), transparent);
 }
 
 html[data-has-hero] { --sl-content-width: 87rem; }

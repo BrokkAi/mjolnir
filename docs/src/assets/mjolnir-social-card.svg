@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
+  <title id="title">Mjolnir social card</title>
+  <desc id="description">Mjolnir, a native Rust terminal interface for coordinating a council of coding agents, illustrated with a fixed-grid ASCII hammer.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0910"/>
+      <stop offset="0.56" stop-color="#08070c"/>
+      <stop offset="1" stop-color="#050509"/>
+    </linearGradient>
+    <radialGradient id="hammerGlow" cx="50%" cy="46%" r="58%">
+      <stop offset="0" stop-color="#985cff" stop-opacity="0.24"/>
+      <stop offset="0.62" stop-color="#7b3fe4" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#7b3fe4" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" fill="none" stroke="#1c1728" stroke-width="1"/>
+    </pattern>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#background)"/>
+  <rect width="1200" height="630" fill="url(#grid)" opacity="0.52"/>
+  <rect x="1" y="1" width="1198" height="628" rx="16" fill="none" stroke="#30273e" stroke-width="2"/>
+  <path d="M0 112H1200" stroke="#211a2b"/>
+
+  <g transform="translate(58 48)">
+    <rect x="0" y="3" width="42" height="14" rx="2" fill="#9a63ff"/>
+    <rect x="17" y="17" width="8" height="22" fill="#eee8ff"/>
+    <path d="M4 7H38" stroke="#d9c7ff" stroke-width="2" opacity="0.7"/>
+    <text x="60" y="25" fill="#f5f1ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" font-weight="800" letter-spacing="4">MJOLNIR</text>
+    <path d="M226 2V30" stroke="#514361"/>
+    <text x="246" y="23" fill="#8d819c" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="700" letter-spacing="3">TERMINAL COUNCIL</text>
+  </g>
+
+  <g transform="translate(58 206)">
+    <text fill="#f6f2ff" font-family="Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif" font-size="72" font-weight="800" letter-spacing="1">
+      <tspan x="0" y="0">ONE TERMINAL.</tspan>
+      <tspan x="0" y="78">A COUNCIL OF</tspan>
+      <tspan x="0" y="156">AGENTS.</tspan>
+    </text>
+    <text x="2" y="208" fill="#b5aabd" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="20">
+      Native Rust TUI · Model-first agents · One shared terminal
+    </text>
+  </g>
+
+  <text x="1142" y="74" text-anchor="end" fill="#8f839b" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" letter-spacing="2.2">RUST 2024  ·  ACP NATIVE  ·  COUNCIL CONTROL</text>
+
+  <g>
+    <ellipse cx="925" cy="330" rx="280" ry="270" fill="url(#hammerGlow)"/>
+    <text xml:space="preserve" fill="#b88cff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="750" letter-spacing="0.8" filter="url(#glow)" opacity="0.9">
+      <tspan x="720" y="120">XXAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNXX</tspan>
+      <tspan x="720" dy="14.5">XXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXXX</tspan>
+      <tspan x="720" dy="14.5">XXXNAVMWXNAVMWXNAVMWXNAVMWXNAVMWXNAVMWXNAVMWXNAVMWXX</tspan>
+      <tspan x="720" dy="14.5">XX                                                XX</tspan>
+      <tspan x="720" dy="14.5">XX    XMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWN    XX</tspan>
+      <tspan x="720" dy="14.5">XX    XX                                    XX    XX</tspan>
+      <tspan x="720" dy="14.5">XX    XX                                    XX    XX</tspan>
+      <tspan x="720" dy="14.5">XX    XX                                    XX    XX</tspan>
+      <tspan x="720" dy="14.5">XX    XX                                    XX    XX</tspan>
+      <tspan x="720" dy="14.5">XX    WNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAV    XX</tspan>
+      <tspan x="720" dy="14.5">XX                                                XX</tspan>
+      <tspan x="720" dy="14.5">XXVWMNAXVWMNAXVWMNAXVWMNAXVWMNAXVWMNAXVWMNAXVWMNAXXX</tspan>
+      <tspan x="720" dy="14.5">XXWNNAVXWNNAVXWNNAVXWNNAVXWNNAVXWNNAVXWNNAVXWNNAVXXX</tspan>
+      <tspan x="720" dy="14.5">XXNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWNAVXMWXX</tspan>
+
+      <tspan x="882" dy="14.5">AVXMWNAVXMWN</tspan>
+      <tspan x="882" dy="14.5">AV  XMWN  VA</tspan>
+      <tspan x="882" dy="14.5">MW  NAVX  MW</tspan>
+      <tspan x="882" dy="14.5">XN  VMWA  XN</tspan>
+      <tspan x="882" dy="14.5">VA  XNMW  VA</tspan>
+      <tspan x="882" dy="14.5">MW  AVXN  MW</tspan>
+      <tspan x="882" dy="14.5">XN  MWAV  XN</tspan>
+      <tspan x="882" dy="14.5">VA  WNMX  VA</tspan>
+      <tspan x="882" dy="14.5">MW  XAVN  MW</tspan>
+      <tspan x="882" dy="14.5">XN  AVMW  XN</tspan>
+      <tspan x="882" dy="14.5">VA  MNXW  VA</tspan>
+      <tspan x="882" dy="14.5">MW  XWNA  MW</tspan>
+      <tspan x="882" dy="14.5">XN  VAMW  XN</tspan>
+      <tspan x="882" dy="14.5">AVXMWNAVXMWN</tspan>
+
+      <tspan x="856" dy="14.5">AVXMWNAVXMWNAVXMWN</tspan>
+      <tspan x="856" dy="14.5">AV              VA</tspan>
+      <tspan x="856" dy="14.5">MWNAVXMWNAVXMWNAVX</tspan>
+    </text>
+  </g>
+
+  <g fill="none" stroke="#8f59ed" stroke-width="1.5" opacity="0.7">
+    <path d="M650 148H610L584 120H548"/><path d="M676 214H622L598 238H554"/>
+    <path d="M1156 170H1176L1190 154"/><path d="M1132 420H1164L1186 444"/>
+    <path d="M676 468H630L600 498H548"/><path d="M1038 566H1090L1124 598"/>
+  </g>
+  <g fill="#b98cff">
+    <circle cx="548" cy="120" r="3"/><circle cx="554" cy="238" r="3"/><circle cx="548" cy="498" r="3"/>
+    <circle cx="1190" cy="154" r="3"/><circle cx="1186" cy="444" r="3"/><circle cx="1124" cy="598" r="3"/>
+  </g>
+  <g fill="none" stroke="#985cff" stroke-width="2" opacity="0.9" filter="url(#glow)">
+    <path d="M660 84L684 116L670 144L698 172L680 204"/>
+    <path d="M1146 282L1122 312L1140 344L1118 378"/>
+    <path d="M778 560L754 536L770 508L748 482"/>
+  </g>
+  <g fill="#ffd84a" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" font-weight="900" filter="url(#glow)">
+    <text x="626" y="178">ϟ</text><text x="754" y="594">ϟ</text>
+  </g>
+
+  <g transform="translate(58 578)">
+    <circle cx="6" cy="-7" r="5" fill="#9a63ff"/>
+    <text x="22" y="0" fill="#d8d0df" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" letter-spacing="1.2">GITHUB.COM/BROKKAI/MJOLNIR</text>
+  </g>
+</svg>

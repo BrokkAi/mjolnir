@@ -90,9 +90,11 @@ Add the smallest regression test that would have caught the problem:
   process boundary.
 - Add negative controls for permission, protocol, persistence, cleanup, and
   terminal-lifecycle changes.
-- Update [README.md](README.md) when a user-visible command, keyboard action,
-  setup flow, ACP adapter, Council behavior, remote feature, configuration
-  option, or limitation changes.
+- Update the relevant page in the [documentation site](docs/src/content/docs/)
+  when a user-visible command, keyboard action, setup flow, ACP adapter,
+  Council behavior, remote feature, configuration option, or limitation
+  changes. Update [README.md](README.md) when the front-door positioning,
+  installation, compatibility, or primary quick start changes.
 - Update [AGENTS.md](AGENTS.md) when an implementation invariant or contributor
   checklist changes.
 

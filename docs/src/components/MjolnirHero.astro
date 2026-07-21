@@ -4,10 +4,65 @@ import type { StarlightRouteData } from '@astrojs/starlight/route-data';
 
 const { data } = (Astro.locals as { starlightRoute: StarlightRouteData }).starlightRoute.entry;
 const { actions = [] } = data.hero || {};
+
+const hammerWidth = 52;
+const hammerMask = `####################################################
+####################################################
+####################################################
+##                                                ##
+##    ########################################    ##
+##    ##                                    ##    ##
+##    ##                                    ##    ##
+##    ##                                    ##    ##
+##    ##                                    ##    ##
+##    ########################################    ##
+##                                                ##
+####################################################
+####################################################
+####################################################
+                    ############
+                    ##  ####  ##
+                    ##  ####  ##
+                    ##  ####  ##
+                    ##  ####  ##
+                    ##  ####  ##
+                    ##  ####  ##
+                    ##  ####  ##
+                    ##  ####  ##
+                    ##  ####  ##
+                    ##  ####  ##
+                    ##  ####  ##
+                    ##  ####  ##
+                    ############
+                 ##################
+                 ##              ##
+                 ##################`
+  .split('\n')
+  .map((line) => line.padEnd(hammerWidth, ' '))
+  .join('\n');
+const hammerGlyphs = 'AVXMWN';
+const hammerArt = [...hammerMask]
+  .map((cell, index) => (cell === '#' ? hammerGlyphs[(index * 7) % hammerGlyphs.length] : cell))
+  .join('');
+
+const councilTopology = `              THOR / DIRECTOR
+        plan · route · synthesize
+                    │
+             ┌──────┴──────┐
+             ▼             ▼
+       EITRI / FORGE   LOKI / REVIEW
+       isolate · build  inspect · challenge
+             │             │
+             └──────┬──────┘
+                    ▼
+             COUNCIL / READY`;
 ---
 
 <section class="mj-hero" aria-labelledby="_top">
   <div class="hero-copy">
+    <div class="hero-hammer" aria-hidden="true">
+      <pre class="hammer-art" data-hammer-art data-mask={hammerMask}><code>{hammerArt}</code></pre>
+    </div>
     <p class="hero-kicker"><span aria-hidden="true">⚡</span> MJOLNIR / NATIVE RUST TUI</p>
     <h1 id="_top">One terminal.<br /><em>A council</em> of agents.</h1>
     <p class="hero-tagline">Mjolnir gives coding agents distinct roles, a shared terminal, and one consistent way to work—no matter which model is behind the hammer.</p>
@@ -36,18 +91,7 @@ const { actions = [] } = data.hero || {};
       <small>RAGNAROK: STANDBY</small>
     </div>
     <div class="ascii-storm" aria-hidden="true">
-      <pre><code>             .        ╲  │  ╱
-       ·          ┌─────────────┐       .
-   ╲  │  ╱        │   MJØLNIR   │   ╲  │  ╱
-    ╲ │ ╱      ┌──┴─────────────┴──┐ ╲ │ ╱
-  ─── ⚡ ───    │  ███████████████  │── ⚡ ───
-    ╱ │ ╲      └────────┬──────────┘ ╱ │ ╲
-   ╱  │  ╲              │           ╱  │  ╲
-                   ╔════╧════╗
-                   ║   mj    ║
-                   ╚════╤════╝
-                        │
-                    forge://ready</code></pre>
+      <pre class="council-topology"><code>{councilTopology}</code></pre>
     </div>
     <div class="council-feed">
       <div><b>THOR</b><span>plans the turn and delegates the seam</span><small>COORDINATING</small></div>
@@ -60,14 +104,46 @@ const { actions = [] } = data.hero || {};
   <p class="hero-rail" aria-hidden="true">MODEL FIRST // ACP NATIVE // INLINE TUI // COUNCIL CONTROL</p>
 </section>
 
+<script>
+  const animateHammers = () => {
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+    document.querySelectorAll<HTMLElement>('[data-hammer-art]').forEach((art) => {
+      const code = art.querySelector('code');
+      const mask = art.dataset.mask;
+      if (!code || !mask || reducedMotion.matches || art.dataset.animated === 'true') return;
+
+      art.dataset.animated = 'true';
+      const glyphs = 'AVXMWN';
+      const cells = [...code.textContent!];
+      const interval = window.setInterval(() => {
+        if (!code.isConnected || reducedMotion.matches) {
+          window.clearInterval(interval);
+          return;
+        }
+
+        for (let index = 0; index < cells.length; index += 1) {
+          if (mask[index] === '#' && Math.random() < 0.24) {
+            cells[index] = glyphs[Math.floor(Math.random() * glyphs.length)];
+          }
+        }
+        code.textContent = cells.join('');
+      }, 90);
+    });
+  };
+
+  animateHammers();
+  document.addEventListener('astro:page-load', animateHammers);
+</script>
+
 <style>
   @layer starlight.user {
     .mj-hero {
       position: relative;
       isolation: isolate;
       display: grid;
-      grid-template-columns: minmax(0, 1.04fr) minmax(31rem, 0.96fr);
-      gap: clamp(2.5rem, 5vw, 6.5rem);
+      grid-template-columns: minmax(0, 1fr);
+      gap: clamp(3rem, 5vw, 5rem);
       align-items: center;
       min-height: min(50rem, calc(100vh - var(--sl-nav-height)));
       padding: clamp(4.5rem, 8vw, 7.5rem) clamp(0rem, 2vw, 1.7rem) clamp(7rem, 11vw, 9rem);
@@ -95,7 +171,40 @@ const { actions = [] } = data.hero || {};
       filter: blur(12px);
     }
 
-    .hero-copy { position: relative; z-index: 2; }
+    .hero-copy { position: relative; z-index: 2; max-width: none; }
+    .hero-hammer {
+      position: absolute;
+      z-index: -1;
+      inset: 1rem -2rem auto auto;
+      display: block;
+      width: 32rem;
+      padding: 0;
+      background: radial-gradient(ellipse at 54% 45%, color-mix(in srgb, var(--mj-violet) 18%, transparent), transparent 68%);
+      color: var(--mj-violet-soft);
+      font-family: var(--sl-font-mono);
+      filter: drop-shadow(0 0 24px color-mix(in srgb, var(--mj-violet) 26%, transparent));
+      mask-image: radial-gradient(ellipse 82% 84% at 52% 46%, black 56%, rgb(0 0 0 / 0.68) 80%, transparent 100%);
+      opacity: 0.32;
+      pointer-events: none;
+    }
+    .hammer-art {
+      position: relative;
+      z-index: 1;
+      width: 52ch;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font-size: 0.9rem;
+      font-weight: 650;
+      letter-spacing: 0;
+      line-height: 1.04;
+      text-align: left;
+      text-shadow: 0 0 12px color-mix(in srgb, var(--mj-violet) 48%, transparent);
+      white-space: pre;
+    }
+    .hammer-art code { background: transparent; color: inherit; font: inherit; letter-spacing: inherit; }
     .hero-kicker {
       display: flex;
       align-items: center;
@@ -160,7 +269,9 @@ const { actions = [] } = data.hero || {};
       background-size: 20px 20px;
       box-shadow: 0 38px 100px rgb(0 0 0 / 0.38), inset 0 1px var(--mj-highlight);
       font-family: var(--sl-font-mono);
-      transform: perspective(90rem) rotateY(-2deg) rotateX(1deg);
+      width: min(100%, 54rem);
+      justify-self: center;
+      transform: none;
     }
     .storm-console::before, .storm-console::after {
       position: absolute;
@@ -176,9 +287,9 @@ const { actions = [] } = data.hero || {};
     .console-bar { display: flex; justify-content: space-between; padding: 0.8rem 0.95rem; border-bottom: 1px solid var(--mj-line-strong); color: var(--mj-muted); font-size: 0.57rem; font-weight: 700; letter-spacing: 0.07em; }
     .console-bar i { display: inline-block; width: 0.42rem; height: 0.42rem; margin-right: 0.4rem; border-radius: 50%; background: var(--mj-violet); box-shadow: 0 0 11px var(--mj-violet); }
     .console-bar small { color: var(--mj-gold); font-size: inherit; }
-    .ascii-storm { min-height: 18rem; display: grid; place-items: center; padding: 1.35rem 0.75rem; overflow: hidden; background: radial-gradient(circle, color-mix(in srgb, var(--mj-violet) 10%, transparent), transparent 62%); }
-    .ascii-storm pre { margin: 0; padding: 0; border: 0; background: transparent; color: var(--mj-violet-soft); font-size: clamp(0.55rem, 1vw, 0.77rem); line-height: 1.45; text-shadow: 0 0 12px color-mix(in srgb, var(--mj-violet) 28%, transparent); }
-    .ascii-storm code { background: transparent; color: inherit; }
+    .ascii-storm { min-height: 18rem; display: grid; place-items: center; padding: 1.15rem 0.75rem; overflow: hidden; background: radial-gradient(circle, color-mix(in srgb, var(--mj-violet) 10%, transparent), transparent 62%); }
+    .council-topology { margin: 0; padding: 0; border: 0; background: transparent; color: var(--mj-violet-soft); font-size: clamp(0.48rem, 1vw, 0.68rem); line-height: 1.65; text-shadow: 0 0 10px color-mix(in srgb, var(--mj-violet) 24%, transparent); }
+    .council-topology code { background: transparent; color: inherit; }
     .council-feed { border-block: 1px solid var(--mj-line-strong); }
     .council-feed > div { display: grid; grid-template-columns: 3.4rem 1fr auto; gap: 0.7rem; align-items: center; padding: 0.68rem 0.85rem; }
     .council-feed > div + div { border-top: 1px solid var(--mj-line); }
@@ -192,10 +303,9 @@ const { actions = [] } = data.hero || {};
 
     @keyframes cursor-pulse { 50% { opacity: 0.2; } }
     @media (max-width: 68rem) {
-      .mj-hero { grid-template-columns: 1fr; }
-      .hero-copy { max-width: 50rem; }
-      .storm-console { width: min(100%, 43rem); justify-self: center; transform: none; }
+      .storm-console { width: min(100%, 43rem); }
     }
+    @media (max-width: 48rem) { .hero-hammer { display: none; } }
     @media (max-width: 42rem) {
       .mj-hero { padding-top: 3.5rem; }
       .mj-hero h1 { font-size: clamp(3.4rem, 18vw, 5.5rem); }
@@ -206,6 +316,8 @@ const { actions = [] } = data.hero || {};
       .council-feed > div { grid-template-columns: 3.2rem 1fr; }
       .council-feed small { display: none; }
     }
-    @media (prefers-reduced-motion: reduce) { .console-prompt i { animation: none; } }
+    @media (prefers-reduced-motion: reduce) {
+      .console-prompt i { animation: none; }
+    }
   }
 </style>
