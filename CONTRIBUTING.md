@@ -204,6 +204,13 @@ and a universal macOS archive. Desktop archives contain `mj`, the voice worker,
 and pinned Anvil; Android omits the voice worker. Every archive includes the
 applicable licenses and notices and is published with a SHA-256 sidecar.
 
+To announce a published GitHub Release in Discord, set the
+`DISCORD_RELEASE_WEBHOOK_URL` repository Actions secret to the target channel's
+webhook URL. The release workflow reuses GitHub's generated release notes,
+prevents mentions from being parsed, suppresses automatic link embeds, and
+leaves a failed Discord delivery as a warning so it cannot invalidate an
+already-published release.
+
 Before tagging, maintainers should confirm that:
 
 1. Both crate manifests, `Cargo.lock`, and `install.sh` match the intended tag.
