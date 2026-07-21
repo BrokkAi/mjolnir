@@ -39,3 +39,8 @@ target/
 .codex-pr-review/
 
 .bifrost
+
+# Astro documentation
+docs/.astro/
+docs/dist/
+docs/node_modules/

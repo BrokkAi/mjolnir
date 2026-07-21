@@ -1,0 +1,135 @@
+---
+import LanguageSelect from '@astrojs/starlight/components/LanguageSelect.astro';
+import Search from '@astrojs/starlight/components/Search.astro';
+import SiteTitle from '@astrojs/starlight/components/SiteTitle.astro';
+import SocialIcons from '@astrojs/starlight/components/SocialIcons.astro';
+import ThemeSelect from '@astrojs/starlight/components/ThemeSelect.astro';
+import type { StarlightRouteData } from '@astrojs/starlight/route-data';
+
+const { siteTitleHref } = (Astro.locals as { starlightRoute: StarlightRouteData }).starlightRoute;
+const root = siteTitleHref.endsWith('/') ? siteTitleHref : `${siteTitleHref}/`;
+const navItems = [
+  { label: 'Overview', slug: 'overview/' },
+  { label: 'Council', slug: 'council/' },
+  { label: 'Configuration', slug: 'configuration/' },
+  { label: 'Remote', slug: 'remote/' },
+];
+const currentPath = Astro.url.pathname.replace(/\/+$/, '/');
+---
+
+<div class="mj-header-shell">
+  <div class="mj-brand sl-flex">
+    <span class="mj-mark" aria-hidden="true"><i></i><b></b></span>
+    <SiteTitle />
+    <small>terminal council</small>
+  </div>
+
+  <nav class="mj-primary-nav print:hidden" aria-label="Primary">
+    {
+      navItems.map(({ label, slug }) => {
+        const href = `${root}${slug}`;
+        return <a href={href} aria-current={currentPath === href ? 'page' : undefined}>{label}</a>;
+      })
+    }
+  </nav>
+
+  <div class="mj-header-search sl-flex print:hidden"><Search /></div>
+  <div class="mj-header-tools sl-hidden md:sl-flex print:hidden">
+    <div class="sl-flex social-icons"><SocialIcons /></div>
+    <ThemeSelect />
+    <LanguageSelect />
+  </div>
+</div>
+
+<style>
+  @layer starlight.user {
+    .mj-header-shell {
+      display: grid;
+      grid-template-columns: minmax(11rem, auto) minmax(8rem, 22rem) auto;
+      align-items: center;
+      gap: clamp(0.7rem, 1.6vw, 1.5rem);
+      height: 100%;
+      max-width: 92rem;
+      margin-inline: auto;
+      padding: 0.46rem 0.7rem 0.46rem 0.85rem;
+      border: 1px solid var(--mj-line-strong);
+      border-radius: 0.3rem;
+      background: color-mix(in srgb, var(--mj-surface) 90%, transparent);
+      box-shadow: 0 18px 48px rgb(0 0 0 / 0.3), inset 0 1px var(--mj-highlight);
+      backdrop-filter: blur(20px) saturate(120%);
+    }
+
+    .mj-brand { align-items: center; gap: 0.65rem; min-width: 0; }
+    .mj-brand small {
+      padding-inline-start: 0.65rem;
+      border-inline-start: 1px solid var(--mj-line-strong);
+      color: var(--mj-muted);
+      font-family: var(--sl-font-mono);
+      font-size: 0.57rem;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .mj-mark { position: relative; display: block; flex: 0 0 1.45rem; width: 1.45rem; height: 1.35rem; }
+    .mj-mark i {
+      position: absolute;
+      inset: 0.08rem 0 auto;
+      height: 0.62rem;
+      border: 1px solid var(--mj-violet);
+      background: color-mix(in srgb, var(--mj-violet) 16%, transparent);
+      box-shadow: 0 0 14px color-mix(in srgb, var(--mj-violet) 42%, transparent);
+      clip-path: polygon(8% 0, 92% 0, 100% 25%, 100% 75%, 92% 100%, 8% 100%, 0 75%, 0 25%);
+    }
+    .mj-mark b { position: absolute; inset: 0.7rem 0.63rem auto; height: 0.58rem; background: var(--mj-ink); }
+
+    .mj-brand :global(.site-title) {
+      color: var(--mj-ink);
+      font-size: 0.98rem;
+      font-weight: 780;
+      letter-spacing: 0.035em;
+      text-transform: uppercase;
+    }
+
+    .mj-primary-nav { display: none; align-items: center; justify-content: center; gap: 0.15rem; }
+    .mj-primary-nav a {
+      position: relative;
+      padding: 0.5rem 0.68rem;
+      color: var(--mj-muted);
+      font-family: var(--sl-font-mono);
+      font-size: 0.63rem;
+      font-weight: 650;
+      letter-spacing: 0.06em;
+      text-decoration: none;
+      text-transform: uppercase;
+    }
+    .mj-primary-nav a::after {
+      position: absolute;
+      inset: auto 0.68rem 0.2rem;
+      height: 1px;
+      background: var(--mj-violet);
+      box-shadow: 0 0 8px var(--mj-violet);
+      content: '';
+      transform: scaleX(0);
+      transition: transform 140ms ease;
+    }
+    .mj-primary-nav a:hover,
+    .mj-primary-nav a:focus-visible,
+    .mj-primary-nav a[aria-current='page'] { color: var(--mj-ink); }
+    .mj-primary-nav a[aria-current='page']::after { transform: scaleX(1); }
+
+    .mj-header-search { justify-self: end; min-width: 0; }
+    .mj-header-tools, .social-icons { align-items: center; gap: 0.7rem; }
+    .social-icons::after { width: 1px; height: 1.4rem; background: var(--mj-line-strong); content: ''; }
+
+    @media (min-width: 72rem) {
+      .mj-header-shell { grid-template-columns: minmax(14rem, auto) minmax(0, 1fr) auto auto; }
+      .mj-primary-nav { display: flex; }
+    }
+
+    @media (max-width: 49.99rem) {
+      .mj-header-shell { grid-template-columns: minmax(0, 1fr) auto; }
+      .mj-brand small { display: none; }
+    }
+  }
+</style>
