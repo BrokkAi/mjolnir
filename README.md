@@ -1,7 +1,7 @@
 <h1 align="center">Mjolnir</h1>
 
 <p align="center">
-  <a href="https://brokkai.github.io/mjolnir/">
+  <a href="https://mjolnir.brokk.ai/">
     <img src="docs/public/og.png" alt="Mjolnir — one terminal and a council of coding agents" width="720">
   </a>
 </p>
@@ -27,8 +27,8 @@ also managed as a bundled or downloaded route. Provider use may incur cost.
 
 Codex and Claude ACP bridges use Node.js/npm and their PATH-visible vendor CLIs. Mjolnir can install
 the Kimi adapter and other binary ACP agents from the public ACP registry. Read
-[installation](https://brokkai.github.io/mjolnir/install/) and the
-[data and trust boundaries](https://brokkai.github.io/mjolnir/data-boundaries/)
+[installation](https://mjolnir.brokk.ai/install/) and the
+[data and trust boundaries](https://mjolnir.brokk.ai/data-boundaries/)
 before connecting a private repository.
 
 ## Install and run
@@ -60,7 +60,7 @@ session.
 
 ## Try it
 
-The [10-minute evaluation](https://brokkai.github.io/mjolnir/evaluate/) uses a
+The [10-minute evaluation](https://mjolnir.brokk.ai/evaluate/) uses a
 checked-in disposable fixture to exercise Thor, an Eitri implementation
 handoff, explicit review, session resume, and headless output without risking a
 real repository.
@@ -79,16 +79,16 @@ mj --worktree
 
 ## Documentation
 
-- [Overview](https://brokkai.github.io/mjolnir/overview/)
-- [Install and run](https://brokkai.github.io/mjolnir/install/)
-- [10-minute evaluation](https://brokkai.github.io/mjolnir/evaluate/)
-- [Thor, Eitri, and Loki](https://brokkai.github.io/mjolnir/council/)
-- [Permissions and workspace scope](https://brokkai.github.io/mjolnir/permissions/)
-- [Sessions, worktrees, and resume](https://brokkai.github.io/mjolnir/sessions-worktrees/)
-- [Headless automation](https://brokkai.github.io/mjolnir/headless/)
-- [Remote control](https://brokkai.github.io/mjolnir/remote/)
-- [License and use cases](https://brokkai.github.io/mjolnir/license-use-cases/)
-- [Data and trust boundaries](https://brokkai.github.io/mjolnir/data-boundaries/)
+- [Overview](https://mjolnir.brokk.ai/overview/)
+- [Install and run](https://mjolnir.brokk.ai/install/)
+- [10-minute evaluation](https://mjolnir.brokk.ai/evaluate/)
+- [Thor, Eitri, and Loki](https://mjolnir.brokk.ai/council/)
+- [Permissions and workspace scope](https://mjolnir.brokk.ai/permissions/)
+- [Sessions, worktrees, and resume](https://mjolnir.brokk.ai/sessions-worktrees/)
+- [Headless automation](https://mjolnir.brokk.ai/headless/)
+- [Remote control](https://mjolnir.brokk.ai/remote/)
+- [License and use cases](https://mjolnir.brokk.ai/license-use-cases/)
+- [Data and trust boundaries](https://mjolnir.brokk.ai/data-boundaries/)
 
 ## Contributing
 
@@ -101,5 +101,5 @@ Repository-specific agent guidance lives in [AGENTS.md](AGENTS.md).
 Mjolnir and its voice worker are licensed under `GPL-3.0-only`. See
 [LICENSE](LICENSE). Official release archives include the corresponding source
 offer, dependency reports, supplemental notices, and the legal bundle for the
-shipped Anvil binary. See [License and use cases](https://brokkai.github.io/mjolnir/license-use-cases/)
-and [Third-party notices](https://brokkai.github.io/mjolnir/third-party-notices/).
+shipped Anvil binary. See [License and use cases](https://mjolnir.brokk.ai/license-use-cases/)
+and [Third-party notices](https://mjolnir.brokk.ai/third-party-notices/).

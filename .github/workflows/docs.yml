@@ -43,8 +43,8 @@ jobs:
         working-directory: docs
         env:
           ASTRO_TELEMETRY_DISABLED: 1
-          PUBLIC_DOCS_SITE: https://brokkai.github.io
-          PUBLIC_DOCS_BASE: /mjolnir
+          PUBLIC_DOCS_SITE: https://mjolnir.brokk.ai
+          PUBLIC_DOCS_BASE: /
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
