@@ -6,20 +6,20 @@ const { data } = (Astro.locals as { starlightRoute: StarlightRouteData }).starli
 const { actions = [] } = data.hero || {};
 
 const hammerWidth = 52;
-const hammerMask = `####################################################
+const hammerMask = ` ################################################## 
 ####################################################
 ####################################################
 ##                                                ##
-##    ########################################    ##
-##    ##                                    ##    ##
-##    ##                                    ##    ##
-##    ##                                    ##    ##
-##    ##                                    ##    ##
-##    ########################################    ##
+##      ####################################      ##
+##     ##                                  ##     ##
+##     ##                                  ##     ##
+##     ##                                  ##     ##
+##     ##                                  ##     ##
+##      ####################################      ##
 ##                                                ##
 ####################################################
-####################################################
-####################################################
+ ##################################################
+  ################################################
                     ############
                     ##  ####  ##
                     ##  ####  ##
@@ -45,17 +45,6 @@ const hammerArt = [...hammerMask]
   .map((cell, index) => (cell === '#' ? hammerGlyphs[(index * 7) % hammerGlyphs.length] : cell))
   .join('');
 
-const councilTopology = `              THOR / DIRECTOR
-        plan · route · synthesize
-                    │
-             ┌──────┴──────┐
-             ▼             ▼
-       EITRI / FORGE   LOKI / REVIEW
-       isolate · build  inspect · challenge
-             │             │
-             └──────┬──────┘
-                    ▼
-             COUNCIL / READY`;
 ---
 
 <section class="mj-hero" aria-labelledby="_top">
@@ -63,7 +52,9 @@ const councilTopology = `              THOR / DIRECTOR
     <div class="hero-hammer" aria-hidden="true">
       <pre class="hammer-art" data-hammer-art data-mask={hammerMask}><code>{hammerArt}</code></pre>
     </div>
-    <p class="hero-kicker"><span aria-hidden="true">⚡</span> MJOLNIR / NATIVE RUST TUI</p>
+    <p class="hero-kicker">
+      <span aria-hidden="true"></span> Mjolnir by <a href="https://brokk.ai" rel="external">Brokk</a>
+    </p>
     <h1 id="_top">One terminal.<br /><em>A council</em> of agents.</h1>
     <p class="hero-tagline">Mjolnir gives coding agents distinct roles, a shared terminal, and one consistent way to work—no matter which model is behind the hammer.</p>
     {
@@ -85,23 +76,79 @@ const councilTopology = `              THOR / DIRECTOR
     </ul>
   </div>
 
-  <div class="storm-console" aria-label="Example Mjolnir council session">
+  <div class="storm-console mj-panel" aria-label="How a Mjolnir council turn runs, and which agents can take each seat">
     <div class="console-bar">
-      <span><i></i> COUNCIL / SESSION 0042</span>
-      <small>RAGNAROK: STANDBY</small>
+      <span><i></i> COUNCIL</span>
     </div>
-    <div class="ascii-storm" aria-hidden="true">
-      <pre class="council-topology"><code>{councilTopology}</code></pre>
+    <div class="topology-stage">
+      <div
+        class="council-flow"
+        role="img"
+        aria-label="Your prompt goes to Thor, which owns the turn and delegates bounded implementation runs to Eitri; results and the answer come back to you in the same terminal. Loki reads checkpoints from both lanes and returns advice asynchronously, without blocking the turn."
+      >
+        <div class="flow-node flow-node--you">
+          <div><strong>YOU</strong><span>/ ONE TERMINAL</span></div>
+        </div>
+
+        <div class="flow-link" aria-hidden="true">
+          <i class="flow-lane flow-lane--down"><em>prompt</em></i>
+          <i class="flow-lane flow-lane--up"><em>answer</em></i>
+        </div>
+
+        <div class="flow-node flow-node--thor">
+          <div><strong>THOR</strong><span>/ COORDINATES</span></div>
+          <small>plans the work · hands off tasks</small>
+        </div>
+
+        <div class="flow-link" aria-hidden="true">
+          <i class="flow-lane flow-lane--down"><em>delegates</em></i>
+          <i class="flow-lane flow-lane--up"><em>returns</em></i>
+        </div>
+
+        <div class="flow-node flow-node--eitri">
+          <div><strong>EITRI</strong><span>/ IMPLEMENTS</span></div>
+          <small>fresh context · bounded run</small>
+        </div>
+
+        <aside class="flow-observer">
+          <div><strong>LOKI</strong><span>/ REVIEWS</span></div>
+          <small>reads every checkpoint</small>
+          <small>advice at boundaries</small>
+          <b>ASYNC · NEVER BLOCKS</b>
+          <i class="flow-tap flow-tap--in" aria-hidden="true"></i>
+          <i class="flow-tap flow-tap--out" aria-hidden="true"></i>
+          <i class="flow-tap flow-tap--forge" aria-hidden="true"></i>
+        </aside>
+      </div>
     </div>
-    <div class="council-feed">
-      <div><b>THOR</b><span>plans the turn and delegates the seam</span><small>COORDINATING</small></div>
-      <div><b>EITRI</b><span>implements in a fresh agent context</span><small>FORGING</small></div>
-      <div><b>LOKI</b><span>reviews checkpoints without blocking progress</span><small>OBSERVING</small></div>
+    <div class="seat-board">
+      <div class="seat-head">
+        <span>SEATS / ANY ACP AGENT</span>
+        <small>MODEL-FIRST ROUTING</small>
+      </div>
+      <ul class="seat-list">
+        <li>
+          <b>THOR</b>
+          <span>plans the work and hands off tasks</span>
+          <em class="seat-route" data-seat-rotator data-agents="Claude Code|Codex|OpenCode|Kimi|pi" aria-hidden="true">Codex</em>
+        </li>
+        <li>
+          <b>EITRI</b>
+          <span>writes the code in a fresh context</span>
+          <em class="seat-route" data-seat-rotator data-agents="Claude Code|Codex|OpenCode|Kimi|pi" aria-hidden="true">Claude Code</em>
+        </li>
+        <li>
+          <b>LOKI</b>
+          <span>reviews the code as it lands</span>
+          <em class="seat-route" data-seat-rotator data-agents="Claude Code|Codex|OpenCode|Kimi|pi" aria-hidden="true">OpenCode</em>
+        </li>
+      </ul>
+      <p class="seat-note">
+        Bring your favorite coding agent to each seat — one to delegate, one to program, one to review.
+      </p>
     </div>
-    <div class="console-prompt"><span>❯</span><code>mj --worktree quiet-forge</code><i></i></div>
   </div>
 
-  <p class="hero-rail" aria-hidden="true">MODEL FIRST // ACP NATIVE // INLINE TUI // COUNCIL CONTROL</p>
 </section>
 
 <script>
@@ -132,8 +179,55 @@ const councilTopology = `              THOR / DIRECTOR
     });
   };
 
+  /* what each seat is showing right now, so no agent is drawn into two seats at once */
+  const seatedAgents = new Map<HTMLElement, string>();
+
+  const rotateSeats = () => {
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+    document.querySelectorAll<HTMLElement>('[data-seat-rotator]').forEach((seat, seatIndex) => {
+      const agents = (seat.dataset.agents ?? '').split('|').filter(Boolean);
+      if (agents.length < 2 || reducedMotion.matches || seat.dataset.rotating === 'true') return;
+
+      seat.dataset.rotating = 'true';
+      seatedAgents.set(seat, seat.textContent?.trim() ?? agents[0]);
+
+      const tick = () => {
+        if (!seat.isConnected || reducedMotion.matches) {
+          seatedAgents.delete(seat);
+          return;
+        }
+
+        seatedAgents.forEach((_, other) => {
+          if (!other.isConnected) seatedAgents.delete(other);
+        });
+
+        const taken = new Set(seatedAgents.values());
+        const free = agents.filter((agent) => !taken.has(agent));
+        const next = free[Math.floor(Math.random() * free.length)];
+
+        if (next) {
+          seatedAgents.set(seat, next);
+          seat.dataset.swapping = 'true';
+          window.setTimeout(() => {
+            seat.textContent = next;
+            seat.dataset.swapping = 'false';
+          }, 220);
+        }
+
+        window.setTimeout(tick, 2400 + Math.random() * 2600);
+      };
+
+      window.setTimeout(tick, 1600 + seatIndex * 700 + Math.random() * 900);
+    });
+  };
+
   animateHammers();
-  document.addEventListener('astro:page-load', animateHammers);
+  rotateSeats();
+  document.addEventListener('astro:page-load', () => {
+    animateHammers();
+    rotateSeats();
+  });
 </script>
 
 <style>
@@ -181,7 +275,7 @@ const councilTopology = `              THOR / DIRECTOR
       padding: 0;
       background: radial-gradient(ellipse at 54% 45%, color-mix(in srgb, var(--mj-violet) 18%, transparent), transparent 68%);
       color: var(--mj-violet-soft);
-      font-family: var(--sl-font-mono);
+      font-family: var(--mj-font-mono);
       filter: drop-shadow(0 0 24px color-mix(in srgb, var(--mj-violet) 26%, transparent));
       mask-image: radial-gradient(ellipse 82% 84% at 52% 46%, black 56%, rgb(0 0 0 / 0.68) 80%, transparent 100%);
       opacity: 0.32;
@@ -196,10 +290,10 @@ const councilTopology = `              THOR / DIRECTOR
       border: 0;
       background: transparent;
       color: inherit;
-      font-size: 0.9rem;
-      font-weight: 650;
+      font-size: var(--text-lg);
+      font-weight: var(--weight-semibold);
       letter-spacing: 0;
-      line-height: 1.04;
+      line-height: 1.04; /* grid-locked to the ASCII hammer mask — not part of the type scale */
       text-align: left;
       text-shadow: 0 0 12px color-mix(in srgb, var(--mj-violet) 48%, transparent);
       white-space: pre;
@@ -208,116 +302,310 @@ const councilTopology = `              THOR / DIRECTOR
     .hero-kicker {
       display: flex;
       align-items: center;
-      gap: 0.75rem;
-      margin: 0 0 1.5rem;
+      gap: var(--space-3);
+      margin: 0 0 var(--space-6);
       color: var(--mj-muted);
-      font-family: var(--sl-font-mono);
-      font-size: 0.68rem;
-      font-weight: 700;
-      letter-spacing: 0.1em;
+      font-family: var(--mj-font-mono);
+      font-size: var(--text-sm);
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-widest);
+      text-transform: uppercase;
     }
-    .hero-kicker span { color: var(--mj-gold); text-shadow: 0 0 14px color-mix(in srgb, var(--mj-gold) 75%, transparent); }
+    .hero-kicker > span { width: 0.5rem; height: 0.5rem; background: var(--mj-violet); box-shadow: 0 0 14px var(--mj-violet); transform: rotate(45deg); }
+    .hero-kicker a {
+      color: var(--mj-ink);
+      text-decoration-color: color-mix(in srgb, var(--mj-ink) 38%, transparent);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 0.2em;
+      transition: color 140ms ease, text-decoration-color 140ms ease;
+    }
+    .hero-kicker a:hover, .hero-kicker a:focus-visible { color: var(--mj-violet-soft); text-decoration-color: currentColor; }
 
     .mj-hero h1 {
       max-width: 12ch;
       margin: 0;
       color: var(--mj-ink);
-      font-family: var(--mj-display);
-      font-size: clamp(4rem, 7.5vw, 7.7rem);
-      font-weight: 760;
-      letter-spacing: -0.065em;
-      line-height: 0.82;
+      font-family: var(--mj-font-display);
+      font-size: var(--text-display-hero);
+      font-weight: var(--weight-regular); /* Staatliches only ships weight 400 */
+      letter-spacing: var(--tracking-tightest);
+      line-height: var(--leading-hero);
     }
     .mj-hero h1 em { color: var(--mj-violet); font-style: normal; text-shadow: 0 0 34px color-mix(in srgb, var(--mj-violet) 18%, transparent); }
-    .hero-tagline { max-width: 40rem; margin: 2rem 0 0; color: var(--mj-copy); font-size: clamp(1.06rem, 1.45vw, 1.23rem); line-height: 1.58; }
-    .hero-actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 2rem; }
+    .hero-tagline { max-width: 40rem; margin: var(--space-8) 0 0; color: var(--mj-copy); font-size: var(--text-tagline); line-height: var(--leading-body); }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-8); }
     .hero-actions :global(.sl-link-button) {
       min-width: 10rem;
       justify-content: center;
-      border-radius: 0.16rem;
-      font-family: var(--sl-font-mono);
-      font-size: 0.69rem;
-      font-weight: 750;
-      letter-spacing: 0.055em;
+      overflow: hidden;
+      border-radius: 999rem;
+      font-family: var(--mj-font-mono);
+      font-size: var(--text-sm);
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-wider);
       text-transform: uppercase;
     }
     .hero-actions :global(.primary) { box-shadow: 0 10px 34px color-mix(in srgb, var(--mj-violet) 24%, transparent); }
+    .hero-actions :global(.sl-link-button.secondary) {
+      border-color: var(--mj-line-strong);
+      background: color-mix(in srgb, var(--mj-surface-raised) 92%, transparent);
+    }
 
     .hero-facts {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      max-width: 40rem;
-      margin: 3rem 0 0;
+      max-width: 46rem;
+      margin: calc(var(--space-12) + var(--space-2)) 0 0;
       padding: 0;
       border-block: 1px solid var(--mj-line);
       list-style: none;
     }
-    .hero-facts li { padding: 0.9rem 0.7rem 0.9rem 0; }
-    .hero-facts li + li { padding-inline-start: 0.9rem; border-inline-start: 1px solid var(--mj-line); }
+    .hero-facts li { padding: var(--space-5) var(--space-4) var(--space-5) 0; }
+    .hero-facts li + li { padding-inline-start: var(--space-5); border-inline-start: 1px solid var(--mj-line); }
     .hero-facts span, .hero-facts strong { display: block; }
-    .hero-facts span { margin-bottom: 0.22rem; color: var(--mj-violet); font-family: var(--sl-font-mono); font-size: 0.56rem; letter-spacing: 0.07em; }
-    .hero-facts strong { color: var(--mj-ink); font-size: 0.77rem; font-weight: 680; }
+    .hero-facts span { margin-bottom: var(--space-2); color: var(--mj-violet); font-family: var(--mj-font-mono); font-size: var(--text-sm); letter-spacing: var(--tracking-widest); }
+    .hero-facts strong { color: var(--mj-ink); font-size: var(--text-xl); font-weight: var(--weight-semibold); }
 
     .storm-console {
-      position: relative;
       z-index: 2;
-      border: 1px solid var(--mj-line-strong);
-      background:
-        linear-gradient(var(--mj-grid) 1px, transparent 1px),
-        linear-gradient(90deg, var(--mj-grid) 1px, transparent 1px),
-        color-mix(in srgb, var(--mj-surface-raised) 94%, transparent);
-      background-size: 20px 20px;
-      box-shadow: 0 38px 100px rgb(0 0 0 / 0.38), inset 0 1px var(--mj-highlight);
-      font-family: var(--sl-font-mono);
-      width: min(100%, 54rem);
+      font-family: var(--mj-font-mono);
+      width: min(100%, 68rem);
       justify-self: center;
       transform: none;
     }
-    .storm-console::before, .storm-console::after {
-      position: absolute;
-      z-index: -1;
-      width: 7rem;
-      height: 7rem;
-      border-color: var(--mj-violet);
-      content: '';
-      opacity: 0.55;
+    /* face layer — the panel's actual background/grid texture, inset inside the .mj-panel ring */
+    .storm-console::after {
+      background: color-mix(in srgb, var(--mj-surface-raised) 94%, transparent);
+      box-shadow: 0 38px 100px rgb(0 0 0 / 0.38), inset 0 1px var(--mj-highlight);
     }
-    .storm-console::before { inset: -0.75rem auto auto -0.75rem; border-block-start: 1px solid; border-inline-start: 1px solid; }
-    .storm-console::after { inset: auto -0.75rem -0.75rem auto; border-block-end: 1px solid; border-inline-end: 1px solid; }
-    .console-bar { display: flex; justify-content: space-between; padding: 0.8rem 0.95rem; border-bottom: 1px solid var(--mj-line-strong); color: var(--mj-muted); font-size: 0.57rem; font-weight: 700; letter-spacing: 0.07em; }
-    .console-bar i { display: inline-block; width: 0.42rem; height: 0.42rem; margin-right: 0.4rem; border-radius: 50%; background: var(--mj-violet); box-shadow: 0 0 11px var(--mj-violet); }
-    .console-bar small { color: var(--mj-gold); font-size: inherit; }
-    .ascii-storm { min-height: 18rem; display: grid; place-items: center; padding: 1.15rem 0.75rem; overflow: hidden; background: radial-gradient(circle, color-mix(in srgb, var(--mj-violet) 10%, transparent), transparent 62%); }
-    .council-topology { margin: 0; padding: 0; border: 0; background: transparent; color: var(--mj-violet-soft); font-size: clamp(0.48rem, 1vw, 0.68rem); line-height: 1.65; text-shadow: 0 0 10px color-mix(in srgb, var(--mj-violet) 24%, transparent); }
-    .council-topology code { background: transparent; color: inherit; }
-    .council-feed { border-block: 1px solid var(--mj-line-strong); }
-    .council-feed > div { display: grid; grid-template-columns: 3.4rem 1fr auto; gap: 0.7rem; align-items: center; padding: 0.68rem 0.85rem; }
-    .council-feed > div + div { border-top: 1px solid var(--mj-line); }
-    .council-feed b { color: var(--mj-violet); font-size: 0.6rem; letter-spacing: 0.08em; }
-    .council-feed span { color: var(--mj-copy); font-size: 0.61rem; }
-    .council-feed small { color: var(--mj-muted); font-size: 0.5rem; letter-spacing: 0.07em; }
-    .console-prompt { display: flex; align-items: center; gap: 0.65rem; padding: 0.85rem; color: var(--mj-copy); font-size: 0.66rem; }
-    .console-prompt span { color: var(--mj-gold); }
-    .console-prompt i { width: 0.48rem; height: 0.9rem; background: var(--mj-violet); animation: cursor-pulse 1.1s steps(2, jump-none) infinite; }
-    .hero-rail { position: absolute; inset: auto 0 1.15rem; margin: 0; color: var(--mj-muted); font-family: var(--sl-font-mono); font-size: 0.54rem; letter-spacing: 0.18em; text-align: center; }
+    .console-bar { display: flex; justify-content: space-between; padding: var(--space-5) var(--space-6); border-bottom: 1px solid var(--mj-line-strong); color: var(--mj-muted); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: var(--tracking-widest); }
+    .console-bar i { display: inline-block; width: 0.42rem; height: 0.42rem; margin-right: var(--space-1); border-radius: 50%; background: var(--mj-violet); box-shadow: 0 0 11px var(--mj-violet); }
+    .topology-stage {
+      min-height: 28rem;
+      display: grid;
+      place-items: center;
+      padding: var(--space-12) var(--space-8);
+      overflow: hidden;
+      background: radial-gradient(circle, color-mix(in srgb, var(--mj-violet) 10%, transparent), transparent 62%);
+    }
+    .council-flow {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 15rem;
+      column-gap: 3.75rem;
+      width: min(100%, 52rem);
+      color: var(--mj-violet-soft);
+    }
+    .flow-node, .flow-link { grid-column: 1; }
+    .flow-node, .flow-observer {
+      position: relative;
+      display: grid;
+      place-content: center;
+      min-height: 5.75rem;
+      padding: var(--space-4) var(--space-5);
+      border: 1px solid color-mix(in srgb, var(--mj-violet) 48%, var(--mj-line-strong));
+      background: color-mix(in srgb, var(--mj-surface-raised) 88%, transparent);
+      box-shadow:
+        inset 0 -3px var(--mj-violet),
+        0 0 24px color-mix(in srgb, var(--mj-violet) 8%, transparent);
+      text-align: center;
+    }
+    .flow-node > div, .flow-observer > div {
+      display: flex;
+      justify-content: center;
+      gap: var(--space-2);
+      align-items: baseline;
+      white-space: nowrap;
+    }
+    .flow-node strong, .flow-observer strong {
+      color: var(--mj-ink);
+      font-size: var(--text-lg);
+      letter-spacing: var(--tracking-widest);
+    }
+    .flow-node span, .flow-observer span {
+      color: var(--mj-violet-soft);
+      font-size: var(--text-sm);
+      letter-spacing: var(--tracking-wider);
+    }
+    .flow-node small, .flow-observer small {
+      margin-top: var(--space-2);
+      color: var(--mj-muted);
+      font-size: var(--text-sm);
+      letter-spacing: 0.025em;
+    }
+    .flow-node--you {
+      min-height: 4.25rem;
+      border-color: color-mix(in srgb, var(--mj-gold) 52%, var(--mj-line-strong));
+      box-shadow:
+        inset 0 -3px var(--mj-gold),
+        0 0 24px color-mix(in srgb, var(--mj-gold) 8%, transparent);
+    }
+    .flow-node--you span { color: var(--mj-gold); }
 
-    @keyframes cursor-pulse { 50% { opacity: 0.2; } }
-    @media (max-width: 68rem) {
-      .storm-console { width: min(100%, 43rem); }
+    /* two-way lanes between spine nodes: work goes down, results come back up */
+    .flow-link {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      height: 4rem;
+      color: color-mix(in srgb, var(--mj-violet) 72%, var(--mj-line-strong));
     }
-    @media (max-width: 48rem) { .hero-hammer { display: none; } }
-    @media (max-width: 42rem) {
+    .flow-lane { position: relative; display: block; }
+    .flow-lane::before {
+      position: absolute;
+      inset-block: 0;
+      inset-inline-start: 50%;
+      border-inline-start: 1px solid currentColor;
+      content: '';
+    }
+    .flow-lane::after {
+      position: absolute;
+      inset-inline-start: 50%;
+      width: 0;
+      height: 0;
+      border: 4px solid transparent;
+      content: '';
+      transform: translateX(-50%);
+    }
+    .flow-lane--down::after { inset-block-end: -1px; border-block-start: 5px solid currentColor; }
+    .flow-lane--up::after { inset-block-start: -1px; border-block-end: 5px solid currentColor; }
+    .flow-lane em {
+      position: absolute;
+      inset-block-start: 50%;
+      color: var(--mj-muted);
+      font-size: var(--text-xs);
+      font-style: normal;
+      letter-spacing: var(--tracking-wider);
+      transform: translateY(-50%);
+      white-space: nowrap;
+    }
+    .flow-lane--down em { inset-inline-end: calc(50% + 0.5rem); }
+    .flow-lane--up em { inset-inline-start: calc(50% + 0.5rem); }
+
+    /* Loki sits beside the turn, not inside it */
+    .flow-observer {
+      grid-column: 2;
+      grid-row: 3 / 6;
+      border-style: dashed;
+      box-shadow: inset 0 -3px color-mix(in srgb, var(--mj-violet) 62%, transparent);
+    }
+    .flow-observer b {
+      margin-top: var(--space-4);
+      color: var(--mj-gold);
+      font-size: var(--text-xs);
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-widest);
+    }
+    .flow-tap {
+      position: absolute;
+      inset-inline-start: -3.75rem;
+      width: 3.75rem;
+      border-block-start: 1px dashed color-mix(in srgb, var(--mj-violet) 66%, var(--mj-line-strong));
+    }
+    .flow-tap::after {
+      position: absolute;
+      inset-block-start: -4px;
+      width: 0;
+      height: 0;
+      border: 4px solid transparent;
+      content: '';
+    }
+    .flow-tap--in { inset-block-start: 2.15rem; }
+    .flow-tap--out { inset-block-start: 3.65rem; }
+    .flow-tap--forge { inset-block-end: 2.8rem; }
+    .flow-tap--in::after,
+    .flow-tap--forge::after {
+      inset-inline-end: -1px;
+      border-inline-start: 5px solid color-mix(in srgb, var(--mj-violet) 66%, var(--mj-line-strong));
+    }
+    .flow-tap--out::after {
+      inset-inline-start: -1px;
+      border-inline-end: 5px solid color-mix(in srgb, var(--mj-violet) 66%, var(--mj-line-strong));
+    }
+
+    .seat-board { border-top: 1px solid var(--mj-line-strong); }
+    .seat-head {
+      display: flex;
+      justify-content: space-between;
+      gap: var(--space-3);
+      padding: var(--space-4) var(--space-6);
+      border-bottom: 1px solid var(--mj-line);
+      color: var(--mj-muted);
+      font-size: var(--text-xs);
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-widest);
+    }
+    .seat-head small { color: var(--mj-violet-soft); font-size: inherit; }
+    .seat-list { margin: 0; padding: 0; list-style: none; }
+    .seat-list li {
+      display: grid;
+      grid-template-columns: 4.5rem 1fr auto;
+      gap: var(--space-4);
+      align-items: center;
+      padding: var(--space-4) var(--space-6);
+    }
+    .seat-list li + li { border-top: 1px solid var(--mj-line); }
+    .seat-list b { color: var(--mj-violet); font-size: var(--text-sm); letter-spacing: var(--tracking-widest); }
+    .seat-list span { color: var(--mj-copy); font-size: var(--text-sm); }
+    .seat-route {
+      display: inline-grid;
+      place-items: center;
+      min-width: 8rem;
+      padding: 0.4rem var(--space-4);
+      border: 1px solid color-mix(in srgb, var(--mj-violet) 40%, var(--mj-line-strong));
+      background: color-mix(in srgb, var(--mj-violet) 9%, transparent);
+      color: var(--mj-ink);
+      font-size: var(--text-xs);
+      font-style: normal;
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-wider);
+      text-transform: uppercase;
+      transition: opacity 220ms ease;
+    }
+    .seat-route[data-swapping='true'] { opacity: 0; }
+    .seat-note {
+      margin: 0;
+      padding: var(--space-5) var(--space-6);
+      border-top: 1px solid var(--mj-line-strong);
+      color: var(--mj-muted);
+      font-size: var(--text-sm);
+      line-height: var(--leading-body);
+    }
+    @media (width < 72rem) {
+      .storm-console { width: min(100%, 52rem); }
+    }
+    @media (width < 50rem) { .hero-hammer { display: none; } }
+    @media (width < 42rem) {
       .mj-hero { padding-top: 3.5rem; }
-      .mj-hero h1 { font-size: clamp(3.4rem, 18vw, 5.5rem); }
+      .mj-hero h1 { font-size: var(--text-display-hero-sm); }
       .hero-facts { grid-template-columns: 1fr; }
       .hero-facts li + li { padding-inline-start: 0; border-inline-start: 0; border-top: 1px solid var(--mj-line); }
-      .ascii-storm { min-height: 14rem; }
-      .ascii-storm pre { font-size: clamp(0.43rem, 2.5vw, 0.62rem); }
-      .council-feed > div { grid-template-columns: 3.2rem 1fr; }
-      .council-feed small { display: none; }
+      .topology-stage { min-height: 20rem; padding-inline: var(--space-3); }
+      .council-flow { grid-template-columns: minmax(0, 1fr); }
+      .flow-node, .flow-observer { min-height: 4.5rem; padding-inline: var(--space-2); }
+      .flow-node > div, .flow-observer > div { gap: var(--space-1); }
+      .flow-node strong, .flow-observer strong,
+      .flow-node span, .flow-observer span,
+      .flow-node small, .flow-observer small { font-size: var(--text-2xs); }
+      .flow-observer {
+        position: relative;
+        grid-column: 1;
+        grid-row: auto;
+        margin-top: 4rem;
+      }
+      /* the side rail becomes a vertical dashed tap once the card stacks */
+      .flow-observer::before {
+        position: absolute;
+        inset: -4rem auto auto 50%;
+        height: 4rem;
+        border-inline-start: 1px dashed color-mix(in srgb, var(--mj-violet) 66%, var(--mj-line-strong));
+        content: '';
+      }
+      .flow-tap { display: none; }
+      .seat-list li { grid-template-columns: 4rem 1fr; }
+      .seat-route { grid-column: 2; justify-self: start; }
     }
     @media (prefers-reduced-motion: reduce) {
-      .console-prompt i { animation: none; }
+      .seat-route { transition: none; }
     }
   }
 </style>

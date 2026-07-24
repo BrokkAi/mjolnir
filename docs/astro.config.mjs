@@ -25,6 +25,15 @@ export default defineConfig({
       title: 'Mjolnir',
       description: 'A forge-grade terminal client for a council of coding agents.',
       head: [
+        { tag: 'link', attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' } },
+        { tag: 'link', attrs: { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: true } },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'stylesheet',
+            href: 'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&family=Rajdhani:wght@400;500;600;700&family=Staatliches&display=swap',
+          },
+        },
         { tag: 'meta', attrs: { property: 'og:type', content: 'website' } },
         { tag: 'meta', attrs: { property: 'og:image', content: socialCardUrl } },
         { tag: 'meta', attrs: { property: 'og:image:type', content: 'image/png' } },

@@ -1,21 +1,92 @@
+/*
+ * Breakpoint contract — shared across mjolnir.css, MjolnirHeader.astro, MjolnirHero.astro.
+ * CSS custom properties can't be read inside @media conditions, so these four values are
+ * enforced by convention (range syntax avoids the old max/min 0.01rem overlap fudge):
+ *   --bp-sm  42rem (672px)  — smallest mobile collapse
+ *   --bp-md  50rem (800px)  — sidebar / header collapse
+ *   --bp-lg  64rem (1024px) — capability grid, storm-console narrowing
+ *   --bp-xl  72rem (1152px) — header primary nav appears
+ */
+
 :root {
-  --sl-font: Inter, "SF Pro Text", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --sl-font-mono: "SFMono-Regular", "Roboto Mono", Consolas, "Liberation Mono", monospace;
-  --mj-display: "Arial Narrow", "Avenir Next Condensed", Inter, sans-serif;
-  --sl-color-accent-low: #2b1552;
-  --sl-color-accent: #a977ff;
-  --sl-color-accent-high: #f2eaff;
-  --sl-color-white: #f4f0fa;
-  --sl-color-gray-1: #e1daec;
-  --sl-color-gray-2: #b8adc9;
-  --sl-color-gray-3: #857a96;
-  --sl-color-gray-4: #574f66;
-  --sl-color-gray-5: #342e40;
-  --sl-color-gray-6: #1d1926;
-  --sl-color-black: #09070e;
-  --sl-content-width: 50rem;
-  --sl-sidebar-width: 18.5rem;
-  --sl-nav-height: 4.8rem;
+  --mj-font-display: "Staatliches", Impact, Haettenschweiler, "Arial Black", system-ui, sans-serif;
+  --mj-font-body: "Rajdhani", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mj-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --sl-font: var(--mj-font-body);
+  --sl-font-mono: var(--mj-font-mono);
+
+  /* type scale — named steps replace ~30 one-off rem values */
+  --text-2xs: 0.5625rem;  /* 9px  — micro chrome: badges, console labels */
+  --text-xs: 0.625rem;    /* 10px — uppercase mono labels: kickers, sidebar groups */
+  --text-sm: 0.6875rem;   /* 11px — secondary UI text: buttons, callout links */
+  --text-base: 0.75rem;   /* 12px — small emphasis text */
+  --text-lg: 0.875rem;    /* 14px — card/paragraph copy */
+  --text-xl: 1rem;        /* 16px — site title, larger UI text */
+  --text-2xl: 1.125rem;   /* 18px — section intro paragraph, capability card titles */
+  --text-3xl: 1.5625rem;  /* 25px — role-grid card titles */
+
+  /* display steps stay independent clamp ranges — three deliberate tiers, not one merged size */
+  --text-display-page: clamp(3rem, 5vw, 4.8rem);       /* doc h1 */
+  --text-display-section: clamp(2.8rem, 5vw, 5.2rem);  /* home-section h2 */
+  --text-display-hero: clamp(4rem, 7.5vw, 7.7rem);     /* homepage hero h1 */
+  --text-display-hero-sm: clamp(3.4rem, 18vw, 5.5rem); /* homepage hero h1, narrow viewport */
+  --text-tagline: clamp(1.06rem, 1.45vw, 1.23rem);     /* hero tagline */
+
+  /* Staatliches is already a tight condensed face — the old values here were tuned for
+     Arial Narrow/Avenir Next Condensed and crush Staatliches's letterforms into each other */
+  --tracking-tight: 0;      /* default display heading (doc h1/h2) */
+  --tracking-tighter: 0;    /* home-section h2 */
+  --tracking-tightest: -0.01em; /* hero h1 — largest size only, can take a hair of tightening */
+  --tracking-wide: 0.035em;      /* site title */
+  --tracking-wider: 0.06em;      /* nav links, buttons */
+  --tracking-widest: 0.09em;     /* uppercase eyebrow/kicker labels */
+
+  --leading-hero: 0.82;   /* homepage hero h1 — tightest, largest */
+  --leading-display: 0.94; /* doc h1 + home-section h2 */
+  --leading-body: 1.55;   /* paragraph copy */
+  --leading-loose: 1.65;  /* council topology ASCII diagram */
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --weight-extrabold: 800; /* JetBrains Mono only */
+
+  /* spacing scale — 4px base */
+  --space-1: 0.25rem;  /* 4px */
+  --space-2: 0.5rem;   /* 8px */
+  --space-3: 0.75rem;  /* 12px */
+  --space-4: 1rem;     /* 16px */
+  --space-5: 1.25rem;  /* 20px */
+  --space-6: 1.5rem;   /* 24px */
+  --space-8: 2rem;     /* 32px */
+  --space-10: 2.5rem;  /* 40px */
+  --space-12: 3rem;    /* 48px */
+  --space-16: 4rem;    /* 64px */
+  --space-20: 5rem;    /* 80px */
+  --space-24: 6rem;    /* 96px */
+
+  /* chamfered-panel primitives — cut top-right + bottom-left corners, no border-radius.
+     clip-path never draws a stroke along its own cut edge, so a plain `border` on a
+     clipped box just stops dead at the diagonal. Panels instead layer two clipped fills:
+     a full-bleed "ring" color behind a 1px-inset "face" color, using the -inset variants
+     below for the face layer so the visible ring is a uniform width all the way around. */
+  --mj-chamfer-lg: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 16px 100%, 0 calc(100% - 16px));
+  --mj-chamfer-lg-inset: polygon(0 0, calc(100% - 15px) 0, 100% 15px, 100% 100%, 15px 100%, 0 calc(100% - 15px));
+  --mj-chamfer-sm: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+  --mj-chamfer-sm-inset: polygon(0 0, calc(100% - 7px) 0, 100% 7px, 100% 100%, 7px 100%, 0 calc(100% - 7px));
+
+  /* Shape variants mirror Brokk's shell/inner panel system: a true octagon plus
+     asymmetric cuts that can be alternated instead of repeating one silhouette. */
+  --mj-octagon-lg: polygon(16px 0, calc(100% - 16px) 0, 100% 16px, 100% calc(100% - 16px), calc(100% - 16px) 100%, 16px 100%, 0 calc(100% - 16px), 0 16px);
+  --mj-octagon-lg-inset: polygon(15px 0, calc(100% - 15px) 0, 100% 15px, 100% calc(100% - 15px), calc(100% - 15px) 100%, 15px 100%, 0 calc(100% - 15px), 0 15px);
+  --mj-chamfer-reverse-lg: polygon(16px 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%, 0 16px);
+  --mj-chamfer-reverse-lg-inset: polygon(15px 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%, 0 15px);
+  --mj-three-cut-lg: polygon(16px 0, calc(100% - 16px) 0, 100% 16px, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%, 0 16px);
+  --mj-three-cut-lg-inset: polygon(15px 0, calc(100% - 15px) 0, 100% 15px, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%, 0 15px);
+  --mj-integrated-nav: polygon(0 0, 100% 0, 100% 100%, 0 100%);
+  --mj-integrated-nav-inset: polygon(0 0, 100% 0, 100% 100%, 0 100%);
+
   --mj-violet: #a977ff;
   --mj-violet-soft: #c9adff;
   --mj-gold: #f2c94c;
@@ -29,20 +100,25 @@
   --mj-grid: rgb(218 196 255 / 0.035);
   --mj-grid-strong: rgb(218 196 255 / 0.07);
   --mj-highlight: rgb(255 255 255 / 0.035);
+
+  /* Starlight tokens — aliased to the mj-* values above so colors are defined once */
+  --sl-color-accent-low: #2b1552;
+  --sl-color-accent: var(--mj-violet);
+  --sl-color-accent-high: #f2eaff;
+  --sl-color-white: var(--mj-ink);
+  --sl-color-gray-1: #e1daec;
+  --sl-color-gray-2: var(--mj-copy);
+  --sl-color-gray-3: var(--mj-muted);
+  --sl-color-gray-4: #574f66;
+  --sl-color-gray-5: #342e40;
+  --sl-color-gray-6: #1d1926;
+  --sl-color-black: #09070e;
+  --sl-content-width: 60rem;
+  --sl-sidebar-width: 18.5rem;
+  --sl-nav-height: 4.8rem;
 }
 
 :root[data-theme='light'] {
-  --sl-color-accent-low: #e8dcff;
-  --sl-color-accent: #7244cc;
-  --sl-color-accent-high: #2b1552;
-  --sl-color-white: #171221;
-  --sl-color-gray-1: #241d31;
-  --sl-color-gray-2: #4d435c;
-  --sl-color-gray-3: #71667f;
-  --sl-color-gray-4: #9f95aa;
-  --sl-color-gray-5: #ccc5d3;
-  --sl-color-gray-6: #e9e5ed;
-  --sl-color-black: #f7f5f9;
   --mj-violet: #7244cc;
   --mj-violet-soft: #5c35a8;
   --mj-gold: #9a6c00;
@@ -56,13 +132,21 @@
   --mj-grid: rgb(23 18 33 / 0.035);
   --mj-grid-strong: rgb(23 18 33 / 0.065);
   --mj-highlight: rgb(255 255 255 / 0.8);
+
+  --sl-color-accent-low: #e8dcff;
+  --sl-color-accent-high: #2b1552;
+  --sl-color-gray-1: #241d31;
+  --sl-color-gray-4: #9f95aa;
+  --sl-color-gray-5: #ccc5d3;
+  --sl-color-gray-6: #e9e5ed;
+  --sl-color-black: #f7f5f9;
 }
 
 :root[data-theme='light'] body {
   background-color: var(--mj-surface);
 }
 
-:root[data-theme='light'] .storm-console {
+:root[data-theme='light'] .storm-console::after {
   background-color: rgb(252 250 255 / 0.94);
   box-shadow: 0 38px 90px rgb(63 39 91 / 0.16), inset 0 1px white;
 }
@@ -89,59 +173,131 @@ body {
   background-attachment: fixed;
   background-size: 32px 32px, 32px 32px, auto;
 }
-.site-title, .sl-markdown-content h1, .sl-markdown-content h2 { font-family: var(--mj-display); letter-spacing: -0.04em; }
-.sl-markdown-content h1 { font-size: clamp(3rem, 5vw, 4.8rem); line-height: 0.95; }
+
+/* chamfered-panel utility — applied to the header shell and storm-console.
+   `border` can't stroke a clip-path's cut diagonal (see the comment on --mj-chamfer-lg
+   above), so the "border" here is the panel's own background acting as a 1px ring behind
+   an inset ::after that carries the panel's real background/blur/shadow (set per-component). */
+.mj-panel {
+  --mj-panel-shell: var(--mj-chamfer-lg);
+  --mj-panel-inner: var(--mj-chamfer-lg-inset);
+  position: relative;
+  isolation: isolate;
+  clip-path: var(--mj-panel-shell);
+  background: var(--mj-line-strong);
+}
+.mj-panel::after {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  z-index: -1;
+  clip-path: var(--mj-panel-inner);
+}
+.mj-panel--octagon {
+  --mj-panel-shell: var(--mj-octagon-lg);
+  --mj-panel-inner: var(--mj-octagon-lg-inset);
+}
+.mj-panel--reverse {
+  --mj-panel-shell: var(--mj-chamfer-reverse-lg);
+  --mj-panel-inner: var(--mj-chamfer-reverse-lg-inset);
+}
+.mj-panel--three-cut {
+  --mj-panel-shell: var(--mj-three-cut-lg);
+  --mj-panel-inner: var(--mj-three-cut-lg-inset);
+}
+
+.site-title, .sl-markdown-content h1, .sl-markdown-content h2 { font-family: var(--mj-font-display); font-weight: var(--weight-regular); letter-spacing: var(--tracking-tight); }
+.sl-markdown-content h1 { font-size: var(--text-display-page); line-height: var(--leading-display); }
 .sl-markdown-content h2 { margin-top: 2.4em; padding-top: 0.6em; border-top: 1px solid var(--mj-line); }
 .sl-markdown-content h2::before { display: inline-block; width: 0.85rem; height: 0.16rem; margin: 0 0.55rem 0.17rem 0; background: var(--mj-violet); content: ''; box-shadow: 0 0 9px color-mix(in srgb, var(--mj-violet) 45%, transparent); }
-.page > header.header { height: var(--sl-nav-height); padding: 0.52rem max(0.65rem, 1.4vw); border-bottom: 0; background: linear-gradient(180deg, color-mix(in srgb, var(--mj-surface) 96%, transparent), transparent); }
+.page > header.header { height: var(--sl-nav-height); padding: var(--space-2) max(0.65rem, 1.4vw); border-bottom: 0; background: linear-gradient(180deg, color-mix(in srgb, var(--mj-surface) 96%, transparent), transparent); }
 
-@media (min-width: 50rem) {
-  #starlight__sidebar.sidebar-pane { top: var(--sl-nav-height); padding: 0.55rem 0.55rem 0; border-inline-end: 0; background: color-mix(in srgb, var(--mj-surface) 90%, transparent); }
-  #starlight__sidebar .sidebar-content { padding: 1.25rem 0.8rem 1.5rem; border: 1px solid var(--mj-line); border-bottom: 0; background: color-mix(in srgb, var(--mj-surface-raised) 82%, transparent); }
+/* Interior pages use an integrated navigation rail rather than the landing page's
+   floating octagon. Its square left edge forms one continuous seam with the sidebar. */
+html:not([data-has-hero]) .page > header.header {
+  padding: 0;
+  background: var(--mj-surface);
 }
-#starlight__sidebar .top-level > li + li { margin-top: 1rem; }
-#starlight__sidebar .group-label .large, #starlight__sidebar a.large { color: var(--mj-muted); font-family: var(--sl-font-mono); font-size: 0.62rem; font-weight: 700; letter-spacing: 0.075em; text-transform: uppercase; }
+html:not([data-has-hero]) .mj-header-shell {
+  --mj-panel-shell: var(--mj-integrated-nav);
+  --mj-panel-inner: var(--mj-integrated-nav-inset);
+  width: 100%;
+  max-width: none;
+  margin-inline: 0;
+}
+
+@media (width >= 50rem) {
+  #starlight__sidebar.sidebar-pane { top: var(--sl-nav-height); padding: var(--space-2) var(--space-2) 0; border-inline-end: 0; background: color-mix(in srgb, var(--mj-surface) 90%, transparent); }
+  #starlight__sidebar .sidebar-content { padding: var(--space-5) var(--space-3) var(--space-6); border: 1px solid var(--mj-line); border-bottom: 0; background: color-mix(in srgb, var(--mj-surface-raised) 82%, transparent); }
+  html:not([data-has-hero]) #starlight__sidebar.sidebar-pane {
+    padding-block-start: 0;
+    padding-inline-start: 0;
+  }
+  html:not([data-has-hero]) #starlight__sidebar .sidebar-content { border-block-start: 0; }
+}
+#starlight__sidebar .top-level > li + li { margin-top: var(--space-4); }
+#starlight__sidebar .group-label .large, #starlight__sidebar a.large { color: var(--mj-muted); font-family: var(--mj-font-mono); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: var(--tracking-widest); text-transform: uppercase; }
 #starlight__sidebar a { border-radius: 0; color: var(--mj-muted); }
 #starlight__sidebar a:hover, #starlight__sidebar a:focus-visible { color: var(--mj-ink); background: color-mix(in srgb, var(--mj-violet) 6%, transparent); }
-#starlight__sidebar a[aria-current='page'] { color: var(--mj-ink); background: linear-gradient(90deg, color-mix(in srgb, var(--mj-violet) 14%, transparent), transparent); box-shadow: inset 2px 0 var(--mj-violet); font-weight: 700; }
+#starlight__sidebar a[aria-current='page'] { color: var(--mj-ink); background: linear-gradient(90deg, color-mix(in srgb, var(--mj-violet) 14%, transparent), transparent); box-shadow: inset 2px 0 var(--mj-violet); font-weight: var(--weight-bold); }
 
 html[data-has-hero] .sl-markdown-content { position: relative; z-index: 3; }
 html[data-has-hero] .sl-markdown-content > .home-section:first-child { margin-top: -2.4rem; }
-.home-section { margin-block: 0; padding: clamp(3.6rem, 7vw, 6.8rem) clamp(0rem, 2vw, 1.5rem); border-top: 1px solid var(--mj-line); }
-.section-label { display: flex; align-items: center; gap: 0.7rem; margin: 0 0 1.2rem; color: var(--mj-muted); font-family: var(--sl-font-mono); font-size: 0.61rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
+.home-section { margin-block: 0; padding: clamp(3.6rem, 7vw, 6.8rem) clamp(0rem, 2vw, var(--space-6)); border-top: 1px solid var(--mj-line); }
+.section-label { display: flex; align-items: center; gap: var(--space-3); margin: 0 0 var(--space-5); color: var(--mj-muted); font-family: var(--mj-font-mono); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: var(--tracking-widest); text-transform: uppercase; }
 .section-label::before { width: 1.35rem; height: 2px; background: var(--mj-violet); box-shadow: 0 0 8px var(--mj-violet); content: ''; }
-.home-section h2 { max-width: 18ch; margin: 0; padding: 0; border: 0; color: var(--mj-ink); font-family: var(--mj-display); font-size: clamp(2.8rem, 5vw, 5.2rem); letter-spacing: -0.055em; line-height: 0.93; }
+.home-section h2 { max-width: 18ch; margin: 0; padding: 0; border: 0; color: var(--mj-ink); font-family: var(--mj-font-display); font-weight: var(--weight-regular); font-size: var(--text-display-section); letter-spacing: var(--tracking-tighter); line-height: var(--leading-display); }
 .home-section h2::before { display: none; }
-.home-section > p:not(.section-label) { max-width: 50rem; color: var(--mj-copy); font-size: 1.08rem; }
+.home-section > p:not(.section-label) { max-width: 50rem; color: var(--mj-copy); font-size: var(--text-2xl); }
 
-.role-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 2.7rem; border: 1px solid var(--mj-line-strong); background: var(--mj-line-strong); }
-.role-grid article { min-height: 18rem; padding: clamp(1.5rem, 3vw, 2.35rem); background: var(--mj-surface-raised); }
+/* chamfer applied once to the outer grid silhouette — clip-path on a shared-border grid's
+   individual cards would cut notches out of the shared 1px divider lines, not a clean corner */
+.role-grid { position: relative; padding: 1px; margin-top: var(--space-10); background: var(--mj-line-strong); clip-path: var(--mj-chamfer-reverse-lg); }
+.role-grid__inner { display: grid; grid-template-columns: repeat(3, 1fr); grid-auto-rows: 1fr; gap: 1px; margin: 0; background: var(--mj-line-strong); clip-path: var(--mj-chamfer-reverse-lg-inset); }
+.role-grid article { display: flex; flex-direction: column; min-height: 18rem; margin: 0; padding: clamp(var(--space-6), 3vw, var(--space-8)); background: var(--mj-surface-raised); }
 .role-grid article:nth-child(2) { background: color-mix(in srgb, var(--mj-violet) 7%, var(--mj-surface-raised)); }
-.role-grid small { color: var(--mj-violet); font-family: var(--sl-font-mono); font-size: 0.59rem; font-weight: 750; letter-spacing: 0.09em; }
-.role-grid h3 { margin: 2.8rem 0 0.7rem; color: var(--mj-ink); font-size: 1.55rem; }
-.role-grid p { margin: 0; color: var(--mj-muted); font-size: 0.92rem; line-height: 1.55; }
-.role-grid code { display: inline-block; margin-top: 1.4rem; color: var(--mj-gold); font-size: 0.62rem; }
+.role-grid small { color: var(--mj-violet); font-family: var(--mj-font-mono); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: var(--tracking-widest); }
+.role-grid h3 { margin: var(--space-10) 0 var(--space-3); color: var(--mj-ink); font-size: var(--text-3xl); }
+.role-grid p { flex: 1; margin: 0; color: var(--mj-muted); font-size: var(--text-2xl); line-height: var(--leading-body); }
+.role-grid code { align-self: flex-start; display: inline-block; margin-top: var(--space-5); padding-top: 0; color: var(--mj-gold); font-size: var(--text-xs); }
 
-.capability-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin-top: 2.6rem; border: 1px solid var(--mj-line-strong); background: var(--mj-line-strong); }
-.capability-grid a { position: relative; min-height: 13rem; padding: 1.55rem; background: var(--mj-surface-raised); color: inherit; text-decoration: none; transition: background-color 150ms ease, transform 150ms ease; }
+.capability-grid { position: relative; padding: 1px; margin-top: var(--space-10); background: var(--mj-line-strong); clip-path: var(--mj-octagon-lg); }
+.capability-grid__inner { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin: 0; background: var(--mj-line-strong); clip-path: var(--mj-octagon-lg-inset); }
+.capability-grid a { position: relative; min-height: 13rem; padding: var(--space-6); background: var(--mj-surface-raised); color: inherit; text-decoration: none; transition: background-color 150ms ease, transform 150ms ease; }
 .capability-grid a:hover { z-index: 1; background: color-mix(in srgb, var(--mj-violet) 9%, var(--mj-surface-raised)); transform: translateY(-3px); }
-.capability-grid span { color: var(--mj-violet); font-family: var(--sl-font-mono); font-size: 0.58rem; font-weight: 750; }
-.capability-grid h3 { margin: 2.4rem 0 0.65rem; color: var(--mj-ink); font-size: 1.12rem; }
-.capability-grid p { margin: 0; color: var(--mj-muted); font-size: 0.88rem; line-height: 1.5; }
+.capability-grid span { color: var(--mj-violet); font-family: var(--mj-font-mono); font-size: var(--text-xs); font-weight: var(--weight-bold); }
+.capability-grid h3 { margin: var(--space-10) 0 var(--space-3); color: var(--mj-ink); font-size: var(--text-2xl); }
+.capability-grid p { margin: 0; color: var(--mj-muted); font-size: var(--text-lg); line-height: var(--leading-body); }
 
-.command-strip { display: grid; grid-template-columns: auto 1fr auto; gap: 1rem; align-items: center; margin-top: 2.5rem; padding: 1rem 1.2rem; border: 1px solid var(--mj-line-strong); background: var(--mj-surface-raised); font-family: var(--sl-font-mono); }
+.command-strip { position: relative; isolation: isolate; display: grid; grid-template-columns: auto 1fr auto; gap: var(--space-4); align-items: center; margin-top: var(--space-10); padding: var(--space-4) var(--space-5); background: var(--mj-line-strong); font-family: var(--mj-font-mono); clip-path: var(--mj-three-cut-lg); }
+.command-strip::after { content: ''; position: absolute; inset: 1px; z-index: -1; background: var(--mj-surface-raised); clip-path: var(--mj-three-cut-lg-inset); }
 .command-strip span { color: var(--mj-gold); }
 .command-strip code { color: var(--mj-ink); background: transparent; }
-.command-strip small { color: var(--mj-muted); font-size: 0.57rem; letter-spacing: 0.08em; }
-.docs-callout { display: grid; grid-template-columns: 1fr auto; gap: 2rem; align-items: end; padding: clamp(2rem, 5vw, 4rem); border: 1px solid color-mix(in srgb, var(--mj-violet) 38%, var(--mj-line)); background: linear-gradient(135deg, color-mix(in srgb, var(--mj-violet) 12%, transparent), transparent 55%), var(--mj-surface-raised); }
+.command-strip small { color: var(--mj-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-widest); }
+.docs-callout { position: relative; isolation: isolate; display: grid; grid-template-columns: 1fr auto; gap: var(--space-8); align-items: end; padding: clamp(var(--space-8), 5vw, var(--space-16)); background: color-mix(in srgb, var(--mj-violet) 38%, var(--mj-line)); clip-path: var(--mj-chamfer-reverse-lg); }
+.docs-callout::after { content: ''; position: absolute; inset: 1px; z-index: -1; background: linear-gradient(135deg, color-mix(in srgb, var(--mj-violet) 12%, transparent), transparent 55%), var(--mj-surface-raised); clip-path: var(--mj-chamfer-reverse-lg-inset); }
 .docs-callout h2 { max-width: 14ch; }
 .docs-callout p { max-width: 42rem; margin-bottom: 0; color: var(--mj-copy); }
-.docs-callout a { display: inline-flex; align-items: center; gap: 0.6rem; padding: 0.8rem 1rem; border: 1px solid var(--mj-violet); background: var(--mj-violet); color: #10091d; font-family: var(--sl-font-mono); font-size: 0.67rem; font-weight: 800; letter-spacing: 0.05em; text-decoration: none; text-transform: uppercase; white-space: nowrap; }
+.docs-callout a { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--mj-violet); color: #10091d; font-family: var(--mj-font-mono); font-size: var(--text-sm); font-weight: var(--weight-extrabold); letter-spacing: var(--tracking-wider); text-decoration: none; text-transform: uppercase; white-space: nowrap; clip-path: var(--mj-chamfer-sm); }
 
-@media (max-width: 64rem) { .capability-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 49.99rem) {
+/* Brokk-style glowing accent edges — only on standalone panels, not on the multi-card grids above. */
+.command-strip::before,
+.docs-callout::before {
+  position: absolute;
+  height: 1px;
+  background: linear-gradient(90deg, var(--mj-violet), transparent 70%);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--mj-violet) 55%, transparent);
+  content: '';
+  opacity: 0.75;
+  pointer-events: none;
+}
+.command-strip::before { inset: auto 16px 0 0; }
+.docs-callout::before { inset: 0 16px auto 0; }
+
+@media (width < 64rem) { .capability-grid__inner { grid-template-columns: repeat(2, 1fr); } }
+@media (width < 50rem) {
   :root { --sl-nav-height: 4.45rem; }
-  .role-grid, .capability-grid, .docs-callout { grid-template-columns: 1fr; }
+  .role-grid__inner, .capability-grid__inner, .docs-callout { grid-template-columns: 1fr; }
   .command-strip { grid-template-columns: auto 1fr; }
   .command-strip small { display: none; }
 }

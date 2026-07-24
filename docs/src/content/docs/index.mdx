@@ -21,24 +21,26 @@ hero:
   <h2>Different jobs deserve different agents.</h2>
   <p>Mjolnir turns a single coding session into a small, deliberate team. Each role has a clear responsibility, its own model strategy, and a place in the transcript.</p>
   <div class="role-grid">
-    <article>
-      <small>01 / COORDINATE</small>
-      <h3>Thor directs</h3>
-      <p>Owns the user turn, plans the work, and decides when a focused handoff will improve the result.</p>
-      <code>role://thor</code>
-    </article>
-    <article>
-      <small>02 / IMPLEMENT</small>
-      <h3>Eitri forges</h3>
-      <p>Receives bounded coding tasks in a fresh context, then streams the implementation back through the same UI.</p>
-      <code>role://eitri</code>
-    </article>
-    <article>
-      <small>03 / REVIEW</small>
-      <h3>Loki challenges</h3>
-      <p>Reviews checkpoints asynchronously and returns useful dissent at natural boundaries without stopping the work.</p>
-      <code>role://loki</code>
-    </article>
+    <div class="role-grid__inner">
+      <article>
+        <small>01 / COORDINATE</small>
+        <h3>Thor directs</h3>
+        <p>Owns the user turn, plans the work, and decides when a focused handoff will improve the result.</p>
+        <code>role://thor</code>
+      </article>
+      <article>
+        <small>02 / IMPLEMENT</small>
+        <h3>Eitri forges</h3>
+        <p>Receives bounded coding tasks in a fresh context, then streams the implementation back through the same UI.</p>
+        <code>role://eitri</code>
+      </article>
+      <article>
+        <small>03 / REVIEW</small>
+        <h3>Loki challenges</h3>
+        <p>Reviews checkpoints asynchronously and returns useful dissent at natural boundaries without stopping the work.</p>
+        <code>role://loki</code>
+      </article>
+    </div>
   </div>
 </section>
 
@@ -47,18 +49,20 @@ hero:
   <h2>Agent work that feels native to the command line.</h2>
   <p>Inline rendering keeps the shell in view while Mjolnir handles streaming, permissions, tools, sessions, worktrees, and model-specific controls.</p>
   <div class="capability-grid">
-    <a href="council/">
-      <span>01 / ORCHESTRATE</span><h3>Model-first Council</h3><p>Select strong models first, then route them through available ACP adapters.</p>
-    </a>
-    <a href="configuration/">
-      <span>02 / CONTROL</span><h3>Explicit permissions</h3><p>Keep agent choices readable and interactive without leaving the terminal.</p>
-    </a>
-    <a href="overview/#sessions-and-worktrees">
-      <span>03 / RESUME</span><h3>Durable sessions</h3><p>Resume the original route and isolate work in linked Git worktrees.</p>
-    </a>
-    <a href="remote/">
-      <span>04 / AUTOMATE</span><h3>Headless + remote</h3><p>Use the same Council from scripts, JSON streams, or a remote client.</p>
-    </a>
+    <div class="capability-grid__inner">
+      <a href="council/">
+        <span>01 / ORCHESTRATE</span><h3>Model-first Council</h3><p>Select strong models first, then route them through available ACP adapters.</p>
+      </a>
+      <a href="configuration/">
+        <span>02 / CONTROL</span><h3>Explicit permissions</h3><p>Keep agent choices readable and interactive without leaving the terminal.</p>
+      </a>
+      <a href="overview/#sessions-and-worktrees">
+        <span>03 / RESUME</span><h3>Durable sessions</h3><p>Resume the original route and isolate work in linked Git worktrees.</p>
+      </a>
+      <a href="remote/">
+        <span>04 / AUTOMATE</span><h3>Headless + remote</h3><p>Use the same Council from scripts, JSON streams, or a remote client.</p>
+      </a>
+    </div>
   </div>
 </section>
 
