@@ -2713,8 +2713,7 @@ enum RemotePendingApproval {
 }
 
 /// Keep the recognition deliberately narrow: only Codex's native approval
-/// form for the two injected servers and their approved tool names may cross
-/// the remote boundary.
+/// form for the two injected MCP servers may cross the remote boundary.
 fn is_native_injected_mcp_approval(prompt: &ElicitationPrompt) -> bool {
     let ElicitationMode::Form(form) = &prompt.mode else {
         return false;
@@ -2740,10 +2739,65 @@ fn is_native_injected_mcp_approval(prompt: &ElicitationPrompt) -> bool {
     if !matches_native_schema {
         return false;
     }
-    let message = prompt.message.to_ascii_lowercase();
-    message.contains("mcp")
-        && ((message.contains("mj-loki-pull") && message.contains("pull_advice"))
-            || (message.contains("mj-code-agent") && message.contains("explore_agent")))
+    message_has_exact_native_mcp_tool_identity(&prompt.message)
+}
+
+/// Match only the fully qualified identities of tools injected by Mjolnir.
+/// Server names or arbitrary tool names mentioned in prose are insufficient.
+fn message_has_exact_native_mcp_tool_identity(message: &str) -> bool {
+    ["mj-code-agent", "mj-loki-pull"].into_iter().any(|server| {
+        known_native_mcp_tools(server).iter().any(|tool| {
+            let dotted_identity = format!("mcp.{server}.{tool}");
+            message_has_exact_mcp_identity(message, &dotted_identity)
+                || match server {
+                    "mj-code-agent" => message_has_exact_mcp_identity(
+                        message,
+                        &format!("mcp__mj_code_agent__{tool}"),
+                    ),
+                    "mj-loki-pull" => message_has_exact_mcp_identity(
+                        message,
+                        &format!("mcp__mj-loki-pull__{tool}"),
+                    ),
+                    _ => false,
+                }
+        })
+    })
+}
+
+fn message_has_exact_mcp_identity(message: &str, identity: &str) -> bool {
+    message.match_indices(identity).any(|(start, _)| {
+        let end = start + identity.len();
+        has_identifier_boundary_before(message, start)
+            && !message[end..]
+                .chars()
+                .next()
+                .is_some_and(is_mcp_server_identifier_char)
+    })
+}
+
+fn known_native_mcp_tools(server: &str) -> &'static [&'static str] {
+    match server {
+        "mj-code-agent" => &[
+            "explore_agent",
+            "explore_agents",
+            "code_agent",
+            "code_agent_continue",
+            "code_agent_cancel",
+        ],
+        "mj-loki-pull" => &["pull_advice"],
+        _ => &[],
+    }
+}
+
+fn has_identifier_boundary_before(message: &str, start: usize) -> bool {
+    !message[..start]
+        .chars()
+        .next_back()
+        .is_some_and(is_mcp_server_identifier_char)
+}
+
+fn is_mcp_server_identifier_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
 }
 
 fn native_mcp_approval_outcome(option_id: &str) -> Option<ElicitationOutcome> {
@@ -5422,10 +5476,11 @@ fn parse_rfc3339_datetime(
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, Diff, PermissionOption,
-        SessionConfigSelect, SessionConfigSelectOption, StopReason, Terminal, TerminalExitStatus,
-        TerminalId, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-        ToolCallUpdateFields, UnstructuredCommandInput,
+        AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, Diff,
+        ElicitationFormMode, ElicitationSchema, ElicitationSessionScope, EnumOption,
+        PermissionOption, SessionConfigSelect, SessionConfigSelectOption, StopReason,
+        StringPropertySchema, Terminal, TerminalExitStatus, TerminalId, ToolCall, ToolCallContent,
+        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput,
     };
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
@@ -5544,6 +5599,304 @@ mod tests {
             responder,
         };
         (prompt, rx)
+    }
+
+    fn native_mcp_approval_schema() -> ElicitationSchema {
+        ElicitationSchema::new().property(
+            NATIVE_MCP_APPROVAL_PROPERTY,
+            StringPropertySchema::new().one_of(
+                NATIVE_MCP_APPROVAL_CHOICES
+                    .into_iter()
+                    .map(|(value, label, _)| EnumOption::new(value, label))
+                    .collect::<Vec<_>>(),
+            ),
+            true,
+        )
+    }
+
+    fn mcp_approval_prompt(
+        message: impl Into<String>,
+        schema: ElicitationSchema,
+    ) -> (
+        ElicitationPrompt,
+        tokio::sync::oneshot::Receiver<ElicitationOutcome>,
+    ) {
+        let (responder, rx) = tokio::sync::oneshot::channel();
+        (
+            ElicitationPrompt {
+                message: message.into(),
+                mode: ElicitationFormMode::new(ElicitationSessionScope::new("session"), schema)
+                    .into(),
+                responder,
+            },
+            rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn top_level_code_agent_mcp_approvals_track_cards_and_forward_persist_choices() {
+        for (tool, choice) in [
+            ("explore_agent", "once"),
+            ("code_agent", "once"),
+            ("code_agent_continue", "session"),
+            ("code_agent_cancel", "always"),
+        ] {
+            let tracker =
+                RemoteSessionTracker::new_disconnected("project".to_string(), "thor".to_string());
+            tracker.observe_event(&UiEvent::SessionStarted {
+                session_id: "sess-1".to_string(),
+                resumed: false,
+            });
+            let (prompt, rx) = mcp_approval_prompt(
+                format!("MCP approval for mcp__mj_code_agent__{tool}"),
+                native_mcp_approval_schema(),
+            );
+            let mut pending = HashMap::new();
+
+            handle_server_agent_event(UiEvent::ElicitationRequest(prompt), &tracker, &mut pending);
+
+            let snapshot = tracker
+                .state
+                .lock()
+                .expect("state")
+                .snapshot()
+                .expect("snapshot");
+            assert_eq!(snapshot.pending_permissions.len(), 1, "{tool} card");
+            assert_eq!(
+                snapshot.pending_permissions[0].options.len(),
+                4,
+                "{tool} choices"
+            );
+            let request_id = snapshot.pending_permissions[0].request_id.clone();
+
+            handle_server_remote_event(
+                UiEvent::RemotePermissionDecision {
+                    request_id,
+                    option_id: choice.to_string(),
+                },
+                &mut pending,
+            );
+            assert!(
+                pending.is_empty(),
+                "{tool} decision consumes pending prompt"
+            );
+            match rx.await.expect("forwarded outcome") {
+                ElicitationOutcome::Accept(values) => assert_eq!(
+                    values.get(NATIVE_MCP_APPROVAL_PROPERTY),
+                    Some(&ElicitationContentValue::String(choice.to_string()))
+                ),
+                outcome => panic!("expected persist acceptance for {tool}, got {outcome:?}"),
+            }
+            assert!(
+                tracker
+                    .state
+                    .lock()
+                    .expect("state")
+                    .snapshot()
+                    .expect("snapshot")
+                    .pending_permissions
+                    .is_empty(),
+                "{tool} decision cleans up card"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn top_level_code_agent_mcp_approval_decline_forwards_and_cleans_up() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("project".to_string(), "thor".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        let (prompt, rx) = mcp_approval_prompt(
+            "MCP approval for mcp__mj_code_agent__code_agent_cancel",
+            native_mcp_approval_schema(),
+        );
+        let mut pending = HashMap::new();
+        handle_server_agent_event(UiEvent::ElicitationRequest(prompt), &tracker, &mut pending);
+        let request_id = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot")
+            .pending_permissions[0]
+            .request_id
+            .clone();
+
+        handle_server_remote_event(
+            UiEvent::RemotePermissionDecision {
+                request_id,
+                option_id: "decline".to_string(),
+            },
+            &mut pending,
+        );
+        assert!(pending.is_empty());
+        assert!(matches!(rx.await, Ok(ElicitationOutcome::Decline)));
+        assert!(
+            tracker
+                .state
+                .lock()
+                .expect("state")
+                .snapshot()
+                .expect("snapshot")
+                .pending_permissions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn native_mcp_approval_accepts_exact_known_tool_identities() {
+        for message in [
+            "MCP approval for mcp.mj-code-agent.code_agent",
+            "MCP approval for mcp.mj-code-agent.explore_agent",
+            "MCP approval for mcp.mj-code-agent.explore_agents",
+            "MCP approval for mcp.mj-code-agent.code_agent_continue",
+            "MCP approval for mcp.mj-code-agent.code_agent_cancel",
+            "MCP approval for mcp__mj_code_agent__code_agent",
+            "MCP approval for mcp__mj_code_agent__explore_agent",
+            "MCP approval for mcp__mj_code_agent__explore_agents",
+            "MCP approval for mcp__mj_code_agent__code_agent_continue",
+            "MCP approval for mcp__mj_code_agent__code_agent_cancel",
+            "MCP approval for mcp.mj-loki-pull.pull_advice",
+            "MCP approval for mcp__mj-loki-pull__pull_advice",
+        ] {
+            let (prompt, _) = mcp_approval_prompt(message, native_mcp_approval_schema());
+            assert!(is_native_injected_mcp_approval(&prompt), "{message}");
+        }
+    }
+
+    #[test]
+    fn native_mcp_approval_rejects_wrong_values_extra_fields_and_non_server_tokens() {
+        let extra_field = native_mcp_approval_schema().string("extra", false);
+        let (prompt, _) = mcp_approval_prompt(
+            "MCP approval for mcp__mj_code_agent__code_agent",
+            extra_field,
+        );
+        assert!(!is_native_injected_mcp_approval(&prompt));
+
+        let mut wrong_values = native_mcp_approval_schema();
+        let ElicitationPropertySchema::String(approval) = wrong_values
+            .properties
+            .get_mut(NATIVE_MCP_APPROVAL_PROPERTY)
+            .expect("persist property")
+        else {
+            panic!("persist property is a string schema");
+        };
+        approval.one_of.as_mut().expect("persist choices")[1].value = "forever".to_string();
+        let (prompt, _) = mcp_approval_prompt(
+            "MCP approval for mcp__mj_code_agent__code_agent",
+            wrong_values,
+        );
+        assert!(!is_native_injected_mcp_approval(&prompt));
+
+        let mut optional_persist = native_mcp_approval_schema();
+        optional_persist.required = Some(Vec::new());
+        let (prompt, _) = mcp_approval_prompt(
+            "MCP approval for mcp__mj_code_agent__code_agent",
+            optional_persist,
+        );
+        assert!(!is_native_injected_mcp_approval(&prompt));
+
+        for message in [
+            "MCP approval for xmcp__mj_code_agent__code_agent",
+            "MCP approval for mcp__mj-code-agent__code_agent",
+            "MCP approval for mcp__mj_code-agent__code_agent",
+            "MCP approval for mcp__mj_code_agent__code-agent",
+            "MCP approval for mcp__mj__code_agent__code_agent",
+            "MCP approval for mcp__mj_code__agent__code_agent",
+            "MCP approval for mcp__mj-code-agent-extra__code_agent",
+            "MCP approval for mcp__mj-code-agent_extra__code_agent",
+            "MCP approval for mcp__mj-code-agent___code_agent",
+            "MCP approval for mj-code-agent.extra",
+            "MCP approval for mj-code-agent-extra",
+            "MCP approval for mcp.mj-code-agent-extra.code_agent",
+            "MCP approval for mcp.mj-code-agent.extra",
+            "MCP approval for mcp.mj-code-agent.a_future_top_level_code_agent_operation",
+            "MCP approval for mcp.mj-code-agent.code_agent.extra",
+            "MCP approval for mcp.mj-code-agent.code_agent_extra",
+            "MCP approval for mcp__mj-code-agent__a_future_top_level_code_agent_operation",
+            "MCP approval for mcp__mj-code-agent__code_agent_extra",
+            "MCP approval for mcp__mj-code-agent__code_agent__extra",
+            "MCP approval for mcp__mj_code_agent__a_future_top_level_code_agent_operation",
+            "MCP approval for mcp__mj_code_agent__code_agent_extra",
+            "MCP approval for mcp__mj_code_agent__code_agent__extra",
+            "MCP approval for mcp__mj-loki-pull__code_agent",
+            "MCP approval for mj-code-agent",
+            "MCP approval mentions mcp__mj_code_agent__code_agent_extra",
+            "MCP approval for mcp.mj-loki-pull.pull_advice.extra",
+            "MCP approval for mcp__MJ-code-agent__code_agent",
+        ] {
+            let (prompt, _) = mcp_approval_prompt(message, native_mcp_approval_schema());
+            assert!(!is_native_injected_mcp_approval(&prompt), "{message}");
+        }
+
+        let (loki, _) = mcp_approval_prompt(
+            "MCP approval for mcp__mj-loki-pull__pull_advice",
+            native_mcp_approval_schema(),
+        );
+        assert!(is_native_injected_mcp_approval(&loki));
+
+        let (dotted_loki, _) = mcp_approval_prompt(
+            "MCP approval for mcp.mj-loki-pull.pull_advice",
+            native_mcp_approval_schema(),
+        );
+        assert!(is_native_injected_mcp_approval(&dotted_loki));
+    }
+
+    #[test]
+    fn native_mcp_approval_allows_option_labels_and_metadata() {
+        let mut altered_label = native_mcp_approval_schema();
+        let ElicitationPropertySchema::String(approval) = altered_label
+            .properties
+            .get_mut(NATIVE_MCP_APPROVAL_PROPERTY)
+            .expect("persist property")
+        else {
+            panic!("persist property is a string schema");
+        };
+        approval.one_of.as_mut().expect("persist choices")[0].title = "Allow this time".to_string();
+        approval.meta = Some(serde_json::Map::new());
+        approval.one_of.as_mut().expect("persist choices")[0].meta = Some(serde_json::Map::new());
+        let (prompt, _) = mcp_approval_prompt(
+            "MCP approval for mcp__mj_code_agent__code_agent",
+            altered_label,
+        );
+        assert!(is_native_injected_mcp_approval(&prompt));
+    }
+
+    #[test]
+    fn nested_code_agent_elicitation_is_declined_without_a_remote_card() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("project".to_string(), "thor".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        let (prompt, mut rx) = mcp_approval_prompt(
+            "MCP approval for mcp__mj_code_agent__code_agent",
+            native_mcp_approval_schema(),
+        );
+        let mut pending = HashMap::new();
+
+        handle_server_agent_event(
+            UiEvent::CodeAgent(crate::event::CodeAgentEvent::ElicitationRequest(prompt)),
+            &tracker,
+            &mut pending,
+        );
+
+        assert!(pending.is_empty());
+        assert!(
+            tracker
+                .state
+                .lock()
+                .expect("state")
+                .snapshot()
+                .expect("snapshot")
+                .pending_permissions
+                .is_empty()
+        );
+        assert!(matches!(rx.try_recv(), Ok(ElicitationOutcome::Decline)));
     }
 
     #[test]
