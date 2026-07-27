@@ -6256,18 +6256,20 @@ fn render_transcript_entry_range(
     compact_completed_turns: bool,
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
-    let turns = compact_completed_turns.then(|| transcript_turns(state));
+    let turns = transcript_turns(state);
     let mut speaker = state.transcript[..entry_range.start]
         .iter()
         .filter_map(entry_speaker)
         .next_back();
     for (offset, entry) in state.transcript[entry_range.clone()].iter().enumerate() {
         let entry_index = entry_range.start + offset;
-        let compact_turn = turns.as_ref().and_then(|turns| {
+        let compact_turn = if compact_completed_turns {
             turns.iter().find(|turn| {
                 turn.is_compactable && (turn.prompt_index..turn.end).contains(&entry_index)
             })
-        });
+        } else {
+            None
+        };
         // Completed successful tools are represented by the turn summary.
         // Do this before speaker grouping so a nested actor with only compacted
         // tool activity cannot leave behind an empty attribution header.
@@ -6277,18 +6279,19 @@ fn render_transcript_entry_range(
         {
             continue;
         }
-        let collapse_message =
-            collapse_limit.is_some() && transcript_entry_is_stable(state, entry_index, entry);
+        let is_final_response = turns
+            .iter()
+            .any(|turn| turn.is_compactable && turn.final_response_index == Some(entry_index));
+        let collapse_message = collapse_limit.is_some()
+            && !is_final_response
+            && transcript_entry_is_stable(state, entry_index, entry);
         if let Some(next) = entry_speaker(entry)
             && speaker.as_deref() != Some(next.as_str())
         {
             push_speaker_name(&mut out, &next, theme);
             speaker = Some(next);
         }
-        if compact_turn
-            .and_then(|turn| turn.final_response_index)
-            .is_some_and(|index| index == entry_index)
-        {
+        if compact_turn.is_some() && is_final_response {
             push_turn_final_response_label(&mut out, theme);
         }
         match entry {
@@ -16936,10 +16939,10 @@ mod tests {
     }
 
     #[test]
-    fn active_streaming_message_stays_expanded_until_stable() {
+    fn completed_final_response_stays_expanded() {
         let mut state = AppState::new();
         state.record_user_prompt("start".to_string());
-        let long = format!("{}STREAMING_TAIL", "x".repeat(MESSAGE_COLLAPSED_CHARS));
+        let long = format!("{}FINAL_RESPONSE_TAIL", "x".repeat(MESSAGE_COLLAPSED_CHARS));
         state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
             text_chunk(&long),
         )));
@@ -16948,7 +16951,11 @@ mod tests {
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
-        assert!(streaming.iter().any(|line| line.contains("STREAMING_TAIL")));
+        assert!(
+            streaming
+                .iter()
+                .any(|line| line.contains("FINAL_RESPONSE_TAIL"))
+        );
         assert!(!streaming.iter().any(|line| line.contains("details hidden")));
 
         state.apply_event(UiEvent::PromptDone {
@@ -16959,8 +16966,13 @@ mod tests {
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
-        assert!(!stable.iter().any(|line| line.contains("STREAMING_TAIL")));
-        assert!(stable.iter().any(|line| line.contains("details hidden")));
+        assert!(
+            stable
+                .iter()
+                .any(|line| line.contains("FINAL_RESPONSE_TAIL")),
+            "final answer must remain fully readable: {stable:?}"
+        );
+        assert!(!stable.iter().any(|line| line.contains("details hidden")));
     }
 
     #[test]
