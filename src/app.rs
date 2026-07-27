@@ -793,6 +793,10 @@ pub struct AppState {
     /// skip rebuilding `Vec<Line>` and re-running word-wrap when nothing
     /// visible changed.
     transcript_revision: u64,
+    /// UI-owned reveal bounds for currently streaming prose. The canonical
+    /// transcript always retains the complete source; this only lets the
+    /// terminal renderer hold back incomplete or not-yet-paced source.
+    stream_visible_bytes: HashMap<usize, usize>,
     pub input: String,
     /// Cursor position in `input`, counted in Unicode scalar values from
     /// the start of the buffer.
@@ -1195,6 +1199,7 @@ impl AppState {
             suppressed_tool_calls: HashSet::new(),
             terminal_outputs: HashMap::new(),
             transcript_revision: 0,
+            stream_visible_bytes: HashMap::new(),
             input: String::new(),
             input_cursor: 0,
             input_scroll_offset: 0,
@@ -1627,6 +1632,50 @@ impl AppState {
     /// in a way that the renderer cares about.
     pub fn transcript_revision(&self) -> u64 {
         self.transcript_revision
+    }
+
+    /// Limit an active transcript entry to a source prefix for live rendering.
+    /// This is deliberately transient: exports, history, and replay continue
+    /// to read the complete entry.
+    pub(crate) fn set_stream_visible_bytes(&mut self, entry_index: usize, bytes: usize) -> bool {
+        let Some(text) = self.transcript_entry_text(entry_index) else {
+            return false;
+        };
+        let bytes = bytes.min(text.len());
+        if !text.is_char_boundary(bytes) {
+            return false;
+        }
+        if self.stream_visible_bytes.get(&entry_index) == Some(&bytes) {
+            return false;
+        }
+        self.stream_visible_bytes.insert(entry_index, bytes);
+        self.bump_transcript_revision();
+        true
+    }
+
+    /// Stop applying a live-render prefix once an entry is complete.
+    pub(crate) fn clear_stream_visible_bytes(&mut self, entry_index: usize) -> bool {
+        if self.stream_visible_bytes.remove(&entry_index).is_some() {
+            self.bump_transcript_revision();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn stream_visible_text<'a>(&self, entry_index: usize, text: &'a str) -> &'a str {
+        self.stream_visible_bytes
+            .get(&entry_index)
+            .and_then(|bytes| text.get(..*bytes))
+            .unwrap_or(text)
+    }
+
+    fn transcript_entry_text(&self, entry_index: usize) -> Option<&str> {
+        match self.transcript.get(entry_index)? {
+            Entry::AgentMessage(text) | Entry::SubagentMessage(text) => Some(text),
+            Entry::AgentThought(thought) | Entry::SubagentThought(thought) => Some(&thought.text),
+            _ => None,
+        }
     }
 
     fn bump_transcript_revision(&mut self) {

@@ -5,7 +5,7 @@
 //! into `AppState`, redraws on every tick, and emits `UiCommand`s back
 //! to the runtime when the user submits prompts or cancels.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::io::{self, Stdout, Write};
 use std::ops::Range;
@@ -16,7 +16,7 @@ use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::v1::{
-    AvailableCommandInput, SessionConfigOption, StopReason, ToolCallStatus,
+    AvailableCommandInput, SessionConfigOption, SessionUpdate, StopReason, ToolCallStatus,
 };
 use anyhow::{Context, Result};
 use crossterm::cursor::MoveTo;
@@ -53,8 +53,8 @@ use crate::clipboard::{
 };
 use crate::config;
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, ReviewTarget, SubagentOutcome, UiCommand,
-    UiEvent,
+    PermissionDecision, PermissionPrompt, PromptImage, ReviewTarget, SubagentEvent,
+    SubagentOutcome, UiCommand, UiEvent,
 };
 use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
@@ -90,6 +90,199 @@ const PASTE_BURST_IDLE_TIMEOUT: Duration = Duration::from_millis(16);
 const PASTE_BURST_MIN_CHARS: usize = 3;
 const NOTIFICATION_PREVIEW_CHARS: usize = 80;
 const INLINE_RESIZE_REFLOW_DEBOUNCE: Duration = Duration::from_millis(75);
+/// Codex's streaming commit cadence: one completed source line per 120 FPS
+/// frame while output is keeping up.
+const STREAM_COMMIT_INTERVAL: Duration = Duration::from_nanos(8_333_334);
+const STREAM_CATCH_UP_LINES: usize = 8;
+const STREAM_CATCH_UP_AGE: Duration = Duration::from_millis(120);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProseKind {
+    PrimaryMessage,
+    PrimaryThought,
+    SubagentMessage,
+    SubagentThought,
+}
+
+#[derive(Debug, Default)]
+struct StreamRevealLane {
+    observed_bytes: usize,
+    visible_bytes: usize,
+    unterminated: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StreamCommit {
+    entry_index: usize,
+    bytes: usize,
+    queued_at: Instant,
+}
+
+/// Keeps canonical transcript entries whole while giving their live rendering
+/// Codex-style newline pacing. Incomplete source stays out of the terminal;
+/// complete source lines become visible one tick at a time.
+#[derive(Debug, Default)]
+struct StreamRevealController {
+    lanes: BTreeMap<usize, StreamRevealLane>,
+    queued: VecDeque<StreamCommit>,
+}
+
+impl StreamRevealController {
+    fn flush_for_event(&mut self, state: &mut AppState, event: &UiEvent) -> bool {
+        let Some(next_kind) = prose_kind_for_event(event) else {
+            return self.flush_entries(state, self.lanes.keys().copied().collect());
+        };
+        let entries = self
+            .lanes
+            .iter()
+            .filter_map(|(&entry_index, _)| {
+                (entry_prose_kind(Some(state.transcript.get(entry_index)?)) != Some(next_kind))
+                    .then_some(entry_index)
+            })
+            .collect();
+        self.flush_entries(state, entries)
+    }
+
+    fn observe(&mut self, state: &mut AppState) {
+        let mut active = BTreeSet::new();
+        let mut visibility_updates = Vec::new();
+
+        for (entry_index, entry) in state.transcript.iter().enumerate() {
+            if transcript_entry_is_stable(state, entry_index, entry) {
+                continue;
+            }
+            let Some(text) = entry_prose_text(entry) else {
+                continue;
+            };
+            active.insert(entry_index);
+            let lane = self.lanes.entry(entry_index).or_default();
+            if lane.observed_bytes > text.len() || !text.is_char_boundary(lane.observed_bytes) {
+                lane.observed_bytes = 0;
+                lane.visible_bytes = 0;
+                lane.unterminated.clear();
+            }
+            if lane.observed_bytes < text.len() {
+                lane.unterminated.push_str(&text[lane.observed_bytes..]);
+                lane.observed_bytes = text.len();
+                while let Some(newline) = lane.unterminated.find('\n') {
+                    let bytes = newline + 1;
+                    lane.unterminated.drain(..bytes);
+                    self.queued.push_back(StreamCommit {
+                        entry_index,
+                        bytes,
+                        queued_at: Instant::now(),
+                    });
+                }
+            }
+            visibility_updates.push((entry_index, lane.visible_bytes));
+        }
+
+        let closed = self
+            .lanes
+            .keys()
+            .copied()
+            .filter(|entry_index| !active.contains(entry_index))
+            .collect::<Vec<_>>();
+        for entry_index in closed {
+            self.lanes.remove(&entry_index);
+            state.clear_stream_visible_bytes(entry_index);
+        }
+        for (entry_index, visible_bytes) in visibility_updates {
+            state.set_stream_visible_bytes(entry_index, visible_bytes);
+        }
+    }
+
+    fn commit_one(&mut self, state: &mut AppState) -> bool {
+        let Some(first) = self.queued.front() else {
+            return false;
+        };
+        let catch_up = self.queued.len() >= STREAM_CATCH_UP_LINES
+            || first.queued_at.elapsed() >= STREAM_CATCH_UP_AGE;
+        let commits = if catch_up { self.queued.len() } else { 1 };
+        let mut changed = false;
+        for _ in 0..commits {
+            let Some(commit) = self.queued.pop_front() else {
+                break;
+            };
+            let Some(lane) = self.lanes.get_mut(&commit.entry_index) else {
+                continue;
+            };
+            let Some(text) = state
+                .transcript
+                .get(commit.entry_index)
+                .and_then(entry_prose_text)
+            else {
+                continue;
+            };
+            lane.visible_bytes = lane
+                .visible_bytes
+                .saturating_add(commit.bytes)
+                .min(text.len());
+            state.set_stream_visible_bytes(commit.entry_index, lane.visible_bytes);
+            changed = true;
+        }
+        changed
+    }
+
+    fn flush_entries(&mut self, state: &mut AppState, entries: Vec<usize>) -> bool {
+        if entries.is_empty() {
+            return false;
+        }
+        let entries = entries.into_iter().collect::<BTreeSet<_>>();
+        self.queued
+            .retain(|commit| !entries.contains(&commit.entry_index));
+        let mut changed = false;
+        for entry_index in entries {
+            let Some(text) = state.transcript.get(entry_index).and_then(entry_prose_text) else {
+                continue;
+            };
+            if let Some(lane) = self.lanes.get_mut(&entry_index) {
+                lane.observed_bytes = text.len();
+                lane.visible_bytes = text.len();
+                lane.unterminated.clear();
+            }
+            changed |= state.set_stream_visible_bytes(entry_index, text.len());
+        }
+        changed
+    }
+}
+
+fn entry_prose_text(entry: &Entry) -> Option<&str> {
+    match entry {
+        Entry::AgentMessage(text) | Entry::SubagentMessage(text) => Some(text),
+        Entry::AgentThought(thought) | Entry::SubagentThought(thought) => Some(&thought.text),
+        _ => None,
+    }
+}
+
+fn entry_prose_kind(entry: Option<&Entry>) -> Option<ProseKind> {
+    match entry? {
+        Entry::AgentMessage(_) => Some(ProseKind::PrimaryMessage),
+        Entry::AgentThought(_) => Some(ProseKind::PrimaryThought),
+        Entry::SubagentMessage(_) => Some(ProseKind::SubagentMessage),
+        Entry::SubagentThought(_) => Some(ProseKind::SubagentThought),
+        _ => None,
+    }
+}
+
+fn prose_kind_for_event(event: &UiEvent) -> Option<ProseKind> {
+    let update = match event {
+        UiEvent::SessionUpdate(update) => update,
+        UiEvent::Subagent(SubagentEvent::SessionUpdate { update, .. }) => update,
+        _ => return None,
+    };
+    match update {
+        SessionUpdate::AgentMessageChunk(_) => match event {
+            UiEvent::Subagent(_) => Some(ProseKind::SubagentMessage),
+            _ => Some(ProseKind::PrimaryMessage),
+        },
+        SessionUpdate::AgentThoughtChunk(_) => match event {
+            UiEvent::Subagent(_) => Some(ProseKind::SubagentThought),
+            _ => Some(ProseKind::PrimaryThought),
+        },
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {
@@ -619,11 +812,11 @@ const FRAME_BUDGET: Duration = Duration::from_millis(33);
 
 /// Slower redraw rate for streaming transcript updates in the fullscreen TUI.
 /// User input is intentionally not throttled by this budget.
-const STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(125);
+const STREAMING_FRAME_BUDGET: Duration = STREAM_COMMIT_INTERVAL;
 
 /// Slower redraw rate for streaming transcript updates in inline chat. Spinner
 /// animation has its own cadence, so queued-prompt typing can stay responsive.
-const INLINE_STREAMING_FRAME_BUDGET: Duration = Duration::from_millis(125);
+const INLINE_STREAMING_FRAME_BUDGET: Duration = STREAM_COMMIT_INTERVAL;
 
 /// Spinner-only redraw cadence. Tied to `SPINNER_FRAME_INTERVAL_MS` so the
 /// wall-clock frame selection and idle animation wakeups cannot drift.
@@ -814,6 +1007,7 @@ async fn ui_loop(
     let mut main_transcript_scroll: Option<TranscriptScrollState> = None;
     let mut main_transcript_sink: Option<TranscriptSink> = None;
     let mut inline_resize_reflow = InlineResizeReflow::default();
+    let mut stream_reveal = StreamRevealController::default();
     let mut notification_backend = TerminalNotificationBackend::detect();
     let mut crossterm_events = EventStream::new();
     let (dictation_tx, mut dictation_rx) = mpsc::unbounded_channel::<DictationEvent>();
@@ -829,6 +1023,8 @@ async fn ui_loop(
     redraw_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut animation_tick = tokio::time::interval(SPINNER_FRAME_BUDGET);
     animation_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut stream_commit_tick = tokio::time::interval(STREAM_COMMIT_INTERVAL);
+    stream_commit_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     if mode == UiMode::InlineChat {
         sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
@@ -844,6 +1040,11 @@ async fn ui_loop(
             biased;
             _ = termination.cancelled() => {
                 state.exit_reason = Some(UiExitReason::Quit);
+            }
+            _ = stream_commit_tick.tick() => {
+                if stream_reveal.commit_one(&mut state) {
+                    pending_redraw.mark(RedrawCause::Stream);
+                }
             }
             maybe_ct = crossterm_events.next() => {
                 match maybe_ct {
@@ -985,10 +1186,13 @@ async fn ui_loop(
                         let force_repair_for_event =
                             should_force_inline_repair_for_ui_event(mode, &ev);
                         let notification = notification_message_for_event(mode, &state, &ev);
+                        let prose_event = prose_kind_for_event(&ev).is_some();
                         let failed_side_start = state.is_side
                             && state.session_id.is_none()
                             && matches!(&ev, UiEvent::Fatal(_));
+                        let flushed_prose = stream_reveal.flush_for_event(&mut state, &ev);
                         state.apply_event(ev);
+                        stream_reveal.observe(&mut state);
                         finalize_startup_prompt(&mut state);
                         if failed_side_start {
                             state.side_exit_requested = true;
@@ -1044,7 +1248,9 @@ async fn ui_loop(
                             &mut notification_backend,
                             notification.as_deref(),
                         );
-                        pending_redraw.mark(redraw_cause);
+                        if !prose_event || flushed_prose {
+                            pending_redraw.mark(redraw_cause);
+                        }
                     }
                     None => {
                         state.mark_runtime_closed();
@@ -1085,6 +1291,7 @@ async fn ui_loop(
             let _ = cmd_tx.send(UiCommand::StartSide);
             main_transcript_scroll = Some(std::mem::take(&mut transcript_scroll));
             main_transcript_sink = Some(std::mem::take(&mut transcript_sink));
+            stream_reveal = StreamRevealController::default();
             pending_redraw.mark_interactive();
         }
 
@@ -1105,6 +1312,7 @@ async fn ui_loop(
                 state = main;
                 transcript_scroll = main_transcript_scroll.take().unwrap_or_default();
                 transcript_sink = main_transcript_sink.take().unwrap_or_default();
+                stream_reveal = StreamRevealController::default();
                 pending_redraw.mark_interactive();
             }
         }
@@ -6097,12 +6305,20 @@ fn render_transcript_entry_range(
                     speaker = Some("agent".to_string());
                 }
             }
-            Entry::AgentMessage(text) | Entry::SubagentMessage(text) => {
-                push_markdown_message(&mut out, text, collapse_message, width, theme)
-            }
-            Entry::AgentThought(thought) | Entry::SubagentThought(thought) => {
-                push_thinking(&mut out, thought, collapse_limit.is_some(), theme)
-            }
+            Entry::AgentMessage(text) | Entry::SubagentMessage(text) => push_markdown_message(
+                &mut out,
+                state.stream_visible_text(entry_index, text),
+                collapse_message,
+                width,
+                theme,
+            ),
+            Entry::AgentThought(thought) | Entry::SubagentThought(thought) => push_thinking(
+                &mut out,
+                state.stream_visible_text(entry_index, &thought.text),
+                thought.completed,
+                collapse_limit.is_some(),
+                theme,
+            ),
             Entry::InternalMessage(message) => {
                 let chars = message.text.chars().count();
                 let title = match message.kind {
@@ -6359,13 +6575,13 @@ const ACTIVE_THOUGHT_TAIL_CHARS: usize = 360;
 
 fn push_thinking(
     out: &mut Vec<Line<'static>>,
-    thought: &crate::app::ThoughtEntry,
+    source: &str,
+    completed: bool,
     compact: bool,
     theme: TerminalTheme,
 ) {
     let mut in_html_comment = false;
-    let text = thought
-        .text
+    let text = source
         .split('\n')
         .map(|line| strip_html_comments(line, &mut in_html_comment))
         .collect::<Vec<_>>()
@@ -6374,7 +6590,7 @@ fn push_thinking(
         return;
     }
     let thought_style = Style::default().fg(theme.thought);
-    if compact && thought.completed {
+    if compact && completed {
         let lines = text.lines().count();
         let unit = if lines == 1 { "line" } else { "lines" };
         out.push(Line::from(Span::styled(
@@ -11759,6 +11975,59 @@ mod tests {
             subagent_id,
             outcome,
         }));
+    }
+
+    #[test]
+    fn stream_reveal_hides_partial_source_and_paces_complete_lines() {
+        let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Streaming);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("first line\npartial"),
+        )));
+        let entry_index = state.agent_open_message_index().expect("open message");
+        let mut reveal = StreamRevealController::default();
+
+        reveal.observe(&mut state);
+        let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
+            panic!("expected agent message");
+        };
+        assert_eq!(source, "first line\npartial", "canonical source is intact");
+        assert_eq!(state.stream_visible_text(entry_index, source), "");
+
+        assert!(reveal.commit_one(&mut state));
+        let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
+            panic!("expected agent message");
+        };
+        assert_eq!(
+            state.stream_visible_text(entry_index, source),
+            "first line\n"
+        );
+
+        let canonical = source.to_string();
+        reveal.flush_entries(&mut state, vec![entry_index]);
+        assert_eq!(
+            state.stream_visible_text(entry_index, &canonical),
+            canonical
+        );
+    }
+
+    #[test]
+    fn stream_reveal_catches_up_when_eight_lines_are_queued() {
+        let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Streaming);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("1\n2\n3\n4\n5\n6\n7\n8\n"),
+        )));
+        let entry_index = state.agent_open_message_index().expect("open message");
+        let mut reveal = StreamRevealController::default();
+
+        reveal.observe(&mut state);
+        assert!(reveal.commit_one(&mut state));
+        let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
+            panic!("expected agent message");
+        };
+        assert_eq!(state.stream_visible_text(entry_index, source), source);
+        assert!(reveal.queued.is_empty());
     }
     use agent_client_protocol::schema::v1::{
         AvailableCommand, ContentBlock, ContentChunk, ElicitationFormMode, ElicitationId,
