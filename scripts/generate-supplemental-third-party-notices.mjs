@@ -248,7 +248,7 @@ async function embeddedFontsNotice() {
 }
 
 async function bundledAnvilNotice() {
-  const version = "0.22.0";
+  const version = "0.24.0";
   const workflow = await readFile(
     path.join(repositoryRoot, ".github", "workflows", "release.yml"),
     "utf8",
@@ -263,7 +263,6 @@ async function bundledAnvilNotice() {
   const legalFiles = [
     "LICENSE",
     "GPL-3.0.md",
-    "LGPL-3.0.md",
     "SOURCE.md",
     "THIRD_PARTY_LICENSES.html",
     "SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt",
@@ -279,7 +278,7 @@ async function bundledAnvilNotice() {
     scope: "separately built binary aggregated into every official Mjolnir archive",
     text: [
       `Anvil's complete legal bundle is shipped as anvil-licenses/ and maintained in ${directory}/.`,
-      "Its SOURCE.md identifies the exact source commit. The bundle includes Anvil's LGPLv3 and incorporated GPLv3 texts, the generated locked Rust dependency report, and supplemental native notices.",
+      "Its SOURCE.md identifies the exact corresponding source tag. The bundle includes Anvil's LGPLv3 and incorporated GPLv3 texts, the generated locked Rust dependency report, and supplemental native notices.",
     ].join("\n"),
   };
 }

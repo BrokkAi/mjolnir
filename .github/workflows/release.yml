@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  ANVIL_VERSION: "0.22.0"
+  ANVIL_VERSION: "0.24.0"
 
 jobs:
   build-linux:

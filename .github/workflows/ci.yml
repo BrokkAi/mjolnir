@@ -46,7 +46,7 @@ jobs:
         grep -Fx LICENSE /tmp/mjolnir-package-files.txt
         grep -Fx licenses/THIRD_PARTY_LICENSES.html /tmp/mjolnir-package-files.txt
         grep -Fx licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt /tmp/mjolnir-package-files.txt
-        grep -Fx licenses/anvil-v0.22.0/SOURCE.md /tmp/mjolnir-package-files.txt
+        grep -Fx licenses/anvil-v0.24.0/SOURCE.md /tmp/mjolnir-package-files.txt
         grep -Fx LICENSE /tmp/voice-worker-package-files.txt
 
   mjolnir:

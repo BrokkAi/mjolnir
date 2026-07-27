@@ -154,11 +154,11 @@ The following font software is licensed under the SIL Open Font License 1.1. The
   https://github.com/JetBrains/JetBrainsMono
 
 ================================================================================
-Bundled Anvil 0.22.0
+Bundled Anvil 0.24.0
 ================================================================================
 
-Source: https://github.com/BrokkAi/anvil/releases/tag/v0.22.0
+Source: https://github.com/BrokkAi/anvil/releases/tag/v0.24.0
 Inclusion: separately built binary aggregated into every official Mjolnir archive
 
-Anvil's complete legal bundle is shipped as anvil-licenses/ and maintained in licenses/anvil-v0.22.0/.
-Its SOURCE.md identifies the exact source commit. The bundle includes Anvil's LGPLv3 and incorporated GPLv3 texts, the generated locked Rust dependency report, and supplemental native notices.
+Anvil's complete legal bundle is shipped as anvil-licenses/ and maintained in licenses/anvil-v0.24.0/.
+Its SOURCE.md identifies the exact corresponding source tag. The bundle includes Anvil's LGPLv3 and incorporated GPLv3 texts, the generated locked Rust dependency report, and supplemental native notices.
