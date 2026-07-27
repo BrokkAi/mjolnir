@@ -95,6 +95,9 @@ const INLINE_RESIZE_REFLOW_DEBOUNCE: Duration = Duration::from_millis(75);
 const STREAM_COMMIT_INTERVAL: Duration = Duration::from_nanos(8_333_334);
 const STREAM_CATCH_UP_LINES: usize = 8;
 const STREAM_CATCH_UP_AGE: Duration = Duration::from_millis(120);
+/// Do not wait for a source newline forever. ACP prose chunks are arbitrary
+/// text deltas, so a normal single-paragraph response may never contain one.
+const STREAM_PARTIAL_COMMIT_AGE: Duration = Duration::from_millis(40);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProseKind {
@@ -109,6 +112,7 @@ struct StreamRevealLane {
     observed_bytes: usize,
     visible_bytes: usize,
     unterminated: String,
+    unterminated_since: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -128,6 +132,52 @@ struct StreamRevealController {
 }
 
 impl StreamRevealController {
+    /// Reattach to a state that may have continued streaming while another UI
+    /// state was visible. Existing source starts visible; only future deltas
+    /// are paced.
+    fn resume(state: &mut AppState) -> Self {
+        state.clear_stream_visibility();
+        let lanes = state
+            .transcript
+            .iter()
+            .enumerate()
+            .filter_map(|(entry_index, entry)| {
+                if transcript_entry_is_stable(state, entry_index, entry) {
+                    return None;
+                }
+                let text = entry_prose_text(entry)?;
+                Some((
+                    entry_index,
+                    StreamRevealLane {
+                        observed_bytes: text.len(),
+                        visible_bytes: text.len(),
+                        unterminated: String::new(),
+                        unterminated_since: None,
+                    },
+                ))
+            })
+            .collect();
+        Self {
+            lanes,
+            queued: VecDeque::new(),
+        }
+    }
+
+    /// Detach without leaving renderer-only prefixes behind in `AppState`.
+    fn release(&mut self, state: &mut AppState) {
+        state.clear_stream_visibility();
+        self.lanes.clear();
+        self.queued.clear();
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.queued.is_empty()
+            || self
+                .lanes
+                .values()
+                .any(|lane| !lane.unterminated.is_empty())
+    }
+
     fn flush_for_event(&mut self, state: &mut AppState, event: &UiEvent) -> bool {
         let Some(next_kind) = prose_kind_for_event(event) else {
             return self.flush_entries(state, self.lanes.keys().copied().collect());
@@ -144,6 +194,10 @@ impl StreamRevealController {
     }
 
     fn observe(&mut self, state: &mut AppState) {
+        self.observe_at(state, Instant::now());
+    }
+
+    fn observe_at(&mut self, state: &mut AppState, now: Instant) {
         let mut active = BTreeSet::new();
         let mut visibility_updates = Vec::new();
 
@@ -160,18 +214,24 @@ impl StreamRevealController {
                 lane.observed_bytes = 0;
                 lane.visible_bytes = 0;
                 lane.unterminated.clear();
+                lane.unterminated_since = None;
             }
             if lane.observed_bytes < text.len() {
+                let was_unterminated_empty = lane.unterminated.is_empty();
                 lane.unterminated.push_str(&text[lane.observed_bytes..]);
                 lane.observed_bytes = text.len();
+                if was_unterminated_empty && !lane.unterminated.is_empty() {
+                    lane.unterminated_since = Some(now);
+                }
                 while let Some(newline) = lane.unterminated.find('\n') {
                     let bytes = newline + 1;
                     lane.unterminated.drain(..bytes);
                     self.queued.push_back(StreamCommit {
                         entry_index,
                         bytes,
-                        queued_at: Instant::now(),
+                        queued_at: now,
                     });
+                    lane.unterminated_since = (!lane.unterminated.is_empty()).then_some(now);
                 }
             }
             visibility_updates.push((entry_index, lane.visible_bytes));
@@ -193,11 +253,15 @@ impl StreamRevealController {
     }
 
     fn commit_one(&mut self, state: &mut AppState) -> bool {
+        self.commit_one_at(state, Instant::now())
+    }
+
+    fn commit_one_at(&mut self, state: &mut AppState, now: Instant) -> bool {
         let Some(first) = self.queued.front() else {
-            return false;
+            return self.commit_unterminated_at(state, now);
         };
         let catch_up = self.queued.len() >= STREAM_CATCH_UP_LINES
-            || first.queued_at.elapsed() >= STREAM_CATCH_UP_AGE;
+            || now.saturating_duration_since(first.queued_at) >= STREAM_CATCH_UP_AGE;
         let commits = if catch_up { self.queued.len() } else { 1 };
         let mut changed = false;
         for _ in 0..commits {
@@ -224,6 +288,28 @@ impl StreamRevealController {
         changed
     }
 
+    fn commit_unterminated_at(&mut self, state: &mut AppState, now: Instant) -> bool {
+        let Some(entry_index) = self.lanes.iter().find_map(|(&entry_index, lane)| {
+            let queued_at = lane.unterminated_since?;
+            (!lane.unterminated.is_empty()
+                && now.saturating_duration_since(queued_at) >= STREAM_PARTIAL_COMMIT_AGE)
+                .then_some(entry_index)
+        }) else {
+            return false;
+        };
+        let Some(lane) = self.lanes.get_mut(&entry_index) else {
+            return false;
+        };
+        let bytes = lane.unterminated.len();
+        lane.unterminated.clear();
+        lane.unterminated_since = None;
+        let Some(text) = state.transcript.get(entry_index).and_then(entry_prose_text) else {
+            return false;
+        };
+        lane.visible_bytes = lane.visible_bytes.saturating_add(bytes).min(text.len());
+        state.set_stream_visible_bytes(entry_index, lane.visible_bytes)
+    }
+
     fn flush_entries(&mut self, state: &mut AppState, entries: Vec<usize>) -> bool {
         if entries.is_empty() {
             return false;
@@ -240,6 +326,7 @@ impl StreamRevealController {
                 lane.observed_bytes = text.len();
                 lane.visible_bytes = text.len();
                 lane.unterminated.clear();
+                lane.unterminated_since = None;
             }
             changed |= state.set_stream_visible_bytes(entry_index, text.len());
         }
@@ -1041,7 +1128,7 @@ async fn ui_loop(
             _ = termination.cancelled() => {
                 state.exit_reason = Some(UiExitReason::Quit);
             }
-            _ = stream_commit_tick.tick() => {
+            _ = stream_commit_tick.tick(), if stream_reveal.has_pending() => {
                 if stream_reveal.commit_one(&mut state) {
                     pending_redraw.mark(RedrawCause::Stream);
                 }
@@ -1153,9 +1240,11 @@ async fn ui_loop(
                             UiEvent::Side(event) if main_state.is_some() => *event,
                             UiEvent::Side(_) => continue,
                             UiEvent::SideStartFailed { message } => {
+                                stream_reveal.release(&mut state);
                                 if let Some(mut main) = main_state.take() {
                                     main.record_status_message(StatusKind::Warning, message);
                                     state = main;
+                                    stream_reveal = StreamRevealController::resume(&mut state);
                                     transcript_scroll = main_transcript_scroll
                                         .take()
                                         .unwrap_or_default();
@@ -1284,6 +1373,7 @@ async fn ui_loop(
         if state.side_start_requested && main_state.is_none() {
             state.side_start_requested = false;
             let question = state.side_initial_question.take();
+            stream_reveal.release(&mut state);
             let side_state = state.side_conversation(question.clone());
             let main = std::mem::replace(&mut state, side_state);
             main_state = Some(main);
@@ -1291,7 +1381,7 @@ async fn ui_loop(
             let _ = cmd_tx.send(UiCommand::StartSide);
             main_transcript_scroll = Some(std::mem::take(&mut transcript_scroll));
             main_transcript_sink = Some(std::mem::take(&mut transcript_sink));
-            stream_reveal = StreamRevealController::default();
+            stream_reveal = StreamRevealController::resume(&mut state);
             pending_redraw.mark_interactive();
         }
 
@@ -1312,7 +1402,7 @@ async fn ui_loop(
                 state = main;
                 transcript_scroll = main_transcript_scroll.take().unwrap_or_default();
                 transcript_sink = main_transcript_sink.take().unwrap_or_default();
-                stream_reveal = StreamRevealController::default();
+                stream_reveal = StreamRevealController::resume(&mut state);
                 pending_redraw.mark_interactive();
             }
         }
@@ -12032,6 +12122,99 @@ mod tests {
         assert_eq!(state.stream_visible_text(entry_index, source), source);
         assert!(reveal.queued.is_empty());
     }
+
+    #[test]
+    fn stream_reveal_reveals_unterminated_source_after_short_delay() {
+        let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Streaming);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("single paragraph without a newline"),
+        )));
+        let entry_index = state.agent_open_message_index().expect("open message");
+        let observed_at = Instant::now();
+        let mut reveal = StreamRevealController::default();
+
+        reveal.observe_at(&mut state, observed_at);
+        let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
+            panic!("expected agent message");
+        };
+        assert_eq!(state.stream_visible_text(entry_index, source), "");
+        assert!(reveal.has_pending());
+        assert!(!reveal.commit_one_at(
+            &mut state,
+            observed_at + STREAM_PARTIAL_COMMIT_AGE - Duration::from_nanos(1),
+        ));
+        assert!(reveal.commit_one_at(&mut state, observed_at + STREAM_PARTIAL_COMMIT_AGE,));
+
+        let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
+            panic!("expected agent message");
+        };
+        assert_eq!(state.stream_visible_text(entry_index, source), source);
+        assert!(!reveal.has_pending());
+    }
+
+    #[test]
+    fn stream_reveal_release_prevents_hidden_completion_from_truncating_source() {
+        let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Streaming);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("visible line\nhidden partial"),
+        )));
+        let entry_index = state.agent_open_message_index().expect("open message");
+        let mut reveal = StreamRevealController::default();
+        reveal.observe(&mut state);
+        assert!(reveal.commit_one(&mut state));
+
+        reveal.release(&mut state);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk(" completed while side is open"),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+
+        let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
+            panic!("expected agent message");
+        };
+        assert_eq!(state.stream_visible_text(entry_index, source), source);
+        let resumed = StreamRevealController::resume(&mut state);
+        assert!(
+            resumed.lanes.is_empty(),
+            "completed source needs no reveal lane"
+        );
+        assert!(!resumed.has_pending());
+    }
+
+    #[test]
+    fn stream_reveal_resume_keeps_existing_active_source_visible() {
+        let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Streaming);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("source received while hidden"),
+        )));
+        let entry_index = state.agent_open_message_index().expect("open message");
+        let mut reveal = StreamRevealController::resume(&mut state);
+
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk(" then streamed"),
+        )));
+        let observed_at = Instant::now();
+        reveal.observe_at(&mut state, observed_at);
+        let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
+            panic!("expected agent message");
+        };
+        assert_eq!(
+            state.stream_visible_text(entry_index, source),
+            "source received while hidden"
+        );
+        assert!(reveal.commit_one_at(&mut state, observed_at + STREAM_PARTIAL_COMMIT_AGE,));
+        let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
+            panic!("expected agent message");
+        };
+        assert_eq!(state.stream_visible_text(entry_index, source), source);
+    }
+
     use agent_client_protocol::schema::v1::{
         AvailableCommand, ContentBlock, ContentChunk, ElicitationFormMode, ElicitationId,
         ElicitationMode, ElicitationSchema, ElicitationSessionScope, ElicitationUrlMode,

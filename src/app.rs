@@ -1663,6 +1663,17 @@ impl AppState {
         }
     }
 
+    /// Release every transient live-render prefix before the UI state is
+    /// detached from its reveal controller.
+    pub(crate) fn clear_stream_visibility(&mut self) -> bool {
+        if self.stream_visible_bytes.is_empty() {
+            return false;
+        }
+        self.stream_visible_bytes.clear();
+        self.bump_transcript_revision();
+        true
+    }
+
     pub(crate) fn stream_visible_text<'a>(&self, entry_index: usize, text: &'a str) -> &'a str {
         self.stream_visible_bytes
             .get(&entry_index)
