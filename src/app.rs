@@ -884,6 +884,9 @@ pub struct AppState {
     /// map iterates in spawn order. Finished rows linger for
     /// [`SUBAGENT_DONE_TTL`] and are pruned lazily.
     subagents: BTreeMap<u64, SubagentStatus>,
+    /// Canonical runtime-owned workflow state. Transcript prose and display
+    /// labels never mutate this store.
+    pub workflows: crate::workflow::WorkflowStore,
     pub agent_usage: crate::agent_usage::Snapshot,
     /// Transient status line with severity.
     pub status_line: Option<StatusMessage>,
@@ -1241,6 +1244,7 @@ impl AppState {
             subagent_label: None,
             active_subagents: 0,
             subagents: BTreeMap::new(),
+            workflows: crate::workflow::WorkflowStore::default(),
             agent_usage: crate::agent_usage::Snapshot::default(),
             status_line: None,
             voice_input_active: false,
@@ -2643,6 +2647,15 @@ impl AppState {
                 self.update_autocomplete();
             }
             UiEvent::Subagent(event) => self.apply_subagent_event(event),
+            UiEvent::Workflow(event) => {
+                if let Err(error) = self.workflows.apply(&event) {
+                    tracing::warn!(
+                        event = "workflow_transition_rejected_by_ui",
+                        error = %error,
+                        "ignoring an invalid workflow transition"
+                    );
+                }
+            }
             UiEvent::RemotePermissionDecision {
                 request_id,
                 option_id,
@@ -2740,6 +2753,7 @@ impl AppState {
         match event {
             SubagentEvent::Started {
                 subagent_id,
+                resumed,
                 label,
                 model,
                 agent,
@@ -2749,33 +2763,47 @@ impl AppState {
                 self.subagent_label = Some(label.clone());
                 self.subagent_token_usage = TokenUsage::default();
                 let objective = objective.trim().to_string();
-                self.subagents.insert(
-                    subagent_id,
-                    SubagentStatus {
+                let now = Instant::now();
+                self.subagents
+                    .entry(subagent_id)
+                    .and_modify(|status| {
+                        status.label = label.clone();
+                        status.model = model.clone();
+                        status.activity = objective.clone();
+                        status.started_at = now;
+                        status.finished = None;
+                    })
+                    .or_insert_with(|| SubagentStatus {
                         label: label.clone(),
                         model: model.clone(),
                         activity: objective.clone(),
-                        started_at: Instant::now(),
+                        started_at: now,
                         finished: None,
-                    },
-                );
+                    });
                 self.active_subagents = self.running_subagent_count();
                 let backend = match model {
                     Some(model) => format!("{agent}/{model}"),
                     None => agent,
                 };
-                // The transcript keeps exactly one permanent record per
-                // subagent start; live progress belongs to the status area.
-                let headline = ragnarok::first_line(&objective, SUBAGENT_RECORD_LINE_CHARS);
-                let started = if headline.is_empty() {
-                    format!("subagent #{subagent_id} · {label} · started")
-                } else {
-                    format!("subagent #{subagent_id} · {label} · started · {headline}")
-                };
-                self.push_system_message(started);
+                if !resumed {
+                    // A retained actor has one identity across ACP turns. Its
+                    // later resumes update the live row without manufacturing
+                    // another permanent "started" record.
+                    let headline = ragnarok::first_line(&objective, SUBAGENT_RECORD_LINE_CHARS);
+                    let started = if headline.is_empty() {
+                        format!("subagent #{subagent_id} · {label} · started")
+                    } else {
+                        format!("subagent #{subagent_id} · {label} · started · {headline}")
+                    };
+                    self.push_system_message(started);
+                }
                 self.set_status_line(
                     StatusKind::Info,
-                    format!("subagent #{subagent_id} · {label} ({backend})"),
+                    if resumed {
+                        format!("subagent #{subagent_id} · {label} resumed ({backend})")
+                    } else {
+                        format!("subagent #{subagent_id} · {label} ({backend})")
+                    },
                 );
             }
             SubagentEvent::Activity {
@@ -2789,6 +2817,7 @@ impl AppState {
                     status.activity = activity;
                 }
             }
+            SubagentEvent::SessionStarted { .. } => {}
             SubagentEvent::SessionUpdate {
                 subagent_id,
                 update,
@@ -4299,6 +4328,7 @@ mod tests {
     fn subagent_started(subagent_id: u64, label: &str, objective: &str) -> UiEvent {
         UiEvent::Subagent(SubagentEvent::Started {
             subagent_id,
+            resumed: false,
             label: label.to_string(),
             model: Some("gpt-y".to_string()),
             agent: "codex-acp".to_string(),
@@ -4691,6 +4721,7 @@ mod tests {
         let mut state = AppState::new();
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -4828,6 +4859,7 @@ mod tests {
         let mut state = AppState::new();
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -4855,6 +4887,7 @@ mod tests {
         )));
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -4908,6 +4941,7 @@ mod tests {
         let mut state = AppState::new();
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -4967,6 +5001,35 @@ mod tests {
             [Entry::System(record)]
                 if record == "subagent #3 · fix-tests · started · Fix the failing parser tests"
         ));
+    }
+
+    #[test]
+    fn retained_subagent_resume_reuses_its_row_and_start_record() {
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(3, "review · supervisor", "review"));
+        let transcript_len = state.transcript.len();
+
+        state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
+            subagent_id: 3,
+            resumed: true,
+            label: "review · supervisor".to_string(),
+            model: Some("gpt-y".to_string()),
+            agent: "codex-acp".to_string(),
+            objective: "vet two automatic reviewer reports".to_string(),
+        }));
+
+        assert_eq!(state.transcript.len(), transcript_len);
+        let rows = state.subagent_status_rows().collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, 3);
+        assert_eq!(rows[0].1.activity, "vet two automatic reviewer reports");
+        assert!(rows[0].1.finished.is_none());
+        assert!(
+            state
+                .status_line
+                .as_ref()
+                .is_some_and(|status| status.text.contains("resumed"))
+        );
     }
 
     #[test]
@@ -5144,6 +5207,7 @@ mod tests {
         }));
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -5270,6 +5334,7 @@ mod tests {
         )));
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -5299,6 +5364,7 @@ mod tests {
         state.record_user_prompt("delegate".to_string());
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),

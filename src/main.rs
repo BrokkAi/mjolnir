@@ -56,6 +56,7 @@ mod trajectory;
 mod ui;
 mod usage_format;
 mod version;
+mod workflow;
 mod workspace_snapshot;
 mod worktree;
 

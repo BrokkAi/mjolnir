@@ -20,6 +20,11 @@ use crate::{
     },
     subagent::{ActiveSubagentWorkers, SubagentReport, SubagentReportBus, format_report_injection},
     trajectory::BoundaryTracker,
+    workflow::{
+        WorkflowActorId, WorkflowActorRole, WorkflowCoverage, WorkflowEmitter, WorkflowEvent,
+        WorkflowId, WorkflowKind, WorkflowOutcome, WorkflowPhase, WorkflowStage,
+        WorkflowTransition,
+    },
     workspace_snapshot::{
         RepositoryReviewTarget, ReviewSnapshot, WorkspaceDelta, WorkspaceSnapshot,
         repository_review_patch,
@@ -171,6 +176,81 @@ fn outcome_label(outcome: &AgentCommandOutcome) -> String {
     }
 }
 
+fn observe_delegation_event(workflow: &WorkflowEmitter, turn_id: u64, event: &UiEvent) {
+    if turn_id == 0 {
+        return;
+    }
+    let workflow_id = WorkflowId::delegation(turn_id);
+    let UiEvent::Subagent(event) = event else {
+        return;
+    };
+    if workflow.state(workflow_id).is_none() {
+        emit_workflow(
+            workflow,
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::Started {
+                    kind: WorkflowKind::Delegation,
+                    stage: WorkflowStage::new(0, WorkflowPhase::Delegating),
+                },
+            ),
+        );
+    }
+    match event {
+        crate::event::SubagentEvent::Started {
+            subagent_id,
+            resumed,
+            ..
+        } => {
+            let transition = if *resumed {
+                WorkflowTransition::ActorResumed {
+                    actor_id: WorkflowActorId::Subagent(*subagent_id),
+                }
+            } else {
+                WorkflowTransition::ActorStarted {
+                    actor_id: WorkflowActorId::Subagent(*subagent_id),
+                    role: WorkflowActorRole::Implementation,
+                }
+            };
+            emit_workflow(workflow, WorkflowEvent::new(workflow_id, transition));
+        }
+        crate::event::SubagentEvent::SessionStarted {
+            subagent_id,
+            session_id,
+            ..
+        } => emit_workflow(
+            workflow,
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorSessionBound {
+                    actor_id: WorkflowActorId::Subagent(*subagent_id),
+                    retained_session_id: session_id.clone(),
+                },
+            ),
+        ),
+        crate::event::SubagentEvent::Finished {
+            subagent_id,
+            outcome,
+        } => emit_workflow(
+            workflow,
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorFinished {
+                    actor_id: WorkflowActorId::Subagent(*subagent_id),
+                    outcome: outcome.clone(),
+                },
+            ),
+        ),
+        crate::event::SubagentEvent::Activity { .. }
+        | crate::event::SubagentEvent::SessionUpdate { .. }
+        | crate::event::SubagentEvent::TerminalOutput { .. }
+        | crate::event::SubagentEvent::PermissionRequest { .. }
+        | crate::event::SubagentEvent::ElicitationRequest { .. }
+        | crate::event::SubagentEvent::CancelPendingPermissions { .. }
+        | crate::event::SubagentEvent::Status { .. } => {}
+    }
+}
+
 pub struct Config {
     pub runtime_commands: mpsc::UnboundedSender<UiCommand>,
     pub active_subagent_workers: ActiveSubagentWorkers,
@@ -197,6 +277,8 @@ pub struct Config {
 /// lanes work.
 struct ReviewInFlight {
     epoch: u64,
+    workflow_id: WorkflowId,
+    review_pass: u32,
     /// The primary's withheld `PromptDone`. Released on a `Clean` verdict, dropped on
     /// `Findings` (the corrective turn produces the real completion).
     completion: UiEvent,
@@ -232,6 +314,7 @@ pub struct Running {
 
 pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: Config) -> Running {
     let (events_tx, events) = mpsc::unbounded_channel();
+    let workflow = WorkflowEmitter::new(events_tx.clone());
     let (review_requests, mut review_request_rx) = mpsc::unbounded_channel();
     let (review_cancels, mut review_cancel_rx) = mpsc::unbounded_channel();
     let turn = Arc::new(Mutex::new(ActiveTurn::default()));
@@ -263,6 +346,10 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
         let mut session_id = None;
         let mut last_changed_turn: Option<ChangedTurnReview> = None;
         let mut manual_review_active = false;
+        let mut review_pass = 0_u32;
+        // Bool marks a single-prompt/fallback review, whose primary completion
+        // is terminal. Corrective primary work instead advances to another pass.
+        let mut active_primary_review_actor: Option<(WorkflowActorId, bool)> = None;
         // Finished subagent reports waiting to be injected as one batched user
         // message. This turn-boundary gate is the primary mechanism: holding
         // reports until the orchestrator has observed the completion lets them
@@ -326,10 +413,16 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         user_messages.lock().await.observe(update);
                     }
                     let active = turn.lock().await.clone();
+                    observe_delegation_event(&workflow, active.epoch, &event);
                     if matches!(event, UiEvent::ContextCompacted) {
                         continue;
                     }
                     if active.epoch != observed_epoch {
+                        cancel_primary_review_actor(
+                            &workflow,
+                            observed_epoch,
+                            &mut active_primary_review_actor,
+                        );
                         observed_epoch = active.epoch;
                         idle_epoch = None;
                         held_completion = None;
@@ -342,9 +435,10 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         // A new user turn supersedes whatever the previous
                         // turn's lanes were reviewing; stop their adapter
                         // subprocesses instead of letting them run detached.
-                        cancel_review(&mut review_in_flight).await;
+                        cancel_review(&workflow, &mut review_in_flight).await;
                         trajectory = BoundaryTracker::default();
                         manual_review_active = false;
+                        review_pass = 0;
                     }
                     if active.epoch > 0 && !manual_review_active {
                         trajectory.observe(&event);
@@ -364,6 +458,71 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             session_id: session_id.clone(),
                         }));
                     }
+                    if let UiEvent::PromptDone { stop_reason, .. } = &event
+                        && let Some((actor_id, terminal_primary_review)) =
+                            active_primary_review_actor.take()
+                    {
+                        let outcome = if matches!(stop_reason, StopReason::Cancelled) {
+                            SubagentOutcome::Cancelled
+                        } else {
+                            SubagentOutcome::Completed
+                        };
+                        let workflow_id = WorkflowId::review(active.epoch);
+                        emit_workflow(
+                            &workflow,
+                            WorkflowEvent::new(
+                                workflow_id,
+                                WorkflowTransition::ActorFinished {
+                                    actor_id,
+                                    outcome: outcome.clone(),
+                                },
+                            ),
+                        );
+                        if terminal_primary_review
+                            || matches!(outcome, SubagentOutcome::Cancelled)
+                        {
+                            let coverage = workflow_coverage(&workflow, workflow_id);
+                            emit_workflow(
+                                &workflow,
+                                WorkflowEvent::new(
+                                    workflow_id,
+                                    WorkflowTransition::Terminal {
+                                        outcome: if matches!(outcome, SubagentOutcome::Cancelled) {
+                                            WorkflowOutcome::Cancelled
+                                        } else {
+                                            WorkflowOutcome::Degraded
+                                        },
+                                        coverage,
+                                    },
+                                ),
+                            );
+                        }
+                    }
+                    if let UiEvent::PromptFailed { message } = &event
+                        && let Some((actor_id, _)) = active_primary_review_actor.take()
+                    {
+                        let workflow_id = WorkflowId::review(active.epoch);
+                        emit_workflow(
+                            &workflow,
+                            WorkflowEvent::new(
+                                workflow_id,
+                                WorkflowTransition::ActorFinished {
+                                    actor_id,
+                                    outcome: SubagentOutcome::Failed(message.clone()),
+                                },
+                            ),
+                        );
+                        emit_workflow(
+                            &workflow,
+                            WorkflowEvent::new(
+                                workflow_id,
+                                WorkflowTransition::Terminal {
+                                    outcome: WorkflowOutcome::Failed,
+                                    coverage: WorkflowCoverage::Degraded,
+                                },
+                            ),
+                        );
+                    }
 
                     match &event {
                         UiEvent::PromptDone {
@@ -372,6 +531,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         } => {
                             let _ = events_tx.send(event);
                             reset_turn_state(
+                                &workflow,
                                 &mut trajectory,
                                 &mut held_completion,
                                 &mut discrete_review_started,
@@ -391,6 +551,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             latest_usage_update = None;
                             let _ = events_tx.send(event);
                             reset_turn_state(
+                                &workflow,
                                 &mut trajectory,
                                 &mut held_completion,
                                 &mut discrete_review_started,
@@ -434,6 +595,8 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     }
                     let ReviewInFlight {
                         epoch,
+                        workflow_id,
+                        review_pass: completed_pass,
                         completion,
                         context,
                         task,
@@ -454,6 +617,34 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             // the corrective turn produces the real one, the
                             // same way today's single-prompt review does.
                             let prompt = fanout_corrective_prompt(&synthesis);
+                            emit_workflow(
+                                &workflow,
+                                WorkflowEvent::new(
+                                    workflow_id,
+                                    WorkflowTransition::PhaseChanged {
+                                        stage: WorkflowStage::new(
+                                            completed_pass,
+                                            WorkflowPhase::Correction,
+                                        ),
+                                    },
+                                ),
+                            );
+                            let actor_id = WorkflowActorId::Named(format!(
+                                "primary-correction-{}",
+                                completed_pass + 1
+                            ));
+                            emit_workflow(
+                                &workflow,
+                                WorkflowEvent::new(
+                                    workflow_id,
+                                    WorkflowTransition::ActorStarted {
+                                        actor_id: actor_id.clone(),
+                                        role: WorkflowActorRole::PrimaryCorrection,
+                                    },
+                                ),
+                            );
+                            active_primary_review_actor = Some((actor_id, false));
+                            review_pass = completed_pass.saturating_add(1);
                             let _ = events_tx.send(UiEvent::Info(
                                 "discrete review · correcting the flagged findings…".to_string(),
                             ));
@@ -480,14 +671,36 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             primary_review_prompt_active = true;
                         }
                         discrete_review::ReviewVerdict::Clean => {
-                            let _ = events_tx.send(UiEvent::Info(
-                                "discrete review · no material findings".to_string(),
-                            ));
+                            let coverage = workflow_coverage(&workflow, workflow_id);
+                            let workflow_outcome = if coverage == WorkflowCoverage::Complete {
+                                WorkflowOutcome::Clean
+                            } else {
+                                WorkflowOutcome::Degraded
+                            };
+                            emit_workflow(
+                                &workflow,
+                                WorkflowEvent::new(
+                                    workflow_id,
+                                    WorkflowTransition::Terminal {
+                                        outcome: workflow_outcome,
+                                        coverage,
+                                    },
+                                ),
+                            );
+                            let _ = events_tx.send(UiEvent::Info(if matches!(
+                                workflow_outcome,
+                                WorkflowOutcome::Clean
+                            ) {
+                                "discrete review · no material findings".to_string()
+                            } else {
+                                "discrete review · completed with degraded coverage".to_string()
+                            }));
                             if let Some(saved_turn) = saved_turn {
                                 last_changed_turn = Some(saved_turn);
                             }
                             let _ = events_tx.send(completion);
                             reset_turn_state(
+                                &workflow,
                                 &mut trajectory,
                                 &mut held_completion,
                                 &mut discrete_review_started,
@@ -501,6 +714,40 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         }
                         discrete_review::ReviewVerdict::Failed { reason } => {
                             correction_review_base = None;
+                            emit_workflow(
+                                &workflow,
+                                WorkflowEvent::new(
+                                    workflow_id,
+                                    WorkflowTransition::PhaseChanged {
+                                        stage: WorkflowStage::new(
+                                            completed_pass,
+                                            WorkflowPhase::Fallback,
+                                        ),
+                                    },
+                                ),
+                            );
+                            emit_workflow(
+                                &workflow,
+                                WorkflowEvent::new(
+                                    workflow_id,
+                                    WorkflowTransition::CoverageChanged {
+                                        coverage: WorkflowCoverage::Degraded,
+                                    },
+                                ),
+                            );
+                            let actor_id =
+                                WorkflowActorId::Named("primary-fallback-review".to_string());
+                            emit_workflow(
+                                &workflow,
+                                WorkflowEvent::new(
+                                    workflow_id,
+                                    WorkflowTransition::ActorStarted {
+                                        actor_id: actor_id.clone(),
+                                        role: WorkflowActorRole::FallbackReviewer,
+                                    },
+                                ),
+                            );
+                            active_primary_review_actor = Some((actor_id, true));
                             fall_back_to_single_prompt_review(
                                 &events_tx,
                                 &config.runtime_commands,
@@ -517,13 +764,16 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     let Some(()) = cancel else { break; };
                     let active = turn.lock().await.clone();
                     if let Some(review) = review_in_flight.take() {
+                        let workflow_id = review.workflow_id;
                         review.cancel.cancel();
                         await_review_task(review.review_task).await;
+                        terminal_cancelled_workflow(&workflow, workflow_id);
                         let _ = events_tx.send(UiEvent::Info(
                             "discrete review · cancelled; releasing completed turn".to_string(),
                         ));
                         let _ = events_tx.send(review.completion);
                         reset_turn_state(
+                            &workflow,
                             &mut trajectory,
                             &mut held_completion,
                             &mut discrete_review_started,
@@ -540,6 +790,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         ));
                         let _ = events_tx.send(completion);
                         reset_turn_state(
+                            &workflow,
                             &mut trajectory,
                             &mut held_completion,
                             &mut discrete_review_started,
@@ -643,12 +894,14 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 let event = held_completion
                     .take()
                     .expect("completion held after pending review cancellation");
+                terminal_cancelled_workflow(&workflow, WorkflowId::review(active.epoch));
                 let _ = events_tx.send(UiEvent::Info(
                     "discrete review · cancelled before dispatch; releasing completed turn"
                         .to_string(),
                 ));
                 let _ = events_tx.send(event);
                 reset_turn_state(
+                    &workflow,
                     &mut trajectory,
                     &mut held_completion,
                     &mut discrete_review_started,
@@ -667,6 +920,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     .expect("manual review completion held");
                 let _ = events_tx.send(event);
                 reset_turn_state(
+                    &workflow,
                     &mut trajectory,
                     &mut held_completion,
                     &mut discrete_review_started,
@@ -695,6 +949,30 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 delta.as_ref().is_some_and(WorkspaceDelta::changed) || correction_changed,
                 *active_worker_updates.borrow(),
             ) {
+                let workflow_id = WorkflowId::review(active.epoch);
+                let review_stage = WorkflowStage::new(review_pass, WorkflowPhase::IntentAnalysis);
+                if workflow.state(workflow_id).is_none() {
+                    emit_workflow(
+                        &workflow,
+                        WorkflowEvent::new(
+                            workflow_id,
+                            WorkflowTransition::Started {
+                                kind: WorkflowKind::Review,
+                                stage: review_stage,
+                            },
+                        ),
+                    );
+                } else {
+                    emit_workflow(
+                        &workflow,
+                        WorkflowEvent::new(
+                            workflow_id,
+                            WorkflowTransition::PhaseChanged {
+                                stage: review_stage,
+                            },
+                        ),
+                    );
+                }
                 let initial_result = trajectory.final_message();
                 let review_trajectory = trajectory.review_trajectory();
                 let context = discrete_review_context(delta.as_ref(), review_trajectory.clone());
@@ -755,6 +1033,9 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             });
                     let job = discrete_review::ReviewJob {
                         epoch: active.epoch,
+                        workflow_id,
+                        review_pass,
+                        workflow: workflow.clone(),
                         task: active.task.clone(),
                         images: active.images.as_ref().clone(),
                         user_messages: user_messages.lock().await.snapshot(),
@@ -778,6 +1059,8 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     );
                     review_in_flight = Some(ReviewInFlight {
                         epoch: active.epoch,
+                        workflow_id,
+                        review_pass,
                         completion,
                         context,
                         task: active.task.clone(),
@@ -796,6 +1079,36 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 discrete_review_started = true;
                 trajectory.reset_attempt();
                 let prompt = discrete_review_prompt(&active.task, &initial_result, &context);
+                emit_workflow(
+                    &workflow,
+                    WorkflowEvent::new(
+                        workflow_id,
+                        WorkflowTransition::PhaseChanged {
+                            stage: WorkflowStage::new(review_pass, WorkflowPhase::Fallback),
+                        },
+                    ),
+                );
+                emit_workflow(
+                    &workflow,
+                    WorkflowEvent::new(
+                        workflow_id,
+                        WorkflowTransition::CoverageChanged {
+                            coverage: WorkflowCoverage::Degraded,
+                        },
+                    ),
+                );
+                let actor_id = WorkflowActorId::Named("primary-single-review".to_string());
+                emit_workflow(
+                    &workflow,
+                    WorkflowEvent::new(
+                        workflow_id,
+                        WorkflowTransition::ActorStarted {
+                            actor_id: actor_id.clone(),
+                            role: WorkflowActorRole::FallbackReviewer,
+                        },
+                    ),
+                );
+                active_primary_review_actor = Some((actor_id, true));
                 let _ = events_tx.send(UiEvent::Info("reviewing the completed work…".to_string()));
                 emit_internal(
                     &events_tx,
@@ -822,6 +1135,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
             }
             let _ = events_tx.send(event);
             reset_turn_state(
+                &workflow,
                 &mut trajectory,
                 &mut held_completion,
                 &mut discrete_review_started,
@@ -834,7 +1148,8 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
             idle_epoch = Some(active.epoch);
         }
         // The session is going away; lane subprocesses must not outlive it.
-        cancel_review(&mut review_in_flight).await;
+        cancel_review(&workflow, &mut review_in_flight).await;
+        cancel_primary_review_actor(&workflow, observed_epoch, &mut active_primary_review_actor);
     });
     Running {
         handle,
@@ -843,7 +1158,80 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
     }
 }
 
+fn emit_workflow(workflow: &WorkflowEmitter, event: WorkflowEvent) {
+    if let Err(error) = workflow.emit(event) {
+        tracing::warn!(
+            event = "workflow_transition_rejected_at_source",
+            error = %error,
+            "runtime rejected a non-monotonic workflow transition"
+        );
+    }
+}
+
+fn workflow_coverage(workflow: &WorkflowEmitter, workflow_id: WorkflowId) -> WorkflowCoverage {
+    let Some(state) = workflow.state(workflow_id) else {
+        return WorkflowCoverage::Degraded;
+    };
+    if state.coverage == WorkflowCoverage::Degraded
+        || state.actors.values().any(|actor| {
+            matches!(
+                actor.lifecycle,
+                crate::workflow::WorkflowActorLifecycle::Failed(_)
+                    | crate::workflow::WorkflowActorLifecycle::Cancelled
+            )
+        })
+    {
+        WorkflowCoverage::Degraded
+    } else {
+        WorkflowCoverage::Complete
+    }
+}
+
+fn terminal_cancelled_workflow(workflow: &WorkflowEmitter, workflow_id: WorkflowId) {
+    let Some(state) = workflow.state(workflow_id) else {
+        return;
+    };
+    if state.outcome.is_some() {
+        return;
+    }
+    let coverage = workflow_coverage(workflow, workflow_id);
+    emit_workflow(
+        workflow,
+        WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Cancelled,
+                coverage,
+            },
+        ),
+    );
+}
+
+fn cancel_primary_review_actor(
+    workflow: &WorkflowEmitter,
+    turn_id: u64,
+    active_actor: &mut Option<(WorkflowActorId, bool)>,
+) {
+    let Some((actor_id, _)) = active_actor.take() else {
+        return;
+    };
+    let workflow_id = WorkflowId::review(turn_id);
+    emit_workflow(
+        workflow,
+        WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorFinished {
+                actor_id,
+                outcome: SubagentOutcome::Cancelled,
+            },
+        ),
+    );
+    terminal_cancelled_workflow(workflow, workflow_id);
+}
+
+#[allow(clippy::too_many_arguments)] // All fields belong to the one turn-reset boundary.
 async fn reset_turn_state(
+    workflow: &WorkflowEmitter,
     trajectory: &mut BoundaryTracker,
     held_completion: &mut Option<UiEvent>,
     discrete_review_started: &mut bool,
@@ -858,15 +1246,17 @@ async fn reset_turn_state(
     *correction_review_base = None;
     *primary_review_prompt_active = false;
     *review_cancel_pending = None;
-    cancel_review(review_in_flight).await;
+    cancel_review(workflow, review_in_flight).await;
 }
 
 /// Stop an in-flight fan-out and forget it, so its (now stale) verdict is
 /// discarded by the outcome arm's epoch check even if it is already queued.
-async fn cancel_review(review_in_flight: &mut Option<ReviewInFlight>) {
+async fn cancel_review(workflow: &WorkflowEmitter, review_in_flight: &mut Option<ReviewInFlight>) {
     if let Some(review) = review_in_flight.take() {
+        let workflow_id = review.workflow_id;
         review.cancel.cancel();
         await_review_task(review.review_task).await;
+        terminal_cancelled_workflow(workflow, workflow_id);
     }
 }
 
@@ -1649,16 +2039,33 @@ mod tests {
         runtime_tx
             .send(completion())
             .expect("send queued corrective completion");
+        let mut workflow_cancelled = false;
         loop {
             let event = tokio::time::timeout(Duration::from_secs(5), running.events.recv())
                 .await
                 .expect("corrective completion was released")
                 .expect("orchestrated event");
+            if matches!(
+                event,
+                UiEvent::Workflow(WorkflowEvent {
+                    transition: WorkflowTransition::Terminal {
+                        outcome: WorkflowOutcome::Cancelled,
+                        ..
+                    },
+                    ..
+                })
+            ) {
+                workflow_cancelled = true;
+            }
             if matches!(event, UiEvent::PromptDone { .. }) {
                 break;
             }
         }
         assert_eq!(1, passes.load(Ordering::SeqCst));
+        assert!(
+            workflow_cancelled,
+            "the stopped correction must make the review workflow terminal"
+        );
 
         drop(runtime_tx);
         running.task.await.expect("orchestrator task");
@@ -1777,15 +2184,32 @@ mod tests {
         runtime_tx.send(completion()).expect("send completion");
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut workflow_clean = false;
         loop {
             let event = tokio::time::timeout_at(deadline, running.events.recv())
                 .await
                 .expect("the completion was released")
                 .expect("orchestrated event");
+            if matches!(
+                event,
+                UiEvent::Workflow(WorkflowEvent {
+                    transition: WorkflowTransition::Terminal {
+                        outcome: WorkflowOutcome::Clean,
+                        coverage: WorkflowCoverage::Complete,
+                    },
+                    ..
+                })
+            ) {
+                workflow_clean = true;
+            }
             if matches!(event, UiEvent::PromptDone { .. }) {
                 break;
             }
         }
+        assert!(
+            workflow_clean,
+            "the clean verdict must terminate the authoritative review workflow"
+        );
         assert!(
             command_rx.try_recv().is_err(),
             "a clean verdict must not dispatch a corrective turn"
@@ -1809,7 +2233,7 @@ mod tests {
                 },
             });
         });
-        let running = spawn(runtime_rx, fanout_config(command_tx, spawner));
+        let mut running = spawn(runtime_rx, fanout_config(command_tx, spawner));
         running
             .handle
             .begin_turn(1, "add a retry".to_string(), Vec::new(), snapshot)
@@ -1822,6 +2246,37 @@ mod tests {
             "review value must survive a failed fan-out"
         );
         assert!(prompt.contains("<original_task>\nadd a retry"));
+        runtime_tx
+            .send(UiEvent::PromptFailed {
+                message: "primary fallback failed".to_string(),
+            })
+            .expect("send fallback failure");
+        let mut workflow_failed = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), running.events.recv())
+                .await
+                .expect("fallback failure was surfaced")
+                .expect("orchestrated event");
+            if matches!(
+                event,
+                UiEvent::Workflow(WorkflowEvent {
+                    transition: WorkflowTransition::Terminal {
+                        outcome: WorkflowOutcome::Failed,
+                        coverage: WorkflowCoverage::Degraded,
+                    },
+                    ..
+                })
+            ) {
+                workflow_failed = true;
+            }
+            if matches!(event, UiEvent::PromptFailed { .. }) {
+                break;
+            }
+        }
+        assert!(
+            workflow_failed,
+            "the failed fallback must terminate the authoritative review workflow"
+        );
 
         drop(runtime_tx);
         running.task.await.expect("orchestrator task");

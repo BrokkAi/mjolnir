@@ -241,6 +241,9 @@ pub(crate) struct FanoutConfig {
 /// cannot mutate what the lanes were asked about.
 pub(crate) struct ReviewJob {
     pub epoch: u64,
+    pub workflow_id: crate::workflow::WorkflowId,
+    pub review_pass: u32,
+    pub workflow: crate::workflow::WorkflowEmitter,
     pub task: String,
     /// Image blocks attached to the current outer prompt. The intent analyst
     /// and supervisor receive them directly instead of trying to reconstruct
@@ -333,6 +336,9 @@ struct ReviewDispatch {
     repository_root: PathBuf,
     started: Arc<Mutex<HashMap<ReviewAgentId, u64>>>,
     launch_failures: Arc<Mutex<HashMap<ReviewAgentId, String>>>,
+    workflow_id: crate::workflow::WorkflowId,
+    review_pass: u32,
+    workflow: crate::workflow::WorkflowEmitter,
 }
 
 enum ReviewLaunch {
@@ -405,10 +411,26 @@ impl ReviewDispatch {
                         LANE_BIFROST_TOOLSET,
                     )],
                     retain_after_completion: false,
+                    workflow: Some(crate::workflow::WorkflowActorContext {
+                        emitter: self.workflow.clone(),
+                        workflow_id: self.workflow_id,
+                        role: crate::workflow::WorkflowActorRole::SpecialistReviewer {
+                            lane: lane.id.to_string(),
+                        },
+                    }),
                 })
                 .await;
             match result {
                 Ok(started) => {
+                    let _ = self.workflow.emit(crate::workflow::WorkflowEvent::new(
+                        self.workflow_id,
+                        crate::workflow::WorkflowTransition::PhaseChanged {
+                            stage: crate::workflow::WorkflowStage::new(
+                                self.review_pass,
+                                crate::workflow::WorkflowPhase::SpecialistReview,
+                            ),
+                        },
+                    ));
                     started_reviewers.insert(id, started.subagent_id);
                     self.launch_failures.lock().await.remove(&id);
                     launched.push((
@@ -421,6 +443,26 @@ impl ReviewDispatch {
                 }
                 Err(error) => {
                     let reason = format!("could not launch {}: {error:#}", lane.label);
+                    let actor_id = crate::workflow::WorkflowActorId::Named(format!(
+                        "reviewer-{}-pass-{}",
+                        lane.id, self.review_pass
+                    ));
+                    let _ = self.workflow.emit(crate::workflow::WorkflowEvent::new(
+                        self.workflow_id,
+                        crate::workflow::WorkflowTransition::ActorStarted {
+                            actor_id: actor_id.clone(),
+                            role: crate::workflow::WorkflowActorRole::SpecialistReviewer {
+                                lane: lane.id.to_string(),
+                            },
+                        },
+                    ));
+                    let _ = self.workflow.emit(crate::workflow::WorkflowEvent::new(
+                        self.workflow_id,
+                        crate::workflow::WorkflowTransition::ActorFinished {
+                            actor_id,
+                            outcome: SubagentOutcome::Failed(reason.clone()),
+                        },
+                    ));
                     self.launch_failures.lock().await.insert(id, reason.clone());
                     launched.push((id, ReviewLaunch::Failed(reason)));
                 }
@@ -965,6 +1007,11 @@ async fn run_async(
                 preamble: INTENT_PREAMBLE.to_string(),
                 mcp_servers: Vec::new(),
                 retain_after_completion: false,
+                workflow: Some(crate::workflow::WorkflowActorContext {
+                    emitter: job.workflow.clone(),
+                    workflow_id: job.workflow_id,
+                    role: crate::workflow::WorkflowActorRole::IntentAnalyst,
+                }),
             })
             .await;
         let intent = match intent_started {
@@ -984,9 +1031,28 @@ async fn run_async(
                 )),
                 Err(reason) => SupplementalContext::unavailable(reason),
             },
-            Err(error) => SupplementalContext::unavailable(format!(
-                "could not launch review intent extraction: {error:#}"
-            )),
+            Err(error) => {
+                let reason = format!("could not launch review intent extraction: {error:#}");
+                let actor_id = crate::workflow::WorkflowActorId::Named(format!(
+                    "review-intent-pass-{}",
+                    job.review_pass
+                ));
+                let _ = job.workflow.emit(crate::workflow::WorkflowEvent::new(
+                    job.workflow_id,
+                    crate::workflow::WorkflowTransition::ActorStarted {
+                        actor_id: actor_id.clone(),
+                        role: crate::workflow::WorkflowActorRole::IntentAnalyst,
+                    },
+                ));
+                let _ = job.workflow.emit(crate::workflow::WorkflowEvent::new(
+                    job.workflow_id,
+                    crate::workflow::WorkflowTransition::ActorFinished {
+                        actor_id,
+                        outcome: SubagentOutcome::Failed(reason.clone()),
+                    },
+                ));
+                SupplementalContext::unavailable(reason)
+            }
         };
         if cancel.is_cancelled() {
             let _ = intent_pool.cancel_and_wait().await;
@@ -1036,6 +1102,16 @@ async fn run_async(
         }
     };
 
+    let _ = job.workflow.emit(crate::workflow::WorkflowEvent::new(
+        job.workflow_id,
+        crate::workflow::WorkflowTransition::PhaseChanged {
+            stage: crate::workflow::WorkflowStage::new(
+                job.review_pass,
+                crate::workflow::WorkflowPhase::Supervision,
+            ),
+        },
+    ));
+
     let (reviewer_bus, reviewer_reports) = SubagentReportBus::channel();
     let reviewer_config = configure_review_pool(
         SubagentConfig::new(config.workers.clone(), config.agent_stderr.clone()),
@@ -1053,6 +1129,9 @@ async fn run_async(
         repository_root: repository_root.clone(),
         started: Arc::new(Mutex::new(HashMap::new())),
         launch_failures: Arc::new(Mutex::new(HashMap::new())),
+        workflow_id: job.workflow_id,
+        review_pass: job.review_pass,
+        workflow: job.workflow.clone(),
     };
     let reviewer_launch_failures = Arc::clone(&dispatch.launch_failures);
     let review_server = match ReviewHttpServer::start(dispatch).await {
@@ -1103,6 +1182,11 @@ async fn run_async(
                 review_server.advertised.clone(),
             ],
             retain_after_completion: true,
+            workflow: Some(crate::workflow::WorkflowActorContext {
+                emitter: job.workflow.clone(),
+                workflow_id: job.workflow_id,
+                role: crate::workflow::WorkflowActorRole::ReviewSupervisor,
+            }),
         })
         .await;
 
@@ -1125,6 +1209,9 @@ async fn run_async(
                 reviewer_launch_failures,
                 cancel: &cancel,
                 events,
+                workflow_id: job.workflow_id,
+                review_pass: job.review_pass,
+                workflow: job.workflow.clone(),
             })
             .await
             .map_or_else(
@@ -1151,9 +1238,28 @@ async fn run_async(
                 },
             )
         }
-        Err(error) => ReviewVerdict::Failed {
-            reason: format!("could not launch review supervisor: {error:#}"),
-        },
+        Err(error) => {
+            let reason = format!("could not launch review supervisor: {error:#}");
+            let actor_id = crate::workflow::WorkflowActorId::Named(format!(
+                "review-supervisor-pass-{}",
+                job.review_pass
+            ));
+            let _ = job.workflow.emit(crate::workflow::WorkflowEvent::new(
+                job.workflow_id,
+                crate::workflow::WorkflowTransition::ActorStarted {
+                    actor_id: actor_id.clone(),
+                    role: crate::workflow::WorkflowActorRole::ReviewSupervisor,
+                },
+            ));
+            let _ = job.workflow.emit(crate::workflow::WorkflowEvent::new(
+                job.workflow_id,
+                crate::workflow::WorkflowTransition::ActorFinished {
+                    actor_id,
+                    outcome: SubagentOutcome::Failed(reason.clone()),
+                },
+            ));
+            ReviewVerdict::Failed { reason }
+        }
     };
 
     if cancel.is_cancelled() {
@@ -1182,6 +1288,9 @@ struct SupervisorDriver<'a> {
     reviewer_launch_failures: Arc<Mutex<HashMap<ReviewAgentId, String>>>,
     cancel: &'a CancellationToken,
     events: &'a UnboundedSender<UiEvent>,
+    workflow_id: crate::workflow::WorkflowId,
+    review_pass: u32,
+    workflow: crate::workflow::WorkflowEmitter,
 }
 
 struct SupervisorResult {
@@ -1248,6 +1357,9 @@ async fn drive_supervisor(driver: SupervisorDriver<'_>) -> Result<SupervisorResu
         reviewer_launch_failures,
         cancel,
         events,
+        workflow_id,
+        review_pass,
+        workflow,
     } = driver;
     let mut supervisor_idle = false;
     let mut queued = Vec::new();
@@ -1316,6 +1428,15 @@ async fn drive_supervisor(driver: SupervisorDriver<'_>) -> Result<SupervisorResu
                     queued.push(report);
                 }
                 if reviewer_bus.pending() == 0 && queued.is_empty() {
+                    let _ = workflow.emit(crate::workflow::WorkflowEvent::new(
+                        workflow_id,
+                        crate::workflow::WorkflowTransition::PhaseChanged {
+                            stage: crate::workflow::WorkflowStage::new(
+                                review_pass,
+                                crate::workflow::WorkflowPhase::Synthesis,
+                            ),
+                        },
+                    ));
                     let failures = reviewer_launch_failures.lock().await;
                     merge_launch_failures(&mut lane_evidence, &failures);
                     lane_evidence.sort_by(|left, right| left.id.cmp(&right.id));
@@ -1323,6 +1444,32 @@ async fn drive_supervisor(driver: SupervisorDriver<'_>) -> Result<SupervisorResu
                         text: bound_tail(text.trim(), SYNTHESIS_LIMIT, "synthesis"),
                         lanes: lane_evidence,
                     });
+                }
+                let remaining = reviewer_bus.pending();
+                let dependency = if queued.is_empty() {
+                    "automatic specialist reviewer reports"
+                } else {
+                    "queued specialist reviewer reports"
+                }
+                .to_string();
+                let _ = workflow.emit(crate::workflow::WorkflowEvent::new(
+                    workflow_id,
+                    crate::workflow::WorkflowTransition::ActorWaiting {
+                        actor_id: crate::workflow::WorkflowActorId::Subagent(supervisor_id),
+                        dependency: dependency.clone(),
+                        remaining: Some(remaining),
+                        requires_user_action: false,
+                    },
+                ));
+                if queued.is_empty() {
+                    let _ = workflow.emit(crate::workflow::WorkflowEvent::new(
+                        workflow_id,
+                        crate::workflow::WorkflowTransition::Waiting {
+                            dependency,
+                            remaining: Some(remaining),
+                            requires_user_action: false,
+                        },
+                    ));
                 }
             }
             report = reviewer_reports.recv() => {
@@ -1973,9 +2120,26 @@ fn bound_tail(text: &str, limit: usize, label: &str) -> String {
 mod tests {
     use super::*;
 
+    fn workflow(
+        epoch: u64,
+    ) -> (
+        crate::workflow::WorkflowId,
+        crate::workflow::WorkflowEmitter,
+    ) {
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            crate::workflow::WorkflowId::review(epoch),
+            crate::workflow::WorkflowEmitter::new(events),
+        )
+    }
+
     fn job() -> ReviewJob {
+        let (workflow_id, workflow) = workflow(7);
         ReviewJob {
             epoch: 7,
+            workflow_id,
+            review_pass: 0,
+            workflow,
             task: "add a retry to the uploader".to_string(),
             images: Vec::new(),
             user_messages: vec![
@@ -2412,8 +2576,12 @@ mod tests {
 
     #[test]
     fn lane_context_bounds_diff_and_trajectory() {
+        let (workflow_id, workflow) = workflow(1);
         let job = ReviewJob {
             epoch: 1,
+            workflow_id,
+            review_pass: 0,
+            workflow,
             task: "task".to_string(),
             images: Vec::new(),
             user_messages: vec!["task".to_string()],

@@ -1081,6 +1081,7 @@ impl TrackerState {
             | UiEvent::RemotePermissionDecision { .. }
             | UiEvent::RosterUpdate { .. } => {}
             UiEvent::Subagent(subagent_event) => self.observe_subagent_event(subagent_event),
+            UiEvent::Workflow(_) => {}
             UiEvent::Info(message) => {
                 if message.starts_with("compact: primary") {
                     self.record_system_notice(message.clone());
@@ -1107,6 +1108,7 @@ impl TrackerState {
         match event {
             SubagentEvent::Started {
                 subagent_id,
+                resumed,
                 label,
                 model,
                 objective,
@@ -1126,11 +1128,13 @@ impl TrackerState {
                     },
                 );
                 self.prune_finished_subagents();
-                self.push_actor_transcript_entry(
-                    "system",
-                    "subagent",
-                    format!("subagent #{subagent_id} · {label} · started · {objective}"),
-                );
+                if !resumed {
+                    self.push_actor_transcript_entry(
+                        "system",
+                        "subagent",
+                        format!("subagent #{subagent_id} · {label} · started · {objective}"),
+                    );
+                }
                 self.touch();
             }
             SubagentEvent::Activity {
@@ -1142,6 +1146,7 @@ impl TrackerState {
                     self.touch();
                 }
             }
+            SubagentEvent::SessionStarted { .. } => {}
             SubagentEvent::Finished {
                 subagent_id,
                 outcome,
@@ -2760,6 +2765,7 @@ fn handle_server_agent_event(
         match subagent_event {
             crate::event::SubagentEvent::Started { .. }
             | crate::event::SubagentEvent::Activity { .. }
+            | crate::event::SubagentEvent::SessionStarted { .. }
             | crate::event::SubagentEvent::Finished { .. } => {}
             crate::event::SubagentEvent::PermissionRequest {
                 subagent_id,
@@ -6115,6 +6121,7 @@ mod tests {
     fn started_subagent(subagent_id: u64, label: &str, objective: &str) -> UiEvent {
         UiEvent::Subagent(SubagentEvent::Started {
             subagent_id,
+            resumed: false,
             label: label.to_string(),
             model: Some("gpt-5.6".to_string()),
             agent: "codex-acp".to_string(),

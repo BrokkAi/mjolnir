@@ -134,6 +134,9 @@ pub enum UiEvent {
     /// tool. Kept under one wrapper so nested lifecycle/config state cannot be
     /// mistaken for the primary session's state.
     Subagent(SubagentEvent),
+    /// Runtime-owned workflow state transition. Unlike transcript prose and
+    /// generic subagent labels, this is safe to use as lifecycle authority.
+    Workflow(crate::workflow::WorkflowEvent),
     /// The runtime sent `session/cancel`; queued permission prompts for the
     /// cancelled turn must answer with `cancelled` and disappear.
     CancelPendingPermissions,
@@ -179,6 +182,8 @@ pub enum UiEvent {
 pub enum SubagentEvent {
     Started {
         subagent_id: u64,
+        /// True when a retained ACP session is continuing another turn.
+        resumed: bool,
         label: String,
         model: Option<String>,
         agent: String,
@@ -188,6 +193,11 @@ pub enum SubagentEvent {
     Activity {
         subagent_id: u64,
         activity: String,
+    },
+    /// Stable ACP session identity for this retained actor.
+    SessionStarted {
+        subagent_id: u64,
+        session_id: String,
     },
     SessionUpdate {
         subagent_id: u64,

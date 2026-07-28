@@ -1044,6 +1044,7 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
         | UiEvent::InternalMessage(_)
         | UiEvent::Fatal(_)
         | UiEvent::RosterUpdate { .. }
+        | UiEvent::Workflow(_)
         | UiEvent::Subagent(_) => RedrawCause::Interactive,
     }
 }
@@ -12104,6 +12105,7 @@ mod tests {
     fn start_subagent(state: &mut AppState, subagent_id: u64, label: &str, objective: &str) {
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id,
+            resumed: false,
             label: label.to_string(),
             model: Some("gpt-y".to_string()),
             agent: "codex-acp".to_string(),
@@ -12840,6 +12842,7 @@ mod tests {
 
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -13587,6 +13590,7 @@ mod tests {
         for event in [
             UiEvent::Subagent(SubagentEvent::Started {
                 subagent_id: 1,
+                resumed: false,
                 label: "fix-tests".to_string(),
                 model: None,
                 agent: "codex-acp".to_string(),
@@ -15517,6 +15521,7 @@ mod tests {
         let _ = sink.pending_lines(&state, 80);
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -15810,6 +15815,7 @@ mod tests {
         }));
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -15860,6 +15866,7 @@ mod tests {
         }));
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -15901,6 +15908,7 @@ mod tests {
 
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -15990,6 +15998,7 @@ mod tests {
         }));
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -16065,6 +16074,7 @@ mod tests {
         let _ = sink.pending_lines(&state, 20);
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
@@ -21854,6 +21864,7 @@ mod tests {
         state.record_user_prompt("delegate".to_string());
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
+            resumed: false,
             model: None,
             agent: "codex-acp".to_string(),
             objective: String::new(),
