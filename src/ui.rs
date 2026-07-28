@@ -2336,8 +2336,8 @@ fn handle_crossterm(
         && state.ragnarok.is_none()
         && state.agent_picker.is_none()
         && state.config_picker.is_none()
-        && key.modifiers == KeyModifiers::CONTROL
-        && matches!(key.code, KeyCode::Char('l' | 'L'))
+        && key.modifiers.is_empty()
+        && matches!(key.code, KeyCode::F(11))
     {
         if state.nested_agent_viewer {
             state.close_nested_agent_viewer();
@@ -3810,13 +3810,8 @@ fn handle_nested_agent_viewer_key(
     code: KeyCode,
     mode: UiMode,
 ) -> TerminalRequest {
-    let ctrl_l = modifiers.contains(KeyModifiers::CONTROL)
-        && !modifiers.intersects(
-            KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
-        )
-        && matches!(code, KeyCode::Char('l' | 'L'));
     if matches!(code, KeyCode::Esc)
-        || ctrl_l
+        || (modifiers.is_empty() && matches!(code, KeyCode::F(11)))
         || (modifiers.is_empty() && matches!(code, KeyCode::Char('q')))
     {
         state.close_nested_agent_viewer();
@@ -6320,7 +6315,7 @@ fn draw_nested_agent_viewer(
     }
 
     let footer =
-        "Ctrl-L/Esc close · Left/Right agent · Up/Down PgUp/PgDn Home/End scroll · Alt-T tool";
+        "F11/Esc close · Left/Right agent · Up/Down PgUp/PgDn Home/End scroll · Alt-T tool";
     let footer_height = Paragraph::new(footer)
         .wrap(Wrap { trim: false })
         .line_count(area.width)
@@ -10662,7 +10657,7 @@ fn help_modal_lines(
     lines.extend([
         help_section_line("Overlays", theme),
         help_binding_line(
-            "Ctrl-L / /subagents",
+            "F11 / /subagents",
             "inspect retained implementation and review agent transcripts",
             theme,
         ),
@@ -14133,11 +14128,14 @@ mod tests {
         assert_eq!(state.nested_agent_selected, Some(7));
         state.close_nested_agent_viewer();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        let request = handle_inline_crossterm(
+        let ctrl_l = handle_inline_crossterm(
             &mut state,
             &cmd_tx,
             key_with_modifiers(KeyCode::Char('l'), KeyModifiers::CONTROL),
         );
+        assert!(!state.nested_agent_viewer, "Ctrl-L remains unclaimed");
+        assert_eq!(ctrl_l, TerminalRequest::None);
+        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(11)));
         assert!(state.nested_agent_viewer);
         assert_ne!(request, TerminalRequest::None);
 
@@ -14148,6 +14146,8 @@ mod tests {
             .expect("narrow inline viewer");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("#7"), "{rendered}");
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(11)));
+        assert!(!state.nested_agent_viewer, "F11 closes the viewer");
 
         let mut pending =
             permission_pending_with_options("run a long command", &["Allow", "Reject"], 0);
@@ -17892,14 +17892,7 @@ mod tests {
             Entry::UserPrompt(long.clone()),
             Entry::AgentMessage(long.clone()),
             Entry::SubagentMessage(long.clone()),
-            Entry::System(long.clone()),
-            Entry::InternalMessage(crate::event::InternalMessage {
-                source: "primary".to_string(),
-                target: "subagent".to_string(),
-                kind: crate::event::InternalMessageKind::Delegation,
-                text: long,
-                owner_subagent_id: None,
-            }),
+            Entry::System(long),
         ]);
 
         let rendered = render_transcript_lines(&state, 100)
@@ -17911,15 +17904,10 @@ mod tests {
                 .iter()
                 .filter(|line| line.as_str() == "… details hidden")
                 .count(),
-            5,
+            4,
             "rendered: {rendered:?}"
         );
         assert!(!rendered.iter().any(|line| line == "line 7"));
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line.starts_with("delegated to subagent ·"))
-        );
     }
 
     #[test]
@@ -17993,42 +17981,43 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_t_reader_and_export_reveal_complete_internal_message() {
+    fn nested_viewer_and_full_export_reveal_complete_internal_message() {
         let mut state = AppState::new();
         let full = format!("{}INTERNAL_EXACT_SUFFIX", "brief ".repeat(150));
-        state
-            .transcript
-            .push(Entry::InternalMessage(crate::event::InternalMessage {
-                source: "primary".to_string(),
-                target: "subagent".to_string(),
-                kind: crate::event::InternalMessageKind::Delegation,
-                text: full.clone(),
-                owner_subagent_id: None,
-            }));
+        state.apply_event(UiEvent::InternalMessage(crate::event::InternalMessage {
+            source: "primary".to_string(),
+            target: "subagent".to_string(),
+            kind: crate::event::InternalMessageKind::Delegation,
+            text: full.clone(),
+            owner_subagent_id: Some(1),
+        }));
 
-        let compact = render_transcript_lines(&state, 100)
+        let primary = render_transcript_lines(&state, 100)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
         assert!(
-            !compact
+            !primary
                 .iter()
                 .any(|line| line.contains("INTERNAL_EXACT_SUFFIX"))
         );
 
-        let expanded = render_full_transcript_lines(&state, 100)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
+        let nested =
+            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 100)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>();
         assert!(
-            expanded
+            nested
                 .iter()
                 .any(|line| line.contains("INTERNAL_EXACT_SUFFIX"))
         );
 
-        let exported = transcript_export_markdown(&state);
-        assert!(exported.contains("## primary → subagent delegation"));
-        assert!(exported.contains("INTERNAL\\_EXACT\\_SUFFIX"));
+        let primary_export = transcript_export_markdown(&state);
+        assert!(!primary_export.contains("INTERNAL\\_EXACT\\_SUFFIX"));
+        let full_export = transcript_export_markdown_with_nested(&state, true);
+        assert!(full_export.contains("## primary → subagent delegation"));
+        assert!(full_export.contains("INTERNAL\\_EXACT\\_SUFFIX"));
     }
 
     #[test]

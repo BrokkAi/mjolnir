@@ -45,8 +45,8 @@ use tokio_util::sync::CancellationToken;
 use crate::acp::{self, AcpRuntimeConfig, RuntimeAccessMode};
 use crate::agent_usage::{Record, Seat};
 use crate::event::{
-    InternalMessage, InternalMessageKind, PromptImage, SubagentEvent, SubagentOutcome, UiCommand,
-    UiEvent, content_block_text,
+    InternalMessage, InternalMessageKind, PromptImage, SubagentEvent, SubagentOutcome,
+    SubagentStatusKind, UiCommand, UiEvent, content_block_text,
 };
 use crate::ragnarok::PromptToolLifecycle;
 use crate::roster::{ResolvedAgent, Roster};
@@ -2694,6 +2694,7 @@ async fn run(
                             awaiting_cancel_settle = true;
                             let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Status {
                                 subagent_id,
+                                kind: SubagentStatusKind::Info,
                                 message: "cancellation requested; stopping the in-flight turn".to_string(),
                             }));
                             let _ = nested_cmd_tx.send(UiCommand::CancelPrompt);
@@ -2818,9 +2819,17 @@ async fn run(
                                 SubagentEvent::CancelPendingPermissions { subagent_id },
                             ));
                         }
-                        UiEvent::Info(message) | UiEvent::Warning(message) => {
+                        UiEvent::Info(message) => {
                             let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Status {
                                 subagent_id,
+                                kind: SubagentStatusKind::Info,
+                                message,
+                            }));
+                        }
+                        UiEvent::Warning(message) => {
+                            let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Status {
+                                subagent_id,
+                                kind: SubagentStatusKind::Warning,
                                 message,
                             }));
                         }
@@ -2948,6 +2957,7 @@ async fn run(
             };
             let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Status {
                 subagent_id,
+                kind: SubagentStatusKind::Info,
                 message: message.to_string(),
             }));
 
@@ -4633,6 +4643,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_runtime_preserves_warning_severity_for_the_primary_ui() {
+        let mut run = spawn_fake_run().await;
+        run.nested_events
+            .send(UiEvent::SessionStarted {
+                session_id: "s1".to_string(),
+                resumed: false,
+            })
+            .expect("session started");
+        let _ = run.nested_commands.recv().await.expect("prompt");
+        run.nested_events
+            .send(UiEvent::Warning("provider rate limit is near".to_string()))
+            .expect("warning");
+
+        loop {
+            if let SubagentEvent::Status {
+                subagent_id,
+                kind,
+                message,
+            } = next_visible_subagent_event(&mut run.ui_events).await
+            {
+                assert_eq!(subagent_id, run.subagent_id);
+                assert_eq!(kind, SubagentStatusKind::Warning);
+                assert_eq!(message, "provider rate limit is near");
+                break;
+            }
+        }
+
+        assert!(run.controller.cancel_and_wait().await);
+    }
+
+    #[tokio::test]
     async fn a_finished_run_reports_and_retains_its_session_for_resume() {
         let mut run = spawn_fake_run().await;
         run.nested_events
@@ -4749,6 +4790,7 @@ mod tests {
                 SubagentEvent::Status {
                     subagent_id,
                     message,
+                    ..
                 } if message.contains("session retained for automatic resume") => {
                     assert_eq!(subagent_id, run.subagent_id);
                     break;

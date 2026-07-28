@@ -26,7 +26,7 @@ use agent_client_protocol::schema::v1::{
 use crate::event::{
     ElicitationOutcome, ElicitationPrompt, InternalMessage, PermissionDecision, PermissionPrompt,
     PromptImage, ReviewTarget, SessionConfigTarget, SubagentEvent, SubagentOutcome,
-    TerminalOutputSnapshot, UiEvent, content_block_text,
+    SubagentStatusKind, TerminalOutputSnapshot, UiEvent, content_block_text,
 };
 use crate::palette::TerminalTheme;
 use crate::ragnarok;
@@ -54,6 +54,7 @@ const SUBAGENT_RECORD_LINE_CHARS: usize = 160;
 #[derive(Debug, Clone)]
 pub struct SubagentStatus {
     pub label: String,
+    label_is_placeholder: bool,
     pub model: Option<String>,
     pub adapter: String,
     pub objective: String,
@@ -81,6 +82,7 @@ impl SubagentStatus {
             .unwrap_or_else(|| "subagent".to_string());
         Self {
             label: label.clone(),
+            label_is_placeholder: true,
             model: None,
             adapter: String::new(),
             objective: String::new(),
@@ -2698,8 +2700,17 @@ impl AppState {
                     self.turn_started_at = Some(Instant::now());
                     self.last_turn_elapsed = None;
                 }
-                if let Some(subagent_id) = message.owner_subagent_id {
-                    self.append_nested_internal_message(subagent_id, message);
+                match message.owner_subagent_id {
+                    Some(subagent_id) => {
+                        self.append_nested_internal_message(subagent_id, message);
+                    }
+                    None => {
+                        // Primary-owned orchestration packets are model input,
+                        // not user transcript. Their visible state is carried
+                        // by typed workflow transitions and adjacent
+                        // info/warning events, while full nested packets live
+                        // only under an explicitly identified actor.
+                    }
                 }
             }
             UiEvent::AgentUsage(record) => self.agent_usage.observe(record),
@@ -2876,7 +2887,7 @@ impl AppState {
                         .or_insert_with(|| SubagentStatus::placeholder(Some(role.clone()), now));
                     state.role = Some(role.clone());
                     state.lifecycle = Some(WorkflowActorLifecycle::Running);
-                    if state.label == "subagent" {
+                    if state.label_is_placeholder {
                         state.label = nested_role_label(role);
                     }
                 }
@@ -2992,6 +3003,7 @@ impl AppState {
                     .entry(subagent_id)
                     .and_modify(|status| {
                         status.label = label.clone();
+                        status.label_is_placeholder = false;
                         status.model = model.clone();
                         status.adapter = agent.clone();
                         if status.objective.is_empty() {
@@ -3008,6 +3020,7 @@ impl AppState {
                     })
                     .or_insert_with(|| SubagentStatus {
                         label: label.clone(),
+                        label_is_placeholder: false,
                         model: model.clone(),
                         adapter: agent.clone(),
                         objective: objective.clone(),
@@ -3056,10 +3069,10 @@ impl AppState {
                     StatusKind::Info,
                     if resumed {
                         format!(
-                            "subagent #{subagent_id} · {label} resumed ({backend}) · Ctrl-L inspect"
+                            "subagent #{subagent_id} · {label} resumed ({backend}) · F11 inspect"
                         )
                     } else {
-                        format!("subagent #{subagent_id} · {label} ({backend}) · Ctrl-L inspect")
+                        format!("subagent #{subagent_id} · {label} ({backend}) · F11 inspect")
                     },
                 );
             }
@@ -3136,13 +3149,20 @@ impl AppState {
             }
             SubagentEvent::Status {
                 subagent_id,
+                kind,
                 message,
             } => {
                 self.finalize_subagent_thinking(subagent_id);
                 self.finalize_subagent_message(subagent_id);
                 let state = self.ensure_subagent_state(subagent_id);
                 state.activity = message.clone();
-                state.transcript.push(Entry::System(message));
+                state.transcript.push(Entry::System(message.clone()));
+                if kind == SubagentStatusKind::Warning {
+                    self.record_status_message(
+                        StatusKind::Warning,
+                        format!("subagent #{subagent_id} · {message}"),
+                    );
+                }
             }
             SubagentEvent::Finished {
                 subagent_id,
@@ -3160,13 +3180,13 @@ impl AppState {
                 match outcome {
                     SubagentOutcome::Completed => self.set_status_line(
                         StatusKind::Info,
-                        format!("subagent #{subagent_id} complete · Ctrl-L inspect"),
+                        format!("subagent #{subagent_id} complete · F11 inspect"),
                     ),
                     SubagentOutcome::Cancelled => {
                         self.mark_subagent_tools_failed(subagent_id, "tool call cancelled");
                         self.set_status_line(
                             StatusKind::Info,
-                            format!("subagent #{subagent_id} cancelled · Ctrl-L inspect"),
+                            format!("subagent #{subagent_id} cancelled · F11 inspect"),
                         );
                     }
                     SubagentOutcome::Failed(message) => {
@@ -3175,7 +3195,7 @@ impl AppState {
                         // this subagent's permanent transcript entry.
                         self.set_status_line(
                             StatusKind::Warning,
-                            format!("subagent #{subagent_id} failed · {message} · Ctrl-L inspect"),
+                            format!("subagent #{subagent_id} failed · {message} · F11 inspect"),
                         );
                     }
                 }
@@ -3218,7 +3238,9 @@ impl AppState {
                     (
                         Some(crate::workflow::WorkflowActorRole::SpecialistReviewer { lane }),
                         SubagentOutcome::Completed,
-                    ) => Some(format!("reviewer {lane} · report delivered · {elapsed}")),
+                    ) => {
+                        format!("reviewer {lane} #{subagent_id} · report delivered · {elapsed}")
+                    }
                     (Some(role), SubagentOutcome::Completed)
                         if matches!(
                             role,
@@ -3226,24 +3248,22 @@ impl AppState {
                                 | crate::workflow::WorkflowActorRole::ReviewSupervisor
                         ) =>
                     {
-                        Some(format!(
+                        format!(
                             "{} #{subagent_id} · completed · {elapsed}",
                             nested_role_label(role)
-                        ))
+                        )
                     }
-                    _ => Some(format!(
+                    _ => format!(
                         "subagent #{subagent_id} · {} · {status} · {elapsed}",
                         row.label
-                    )),
+                    ),
                 }
             }
             // A `Finished` with no row (a start this UI never saw) still gets
             // its record; there is simply no elapsed time to report.
-            None => Some(format!("subagent #{subagent_id} · {status}")),
+            None => format!("subagent #{subagent_id} · {status}"),
         };
-        if let Some(record) = record {
-            self.push_system_message(record);
-        }
+        self.push_system_message(record);
     }
 
     /// Status rows in render order: everything still running first (in spawn
@@ -5518,6 +5538,10 @@ mod tests {
             ConnectionState::Ready,
             "delegation notes ride held completions and must not change state"
         );
+        assert!(
+            state.transcript.is_empty(),
+            "primary-owned orchestration packets are intentionally not transcript entries"
+        );
 
         state.apply_event(UiEvent::InternalMessage(InternalMessage {
             source: "primary".to_string(),
@@ -5528,6 +5552,10 @@ mod tests {
         }));
         assert_eq!(state.connection_state, ConnectionState::Streaming);
         assert!(state.is_busy());
+        assert!(
+            state.transcript.is_empty(),
+            "review envelopes stay hidden behind typed workflow summaries"
+        );
 
         state.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
@@ -5579,6 +5607,49 @@ mod tests {
     }
 
     #[test]
+    fn nested_warnings_are_private_detail_and_primary_visible_alerts() {
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(7, "build", "compile the workspace"));
+        state.apply_event(UiEvent::Subagent(SubagentEvent::Status {
+            subagent_id: 7,
+            kind: SubagentStatusKind::Info,
+            message: "checking dependencies".to_string(),
+        }));
+        state.apply_event(UiEvent::Subagent(SubagentEvent::Status {
+            subagent_id: 7,
+            kind: SubagentStatusKind::Warning,
+            message: "adapter authentication expires soon".to_string(),
+        }));
+
+        let actor = state.nested_agent(7).expect("nested actor");
+        assert!(matches!(
+            actor.transcript.as_slice(),
+            [Entry::System(info), Entry::System(warning)]
+                if info == "checking dependencies"
+                    && warning == "adapter authentication expires soon"
+        ));
+        assert!(
+            !state.transcript.iter().any(
+                |entry| matches!(entry, Entry::System(text) if text == "checking dependencies")
+            ),
+            "informational nested status remains private"
+        );
+        assert!(state.transcript.iter().any(|entry| matches!(
+            entry,
+            Entry::System(text)
+                if text
+                    == "warning: subagent #7 · adapter authentication expires soon"
+        )));
+        assert!(matches!(
+            state.status_line,
+            Some(StatusMessage {
+                kind: StatusKind::Warning,
+                ref text,
+            }) if text == "subagent #7 · adapter authentication expires soon"
+        ));
+    }
+
+    #[test]
     fn workflow_roles_and_supervisor_packets_attach_to_stable_nested_actors() {
         use crate::workflow::{
             WorkflowActorId, WorkflowActorRole, WorkflowCoverage, WorkflowEvent, WorkflowId,
@@ -5611,6 +5682,10 @@ mod tests {
         }));
         for (kind, text) in [
             (
+                crate::event::InternalMessageKind::ReviewLane,
+                "intent brief",
+            ),
+            (
                 crate::event::InternalMessageKind::ReviewProgress,
                 "two specialists remain",
             ),
@@ -5634,15 +5709,18 @@ mod tests {
         assert_eq!(actor.model.as_deref(), Some("gpt-review"));
         assert!(matches!(
             actor.transcript.as_slice(),
-            [Entry::InternalMessage(progress), Entry::InternalMessage(synthesis)]
-                if progress.kind == crate::event::InternalMessageKind::ReviewProgress
+            [Entry::InternalMessage(intent), Entry::InternalMessage(progress), Entry::InternalMessage(synthesis)]
+                if intent.kind == crate::event::InternalMessageKind::ReviewLane
+                    && intent.text == "intent brief"
+                    && progress.kind == crate::event::InternalMessageKind::ReviewProgress
                     && synthesis.kind == crate::event::InternalMessageKind::ReviewSynthesis
         ));
         assert!(
             !state.transcript.iter().any(|entry| matches!(
                 entry,
                 Entry::InternalMessage(message)
-                    if message.text == "two specialists remain"
+                    if message.text == "intent brief"
+                        || message.text == "two specialists remain"
                         || message.text == "No material findings."
             )),
             "review envelopes stay out of the primary transcript"
@@ -5685,6 +5763,74 @@ mod tests {
                 .any(|text| text.starts_with("review supervisor #42 · completed"))
         );
         assert!(summaries.contains(&"review complete · no material findings"));
+    }
+
+    #[test]
+    fn implementation_role_after_started_preserves_the_real_actor_label() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(11, "subagent", "implement the parser"));
+        let workflow_id = WorkflowId::delegation(4);
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Delegation,
+                stage: WorkflowStage::new(0, WorkflowPhase::Delegating),
+            },
+        )));
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: WorkflowActorId::Subagent(11),
+                role: WorkflowActorRole::Implementation,
+            },
+        )));
+
+        let actor = state.nested_agent(11).expect("implementation actor");
+        assert_eq!(actor.label, "subagent");
+        assert!(!actor.label_is_placeholder);
+        assert_eq!(actor.role, Some(WorkflowActorRole::Implementation));
+    }
+
+    #[test]
+    fn specialist_report_summary_keeps_the_actor_id() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        let workflow_id = WorkflowId::review(5);
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::SpecialistReview),
+            },
+        )));
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: WorkflowActorId::Subagent(12),
+                role: WorkflowActorRole::SpecialistReviewer {
+                    lane: "Týr".to_string(),
+                },
+            },
+        )));
+        state.apply_event(subagent_started(12, "review · Týr", "inspect correctness"));
+        state.apply_event(UiEvent::Subagent(SubagentEvent::Finished {
+            subagent_id: 12,
+            outcome: SubagentOutcome::Completed,
+        }));
+
+        assert!(state.transcript.iter().any(|entry| matches!(
+            entry,
+            Entry::System(text) if text.starts_with("reviewer Týr #12 · report delivered")
+        )));
     }
 
     #[test]

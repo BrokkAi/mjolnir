@@ -179,6 +179,13 @@ pub enum UiEvent {
     Fatal(String),
 }
 
+/// Severity of a nested runtime status update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentStatusKind {
+    Info,
+    Warning,
+}
+
 /// Lifecycle and activity of one background subagent. Every variant carries
 /// `subagent_id` so concurrent subagents stay distinguishable in the TUI,
 /// headless stream, and remote viewer.
@@ -224,6 +231,7 @@ pub enum SubagentEvent {
     },
     Status {
         subagent_id: u64,
+        kind: SubagentStatusKind,
         message: String,
     },
     Finished {

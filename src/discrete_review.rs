@@ -1083,15 +1083,6 @@ async fn run_async(
             reason: "the review was cancelled".to_string(),
         };
     }
-    emit_internal(
-        events,
-        "Eitri",
-        "review supervisor",
-        InternalMessageKind::ReviewLane,
-        &intent.body,
-        None,
-    );
-
     let changed_functions = match changed_functions_task {
         None => SupplementalContext::available(
             "Not invoked: the complete captured turn diff is included because this turn changed fewer than 200 lines."
@@ -1207,6 +1198,14 @@ async fn run_async(
 
     let verdict = match supervisor_started {
         Ok(started) => {
+            emit_internal(
+                events,
+                "Eitri",
+                "review supervisor",
+                InternalMessageKind::ReviewLane,
+                &intent.body,
+                Some(started.subagent_id),
+            );
             emit_internal(
                 events,
                 "primary",
