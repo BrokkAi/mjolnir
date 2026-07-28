@@ -1155,36 +1155,50 @@ struct RunSessionResult {
     session_title: Option<String>,
     theme_kind: theme::TerminalThemeKind,
     spinner_style: spinner::SpinnerStyle,
-    new_session_loading: Option<NewSessionLoading>,
 }
 
-struct NewSessionLoading {
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl NewSessionLoading {
-    fn start() -> Self {
-        print!("\rloading.   ");
-        let _ = std::io::stdout().flush();
-        let task = tokio::spawn(async {
-            let mut dots = 2;
-            loop {
-                tokio::time::sleep(Duration::from_millis(350)).await;
-                print!("\rloading{}   ", ".".repeat(dots));
-                let _ = std::io::stdout().flush();
-                dots = dots % 3 + 1;
+async fn start_new_session_loading() -> Option<(CancellationToken, tokio::task::JoinHandle<()>)> {
+    let mut stdout = std::io::stdout();
+    if !stdout.is_terminal() {
+        return None;
+    }
+    if write!(stdout, "\r\x1b[2Kloading.")
+        .and_then(|()| stdout.flush())
+        .is_err()
+    {
+        return None;
+    }
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        let mut dots = 2;
+        loop {
+            tokio::select! {
+                _ = task_cancel.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_millis(350)) => {}
             }
-        });
-        Self { task }
-    }
+            if write!(stdout, "\r\x1b[2Kloading{}", ".".repeat(dots))
+                .and_then(|()| stdout.flush())
+                .is_err()
+            {
+                return;
+            }
+            dots = dots % 3 + 1;
+        }
+    });
+    Some((cancel, task))
 }
 
-impl Drop for NewSessionLoading {
-    fn drop(&mut self) {
-        self.task.abort();
-        print!("\r             \r");
-        let _ = std::io::stdout().flush();
-    }
+async fn stop_new_session_loading(
+    loading: Option<(CancellationToken, tokio::task::JoinHandle<()>)>,
+) {
+    let Some((cancel, task)) = loading else {
+        return;
+    };
+    cancel.cancel();
+    let _ = task.await;
+    let mut stdout = std::io::stdout();
+    let _ = write!(stdout, "\r\x1b[2K").and_then(|()| stdout.flush());
 }
 
 struct ActiveSideRuntime {
@@ -1266,7 +1280,6 @@ impl From<ui::UiRunResult> for RunSessionResult {
             session_title: result.session_title,
             theme_kind: result.theme_kind,
             spinner_style: result.spinner_style,
-            new_session_loading: None,
         }
     }
 }
@@ -1462,7 +1475,6 @@ async fn run_app(
             UiExitReason::Quit => return Ok(session_result.session_id),
             UiExitReason::NewSession | UiExitReason::ClearSession => {
                 let show_new_session_boundary = session_result.reason == UiExitReason::NewSession;
-                let new_session_loading = session_result.new_session_loading;
                 cfg = Config::load(&config_path)?;
                 let resolution = resolve_roster_streaming_for_tui(&cfg, &cwd).await?;
                 roster = resolution.roster;
@@ -1474,7 +1486,6 @@ async fn run_app(
                 if session_result.reason == UiExitReason::ClearSession {
                     pending_models_boundary = Some(models_reload_message(&roster));
                 }
-                drop(new_session_loading);
                 continue;
             }
             UiExitReason::SwitchSession => {
@@ -2517,7 +2528,6 @@ async fn run_session(
                 session_title: current_session_title,
                 theme_kind,
                 spinner_style,
-                new_session_loading: None,
             });
         };
 
@@ -2532,7 +2542,6 @@ async fn run_session(
                 session_title: target_title,
                 theme_kind,
                 spinner_style,
-                new_session_loading: None,
             });
         }
 
@@ -2571,18 +2580,17 @@ async fn run_session(
                     session_title: target_title,
                     theme_kind,
                     spinner_style,
-                    new_session_loading: None,
                 });
             }
         }
     };
 
-    let mut new_session_loading = if matches!(
+    let new_session_loading = if matches!(
         ui_result.as_ref().map(|result| result.reason),
         Ok(UiExitReason::NewSession)
     ) {
         terminal.restore_once();
-        Some(NewSessionLoading::start())
+        start_new_session_loading().await
     } else {
         None
     };
@@ -2646,11 +2654,11 @@ async fn run_session(
     }
 
     // Restore the terminal only now, after the runtime has finished tearing
-    // down, so the session UI stayed on screen through shutdown and is torn
-    // down moments before the process exits (or the next session draws) instead
-    // of leaving a blank gap during teardown. No-op if the LoadSession path
-    // already restored before showing the session picker.
+    // down, so the session UI stays on screen through shutdown. `/new` restores
+    // earlier to show its standalone loading line, and LoadSession restores
+    // before showing the session picker; this is a no-op for both paths.
     terminal.restore_once();
+    stop_new_session_loading(new_session_loading).await;
     if matches!(
         ui_result.as_ref().map(|result| result.reason),
         Ok(UiExitReason::ClearSession)
@@ -2659,10 +2667,7 @@ async fn run_session(
         tracing::warn!("clear terminal for /clear failed: {e}");
     }
 
-    ui_result.map(|mut result| {
-        result.new_session_loading = new_session_loading.take();
-        result
-    })
+    ui_result
 }
 
 fn isolated_subagent_role(
@@ -3319,7 +3324,6 @@ mod tests {
             session_title: Some("Current".to_string()),
             theme_kind: theme::TerminalThemeKind::AnsiLight,
             spinner_style: spinner::SpinnerStyle::Bars,
-            new_session_loading: None,
         };
 
         apply_session_result_to_config(&mut cfg, &result);
