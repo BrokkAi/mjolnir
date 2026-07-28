@@ -274,6 +274,18 @@ pub enum Entry {
     /// Latest plan posted by the agent.
     Plan(Vec<PlanEntry>),
     SubagentPlan(Vec<PlanEntry>),
+    /// A high-value result discovered while a locally submitted turn is still
+    /// running. The URL keys back into that turn's typed artifact record so
+    /// later structured updates can enrich metadata without duplicating rows.
+    TurnArtifact {
+        prompt_index: usize,
+        url: String,
+    },
+    /// Final durable-result recap emitted when the locally submitted turn's
+    /// completion is finally released (including after discrete review).
+    TurnArtifactSummary {
+        prompt_index: usize,
+    },
     /// Orchestration prompt retained in full but normally rendered compactly.
     InternalMessage(InternalMessage),
     /// System-level note (errors, warnings, mode changes).
@@ -300,14 +312,492 @@ pub struct ToolCallView {
     pub body: Vec<ToolCallOutput>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnArtifact {
+    PullRequest(PullRequestArtifact),
+}
+
+impl TurnArtifact {
+    pub fn url(&self) -> &str {
+        match self {
+            Self::PullRequest(pr) => &pr.url,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestArtifact {
+    pub repository: String,
+    pub number: u64,
+    pub url: String,
+    pub title: Option<String>,
+    pub draft: Option<bool>,
+    pub state: Option<PullRequestState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestState {
+    Open,
+    Closed,
+    Merged,
+}
+
 /// Durable facts about one locally submitted prompt turn.  Entries remain the
 /// source-of-truth transcript; this only records lifecycle data which would
 /// otherwise be lost once a later turn starts.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct PromptTurn {
     prompt_index: usize,
     elapsed: Option<Duration>,
     completed: bool,
+    artifacts: Vec<TurnArtifact>,
+}
+
+#[derive(Debug, Clone)]
+struct ToolCallArtifactEvidence {
+    title: String,
+    status: ToolCallStatus,
+    raw_input: Option<serde_json::Value>,
+    raw_output: Option<serde_json::Value>,
+    metadata: Option<serde_json::Value>,
+    content: String,
+    artifact_checked: bool,
+}
+
+impl ToolCallArtifactEvidence {
+    fn from_tool_call(tool_call: &ToolCall) -> Self {
+        Self {
+            title: tool_call.title.clone(),
+            status: tool_call.status,
+            raw_input: tool_call.raw_input.clone(),
+            raw_output: tool_call.raw_output.clone(),
+            metadata: tool_call.meta.clone().map(serde_json::Value::Object),
+            content: tool_call_content_text(&tool_call.content),
+            artifact_checked: false,
+        }
+    }
+
+    fn from_update(update: &ToolCallUpdate) -> Self {
+        Self {
+            title: update
+                .fields
+                .title
+                .clone()
+                .unwrap_or_else(|| "tool".to_string()),
+            status: update.fields.status.unwrap_or(ToolCallStatus::Pending),
+            raw_input: update.fields.raw_input.clone(),
+            raw_output: update.fields.raw_output.clone(),
+            metadata: update.meta.clone().map(serde_json::Value::Object),
+            content: update
+                .fields
+                .content
+                .as_deref()
+                .map(tool_call_content_text)
+                .unwrap_or_default(),
+            artifact_checked: false,
+        }
+    }
+
+    fn apply_update(&mut self, update: &ToolCallUpdate) {
+        self.artifact_checked = false;
+        if let Some(title) = &update.fields.title {
+            self.title = title.clone();
+        }
+        if let Some(status) = update.fields.status {
+            self.status = status;
+        }
+        if let Some(raw_input) = &update.fields.raw_input {
+            self.raw_input = Some(raw_input.clone());
+        }
+        if let Some(raw_output) = &update.fields.raw_output {
+            self.raw_output = Some(raw_output.clone());
+        }
+        if let Some(metadata) = &update.meta {
+            self.metadata = Some(serde_json::Value::Object(metadata.clone()));
+        }
+        if let Some(content) = &update.fields.content {
+            self.content = tool_call_content_text(content);
+        }
+    }
+}
+
+fn tool_call_content_text(content: &[ToolCallContent]) -> String {
+    let mut text = String::new();
+    for item in content {
+        if let ToolCallContent::Content(block) = item {
+            let next = content_block_text(&block.content);
+            if !next.is_empty() {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&next);
+            }
+        }
+    }
+    text
+}
+
+fn tool_call_output_text(outputs: &[ToolCallOutput]) -> String {
+    let mut text = String::new();
+    for output in outputs {
+        let next = match output {
+            ToolCallOutput::Text(text) | ToolCallOutput::Note(text) => text.as_str(),
+            ToolCallOutput::Terminal { output, .. } => output.as_str(),
+            ToolCallOutput::Diff { .. } => continue,
+        };
+        if !next.is_empty() {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(next);
+        }
+    }
+    text
+}
+
+fn merge_pull_request_artifact(existing: &mut PullRequestArtifact, candidate: PullRequestArtifact) {
+    if candidate.title.is_some() {
+        existing.title = candidate.title;
+    }
+    if candidate.draft.is_some() {
+        existing.draft = candidate.draft;
+    }
+    if candidate.state.is_some() {
+        existing.state = candidate.state;
+    }
+}
+
+fn pull_request_creation_artifacts(
+    evidence: &ToolCallArtifactEvidence,
+) -> Vec<PullRequestArtifact> {
+    if evidence.status != ToolCallStatus::Completed || !is_pull_request_creation_tool(evidence) {
+        return Vec::new();
+    }
+
+    let mut artifacts = Vec::new();
+    for value in [
+        evidence.raw_output.as_ref(),
+        evidence.metadata.as_ref(),
+        evidence.raw_input.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        collect_pull_requests_from_json(value, &mut artifacts);
+    }
+    for candidate in pull_requests_from_text(&evidence.content) {
+        push_or_merge_pull_request(&mut artifacts, candidate);
+    }
+    artifacts
+}
+
+fn is_pull_request_creation_tool(evidence: &ToolCallArtifactEvidence) -> bool {
+    let mut identifiers = vec![evidence.title.clone()];
+    for value in [evidence.raw_input.as_ref(), evidence.metadata.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        collect_json_identifiers(value, &mut identifiers);
+    }
+    identifiers.into_iter().any(|identifier| {
+        let words = identifier_words(&identifier);
+        contains_word_sequence(&words, &["create", "pull", "request"])
+            || contains_word_sequence(&words, &["gh", "pr", "create"])
+    })
+}
+
+fn collect_json_identifiers(value: &serde_json::Value, output: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if matches!(
+                    key.as_str(),
+                    "tool"
+                        | "tool_name"
+                        | "toolName"
+                        | "name"
+                        | "command"
+                        | "cmd"
+                        | "operation"
+                        | "action"
+                ) && let Some(value) = value.as_str()
+                {
+                    output.push(value.to_string());
+                }
+                collect_json_identifiers(value, output);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_json_identifiers(value, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn identifier_words(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn contains_word_sequence(words: &[String], expected: &[&str]) -> bool {
+    words.windows(expected.len()).any(|window| {
+        window
+            .iter()
+            .map(String::as_str)
+            .eq(expected.iter().copied())
+    })
+}
+
+fn collect_pull_requests_from_json(
+    value: &serde_json::Value,
+    output: &mut Vec<PullRequestArtifact>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let title =
+                artifact_string_field(object, &["title", "pull_request_title", "pullRequestTitle"]);
+            let draft = bool_field(object, &["draft", "is_draft", "isDraft"]);
+            let state = artifact_string_field(object, &["state", "status"])
+                .and_then(|state| pull_request_state(&state));
+            if let (Some(repository), Some(number)) = (
+                structured_repository(object),
+                u64_field(
+                    object,
+                    &["number", "pr_number", "pull_number", "pullRequestNumber"],
+                ),
+            ) && let Some(mut candidate) =
+                pull_request_from_repository_number(&repository, number)
+            {
+                candidate.title = title.clone();
+                candidate.draft = draft;
+                candidate.state = state;
+                push_or_merge_pull_request(output, candidate);
+            }
+
+            for value in object.values() {
+                if let Some(text) = value.as_str() {
+                    for mut candidate in pull_requests_from_text(text) {
+                        if candidate.title.is_none() {
+                            candidate.title = title.clone();
+                        }
+                        if candidate.draft.is_none() {
+                            candidate.draft = draft;
+                        }
+                        if candidate.state.is_none() {
+                            candidate.state = state;
+                        }
+                        push_or_merge_pull_request(output, candidate);
+                    }
+                }
+                collect_pull_requests_from_json(value, output);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_pull_requests_from_json(value, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn artifact_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+}
+
+fn bool_field(object: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(serde_json::Value::as_bool))
+}
+
+fn u64_field(object: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| {
+        let value = object.get(*key)?;
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.parse::<u64>().ok())
+            .filter(|number| *number > 0)
+    })
+}
+
+fn structured_repository(object: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    artifact_string_field(
+        object,
+        &[
+            "repository_full_name",
+            "repositoryFullName",
+            "repo_full_name",
+            "repoFullName",
+            "name_with_owner",
+            "nameWithOwner",
+            "full_name",
+            "fullName",
+        ],
+    )
+    .or_else(
+        || match object.get("repository").or_else(|| object.get("repo")) {
+            Some(serde_json::Value::String(repository)) => Some(repository.clone()),
+            Some(serde_json::Value::Object(repository)) => artifact_string_field(
+                repository,
+                &["full_name", "fullName", "name_with_owner", "nameWithOwner"],
+            ),
+            _ => None,
+        },
+    )
+}
+
+fn pull_request_state(state: &str) -> Option<PullRequestState> {
+    match state.to_ascii_lowercase().as_str() {
+        "open" | "opened" => Some(PullRequestState::Open),
+        "closed" => Some(PullRequestState::Closed),
+        "merged" => Some(PullRequestState::Merged),
+        _ => None,
+    }
+}
+
+fn pull_request_from_repository_number(
+    repository: &str,
+    number: u64,
+) -> Option<PullRequestArtifact> {
+    let (owner, name) = repository.split_once('/')?;
+    if name.contains('/') || !valid_github_owner(owner) || !valid_github_repository(name) {
+        return None;
+    }
+    Some(PullRequestArtifact {
+        repository: repository.to_string(),
+        number,
+        url: format!("https://github.com/{repository}/pull/{number}"),
+        title: None,
+        draft: None,
+        state: None,
+    })
+}
+
+fn pull_requests_from_text(text: &str) -> Vec<PullRequestArtifact> {
+    const PREFIX: &str = "https://github.com/";
+    let mut artifacts = Vec::new();
+    let mut remaining = text;
+    while let Some(start) = remaining.find(PREFIX) {
+        let tail = &remaining[start..];
+        let end = tail
+            .find(|character: char| {
+                character.is_whitespace()
+                    || matches!(character, '"' | '\'' | '<' | '>' | '[' | ']' | '(' | ')')
+            })
+            .unwrap_or(tail.len());
+        let candidate = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        if let Some(artifact) = parse_canonical_pull_request_url(candidate) {
+            push_or_merge_pull_request(&mut artifacts, artifact);
+        }
+        remaining = &tail[end..];
+        if remaining.is_empty() {
+            break;
+        }
+    }
+    artifacts
+}
+
+fn pull_requests_created_in_final_response(text: &str) -> Vec<PullRequestArtifact> {
+    pull_requests_from_text(text)
+        .into_iter()
+        .filter(|artifact| {
+            text.match_indices(&artifact.url).any(|(url_start, _)| {
+                let context_start = text[..url_start]
+                    .char_indices()
+                    .rev()
+                    .nth(160)
+                    .map(|(index, _)| index)
+                    .unwrap_or(0);
+                let context = &text[context_start..url_start];
+                let clause_start = context
+                    .rfind(['\n', '.', '!', '?'])
+                    .map(|index| index + 1)
+                    .unwrap_or(0);
+                let words = identifier_words(&context[clause_start..]);
+                let names_pull_request = words.iter().any(|word| word == "pr")
+                    || contains_word_sequence(&words, &["pull", "request"]);
+                contains_word_sequence(&words, &["created", "pull", "request"])
+                    || contains_word_sequence(&words, &["pull", "request", "created"])
+                    || contains_word_sequence(&words, &["created", "draft", "pull", "request"])
+                    || contains_word_sequence(&words, &["opened", "pull", "request"])
+                    || contains_word_sequence(&words, &["published", "pull", "request"])
+                    || contains_word_sequence(&words, &["created", "pr"])
+                    || contains_word_sequence(&words, &["pr", "created"])
+                    || contains_word_sequence(&words, &["opened", "pr"])
+                    || contains_word_sequence(&words, &["published", "pr"])
+                    || (names_pull_request
+                        && words.last().is_some_and(|word| {
+                            matches!(word.as_str(), "created" | "opened" | "published")
+                        }))
+            })
+        })
+        .collect()
+}
+
+fn parse_canonical_pull_request_url(url: &str) -> Option<PullRequestArtifact> {
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.scheme() != "https"
+        || parsed.host_str()? != "github.com"
+        || parsed.port().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    let segments = parsed.path_segments()?.collect::<Vec<_>>();
+    let [owner, repository, "pull", number] = segments.as_slice() else {
+        return None;
+    };
+    if !valid_github_owner(owner) || !valid_github_repository(repository) {
+        return None;
+    }
+    let number = number.parse::<u64>().ok().filter(|number| *number > 0)?;
+    let repository = format!("{owner}/{repository}");
+    pull_request_from_repository_number(&repository, number)
+}
+
+fn valid_github_owner(owner: &str) -> bool {
+    !owner.is_empty()
+        && owner.len() <= 39
+        && !owner.starts_with('-')
+        && !owner.ends_with('-')
+        && owner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn valid_github_repository(repository: &str) -> bool {
+    !repository.is_empty()
+        && repository != "."
+        && repository != ".."
+        && repository
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn push_or_merge_pull_request(
+    artifacts: &mut Vec<PullRequestArtifact>,
+    candidate: PullRequestArtifact,
+) {
+    if let Some(existing) = artifacts
+        .iter_mut()
+        .find(|artifact| artifact.url == candidate.url)
+    {
+        merge_pull_request_artifact(existing, candidate);
+    } else {
+        artifacts.push(candidate);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -784,6 +1274,9 @@ pub struct AppState {
     /// lookup lets one concurrent worker overwrite another worker's plan.
     subagent_plan_indices: HashMap<u64, usize>,
     pub tool_calls: HashMap<String, ToolCallView>,
+    /// Structured tool fields retained separately from the compact display
+    /// model so successful external results can become durable turn artifacts.
+    tool_call_artifact_evidence: HashMap<String, ToolCallArtifactEvidence>,
     /// Per-tool expansion choices, keyed by ACP tool-call ID. `true` means
     /// expanded; entries matching the renderer's default are omitted.
     tool_detail_overrides: HashMap<String, bool>,
@@ -854,6 +1347,8 @@ pub struct AppState {
     pub agent_picker: Option<AgentPicker>,
     pub config_picker: Option<ConfigPicker>,
     pub review_picker: Option<ReviewPicker>,
+    /// Selected artifact in the durable-result action overlay.
+    pub artifact_picker: Option<usize>,
     /// Scroll offset measured in rendered lines from the bottom of the
     /// transcript. `0` keeps the view pinned to the newest line.
     pub scroll_offset: usize,
@@ -1208,6 +1703,7 @@ impl AppState {
             subagent_open_thought_owner: None,
             subagent_plan_indices: HashMap::new(),
             tool_calls: HashMap::new(),
+            tool_call_artifact_evidence: HashMap::new(),
             tool_detail_overrides: HashMap::new(),
             workspace_diffs: Vec::new(),
             suppressed_tool_calls: HashSet::new(),
@@ -1229,6 +1725,7 @@ impl AppState {
             agent_picker: None,
             config_picker: None,
             review_picker: None,
+            artifact_picker: None,
             scroll_offset: 0,
             expand_transcript_details: false,
             transcript_viewer: false,
@@ -1825,6 +2322,8 @@ impl AppState {
             | Entry::SubagentToolCall(_)
             | Entry::Plan(_)
             | Entry::SubagentPlan(_)
+            | Entry::TurnArtifact { .. }
+            | Entry::TurnArtifactSummary { .. }
             | Entry::InternalMessage(_)
             | Entry::System(_)
             | Entry::SessionBoundary(_) => None,
@@ -1892,6 +2391,182 @@ impl AppState {
             .iter()
             .find(|turn| turn.prompt_index == prompt_index)
             .and_then(|turn| turn.elapsed)
+    }
+
+    pub fn prompt_turn_artifacts(&self, prompt_index: usize) -> &[TurnArtifact] {
+        self.prompt_turns
+            .iter()
+            .find(|turn| turn.prompt_index == prompt_index)
+            .map(|turn| turn.artifacts.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// Artifacts shown in the pinned result strip and action overlay. They
+    /// belong only to the active local turn (or the latest local turn once it
+    /// completes), so an older PR is never presented as a result of a newer
+    /// prompt. Replay-only prompts never enter `prompt_turns`.
+    pub fn visible_turn_artifacts(&self) -> &[TurnArtifact] {
+        self.active_prompt_turn
+            .and_then(|prompt_index| {
+                self.prompt_turns
+                    .iter()
+                    .find(|turn| turn.prompt_index == prompt_index)
+            })
+            .or_else(|| self.prompt_turns.last())
+            .map(|turn| turn.artifacts.as_slice())
+            .unwrap_or_default()
+    }
+
+    pub fn selected_turn_artifact(&self) -> Option<&TurnArtifact> {
+        let selected = self.artifact_picker?;
+        self.visible_turn_artifacts().get(selected)
+    }
+
+    pub fn open_artifact_picker(&mut self) -> bool {
+        if self.visible_turn_artifacts().is_empty() {
+            return false;
+        }
+        self.artifact_picker = Some(0);
+        self.agent_picker = None;
+        self.config_picker = None;
+        self.review_picker = None;
+        true
+    }
+
+    pub fn move_artifact_picker(&mut self, delta: i32) {
+        let len = self.visible_turn_artifacts().len();
+        if len == 0 {
+            self.artifact_picker = None;
+            return;
+        }
+        let Some(selected) = self.artifact_picker.as_mut() else {
+            return;
+        };
+        move_wrapped(selected, delta, len);
+    }
+
+    pub fn close_artifact_picker(&mut self) {
+        self.artifact_picker = None;
+    }
+
+    fn capture_completed_tool_artifacts(&mut self) {
+        let candidates = self
+            .tool_call_artifact_evidence
+            .iter_mut()
+            .filter_map(|(id, stored)| {
+                let mut evidence = stored.clone();
+                if let Some(view) = self.tool_calls.get(id) {
+                    evidence.status = view.status;
+                    let mut terminal_pending = false;
+                    for output in &view.body {
+                        if let ToolCallOutput::Terminal { exit_status, .. } = output {
+                            let Some(status) = exit_status else {
+                                terminal_pending = true;
+                                continue;
+                            };
+                            if status.exit_code != Some(0) || status.signal.is_some() {
+                                stored.artifact_checked = true;
+                                return None;
+                            }
+                        }
+                    }
+                    if terminal_pending {
+                        return None;
+                    }
+                    let rendered = tool_call_output_text(&view.body);
+                    if !rendered.is_empty() {
+                        if !evidence.content.is_empty() {
+                            evidence.content.push('\n');
+                        }
+                        evidence.content.push_str(&rendered);
+                    }
+                }
+                if evidence.status != ToolCallStatus::Completed || evidence.artifact_checked {
+                    return None;
+                }
+                stored.artifact_checked = true;
+                Some(evidence)
+            })
+            .flat_map(|evidence| pull_request_creation_artifacts(&evidence))
+            .collect::<Vec<_>>();
+        for candidate in candidates {
+            self.record_pull_request_artifact(candidate);
+        }
+    }
+
+    fn mark_completed_tool_artifacts_dirty(&mut self) {
+        for evidence in self.tool_call_artifact_evidence.values_mut() {
+            if evidence.status == ToolCallStatus::Completed {
+                evidence.artifact_checked = false;
+            }
+        }
+    }
+
+    fn capture_final_response_artifacts(&mut self) {
+        let Some(prompt_index) = self.active_prompt_turn else {
+            return;
+        };
+        let candidates = self.transcript[prompt_index..]
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::AgentMessage(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .flat_map(pull_requests_created_in_final_response)
+            .collect::<Vec<_>>();
+        for candidate in candidates {
+            self.record_pull_request_artifact(candidate);
+        }
+    }
+
+    fn record_pull_request_artifact(&mut self, candidate: PullRequestArtifact) {
+        let Some(prompt_index) = self.active_prompt_turn else {
+            // Replay/load updates have no locally submitted turn ownership.
+            return;
+        };
+        let Some(turn) = self
+            .prompt_turns
+            .iter_mut()
+            .find(|turn| turn.prompt_index == prompt_index)
+        else {
+            return;
+        };
+        if let Some(TurnArtifact::PullRequest(existing)) = turn
+            .artifacts
+            .iter_mut()
+            .find(|artifact| artifact.url() == candidate.url)
+        {
+            merge_pull_request_artifact(existing, candidate);
+            self.bump_transcript_revision();
+            return;
+        }
+
+        let url = candidate.url.clone();
+        turn.artifacts.push(TurnArtifact::PullRequest(candidate));
+        self.transcript
+            .push(Entry::TurnArtifact { prompt_index, url });
+        self.bump_transcript_revision();
+    }
+
+    fn append_active_artifact_summary(&mut self) {
+        let Some(prompt_index) = self.active_prompt_turn else {
+            return;
+        };
+        if self.prompt_turn_artifacts(prompt_index).is_empty()
+            || self.transcript.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::TurnArtifactSummary {
+                        prompt_index: existing
+                    } if *existing == prompt_index
+                )
+            })
+        {
+            return;
+        }
+        self.transcript
+            .push(Entry::TurnArtifactSummary { prompt_index });
+        self.bump_transcript_revision();
     }
 
     pub fn connection_state_elapsed(&self) -> Duration {
@@ -2234,6 +2909,7 @@ impl AppState {
             prompt_index,
             elapsed: None,
             completed: false,
+            artifacts: Vec::new(),
         });
         self.active_prompt_turn = Some(prompt_index);
         self.record_prompt_history(text);
@@ -2547,6 +3223,7 @@ impl AppState {
             UiEvent::SessionUpdate(u) => {
                 self.apply_session_update(u);
                 self.apply_known_terminal_outputs();
+                self.capture_completed_tool_artifacts();
             }
             UiEvent::ContextCompacted => {}
             UiEvent::TerminalOutput(snapshot) => {
@@ -2554,6 +3231,8 @@ impl AppState {
                 self.terminal_outputs
                     .insert(snapshot.terminal_id.clone(), snapshot);
                 self.apply_known_terminal_outputs();
+                self.mark_completed_tool_artifacts_dirty();
+                self.capture_completed_tool_artifacts();
             }
             UiEvent::SessionConfigOptions {
                 options,
@@ -2653,6 +3332,10 @@ impl AppState {
                 self.finalize_thinking(EntryKind::Thought);
                 self.finalize_message(EntryKind::Agent);
                 self.finalize_message(EntryKind::Subagent);
+                if !matches!(stop_reason, StopReason::Cancelled) {
+                    self.capture_final_response_artifacts();
+                }
+                self.append_active_artifact_summary();
                 self.finish_prompt_turn(matches!(stop_reason, StopReason::Cancelled));
                 if let Some(usage) = usage {
                     self.token_usage.apply_prompt_usage(usage);
@@ -2690,6 +3373,7 @@ impl AppState {
                 self.finalize_thinking(EntryKind::Thought);
                 self.finalize_message(EntryKind::Agent);
                 self.finalize_message(EntryKind::Subagent);
+                self.append_active_artifact_summary();
                 self.finish_prompt_turn(true);
                 self.pending_workspace_diff_total = None;
                 // Drop queued prompts: finish_prompt_turn flips back to
@@ -2806,6 +3490,8 @@ impl AppState {
                 self.terminal_outputs
                     .insert(snapshot.terminal_id.clone(), snapshot);
                 self.apply_known_terminal_outputs();
+                self.mark_completed_tool_artifacts_dirty();
+                self.capture_completed_tool_artifacts();
             }
             SubagentEvent::PermissionRequest {
                 subagent_id,
@@ -3063,6 +3749,10 @@ impl AppState {
                 self.finalize_subagent_thinking(subagent_id);
                 self.finalize_subagent_message(subagent_id);
                 let key = format!("{prefix}{}", tool_call.tool_call_id);
+                self.tool_call_artifact_evidence.insert(
+                    key.clone(),
+                    ToolCallArtifactEvidence::from_tool_call(&tool_call),
+                );
                 let mut view = ToolCallView::from_tool_call(&tool_call);
                 view.namespace_terminal_ids(prefix);
                 self.tool_calls.insert(key.clone(), view);
@@ -3073,6 +3763,10 @@ impl AppState {
                 self.finalize_subagent_thinking(subagent_id);
                 self.finalize_subagent_message(subagent_id);
                 let key = format!("{prefix}{}", update.tool_call_id);
+                self.tool_call_artifact_evidence
+                    .entry(key.clone())
+                    .and_modify(|evidence| evidence.apply_update(&update))
+                    .or_insert_with(|| ToolCallArtifactEvidence::from_update(&update));
                 if let Some(view) = self.tool_calls.get_mut(&key) {
                     view.apply_update(&update);
                     view.namespace_terminal_ids(prefix);
@@ -3116,6 +3810,7 @@ impl AppState {
             _ => {}
         }
         self.apply_known_terminal_outputs();
+        self.capture_completed_tool_artifacts();
     }
 
     fn cancel_subagent_prompts(&mut self, subagent_id: u64) {
@@ -3267,6 +3962,8 @@ impl AppState {
                 self.finalize_message(EntryKind::Agent);
                 let id = tc.tool_call_id.to_string();
                 let suppressed = is_subagent_transport_call(&tc);
+                self.tool_call_artifact_evidence
+                    .insert(id.clone(), ToolCallArtifactEvidence::from_tool_call(&tc));
                 self.tool_calls
                     .insert(id.clone(), ToolCallView::from_tool_call(&tc));
                 if suppressed {
@@ -3280,6 +3977,10 @@ impl AppState {
                 self.finalize_thinking(EntryKind::Thought);
                 self.finalize_message(EntryKind::Agent);
                 let id = u.tool_call_id.to_string();
+                self.tool_call_artifact_evidence
+                    .entry(id.clone())
+                    .and_modify(|evidence| evidence.apply_update(&u))
+                    .or_insert_with(|| ToolCallArtifactEvidence::from_update(&u));
                 let suppressed =
                     self.suppressed_tool_calls.contains(&id) || is_subagent_transport_update(&u);
                 if suppressed {
@@ -4327,11 +5028,268 @@ mod tests {
         EmbeddedResourceResource, ImageContent, PermissionOption, PermissionOptionKind, Plan,
         PlanEntry, PlanEntryPriority, PlanEntryStatus, ResourceLink, SessionConfigOption,
         SessionConfigOptionCategory, SessionConfigSelectOption, StopReason, StringPropertySchema,
-        Terminal, TextContent, TextResourceContents, Usage, UsageUpdate,
+        Terminal, TextContent, TextResourceContents, ToolCallUpdateFields, Usage, UsageUpdate,
     };
 
     fn text_chunk(s: &str) -> ContentChunk {
         ContentChunk::new(ContentBlock::Text(TextContent::new(s)))
+    }
+
+    fn text_tool_content(text: &str) -> ToolCallContent {
+        ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(text))))
+    }
+
+    fn completed_pr_tool(id: &str, output: serde_json::Value) -> ToolCall {
+        ToolCall::new(
+            id.to_string(),
+            "mcp__codex_apps__github_create_pull_request",
+        )
+        .status(ToolCallStatus::Completed)
+        .raw_input(serde_json::json!({
+            "repository_full_name": "BrokkAi/mjolnir",
+            "title": "durable results"
+        }))
+        .raw_output(output)
+    }
+
+    #[test]
+    fn structured_pr_result_is_durable_and_resurfaced_after_held_review() {
+        let mut state = AppState::new();
+        state.record_user_prompt("create a pull request".to_string());
+        let prompt_index = state.active_prompt_turn.expect("local turn");
+
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            completed_pr_tool(
+                "create-pr",
+                serde_json::json!({
+                    "pull_request": {
+                        "url": "https://github.com/BrokkAi/mjolnir/pull/487",
+                        "title": "surface durable PR results",
+                        "draft": true,
+                        "state": "open"
+                    }
+                }),
+            ),
+        )));
+
+        assert_eq!(
+            state.visible_turn_artifacts(),
+            &[TurnArtifact::PullRequest(PullRequestArtifact {
+                repository: "BrokkAi/mjolnir".to_string(),
+                number: 487,
+                url: "https://github.com/BrokkAi/mjolnir/pull/487".to_string(),
+                title: Some("surface durable PR results".to_string()),
+                draft: Some(true),
+                state: Some(PullRequestState::Open),
+            })]
+        );
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::TurnArtifact {
+                prompt_index: found,
+                ..
+            }) if *found == prompt_index
+        ));
+
+        state.apply_event(UiEvent::InternalMessage(InternalMessage {
+            source: "primary".to_string(),
+            target: "primary".to_string(),
+            kind: crate::event::InternalMessageKind::DiscreteReview,
+            text: "review the completed work".to_string(),
+        }));
+        assert_eq!(state.visible_turn_artifacts().len(), 1);
+
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        assert!(state.prompt_turn_completed(prompt_index));
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::TurnArtifactSummary {
+                prompt_index: found
+            }) if *found == prompt_index
+        ));
+    }
+
+    #[test]
+    fn text_only_creation_result_and_final_response_deduplicate() {
+        let mut state = AppState::new();
+        state.record_user_prompt("publish this branch".to_string());
+        let url = "https://github.com/BrokkAi/mjolnir/pull/488";
+        let call = ToolCall::new("create-pr", "github.create_pull_request")
+            .status(ToolCallStatus::InProgress);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(call)));
+
+        let update = ToolCallUpdate::new(
+            "create-pr",
+            ToolCallUpdateFields::new()
+                .status(ToolCallStatus::Completed)
+                .content(vec![text_tool_content(&format!(
+                    "Pull request created: {url}"
+                ))]),
+        );
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            update.clone(),
+        )));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            update,
+        )));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk(&format!("Created pull request: {url}")),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+
+        assert_eq!(state.visible_turn_artifacts().len(), 1);
+        assert_eq!(
+            state
+                .transcript
+                .iter()
+                .filter(|entry| matches!(entry, Entry::TurnArtifact { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            state
+                .transcript
+                .iter()
+                .filter(|entry| matches!(entry, Entry::TurnArtifactSummary { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn canonical_pr_fallback_rejects_mentions_failures_and_other_github_urls() {
+        let urls = [
+            "https://github.com/BrokkAi/mjolnir/issues/487",
+            "https://github.com/BrokkAi/mjolnir/commit/deadbeef",
+            "https://github.com/BrokkAi/mjolnir/compare/master...branch",
+            "https://github.com/BrokkAi/mjolnir/pull/487/files",
+        ];
+        for (index, url) in urls.into_iter().enumerate() {
+            let mut state = AppState::new();
+            state.record_user_prompt("create it".to_string());
+            state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+                completed_pr_tool(&format!("wrong-{index}"), serde_json::json!({"url": url})),
+            )));
+            assert!(state.visible_turn_artifacts().is_empty(), "{url}");
+        }
+
+        let mut inspected = AppState::new();
+        inspected.record_user_prompt("inspect the PR".to_string());
+        inspected.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("inspect", "github.get_pull_request")
+                .status(ToolCallStatus::Completed)
+                .raw_output(serde_json::json!({
+                    "url": "https://github.com/BrokkAi/mjolnir/pull/487"
+                })),
+        )));
+        inspected.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk(
+                "Created a different artifact. Inspected existing pull request https://github.com/BrokkAi/mjolnir/pull/487",
+            ),
+        )));
+        inspected.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        assert!(inspected.visible_turn_artifacts().is_empty());
+
+        let mut failed = AppState::new();
+        failed.record_user_prompt("create the PR".to_string());
+        failed.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("failed", "github.create_pull_request")
+                .status(ToolCallStatus::Failed)
+                .raw_output(serde_json::json!({
+                    "url": "https://github.com/BrokkAi/mjolnir/pull/489"
+                })),
+        )));
+        assert!(failed.visible_turn_artifacts().is_empty());
+    }
+
+    #[test]
+    fn multiple_prs_are_owned_by_local_turn_and_replay_is_ignored() {
+        let output = serde_json::json!({
+            "created": [
+                {"url": "https://github.com/BrokkAi/mjolnir/pull/490"},
+                {
+                    "repository": {"full_name": "BrokkAi/anvil"},
+                    "number": 227,
+                    "draft": false
+                }
+            ]
+        });
+
+        let mut replay = AppState::new();
+        replay.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            completed_pr_tool("replayed-create", output.clone()),
+        )));
+        assert!(replay.visible_turn_artifacts().is_empty());
+
+        replay.record_user_prompt("create both PRs".to_string());
+        let prompt_index = replay.active_prompt_turn.expect("local turn");
+        replay.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            completed_pr_tool("live-create", output),
+        )));
+        assert_eq!(replay.visible_turn_artifacts().len(), 2);
+        assert!(matches!(
+            &replay.visible_turn_artifacts()[0],
+            TurnArtifact::PullRequest(pr)
+                if pr.repository == "BrokkAi/mjolnir" && pr.number == 490
+        ));
+        assert!(matches!(
+            &replay.visible_turn_artifacts()[1],
+            TurnArtifact::PullRequest(pr)
+                if pr.repository == "BrokkAi/anvil" && pr.number == 227
+        ));
+
+        replay.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        replay.record_user_prompt("a later turn".to_string());
+        assert!(replay.visible_turn_artifacts().is_empty());
+        assert_eq!(replay.prompt_turn_artifacts(prompt_index).len(), 2);
+    }
+
+    #[test]
+    fn completed_terminal_pr_creation_is_captured_when_output_arrives() {
+        let mut state = AppState::new();
+        state.record_user_prompt("create with gh".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("gh-create", "gh pr create --draft")
+                .status(ToolCallStatus::Completed)
+                .content(vec![ToolCallContent::Terminal(Terminal::new("terminal-1"))]),
+        )));
+        assert!(state.visible_turn_artifacts().is_empty());
+
+        state.apply_event(UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "terminal-1".to_string(),
+            output: "https://github.com/BrokkAi/mjolnir/pull/491\n".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        }));
+        assert_eq!(state.visible_turn_artifacts().len(), 1);
+
+        let mut failed = AppState::new();
+        failed.record_user_prompt("create with gh".to_string());
+        failed.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("gh-create", "gh pr create --draft")
+                .status(ToolCallStatus::Completed)
+                .content(vec![ToolCallContent::Terminal(Terminal::new("terminal-1"))]),
+        )));
+        failed.apply_event(UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "terminal-1".to_string(),
+            output: "a PR already exists: https://github.com/BrokkAi/mjolnir/pull/491\n"
+                .to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(1)),
+        }));
+        assert!(failed.visible_turn_artifacts().is_empty());
     }
 
     #[test]

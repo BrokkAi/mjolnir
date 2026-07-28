@@ -12,6 +12,7 @@ use std::ops::Range;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -44,9 +45,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{
     AppState, ArenaPane, ConfigValueChoice, ConnectionState, ElicitationView, Entry,
     PastedAttachment, PastedImageAttachment, PendingElicitation, PendingPermission,
-    QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus, RagnarokFighterUi,
-    RagnarokUi, StatusKind, StatusMessage, ToolCallOutput, UiExitReason, classify_elicitation,
-    config_option_choices, config_option_current_value_label,
+    PullRequestArtifact, PullRequestState, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt,
+    RagnarokDraftPrStatus, RagnarokFighterUi, RagnarokUi, StatusKind, StatusMessage,
+    ToolCallOutput, TurnArtifact, UiExitReason, classify_elicitation, config_option_choices,
+    config_option_current_value_label,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -79,6 +81,7 @@ const HELP_SCROLL_PAGE_STEP: u16 = 10;
 /// Inline viewport height for the `/mjconfig` overlay (border + two sections).
 const INLINE_MJCONFIG_HEIGHT: u16 = 24;
 const QUEUED_PROMPT_VISIBLE_ROWS: usize = 3;
+const ARTIFACT_VISIBLE_ROWS: usize = 3;
 /// Subagent status rows rendered before the area folds into a "… N more" line.
 const SUBAGENT_VISIBLE_ROWS: usize = 4;
 const CURSOR_POSITION_TIMEOUT_MESSAGE: &str =
@@ -393,6 +396,7 @@ enum TerminalRequest {
     StopDictation,
     ForceInlineRepair,
     CopyText(String),
+    OpenUrl(String),
     Authenticate(crate::auth::AuthVendor),
 }
 
@@ -700,6 +704,8 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
         | Entry::SessionBoundary(_)
         | Entry::Plan(_)
         | Entry::SubagentPlan(_)
+        | Entry::TurnArtifact { .. }
+        | Entry::TurnArtifactSummary { .. }
         | Entry::InternalMessage(_) => true,
         Entry::AgentThought(thought) => thought.completed,
         Entry::SubagentThought(thought) => thought.completed,
@@ -2126,6 +2132,8 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
         usize::from(INLINE_HELP_HEIGHT)
     } else if state.mjconfig_menu.is_some() {
         usize::from(INLINE_MJCONFIG_HEIGHT)
+    } else if state.artifact_picker.is_some() {
+        8
     } else if let Some(picker) = state.agent_picker.as_ref() {
         picker.role_indices.len().saturating_add(4)
     } else if state.review_picker.is_some() {
@@ -2156,6 +2164,7 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
         // the input box keeps its full height while the queue is visible.
         usize::from(INLINE_CHAT_HEIGHT)
             + usize::from(queued_prompt_row_count(state))
+            + usize::from(artifact_result_row_count(state))
             + usize::from(subagent_status_row_count(state))
             + usage_quota_row_count(state, width)
             + inline_transcript_tail_row_count(state, width)
@@ -2191,6 +2200,7 @@ fn handle_crossterm(
             if state.help_overlay
                 || state.has_pending_permission()
                 || state.has_pending_elicitation()
+                || state.artifact_picker.is_some()
                 || state.agent_picker.is_some()
                 || state.config_picker.is_some()
                 || state.mjconfig_menu.is_some()
@@ -2304,6 +2314,23 @@ fn handle_crossterm(
         return handle_transcript_viewer_key(state, key.modifiers, key.code, mode);
     }
 
+    if state.artifact_picker.is_none()
+        && state.ragnarok.is_none()
+        && state.agent_picker.is_none()
+        && state.review_picker.is_none()
+        && state.config_picker.is_none()
+        && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+        && key.modifiers == KeyModifiers::ALT
+        && matches!(key.code, KeyCode::Char('p' | 'P'))
+    {
+        if !state.open_artifact_picker() {
+            state.record_status_message(StatusKind::Info, "no durable turn results yet");
+            return TerminalRequest::None;
+        }
+        return inline_repair_request(mode);
+    }
+
     if state.runtime_closed {
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c'))
@@ -2377,6 +2404,10 @@ fn handle_crossterm(
     // and wins if both are somehow pending (its check runs first above).
     if state.has_pending_elicitation() {
         return handle_elicitation_key(state, key.code, mode);
+    }
+
+    if state.artifact_picker.is_some() {
+        return handle_artifact_picker_key(state, key.code, mode);
     }
 
     // The Ragnarok arena owns the keyboard while a battle is on screen. It
@@ -2732,6 +2763,27 @@ async fn apply_terminal_request(
             copy_text_to_clipboard(state, &text, Some("URL"));
             Ok(())
         }
+        TerminalRequest::OpenUrl(url) => {
+            restore_terminal_for_auth(terminal, mode)?;
+            let opened = open_url_in_system_browser(&url);
+            let resumed = resume_terminal_after_auth(terminal, mode);
+            match resumed {
+                Ok(()) => {
+                    match opened {
+                        Ok(()) => state.record_status_message(
+                            StatusKind::Info,
+                            "opened pull request in the system browser",
+                        ),
+                        Err(error) => state.record_status_message(
+                            StatusKind::Warning,
+                            format!("could not open browser: {error:#}; use c to copy the URL"),
+                        ),
+                    }
+                    Ok(())
+                }
+                Err(error) => Err(error.context("restore UI after opening browser")),
+            }
+        }
         TerminalRequest::Authenticate(vendor) => {
             restore_terminal_for_auth(terminal, mode)?;
             let login = crate::auth::run_login(vendor).await;
@@ -2747,6 +2799,46 @@ async fn apply_terminal_request(
             Ok(())
         }
     }
+}
+
+fn open_url_in_system_browser(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).context("parse browser URL")?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("github.com") {
+        anyhow::bail!("refusing to open a non-GitHub HTTPS URL");
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "android")]
+    let mut command = {
+        let mut command = Command::new("termux-open-url");
+        command.arg(url);
+        command
+    };
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    #[cfg(not(unix))]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("launch system URL opener")?;
+    Ok(())
 }
 
 fn set_mouse_capture(terminal: &mut Terminal<TrackedBackend<Stdout>>, enabled: bool) -> Result<()> {
@@ -4373,6 +4465,20 @@ fn transcript_export_markdown(state: &AppState) -> String {
                 }
                 out.push('\n');
             }
+            Entry::TurnArtifact { prompt_index, url } => {
+                if let Some(artifact) = state
+                    .prompt_turn_artifacts(*prompt_index)
+                    .iter()
+                    .find(|artifact| artifact.url() == url)
+                {
+                    push_export_artifact(&mut out, artifact, "Turn result");
+                }
+            }
+            Entry::TurnArtifactSummary { prompt_index } => {
+                for artifact in state.prompt_turn_artifacts(*prompt_index) {
+                    push_export_artifact(&mut out, artifact, "Final turn result");
+                }
+            }
             Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
                 if let Some(view) = state.tool_calls.get(id) {
                     let label = if matches!(entry, Entry::SubagentToolCall(_)) {
@@ -4395,6 +4501,25 @@ fn transcript_export_markdown(state: &AppState) -> String {
     }
 
     out
+}
+
+fn push_export_artifact(out: &mut String, artifact: &TurnArtifact, heading: &str) {
+    match artifact {
+        TurnArtifact::PullRequest(pr) => {
+            out.push_str(&format!(
+                "## {heading}: Pull request created\n\n- Repository: {}\n- Number: #{}\n",
+                escape_markdown_text(&pr.repository),
+                pr.number
+            ));
+            if let Some(title) = pr.title.as_deref() {
+                out.push_str(&format!("- Title: {}\n", escape_markdown_text(title)));
+            }
+            if let Some(metadata) = pull_request_metadata_label(pr) {
+                out.push_str(&format!("- Status: {metadata}\n"));
+            }
+            out.push_str(&format!("- URL: {}\n\n", pr.url));
+        }
+    }
 }
 
 fn push_export_text(out: &mut String, heading: &str, text: &str) {
@@ -5006,6 +5131,39 @@ fn handle_review_picker_key(
     }
 }
 
+fn handle_artifact_picker_key(
+    state: &mut AppState,
+    code: KeyCode,
+    mode: UiMode,
+) -> TerminalRequest {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => state.move_artifact_picker(-1),
+        KeyCode::Down | KeyCode::Char('j') => state.move_artifact_picker(1),
+        KeyCode::Char('c' | 'C') => {
+            if let Some(url) = state
+                .selected_turn_artifact()
+                .map(|artifact| artifact.url().to_string())
+            {
+                return TerminalRequest::CopyText(url);
+            }
+        }
+        KeyCode::Char('o' | 'O') | KeyCode::Enter => {
+            if let Some(url) = state
+                .selected_turn_artifact()
+                .map(|artifact| artifact.url().to_string())
+            {
+                return TerminalRequest::OpenUrl(url);
+            }
+        }
+        KeyCode::Esc => {
+            state.close_artifact_picker();
+            return inline_repair_request(mode);
+        }
+        _ => {}
+    }
+    TerminalRequest::None
+}
+
 fn open_config_value_picker_for_shortcut(
     state: &mut AppState,
     modifiers: KeyModifiers,
@@ -5355,6 +5513,7 @@ fn draw(
 
     let queued_row = queued_prompt_row_count(state);
     let subagent_rows = subagent_status_row_count(state);
+    let artifact_rows = artifact_result_row_count(state);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -5362,6 +5521,7 @@ fn draw(
             Constraint::Min(3),
             Constraint::Length(1),
             Constraint::Length(subagent_rows),
+            Constraint::Length(artifact_rows),
             Constraint::Length(queued_row),
             Constraint::Length(input_height),
             Constraint::Length(usage_quota_rows),
@@ -5376,10 +5536,11 @@ fn draw(
     }
     draw_header(f, chunks[1], state);
     draw_subagent_status_rows(f, chunks[2], state);
-    draw_queued_prompt_row(f, chunks[3], state);
-    draw_input(f, chunks[4], state, mode);
-    draw_usage_quota_row(f, chunks[5], state);
-    draw_config_shortcuts_row(f, chunks[6], state);
+    draw_artifact_result_rows(f, chunks[3], state);
+    draw_queued_prompt_row(f, chunks[4], state);
+    draw_input(f, chunks[5], state, mode);
+    draw_usage_quota_row(f, chunks[6], state);
+    draw_config_shortcuts_row(f, chunks[7], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -5395,6 +5556,10 @@ fn draw(
 
     if state.review_picker.is_some() {
         draw_review_picker_modal(f, f.area(), state);
+    }
+
+    if state.artifact_picker.is_some() {
+        draw_artifact_picker_modal(f, f.area(), state);
     }
 
     if state.config_picker.is_some() {
@@ -5516,6 +5681,11 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
         return;
     }
 
+    if state.artifact_picker.is_some() {
+        draw_inline_artifact_picker(f, f.area(), state);
+        return;
+    }
+
     if state.config_picker.is_some() {
         draw_inline_config_value_picker(f, f.area(), state);
         return;
@@ -5540,6 +5710,7 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     let usage_quota_rows = usage_quota_row_count(state, f.area().width) as u16;
     let queued_row = queued_prompt_row_count(state);
     let subagent_rows = subagent_status_row_count(state);
+    let artifact_rows = artifact_result_row_count(state);
     let live_rows = inline_transcript_tail_row_count(state, f.area().width)
         .min(usize::from(f.area().height)) as u16;
     let chunks = Layout::default()
@@ -5548,6 +5719,7 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
             Constraint::Length(live_rows),
             Constraint::Length(1),
             Constraint::Length(subagent_rows),
+            Constraint::Length(artifact_rows),
             Constraint::Length(queued_row),
             Constraint::Min(MIN_INPUT_HEIGHT),
             Constraint::Length(usage_quota_rows),
@@ -5558,10 +5730,11 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     draw_inline_transcript_tail(f, chunks[0], state);
     draw_header(f, chunks[1], state);
     draw_subagent_status_rows(f, chunks[2], state);
-    draw_queued_prompt_row(f, chunks[3], state);
-    draw_input(f, chunks[4], state, UiMode::InlineChat);
-    draw_usage_quota_row(f, chunks[5], state);
-    draw_config_shortcuts_row(f, chunks[6], state);
+    draw_artifact_result_rows(f, chunks[3], state);
+    draw_queued_prompt_row(f, chunks[4], state);
+    draw_input(f, chunks[5], state, UiMode::InlineChat);
+    draw_usage_quota_row(f, chunks[6], state);
+    draw_config_shortcuts_row(f, chunks[7], state);
 
     if state.autocomplete.visible
         && !state.has_pending_permission()
@@ -6457,6 +6630,29 @@ fn render_transcript_entry_range(
                 }
                 out.push(Line::from(""));
             }
+            Entry::TurnArtifact { prompt_index, url } => {
+                if let Some(artifact) = state
+                    .prompt_turn_artifacts(*prompt_index)
+                    .iter()
+                    .find(|artifact| artifact.url() == url)
+                {
+                    push_turn_artifact(&mut out, artifact, theme);
+                }
+            }
+            Entry::TurnArtifactSummary { prompt_index } => {
+                let artifacts = state.prompt_turn_artifacts(*prompt_index);
+                if !artifacts.is_empty() {
+                    out.push(Line::from(Span::styled(
+                        "turn results",
+                        Style::default()
+                            .fg(theme.success)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    for artifact in artifacts {
+                        push_turn_artifact(&mut out, artifact, theme);
+                    }
+                }
+            }
             Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
                 if let Some(view) = state.tool_calls.get(id) {
                     let color = tool_status_color(view.status, theme);
@@ -6547,6 +6743,60 @@ fn render_transcript_entry_range(
     out
 }
 
+fn push_turn_artifact(out: &mut Vec<Line<'static>>, artifact: &TurnArtifact, theme: TerminalTheme) {
+    match artifact {
+        TurnArtifact::PullRequest(pr) => {
+            let mut label = format!("Pull request created · {}#{}", pr.repository, pr.number);
+            if let Some(metadata) = pull_request_metadata_label(pr) {
+                label.push_str(" · ");
+                label.push_str(&metadata);
+            }
+            out.push(Line::from(Span::styled(
+                label,
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            if let Some(title) = pr
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+            {
+                out.push(Line::from(Span::styled(
+                    title.to_string(),
+                    Style::default().fg(theme.text),
+                )));
+            }
+            out.push(Line::from(Span::styled(
+                pr.url.clone(),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::UNDERLINED),
+            )));
+            out.push(Line::from(""));
+        }
+    }
+}
+
+fn pull_request_metadata_label(pr: &PullRequestArtifact) -> Option<String> {
+    let mut metadata = Vec::new();
+    if let Some(draft) = pr.draft {
+        metadata.push(if draft { "draft" } else { "ready" }.to_string());
+    }
+    if let Some(state) = pr.state {
+        metadata.push(
+            match state {
+                PullRequestState::Open => "open",
+                PullRequestState::Closed => "closed",
+                PullRequestState::Merged => "merged",
+            }
+            .to_string(),
+        );
+    }
+    (!metadata.is_empty()).then(|| metadata.join(" · "))
+}
+
 fn tool_entry_is_successful(state: &AppState, entry: &Entry) -> bool {
     let (Entry::ToolCall(id) | Entry::SubagentToolCall(id)) = entry else {
         return false;
@@ -6619,7 +6869,10 @@ fn entry_speaker(entry: &Entry) -> Option<String> {
         | Entry::SubagentToolCall(_)
         | Entry::SubagentPlan(_) => Some("subagent".to_string()),
         Entry::InternalMessage(message) => Some(message.source.clone()),
-        Entry::System(_) | Entry::SessionBoundary(_) => None,
+        Entry::TurnArtifact { .. }
+        | Entry::TurnArtifactSummary { .. }
+        | Entry::System(_)
+        | Entry::SessionBoundary(_) => None,
     }
 }
 
@@ -8895,6 +9148,16 @@ fn queued_prompt_row_count(state: &AppState) -> u16 {
     (visible + overflow).min(u16::MAX as usize) as u16
 }
 
+fn artifact_result_row_count(state: &AppState) -> u16 {
+    let count = state.visible_turn_artifacts().len();
+    if count == 0 {
+        return 0;
+    }
+    let visible = count.min(ARTIFACT_VISIBLE_ROWS);
+    let overflow = usize::from(count > ARTIFACT_VISIBLE_ROWS);
+    (visible + overflow).min(u16::MAX as usize) as u16
+}
+
 /// Height of the dedicated subagent status area: zero when nothing is running
 /// (so every existing layout is untouched), otherwise one line per visible
 /// subagent plus an overflow line when there are more than fit.
@@ -8942,6 +9205,61 @@ fn draw_subagent_status_rows(f: &mut ratatui::Frame, area: Rect, state: &AppStat
         lines.push(Line::from(Span::styled(
             fit_width(format!(" … {} more", total - visible), width),
             Style::default().fg(state.theme.muted),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_artifact_result_rows(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let artifacts = state.visible_turn_artifacts();
+    if artifacts.is_empty() {
+        return;
+    }
+    let capacity = usize::from(area.height);
+    let visible = artifacts
+        .len()
+        .min(ARTIFACT_VISIBLE_ROWS)
+        .min(capacity.saturating_sub(usize::from(artifacts.len() > capacity)));
+    let width = usize::from(area.width);
+    let mut lines = artifacts
+        .iter()
+        .take(visible)
+        .map(|artifact| match artifact {
+            TurnArtifact::PullRequest(pr) => {
+                let metadata = pull_request_metadata_label(pr)
+                    .map(|label| format!(" · {label}"))
+                    .unwrap_or_default();
+                Line::from(vec![
+                    Span::styled(
+                        fit_width(
+                            format!(
+                                " ✔ PR created · {}#{}{}",
+                                pr.repository, pr.number, metadata
+                            ),
+                            width.saturating_sub(" · Alt-P actions".width()),
+                        ),
+                        Style::default()
+                            .fg(state.theme.success)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" · Alt-P actions", Style::default().fg(state.theme.accent)),
+                ])
+            }
+        })
+        .collect::<Vec<_>>();
+    if artifacts.len() > visible && lines.len() < capacity {
+        lines.push(Line::from(Span::styled(
+            fit_width(
+                format!(
+                    " … {} more PR results · Alt-P actions",
+                    artifacts.len() - visible
+                ),
+                width,
+            ),
+            Style::default().fg(state.theme.accent),
         )));
     }
     f.render_widget(Paragraph::new(lines), area);
@@ -10158,6 +10476,11 @@ fn general_help_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<
         help_binding_line("Ctrl-V/Ctrl-Alt-V", "paste image from clipboard", theme),
         help_binding_line("Ctrl-Y", "copy last agent message to clipboard", theme),
         help_binding_line(
+            "Alt-P",
+            "open durable turn results; copy or open created pull requests",
+            theme,
+        ),
+        help_binding_line(
             "Esc",
             "cancel streaming; clear input, chips, and browsing history",
             theme,
@@ -10335,6 +10658,100 @@ fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppStat
         Paragraph::new("Up/Down choose | Enter review | Esc cancel")
             .style(Style::default().fg(state.theme.muted)),
         layout[2],
+    );
+}
+
+fn artifact_picker_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
+    let artifacts = state.visible_turn_artifacts();
+    let selected = state
+        .artifact_picker
+        .unwrap_or(0)
+        .min(artifacts.len().saturating_sub(1));
+    let Some(TurnArtifact::PullRequest(pr)) = artifacts.get(selected) else {
+        return vec![Line::from("No durable turn results.")];
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "Pull request {}/{} · {}#{}",
+            selected + 1,
+            artifacts.len(),
+            pr.repository,
+            pr.number
+        ),
+        Style::default()
+            .fg(state.theme.success)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    if let Some(metadata) = pull_request_metadata_label(pr) {
+        lines.push(Line::from(Span::styled(
+            metadata,
+            Style::default().fg(state.theme.secondary),
+        )));
+    }
+    if let Some(title) = pr
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        lines.push(Line::from(title.to_string()));
+    }
+    lines.push(Line::from(""));
+    lines.extend(
+        wrap_text_to_width(&pr.url, width.max(1))
+            .into_iter()
+            .map(|url| {
+                Line::from(Span::styled(
+                    url,
+                    Style::default()
+                        .fg(state.theme.accent)
+                        .add_modifier(Modifier::UNDERLINED),
+                ))
+            }),
+    );
+    lines
+}
+
+fn draw_artifact_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let width = area.width.saturating_sub(4).min(96);
+    let height = area.height.saturating_sub(4).min(12);
+    if width < 24 || height < 6 {
+        return;
+    }
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" turn results ")
+        .title_bottom(" ↑/↓ select · c copy URL · o/Enter open · Esc close ")
+        .style(Style::default().fg(state.theme.success));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(artifact_picker_lines(state, inner.width)).wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn draw_inline_artifact_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let content = inline_content_rect(area);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(content);
+    f.render_widget(
+        Paragraph::new(artifact_picker_lines(state, layout[0].width)).wrap(Wrap { trim: false }),
+        layout[0],
+    );
+    f.render_widget(
+        Paragraph::new("↑/↓ select · c copy URL · o/Enter open · Esc close")
+            .style(Style::default().fg(state.theme.accent)),
+        layout[1],
     );
 }
 
@@ -12227,6 +12644,109 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::{Backend, TestBackend};
     use ratatui::layout::Position;
+
+    fn state_with_created_pr() -> AppState {
+        let mut state = AppState::new();
+        state.record_user_prompt("create the pull request".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("create-pr", "github.create_pull_request")
+                .status(ToolCallStatus::Completed)
+                .raw_output(serde_json::json!({
+                    "pull_request": {
+                        "url": "https://github.com/BrokkAi/mjolnir/pull/487",
+                        "title": "surface durable PR results",
+                        "draft": true,
+                        "state": "open"
+                    }
+                })),
+        )));
+        state
+    }
+
+    #[test]
+    fn created_pr_renders_immediately_wraps_narrowly_and_reappears_in_final_summary() {
+        let mut state = state_with_created_pr();
+        let immediate = render_full_transcript_lines(&state, 18);
+        let immediate_text = immediate
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            immediate_text.contains("Pull request created"),
+            "{immediate_text}"
+        );
+        assert!(
+            immediate_text.contains("https://github.com/BrokkAi/mjolnir/pull/487"),
+            "{immediate_text}"
+        );
+        assert!(
+            Paragraph::new(immediate)
+                .wrap(Wrap { trim: false })
+                .line_count(18)
+                > 6
+        );
+
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        let final_text = render_full_transcript_lines(&state, 18)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(final_text.contains("turn results"), "{final_text}");
+        assert_eq!(final_text.matches("Pull request created").count(), 2);
+        assert_eq!(
+            final_text
+                .matches("https://github.com/BrokkAi/mjolnir/pull/487")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn durable_pr_strip_opens_discoverable_copy_and_browser_actions() {
+        let mut state = state_with_created_pr();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_artifact_result_rows(frame, frame.area(), &state))
+            .expect("draw durable result strip");
+        let strip = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(strip.contains("PR created"), "{strip}");
+        assert!(strip.contains("Alt-P actions"), "{strip}");
+
+        let open_picker = handle_inline_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('p'), KeyModifiers::ALT),
+        );
+        assert_eq!(open_picker, TerminalRequest::ForceInlineRepair);
+        assert_eq!(state.artifact_picker, Some(0));
+
+        let url = "https://github.com/BrokkAi/mjolnir/pull/487".to_string();
+        assert_eq!(
+            handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('c')),),
+            TerminalRequest::CopyText(url.clone())
+        );
+        assert_eq!(
+            handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('o')),),
+            TerminalRequest::OpenUrl(url)
+        );
+
+        let backend = TestBackend::new(42, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .expect("draw artifact actions");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("c copy URL"), "{rendered}");
+        assert!(rendered.contains("o/Enter open"), "{rendered}");
+    }
 
     fn key(code: KeyCode) -> CtEvent {
         key_with_modifiers(code, KeyModifiers::NONE)
