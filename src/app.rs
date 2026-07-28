@@ -353,6 +353,12 @@ pub struct ToolCallView {
     pub body: Vec<ToolCallOutput>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentBranchPullRequest {
+    pub number: u64,
+    pub url: String,
+}
+
 /// Durable facts about one locally submitted prompt turn.  Entries remain the
 /// source-of-truth transcript; this only records lifecycle data which would
 /// otherwise be lost once a later turn starts.
@@ -938,6 +944,11 @@ pub struct AppState {
     pub agent_usage: crate::agent_usage::Snapshot,
     /// Transient status line with severity.
     pub status_line: Option<StatusMessage>,
+    /// Open pull request resolved by `gh pr view` for the checked-out branch.
+    pub current_branch_pull_request: Option<CurrentBranchPullRequest>,
+    /// Branch used for the latest pull-request probe. Kept separately so a
+    /// branch switch immediately retires the previous branch's result.
+    pub(crate) current_branch_pull_request_branch: Option<String>,
     /// True while the local microphone dictation helper is running.
     pub voice_input_active: bool,
     /// Prompt buffer range currently owned by live voice dictation.
@@ -1295,6 +1306,8 @@ impl AppState {
             workflow_clocks: BTreeMap::new(),
             agent_usage: crate::agent_usage::Snapshot::default(),
             status_line: None,
+            current_branch_pull_request: None,
+            current_branch_pull_request_branch: None,
             voice_input_active: false,
             voice_input_range: None,
             voice_input_level: None,
@@ -1347,6 +1360,8 @@ impl AppState {
         side.primary_acp_name = self.primary_acp_name.clone();
         side.agent_source_id = self.agent_source_id.clone();
         side.active_agent_launch = self.active_agent_launch.clone();
+        side.current_branch_pull_request = self.current_branch_pull_request.clone();
+        side.current_branch_pull_request_branch = self.current_branch_pull_request_branch.clone();
         side.transcript_export_dir = self.transcript_export_dir.clone();
         side.prompt_images_supported = self.prompt_images_supported;
         side.side_main_notice = Some(
