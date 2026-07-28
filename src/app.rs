@@ -9,6 +9,10 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::artifact::{
+    PullRequestArtifact, TurnArtifact, TurnArtifactKind, created_pull_requests_from_prose,
+    is_pull_request_creation_tool, pull_requests_from_tool_result,
+};
 use crate::bedrock_credits::BedrockCreditsStatus;
 use crate::claude_usage::ClaudeUsageStatus;
 use crate::clipboard::ClipboardLease;
@@ -351,6 +355,38 @@ pub struct ToolCallView {
     pub kind: ToolKind,
     pub status: ToolCallStatus,
     pub body: Vec<ToolCallOutput>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolCallArtifactSource {
+    raw_input: Option<serde_json::Value>,
+    raw_output: Option<serde_json::Value>,
+    meta: Option<serde_json::Value>,
+}
+
+impl ToolCallArtifactSource {
+    fn from_tool_call(tool_call: &ToolCall) -> Self {
+        Self {
+            raw_input: tool_call.raw_input.clone(),
+            raw_output: tool_call.raw_output.clone(),
+            meta: tool_call
+                .meta
+                .as_ref()
+                .and_then(|meta| serde_json::to_value(meta).ok()),
+        }
+    }
+
+    fn apply_update(&mut self, update: &ToolCallUpdate) {
+        if let Some(raw_input) = &update.fields.raw_input {
+            self.raw_input = Some(raw_input.clone());
+        }
+        if let Some(raw_output) = &update.fields.raw_output {
+            self.raw_output = Some(raw_output.clone());
+        }
+        if let Some(meta) = &update.meta {
+            self.meta = serde_json::to_value(meta).ok();
+        }
+    }
 }
 
 /// Durable facts about one locally submitted prompt turn.  Entries remain the
@@ -825,6 +861,11 @@ pub struct AppState {
     /// later primary row from splitting a subagent's result into immutable pieces.
     agent_open_message_index: Option<usize>,
     pub tool_calls: HashMap<String, ToolCallView>,
+    tool_artifact_sources: HashMap<String, ToolCallArtifactSource>,
+    /// Typed, durable results discovered during this UI process. Artifacts
+    /// retain their session and local prompt-turn association independently of
+    /// transcript compaction and workflow progress.
+    pub artifacts: Vec<TurnArtifact>,
     /// Per-tool expansion choices, keyed by ACP tool-call ID. `true` means
     /// expanded; entries matching the renderer's default are omitted.
     tool_detail_overrides: HashMap<String, bool>,
@@ -917,6 +958,9 @@ pub struct AppState {
     pub workspace_diff_viewer: bool,
     pub workspace_diff_selected_file: usize,
     pub workspace_diff_scroll_offset: usize,
+    /// On-demand reader/actions for durable created artifacts.
+    pub artifact_viewer: bool,
+    artifact_selected: Option<usize>,
     pub exit_reason: Option<UiExitReason>,
     /// True once the runtime has stopped accepting commands.
     pub runtime_closed: bool,
@@ -1255,6 +1299,8 @@ impl AppState {
             transcript: Vec::new(),
             agent_open_message_index: None,
             tool_calls: HashMap::new(),
+            tool_artifact_sources: HashMap::new(),
+            artifacts: Vec::new(),
             tool_detail_overrides: HashMap::new(),
             workspace_diffs: Vec::new(),
             suppressed_tool_calls: HashSet::new(),
@@ -1285,6 +1331,8 @@ impl AppState {
             workspace_diff_viewer: false,
             workspace_diff_selected_file: 0,
             workspace_diff_scroll_offset: 0,
+            artifact_viewer: false,
+            artifact_selected: None,
             exit_reason: None,
             runtime_closed: false,
             subagent_active: false,
@@ -1767,6 +1815,106 @@ impl AppState {
         if changed {
             self.bump_transcript_revision();
         }
+        let tool_call_ids = self.tool_calls.keys().cloned().collect::<Vec<_>>();
+        for tool_call_id in tool_call_ids {
+            self.capture_completed_tool_artifacts(&tool_call_id);
+        }
+    }
+
+    fn capture_completed_tool_artifacts(&mut self, tool_call_id: &str) {
+        let pull_requests = {
+            let Some(view) = self.tool_calls.get(tool_call_id) else {
+                return;
+            };
+            let source = self.tool_artifact_sources.get(tool_call_id);
+            if view.status != ToolCallStatus::Completed
+                || !is_pull_request_creation_tool(
+                    &view.title,
+                    source.and_then(|source| source.raw_input.as_ref()),
+                    source.and_then(|source| source.meta.as_ref()),
+                )
+            {
+                return;
+            }
+            let display_text = view
+                .body
+                .iter()
+                .filter_map(|output| match output {
+                    ToolCallOutput::Text(text) | ToolCallOutput::Note(text) => Some(text.as_str()),
+                    ToolCallOutput::Terminal { output, .. } => Some(output.as_str()),
+                    ToolCallOutput::Diff { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            pull_requests_from_tool_result(
+                source.and_then(|source| source.raw_output.as_ref()),
+                source.and_then(|source| source.meta.as_ref()),
+                &display_text,
+            )
+        };
+
+        for pull_request in pull_requests {
+            self.record_pull_request_artifact(pull_request, Some(tool_call_id.to_string()));
+        }
+    }
+
+    fn capture_created_pull_requests_from_open_message(&mut self) {
+        let Some(text) = self
+            .agent_open_message_index
+            .and_then(|index| self.transcript.get(index))
+            .and_then(|entry| match entry {
+                Entry::AgentMessage(text) => Some(text.clone()),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        for pull_request in created_pull_requests_from_prose(&text) {
+            self.record_pull_request_artifact(pull_request, None);
+        }
+    }
+
+    fn current_artifact_prompt_index(&self) -> Option<usize> {
+        self.active_prompt_turn.or_else(|| {
+            self.is_streaming()
+                .then(|| self.prompt_turns.last().map(|turn| turn.prompt_index))
+                .flatten()
+        })
+    }
+
+    fn record_pull_request_artifact(
+        &mut self,
+        pull_request: PullRequestArtifact,
+        source_tool_call_id: Option<String>,
+    ) {
+        let session_id = self.session_id.clone();
+        let prompt_index = self.current_artifact_prompt_index();
+        if let Some((index, existing)) =
+            self.artifacts.iter_mut().enumerate().find(|(_, artifact)| {
+                artifact.session_id == session_id && artifact.pull_request().url == pull_request.url
+            })
+        {
+            let TurnArtifactKind::PullRequest(existing_pull_request) = &mut existing.kind;
+            existing_pull_request.merge_from(pull_request);
+            if existing.prompt_index.is_none() {
+                existing.prompt_index = prompt_index;
+            }
+            if existing.source_tool_call_id.is_none() {
+                existing.source_tool_call_id = source_tool_call_id;
+            }
+            self.artifact_selected = Some(index);
+            return;
+        }
+
+        let transcript_text = format!("{}\n{}", pull_request.summary(), pull_request.url);
+        self.artifacts.push(TurnArtifact {
+            session_id,
+            prompt_index,
+            source_tool_call_id,
+            kind: TurnArtifactKind::PullRequest(pull_request),
+        });
+        self.artifact_selected = Some(self.artifacts.len() - 1);
+        self.push_system_message(transcript_text);
     }
 
     /// Flip the global transcript-detail collapse setting. Bumps the transcript
@@ -1812,6 +1960,7 @@ impl AppState {
     pub fn open_transcript_viewer(&mut self) {
         self.close_nested_agent_viewer();
         self.close_workspace_diff_viewer();
+        self.close_artifact_viewer();
         self.transcript_viewer = true;
         self.scroll_offset = usize::MAX;
     }
@@ -1831,6 +1980,7 @@ impl AppState {
         };
         self.close_transcript_viewer();
         self.close_workspace_diff_viewer();
+        self.close_artifact_viewer();
         self.nested_agent_viewer = true;
         self.nested_agent_selected = Some(selected);
         self.nested_agent_scroll_offset = usize::MAX;
@@ -1895,6 +2045,7 @@ impl AppState {
     pub fn open_workspace_diff_viewer(&mut self) {
         self.close_nested_agent_viewer();
         self.close_transcript_viewer();
+        self.close_artifact_viewer();
         self.workspace_diff_viewer = true;
         self.workspace_diff_selected_file = 0;
         self.workspace_diff_scroll_offset = 0;
@@ -1905,6 +2056,64 @@ impl AppState {
         self.workspace_diff_viewer = false;
         self.workspace_diff_selected_file = 0;
         self.workspace_diff_scroll_offset = 0;
+    }
+
+    pub fn current_session_artifact_indices(&self) -> Vec<usize> {
+        self.artifacts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, artifact)| {
+                (artifact.session_id == self.session_id).then_some(index)
+            })
+            .collect()
+    }
+
+    pub fn open_artifact_viewer(&mut self) -> bool {
+        let Some(selected) = self.current_session_artifact_indices().last().copied() else {
+            return false;
+        };
+        self.close_transcript_viewer();
+        self.close_nested_agent_viewer();
+        self.close_workspace_diff_viewer();
+        self.artifact_viewer = true;
+        self.artifact_selected = Some(selected);
+        true
+    }
+
+    pub fn close_artifact_viewer(&mut self) {
+        self.artifact_viewer = false;
+    }
+
+    pub fn selected_artifact(&self) -> Option<&TurnArtifact> {
+        self.artifact_selected
+            .and_then(|index| self.artifacts.get(index))
+            .filter(|artifact| artifact.session_id == self.session_id)
+    }
+
+    pub fn selected_artifact_index(&self) -> Option<usize> {
+        let index = self.artifact_selected?;
+        self.artifacts
+            .get(index)
+            .is_some_and(|artifact| artifact.session_id == self.session_id)
+            .then_some(index)
+    }
+
+    pub fn select_artifact(&mut self, next: bool) {
+        let indices = self.current_session_artifact_indices();
+        if indices.is_empty() {
+            self.artifact_selected = None;
+            return;
+        }
+        let current = self
+            .artifact_selected
+            .and_then(|selected| indices.iter().position(|index| *index == selected))
+            .unwrap_or(indices.len() - 1);
+        let next_position = if next {
+            (current + 1).min(indices.len() - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        self.artifact_selected = Some(indices[next_position]);
     }
 
     pub fn workspace_diff_file_count(&self) -> usize {
@@ -2655,6 +2864,7 @@ impl AppState {
                     self.pending_workspace_diff_total = None;
                     self.close_workspace_diff_viewer();
                     self.close_nested_agent_viewer();
+                    self.close_artifact_viewer();
                     self.nested_agent_selected = None;
                     self.subagents.clear();
                     self.subagent_active = false;
@@ -2667,6 +2877,7 @@ impl AppState {
                     }
                 }
                 self.session_id = Some(session_id);
+                self.artifact_selected = self.current_session_artifact_indices().last().copied();
                 if !self.is_streaming() {
                     self.set_connection_state(ConnectionState::Ready);
                 }
@@ -2983,6 +3194,10 @@ impl AppState {
                 }
             }
             WorkflowTransition::Terminal { outcome, .. } => {
+                let workflow_kind = self
+                    .workflows
+                    .get(event.workflow_id)
+                    .map(|state| state.kind);
                 let summary = self
                     .workflows
                     .get(event.workflow_id)
@@ -3028,7 +3243,22 @@ impl AppState {
                 if let Some(clock) = self.workflow_clocks.get_mut(&event.workflow_id) {
                     clock.finished_at = Some(Instant::now());
                 }
-                if let Some(summary) = summary {
+                if let Some(mut summary) = summary {
+                    if workflow_kind == Some(WorkflowKind::Review)
+                        && let Some(prompt_index) =
+                            self.prompt_turns.last().map(|turn| turn.prompt_index)
+                    {
+                        for artifact in self.artifacts.iter().filter(|artifact| {
+                            artifact.session_id == self.session_id
+                                && artifact.prompt_index == Some(prompt_index)
+                        }) {
+                            let pull_request = artifact.pull_request();
+                            summary.push('\n');
+                            summary.push_str(&pull_request.summary());
+                            summary.push('\n');
+                            summary.push_str(&pull_request.url);
+                        }
+                    }
                     self.push_system_message(summary);
                 }
             }
@@ -3452,6 +3682,10 @@ impl AppState {
                 self.finalize_subagent_thinking(subagent_id);
                 self.finalize_subagent_message(subagent_id);
                 let key = format!("{prefix}{}", tool_call.tool_call_id);
+                self.tool_artifact_sources.insert(
+                    key.clone(),
+                    ToolCallArtifactSource::from_tool_call(&tool_call),
+                );
                 let mut view = ToolCallView::from_tool_call(&tool_call);
                 view.namespace_terminal_ids(prefix);
                 self.tool_calls.insert(key.clone(), view);
@@ -3463,6 +3697,10 @@ impl AppState {
                 self.finalize_subagent_thinking(subagent_id);
                 self.finalize_subagent_message(subagent_id);
                 let key = format!("{prefix}{}", update.tool_call_id);
+                self.tool_artifact_sources
+                    .entry(key.clone())
+                    .or_default()
+                    .apply_update(&update);
                 if let Some(view) = self.tool_calls.get_mut(&key) {
                     view.apply_update(&update);
                     view.namespace_terminal_ids(prefix);
@@ -3644,6 +3882,7 @@ impl AppState {
                 let text = content_block_text(&c.content);
                 self.append_message_chunk(EntryKind::Agent, text);
                 self.bump_transcript_revision();
+                self.capture_created_pull_requests_from_open_message();
             }
             SessionUpdate::AgentThoughtChunk(c) => {
                 self.finalize_message(EntryKind::Agent);
@@ -3656,6 +3895,8 @@ impl AppState {
                 self.finalize_message(EntryKind::Agent);
                 let id = tc.tool_call_id.to_string();
                 let suppressed = is_subagent_transport_call(&tc);
+                self.tool_artifact_sources
+                    .insert(id.clone(), ToolCallArtifactSource::from_tool_call(&tc));
                 self.tool_calls
                     .insert(id.clone(), ToolCallView::from_tool_call(&tc));
                 if suppressed {
@@ -3669,6 +3910,10 @@ impl AppState {
                 self.finalize_thinking(EntryKind::Thought);
                 self.finalize_message(EntryKind::Agent);
                 let id = u.tool_call_id.to_string();
+                self.tool_artifact_sources
+                    .entry(id.clone())
+                    .or_default()
+                    .apply_update(&u);
                 let suppressed =
                     self.suppressed_tool_calls.contains(&id) || is_subagent_transport_update(&u);
                 if suppressed {
@@ -6083,6 +6328,204 @@ mod tests {
         let view = s.tool_calls.get("call-1").expect("view");
         assert_eq!(view.status, ToolCallStatus::Completed);
         assert_eq!(view.title, "running ls");
+    }
+
+    #[test]
+    fn completed_pr_creation_captures_structured_result_and_deduplicates_repeats() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "session-1".to_string(),
+            resumed: false,
+        });
+        state.record_user_prompt("open a pull request".to_string());
+        let raw_output = serde_json::json!({
+            "repository_full_name": "BrokkAi/mjolnir",
+            "number": 487,
+            "url": "https://github.com/BrokkAi/mjolnir/pull/487",
+            "title": "surface durable artifacts",
+            "draft": true,
+            "state": "open"
+        });
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("create-pr", "mcp__github__create_pull_request")
+                .status(ToolCallStatus::Completed)
+                .raw_output(raw_output.clone()),
+        )));
+
+        assert_eq!(state.artifacts.len(), 1);
+        let artifact = &state.artifacts[0];
+        assert_eq!(artifact.session_id.as_deref(), Some("session-1"));
+        assert_eq!(artifact.prompt_index, Some(0));
+        assert_eq!(artifact.source_tool_call_id.as_deref(), Some("create-pr"));
+        assert_eq!(artifact.pull_request().number, 487);
+        assert_eq!(artifact.pull_request().draft, Some(true));
+        assert!(state.transcript.iter().any(|entry| matches!(
+            entry,
+            Entry::System(text)
+                if text.contains("Pull request created · BrokkAi/mjolnir#487 · draft")
+                    && text.contains("https://github.com/BrokkAi/mjolnir/pull/487")
+        )));
+
+        let fields = agent_client_protocol::schema::v1::ToolCallUpdateFields::new()
+            .status(ToolCallStatus::Completed)
+            .raw_output(raw_output.clone());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("create-pr", fields),
+        )));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("Pull request created: https://github.com/BrokkAi/mjolnir/pull/487"),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "session-1".to_string(),
+            resumed: true,
+        });
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UserMessageChunk(
+            text_chunk("replayed prompt"),
+        )));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("replayed-create-pr", "create pull request")
+                .status(ToolCallStatus::Completed)
+                .raw_output(raw_output),
+        )));
+
+        assert_eq!(
+            state.artifacts.len(),
+            1,
+            "tool updates and final prose must converge on one artifact"
+        );
+    }
+
+    #[test]
+    fn text_only_pr_creation_fallback_is_conservative_about_status_and_tool_intent() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "session-1".to_string(),
+            resumed: false,
+        });
+        state.record_user_prompt("publish it".to_string());
+        let content = vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
+            TextContent::new("https://github.com/BrokkAi/mjolnir/pull/501"),
+        )))];
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("view-pr", "inspect pull request")
+                .status(ToolCallStatus::Completed)
+                .content(content.clone()),
+        )));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("failed-pr", "create pull request")
+                .status(ToolCallStatus::Failed)
+                .content(content.clone()),
+        )));
+        assert!(state.artifacts.is_empty());
+
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("created-pr", "run gh pr create")
+                .status(ToolCallStatus::Completed)
+                .content(content),
+        )));
+        assert_eq!(state.artifacts.len(), 1);
+        assert_eq!(state.artifacts[0].pull_request().number, 501);
+    }
+
+    #[test]
+    fn review_terminal_summary_resurfaces_only_pull_requests_from_reviewed_turn() {
+        use crate::workflow::{
+            WorkflowCoverage, WorkflowId, WorkflowKind, WorkflowOutcome, WorkflowPhase,
+            WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "session-1".to_string(),
+            resumed: false,
+        });
+        for (turn, number) in [("first", 510), ("second", 511)] {
+            state.record_user_prompt(turn.to_string());
+            state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+                ToolCall::new(format!("create-{number}"), "create_pull_request")
+                    .status(ToolCallStatus::Completed)
+                    .raw_output(serde_json::json!({
+                        "repository_full_name": "BrokkAi/mjolnir",
+                        "number": number,
+                        "draft": false
+                    })),
+            )));
+            state.apply_event(UiEvent::PromptDone {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            });
+        }
+        assert_eq!(state.artifacts.len(), 2);
+        assert_ne!(
+            state.artifacts[0].prompt_index,
+            state.artifacts[1].prompt_index
+        );
+
+        let workflow_id = WorkflowId::review(2);
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+            },
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Clean,
+                coverage: WorkflowCoverage::Complete,
+            },
+        );
+
+        let Some(Entry::System(summary)) = state.transcript.last() else {
+            panic!("expected review summary");
+        };
+        assert!(summary.contains("review complete · no material findings"));
+        assert!(summary.contains("BrokkAi/mjolnir#511"));
+        assert!(summary.contains("https://github.com/BrokkAi/mjolnir/pull/511"));
+        assert!(
+            !summary.contains("#510"),
+            "an older turn's artifact must not leak into this review summary"
+        );
+    }
+
+    #[test]
+    fn nested_pr_creation_is_associated_with_the_active_primary_turn() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "session-1".to_string(),
+            resumed: false,
+        });
+        state.record_user_prompt("delegate and publish".to_string());
+        state.apply_event(subagent_session_update_for(
+            7,
+            SessionUpdate::ToolCall(
+                ToolCall::new("create-pr", "create_pull_request")
+                    .status(ToolCallStatus::Completed)
+                    .raw_output(serde_json::json!({
+                        "repository_full_name": "BrokkAi/mjolnir",
+                        "number": 512,
+                        "url": "https://github.com/BrokkAi/mjolnir/pull/512"
+                    })),
+            ),
+        ));
+
+        assert_eq!(state.artifacts.len(), 1);
+        assert_eq!(state.artifacts[0].prompt_index, Some(0));
+        assert_eq!(
+            state.artifacts[0].source_tool_call_id.as_deref(),
+            Some("subagent-7:create-pr")
+        );
+        assert!(state.transcript.iter().any(|entry| matches!(
+            entry,
+            Entry::System(text) if text.contains("BrokkAi/mjolnir#512")
+        )));
     }
 
     #[test]

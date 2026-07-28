@@ -9,6 +9,7 @@ mod agent_usage;
 mod anvil;
 mod app;
 mod archive;
+mod artifact;
 mod auth;
 mod bedrock_credits;
 mod claude_usage;

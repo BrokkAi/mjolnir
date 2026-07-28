@@ -12,13 +12,15 @@ use std::ops::Range;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "android"))]
+use std::process::{Command, Stdio};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::v1::{
     AvailableCommandInput, SessionConfigOption, SessionUpdate, StopReason, ToolCallStatus,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use crossterm::cursor::MoveTo;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -394,6 +396,7 @@ enum TerminalRequest {
     StopDictation,
     ForceInlineRepair,
     CopyText(String),
+    OpenUrl(String),
     Authenticate(crate::auth::AuthVendor),
 }
 
@@ -413,10 +416,16 @@ fn inline_reader_accepts_input(state: &AppState) -> bool {
         || (state.workspace_diff_viewer
             && !state.has_pending_permission()
             && !state.has_pending_elicitation())
+        || (state.artifact_viewer
+            && !state.has_pending_permission()
+            && !state.has_pending_elicitation())
 }
 
 fn inline_reader_is_open(state: &AppState) -> bool {
-    state.transcript_viewer || state.nested_agent_viewer || state.workspace_diff_viewer
+    state.transcript_viewer
+        || state.nested_agent_viewer
+        || state.workspace_diff_viewer
+        || state.artifact_viewer
 }
 
 #[derive(Debug)]
@@ -1504,6 +1513,7 @@ async fn ui_loop(
             && !state.transcript_viewer
             && !state.nested_agent_viewer
             && !state.workspace_diff_viewer
+            && !state.artifact_viewer
             && state.ragnarok.is_none()
             && !inline_resize_reflow.is_pending()
         {
@@ -1732,6 +1742,7 @@ fn should_force_inline_repair_for_event(mode: UiMode, state: &AppState, ev: &CtE
         && !state.transcript_viewer
         && !state.nested_agent_viewer
         && !state.workspace_diff_viewer
+        && !state.artifact_viewer
     {
         return true;
     }
@@ -1929,6 +1940,7 @@ fn should_run_inline_resize_reflow(
         && !state.transcript_viewer
         && !state.nested_agent_viewer
         && !state.workspace_diff_viewer
+        && !state.artifact_viewer
 }
 
 struct InlineResizeReflowSnapshot {
@@ -2298,7 +2310,10 @@ fn inline_viewport_resize_plan(
 fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
     // Full-history readers take the whole terminal (minus one row) so long
     // documents and complete nested-actor rosters are calm to page through.
-    if (state.transcript_viewer || state.nested_agent_viewer || state.workspace_diff_viewer)
+    if (state.transcript_viewer
+        || state.nested_agent_viewer
+        || state.workspace_diff_viewer
+        || state.artifact_viewer)
         && !state.has_pending_permission()
         && !state.has_pending_elicitation()
     {
@@ -2365,6 +2380,7 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
         usize::from(INLINE_CHAT_HEIGHT)
             + usize::from(queued_prompt_row_count(state))
             + usize::from(workflow_progress_row_count(state))
+            + usize::from(artifact_status_row_count(state, width))
             + usage_quota_row_count(state, width)
             + inline_transcript_tail_row_count(state, width)
     };
@@ -2406,6 +2422,7 @@ fn handle_crossterm(
                 || state.transcript_viewer
                 || state.nested_agent_viewer
                 || state.workspace_diff_viewer
+                || state.artifact_viewer
             {
                 return TerminalRequest::None;
             }
@@ -2416,7 +2433,7 @@ fn handle_crossterm(
         CtEvent::Mouse(mouse) => {
             // The diff reader does not support mouse scrolling yet. In
             // particular, do not mutate the hidden transcript's offset.
-            if state.workspace_diff_viewer || state.nested_agent_viewer {
+            if state.workspace_diff_viewer || state.nested_agent_viewer || state.artifact_viewer {
                 return TerminalRequest::None;
             } else if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
                 handle_transcript_viewer_mouse(state, mouse);
@@ -2502,6 +2519,22 @@ fn handle_crossterm(
         && state.ragnarok.is_none()
         && state.agent_picker.is_none()
         && state.config_picker.is_none()
+        && key.modifiers == KeyModifiers::ALT
+        && matches!(key.code, KeyCode::Char('o' | 'O'))
+    {
+        if state.artifact_viewer {
+            state.close_artifact_viewer();
+        } else if !state.open_artifact_viewer() {
+            state.status_line = Some(StatusMessage::info("no created pull requests to inspect"));
+        }
+        return inline_repair_request(mode);
+    }
+
+    if !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+        && state.ragnarok.is_none()
+        && state.agent_picker.is_none()
+        && state.config_picker.is_none()
         && key.modifiers == KeyModifiers::CONTROL
         && matches!(key.code, KeyCode::Char('g' | 'G'))
     {
@@ -2521,6 +2554,10 @@ fn handle_crossterm(
         && !state.has_pending_elicitation()
     {
         return handle_workspace_diff_viewer_key(state, key.modifiers, key.code, mode);
+    }
+    if state.artifact_viewer && !state.has_pending_permission() && !state.has_pending_elicitation()
+    {
+        return handle_artifact_viewer_key(state, key.modifiers, key.code, mode);
     }
     if state.nested_agent_viewer
         && !state.has_pending_permission()
@@ -2963,6 +3000,25 @@ async fn apply_terminal_request(
             copy_text_to_clipboard(state, &text, Some("URL"));
             Ok(())
         }
+        TerminalRequest::OpenUrl(url) => {
+            restore_terminal_for_auth(terminal, mode)?;
+            let opened = open_url_in_browser(&url);
+            let resumed = resume_terminal_after_auth(terminal, mode);
+            match (opened, resumed) {
+                (Ok(()), Ok(())) => {
+                    state.status_line =
+                        Some(StatusMessage::info("pull request opened in system browser"));
+                    Ok(())
+                }
+                (Err(error), Ok(())) => {
+                    state.status_line = Some(StatusMessage::warning(format!(
+                        "could not open browser: {error:#}; URL remains available to copy"
+                    )));
+                    Ok(())
+                }
+                (_, Err(error)) => Err(error.context("restore UI after opening browser")),
+            }
+        }
         TerminalRequest::Authenticate(vendor) => {
             restore_terminal_for_auth(terminal, mode)?;
             let login = crate::auth::run_login(vendor).await;
@@ -2977,6 +3033,49 @@ async fn apply_terminal_request(
             }
             Ok(())
         }
+    }
+}
+
+fn open_url_in_browser(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).context("parse browser URL")?;
+    ensure!(
+        matches!(parsed.scheme(), "http" | "https"),
+        "browser URL must use http or https"
+    );
+
+    #[cfg(target_os = "android")]
+    {
+        anyhow::bail!("opening the system browser is not supported on Android terminals");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        #[cfg(target_os = "macos")]
+        let mut command = {
+            let mut command = Command::new("open");
+            command.arg(url);
+            command
+        };
+        #[cfg(target_os = "windows")]
+        let mut command = {
+            let mut command = Command::new("rundll32");
+            command.args(["url.dll,FileProtocolHandler", url]);
+            command
+        };
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+        let mut command = {
+            let mut command = Command::new("xdg-open");
+            command.arg(url);
+            command
+        };
+
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("launch browser for {url}"))?;
+        Ok(())
     }
 }
 
@@ -4048,6 +4147,43 @@ fn handle_workspace_diff_viewer_key(
         KeyCode::End => state.workspace_diff_scroll_offset = usize::MAX,
         KeyCode::Char('n') if modifiers.is_empty() => state.select_workspace_diff_file(true),
         KeyCode::Char('p') if modifiers.is_empty() => state.select_workspace_diff_file(false),
+        _ => {}
+    }
+    TerminalRequest::None
+}
+
+fn handle_artifact_viewer_key(
+    state: &mut AppState,
+    modifiers: KeyModifiers,
+    code: KeyCode,
+    mode: UiMode,
+) -> TerminalRequest {
+    let alt_o = modifiers == KeyModifiers::ALT && matches!(code, KeyCode::Char('o' | 'O'));
+    if matches!(code, KeyCode::Esc)
+        || alt_o
+        || (modifiers.is_empty() && matches!(code, KeyCode::Char('q')))
+    {
+        state.close_artifact_viewer();
+        return inline_repair_request(mode);
+    }
+
+    match code {
+        KeyCode::Up | KeyCode::Left | KeyCode::Char('p') if modifiers.is_empty() => {
+            state.select_artifact(false);
+        }
+        KeyCode::Down | KeyCode::Right | KeyCode::Char('n') if modifiers.is_empty() => {
+            state.select_artifact(true);
+        }
+        KeyCode::Char('c' | 'C' | 'y' | 'Y') if modifiers.is_empty() => {
+            if let Some(artifact) = state.selected_artifact() {
+                return TerminalRequest::CopyText(artifact.pull_request().url.clone());
+            }
+        }
+        KeyCode::Char('o' | 'O') | KeyCode::Enter if modifiers.is_empty() => {
+            if let Some(artifact) = state.selected_artifact() {
+                return TerminalRequest::OpenUrl(artifact.pull_request().url.clone());
+            }
+        }
         _ => {}
     }
     TerminalRequest::None
@@ -5709,6 +5845,7 @@ fn draw(
 
     let queued_row = queued_prompt_row_count(state);
     let workflow_rows = workflow_progress_row_count(state);
+    let artifact_rows = artifact_status_row_count(state, f.area().width);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -5716,6 +5853,7 @@ fn draw(
             Constraint::Min(3),
             Constraint::Length(1),
             Constraint::Length(workflow_rows),
+            Constraint::Length(artifact_rows),
             Constraint::Length(queued_row),
             Constraint::Length(input_height),
             Constraint::Length(usage_quota_rows),
@@ -5727,15 +5865,18 @@ fn draw(
         draw_nested_agent_viewer(f, chunks[0], state, false);
     } else if state.workspace_diff_viewer {
         draw_workspace_diff_viewer(f, chunks[0], state, false);
+    } else if state.artifact_viewer {
+        draw_artifact_viewer(f, chunks[0], state, false);
     } else {
         draw_transcript(f, chunks[0], state, transcript_scroll);
     }
     draw_header(f, chunks[1], state);
     draw_workflow_progress_rows(f, chunks[2], state);
-    draw_queued_prompt_row(f, chunks[3], state);
-    draw_input(f, chunks[4], state, mode);
-    draw_usage_quota_row(f, chunks[5], state);
-    draw_config_shortcuts_row(f, chunks[6], state);
+    draw_artifact_status_rows(f, chunks[3], state);
+    draw_queued_prompt_row(f, chunks[4], state);
+    draw_input(f, chunks[5], state, mode);
+    draw_usage_quota_row(f, chunks[6], state);
+    draw_config_shortcuts_row(f, chunks[7], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -5897,10 +6038,16 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
         return;
     }
 
+    if state.artifact_viewer {
+        draw_artifact_viewer(f, f.area(), state, true);
+        return;
+    }
+
     let has_config_options = !state.selectable_config_options().is_empty();
     let usage_quota_rows = usage_quota_row_count(state, f.area().width) as u16;
     let queued_row = queued_prompt_row_count(state);
     let workflow_rows = workflow_progress_row_count(state);
+    let artifact_rows = artifact_status_row_count(state, f.area().width);
     let live_rows = inline_transcript_tail_row_count(state, f.area().width)
         .min(usize::from(f.area().height)) as u16;
     let chunks = Layout::default()
@@ -5909,6 +6056,7 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
             Constraint::Length(live_rows),
             Constraint::Length(1),
             Constraint::Length(workflow_rows),
+            Constraint::Length(artifact_rows),
             Constraint::Length(queued_row),
             Constraint::Min(MIN_INPUT_HEIGHT),
             Constraint::Length(usage_quota_rows),
@@ -5919,10 +6067,11 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     draw_inline_transcript_tail(f, chunks[0], state);
     draw_header(f, chunks[1], state);
     draw_workflow_progress_rows(f, chunks[2], state);
-    draw_queued_prompt_row(f, chunks[3], state);
-    draw_input(f, chunks[4], state, UiMode::InlineChat);
-    draw_usage_quota_row(f, chunks[5], state);
-    draw_config_shortcuts_row(f, chunks[6], state);
+    draw_artifact_status_rows(f, chunks[3], state);
+    draw_queued_prompt_row(f, chunks[4], state);
+    draw_input(f, chunks[5], state, UiMode::InlineChat);
+    draw_usage_quota_row(f, chunks[6], state);
+    draw_config_shortcuts_row(f, chunks[7], state);
 
     if state.autocomplete.visible
         && !state.has_pending_permission()
@@ -6574,6 +6723,139 @@ fn draw_nested_agent_viewer(
                 0,
             )),
             transcript_inner,
+        );
+    }
+    f.render_widget(
+        Paragraph::new(footer)
+            .style(Style::default().fg(state.theme.muted))
+            .wrap(Wrap { trim: false }),
+        layout[2],
+    );
+}
+
+fn draw_artifact_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppState, inline: bool) {
+    if inline {
+        f.render_widget(Clear, area);
+    }
+    let footer = "Alt-O/Esc close · Up/Down select · c copy URL · o/Enter open in system browser";
+    let footer_height = Paragraph::new(footer)
+        .wrap(Wrap { trim: false })
+        .line_count(area.width)
+        .max(1)
+        .min(u16::MAX as usize) as u16;
+    let indices = state.current_session_artifact_indices();
+    let selected_index = state
+        .selected_artifact_index()
+        .or_else(|| indices.last().copied());
+    let available = area.height.saturating_sub(footer_height);
+    let roster_height = (indices.len().saturating_add(2).min(u16::MAX as usize) as u16)
+        .min(available.saturating_sub(3).max(3));
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(roster_height),
+            Constraint::Min(3),
+            Constraint::Length(footer_height),
+        ])
+        .split(area);
+
+    let roster_block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(
+            " created pull requests — retained for this session ({}) ",
+            indices.len()
+        ))
+        .style(Style::default().fg(state.theme.agent));
+    let roster_inner = roster_block.inner(layout[0]);
+    f.render_widget(roster_block, layout[0]);
+    if roster_inner.width > 0 && roster_inner.height > 0 {
+        let rows = indices
+            .iter()
+            .filter_map(|index| {
+                let pull_request = state.artifacts.get(*index)?.pull_request();
+                let selected = selected_index == Some(*index);
+                let marker = if selected { "›" } else { " " };
+                let mut label = format!("{marker} {}", pull_request.short_label());
+                if let Some(status) = pull_request.status_label() {
+                    label.push_str(" · ");
+                    label.push_str(status);
+                }
+                if let Some(title) = pull_request.title.as_deref() {
+                    label.push_str(" · ");
+                    label.push_str(title);
+                }
+                Some(Line::from(Span::styled(
+                    truncate_text_to_width(label, roster_inner.width),
+                    if selected {
+                        Style::default()
+                            .fg(state.theme.selection_fg)
+                            .bg(state.theme.selection_bg)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(state.theme.primary)
+                    },
+                )))
+            })
+            .collect::<Vec<_>>();
+        let selected_position = selected_index
+            .and_then(|selected| indices.iter().position(|index| *index == selected))
+            .unwrap_or(0);
+        let visible = usize::from(roster_inner.height);
+        let start = selected_position
+            .saturating_sub(visible.saturating_sub(1))
+            .min(rows.len().saturating_sub(visible));
+        f.render_widget(
+            Paragraph::new(
+                rows.into_iter()
+                    .skip(start)
+                    .take(visible)
+                    .collect::<Vec<_>>(),
+            ),
+            roster_inner,
+        );
+    }
+
+    let selected = selected_index
+        .and_then(|index| state.artifacts.get(index))
+        .map(|artifact| artifact.pull_request());
+    let detail_title = selected
+        .map(|pull_request| format!(" {} ", pull_request.summary()))
+        .unwrap_or_else(|| " pull request artifact ".to_string());
+    let detail_block = Block::default()
+        .borders(Borders::ALL)
+        .title(detail_title)
+        .style(Style::default().fg(state.theme.secondary));
+    let detail_inner = detail_block.inner(layout[1]);
+    f.render_widget(detail_block, layout[1]);
+    if detail_inner.width > 0 && detail_inner.height > 0 {
+        let lines = selected.map_or_else(
+            || {
+                vec![Line::from(Span::styled(
+                    "No created pull request has been captured for this session.",
+                    Style::default().fg(state.theme.muted),
+                ))]
+            },
+            |pull_request| {
+                let mut lines = Vec::new();
+                if let Some(title) = pull_request.title.as_deref() {
+                    lines.push(Line::from(Span::styled(
+                        title.to_string(),
+                        Style::default()
+                            .fg(state.theme.primary)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    lines.push(Line::from(""));
+                }
+                lines.push(Line::from(Span::styled(
+                    pull_request.url.clone(),
+                    Style::default().fg(state.theme.secondary),
+                )));
+                lines
+            },
+        );
+        f.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            detail_inner,
         );
     }
     f.render_widget(
@@ -9632,6 +9914,70 @@ fn workflow_progress_row_count(state: &AppState) -> u16 {
     let visible = count.min(WORKFLOW_PROGRESS_VISIBLE_ROWS);
     let overflow = usize::from(count > WORKFLOW_PROGRESS_VISIBLE_ROWS);
     (visible + overflow).min(u16::MAX as usize) as u16
+}
+
+fn artifact_status_lines(state: &AppState) -> Vec<Line<'static>> {
+    let indices = state.current_session_artifact_indices();
+    let Some(latest) = indices
+        .last()
+        .and_then(|index| state.artifacts.get(*index))
+        .map(|artifact| artifact.pull_request())
+    else {
+        return Vec::new();
+    };
+    let count = indices.len();
+    let head = if count == 1 {
+        latest.summary()
+    } else {
+        let mut head = format!(
+            "{count} pull requests created · latest {}",
+            latest.short_label()
+        );
+        if let Some(status) = latest.status_label() {
+            head.push_str(" · ");
+            head.push_str(status);
+        }
+        head
+    };
+    vec![
+        Line::from(vec![
+            Span::styled(
+                format!(" {head}"),
+                Style::default()
+                    .fg(state.theme.success)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" · Alt-O actions", Style::default().fg(state.theme.muted)),
+        ]),
+        Line::from(Span::styled(
+            format!(" {}", latest.url),
+            Style::default().fg(state.theme.secondary),
+        )),
+    ]
+}
+
+fn artifact_status_row_count(state: &AppState, width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let lines = artifact_status_lines(state);
+    if lines.is_empty() {
+        return 0;
+    }
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .min(u16::MAX as usize) as u16
+}
+
+fn draw_artifact_status_rows(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    f.render_widget(
+        Paragraph::new(artifact_status_lines(state)).wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 /// One stable line per visible delegation or review workflow, shared by inline
@@ -13372,6 +13718,29 @@ mod tests {
         ContentChunk::new(ContentBlock::Text(TextContent::new(s)))
     }
 
+    fn add_test_pull_request_artifact(state: &mut AppState, number: u64, title: &str) {
+        if state.session_id.is_none() {
+            state.apply_event(UiEvent::SessionStarted {
+                session_id: "artifact-session".to_string(),
+                resumed: false,
+            });
+        }
+        if !state.is_streaming() {
+            state.record_user_prompt("publish the changes".to_string());
+        }
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new(format!("create-pr-{number}"), "create_pull_request")
+                .status(ToolCallStatus::Completed)
+                .raw_output(serde_json::json!({
+                    "repository_full_name": "BrokkAi/mjolnir",
+                    "number": number,
+                    "title": title,
+                    "draft": number.is_multiple_of(2),
+                    "state": "open"
+                })),
+        )));
+    }
+
     fn handle_crossterm(
         state: &mut AppState,
         cmd_tx: &mpsc::UnboundedSender<UiCommand>,
@@ -14530,6 +14899,100 @@ mod tests {
         assert!(line.contains("1 failed"), "{line}");
         assert!(line.contains("1 cancelled"), "{line}");
         assert!(!state.has_active_workflows());
+    }
+
+    #[test]
+    fn artifact_status_wraps_safely_and_remains_visible_during_a_turn() {
+        use crate::workflow::{
+            WorkflowEvent, WorkflowId, WorkflowKind, WorkflowPhase, WorkflowStage,
+            WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        add_test_pull_request_artifact(
+            &mut state,
+            487,
+            "surface created pull requests as durable turn results",
+        );
+        add_test_pull_request_artifact(&mut state, 488, "second pull request");
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            WorkflowId::delegation(1),
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Delegation,
+                stage: WorkflowStage::new(0, WorkflowPhase::Delegating),
+            },
+        )));
+
+        assert!(
+            artifact_status_row_count(&state, 24) > 2,
+            "narrow status should allocate wrapped rows instead of truncating"
+        );
+        let backend = TestBackend::new(32, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .expect("draw artifact status");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+
+        assert!(rendered.contains("pull requests created"), "{rendered}");
+        assert!(rendered.contains("BrokkAi/mjolnir#488"), "{rendered}");
+        assert!(rendered.contains("github.com"), "{rendered}");
+        assert!(rendered.contains("Alt-O"), "{rendered}");
+        assert!(
+            rendered.contains("Subagents"),
+            "workflow activity and the durable PR row must coexist: {rendered}"
+        );
+    }
+
+    #[test]
+    fn artifact_viewer_distinguishes_multiple_prs_and_exposes_copy_and_open_actions() {
+        let mut state = AppState::new();
+        add_test_pull_request_artifact(&mut state, 487, "first pull request");
+        add_test_pull_request_artifact(&mut state, 488, "second pull request");
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        let request = handle_inline_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('o'), KeyModifiers::ALT),
+        );
+        assert_eq!(request, TerminalRequest::ForceInlineRepair);
+        assert!(state.artifact_viewer);
+        assert_eq!(
+            state.selected_artifact().unwrap().pull_request().number,
+            488
+        );
+
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        assert_eq!(
+            state.selected_artifact().unwrap().pull_request().number,
+            487
+        );
+        assert_eq!(
+            handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('c'))),
+            TerminalRequest::CopyText("https://github.com/BrokkAi/mjolnir/pull/487".to_string())
+        );
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        assert_eq!(
+            handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter)),
+            TerminalRequest::OpenUrl("https://github.com/BrokkAi/mjolnir/pull/488".to_string())
+        );
+
+        let backend = TestBackend::new(52, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_artifact_viewer(frame, frame.area(), &mut state, true))
+            .expect("draw artifact viewer");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("BrokkAi/mjolnir#487"), "{rendered}");
+        assert!(rendered.contains("BrokkAi/mjolnir#488"), "{rendered}");
+        assert!(rendered.contains("copy URL"), "{rendered}");
+        assert!(rendered.contains("open in system browser"), "{rendered}");
+    }
+
+    #[test]
+    fn browser_action_rejects_non_web_urls_before_launching_a_process() {
+        assert!(open_url_in_browser("file:///tmp/not-a-pr").is_err());
     }
 
     #[test]
