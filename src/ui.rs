@@ -7197,6 +7197,27 @@ fn render_transcript_entry_range(
         .next_back();
     for (offset, entry) in state.transcript[entry_range.clone()].iter().enumerate() {
         let entry_index = entry_range.start + offset;
+        // The streaming reveal controller deliberately withholds an active
+        // prose entry until it has a safe chunk to show. Do not leave its
+        // speaker label and trailing blank row behind in the meantime: that
+        // creates a phantom transcript boundary before the actual Markdown
+        // arrives. Once any source becomes visible, the normal renderer
+        // owns the same boundary in fullscreen, inline, and reader views.
+        let prose_is_temporarily_hidden = match entry {
+            Entry::AgentMessage(text) | Entry::SubagentMessage(text) => {
+                !text.is_empty() && state.stream_visible_text(entry_index, text).is_empty()
+            }
+            Entry::AgentThought(thought) | Entry::SubagentThought(thought) => {
+                !thought.text.is_empty()
+                    && state
+                        .stream_visible_text(entry_index, &thought.text)
+                        .is_empty()
+            }
+            _ => false,
+        };
+        if prose_is_temporarily_hidden {
+            continue;
+        }
         let compact_turn = if compact_completed_turns {
             turns.iter().find(|turn| {
                 turn.is_compactable && (turn.prompt_index..turn.end).contains(&entry_index)
@@ -13116,6 +13137,39 @@ mod tests {
         assert_eq!(
             state.stream_visible_text(entry_index, &canonical),
             canonical
+        );
+    }
+
+    #[test]
+    fn hidden_streamed_markdown_does_not_leave_a_phantom_agent_boundary() {
+        let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Streaming);
+        state
+            .transcript
+            .push(Entry::UserPrompt("summarize this".to_string()));
+        state
+            .transcript
+            .push(Entry::AgentMessage("# Result\n- **ready**".to_string()));
+        let entry_index = 1;
+        state.set_stream_visible_bytes(entry_index, 0);
+
+        let hidden: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(hidden, ["You", "summarize this", ""]);
+
+        state.set_stream_visible_bytes(entry_index, "# Result\n".len());
+        let visible = render_transcript_lines(&state, 80);
+        let rendered: Vec<String> = visible.iter().map(line_text).collect();
+        assert_eq!(
+            rendered,
+            ["You", "summarize this", "", "agent", "# Result", "", ""]
+        );
+        let heading = visible.iter().find(|line| line_text(line) == "# Result");
+        assert_eq!(
+            heading.expect("visible Markdown heading").spans[0].style.fg,
+            Some(state.theme.primary)
         );
     }
 
