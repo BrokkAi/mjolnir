@@ -527,6 +527,23 @@ impl TranscriptSink {
         out
     }
 
+    fn pending_lines_for_exit(&mut self, state: &AppState, width: u16) -> Vec<Line<'static>> {
+        let mut out = self.pending_lines(state, width);
+        if self.emitted_entries < state.transcript.len() {
+            out.extend(render_transcript_entry_range(
+                state,
+                width,
+                self.emitted_entries..state.transcript.len(),
+                transcript_collapse_limit(state),
+                state.theme,
+                false,
+            ));
+            self.emitted_entries = state.transcript.len();
+            self.deferred_tool_separator = false;
+        }
+        out
+    }
+
     fn mark_emitted(&mut self, entries: usize) {
         self.emitted_entries = entries;
         // The resize rebuild re-renders the whole stable range in one pass,
@@ -1530,6 +1547,9 @@ async fn ui_loop(
             last_draw = Instant::now();
         }
     }
+    if mode == UiMode::InlineChat {
+        flush_transcript_to_scrollback_for_exit(terminal, &mut transcript_sink, &state)?;
+    }
     cancel_dictation_for_exit(&mut state, &mut dictation_cancel_tx);
     if mode == UiMode::FullscreenTui {
         reset_text_selection_mode_for_exit(&mut state, |enabled| {
@@ -1802,6 +1822,23 @@ fn flush_transcript_to_scrollback(
     sink: &mut TranscriptSink,
     state: &AppState,
 ) -> Result<()> {
+    flush_transcript_lines_to_scrollback(terminal, sink, state, false)
+}
+
+fn flush_transcript_to_scrollback_for_exit(
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
+    sink: &mut TranscriptSink,
+    state: &AppState,
+) -> Result<()> {
+    flush_transcript_lines_to_scrollback(terminal, sink, state, true)
+}
+
+fn flush_transcript_lines_to_scrollback(
+    terminal: &mut Terminal<TrackedBackend<Stdout>>,
+    sink: &mut TranscriptSink,
+    state: &AppState,
+    exiting: bool,
+) -> Result<()> {
     let width = match terminal.size() {
         Ok(size) => size.width,
         Err(e) if is_cursor_position_timeout_io(&e) => {
@@ -1813,7 +1850,11 @@ fn flush_transcript_to_scrollback(
     if width == 0 {
         return Ok(());
     }
-    let lines = sink.pending_lines(state, width);
+    let lines = if exiting {
+        sink.pending_lines_for_exit(state, width)
+    } else {
+        sink.pending_lines(state, width)
+    };
     if lines.is_empty() {
         return Ok(());
     }
@@ -15345,6 +15386,32 @@ mod tests {
             .collect();
         assert_eq!(rendered, vec!["agent", "world", ""]);
         assert!(sink.pending_lines(&state, 80).is_empty());
+    }
+
+    #[test]
+    fn transcript_sink_flushes_visible_streaming_answer_on_exit() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        state.record_user_prompt("hello".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("visible final answer"),
+        )));
+
+        let before_exit: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(before_exit, vec!["You", "hello", ""]);
+
+        let on_exit: Vec<String> = sink
+            .pending_lines_for_exit(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(on_exit, vec!["agent", "visible final answer", ""]);
+        assert!(sink.pending_lines_for_exit(&state, 80).is_empty());
     }
 
     #[test]
