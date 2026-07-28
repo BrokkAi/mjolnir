@@ -45,8 +45,8 @@ use tokio_util::sync::CancellationToken;
 use crate::acp::{self, AcpRuntimeConfig, RuntimeAccessMode};
 use crate::agent_usage::{Record, Seat};
 use crate::event::{
-    InternalMessage, InternalMessageKind, PromptImage, SubagentEvent, SubagentOutcome, UiCommand,
-    UiEvent, content_block_text,
+    InternalMessage, InternalMessageKind, PromptImage, SubagentEvent, SubagentOutcome,
+    SubagentStatusKind, UiCommand, UiEvent, content_block_text,
 };
 use crate::ragnarok::PromptToolLifecycle;
 use crate::roster::{ResolvedAgent, Roster};
@@ -824,6 +824,7 @@ pub(crate) struct ProgrammaticJob {
     pub preamble: String,
     pub mcp_servers: Vec<McpServer>,
     pub retain_after_completion: bool,
+    pub workflow: Option<crate::workflow::WorkflowActorContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -844,6 +845,7 @@ struct RunPolicy {
     /// remain visible while they wait for another injected turn. Public MCP
     /// subagents keep their existing per-turn `Finished` behavior.
     defer_finished_while_retained: bool,
+    workflow: Option<crate::workflow::WorkflowActorContext>,
 }
 
 impl RunPolicy {
@@ -855,6 +857,7 @@ impl RunPolicy {
             retain_after_completion: config.retain_after_completion,
             allow_warm_runtime: true,
             defer_finished_while_retained: false,
+            workflow: None,
         }
     }
 
@@ -868,6 +871,7 @@ impl RunPolicy {
             // MCP list, so a job-specific list always requires a fresh runtime.
             allow_warm_runtime: false,
             defer_finished_while_retained: job.retain_after_completion,
+            workflow: job.workflow.clone(),
         }
     }
 }
@@ -2538,6 +2542,9 @@ async fn run(
         control_tx,
     } = lease;
     let mut cancel_respond: Option<oneshot::Sender<SubagentRunResult>> = None;
+    if let Some(workflow) = policy.workflow.as_ref() {
+        workflow.started(subagent_id);
+    }
     let use_warm = spec.role.is_none() && policy.allow_warm_runtime;
     let mut quota_role = None;
     match spec.role.clone() {
@@ -2568,8 +2575,11 @@ async fn run(
                         );
                         let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Finished {
                             subagent_id,
-                            outcome: SubagentOutcome::Failed(message),
+                            outcome: SubagentOutcome::Failed(message.clone()),
                         }));
+                        if let Some(workflow) = policy.workflow.as_ref() {
+                            workflow.finished(subagent_id, SubagentOutcome::Failed(message));
+                        }
                         return;
                     }
                 }
@@ -2604,9 +2614,11 @@ async fn run(
         target: format!("subagent #{subagent_id}"),
         kind: InternalMessageKind::Delegation,
         text: task.clone(),
+        owner_subagent_id: Some(subagent_id),
     }));
     let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Started {
         subagent_id,
+        resumed: false,
         label: label.clone(),
         model: Some(model_id.clone()),
         agent: agent_id.clone(),
@@ -2683,6 +2695,7 @@ async fn run(
                             awaiting_cancel_settle = true;
                             let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Status {
                                 subagent_id,
+                                kind: SubagentStatusKind::Info,
                                 message: "cancellation requested; stopping the in-flight turn".to_string(),
                             }));
                             let _ = nested_cmd_tx.send(UiCommand::CancelPrompt);
@@ -2724,6 +2737,15 @@ async fn run(
                         UiEvent::Connected { .. } => {}
                         UiEvent::ContextCompacted => {}
                         UiEvent::SessionStarted { session_id: started, .. } if awaiting_session_start => {
+                            if let Some(workflow) = policy.workflow.as_ref() {
+                                workflow.session_bound(subagent_id, started.clone());
+                            }
+                            let _ = ui_tx.send(UiEvent::Subagent(
+                                SubagentEvent::SessionStarted {
+                                    subagent_id,
+                                    session_id: started.clone(),
+                                },
+                            ));
                             session_id = Some(started);
                             awaiting_session_start = false;
                             if let Some((prompt, images)) = prompt_to_send.take()
@@ -2740,6 +2762,7 @@ async fn run(
                         UiEvent::SessionStarted { .. }
                         | UiEvent::SessionConfigOptions { .. }
                         | UiEvent::RosterUpdate { .. }
+                        | UiEvent::Workflow(_)
                         | UiEvent::WorkspaceDiff(_) => {}
                         UiEvent::SessionUpdate(update) => {
                             tool_lifecycle.observe(&update);
@@ -2797,9 +2820,17 @@ async fn run(
                                 SubagentEvent::CancelPendingPermissions { subagent_id },
                             ));
                         }
-                        UiEvent::Info(message) | UiEvent::Warning(message) => {
+                        UiEvent::Info(message) => {
                             let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Status {
                                 subagent_id,
+                                kind: SubagentStatusKind::Info,
+                                message,
+                            }));
+                        }
+                        UiEvent::Warning(message) => {
+                            let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Status {
+                                subagent_id,
+                                kind: SubagentStatusKind::Warning,
                                 message,
                             }));
                         }
@@ -2900,8 +2931,11 @@ async fn run(
                 terminal_finished_pending = false;
                 let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Finished {
                     subagent_id,
-                    outcome,
+                    outcome: outcome.clone(),
                 }));
+                if let Some(workflow) = policy.workflow.as_ref() {
+                    workflow.finished(subagent_id, outcome);
+                }
             }
             if turn_result.is_err() {
                 // A failed turn leaves no session worth resuming.
@@ -2918,12 +2952,13 @@ async fn run(
                 "subagent finished and its session was retained for resume"
             );
             let message = if policy.defer_finished_while_retained {
-                "waiting for coordinator input; session retained for resume"
+                "turn complete; session retained for automatic resume"
             } else {
                 "finished; session retained for resume"
             };
             let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Status {
                 subagent_id,
+                kind: SubagentStatusKind::Info,
                 message: message.to_string(),
             }));
 
@@ -2968,8 +3003,12 @@ async fn run(
                         Some(WorkerRequest::Continue { prompt }) => {
                             // The pool slot was already re-acquired by the
                             // resume call before it handed us this prompt.
+                            if let Some(workflow) = policy.workflow.as_ref() {
+                                workflow.resumed(subagent_id);
+                            }
                             let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Started {
                                 subagent_id,
+                                resumed: true,
                                 label: label.clone(),
                                 model: Some(model_id.clone()),
                                 agent: agent_id.clone(),
@@ -3063,8 +3102,11 @@ async fn run(
         };
         let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Finished {
             subagent_id,
-            outcome,
+            outcome: outcome.clone(),
         }));
+        if let Some(workflow) = policy.workflow.as_ref() {
+            workflow.finished(subagent_id, outcome);
+        }
     }
 
     if let Some(respond) = cancel_respond {
@@ -3098,6 +3140,9 @@ async fn run(
                 subagent_id,
                 outcome: SubagentOutcome::Cancelled,
             }));
+            if let Some(workflow) = policy.workflow.as_ref() {
+                workflow.finished(subagent_id, SubagentOutcome::Cancelled);
+            }
         }
         let _ = respond.send(SubagentRunResult {
             outcome: result,
@@ -3139,8 +3184,11 @@ async fn run(
         );
         let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Finished {
             subagent_id,
-            outcome,
+            outcome: outcome.clone(),
         }));
+        if let Some(workflow) = policy.workflow.as_ref() {
+            workflow.finished(subagent_id, outcome);
+        }
     }
 
     if result
@@ -4596,6 +4644,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_runtime_preserves_warning_severity_for_the_primary_ui() {
+        let mut run = spawn_fake_run().await;
+        run.nested_events
+            .send(UiEvent::SessionStarted {
+                session_id: "s1".to_string(),
+                resumed: false,
+            })
+            .expect("session started");
+        let _ = run.nested_commands.recv().await.expect("prompt");
+        run.nested_events
+            .send(UiEvent::Warning("provider rate limit is near".to_string()))
+            .expect("warning");
+
+        loop {
+            if let SubagentEvent::Status {
+                subagent_id,
+                kind,
+                message,
+            } = next_visible_subagent_event(&mut run.ui_events).await
+            {
+                assert_eq!(subagent_id, run.subagent_id);
+                assert_eq!(kind, SubagentStatusKind::Warning);
+                assert_eq!(message, "provider rate limit is near");
+                break;
+            }
+        }
+
+        assert!(run.controller.cancel_and_wait().await);
+    }
+
+    #[tokio::test]
     async fn a_finished_run_reports_and_retains_its_session_for_resume() {
         let mut run = spawn_fake_run().await;
         run.nested_events
@@ -4712,7 +4791,8 @@ mod tests {
                 SubagentEvent::Status {
                     subagent_id,
                     message,
-                } if message.contains("waiting for coordinator input") => {
+                    ..
+                } if message.contains("session retained for automatic resume") => {
                     assert_eq!(subagent_id, run.subagent_id);
                     break;
                 }

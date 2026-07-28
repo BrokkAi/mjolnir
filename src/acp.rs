@@ -4300,6 +4300,25 @@ fn select_runtime_permission_value(
     )
 }
 
+fn warn_runtime_permission_failure(
+    warnings: &mut Vec<String>,
+    role: &RuntimeRoleConfig,
+    permission: &crate::roster::RuntimePermissionConfig,
+    error: impl std::fmt::Display,
+) {
+    let text = format!(
+        "{} permission mode '{}' was not applied: {error}",
+        role.label, permission.mode
+    );
+    tracing::warn!(
+        requested_permission_mode = %permission.mode,
+        requested_permission_value = %permission.value,
+        config_id = %permission.config_id,
+        "{text}"
+    );
+    warnings.push(text);
+}
+
 async fn apply_saved_session_config(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -4490,39 +4509,65 @@ async fn apply_runtime_role_config(
 
     let mut warnings = Vec::new();
     if let Some(permission) = role.permission.as_ref() {
-        let option_index = session_config
+        let option_index = match session_config
             .targets
             .iter()
             .position(|target| {
                 matches!(target, SessionConfigTarget::ConfigOption { config_id } if config_id.to_string() == permission.config_id)
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ACP adapter did not advertise permission configuration '{}'",
-                    permission.config_id
-                )
-            })?;
-        let (value, used_fallback) =
-            select_runtime_permission_value(&session_config.options[option_index], permission)?;
-        if used_fallback {
-            warnings.push(format!(
-                "{} does not support Auto permissions for this model; using Manual",
-                role.label
-            ));
-        }
-        if config_option_current_value(&session_config.options[option_index]) != Some(&value) {
-            let target = session_config.targets[option_index].clone();
-            match send_config_update(conn, session_id, target.clone(), value.clone()).await? {
-                Some(options) => {
-                    session_config.targets = config_option_targets(&options);
-                    session_config.options = options;
+            }) {
+            Some(index) => Some(index),
+            None => {
+                warn_runtime_permission_failure(
+                    &mut warnings,
+                    role,
+                    permission,
+                    format!(
+                        "ACP adapter did not advertise permission configuration '{}'",
+                        permission.config_id
+                    ),
+                );
+                None
+            }
+        };
+        if let Some(option_index) = option_index {
+            match select_runtime_permission_value(&session_config.options[option_index], permission)
+            {
+                Ok((value, used_fallback)) => {
+                    if used_fallback {
+                        warnings.push(format!(
+                            "{} does not support Auto permissions for this model; using Manual",
+                            role.label
+                        ));
+                    }
+                    if config_option_current_value(&session_config.options[option_index])
+                        != Some(&value)
+                    {
+                        let target = session_config.targets[option_index].clone();
+                        match send_config_update(conn, session_id, target.clone(), value.clone())
+                            .await
+                        {
+                            Ok(Some(options)) => {
+                                session_config.targets = config_option_targets(&options);
+                                session_config.options = options;
+                            }
+                            Ok(None) => set_current_config_value(
+                                &mut session_config.options,
+                                &session_config.targets,
+                                &target,
+                                &value,
+                            ),
+                            Err(error) => warn_runtime_permission_failure(
+                                &mut warnings,
+                                role,
+                                permission,
+                                error,
+                            ),
+                        }
+                    }
                 }
-                None => set_current_config_value(
-                    &mut session_config.options,
-                    &session_config.targets,
-                    &target,
-                    &value,
-                ),
+                Err(error) => {
+                    warn_runtime_permission_failure(&mut warnings, role, permission, error);
+                }
             }
         }
     }
@@ -6726,6 +6771,69 @@ mod tests {
             .await;
     }
 
+    async fn run_mock_agent_rejecting_permission_config(
+        stream: tokio::io::DuplexStream,
+        saw_permission_update: Arc<StdAtomicBool>,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let model_option = SessionConfigOption::select(
+            "model",
+            "Model",
+            "model-a",
+            vec![SessionConfigSelectOption::new("model-a", "Model A")],
+        )
+        .category(SessionConfigOptionCategory::Model);
+        let permission_option = SessionConfigOption::select(
+            "permission_mode",
+            "Permission mode",
+            "default",
+            vec![
+                SessionConfigSelectOption::new("default", "Manual"),
+                SessionConfigSelectOption::new("bypassPermissions", "Bypass permissions"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Mode);
+        let config_options = vec![model_option, permission_option];
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(InitializeResponse::new(
+                        agent_client_protocol::schema::ProtocolVersion::V1,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        NewSessionResponse::new(SessionId::new("test-session"))
+                            .config_options(config_options.clone()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: SetSessionConfigOptionRequest, _responder, _cx| {
+                    assert_eq!(req.config_id.to_string(), "permission_mode");
+                    assert_eq!(req.value.to_string(), "bypassPermissions");
+                    saw_permission_update.store(true, Ordering::SeqCst);
+                    Err::<(), _>(agent_client_protocol::Error::invalid_params())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
     async fn run_mock_agent_with_additional_directories(
         stream: tokio::io::DuplexStream,
         expected_additional_directories: Vec<PathBuf>,
@@ -8129,6 +8237,86 @@ mod tests {
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_role_permission_rejection_warns_with_requested_mode() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let saw_permission_update = Arc::new(StdAtomicBool::new(false));
+
+        let agent_task = tokio::spawn(run_mock_agent_rejecting_permission_config(
+            agent_side,
+            saw_permission_update.clone(),
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let role_config = RuntimeRoleConfig {
+            label: "primary".to_string(),
+            model_id: "model-a".to_string(),
+            model_value: "model-a".to_string(),
+            adapter_source_id: "brokk-acp-rust".to_string(),
+            permission: Some(crate::roster::RuntimePermissionConfig {
+                config_id: "permission_mode".to_string(),
+                value: "bypassPermissions".to_string(),
+                manual_fallback: None,
+                mode: crate::config::PermissionPreset::Yolo,
+            }),
+            session_tag: None,
+            reasoning_effort: None,
+        };
+
+        let client_task = tokio::spawn(drive_client_with_fs_limit(
+            client_transport,
+            std::env::temp_dir(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            SessionRestoreMode::Continue,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+            DEFAULT_FS_TEXT_BYTES,
+            RuntimeAccessMode::Full,
+            None,
+            None,
+            HashMap::new(),
+            Some(role_config),
+            None,
+            false,
+        ));
+
+        let mut saw_warning = false;
+        let mut saw_session = false;
+        while !(saw_warning && saw_session) {
+            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for setup events")
+                .expect("channel closed");
+            match ev {
+                UiEvent::Warning(message) => {
+                    saw_warning = true;
+                    assert!(
+                        message.contains("permission mode 'YOLO' was not applied"),
+                        "unexpected warning: {message}"
+                    );
+                }
+                UiEvent::SessionStarted { .. } => saw_session = true,
+                UiEvent::Fatal(message) => panic!("unexpected fatal: {message}"),
+                _ => {}
+            }
+        }
+        assert!(saw_permission_update.load(Ordering::SeqCst));
+
+        drop(cmd_tx);
+        let join = tokio::time::timeout(Duration::from_secs(2), client_task)
+            .await
+            .expect("drive_client did not return after cmd channel drop");
+        join.expect("client task panicked")
+            .expect("drive_client returned error");
         agent_task.abort();
     }
 

@@ -77,14 +77,15 @@ pub fn configure_permissions(
         (AdapterKind::Claude, PermissionPreset::Auto) => ("mode", "auto", Some("default")),
         (AdapterKind::Claude, PermissionPreset::Yolo) => ("mode", "bypassPermissions", None),
         (AdapterKind::Kimi, _) => return None,
-        (AdapterKind::Anvil, PermissionPreset::Manual) => ("permission_mode", "default", None),
-        (AdapterKind::Anvil, PermissionPreset::Auto) => {
+        (AdapterKind::Anvil | AdapterKind::Custom, PermissionPreset::Manual) => {
+            ("permission_mode", "default", None)
+        }
+        (AdapterKind::Anvil | AdapterKind::Custom, PermissionPreset::Auto) => {
             ("permission_mode", "auto", Some("default"))
         }
-        (AdapterKind::Anvil, PermissionPreset::Yolo) => {
+        (AdapterKind::Anvil | AdapterKind::Custom, PermissionPreset::Yolo) => {
             ("permission_mode", "bypassPermissions", None)
         }
-        (AdapterKind::Custom, _) => return None,
     };
     Some(RuntimePermissionConfig {
         config_id: config_id.to_string(),
@@ -1177,6 +1178,28 @@ mod tests {
             .expect("Anvil preset");
         assert_eq!(anvil.config_id, "permission_mode");
         assert_eq!(anvil.value, "bypassPermissions");
+    }
+
+    #[test]
+    fn custom_explicit_yolo_permission_uses_anvil_config_option() {
+        let mut env = HashMap::new();
+        let custom = configure_permissions(AdapterKind::Custom, PermissionPreset::Yolo, &mut env)
+            .expect("Custom preset");
+
+        assert_eq!(custom.config_id, "permission_mode");
+        assert_eq!(custom.value, "bypassPermissions");
+        assert_eq!(custom.manual_fallback, None);
+        assert_eq!(custom.mode, PermissionPreset::Yolo);
+    }
+
+    #[test]
+    fn custom_without_explicit_permission_mode_sends_no_config() {
+        let mut env = HashMap::new();
+        let omitted: Option<PermissionPreset> = None;
+        let custom =
+            omitted.and_then(|mode| configure_permissions(AdapterKind::Custom, mode, &mut env));
+
+        assert_eq!(custom, None);
     }
 
     fn option(value: &str) -> probe::ModelOption {

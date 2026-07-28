@@ -56,6 +56,7 @@ mod trajectory;
 mod ui;
 mod usage_format;
 mod version;
+mod workflow;
 mod workspace_snapshot;
 mod worktree;
 
@@ -125,8 +126,8 @@ struct Cli {
     /// `manual` rejects permission prompts so headless runs never hang.
     /// `auto` accepts edit/delete/move prompts but rejects shell execution.
     /// `yolo` accepts every permission prompt.
-    #[arg(long, value_enum, default_value_t = HeadlessPermissionMode::Manual)]
-    permission_mode: HeadlessPermissionMode,
+    #[arg(long, value_enum)]
+    permission_mode: Option<HeadlessPermissionMode>,
 
     /// Working directory used when opening a new session. Defaults to
     /// the current directory.
@@ -403,6 +404,16 @@ impl From<HeadlessPermissionMode> for headless::PermissionMode {
     }
 }
 
+impl From<HeadlessPermissionMode> for config::PermissionPreset {
+    fn from(value: HeadlessPermissionMode) -> Self {
+        match value {
+            HeadlessPermissionMode::Manual => Self::Manual,
+            HeadlessPermissionMode::Auto => Self::Auto,
+            HeadlessPermissionMode::Yolo => Self::Yolo,
+        }
+    }
+}
+
 fn ui_mode(fullscreen_tui: bool) -> UiMode {
     if fullscreen_tui {
         UiMode::FullscreenTui
@@ -461,6 +472,7 @@ async fn main() -> Result<()> {
                     fs_max_text_bytes,
                     top_level_additional_directories,
                     debug_file,
+                    cli.permission_mode.map(Into::into),
                     termination.token(),
                 )
                 .await
@@ -497,7 +509,11 @@ async fn main() -> Result<()> {
             snapshot_exclusions,
             fs_max_text_bytes,
             output_format: cli.output_format.into(),
-            permission_mode: cli.permission_mode.into(),
+            permission_mode: cli
+                .permission_mode
+                .unwrap_or(HeadlessPermissionMode::Manual)
+                .into(),
+            permission_config_mode: cli.permission_mode.map(Into::into),
             role_overrides: config::ModelOverrides {
                 primary: cli.model.as_ref().map(|(model, _)| model.clone()),
                 primary_effort: cli.model.and_then(|(_, effort)| effort),
@@ -520,6 +536,7 @@ async fn main() -> Result<()> {
             snapshot_exclusions,
             additional_directories: workspace_roots.additional_directories().to_vec(),
             fs_max_text_bytes,
+            permission_mode: cli.permission_mode.map(Into::into),
             termination: termination.token(),
         },
         project_label,
@@ -732,6 +749,7 @@ async fn run_resume(
     fs_max_text_bytes: u64,
     top_level_additional_directories: Vec<PathBuf>,
     debug_file: Option<PathBuf>,
+    permission_mode: Option<config::PermissionPreset>,
     termination: CancellationToken,
 ) -> Result<()> {
     let mode = ui_mode(args.fullscreen_tui);
@@ -857,6 +875,7 @@ async fn run_resume(
                 ),
                 additional_directories: additional_directories.clone(),
                 fs_max_text_bytes,
+                permission_mode,
                 termination: termination.clone(),
             },
             project_label,
@@ -948,6 +967,7 @@ async fn run_resume(
                         agent_stderr: args.agent_stderr,
                         additional_directories: additional_directories.clone(),
                         fs_max_text_bytes,
+                        permission_mode,
                         termination: termination.clone(),
                     },
                     project_label,
@@ -1125,6 +1145,7 @@ struct RuntimeOptions {
     snapshot_exclusions: Vec<PathBuf>,
     additional_directories: Vec<PathBuf>,
     fs_max_text_bytes: u64,
+    permission_mode: Option<config::PermissionPreset>,
     termination: CancellationToken,
 }
 
@@ -2001,6 +2022,10 @@ async fn run_session(
     // need the pool that is about to move into the subagent config.
     let review_workers = subagent_pool.clone();
 
+    let mut primary_env = agent.env.clone();
+    let primary_permission = runtime_options.permission_mode.and_then(|mode| {
+        roster::configure_permissions(roster.primary.launch.kind, mode, &mut primary_env)
+    });
     let runtime_cfg = acp::AcpRuntimeConfig {
         command: agent.program.clone(),
         args: agent.args.clone(),
@@ -2009,7 +2034,7 @@ async fn run_session(
         mcp_servers: Vec::new(),
         resume_session,
         session_restore_mode: acp::SessionRestoreMode::Replay,
-        env: agent.env.clone(),
+        env: primary_env,
         agent_stderr: runtime_options.agent_stderr.clone(),
         fs_max_text_bytes: runtime_options.fs_max_text_bytes,
         access_mode: acp::RuntimeAccessMode::Full,
@@ -2021,7 +2046,7 @@ async fn run_session(
             model_id: roster.primary.model.model.clone(),
             model_value: roster.primary.model_value.clone(),
             adapter_source_id: roster.primary.launch.source_id.clone(),
-            permission: None,
+            permission: primary_permission,
             session_tag: Some(session_tag.clone()),
             reasoning_effort: roster.primary.reasoning_effort.clone(),
         }),
@@ -3541,36 +3566,42 @@ mod tests {
             Cli::try_parse_from(["mj", "--permission-mode", "auto"]).expect("parse canonical");
         assert!(matches!(
             canonical.permission_mode,
-            HeadlessPermissionMode::Auto
+            Some(HeadlessPermissionMode::Auto)
         ));
 
         let legacy =
             Cli::try_parse_from(["mj", "--permission-mode", "acceptEdits"]).expect("parse legacy");
         assert!(matches!(
             legacy.permission_mode,
-            HeadlessPermissionMode::Auto
+            Some(HeadlessPermissionMode::Auto)
         ));
 
         let canonical =
             Cli::try_parse_from(["mj", "--permission-mode", "yolo"]).expect("parse canonical");
         assert!(matches!(
             canonical.permission_mode,
-            HeadlessPermissionMode::Yolo
+            Some(HeadlessPermissionMode::Yolo)
         ));
 
         let legacy = Cli::try_parse_from(["mj", "--permission-mode", "bypassPermissions"])
             .expect("parse legacy");
         assert!(matches!(
             legacy.permission_mode,
-            HeadlessPermissionMode::Yolo
+            Some(HeadlessPermissionMode::Yolo)
         ));
 
         let legacy =
             Cli::try_parse_from(["mj", "--permission-mode", "default"]).expect("parse legacy");
         assert!(matches!(
             legacy.permission_mode,
-            HeadlessPermissionMode::Manual
+            Some(HeadlessPermissionMode::Manual)
         ));
+    }
+
+    #[test]
+    fn parse_leaves_permission_mode_unset_when_omitted() {
+        let cli = Cli::try_parse_from(["mj"]).expect("parse");
+        assert!(cli.permission_mode.is_none());
     }
 
     #[test]

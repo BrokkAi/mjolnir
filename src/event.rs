@@ -43,14 +43,18 @@ pub struct WorkspaceDiffEvent {
     pub truncated: bool,
 }
 
-/// An orchestration prompt shown as ordinary transcript prose while
-/// retaining its complete text for expansion and export.
+/// An orchestration packet retained by its owning nested actor. Primary
+/// consumers may summarize the packet without exposing its full payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InternalMessage {
     pub source: String,
     pub target: String,
     pub kind: InternalMessageKind,
     pub text: String,
+    /// Nested actor whose private transcript owns this orchestration packet.
+    /// `None` means it belongs to primary orchestration and is summarized
+    /// rather than exposed as nested ACP detail.
+    pub owner_subagent_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +138,9 @@ pub enum UiEvent {
     /// tool. Kept under one wrapper so nested lifecycle/config state cannot be
     /// mistaken for the primary session's state.
     Subagent(SubagentEvent),
+    /// Runtime-owned workflow state transition. Unlike transcript prose and
+    /// generic subagent labels, this is safe to use as lifecycle authority.
+    Workflow(crate::workflow::WorkflowEvent),
     /// The runtime sent `session/cancel`; queued permission prompts for the
     /// cancelled turn must answer with `cancelled` and disappear.
     CancelPendingPermissions,
@@ -172,6 +179,13 @@ pub enum UiEvent {
     Fatal(String),
 }
 
+/// Severity of a nested runtime status update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentStatusKind {
+    Info,
+    Warning,
+}
+
 /// Lifecycle and activity of one background subagent. Every variant carries
 /// `subagent_id` so concurrent subagents stay distinguishable in the TUI,
 /// headless stream, and remote viewer.
@@ -179,6 +193,8 @@ pub enum UiEvent {
 pub enum SubagentEvent {
     Started {
         subagent_id: u64,
+        /// True when a retained ACP session is continuing another turn.
+        resumed: bool,
         label: String,
         model: Option<String>,
         agent: String,
@@ -188,6 +204,11 @@ pub enum SubagentEvent {
     Activity {
         subagent_id: u64,
         activity: String,
+    },
+    /// Stable ACP session identity for this retained actor.
+    SessionStarted {
+        subagent_id: u64,
+        session_id: String,
     },
     SessionUpdate {
         subagent_id: u64,
@@ -210,6 +231,7 @@ pub enum SubagentEvent {
     },
     Status {
         subagent_id: u64,
+        kind: SubagentStatusKind,
         message: String,
     },
     Finished {

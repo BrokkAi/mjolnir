@@ -63,6 +63,7 @@ pub struct RunConfig {
     pub fs_max_text_bytes: u64,
     pub output_format: OutputFormat,
     pub permission_mode: PermissionMode,
+    pub permission_config_mode: Option<config::PermissionPreset>,
     pub role_overrides: config::ModelOverrides,
     /// Process-wide graceful termination.  Headless owns its shutdown so it
     /// can stop the ACP runtime and subagent workers before returning.
@@ -124,6 +125,8 @@ enum StreamRecord<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         elapsed_ms: Option<u64>,
     },
+    /// Runtime-authoritative workflow transition plus its resulting state.
+    Workflow(Box<WorkflowStreamRecord>),
     Warning {
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<&'a str>,
@@ -141,6 +144,41 @@ enum StreamRecord<'a> {
         agent_usage: &'a crate::agent_usage::Snapshot,
         error: Option<&'a str>,
     },
+}
+
+#[derive(Debug, Serialize)]
+struct WorkflowStreamRecord {
+    workflow_id: String,
+    turn_id: u64,
+    operation: u32,
+    kind: &'static str,
+    transition: &'static str,
+    pass: u32,
+    phase: &'static str,
+    selected: usize,
+    running: usize,
+    waiting: usize,
+    completed: usize,
+    failed: usize,
+    cancelled: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waiting_on: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remaining: Option<usize>,
+    requires_user_action: bool,
+    coverage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor_role: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor_lifecycle: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retained_session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,6 +200,7 @@ struct HeadlessState {
     /// (and the start instant behind `elapsed_ms`) is remembered from
     /// `Started`.
     subagents: HashMap<u64, SubagentTrace>,
+    workflows: crate::workflow::WorkflowStore,
 }
 
 #[derive(Debug)]
@@ -237,11 +276,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         subagent::SubagentInventory::from_roster(&resolved),
     ));
     let mut primary_env = primary.launch.env.clone();
-    let primary_permission = roster::configure_permissions(
-        primary.launch.kind,
-        cfg.permission_mode.into(),
-        &mut primary_env,
-    );
+    let primary_permission = cfg.permission_config_mode.and_then(|mode| {
+        roster::configure_permissions(primary.launch.kind, mode, &mut primary_env)
+    });
     let runtime_cfg = AcpRuntimeConfig {
         command: primary.launch.command.clone(),
         args: primary.launch.args.clone(),
@@ -521,6 +558,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             UiEvent::Subagent(event) => match event {
                 SubagentEvent::Started {
                     subagent_id,
+                    resumed,
                     label,
                     objective,
                     ..
@@ -536,7 +574,11 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         cfg.output_format,
                         subagent_id,
                         &label,
-                        SUBAGENT_KIND_STARTED,
+                        if resumed {
+                            SUBAGENT_KIND_RESUMED
+                        } else {
+                            SUBAGENT_KIND_STARTED
+                        },
                         &objective,
                         None,
                     )?;
@@ -611,10 +653,24 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 SubagentEvent::ElicitationRequest { prompt, .. } => {
                     let _ = prompt.responder.send(ElicitationOutcome::Decline);
                 }
-                SubagentEvent::TerminalOutput { .. }
+                SubagentEvent::SessionStarted { .. }
+                | SubagentEvent::TerminalOutput { .. }
                 | SubagentEvent::CancelPendingPermissions { .. }
                 | SubagentEvent::Status { .. } => {}
             },
+            UiEvent::Workflow(event) => {
+                if let Err(error) = state.workflows.apply(&event) {
+                    tracing::warn!(
+                        event = "workflow_transition_rejected_by_headless",
+                        error = %error,
+                        "ignoring an invalid workflow transition"
+                    );
+                    continue;
+                }
+                if matches!(cfg.output_format, OutputFormat::StreamJson) {
+                    emit_workflow(&event, &state.workflows)?;
+                }
+            }
             UiEvent::InternalMessage(message) => {
                 reset_superseded_headless_answer(&mut state, &mut collecting_turn_output, &message);
                 if matches!(cfg.output_format, OutputFormat::StreamJson) {
@@ -804,6 +860,7 @@ fn apply_session_update(
 }
 
 const SUBAGENT_KIND_STARTED: &str = "started";
+const SUBAGENT_KIND_RESUMED: &str = "resumed";
 const SUBAGENT_KIND_ACTIVITY: &str = "activity";
 const SUBAGENT_KIND_FINISHED: &str = "finished";
 /// Label for a subagent whose `Started` event was never seen (a late attach or
@@ -827,6 +884,140 @@ fn subagent_outcome_text(outcome: &SubagentOutcome) -> String {
         SubagentOutcome::Failed(message) => format!("failed: {message}"),
         other => other.label().to_string(),
     }
+}
+
+fn emit_workflow(
+    event: &crate::workflow::WorkflowEvent,
+    workflows: &crate::workflow::WorkflowStore,
+) -> Result<()> {
+    let Some(record) = workflow_stream_record(event, workflows) else {
+        return Ok(());
+    };
+    emit_json(&record)
+}
+
+fn workflow_stream_record(
+    event: &crate::workflow::WorkflowEvent,
+    workflows: &crate::workflow::WorkflowStore,
+) -> Option<StreamRecord<'static>> {
+    use crate::workflow::{WorkflowActorLifecycle, WorkflowTransition};
+
+    let state = workflows.get(event.workflow_id)?;
+    let (transition, actor_id, actor_role, actor_lifecycle, retained_session_id) = match &event
+        .transition
+    {
+        WorkflowTransition::Started { .. } => ("started", None, None, None, None),
+        WorkflowTransition::PhaseChanged { .. } => ("phase_changed", None, None, None, None),
+        WorkflowTransition::ActorStarted { actor_id, role } => (
+            "actor_started",
+            Some(actor_id.as_display()),
+            Some(role.as_str()),
+            Some("running"),
+            None,
+        ),
+        WorkflowTransition::ActorSessionBound {
+            actor_id,
+            retained_session_id,
+        } => (
+            "actor_session_bound",
+            Some(actor_id.as_display()),
+            state.actors.get(actor_id).map(|actor| actor.role.as_str()),
+            state
+                .actors
+                .get(actor_id)
+                .map(|actor| actor.lifecycle.as_str()),
+            Some(retained_session_id.clone()),
+        ),
+        WorkflowTransition::ActorWaiting { actor_id, .. } => (
+            "actor_waiting",
+            Some(actor_id.as_display()),
+            state.actors.get(actor_id).map(|actor| actor.role.as_str()),
+            Some("waiting"),
+            state
+                .actors
+                .get(actor_id)
+                .and_then(|actor| actor.retained_session_id.clone()),
+        ),
+        WorkflowTransition::ActorResumed { actor_id } => (
+            "actor_resumed",
+            Some(actor_id.as_display()),
+            state.actors.get(actor_id).map(|actor| actor.role.as_str()),
+            Some("running"),
+            state
+                .actors
+                .get(actor_id)
+                .and_then(|actor| actor.retained_session_id.clone()),
+        ),
+        WorkflowTransition::ActorFinished { actor_id, .. } => (
+            "actor_finished",
+            Some(actor_id.as_display()),
+            state.actors.get(actor_id).map(|actor| actor.role.as_str()),
+            state
+                .actors
+                .get(actor_id)
+                .map(|actor| actor.lifecycle.as_str()),
+            state
+                .actors
+                .get(actor_id)
+                .and_then(|actor| actor.retained_session_id.clone()),
+        ),
+        WorkflowTransition::Waiting { .. } => ("waiting", None, None, None, None),
+        WorkflowTransition::CoverageChanged { .. } => ("coverage_changed", None, None, None, None),
+        WorkflowTransition::Terminal { .. } => ("terminal", None, None, None, None),
+    };
+    let waiting_on = state
+        .waiting
+        .as_ref()
+        .map(|waiting| waiting.dependency.clone());
+    let remaining = state.waiting.as_ref().and_then(|waiting| waiting.remaining);
+    let requires_user_action = state
+        .waiting
+        .as_ref()
+        .is_some_and(|waiting| waiting.requires_user_action)
+        || state.actors.values().any(|actor| {
+            matches!(
+                actor.lifecycle,
+                WorkflowActorLifecycle::Waiting {
+                    requires_user_action: true,
+                    ..
+                }
+            )
+        });
+    let actor_error = actor_id.as_ref().and_then(|actor_id| {
+        state
+            .actors
+            .iter()
+            .find(|(id, _)| id.as_display() == *actor_id)
+            .and_then(|(_, actor)| match &actor.lifecycle {
+                WorkflowActorLifecycle::Failed(error) => Some(error.clone()),
+                _ => None,
+            })
+    });
+    Some(StreamRecord::Workflow(Box::new(WorkflowStreamRecord {
+        workflow_id: state.id.to_string(),
+        turn_id: state.id.turn_id,
+        operation: state.id.operation,
+        kind: state.kind.as_str(),
+        transition,
+        pass: state.stage.pass,
+        phase: state.stage.phase.as_str(),
+        selected: state.selected_count(),
+        running: state.running_count(),
+        waiting: state.waiting_count(),
+        completed: state.completed_count(),
+        failed: state.failed_count(),
+        cancelled: state.cancelled_count(),
+        waiting_on,
+        remaining,
+        requires_user_action,
+        coverage: state.coverage.as_str(),
+        outcome: state.outcome.map(|outcome| outcome.as_str()),
+        actor_id,
+        actor_role,
+        actor_lifecycle,
+        actor_error,
+        retained_session_id,
+    })))
 }
 
 /// One subagent lifecycle line. `stream-json` gets a structured record;
@@ -990,6 +1181,7 @@ mod tests {
             target: "primary".to_string(),
             kind: crate::event::InternalMessageKind::DiscreteReview,
             text: "correct these findings".to_string(),
+            owner_subagent_id: None,
         };
 
         reset_superseded_headless_answer(&mut state, &mut collecting, &message);
@@ -1268,6 +1460,129 @@ mod tests {
                 "elapsed_ms": 252_000,
             })
         );
+    }
+
+    #[test]
+    fn workflow_stream_records_preserve_wait_resume_and_failure_facts() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowPhase, WorkflowStage, WorkflowStore, WorkflowTransition,
+        };
+
+        let workflow_id = WorkflowId::review(9);
+        let actor_id = WorkflowActorId::Subagent(4);
+        let mut workflows = WorkflowStore::default();
+        for event in [
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::Started {
+                    kind: WorkflowKind::Review,
+                    stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+                },
+            ),
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorStarted {
+                    actor_id: actor_id.clone(),
+                    role: WorkflowActorRole::ReviewSupervisor,
+                },
+            ),
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorSessionBound {
+                    actor_id: actor_id.clone(),
+                    retained_session_id: "supervisor-session".to_string(),
+                },
+            ),
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorWaiting {
+                    actor_id: actor_id.clone(),
+                    dependency: "automatic specialist reviewer reports".to_string(),
+                    remaining: Some(2),
+                    requires_user_action: false,
+                },
+            ),
+        ] {
+            workflows.apply(&event).expect("valid workflow transition");
+        }
+        let waiting = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Waiting {
+                dependency: "automatic specialist reviewer reports".to_string(),
+                remaining: Some(2),
+                requires_user_action: false,
+            },
+        );
+        workflows
+            .apply(&waiting)
+            .expect("valid workflow wait transition");
+        let waiting_record = record_json(
+            &workflow_stream_record(&waiting, &workflows).expect("workflow state exists"),
+        );
+        assert_eq!(waiting_record["type"], "workflow");
+        assert_eq!(waiting_record["workflow_id"], "turn-9-workflow-1");
+        assert_eq!(waiting_record["running"], 0);
+        assert_eq!(waiting_record["waiting"], 1);
+        assert_eq!(waiting_record["remaining"], 2);
+        assert_eq!(
+            waiting_record["waiting_on"],
+            "automatic specialist reviewer reports"
+        );
+        assert_eq!(waiting_record["requires_user_action"], false);
+
+        let resumed = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorResumed {
+                actor_id: actor_id.clone(),
+            },
+        );
+        workflows
+            .apply(&resumed)
+            .expect("valid workflow resume transition");
+        let resumed_record = record_json(
+            &workflow_stream_record(&resumed, &workflows).expect("workflow state exists"),
+        );
+        assert_eq!(resumed_record["actor_id"], "subagent-4");
+        assert_eq!(resumed_record["actor_lifecycle"], "running");
+        assert_eq!(resumed_record["retained_session_id"], "supervisor-session");
+        assert_eq!(resumed_record["running"], 1);
+        assert_eq!(resumed_record["waiting"], 0);
+        assert!(resumed_record.get("waiting_on").is_none());
+
+        let failed = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorFinished {
+                actor_id,
+                outcome: SubagentOutcome::Failed("adapter exited".to_string()),
+            },
+        );
+        workflows
+            .apply(&failed)
+            .expect("valid workflow failure transition");
+        let failed_record = record_json(
+            &workflow_stream_record(&failed, &workflows).expect("workflow state exists"),
+        );
+        assert_eq!(failed_record["actor_lifecycle"], "failed");
+        assert_eq!(failed_record["actor_error"], "adapter exited");
+        assert_eq!(failed_record["failed"], 1);
+    }
+
+    #[test]
+    fn workflow_stream_record_ignores_an_evicted_workflow() {
+        use crate::workflow::{
+            WorkflowEvent, WorkflowId, WorkflowPhase, WorkflowStage, WorkflowStore,
+            WorkflowTransition,
+        };
+
+        let event = WorkflowEvent::new(
+            WorkflowId::review(99),
+            WorkflowTransition::PhaseChanged {
+                stage: WorkflowStage::new(0, WorkflowPhase::Synthesis),
+            },
+        );
+
+        assert!(workflow_stream_record(&event, &WorkflowStore::default()).is_none());
     }
 
     #[test]
