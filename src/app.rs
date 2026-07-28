@@ -41,6 +41,7 @@ pub const QUEUED_PROMPT_PREVIEW_WIDTH: usize = 40;
 /// Longest excerpt of an objective or failure message kept in a subagent's
 /// permanent transcript record.
 const SUBAGENT_RECORD_LINE_CHARS: usize = 160;
+const NESTED_AGENT_VIEWER_LIMIT: usize = 10;
 
 /// Durable UI state for one nested ACP actor. The on-demand viewer reads its
 /// lifecycle and `transcript`; completed actors stay here for the whole
@@ -1893,6 +1894,7 @@ impl AppState {
                 .cmp(&right.finished.is_some())
                 .then_with(|| right_id.cmp(left_id))
         });
+        ids.truncate(NESTED_AGENT_VIEWER_LIMIT);
         ids
     }
 
@@ -5452,6 +5454,20 @@ mod tests {
             [Entry::System(record)]
                 if record == "subagent #3 · fix-tests · started · Fix the failing parser tests"
         ));
+    }
+
+    #[test]
+    fn nested_agent_viewer_keeps_the_ten_most_recent_actors() {
+        let mut state = AppState::new();
+        for id in 1..=15 {
+            state.apply_event(subagent_started(id, &format!("actor-{id}"), "work"));
+        }
+
+        assert_eq!(
+            state.nested_agent_viewer_ids(),
+            (6..=15).rev().collect::<Vec<_>>()
+        );
+        assert_eq!(state.nested_agents().count(), 15);
     }
 
     #[test]

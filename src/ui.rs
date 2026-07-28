@@ -6585,6 +6585,7 @@ fn draw_nested_agent_viewer(
         .max(1)
         .min(usize::from(u16::MAX)) as u16;
     let actor_ids = state.nested_agent_viewer_ids();
+    let actor_count = state.nested_agents().count();
     let roster_rows = actor_ids.len().clamp(1, usize::from(u16::MAX)) as u16;
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -6596,9 +6597,17 @@ fn draw_nested_agent_viewer(
         .split(area);
 
     let now = Instant::now();
+    let roster_title = if actor_count > actor_ids.len() {
+        format!(
+            " nested agents — {} newest of {actor_count} retained ",
+            actor_ids.len()
+        )
+    } else {
+        " nested agents — retained for this session ".to_string()
+    };
     let roster_block = Block::default()
         .borders(Borders::ALL)
-        .title(" nested agents — retained for this session ")
+        .title(roster_title)
         .style(Style::default().fg(state.theme.agent));
     let roster_inner = roster_block.inner(layout[0]);
     f.render_widget(roster_block, layout[0]);
@@ -14797,9 +14806,9 @@ mod tests {
     }
 
     #[test]
-    fn nested_agent_viewer_shows_all_actors_when_narrow_and_keeps_attribution() {
+    fn nested_agent_viewer_shows_ten_newest_actors_and_keeps_attribution() {
         let mut state = AppState::new();
-        for id in 1..=8 {
+        for id in 1..=15 {
             start_subagent(&mut state, id, &format!("actor-{id}"), "work");
         }
         let terminal_size = Size {
@@ -14812,7 +14821,7 @@ mod tests {
             terminal_size.height - 1,
             "the nested viewer needs enough height for every retained actor"
         );
-        assert_eq!(state.nested_agent_selected, Some(8));
+        assert_eq!(state.nested_agent_selected, Some(15));
         state.close_nested_agent_viewer();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let ctrl_l = handle_inline_crossterm(
@@ -14840,12 +14849,19 @@ mod tests {
             .draw(|frame| draw_nested_agent_viewer(frame, frame.area(), &mut state, true))
             .expect("narrow inline viewer");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        for id in 1..=8 {
+        for id in 6..=15 {
             assert!(
                 rendered.contains(&format!("#{id}")),
                 "actor #{id} must remain visible:\n{rendered}"
             );
         }
+        for id in 1..=5 {
+            assert!(
+                !rendered.contains(&format!("#{id} ")),
+                "older actor #{id} must not displace a recent actor:\n{rendered}"
+            );
+        }
+        assert!(rendered.contains("nested agents — 10 ne"), "{rendered}");
         #[cfg(target_os = "macos")]
         assert!(rendered.contains("Fn+Up/Down"), "{rendered}");
         handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(11)));
