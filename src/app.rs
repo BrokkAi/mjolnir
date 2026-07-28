@@ -850,41 +850,91 @@ fn reports_created_pull_request(words: &[String]) -> bool {
         return false;
     }
 
-    words.iter().enumerate().any(|(verb_index, word)| {
-        if !matches!(word.as_str(), "created" | "opened" | "published") {
-            return false;
-        }
-        let nearby_pull_request_positions = pull_request_positions
-            .iter()
-            .copied()
-            .filter(|pr_index| verb_index.abs_diff(*pr_index) <= 6)
-            .collect::<Vec<_>>();
-        if nearby_pull_request_positions.is_empty() {
-            return false;
-        }
-        !words.iter().enumerate().any(|(negative_index, word)| {
-            let is_negative = matches!(
-                word.as_str(),
-                "not"
-                    | "no"
-                    | "never"
-                    | "failed"
-                    | "failure"
-                    | "unable"
-                    | "cannot"
-                    | "couldn"
-                    | "didn"
-                    | "wasn"
-                    | "hasn"
-                    | "haven"
-            );
-            is_negative
-                && (verb_index.abs_diff(negative_index) <= 3
-                    || nearby_pull_request_positions
-                        .iter()
-                        .any(|pr_index| pr_index.abs_diff(negative_index) <= 2))
-        })
+    words.iter().enumerate().any(|(verb_index, verb)| {
+        matches!(verb.as_str(), "created" | "opened" | "published")
+            && pull_request_positions.iter().copied().any(|pr_index| {
+                creation_verb_describes_pull_request(words, verb_index, verb, pr_index)
+            })
     })
+}
+
+fn creation_verb_describes_pull_request(
+    words: &[String],
+    verb_index: usize,
+    verb: &str,
+    pr_index: usize,
+) -> bool {
+    if verb_index.abs_diff(pr_index) > 6 {
+        return false;
+    }
+    let between = if verb_index < pr_index {
+        &words[verb_index + 1..pr_index]
+    } else {
+        &words[pr_index + 1..verb_index]
+    };
+    if !between.iter().all(|word| {
+        word.bytes().all(|byte| byte.is_ascii_digit())
+            || matches!(
+                word.as_str(),
+                "a" | "an"
+                    | "the"
+                    | "pull"
+                    | "draft"
+                    | "new"
+                    | "requested"
+                    | "successfully"
+                    | "now"
+                    | "was"
+                    | "is"
+                    | "has"
+                    | "have"
+                    | "been"
+                    | "just"
+            )
+    }) {
+        return false;
+    }
+
+    let negative = words.iter().enumerate().any(|(index, word)| {
+        let disqualifying = matches!(
+            word.as_str(),
+            "not"
+                | "no"
+                | "never"
+                | "failed"
+                | "failure"
+                | "unable"
+                | "cannot"
+                | "couldn"
+                | "didn"
+                | "wasn"
+                | "hasn"
+                | "haven"
+        );
+        disqualifying && (index.abs_diff(verb_index) <= 3 || index.abs_diff(pr_index) <= 2)
+    });
+    if negative {
+        return false;
+    }
+
+    if verb != "opened" {
+        return true;
+    }
+    let explicitly_new = between
+        .iter()
+        .any(|word| matches!(word.as_str(), "draft" | "new"));
+    let direct_opened_pull_request = verb_index < pr_index
+        && pr_index == verb_index + 2
+        && words.get(verb_index + 1).is_some_and(|word| word == "pull");
+    let opened_for_inspection = words.iter().enumerate().any(|(index, word)| {
+        index > pr_index
+            && index - pr_index <= 4
+            && matches!(
+                word.as_str(),
+                "inspect" | "inspected" | "inspection" | "view" | "viewed" | "browser"
+            )
+    });
+    !opened_for_inspection && (explicitly_new || direct_opened_pull_request)
 }
 
 fn parse_canonical_pull_request_url(url: &str) -> Option<PullRequestArtifact> {
@@ -1537,6 +1587,10 @@ pub struct AppState {
     last_turn_elapsed: Option<Duration>,
     prompt_turns: Vec<PromptTurn>,
     active_prompt_turn: Option<usize>,
+    /// Prompt turn whose artifacts occupy the pinned strip. A newly submitted
+    /// turn clears the previous strip, while a late result can deliberately
+    /// repin its actual owning turn without being reassigned to the new one.
+    pinned_artifact_prompt_index: Option<usize>,
     /// Time since the current connection lifecycle state was entered.
     connection_state_started_at: Instant,
     /// Last token/context usage reported by the agent.
@@ -1891,6 +1945,7 @@ impl AppState {
             last_turn_elapsed: None,
             prompt_turns: Vec::new(),
             active_prompt_turn: None,
+            pinned_artifact_prompt_index: None,
             connection_state_started_at: now,
             token_usage: TokenUsage::default(),
             subagent_token_usage: TokenUsage::default(),
@@ -2545,29 +2600,64 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    /// Artifacts shown in the pinned result strip and action overlay. They
-    /// belong only to the active local turn (or the latest local turn once it
-    /// completes), so an older PR is never presented as a result of a newer
-    /// prompt. Replay-only prompts never enter `prompt_turns`.
+    /// Artifacts shown in the pinned result strip. `record_user_prompt` points
+    /// this at the new (initially empty) turn so old results are not presented
+    /// as new; a delayed result repins the turn it actually belongs to.
     pub fn visible_turn_artifacts(&self) -> &[TurnArtifact] {
-        self.active_prompt_turn
+        self.pinned_artifact_prompt_index
             .and_then(|prompt_index| {
                 self.prompt_turns
                     .iter()
                     .find(|turn| turn.prompt_index == prompt_index)
             })
-            .or_else(|| self.prompt_turns.last())
             .map(|turn| turn.artifacts.as_slice())
             .unwrap_or_default()
     }
 
+    pub fn visible_artifacts_are_from_earlier_turn(&self) -> bool {
+        !self.visible_turn_artifacts().is_empty()
+            && self.active_prompt_turn.is_some()
+            && self.pinned_artifact_prompt_index != self.active_prompt_turn
+    }
+
+    pub fn actionable_turn_artifact_count(&self) -> usize {
+        self.prompt_turns
+            .iter()
+            .map(|turn| turn.artifacts.len())
+            .sum()
+    }
+
+    pub fn actionable_turn_artifact(&self, index: usize) -> Option<&TurnArtifact> {
+        self.actionable_turn_artifact_with_prompt(index)
+            .map(|(_, artifact)| artifact)
+    }
+
+    fn actionable_turn_artifact_with_prompt(&self, index: usize) -> Option<(usize, &TurnArtifact)> {
+        self.prompt_turns
+            .iter()
+            .rev()
+            .flat_map(|turn| {
+                turn.artifacts
+                    .iter()
+                    .map(move |artifact| (turn.prompt_index, artifact))
+            })
+            .nth(index)
+    }
+
+    pub fn actionable_artifact_is_from_earlier_turn(&self, index: usize) -> bool {
+        self.active_prompt_turn.is_some()
+            && self
+                .actionable_turn_artifact_with_prompt(index)
+                .is_some_and(|(prompt_index, _)| Some(prompt_index) != self.active_prompt_turn)
+    }
+
     pub fn selected_turn_artifact(&self) -> Option<&TurnArtifact> {
         let selected = self.artifact_picker?;
-        self.visible_turn_artifacts().get(selected)
+        self.actionable_turn_artifact(selected)
     }
 
     pub fn open_artifact_picker(&mut self) -> bool {
-        if self.visible_turn_artifacts().is_empty() {
+        if self.actionable_turn_artifact_count() == 0 {
             return false;
         }
         self.artifact_picker = Some(0);
@@ -2578,7 +2668,7 @@ impl AppState {
     }
 
     pub fn move_artifact_picker(&mut self, delta: i32) {
-        let len = self.visible_turn_artifacts().len();
+        let len = self.actionable_turn_artifact_count();
         if len == 0 {
             self.artifact_picker = None;
             return;
@@ -2707,21 +2797,31 @@ impl AppState {
             .find(|artifact| artifact.url() == candidate.url)
         {
             merge_pull_request_artifact(existing, candidate);
+            self.pinned_artifact_prompt_index = Some(prompt_index);
             self.bump_transcript_revision();
             return;
         }
 
+        let turn_completed = turn.completed;
         let url = candidate.url.clone();
         turn.artifacts.push(TurnArtifact::PullRequest(candidate));
+        self.pinned_artifact_prompt_index = Some(prompt_index);
         self.transcript
             .push(Entry::TurnArtifact { prompt_index, url });
         self.bump_transcript_revision();
+        if turn_completed {
+            self.append_artifact_summary_for_turn(prompt_index);
+        }
     }
 
     fn append_active_artifact_summary(&mut self) {
         let Some(prompt_index) = self.active_prompt_turn else {
             return;
         };
+        self.append_artifact_summary_for_turn(prompt_index);
+    }
+
+    fn append_artifact_summary_for_turn(&mut self, prompt_index: usize) {
         if self.prompt_turn_artifacts(prompt_index).is_empty()
             || self.transcript.iter().any(|entry| {
                 matches!(
@@ -3082,6 +3182,7 @@ impl AppState {
             artifacts: Vec::new(),
         });
         self.active_prompt_turn = Some(prompt_index);
+        self.pinned_artifact_prompt_index = Some(prompt_index);
         self.record_prompt_history(text);
         self.bump_transcript_revision();
         self.set_connection_state(ConnectionState::Streaming);
@@ -5443,6 +5544,13 @@ mod tests {
         );
         assert_eq!(
             pull_requests_created_in_final_response(&format!(
+                "Opened the existing PR for inspection: {url}"
+            ))
+            .len(),
+            0
+        );
+        assert_eq!(
+            pull_requests_created_in_final_response(&format!(
                 "The pull request was not created: {url}"
             ))
             .len(),
@@ -5542,6 +5650,50 @@ mod tests {
         assert_eq!(state.prompt_turn_artifacts(first_prompt_index).len(), 1);
         assert!(state.prompt_turn_artifacts(second_prompt_index).is_empty());
         assert!(state.visible_turn_artifacts().is_empty());
+    }
+
+    #[test]
+    fn delayed_pr_result_repins_its_turn_and_gets_a_late_summary() {
+        let mut state = AppState::new();
+        state.record_user_prompt("create with gh".to_string());
+        let first_prompt_index = state.active_prompt_turn.expect("first local turn");
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("delayed-create", "gh pr create --draft")
+                .status(ToolCallStatus::Completed)
+                .content(vec![ToolCallContent::Terminal(Terminal::new("terminal-1"))]),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        assert!(state.prompt_turn_artifacts(first_prompt_index).is_empty());
+
+        state.record_user_prompt("start another prompt".to_string());
+        let second_prompt_index = state.active_prompt_turn.expect("second local turn");
+        state.apply_event(UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "terminal-1".to_string(),
+            output: "https://github.com/BrokkAi/mjolnir/pull/494\n".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        }));
+
+        assert_eq!(state.prompt_turn_artifacts(first_prompt_index).len(), 1);
+        assert!(state.prompt_turn_artifacts(second_prompt_index).is_empty());
+        assert_eq!(state.visible_turn_artifacts().len(), 1);
+        assert!(state.visible_artifacts_are_from_earlier_turn());
+        assert_eq!(state.actionable_turn_artifact_count(), 1);
+        assert!(state.actionable_artifact_is_from_earlier_turn(0));
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::TurnArtifactSummary {
+                prompt_index: found
+            }) if *found == first_prompt_index
+        ));
+        assert!(state.open_artifact_picker());
+        assert_eq!(
+            state.selected_turn_artifact().map(TurnArtifact::url),
+            Some("https://github.com/BrokkAi/mjolnir/pull/494")
+        );
     }
 
     #[test]

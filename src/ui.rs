@@ -82,6 +82,8 @@ const HELP_SCROLL_PAGE_STEP: u16 = 10;
 const INLINE_MJCONFIG_HEIGHT: u16 = 24;
 const QUEUED_PROMPT_VISIBLE_ROWS: usize = 3;
 const ARTIFACT_VISIBLE_ROWS: usize = 3;
+const URL_OPENER_STATUS_GRACE: Duration = Duration::from_millis(250);
+const URL_OPENER_STATUS_POLL: Duration = Duration::from_millis(10);
 /// Subagent status rows rendered before the area folds into a "… N more" line.
 const SUBAGENT_VISIBLE_ROWS: usize = 4;
 const CURSOR_POSITION_TIMEOUT_MESSAGE: &str =
@@ -398,6 +400,12 @@ enum TerminalRequest {
     CopyText(String),
     OpenUrl(String),
     Authenticate(crate::auth::AuthVendor),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UrlOpenerOutcome {
+    Confirmed,
+    Detached,
 }
 
 fn terminal_request_forces_inline_repair(request: &TerminalRequest) -> bool {
@@ -2770,9 +2778,13 @@ async fn apply_terminal_request(
             match resumed {
                 Ok(()) => {
                     match opened {
-                        Ok(()) => state.record_status_message(
+                        Ok(UrlOpenerOutcome::Confirmed) => state.record_status_message(
                             StatusKind::Info,
                             "opened pull request in the system browser",
+                        ),
+                        Ok(UrlOpenerOutcome::Detached) => state.record_status_message(
+                            StatusKind::Info,
+                            "sent pull request to the system browser; use c to copy the URL",
                         ),
                         Err(error) => state.record_status_message(
                             StatusKind::Warning,
@@ -2801,7 +2813,7 @@ async fn apply_terminal_request(
     }
 }
 
-fn open_url_in_system_browser(url: &str) -> Result<()> {
+fn open_url_in_system_browser(url: &str) -> Result<UrlOpenerOutcome> {
     let parsed = url::Url::parse(url).context("parse browser URL")?;
     if parsed.scheme() != "https" || parsed.host_str() != Some("github.com") {
         anyhow::bail!("refusing to open a non-GitHub HTTPS URL");
@@ -2835,17 +2847,40 @@ fn open_url_in_system_browser(url: &str) -> Result<()> {
     run_url_opener_command(&mut command)
 }
 
-fn run_url_opener_command(command: &mut Command) -> Result<()> {
-    let status = command
+fn run_url_opener_command(command: &mut Command) -> Result<UrlOpenerOutcome> {
+    run_url_opener_command_with_grace(command, URL_OPENER_STATUS_GRACE)
+}
+
+fn run_url_opener_command_with_grace(
+    command: &mut Command,
+    grace: Duration,
+) -> Result<UrlOpenerOutcome> {
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .spawn()
         .context("launch system URL opener")?;
-    if !status.success() {
-        anyhow::bail!("system URL opener exited with {status}");
+    let deadline = Instant::now() + grace;
+    loop {
+        if let Some(status) = child.try_wait().context("check system URL opener status")? {
+            if !status.success() {
+                anyhow::bail!("system URL opener exited with {status}");
+            }
+            return Ok(UrlOpenerOutcome::Confirmed);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            std::thread::Builder::new()
+                .name("mj-url-opener-reaper".to_string())
+                .spawn(move || {
+                    let _ = child.wait();
+                })
+                .context("detach system URL opener")?;
+            return Ok(UrlOpenerOutcome::Detached);
+        }
+        std::thread::sleep(URL_OPENER_STATUS_POLL.min(deadline.saturating_duration_since(now)));
     }
-    Ok(())
 }
 
 fn set_mouse_capture(terminal: &mut Terminal<TrackedBackend<Stdout>>, enabled: bool) -> Result<()> {
@@ -9226,6 +9261,11 @@ fn draw_artifact_result_rows(f: &mut ratatui::Frame, area: Rect, state: &AppStat
         return;
     }
     let capacity = usize::from(area.height);
+    let result_label = if state.visible_artifacts_are_from_earlier_turn() {
+        "Earlier turn PR created"
+    } else {
+        "PR created"
+    };
     let visible = artifacts
         .len()
         .min(ARTIFACT_VISIBLE_ROWS)
@@ -9243,7 +9283,7 @@ fn draw_artifact_result_rows(f: &mut ratatui::Frame, area: Rect, state: &AppStat
                     Span::styled(
                         fit_width(
                             format!(
-                                " ✔ PR created · {}#{}{}",
+                                " ✔ {result_label} · {}#{}{}",
                                 pr.repository, pr.number, metadata
                             ),
                             width.saturating_sub(" · Alt-P actions".width()),
@@ -10669,19 +10709,24 @@ fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppStat
 }
 
 fn artifact_picker_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
-    let artifacts = state.visible_turn_artifacts();
+    let artifact_count = state.actionable_turn_artifact_count();
     let selected = state
         .artifact_picker
         .unwrap_or(0)
-        .min(artifacts.len().saturating_sub(1));
-    let Some(TurnArtifact::PullRequest(pr)) = artifacts.get(selected) else {
+        .min(artifact_count.saturating_sub(1));
+    let Some(TurnArtifact::PullRequest(pr)) = state.actionable_turn_artifact(selected) else {
         return vec![Line::from("No durable turn results.")];
+    };
+    let result_kind = if state.actionable_artifact_is_from_earlier_turn(selected) {
+        "Earlier turn pull request"
+    } else {
+        "Pull request"
     };
     let mut lines = vec![Line::from(Span::styled(
         format!(
-            "Pull request {}/{} · {}#{}",
+            "{result_kind} {}/{} · {}#{}",
             selected + 1,
-            artifacts.len(),
+            artifact_count,
             pr.repository,
             pr.number
         ),
@@ -12815,6 +12860,24 @@ mod tests {
         assert!(
             error.to_string().contains("system URL opener exited"),
             "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn long_running_url_opener_is_detached_after_grace_period() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 1"]);
+        let started = Instant::now();
+        assert_eq!(
+            run_url_opener_command_with_grace(&mut command, Duration::from_millis(20))
+                .expect("long-running opener should detach"),
+            UrlOpenerOutcome::Detached
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "opener blocked for {:?}",
+            started.elapsed()
         );
     }
 
