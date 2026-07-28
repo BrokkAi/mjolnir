@@ -529,6 +529,13 @@ impl TranscriptSink {
 
     fn pending_lines_for_exit(&mut self, state: &AppState, width: u16) -> Vec<Line<'static>> {
         let mut out = self.pending_lines(state, width);
+        // A completed trailing tool call may already have emitted all of its
+        // content while holding back only its separator. There will never be a
+        // successor once we exit, so commit the separator now.
+        if self.deferred_tool_separator {
+            out.push(Line::from(""));
+            self.deferred_tool_separator = false;
+        }
         if self.emitted_entries < state.transcript.len() {
             out.extend(render_transcript_entry_range(
                 state,
@@ -1471,7 +1478,7 @@ async fn ui_loop(
             }
             cancel_dictation_for_exit(&mut state, &mut dictation_cancel_tx);
             if mode == UiMode::InlineChat {
-                flush_transcript_to_scrollback(terminal, &mut transcript_sink, &state)?;
+                flush_transcript_to_scrollback_for_exit(terminal, &mut transcript_sink, &state)?;
                 sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
             }
             let _ = draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
@@ -15411,6 +15418,49 @@ mod tests {
             .map(line_text)
             .collect();
         assert_eq!(on_exit, vec!["agent", "visible final answer", ""]);
+        assert!(sink.pending_lines_for_exit(&state, 80).is_empty());
+    }
+
+    #[test]
+    fn transcript_sink_exit_commits_deferred_trailing_tool_separator() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        state.record_user_prompt("run it".to_string());
+        let mut emitted: Vec<String> = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "cargo test".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: Vec::new(),
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
+        assert!(sink.deferred_tool_separator);
+        assert_ne!(emitted.last().map(String::as_str), Some(""));
+
+        let on_exit: Vec<String> = sink
+            .pending_lines_for_exit(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(on_exit, vec![""]);
+        emitted.extend(on_exit);
+
+        let full: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(emitted, full);
+        assert!(!sink.deferred_tool_separator);
         assert!(sink.pending_lines_for_exit(&state, 80).is_empty());
     }
 
