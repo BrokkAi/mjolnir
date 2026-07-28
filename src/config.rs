@@ -1144,14 +1144,14 @@ mode = "ask"
         );
 
         let cfg = Config {
-            spinner: SpinnerStyle::Bars,
+            spinner: SpinnerStyle::Hammers,
             ..Config::default()
         };
         cfg.save(&path).expect("save");
         let body = std::fs::read_to_string(&path).expect("read");
-        assert!(body.contains("spinner = \"bars\""));
+        assert!(body.contains("spinner = \"hammers\""));
 
         let loaded = Config::load(&path).expect("load saved");
-        assert_eq!(loaded.spinner, SpinnerStyle::Bars);
+        assert_eq!(loaded.spinner, SpinnerStyle::Hammers);
     }
 }

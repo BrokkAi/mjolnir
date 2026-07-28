@@ -32,19 +32,28 @@ pub enum SpinnerStyle {
     Wave,
     /// Vertical bars bounce like an audio equalizer.
     Bars,
+    /// A pair of spinning hammers flies across the strip.
+    Hammers,
     /// The whole row breathes brightness in unison (calmest).
     #[default]
     Shimmer,
 }
 
 impl SpinnerStyle {
-    pub const ALL: [Self; 4] = [Self::Pulse, Self::Wave, Self::Bars, Self::Shimmer];
+    pub const ALL: [Self; 5] = [
+        Self::Pulse,
+        Self::Wave,
+        Self::Bars,
+        Self::Hammers,
+        Self::Shimmer,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pulse => "pulse",
             Self::Wave => "wave",
             Self::Bars => "bars",
+            Self::Hammers => "hammers",
             Self::Shimmer => "shimmer",
         }
     }
@@ -100,6 +109,7 @@ impl FromStr for SpinnerStyle {
             "pulse" => Ok(Self::Pulse),
             "wave" => Ok(Self::Wave),
             "bars" => Ok(Self::Bars),
+            "hammers" => Ok(Self::Hammers),
             "shimmer" => Ok(Self::Shimmer),
             _ => Err(format!(
                 "unknown spinner {value:?}; expected one of: {}",
@@ -123,6 +133,7 @@ fn frame_set_for(style: SpinnerStyle) -> FrameSet {
         SpinnerStyle::Pulse => build_pulse(),
         SpinnerStyle::Wave => build_wave(),
         SpinnerStyle::Bars => build_bars(),
+        SpinnerStyle::Hammers => build_hammers(),
         SpinnerStyle::Shimmer => build_shimmer(),
     }
 }
@@ -131,7 +142,7 @@ fn frame_set_for(style: SpinnerStyle) -> FrameSet {
 /// by mapping over [`SpinnerStyle::ALL`], so `FRAME_SETS[style.index()]` is
 /// always `style`'s frames — the array length and the exhaustive match in
 /// `frame_set_for` force this to stay correct when a variant is added.
-static FRAME_SETS: LazyLock<[FrameSet; 4]> = LazyLock::new(|| SpinnerStyle::ALL.map(frame_set_for));
+static FRAME_SETS: LazyLock<[FrameSet; 5]> = LazyLock::new(|| SpinnerStyle::ALL.map(frame_set_for));
 
 fn row(s: String) -> String {
     debug_assert_eq!(
@@ -227,6 +238,32 @@ fn build_bars() -> FrameSet {
     }
 }
 
+/// Two hammers fly around a four-position track. A corner arc orbits each
+/// visible hammer while the pair advances, suggesting rotation without blinking
+/// the hammers out or changing the frame width.
+fn build_hammers() -> FrameSet {
+    const ROTATION: [&str; 4] = ["◜🔨", "🔨◝", "🔨◞", "◟🔨"];
+    const SLOTS: usize = SPINNER_WIDTH / 3;
+    let animated = (0..SLOTS * 2)
+        .map(|phase| {
+            let mut slots = ["   "; SLOTS];
+            let first = (phase / 2) % SLOTS;
+            let second = (first + 1) % SLOTS;
+            slots[first] = ROTATION[phase % ROTATION.len()];
+            slots[second] = ROTATION[(phase + 2) % ROTATION.len()];
+            row(slots.concat())
+        })
+        .collect();
+
+    let mut idle = ["   "; SLOTS];
+    idle[0] = " 🔨";
+    idle[2] = " 🔨";
+    FrameSet {
+        animated,
+        idle: row(idle.concat()),
+    }
+}
+
 /// The whole row brightens and dims together — a calm, confident "working…".
 fn build_shimmer() -> FrameSet {
     let w = SPINNER_WIDTH;
@@ -298,6 +335,47 @@ mod tests {
             for b in &SpinnerStyle::ALL[i + 1..] {
                 assert_ne!(a.frames(), b.frames(), "{a} and {b} share frames");
             }
+        }
+    }
+
+    #[test]
+    fn hammers_stay_visible_while_rotating_through_unique_throw_frames() {
+        let frames = SpinnerStyle::Hammers.frames();
+        assert_eq!(frames.len(), 8);
+        let unique = frames.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), frames.len(), "throw frames must not repeat");
+
+        let throw_positions = frames
+            .iter()
+            .map(|frame| {
+                frame
+                    .match_indices("🔨")
+                    .map(|(byte, _)| UnicodeWidthStr::width(&frame[..byte]) / 3)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let expected_positions = vec![
+            vec![0, 1],
+            vec![0, 1],
+            vec![1, 2],
+            vec![1, 2],
+            vec![2, 3],
+            vec![2, 3],
+            vec![0, 3],
+            vec![0, 3],
+        ];
+        assert_eq!(
+            throw_positions, expected_positions,
+            "hammers must advance smoothly through every throw position"
+        );
+
+        for (index, frame) in frames.iter().enumerate() {
+            assert_eq!(frame.matches("🔨").count(), 2, "frame {index}: {frame:?}");
+            let rotation_marks = frame
+                .chars()
+                .filter(|c| matches!(c, '◜' | '◝' | '◞' | '◟'))
+                .count();
+            assert_eq!(rotation_marks, 2, "frame {index}: {frame:?}");
         }
     }
 }
