@@ -355,6 +355,7 @@ struct PromptTurn {
 
 #[derive(Debug, Clone)]
 struct ToolCallArtifactEvidence {
+    owner_prompt_index: Option<usize>,
     title: String,
     status: ToolCallStatus,
     raw_input: Option<serde_json::Value>,
@@ -365,8 +366,9 @@ struct ToolCallArtifactEvidence {
 }
 
 impl ToolCallArtifactEvidence {
-    fn from_tool_call(tool_call: &ToolCall) -> Self {
+    fn from_tool_call(tool_call: &ToolCall, owner_prompt_index: Option<usize>) -> Self {
         Self {
+            owner_prompt_index,
             title: tool_call.title.clone(),
             status: tool_call.status,
             raw_input: tool_call.raw_input.clone(),
@@ -377,8 +379,9 @@ impl ToolCallArtifactEvidence {
         }
     }
 
-    fn from_update(update: &ToolCallUpdate) -> Self {
+    fn from_update(update: &ToolCallUpdate, owner_prompt_index: Option<usize>) -> Self {
         Self {
+            owner_prompt_index,
             title: update
                 .fields
                 .title
@@ -475,18 +478,27 @@ fn pull_request_creation_artifacts(
     }
 
     let mut artifacts = Vec::new();
-    for value in [
-        evidence.raw_output.as_ref(),
-        evidence.metadata.as_ref(),
-        evidence.raw_input.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
+    for value in [evidence.raw_output.as_ref(), evidence.metadata.as_ref()]
+        .into_iter()
+        .flatten()
     {
         collect_pull_requests_from_json(value, &mut artifacts);
     }
-    for candidate in pull_requests_from_text(&evidence.content) {
-        push_or_merge_pull_request(&mut artifacts, candidate);
+
+    // Structured result fields are authoritative. Only fall back to textual
+    // output when no structured PR was found; otherwise request bodies or
+    // explanatory prose can accidentally contribute unrelated PR links.
+    if artifacts.is_empty() {
+        let mut result_text = Vec::new();
+        if let Some(raw_output) = &evidence.raw_output {
+            collect_result_text(raw_output, &mut result_text);
+        }
+        result_text.push(evidence.content.clone());
+        for text in result_text {
+            for candidate in pull_requests_from_creation_text(&text) {
+                push_or_merge_pull_request(&mut artifacts, candidate);
+            }
+        }
     }
     artifacts
 }
@@ -558,6 +570,9 @@ fn collect_pull_requests_from_json(
 ) {
     match value {
         serde_json::Value::Object(object) => {
+            if object_reports_failure(object) {
+                return;
+            }
             let title =
                 artifact_string_field(object, &["title", "pull_request_title", "pullRequestTitle"]);
             let draft = bool_field(object, &["draft", "is_draft", "isDraft"]);
@@ -578,27 +593,103 @@ fn collect_pull_requests_from_json(
                 push_or_merge_pull_request(output, candidate);
             }
 
-            for value in object.values() {
-                if let Some(text) = value.as_str() {
-                    for mut candidate in pull_requests_from_text(text) {
-                        if candidate.title.is_none() {
-                            candidate.title = title.clone();
-                        }
-                        if candidate.draft.is_none() {
-                            candidate.draft = draft;
-                        }
-                        if candidate.state.is_none() {
-                            candidate.state = state;
-                        }
-                        push_or_merge_pull_request(output, candidate);
+            for (key, value) in object {
+                if is_pull_request_url_field(key)
+                    && let Some(url) = value.as_str()
+                    && let Some(mut candidate) = parse_canonical_pull_request_url(url)
+                {
+                    if candidate.title.is_none() {
+                        candidate.title = title.clone();
                     }
+                    if candidate.draft.is_none() {
+                        candidate.draft = draft;
+                    }
+                    if candidate.state.is_none() {
+                        candidate.state = state;
+                    }
+                    push_or_merge_pull_request(output, candidate);
                 }
-                collect_pull_requests_from_json(value, output);
+                if !is_non_result_payload_field(key) {
+                    collect_pull_requests_from_json(value, output);
+                }
             }
         }
         serde_json::Value::Array(values) => {
             for value in values {
                 collect_pull_requests_from_json(value, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn object_reports_failure(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    artifact_string_field(object, &["status", "outcome"]).is_some_and(|status| {
+        matches!(
+            status.to_ascii_lowercase().as_str(),
+            "failed" | "failure" | "error" | "cancelled" | "canceled"
+        )
+    })
+}
+
+fn is_pull_request_url_field(key: &str) -> bool {
+    matches!(
+        key,
+        "url"
+            | "html_url"
+            | "htmlUrl"
+            | "pull_request_url"
+            | "pullRequestUrl"
+            | "web_url"
+            | "webUrl"
+    )
+}
+
+fn is_non_result_payload_field(key: &str) -> bool {
+    matches!(
+        key,
+        "body"
+            | "request_body"
+            | "requestBody"
+            | "response_body"
+            | "responseBody"
+            | "request"
+            | "input"
+            | "raw_input"
+            | "rawInput"
+            | "arguments"
+            | "description"
+    )
+}
+
+fn collect_result_text(value: &serde_json::Value, output: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => output.push(text.clone()),
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if matches!(key.as_str(), "output" | "result" | "message" | "text")
+                    && let Some(text) = value.as_str()
+                {
+                    output.push(text.to_string());
+                } else if matches!(
+                    key.as_str(),
+                    "output"
+                        | "result"
+                        | "data"
+                        | "created"
+                        | "pull_request"
+                        | "pullRequest"
+                        | "pull_requests"
+                        | "pullRequests"
+                ) && (value.is_object() || value.is_array())
+                {
+                    collect_result_text(value, output);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_result_text(value, output);
             }
         }
         _ => {}
@@ -706,41 +797,94 @@ fn pull_requests_from_text(text: &str) -> Vec<PullRequestArtifact> {
     artifacts
 }
 
+fn pull_requests_from_creation_text(text: &str) -> Vec<PullRequestArtifact> {
+    let candidates = pull_requests_from_text(text);
+    let mut created = candidates
+        .iter()
+        .filter(|artifact| text_reports_created_pull_request(text, &artifact.url))
+        .cloned()
+        .collect::<Vec<_>>();
+    if created.is_empty()
+        && candidates.len() == 1
+        && text.trim().trim_matches(['<', '>', '`']) == candidates[0].url
+    {
+        created.push(candidates[0].clone());
+    }
+    created
+}
+
 fn pull_requests_created_in_final_response(text: &str) -> Vec<PullRequestArtifact> {
     pull_requests_from_text(text)
         .into_iter()
-        .filter(|artifact| {
-            text.match_indices(&artifact.url).any(|(url_start, _)| {
-                let context_start = text[..url_start]
-                    .char_indices()
-                    .rev()
-                    .nth(160)
-                    .map(|(index, _)| index)
-                    .unwrap_or(0);
-                let context = &text[context_start..url_start];
-                let clause_start = context
-                    .rfind(['\n', '.', '!', '?'])
-                    .map(|index| index + 1)
-                    .unwrap_or(0);
-                let words = identifier_words(&context[clause_start..]);
-                let names_pull_request = words.iter().any(|word| word == "pr")
-                    || contains_word_sequence(&words, &["pull", "request"]);
-                contains_word_sequence(&words, &["created", "pull", "request"])
-                    || contains_word_sequence(&words, &["pull", "request", "created"])
-                    || contains_word_sequence(&words, &["created", "draft", "pull", "request"])
-                    || contains_word_sequence(&words, &["opened", "pull", "request"])
-                    || contains_word_sequence(&words, &["published", "pull", "request"])
-                    || contains_word_sequence(&words, &["created", "pr"])
-                    || contains_word_sequence(&words, &["pr", "created"])
-                    || contains_word_sequence(&words, &["opened", "pr"])
-                    || contains_word_sequence(&words, &["published", "pr"])
-                    || (names_pull_request
-                        && words.last().is_some_and(|word| {
-                            matches!(word.as_str(), "created" | "opened" | "published")
-                        }))
-            })
-        })
+        .filter(|artifact| text_reports_created_pull_request(text, &artifact.url))
         .collect()
+}
+
+fn text_reports_created_pull_request(text: &str, url: &str) -> bool {
+    text.match_indices(url).any(|(url_start, _)| {
+        let context_start = text[..url_start]
+            .char_indices()
+            .rev()
+            .nth(160)
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        let context = &text[context_start..url_start];
+        let clause_start = context
+            .rfind(['\n', '.', '!', '?', ';'])
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        reports_created_pull_request(&identifier_words(&context[clause_start..]))
+    })
+}
+
+fn reports_created_pull_request(words: &[String]) -> bool {
+    let pull_request_positions = words
+        .iter()
+        .enumerate()
+        .filter_map(|(index, word)| (word == "pr").then_some(index))
+        .chain(words.windows(2).enumerate().filter_map(|(index, pair)| {
+            (pair[0] == "pull" && pair[1] == "request").then_some(index + 1)
+        }))
+        .collect::<Vec<_>>();
+    if pull_request_positions.is_empty() {
+        return false;
+    }
+
+    words.iter().enumerate().any(|(verb_index, word)| {
+        if !matches!(word.as_str(), "created" | "opened" | "published") {
+            return false;
+        }
+        let nearby_pull_request_positions = pull_request_positions
+            .iter()
+            .copied()
+            .filter(|pr_index| verb_index.abs_diff(*pr_index) <= 6)
+            .collect::<Vec<_>>();
+        if nearby_pull_request_positions.is_empty() {
+            return false;
+        }
+        !words.iter().enumerate().any(|(negative_index, word)| {
+            let is_negative = matches!(
+                word.as_str(),
+                "not"
+                    | "no"
+                    | "never"
+                    | "failed"
+                    | "failure"
+                    | "unable"
+                    | "cannot"
+                    | "couldn"
+                    | "didn"
+                    | "wasn"
+                    | "hasn"
+                    | "haven"
+            );
+            is_negative
+                && (verb_index.abs_diff(negative_index) <= 3
+                    || nearby_pull_request_positions
+                        .iter()
+                        .any(|pr_index| pr_index.abs_diff(negative_index) <= 2))
+        })
+    })
 }
 
 fn parse_canonical_pull_request_url(url: &str) -> Option<PullRequestArtifact> {
@@ -2485,18 +2629,36 @@ impl AppState {
                     return None;
                 }
                 stored.artifact_checked = true;
-                Some(evidence)
+                Some((evidence.owner_prompt_index, evidence))
             })
-            .flat_map(|evidence| pull_request_creation_artifacts(&evidence))
+            .flat_map(|(owner_prompt_index, evidence)| {
+                pull_request_creation_artifacts(&evidence)
+                    .into_iter()
+                    .map(move |candidate| (owner_prompt_index, candidate))
+            })
             .collect::<Vec<_>>();
-        for candidate in candidates {
-            self.record_pull_request_artifact(candidate);
+        for (owner_prompt_index, candidate) in candidates {
+            if let Some(prompt_index) = owner_prompt_index {
+                self.record_pull_request_artifact_for_turn(prompt_index, candidate);
+            }
         }
     }
 
-    fn mark_completed_tool_artifacts_dirty(&mut self) {
-        for evidence in self.tool_call_artifact_evidence.values_mut() {
-            if evidence.status == ToolCallStatus::Completed {
+    fn mark_completed_tool_artifact_dirty_for_terminal(&mut self, terminal_id: &str) {
+        for (tool_call_id, view) in &self.tool_calls {
+            let owns_terminal = view.body.iter().any(|output| {
+                matches!(
+                    output,
+                    ToolCallOutput::Terminal {
+                        terminal_id: candidate,
+                        ..
+                    } if candidate == terminal_id
+                )
+            });
+            if owns_terminal
+                && let Some(evidence) = self.tool_call_artifact_evidence.get_mut(tool_call_id)
+                && evidence.status == ToolCallStatus::Completed
+            {
                 evidence.artifact_checked = false;
             }
         }
@@ -2524,6 +2686,14 @@ impl AppState {
             // Replay/load updates have no locally submitted turn ownership.
             return;
         };
+        self.record_pull_request_artifact_for_turn(prompt_index, candidate);
+    }
+
+    fn record_pull_request_artifact_for_turn(
+        &mut self,
+        prompt_index: usize,
+        candidate: PullRequestArtifact,
+    ) {
         let Some(turn) = self
             .prompt_turns
             .iter_mut()
@@ -3228,10 +3398,11 @@ impl AppState {
             UiEvent::ContextCompacted => {}
             UiEvent::TerminalOutput(snapshot) => {
                 self.finalize_thinking(EntryKind::Thought);
+                let terminal_id = snapshot.terminal_id.clone();
                 self.terminal_outputs
                     .insert(snapshot.terminal_id.clone(), snapshot);
                 self.apply_known_terminal_outputs();
-                self.mark_completed_tool_artifacts_dirty();
+                self.mark_completed_tool_artifact_dirty_for_terminal(&terminal_id);
                 self.capture_completed_tool_artifacts();
             }
             UiEvent::SessionConfigOptions {
@@ -3487,10 +3658,11 @@ impl AppState {
                     Self::subagent_id_prefix(subagent_id),
                     snapshot.terminal_id
                 );
+                let terminal_id = snapshot.terminal_id.clone();
                 self.terminal_outputs
                     .insert(snapshot.terminal_id.clone(), snapshot);
                 self.apply_known_terminal_outputs();
-                self.mark_completed_tool_artifacts_dirty();
+                self.mark_completed_tool_artifact_dirty_for_terminal(&terminal_id);
                 self.capture_completed_tool_artifacts();
             }
             SubagentEvent::PermissionRequest {
@@ -3751,7 +3923,7 @@ impl AppState {
                 let key = format!("{prefix}{}", tool_call.tool_call_id);
                 self.tool_call_artifact_evidence.insert(
                     key.clone(),
-                    ToolCallArtifactEvidence::from_tool_call(&tool_call),
+                    ToolCallArtifactEvidence::from_tool_call(&tool_call, self.active_prompt_turn),
                 );
                 let mut view = ToolCallView::from_tool_call(&tool_call);
                 view.namespace_terminal_ids(prefix);
@@ -3763,10 +3935,13 @@ impl AppState {
                 self.finalize_subagent_thinking(subagent_id);
                 self.finalize_subagent_message(subagent_id);
                 let key = format!("{prefix}{}", update.tool_call_id);
+                let owner_prompt_index = self.active_prompt_turn;
                 self.tool_call_artifact_evidence
                     .entry(key.clone())
                     .and_modify(|evidence| evidence.apply_update(&update))
-                    .or_insert_with(|| ToolCallArtifactEvidence::from_update(&update));
+                    .or_insert_with(|| {
+                        ToolCallArtifactEvidence::from_update(&update, owner_prompt_index)
+                    });
                 if let Some(view) = self.tool_calls.get_mut(&key) {
                     view.apply_update(&update);
                     view.namespace_terminal_ids(prefix);
@@ -3962,8 +4137,10 @@ impl AppState {
                 self.finalize_message(EntryKind::Agent);
                 let id = tc.tool_call_id.to_string();
                 let suppressed = is_subagent_transport_call(&tc);
-                self.tool_call_artifact_evidence
-                    .insert(id.clone(), ToolCallArtifactEvidence::from_tool_call(&tc));
+                self.tool_call_artifact_evidence.insert(
+                    id.clone(),
+                    ToolCallArtifactEvidence::from_tool_call(&tc, self.active_prompt_turn),
+                );
                 self.tool_calls
                     .insert(id.clone(), ToolCallView::from_tool_call(&tc));
                 if suppressed {
@@ -3977,10 +4154,13 @@ impl AppState {
                 self.finalize_thinking(EntryKind::Thought);
                 self.finalize_message(EntryKind::Agent);
                 let id = u.tool_call_id.to_string();
+                let owner_prompt_index = self.active_prompt_turn;
                 self.tool_call_artifact_evidence
                     .entry(id.clone())
                     .and_modify(|evidence| evidence.apply_update(&u))
-                    .or_insert_with(|| ToolCallArtifactEvidence::from_update(&u));
+                    .or_insert_with(|| {
+                        ToolCallArtifactEvidence::from_update(&u, owner_prompt_index)
+                    });
                 let suppressed =
                     self.suppressed_tool_calls.contains(&id) || is_subagent_transport_update(&u);
                 if suppressed {
@@ -5212,6 +5392,77 @@ mod tests {
     }
 
     #[test]
+    fn pr_extraction_ignores_request_and_response_body_references() {
+        let existing = "https://github.com/BrokkAi/mjolnir/pull/480";
+        let created = "https://github.com/BrokkAi/mjolnir/pull/492";
+        let evidence = ToolCallArtifactEvidence {
+            owner_prompt_index: Some(0),
+            title: "github.create_pull_request".to_string(),
+            status: ToolCallStatus::Completed,
+            raw_input: Some(serde_json::json!({
+                "body": format!("Follow up to {existing}")
+            })),
+            raw_output: Some(serde_json::json!({
+                "pull_request": {
+                    "url": created,
+                    "title": "actual result"
+                },
+                "request": {"url": existing},
+                "response_body": {
+                    "links": [existing]
+                }
+            })),
+            metadata: Some(serde_json::json!({
+                "description": format!("Requested from {existing}")
+            })),
+            content: format!("Created from the work discussed in {existing}"),
+            artifact_checked: false,
+        };
+
+        let artifacts = pull_request_creation_artifacts(&evidence);
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].url, created);
+
+        let failed_text = ToolCallArtifactEvidence {
+            raw_output: Some(serde_json::json!({
+                "message": format!("Pull request was not created: {existing}"),
+                "body": format!("Existing context: {existing}")
+            })),
+            content: String::new(),
+            ..evidence
+        };
+        assert!(pull_request_creation_artifacts(&failed_text).is_empty());
+    }
+
+    #[test]
+    fn final_response_creation_fallback_is_flexible_and_negation_aware() {
+        let url = "https://github.com/BrokkAi/mjolnir/pull/490";
+        assert_eq!(
+            pull_requests_created_in_final_response(&format!("Opened draft PR #490: {url}")).len(),
+            1
+        );
+        assert_eq!(
+            pull_requests_created_in_final_response(&format!(
+                "The pull request was not created: {url}"
+            ))
+            .len(),
+            0
+        );
+        assert_eq!(
+            pull_requests_created_in_final_response(&format!("No pull request was created: {url}"))
+                .len(),
+            0
+        );
+        assert_eq!(
+            pull_requests_created_in_final_response(&format!(
+                "Failed to publish the PR. Existing PR: {url}"
+            ))
+            .len(),
+            0
+        );
+    }
+
+    #[test]
     fn multiple_prs_are_owned_by_local_turn_and_replay_is_ignored() {
         let output = serde_json::json!({
             "created": [
@@ -5254,6 +5505,43 @@ mod tests {
         replay.record_user_prompt("a later turn".to_string());
         assert!(replay.visible_turn_artifacts().is_empty());
         assert_eq!(replay.prompt_turn_artifacts(prompt_index).len(), 2);
+    }
+
+    #[test]
+    fn later_terminal_snapshot_cannot_reassign_an_earlier_turn_pr() {
+        let mut state = AppState::new();
+        state.record_user_prompt("create the PR".to_string());
+        let first_prompt_index = state.active_prompt_turn.expect("first local turn");
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            completed_pr_tool(
+                "first-create",
+                serde_json::json!({
+                    "url": "https://github.com/BrokkAi/mjolnir/pull/493"
+                }),
+            ),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+
+        state.record_user_prompt("run another terminal".to_string());
+        let second_prompt_index = state.active_prompt_turn.expect("second local turn");
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("later-terminal", "run a command")
+                .status(ToolCallStatus::Completed)
+                .content(vec![ToolCallContent::Terminal(Terminal::new("terminal-2"))]),
+        )));
+        state.apply_event(UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "terminal-2".to_string(),
+            output: "done\n".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        }));
+
+        assert_eq!(state.prompt_turn_artifacts(first_prompt_index).len(), 1);
+        assert!(state.prompt_turn_artifacts(second_prompt_index).is_empty());
+        assert!(state.visible_turn_artifacts().is_empty());
     }
 
     #[test]

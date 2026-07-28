@@ -2832,12 +2832,19 @@ fn open_url_in_system_browser(url: &str) -> Result<()> {
         command
     };
 
-    command
+    run_url_opener_command(&mut command)
+}
+
+fn run_url_opener_command(command: &mut Command) -> Result<()> {
+    let status = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .status()
         .context("launch system URL opener")?;
+    if !status.success() {
+        anyhow::bail!("system URL opener exited with {status}");
+    }
     Ok(())
 }
 
@@ -10716,6 +10723,7 @@ fn draw_artifact_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppSta
     let width = area.width.saturating_sub(4).min(96);
     let height = area.height.saturating_sub(4).min(12);
     if width < 24 || height < 6 {
+        draw_compact_artifact_picker(f, area, state);
         return;
     }
     let rect = Rect::new(
@@ -10735,6 +10743,40 @@ fn draw_artifact_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppSta
     f.render_widget(
         Paragraph::new(artifact_picker_lines(state, inner.width)).wrap(Wrap { trim: false }),
         inner,
+    );
+}
+
+fn draw_compact_artifact_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    f.render_widget(Clear, area);
+    if area.height == 1 {
+        f.render_widget(
+            Paragraph::new(fit_width(
+                "PR results · c copy · o open · Esc",
+                usize::from(area.width),
+            ))
+            .style(Style::default().fg(state.theme.accent)),
+            area,
+        );
+        return;
+    }
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+    f.render_widget(
+        Paragraph::new(artifact_picker_lines(state, layout[0].width)).wrap(Wrap { trim: false }),
+        layout[0],
+    );
+    f.render_widget(
+        Paragraph::new(fit_width(
+            "c copy · o open · Esc close",
+            usize::from(layout[1].width),
+        ))
+        .style(Style::default().fg(state.theme.accent)),
+        layout[1],
     );
 }
 
@@ -12746,6 +12788,34 @@ mod tests {
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("c copy URL"), "{rendered}");
         assert!(rendered.contains("o/Enter open"), "{rendered}");
+    }
+
+    #[test]
+    fn narrow_fullscreen_artifact_picker_remains_visible_and_actionable() {
+        let mut state = state_with_created_pr();
+        assert!(state.open_artifact_picker());
+
+        let backend = TestBackend::new(27, 9);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_artifact_picker_modal(frame, frame.area(), &state))
+            .expect("draw compact artifact picker");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("Pull request"), "{rendered}");
+        assert!(rendered.contains("c copy"), "{rendered}");
+        assert!(rendered.contains("o open"), "{rendered}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failing_url_opener_process_is_reported() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 7"]);
+        let error = run_url_opener_command(&mut command).expect_err("nonzero opener must fail");
+        assert!(
+            error.to_string().contains("system URL opener exited"),
+            "{error:#}"
+        );
     }
 
     fn key(code: KeyCode) -> CtEvent {
