@@ -309,6 +309,7 @@ fn observe_delegation_event(
         }
         crate::event::SubagentEvent::Activity { .. }
         | crate::event::SubagentEvent::SessionUpdate { .. }
+        | crate::event::SubagentEvent::SessionConfigOptions { .. }
         | crate::event::SubagentEvent::TerminalOutput { .. }
         | crate::event::SubagentEvent::PermissionRequest { .. }
         | crate::event::SubagentEvent::ElicitationRequest { .. }

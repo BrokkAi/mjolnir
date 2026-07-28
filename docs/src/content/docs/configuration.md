@@ -100,10 +100,13 @@ configuration remains unchanged.
 
 ## Appearance and session controls
 
-Theme and spinner preferences are persistent. The primary agent's ACP session
-controls are available on F1–F9, but model and thought-level selection belong to
-Mjolnir's own configuration and are edited through `/mjconfig` rather than those
-session controls.
+Theme and spinner preferences are persistent.
+ACP option defaults are edited through the **Agents** and **Subagents** panels in
+`/mjconfig`. Agent defaults are saved and also attempted on the active primary;
+subagent defaults apply when new workers launch. Saved values that an adapter no
+longer advertises are retained and labelled stale. When no live primary exists,
+the editor uses its bounded per-role adapter/model metadata cache until the next
+live primary or worker discovery refreshes it.
 
 Platform config locations come from the operating system rather than a literal
 cross-platform `~/.config` contract. See [Storage and network

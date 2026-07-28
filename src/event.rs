@@ -116,6 +116,12 @@ pub enum UiEvent {
     RosterUpdate {
         choices: Vec<crate::roster::ModelChoice>,
         inventory: crate::roster::AcpInventory,
+        primary_session_config_options: Vec<SessionConfigOption>,
+        subagent_session_config_options: Vec<SessionConfigOption>,
+        primary_session_config_source_id: Option<String>,
+        subagent_session_config_source_id: Option<String>,
+        primary_session_config_model: Option<String>,
+        subagent_session_config_model: Option<String>,
     },
     /// Hidden orchestration made inspectable in the shared transcript.
     InternalMessage(InternalMessage),
@@ -213,6 +219,14 @@ pub enum SubagentEvent {
     SessionUpdate {
         subagent_id: u64,
         update: SessionUpdate,
+    },
+    /// Metadata advertised by a newly launched worker. It is cached for the
+    /// subagent role but never treated as a command for existing workers.
+    SessionConfigOptions {
+        subagent_id: u64,
+        source_id: String,
+        model: String,
+        options: Vec<SessionConfigOption>,
     },
     TerminalOutput {
         subagent_id: u64,
@@ -367,6 +381,11 @@ pub enum UiCommand {
     /// Change the discrete review policy without replacing the primary ACP
     /// session.
     SetReviewPolicy { enabled: bool },
+    /// Replace defaults used only by subagents launched after this command.
+    /// Existing worker sessions deliberately receive no ACP update.
+    SetSubagentDefaults {
+        config: crate::config::SubagentsConfig,
+    },
     /// Run one Mjolnir-owned findings-only review while the primary is idle.
     RunReview { target: ReviewTarget },
     /// Compact the primary session using the exact portable command it

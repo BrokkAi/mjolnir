@@ -1208,6 +1208,12 @@ struct ActiveSideRuntime {
     event_task: tokio::task::JoinHandle<()>,
 }
 
+/// Commands that configure the shared main-runtime worker service must not be
+/// delivered to a focused side ACP runtime.
+fn is_main_runtime_worker_command(command: &UiCommand) -> bool {
+    matches!(command, UiCommand::SetSubagentDefaults { .. })
+}
+
 fn isolated_side_runtime_config(
     agent: &SelectedAgent,
     resume_session: Option<String>,
@@ -1953,6 +1959,18 @@ async fn run_session(
     for warning in &roster.warnings {
         let _ = ui_event_tx.send(crate::event::UiEvent::Warning(warning.clone()));
     }
+    // Populate `/mjconfig` from the detached roster probe even before the
+    // first primary or worker session has advertised anything live.
+    let _ = ui_event_tx.send(crate::event::UiEvent::RosterUpdate {
+        choices: roster.choices.clone(),
+        inventory: roster.inventory.clone(),
+        primary_session_config_options: roster.primary_session_config_options.clone(),
+        subagent_session_config_options: roster.subagent_session_config_options.clone(),
+        primary_session_config_source_id: Some(roster.primary_session_config_source_id.clone()),
+        subagent_session_config_source_id: roster.subagent_session_config_source_id.clone(),
+        primary_session_config_model: Some(roster.primary_session_config_model.clone()),
+        subagent_session_config_model: roster.subagent_session_config_model.clone(),
+    });
     let _ = pending_probe_servers;
     let roster_update_task = roster_updates.map(|mut updates| {
         let tx = ui_event_tx.clone();
@@ -1980,6 +1998,15 @@ async fn run_session(
                     .send(crate::event::UiEvent::RosterUpdate {
                         choices: snapshot.choices,
                         inventory: snapshot.inventory,
+                        primary_session_config_options: snapshot.primary_session_config_options,
+                        subagent_session_config_options: snapshot.subagent_session_config_options,
+                        primary_session_config_source_id: Some(
+                            snapshot.primary_session_config_source_id,
+                        ),
+                        subagent_session_config_source_id: snapshot
+                            .subagent_session_config_source_id,
+                        primary_session_config_model: Some(snapshot.primary_session_config_model),
+                        subagent_session_config_model: snapshot.subagent_session_config_model,
                     })
                     .is_err()
                 {
@@ -2070,6 +2097,31 @@ async fn run_session(
     let primary_permission = runtime_options.permission_mode.and_then(|mode| {
         roster::configure_permissions(roster.primary.launch.kind, mode, &mut primary_env)
     });
+
+    let subagent_runtime_config = subagent_pool.map(|subagent_pool| {
+        let mut config = subagent::Config::new(subagent_pool, runtime_options.agent_stderr.clone());
+        if let Some(role) = config.role_config.as_mut() {
+            role.session_tag = Some(session_tag.clone());
+        }
+        config = config
+            .with_session_config(subagents_config.session_config.clone())
+            .with_subagent_handoff_counter(subagent_handoffs_this_turn.clone())
+            .with_id_allocator(subagent_ids.clone())
+            .with_active_implementation_workers(active_implementation_workers.clone())
+            .with_max_parallel(subagents_config.max_parallel)
+            .with_quota_gate(quota_gate.clone())
+            .with_inventory(subagent_inventory.clone())
+            .with_reports(subagent_reports.clone())
+            .with_prewarm(subagent::RunContext {
+                cwd: cwd.clone(),
+                additional_directories: runtime_options.additional_directories.clone(),
+                snapshot_exclusions: runtime_options.snapshot_exclusions.clone(),
+                fs_max_text_bytes: runtime_options.fs_max_text_bytes,
+                access_mode: acp::RuntimeAccessMode::Full,
+            });
+        config
+    });
+    let live_subagent_defaults = subagent_runtime_config.clone();
     let runtime_cfg = acp::AcpRuntimeConfig {
         command: agent.program.clone(),
         args: agent.args.clone(),
@@ -2084,7 +2136,7 @@ async fn run_session(
         access_mode: acp::RuntimeAccessMode::Full,
         agent_source_id: Some(agent.source_id.clone()),
         config_path: Some(config::default_config_path()),
-        saved_session_config: std::collections::HashMap::new(),
+        saved_session_config: agent_config.session_config.clone(),
         role_config: Some(acp::RuntimeRoleConfig {
             label: "primary".to_string(),
             model_id: roster.primary.model.model.clone(),
@@ -2094,28 +2146,7 @@ async fn run_session(
             session_tag: Some(session_tag.clone()),
             reasoning_effort: roster.primary.reasoning_effort.clone(),
         }),
-        subagents: subagent_pool.map(|subagent_pool| {
-            let mut config =
-                subagent::Config::new(subagent_pool, runtime_options.agent_stderr.clone());
-            if let Some(role) = config.role_config.as_mut() {
-                role.session_tag = Some(session_tag.clone());
-            }
-            config
-                .with_subagent_handoff_counter(subagent_handoffs_this_turn.clone())
-                .with_id_allocator(subagent_ids.clone())
-                .with_active_implementation_workers(active_implementation_workers.clone())
-                .with_max_parallel(subagents_config.max_parallel)
-                .with_quota_gate(quota_gate.clone())
-                .with_inventory(subagent_inventory.clone())
-                .with_reports(subagent_reports.clone())
-                .with_prewarm(subagent::RunContext {
-                    cwd: cwd.clone(),
-                    additional_directories: runtime_options.additional_directories.clone(),
-                    snapshot_exclusions: runtime_options.snapshot_exclusions.clone(),
-                    fs_max_text_bytes: runtime_options.fs_max_text_bytes,
-                    access_mode: acp::RuntimeAccessMode::Full,
-                })
-        }),
+        subagents: subagent_runtime_config,
         side_prompt_policy: false,
         termination: None,
     };
@@ -2374,6 +2405,17 @@ async fn run_session(
                 UiCommand::Main(command) => (*command, true),
                 command => (command, false),
             };
+            // This updates the main runtime's shared future-worker defaults;
+            // it is not an ACP command for whichever side conversation is
+            // currently focused.
+            if is_main_runtime_worker_command(&command)
+                && let UiCommand::SetSubagentDefaults { config } = &command
+            {
+                if let Some(subagents) = live_subagent_defaults.as_ref() {
+                    subagents.update_live_defaults(config.clone()).await;
+                }
+                continue;
+            }
             if !force_main && side_runtime.is_some() {
                 if matches!(command, UiCommand::Shutdown) {
                     if let Some(side) = side_runtime.take() {
@@ -3017,6 +3059,16 @@ mod tests {
     }
 
     #[test]
+    fn subagent_default_updates_stay_with_main_runtime_during_side_session() {
+        let command = UiCommand::SetSubagentDefaults {
+            config: config::SubagentsConfig::default(),
+        };
+
+        assert!(is_main_runtime_worker_command(&command));
+        assert!(!is_main_runtime_worker_command(&UiCommand::CancelPrompt));
+    }
+
+    #[test]
     fn side_runtime_config_has_no_agent_services_or_persistence() {
         let agent = SelectedAgent {
             source_id: "test-agent".to_string(),
@@ -3188,6 +3240,12 @@ mod tests {
             choices: Vec::new(),
             warnings: Vec::new(),
             inventory: roster::AcpInventory::default(),
+            primary_session_config_options: Vec::new(),
+            subagent_session_config_options: Vec::new(),
+            primary_session_config_source_id: String::new(),
+            subagent_session_config_source_id: None,
+            primary_session_config_model: "gpt-test".to_string(),
+            subagent_session_config_model: Some("claude-test".to_string()),
         };
 
         assert_eq!(

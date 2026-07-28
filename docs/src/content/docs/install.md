@@ -72,7 +72,9 @@ for voice prerequisites and the full validation matrix.
 
 ## Connect a provider
 
-Run `mj`, then open `/mjconfig`:
+Run `mj`, then open `/mjconfig`. Use the **Agents** and **Subagents** tabs to
+set role-specific defaults; saved subagent ACP options affect only newly
+launched workers:
 
 1. In **Accounts**, sign in or verify an existing provider credential.
 2. In **ACP Servers**, confirm at least one adapter is available.

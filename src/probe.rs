@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    DeleteSessionRequest, ErrorCode, InitializeRequest, NewSessionRequest,
+    DeleteSessionRequest, ErrorCode, InitializeRequest, NewSessionRequest, SessionConfigOption,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -101,6 +101,10 @@ pub struct ModelOption {
 pub struct AdapterCapabilities {
     pub http_mcp: bool,
     pub models: Vec<ModelOption>,
+    /// Selectable controls observed during the short-lived detached
+    /// `session/new` probe.  This is intentionally the adapter's own metadata,
+    /// not a projection from a live primary or worker session.
+    pub session_config_options: Vec<SessionConfigOption>,
 }
 
 /// Launch an ACP adapter once and capture both its initialize capabilities and
@@ -169,9 +173,8 @@ where
                 }
                 Err(err) => return Ok(Err(format!("session/new failed: {err}"))),
             };
-            let models = session
-                .config_options
-                .unwrap_or_default()
+            let session_config_options = session.config_options.unwrap_or_default();
+            let models = session_config_options
                 .iter()
                 .filter(|option| crate::app::is_model_config_option(option))
                 .filter_map(crate::app::config_option_choices)
@@ -196,6 +199,7 @@ where
             Ok(Ok(AdapterCapabilities {
                 http_mcp: init_resp.agent_capabilities.mcp_capabilities.http,
                 models,
+                session_config_options,
             }))
         })
         .await;

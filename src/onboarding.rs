@@ -156,6 +156,12 @@ mod tests {
             }],
             warnings: Vec::new(),
             inventory: crate::roster::AcpInventory::default(),
+            primary_session_config_options: Vec::new(),
+            subagent_session_config_options: Vec::new(),
+            primary_session_config_source_id: String::new(),
+            subagent_session_config_source_id: None,
+            primary_session_config_model: "gpt-test".to_string(),
+            subagent_session_config_model: None,
         }
     }
 
@@ -170,7 +176,10 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("Welcome to Mjolnir"));
         assert!(rendered.contains("Agents"));
-        assert!(rendered.contains("primary model; plans, implements, and answers"));
+        assert!(rendered.contains("Subagents"));
+        assert!(rendered.contains("ACP Servers"));
+        assert!(rendered.contains("Appearance"));
+        assert!(rendered.contains("Primary model"));
         assert!(rendered.contains("Enter save"));
     }
 }

@@ -114,6 +114,16 @@ pub struct AgentConfig {
     /// single `--print` invocation; never written to the on-disk default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// ACP option defaults for newly created primary sessions. Keys are ACP
+    /// config ids; values are deliberately retained when an adapter no longer
+    /// advertises them so switching back does not lose a preference.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub session_config: HashMap<String, String>,
+    /// Bounded cached selectable ACP metadata by adapter/model identity. A
+    /// live primary session is authoritative and refreshes its matching entry.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub session_config_metadata:
+        HashMap<String, Vec<agent_client_protocol::schema::v1::SessionConfigOption>>,
     #[serde(default = "default_true")]
     pub discrete_review: bool,
 }
@@ -123,6 +133,8 @@ impl Default for AgentConfig {
         Self {
             model: default_auto(),
             reasoning_effort: None,
+            session_config: HashMap::new(),
+            session_config_metadata: HashMap::new(),
             discrete_review: true,
         }
     }
@@ -143,6 +155,13 @@ pub struct SubagentsConfig {
     /// single `--print` invocation; never written to the on-disk default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// ACP option defaults applied only when a new worker session launches.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub session_config: HashMap<String, String>,
+    /// Independently cached selectable metadata for new subagent sessions.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub session_config_metadata:
+        HashMap<String, Vec<agent_client_protocol::schema::v1::SessionConfigOption>>,
     /// Concurrency cap for the shared subagent pool.
     #[serde(default = "default_max_parallel")]
     pub max_parallel: usize,
@@ -156,6 +175,8 @@ impl Default for SubagentsConfig {
         Self {
             model: default_auto(),
             reasoning_effort: None,
+            session_config: HashMap::new(),
+            session_config_metadata: HashMap::new(),
             max_parallel: default_max_parallel(),
             auto_failover: true,
         }
@@ -521,11 +542,15 @@ fn migrate_v2(body: &str) -> Result<Config> {
         agent: AgentConfig {
             model: old.thor.model,
             reasoning_effort: old.thor.reasoning_effort,
+            session_config: HashMap::new(),
+            session_config_metadata: HashMap::new(),
             discrete_review: old.thor.discrete_review,
         },
         subagents: SubagentsConfig {
             model: old.eitri.model,
             reasoning_effort: old.eitri.reasoning_effort,
+            session_config: HashMap::new(),
+            session_config_metadata: HashMap::new(),
             max_parallel: old.eitri.max_parallel_explores,
             auto_failover: old.council.auto_failover,
         },
@@ -884,6 +909,8 @@ origin = "custom"
             agent: AgentConfig {
                 model: "gpt-5-6-sol".to_string(),
                 reasoning_effort: None,
+                session_config: HashMap::new(),
+                session_config_metadata: HashMap::new(),
                 discrete_review: false,
             },
             subagents: SubagentsConfig {
@@ -1067,6 +1094,25 @@ mode = "ask"
         .expect("write");
         let config = Config::load(&path).expect("load incompatible config");
         assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn session_config_defaults_are_separate_for_primary_and_subagents() {
+        let mut config = Config::default();
+        config
+            .agent
+            .session_config
+            .insert("mode".to_string(), "agent".to_string());
+        config
+            .subagents
+            .session_config
+            .insert("mode".to_string(), "read-only".to_string());
+
+        let text = toml::to_string(&config).expect("serialize config");
+        let restored: Config = toml::from_str(&text).expect("deserialize config");
+
+        assert_eq!(restored.agent.session_config["mode"], "agent");
+        assert_eq!(restored.subagents.session_config["mode"], "read-only");
     }
 
     #[test]

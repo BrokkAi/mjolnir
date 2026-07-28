@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -176,7 +177,7 @@ pub struct RolePool {
     roles: Arc<Vec<ResolvedAgent>>,
     state: Arc<Mutex<PoolState>>,
     gate: Gate,
-    auto_failover: bool,
+    auto_failover: Arc<AtomicBool>,
     /// Human-readable name of the pool, used in quota status messages.
     label: &'static str,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
@@ -202,7 +203,7 @@ impl RolePool {
             roles: Arc::new(roles),
             state: Arc::default(),
             gate,
-            auto_failover,
+            auto_failover: Arc::new(AtomicBool::new(auto_failover)),
             label,
             ui_tx,
         }
@@ -213,7 +214,31 @@ impl RolePool {
         self.roles[state.current].clone()
     }
 
-    pub async fn select_for_work(&self) -> Result<Selection, String> {
+    pub fn roles(&self) -> Vec<ResolvedAgent> {
+        self.roles.as_ref().clone()
+    }
+
+    /// Changes quota failover policy for selections made after this call.
+    pub fn set_auto_failover(&self, enabled: bool) {
+        self.auto_failover.store(enabled, Ordering::Release);
+    }
+
+    /// Selects a role only after it has passed the same quota gate as the
+    /// ordinary pool choice. A saved model preference is therefore advisory:
+    /// an excluded or quota-limited provider cannot replace an admitted role.
+    pub async fn select_for_work_preferred(
+        &self,
+        preferred_model: Option<&str>,
+    ) -> Result<Selection, String> {
+        if let Some(preferred_model) = preferred_model.filter(|model| *model != "auto") {
+            let mut state = self.state.lock().expect("role pool poisoned");
+            if let Some(index) = self.roles.iter().position(|role| {
+                role.model.model == preferred_model
+                    && !state.excluded_providers.contains(&role.launch.source_id)
+            }) {
+                state.current = index;
+            }
+        }
         loop {
             let role = {
                 let state = self.state.lock().expect("role pool poisoned");
@@ -260,7 +285,7 @@ impl RolePool {
         if self.roles[state.current].launch.source_id != provider {
             return true;
         }
-        let next = self.auto_failover.then(|| {
+        let next = self.auto_failover.load(Ordering::Acquire).then(|| {
             self.roles.iter().enumerate().find(|(_, candidate)| {
                 !state
                     .excluded_providers
@@ -395,5 +420,24 @@ mod tests {
         assert!(!pool.handle_near_limit(&claude, None));
         assert!(matches!(ui_rx.try_recv(), Ok(UiEvent::Warning(_))));
         assert!(ui_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn updated_failover_policy_controls_the_next_quota_selection() {
+        let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
+        let claude = role("claude-opus", "claude-acp", AdapterKind::Claude);
+        let codex = role("gpt-codex", "codex-acp", AdapterKind::Codex);
+        let pool = RolePool::new(
+            vec![claude.clone(), codex],
+            Gate::new(PathBuf::from("."), ui_tx.clone()),
+            true,
+            "subagents",
+            ui_tx,
+        );
+
+        pool.set_auto_failover(false);
+
+        assert!(!pool.handle_near_limit(&claude, None));
+        assert_eq!(pool.current().model.model, "claude-opus");
     }
 }

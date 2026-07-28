@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use agent_client_protocol::schema::v1::SessionConfigOption;
 use crossterm::event::KeyCode;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -18,24 +19,26 @@ use crate::roster::{AcpInventory, ModelChoice};
 use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
 
-pub const ROLE_DESCRIPTIONS: [(&str, &str); 2] = [
-    ("Agent", "primary model; plans, implements, and answers"),
-    ("Subagents", "default model for create_subagent delegations"),
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     Agents,
+    Subagents,
     AcpServers,
     Appearance,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 3] = [Self::Agents, Self::AcpServers, Self::Appearance];
+    const ALL: [Self; 4] = [
+        Self::Agents,
+        Self::Subagents,
+        Self::AcpServers,
+        Self::Appearance,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Agents => "Agents",
+            Self::Subagents => "Subagents",
             Self::AcpServers => "ACP Servers",
             Self::Appearance => "Appearance",
         }
@@ -96,6 +99,12 @@ pub struct SettingsEditor {
     choices: Vec<ModelChoice>,
     active_models: Option<ModelsConfig>,
     inventory: AcpInventory,
+    primary_session_config_options: Vec<SessionConfigOption>,
+    subagent_session_config_options: Vec<SessionConfigOption>,
+    primary_session_config_source_id: Option<String>,
+    subagent_session_config_source_id: Option<String>,
+    primary_session_config_model: Option<String>,
+    subagent_session_config_model: Option<String>,
     acp_view: AcpView,
     registry: RegistryState,
     installing: Option<InstallingServer>,
@@ -112,6 +121,12 @@ impl SettingsEditor {
             choices,
             active_models: None,
             inventory,
+            primary_session_config_options: Vec::new(),
+            subagent_session_config_options: Vec::new(),
+            primary_session_config_source_id: None,
+            subagent_session_config_source_id: None,
+            primary_session_config_model: None,
+            subagent_session_config_model: None,
             acp_view: AcpView::Servers,
             registry: RegistryState::NotLoaded,
             installing: None,
@@ -128,6 +143,81 @@ impl SettingsEditor {
     pub fn with_active_models(mut self, active_models: ModelsConfig) -> Self {
         self.active_models = Some(active_models);
         self
+    }
+
+    /// Options from the active primary session. They are authoritative for
+    /// the live primary; cached discovery is used only when it is absent.
+    pub fn with_session_config_options(mut self, options: Vec<SessionConfigOption>) -> Self {
+        self.primary_session_config_options = options;
+        self
+    }
+
+    pub fn with_primary_session_config_source_id(mut self, source_id: Option<String>) -> Self {
+        self.primary_session_config_source_id = source_id;
+        if self.primary_session_config_options.is_empty() {
+            self.primary_session_config_options = Self::cached_options(
+                &self.config,
+                true,
+                self.primary_session_config_source_id.as_deref(),
+            );
+        }
+        self
+    }
+
+    pub fn with_primary_session_config_model(mut self, model: Option<String>) -> Self {
+        self.primary_session_config_model = model;
+        self.refresh_detached_options(true);
+        self
+    }
+
+    pub fn with_subagent_session_config_options(
+        mut self,
+        options: Vec<SessionConfigOption>,
+    ) -> Self {
+        self.subagent_session_config_options = options;
+        self
+    }
+
+    pub fn with_subagent_session_config_source_id(mut self, source_id: Option<String>) -> Self {
+        self.subagent_session_config_source_id = source_id;
+        if self.subagent_session_config_options.is_empty() {
+            self.subagent_session_config_options = Self::cached_options(
+                &self.config,
+                false,
+                self.subagent_session_config_source_id.as_deref(),
+            );
+        }
+        self
+    }
+
+    pub fn with_subagent_session_config_model(mut self, model: Option<String>) -> Self {
+        self.subagent_session_config_model = model;
+        self.refresh_detached_options(false);
+        self
+    }
+
+    /// Detached probe options are only usable for the exact adapter/model
+    /// that produced them. Otherwise prefer the matching disk cache (or no
+    /// controls) rather than exposing one model's values for another.
+    fn refresh_detached_options(&mut self, primary: bool) {
+        let (options, source_id, advertised_model, configured_model) = if primary {
+            (
+                &mut self.primary_session_config_options,
+                self.primary_session_config_source_id.as_deref(),
+                self.primary_session_config_model.as_deref(),
+                self.config.agent.model.as_str(),
+            )
+        } else {
+            (
+                &mut self.subagent_session_config_options,
+                self.subagent_session_config_source_id.as_deref(),
+                self.subagent_session_config_model.as_deref(),
+                self.config.subagents.model.as_str(),
+            )
+        };
+        if advertised_model.is_some_and(|model| model != configured_model) || options.is_empty() {
+            *options = Self::cached_options(&self.config, primary, source_id);
+        }
     }
 
     pub fn handle_key(&mut self, code: KeyCode) -> SettingsAction {
@@ -198,7 +288,8 @@ impl SettingsEditor {
 
     fn row_count(&self) -> usize {
         match self.tab {
-            SettingsTab::Agents => 5,
+            SettingsTab::Agents => 3 + self.session_option_row_count(true),
+            SettingsTab::Subagents => 4 + self.session_option_row_count(false),
             SettingsTab::AcpServers => self.inventory.servers.len() + 4,
             SettingsTab::Appearance => 2,
         }
@@ -213,8 +304,13 @@ impl SettingsEditor {
 
     fn change_selected(&mut self, delta: i32) -> SettingsAction {
         match self.tab {
-            SettingsTab::Agents if self.selected < 2 => self.cycle_model(self.selected, delta),
-            SettingsTab::Agents if self.selected == 3 => {
+            SettingsTab::Agents if self.selected == 0 => self.cycle_model(0, delta),
+            SettingsTab::Agents if self.selected == 1 => self.cycle_reasoning(true, delta),
+            SettingsTab::Agents if self.selected >= 3 => self.cycle_session_option(true, delta),
+            SettingsTab::Subagents if self.selected == 0 => self.cycle_model(1, delta),
+            SettingsTab::Subagents if self.selected == 1 => self.cycle_reasoning(false, delta),
+            SettingsTab::Subagents if self.selected >= 4 => self.cycle_session_option(false, delta),
+            SettingsTab::Subagents if self.selected == 2 => {
                 self.config.subagents.max_parallel =
                     (self.config.subagents.max_parallel as i32 + delta).rem_euclid(17) as usize;
             }
@@ -275,7 +371,7 @@ impl SettingsEditor {
             SettingsTab::Agents if self.selected == 2 => {
                 self.config.agent.discrete_review = !self.config.agent.discrete_review;
             }
-            SettingsTab::Agents if self.selected == 4 => {
+            SettingsTab::Subagents if self.selected == 3 => {
                 self.config.subagents.auto_failover = !self.config.subagents.auto_failover;
             }
             SettingsTab::AcpServers => {
@@ -328,6 +424,117 @@ impl SettingsEditor {
             1 => self.config.subagents.model.clone_from(&choices[next]),
             _ => {}
         }
+        self.refresh_detached_options(role == 0);
+    }
+
+    fn cycle_reasoning(&mut self, primary: bool, delta: i32) {
+        let values = ["default", "low", "medium", "high"];
+        let effort = if primary {
+            &mut self.config.agent.reasoning_effort
+        } else {
+            &mut self.config.subagents.reasoning_effort
+        };
+        let current = effort.as_deref().unwrap_or("default");
+        let index = values
+            .iter()
+            .position(|value| *value == current)
+            .unwrap_or(0);
+        let next = (index as i32 + delta).rem_euclid(values.len() as i32) as usize;
+        *effort = (values[next] != "default").then(|| values[next].to_string());
+    }
+
+    fn cycle_session_option(&mut self, primary: bool, delta: i32) {
+        let option_index = self.selected.saturating_sub(if primary { 3 } else { 4 });
+        let options = if primary {
+            &self.primary_session_config_options
+        } else {
+            &self.subagent_session_config_options
+        };
+        let Some(option) = options.get(option_index) else {
+            // Retained defaults that are no longer advertised still occupy a
+            // selectable row, but deliberately have no editable values.
+            return;
+        };
+        let Some(choices) = crate::app::config_option_choices(option) else {
+            return;
+        };
+        if choices.is_empty() {
+            return;
+        }
+        let key = format!("config:{}", option.id);
+        let defaults = if primary {
+            &mut self.config.agent.session_config
+        } else {
+            &mut self.config.subagents.session_config
+        };
+        // An adapter no longer advertising a saved value is not permission to
+        // replace it. Keep the value visible and retain it until the adapter
+        // advertises a safe replacement again.
+        if defaults.get(&key).is_some_and(|saved| {
+            !choices
+                .iter()
+                .any(|choice| choice.value.to_string() == *saved)
+        }) {
+            return;
+        }
+        let current = defaults
+            .get(&key)
+            .cloned()
+            .or_else(|| {
+                crate::app::config_option_current_value_id(option).map(|value| value.to_string())
+            })
+            .unwrap_or_default();
+        let index = choices
+            .iter()
+            .position(|choice| choice.value.to_string() == current)
+            .unwrap_or(0);
+        let next = (index as i32 + delta).rem_euclid(choices.len() as i32) as usize;
+        defaults.insert(key, choices[next].value.to_string());
+        self.notice = None;
+    }
+
+    fn cached_options(
+        config: &Config,
+        primary: bool,
+        source_id: Option<&str>,
+    ) -> Vec<SessionConfigOption> {
+        let cache = if primary {
+            &config.agent.session_config_metadata
+        } else {
+            &config.subagents.session_config_metadata
+        };
+        let model = if primary {
+            &config.agent.model
+        } else {
+            &config.subagents.model
+        };
+        source_id
+            .and_then(|source_id| cache.get(&format!("{source_id}:{model}")))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn session_option_row_count(&self, primary: bool) -> usize {
+        let (options, defaults) = if primary {
+            (
+                &self.primary_session_config_options,
+                &self.config.agent.session_config,
+            )
+        } else {
+            (
+                &self.subagent_session_config_options,
+                &self.config.subagents.session_config,
+            )
+        };
+        options.len()
+            + defaults
+                .keys()
+                .filter(|key| {
+                    !options
+                        .iter()
+                        .any(|option| format!("config:{}", option.id) == ***key)
+                })
+                .count()
     }
 
     fn model_choices(&self, role: usize) -> Vec<String> {
@@ -782,6 +989,7 @@ pub fn draw_settings_panel(
     draw_tabs(frame, rows[0], editor, theme);
     match editor.tab {
         SettingsTab::Agents => draw_agents(frame, rows[1], editor, theme),
+        SettingsTab::Subagents => draw_subagents(frame, rows[1], editor, theme),
         SettingsTab::AcpServers => draw_servers(frame, rows[1], editor, theme),
         SettingsTab::Appearance => draw_appearance(frame, rows[1], editor, theme),
     }
@@ -850,30 +1058,32 @@ fn draw_agents(
         ),
         Line::raw(""),
     ];
-    for (index, (role, description)) in ROLE_DESCRIPTIONS.iter().enumerate() {
-        let model = match index {
-            0 => &editor.config.agent.model,
-            _ => &editor.config.subagents.model,
-        };
-        lines.push(selected_line(
-            editor.selected == index,
-            format!("{role:<9} < {model} >"),
-            theme,
-        ));
-        lines.push(Line::from(vec![
-            Span::raw("            "),
-            Span::styled(*description, Style::default().fg(theme.muted)),
-        ]));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "            saved: {} · active: {}",
-                editor.staged_model_detail(model),
-                editor.active_model_detail(index)
-            ),
-            Style::default().fg(theme.muted),
-        )));
-    }
-    lines.push(Line::raw(""));
+    lines.push(selected_line(
+        editor.selected == 0,
+        format!("Primary model < {} >", editor.config.agent.model),
+        theme,
+    ));
+    lines.push(Line::styled(
+        format!(
+            "         saved: {} · active: {}",
+            editor.staged_model_detail(&editor.config.agent.model),
+            editor.active_model_detail(0)
+        ),
+        Style::default().fg(theme.muted),
+    ));
+    lines.push(selected_line(
+        editor.selected == 1,
+        format!(
+            "Primary reasoning < {} >",
+            editor
+                .config
+                .agent
+                .reasoning_effort
+                .as_deref()
+                .unwrap_or("default")
+        ),
+        theme,
+    ));
     lines.push(selected_line(
         editor.selected == 2,
         format!(
@@ -882,27 +1092,187 @@ fn draw_agents(
         ),
         theme,
     ));
-    lines.push(selected_line(
-        editor.selected == 3,
-        format!(
-            "Parallel subagents < {} >",
-            editor.config.subagents.max_parallel
-        ),
-        theme,
-    ));
-    lines.push(selected_line(
-        editor.selected == 4,
-        format!(
-            "Automatic quota failover [{}]",
-            on_off(editor.config.subagents.auto_failover)
-        ),
-        theme,
-    ));
-    lines.push(Line::from(Span::styled(
-        "         quota changes reload with /new or /clear",
+    lines.push(Line::styled(
+        "ACP options · primary changes are also sent to the active primary.",
         Style::default().fg(theme.muted),
-    )));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    ));
+    append_option_lines(&mut lines, editor, true, theme);
+    let selected_line = settings_selected_line(editor, true);
+    let scroll = settings_scroll(&lines, selected_line, area.width, area.height);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
+fn draw_subagents(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    editor: &SettingsEditor,
+    theme: TerminalTheme,
+) {
+    let mut lines = vec![
+        Line::styled(
+            "Defaults apply only to newly launched workers; they never change running workers.",
+            Style::default().fg(theme.muted),
+        ),
+        Line::raw(""),
+        selected_line(
+            editor.selected == 0,
+            format!("Subagent model < {} >", editor.config.subagents.model),
+            theme,
+        ),
+        Line::styled(
+            format!(
+                "         saved: {} · active: {}",
+                editor.staged_model_detail(&editor.config.subagents.model),
+                editor.active_model_detail(1)
+            ),
+            Style::default().fg(theme.muted),
+        ),
+        selected_line(
+            editor.selected == 1,
+            format!(
+                "Subagent reasoning < {} >",
+                editor
+                    .config
+                    .subagents
+                    .reasoning_effort
+                    .as_deref()
+                    .unwrap_or("default")
+            ),
+            theme,
+        ),
+        selected_line(
+            editor.selected == 2,
+            format!("Max parallel < {} >", editor.config.subagents.max_parallel),
+            theme,
+        ),
+        selected_line(
+            editor.selected == 3,
+            format!(
+                "Automatic quota failover [{}]",
+                on_off(editor.config.subagents.auto_failover)
+            ),
+            theme,
+        ),
+        Line::styled(
+            "ACP options · saved for new workers only.",
+            Style::default().fg(theme.muted),
+        ),
+    ];
+    append_option_lines(&mut lines, editor, false, theme);
+    let selected_line = settings_selected_line(editor, false);
+    let scroll = settings_scroll(&lines, selected_line, area.width, area.height);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
+fn settings_selected_line(editor: &SettingsEditor, primary: bool) -> usize {
+    // These offsets are the actual logical lines built above, including the
+    // descriptive and retained-stale rows. Visual height is calculated below
+    // from those lines and the current panel width.
+    if primary {
+        match editor.selected {
+            0 => 2,
+            1 => 4,
+            2 => 5,
+            selected => 7 + selected.saturating_sub(3),
+        }
+    } else {
+        match editor.selected {
+            0 => 2,
+            1 => 4,
+            2 => 5,
+            3 => 6,
+            selected => 8 + selected.saturating_sub(4),
+        }
+    }
+}
+
+fn settings_scroll(
+    lines: &[Line<'_>],
+    selected_line: usize,
+    width: u16,
+    viewport_height: u16,
+) -> u16 {
+    // Delegate wrapping to the same Paragraph implementation used for the
+    // panel. Counting character widths here is subtly wrong for word breaks,
+    // hyphens, and styled spans. Leave one visual row below the selected
+    // option, while keeping every visual row of a wrapped selection visible.
+    let visual_rows_before_selected = Paragraph::new(lines[..selected_line].to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1));
+    let selected_visual_rows = Paragraph::new(vec![lines[selected_line].clone()])
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1));
+    let viewport_height = usize::from(viewport_height);
+    let scroll = visual_rows_before_selected
+        .saturating_add(selected_visual_rows)
+        .saturating_add(1)
+        .saturating_sub(viewport_height);
+    scroll.min(u16::MAX as usize) as u16
+}
+
+fn append_option_lines(
+    lines: &mut Vec<Line<'static>>,
+    editor: &SettingsEditor,
+    primary: bool,
+    theme: TerminalTheme,
+) {
+    let (options, defaults, start) = if primary {
+        (
+            &editor.primary_session_config_options,
+            &editor.config.agent.session_config,
+            3,
+        )
+    } else {
+        (
+            &editor.subagent_session_config_options,
+            &editor.config.subagents.session_config,
+            4,
+        )
+    };
+    for (index, option) in options.iter().enumerate() {
+        let key = format!("config:{}", option.id);
+        let current = crate::app::config_option_current_value_label(option);
+        let saved = defaults
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| current.clone());
+        let stale = !crate::app::config_option_choices(option)
+            .unwrap_or_default()
+            .iter()
+            .any(|choice| choice.value.to_string() == saved);
+        let suffix = if stale { " (stale; retained)" } else { "" };
+        lines.push(selected_line(
+            editor.selected == start + index,
+            format!("{} < {saved} >{suffix}", option.name),
+            theme,
+        ));
+    }
+    let stale_start = start + options.len();
+    for (stale_index, (key, value)) in defaults
+        .iter()
+        .filter(|(key, _)| {
+            !options
+                .iter()
+                .any(|option| format!("config:{}", option.id) == **key)
+        })
+        .enumerate()
+    {
+        lines.push(selected_line(
+            editor.selected == stale_start + stale_index,
+            format!("{key} < {value} > (stale; retained; not editable)"),
+            theme,
+        ));
+    }
 }
 
 fn draw_servers(
@@ -967,17 +1337,7 @@ fn draw_servers(
             .fg(theme.muted)
             .add_modifier(Modifier::BOLD),
     ));
-    let rows_available = area.height.saturating_sub(lines.len() as u16) as usize / 2;
-    let selected_server = editor.selected.saturating_sub(4);
-    let start = selected_server.saturating_sub(rows_available.saturating_sub(1));
-    for (index, server) in editor
-        .inventory
-        .servers
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(rows_available)
-    {
+    for (index, server) in editor.inventory.servers.iter().enumerate() {
         let status = if server.installing {
             "installing".to_string()
         } else if server.policy == AcpServerPolicy::Disabled {
@@ -1026,7 +1386,18 @@ fn draw_servers(
             Style::default().fg(theme.muted),
         ));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    let selected_line = match editor.selected {
+        0..=2 => editor.selected + 1,
+        3 => 5,
+        selected => 8 + 2 * selected.saturating_sub(4),
+    };
+    let scroll = settings_scroll(&lines, selected_line, area.width, area.height);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        area,
+    );
 }
 
 fn draw_catalog(
@@ -1142,14 +1513,12 @@ fn draw_catalog(
                 "Custom command...".to_string(),
                 theme,
             ));
-            let visible = area.height.saturating_sub(lines.len() as u16) as usize;
-            let start = editor.selected.saturating_sub(visible.saturating_sub(1));
-            for (index, agent) in agents
-                .iter()
-                .enumerate()
-                .skip(start.saturating_sub(1))
-                .take(visible)
-            {
+            let selected_catalog_line = if editor.selected == 0 {
+                lines.len().saturating_sub(1)
+            } else {
+                lines.len().saturating_add(editor.selected - 1)
+            };
+            for (index, agent) in agents.iter().enumerate() {
                 let kind = agent
                     .preferred_kind(&crate::registry::current_platform())
                     .map(DistributionKind::label)
@@ -1160,6 +1529,14 @@ fn draw_catalog(
                     theme,
                 ));
             }
+            let scroll = settings_scroll(&lines, selected_catalog_line, area.width, area.height);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((scroll, 0)),
+                area,
+            );
+            return;
         }
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
@@ -1219,18 +1596,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn role_descriptions_match_product_language() {
-        assert_eq!(
-            ROLE_DESCRIPTIONS[0].1,
-            "primary model; plans, implements, and answers"
-        );
-        assert_eq!(
-            ROLE_DESCRIPTIONS[1].1,
-            "default model for create_subagent delegations"
-        );
-    }
-
-    #[test]
     fn tabs_share_one_editable_config() {
         let mut config = Config::default();
         config.set_acp_server_policy("codex-acp", AcpServerPolicy::Enabled);
@@ -1241,6 +1606,7 @@ mod tests {
             SettingsAction::Changed
         );
         assert!(!editor.config.agent.discrete_review);
+        editor.handle_key(KeyCode::Tab);
         editor.handle_key(KeyCode::Tab);
         assert_eq!(editor.tab, SettingsTab::AcpServers);
         editor.selected = editor
@@ -1263,7 +1629,8 @@ mod tests {
     #[test]
     fn quota_failover_can_be_disabled() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        editor.selected = 4;
+        editor.tab = SettingsTab::Subagents;
+        editor.selected = 3;
         assert_eq!(
             editor.handle_key(KeyCode::Char(' ')),
             SettingsAction::Changed
@@ -1291,9 +1658,443 @@ mod tests {
     #[test]
     fn optional_model_selection_can_disable_subagents() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        editor.selected = 1;
+        editor.tab = SettingsTab::Subagents;
+        editor.selected = 0;
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(editor.config.subagents.model, crate::config::DISABLED_MODEL);
+    }
+
+    fn option(id: &str) -> SessionConfigOption {
+        SessionConfigOption::select(
+            id.to_string(),
+            format!("Option {id}"),
+            "one",
+            vec![
+                agent_client_protocol::schema::v1::SessionConfigSelectOption::new("one", "One"),
+                agent_client_protocol::schema::v1::SessionConfigSelectOption::new("two", "Two"),
+            ],
+        )
+    }
+
+    #[test]
+    fn separate_panels_keep_primary_and_subagent_options_isolated() {
+        let primary = option("primary-mode");
+        let subagent = option("worker-mode");
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None)
+            .with_session_config_options(vec![primary])
+            .with_subagent_session_config_options(vec![subagent]);
+
+        editor.selected = 3;
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(
+            editor.config.agent.session_config["config:primary-mode"],
+            "two"
+        );
+        assert!(editor.config.subagents.session_config.is_empty());
+
+        editor.handle_key(KeyCode::Tab);
+        editor.selected = 4;
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(
+            editor.config.subagents.session_config["config:worker-mode"],
+            "two"
+        );
+        assert!(
+            !editor
+                .config
+                .agent
+                .session_config
+                .contains_key("config:worker-mode")
+        );
+    }
+
+    #[test]
+    fn more_than_nine_dynamic_options_are_reachable_without_shortcuts() {
+        let options = (0..12)
+            .map(|index| option(&format!("option-{index}")))
+            .collect();
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None)
+            .with_session_config_options(options);
+        editor.selected = 3 + 11;
+
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(
+            editor.config.agent.session_config["config:option-11"],
+            "two"
+        );
+    }
+
+    #[test]
+    fn cached_metadata_populates_each_role_without_a_live_primary() {
+        let mut config = Config::default();
+        config
+            .agent
+            .session_config_metadata
+            .insert("adapter-a:auto".to_string(), vec![option("primary")]);
+        config
+            .subagents
+            .session_config_metadata
+            .insert("adapter-b:auto".to_string(), vec![option("worker")]);
+        let editor = SettingsEditor::new(config, Vec::new(), None)
+            .with_primary_session_config_source_id(Some("adapter-a".to_string()))
+            .with_subagent_session_config_source_id(Some("adapter-b".to_string()));
+
+        assert_eq!(
+            editor.primary_session_config_options[0].id.to_string(),
+            "primary"
+        );
+        assert_eq!(
+            editor.subagent_session_config_options[0].id.to_string(),
+            "worker"
+        );
+    }
+
+    #[test]
+    fn cached_metadata_never_crosses_adapter_identities_for_the_same_model() {
+        let mut config = Config::default();
+        config.agent.session_config_metadata.insert(
+            "adapter-a:auto".to_string(),
+            vec![option("adapter-a-option")],
+        );
+        config.agent.session_config_metadata.insert(
+            "adapter-b:auto".to_string(),
+            vec![option("adapter-b-option")],
+        );
+        let editor = SettingsEditor::new(config, Vec::new(), None)
+            .with_primary_session_config_source_id(Some("adapter-b".to_string()));
+
+        assert_eq!(
+            editor.primary_session_config_options[0].id.to_string(),
+            "adapter-b-option"
+        );
+    }
+
+    #[test]
+    fn detached_subagent_metadata_never_crosses_models_for_one_adapter() {
+        let mut config = Config::default();
+        config.subagents.model = "model-y".to_string();
+        config.subagents.session_config_metadata.insert(
+            "adapter-a:model-y".to_string(),
+            vec![option("model-y-option")],
+        );
+        let editor = SettingsEditor::new(config, Vec::new(), None)
+            .with_subagent_session_config_options(vec![option("model-x-option")])
+            .with_subagent_session_config_source_id(Some("adapter-a".to_string()))
+            .with_subagent_session_config_model(Some("model-x".to_string()));
+
+        assert_eq!(
+            editor.subagent_session_config_options[0].id.to_string(),
+            "model-y-option"
+        );
+    }
+
+    #[test]
+    fn stale_saved_options_remain_visible_and_are_not_editable() {
+        let mut config = Config::default();
+        config
+            .agent
+            .session_config
+            .insert("config:removed".to_string(), "legacy".to_string());
+        config
+            .agent
+            .session_config
+            .insert("config:known".to_string(), "legacy".to_string());
+        let mut editor = SettingsEditor::new(config, Vec::new(), None)
+            .with_session_config_options(vec![option("known")]);
+        let rendered = format!("{:?}", editor.config.agent.session_config);
+        assert!(rendered.contains("removed"));
+        editor.selected = 3;
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.agent.session_config["config:known"], "legacy");
+    }
+
+    #[test]
+    fn removed_stale_option_is_selectable_in_a_narrow_panel() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut config = Config::default();
+        config
+            .agent
+            .session_config
+            .insert("config:removed".to_string(), "legacy".to_string());
+        let mut editor = SettingsEditor::new(config, Vec::new(), None);
+        editor.selected = 3;
+        let backend = TestBackend::new(42, 50);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_settings_panel(frame, frame.area(), &editor, "mj config"))
+            .expect("draw");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(rendered.contains("removed"), "{rendered}");
+    }
+
+    #[test]
+    fn narrow_panel_scrolls_to_the_selected_dynamic_option() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let options = (0..12)
+            .map(|index| option(&format!("option-{index}")))
+            .collect();
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None)
+            .with_session_config_options(options);
+        editor.selected = 14;
+        let backend = TestBackend::new(42, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_settings_panel(frame, frame.area(), &editor, "mj config"))
+            .expect("draw");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("Option option-11"), "{rendered}");
+    }
+
+    #[test]
+    fn down_moves_the_settings_highlight_before_scrolling_the_panel() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        fn selected_row(editor: &SettingsEditor) -> u16 {
+            let backend = TestBackend::new(100, 30);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| draw_settings_panel(frame, frame.area(), editor, "mj config"))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content
+                .iter()
+                .enumerate()
+                .find(|(index, cell)| {
+                    *index as u16 % buffer.area.width == 6 && cell.symbol() == ">"
+                })
+                .map(|(index, _)| index)
+                .map(|index| index as u16 / buffer.area.width)
+                .expect("selected row")
+        }
+
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let first_row = selected_row(&editor);
+
+        assert_eq!(editor.handle_key(KeyCode::Down), SettingsAction::None);
+        let second_row = selected_row(&editor);
+
+        assert!(
+            second_row > first_row,
+            "Down should move the highlight down, not keep it at row {first_row}"
+        );
+    }
+
+    #[test]
+    fn narrow_panel_scrolls_to_selected_retained_stale_option_after_wrapping() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut config = Config::default();
+        for index in 0..9 {
+            config.subagents.session_config.insert(
+                format!("config:very-long-retained-option-{index}-that-wraps"),
+                "legacy-value".to_string(),
+            );
+        }
+        let mut editor = SettingsEditor::new(config, Vec::new(), None);
+        editor.tab = SettingsTab::Subagents;
+        editor.selected = 12;
+        let selected_key = editor
+            .config
+            .subagents
+            .session_config
+            .keys()
+            .nth(8)
+            .expect("ninth stale row")
+            .clone();
+        let backend = TestBackend::new(42, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_settings_panel(frame, frame.area(), &editor, "mj config"))
+            .expect("draw");
+        let rendered = terminal.backend().to_string();
+
+        let selected_option = selected_key
+            .strip_prefix("config:very-long-retained-")
+            .and_then(|key| key.split("-that").next())
+            .expect("option label");
+        assert!(rendered.contains(selected_option), "{rendered}");
+    }
+
+    #[test]
+    fn acp_servers_scrolls_selected_server_one_line_above_the_panel_bottom() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut config = Config::default();
+        for index in 0..12 {
+            config.acp.servers.push(ConfiguredAcpServer {
+                id: format!("server-{index}"),
+                label: format!("Server {index}"),
+                command: PathBuf::from("server"),
+                args: Vec::new(),
+                env: Default::default(),
+                origin: AcpServerOrigin::Custom,
+                policy: AcpServerPolicy::Enabled,
+            });
+        }
+        let mut editor = SettingsEditor::new(config, Vec::new(), None);
+        editor.tab = SettingsTab::AcpServers;
+        editor.selected = editor
+            .inventory
+            .servers
+            .iter()
+            .position(|server| server.id == "server-6")
+            .expect("server")
+            + 4;
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_settings_panel(frame, frame.area(), &editor, "mj config"))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let selected_y = buffer
+            .content
+            .iter()
+            .enumerate()
+            .find(|(index, cell)| *index as u16 % buffer.area.width == 6 && cell.symbol() == ">")
+            .map(|(index, _)| index as u16 / buffer.area.width)
+            .expect("selected server marker");
+
+        assert_eq!(
+            selected_y, 20,
+            "selected server should leave one guard line"
+        );
+    }
+
+    #[test]
+    fn acp_servers_keeps_a_wrapped_selected_server_fully_visible() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut config = Config::default();
+        for index in 0..12 {
+            let label = if index == 6 {
+                "wrapped selection keeps every label word visible".to_string()
+            } else {
+                format!("Server {index}")
+            };
+            config.acp.servers.push(ConfiguredAcpServer {
+                id: format!("server-{index}"),
+                label,
+                command: PathBuf::from("server"),
+                args: Vec::new(),
+                env: Default::default(),
+                origin: AcpServerOrigin::Custom,
+                policy: AcpServerPolicy::Enabled,
+            });
+        }
+        let mut editor = SettingsEditor::new(config, Vec::new(), None);
+        editor.tab = SettingsTab::AcpServers;
+        editor.selected = editor
+            .inventory
+            .servers
+            .iter()
+            .position(|server| server.id == "server-6")
+            .expect("server")
+            + 4;
+
+        let backend = TestBackend::new(42, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_settings_panel(frame, frame.area(), &editor, "mj config"))
+            .expect("draw");
+        let rendered = terminal.backend().to_string();
+
+        for word in [
+            "wrapped",
+            "selection",
+            "keeps",
+            "every",
+            "label",
+            "word",
+            "visible",
+        ] {
+            assert!(rendered.contains(word), "missing {word}:\n{rendered}");
+        }
+    }
+
+    #[test]
+    fn catalog_scrolls_wrapped_selected_registry_entry_one_line_above_bottom() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut agents = (0..11)
+            .map(|index| {
+                format!(
+                    r#"{{"id":"catalog-{index}","name":"Catalog Server {index:02}","distribution":{{"npx":{{"package":"catalog-{index}"}}}}}}"#
+                )
+            })
+            .collect::<Vec<_>>();
+        agents.push(
+            r#"{"id":"codebuddy","name":"Codebuddy Code","description":"A deliberately long Codebuddy-like description that wraps across several visual rows and must remain fully readable when selected.","distribution":{"npx":{"package":"codebuddy-code"}}}"#.to_string(),
+        );
+        let registry = Registry::from_json(&format!(r#"{{"agents":[{}]}}"#, agents.join(",")))
+            .expect("registry");
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::AcpServers;
+        editor.acp_view = AcpView::Catalog {
+            filter: String::new(),
+        };
+        editor.registry = RegistryState::Ready(registry);
+        let codebuddy_selection = editor
+            .filtered_agents()
+            .iter()
+            .position(|agent| agent.id == "codebuddy")
+            .expect("Codebuddy catalog entry")
+            + 1;
+        for _ in 0..codebuddy_selection {
+            editor.handle_key(KeyCode::Down);
+        }
+        assert_eq!(editor.selected, codebuddy_selection);
+
+        let backend = TestBackend::new(46, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_settings_panel(frame, frame.area(), &editor, "mj config"))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let selected_y = buffer
+            .content
+            .iter()
+            .enumerate()
+            .find(|(_, cell)| cell.symbol() == ">")
+            .map(|(index, _)| index as u16 / buffer.area.width)
+            .expect("selected registry marker");
+        let rendered = terminal.backend().to_string();
+
+        assert!(selected_y < 15, "selected marker should be visible");
+        for word in ["deliberately", "several", "fully", "readable"] {
+            assert!(rendered.contains(word), "missing {word}:\n{rendered}");
+        }
+
+        editor.handle_key(KeyCode::Up);
+        assert_eq!(editor.selected, codebuddy_selection - 1);
+        editor.handle_key(KeyCode::Down);
+        assert_eq!(editor.selected, codebuddy_selection);
+
+        let backend = TestBackend::new(46, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_settings_panel(frame, frame.area(), &editor, "mj config"))
+            .expect("draw");
+        assert!(
+            terminal.backend().to_string().contains("Codebuddy Code"),
+            "returning Down after Up should restore the selected catalog entry"
+        );
     }
 
     #[test]

@@ -61,9 +61,12 @@ Then open a repository and run:
 mj
 ```
 
-Use `/mjconfig` to choose models, sign in, configure ACP servers, set the review
-policy, and change appearance. Model and adapter changes apply to the next
-session.
+Use `/mjconfig` to choose primary and subagent defaults, sign in, configure ACP
+servers, set the review policy, and change appearance. Its four panels are
+**Agents**, **Subagents**, **ACP Servers**, and **Appearance**. Adapter/model
+option defaults are retained separately for each role; a primary change is
+best-effort applied to the live primary, while subagent changes apply only to
+new workers. Model and adapter changes apply to the next session.
 
 ## Try it
 

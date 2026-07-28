@@ -2049,18 +2049,39 @@ async fn drive_session(
         options: session_config_options,
         targets: session_config_targets,
     };
-    if let Some(role) = role_config.as_ref() {
-        match apply_runtime_role_config(&conn, &session_id, &mut session_config, role).await {
-            Ok(warnings) => {
-                for warning in warnings {
-                    let _ = ui_tx.send(UiEvent::Warning(warning));
+    for step in
+        initial_session_config_steps(role_config.is_some(), !saved_session_config.is_empty())
+    {
+        match step {
+            InitialSessionConfigStep::Role => {
+                let role = role_config
+                    .as_ref()
+                    .expect("role step requires role config");
+                match apply_runtime_role_config(&conn, &session_id, &mut session_config, role).await
+                {
+                    Ok(warnings) => {
+                        for warning in warnings {
+                            let _ = ui_tx.send(UiEvent::Warning(warning));
+                        }
+                    }
+                    Err(error) => {
+                        let text = format!("{} configuration failed: {error}", role.label);
+                        emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                        return Err(anyhow::anyhow!(text));
+                    }
                 }
             }
-            Err(error) => {
-                let text = format!("{} configuration failed: {error}", role.label);
-                emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                return Err(anyhow::anyhow!(text));
+            InitialSessionConfigStep::Saved if !resumed => {
+                apply_saved_session_config(
+                    &conn,
+                    &session_id,
+                    &mut session_config,
+                    &saved_session_config,
+                    ui_tx,
+                )
+                .await;
             }
+            InitialSessionConfigStep::Saved => {}
         }
     }
     // Do not require the primary agent to eagerly list the injected subagent MCP
@@ -2074,16 +2095,6 @@ async fn drive_session(
     // first substantive prompt below still has the subagent MCP server
     // available when delegation is needed.
     context_usage.reset_for_session();
-    if !resumed && !saved_session_config.is_empty() {
-        apply_saved_session_config(
-            &conn,
-            &session_id,
-            &mut session_config,
-            &saved_session_config,
-            ui_tx,
-        )
-        .await;
-    }
     let _ = ui_tx.send(UiEvent::SessionStarted {
         session_id: session_id.to_string(),
         resumed,
@@ -2325,7 +2336,9 @@ async fn drive_session(
                     }
                 }
             }
-            UiCommand::SetReviewPolicy { .. } | UiCommand::RunReview { .. } => {}
+            UiCommand::SetReviewPolicy { .. }
+            | UiCommand::SetSubagentDefaults { .. }
+            | UiCommand::RunReview { .. } => {}
             UiCommand::CompactPrimary => {
                 let _ = ui_tx.send(UiEvent::Warning(
                     "compact command bypassed its coordinator".to_string(),
@@ -2647,7 +2660,9 @@ async fn drive_fork_session(
                         });
                     }
                     Some(UiCommand::CancelPrompt) => {}
-                    Some(UiCommand::SetReviewPolicy { .. } | UiCommand::RunReview { .. }) => {}
+                    Some(UiCommand::SetReviewPolicy { .. }
+                    | UiCommand::SetSubagentDefaults { .. }
+                    | UiCommand::RunReview { .. }) => {}
                     Some(UiCommand::CompactPrimary) => {}
                     Some(UiCommand::RunAdvertisedCommand { responder, .. }) => {
                         let _ = responder.send(AgentCommandOutcome::Failed(
@@ -4319,6 +4334,26 @@ fn warn_runtime_permission_failure(
     warnings.push(text);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InitialSessionConfigStep {
+    Role,
+    Saved,
+}
+
+fn initial_session_config_steps(
+    has_role: bool,
+    has_saved_options: bool,
+) -> Vec<InitialSessionConfigStep> {
+    let mut steps = Vec::with_capacity(2);
+    if has_role {
+        steps.push(InitialSessionConfigStep::Role);
+    }
+    if has_saved_options {
+        steps.push(InitialSessionConfigStep::Saved);
+    }
+    steps
+}
+
 async fn apply_saved_session_config(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -4705,7 +4740,9 @@ async fn drive_config_update(
                         });
                     }
                     Some(UiCommand::CancelPrompt) => {}
-                    Some(UiCommand::SetReviewPolicy { .. } | UiCommand::RunReview { .. }) => {}
+                    Some(UiCommand::SetReviewPolicy { .. }
+                    | UiCommand::SetSubagentDefaults { .. }
+                    | UiCommand::RunReview { .. }) => {}
                     Some(UiCommand::CompactPrimary) => {}
                     Some(UiCommand::RunAdvertisedCommand { responder, .. }) => {
                         let _ = responder.send(AgentCommandOutcome::Failed(
@@ -4871,7 +4908,9 @@ async fn drive_prompt_turn(
                             message: "prompt already in flight".to_string(),
                         });
                     }
-                    Some(UiCommand::SetReviewPolicy { .. } | UiCommand::RunReview { .. }) => {}
+                    Some(UiCommand::SetReviewPolicy { .. }
+                    | UiCommand::SetSubagentDefaults { .. }
+                    | UiCommand::RunReview { .. }) => {}
                     Some(UiCommand::CompactPrimary) => {}
                     Some(UiCommand::RunAdvertisedCommand { responder, .. }) => {
                         let _ = responder.send(AgentCommandOutcome::Failed(
@@ -6480,6 +6519,21 @@ mod tests {
         assert_eq!(
             select_role_model(&codex_model, &codex_role).map(|value| value.to_string()),
             Some("gpt-5.6-sol".to_string())
+        );
+    }
+
+    #[test]
+    fn runtime_role_configuration_precedes_generic_saved_options() {
+        assert_eq!(
+            initial_session_config_steps(true, true),
+            vec![
+                InitialSessionConfigStep::Role,
+                InitialSessionConfigStep::Saved
+            ]
+        );
+        assert_eq!(
+            initial_session_config_steps(true, false),
+            vec![InitialSessionConfigStep::Role]
         );
     }
 

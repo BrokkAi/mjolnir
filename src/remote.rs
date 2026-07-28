@@ -2783,7 +2783,10 @@ fn handle_server_agent_event(
                     );
                 }
             }
+            // `observe_subagent_event` above is authoritative for these
+            // transcript-bearing events and namespaces each subagent's IDs.
             crate::event::SubagentEvent::SessionUpdate { .. }
+            | crate::event::SubagentEvent::SessionConfigOptions { .. }
             | crate::event::SubagentEvent::TerminalOutput { .. } => {}
             crate::event::SubagentEvent::ElicitationRequest { prompt, .. } => {
                 let _ = prompt

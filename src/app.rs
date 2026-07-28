@@ -815,6 +815,16 @@ pub struct AppState {
     pub available_commands: Vec<AvailableCommand>,
     pub session_config_options: Vec<SessionConfigOption>,
     pub session_config_targets: Vec<SessionConfigTarget>,
+    /// Full option metadata advertised by the active primary for `/mjconfig`.
+    pub active_primary_config_options: Vec<SessionConfigOption>,
+    pub active_primary_config_source_id: Option<String>,
+    pub active_primary_config_model: Option<String>,
+    pub active_primary_config_is_live: bool,
+    /// Latest metadata advertised by a worker. This is discovery/cache input
+    /// for the Subagents panel, never live primary state.
+    pub active_subagent_config_options: Vec<SessionConfigOption>,
+    pub active_subagent_config_source_id: Option<String>,
+    pub active_subagent_config_model: Option<String>,
     hidden_session_config_ids: HashSet<String>,
     pub prompt_images_supported: bool,
     pub session_fork_supported: bool,
@@ -1254,6 +1264,13 @@ impl AppState {
             },
             session_config_options: Vec::new(),
             session_config_targets: Vec::new(),
+            active_primary_config_options: Vec::new(),
+            active_primary_config_source_id: None,
+            active_primary_config_model: None,
+            active_primary_config_is_live: false,
+            active_subagent_config_options: Vec::new(),
+            active_subagent_config_source_id: None,
+            active_subagent_config_model: None,
             hidden_session_config_ids: HashSet::new(),
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -1508,6 +1525,14 @@ impl AppState {
         self.mjconfig_menu = Some(MjConfigMenu {
             editor: SettingsEditor::new(config, self.model_choices.clone(), None)
                 .with_active_models(self.active_models.clone())
+                .with_session_config_options(self.active_primary_config_options.clone())
+                .with_primary_session_config_source_id(self.active_primary_config_source_id.clone())
+                .with_primary_session_config_model(self.active_primary_config_model.clone())
+                .with_subagent_session_config_options(self.active_subagent_config_options.clone())
+                .with_subagent_session_config_source_id(
+                    self.active_subagent_config_source_id.clone(),
+                )
+                .with_subagent_session_config_model(self.active_subagent_config_model.clone())
                 .with_inventory(self.acp_inventory.clone()),
             orig_theme: self.theme_kind,
             orig_spinner: self.spinner_style,
@@ -2387,6 +2412,7 @@ impl AppState {
 
     /// Open the value picker for one config option. Returns `true` if it
     /// became visible.
+    #[cfg(test)]
     pub fn open_config_value_picker(&mut self, option_index: usize) -> bool {
         if self.runtime_closed {
             return false;
@@ -2664,6 +2690,7 @@ impl AppState {
                 }
             }
             UiEvent::SessionStarted { session_id, .. } => {
+                self.active_primary_config_is_live = false;
                 if self.connection_state == ConnectionState::Forking {
                     self.finish_turn_timer();
                 }
@@ -2705,11 +2732,36 @@ impl AppState {
                 hidden_config_ids,
             } => {
                 self.hidden_session_config_ids.extend(hidden_config_ids);
+                self.active_primary_config_options = options.clone();
+                self.active_primary_config_source_id =
+                    (!self.agent_source_id.is_empty()).then(|| self.agent_source_id.clone());
+                self.active_primary_config_model = Some(self.active_models.primary.clone());
+                self.active_primary_config_is_live = true;
                 self.apply_session_config_options(options, targets);
             }
-            UiEvent::RosterUpdate { choices, inventory } => {
+            UiEvent::RosterUpdate {
+                choices,
+                inventory,
+                primary_session_config_options,
+                subagent_session_config_options,
+                primary_session_config_source_id,
+                subagent_session_config_source_id,
+                primary_session_config_model,
+                subagent_session_config_model,
+            } => {
                 self.model_choices = choices;
                 self.acp_inventory = inventory;
+                if !self.active_primary_config_is_live && !primary_session_config_options.is_empty()
+                {
+                    self.active_primary_config_options = primary_session_config_options;
+                    self.active_primary_config_source_id = primary_session_config_source_id;
+                    self.active_primary_config_model = primary_session_config_model;
+                }
+                if !subagent_session_config_options.is_empty() {
+                    self.active_subagent_config_options = subagent_session_config_options;
+                    self.active_subagent_config_source_id = subagent_session_config_source_id;
+                    self.active_subagent_config_model = subagent_session_config_model;
+                }
             }
             UiEvent::InternalMessage(message) => {
                 // An internal message starts a fresh orchestrator-initiated
@@ -3056,6 +3108,17 @@ impl AppState {
 
     fn apply_subagent_event(&mut self, event: SubagentEvent) {
         match event {
+            SubagentEvent::SessionConfigOptions {
+                subagent_id,
+                source_id,
+                model,
+                options,
+            } => {
+                let _ = subagent_id;
+                self.active_subagent_config_options = options;
+                self.active_subagent_config_source_id = Some(source_id);
+                self.active_subagent_config_model = Some(model);
+            }
             SubagentEvent::Started {
                 subagent_id,
                 resumed,
@@ -3848,6 +3911,7 @@ impl AppState {
         options: Vec<SessionConfigOption>,
         targets: Vec<SessionConfigTarget>,
     ) {
+        self.active_primary_config_options = options.clone();
         let targets = if targets.len() == options.len() {
             targets
         } else {
@@ -3886,6 +3950,7 @@ impl AppState {
 
     /// Return select-style config options in agent order, together with
     /// their original index and optional `Ctrl-1..9` shortcut.
+    #[cfg(test)]
     pub fn selectable_config_options(&self) -> Vec<(usize, &SessionConfigOption, Option<char>)> {
         self.session_config_options
             .iter()
@@ -4063,6 +4128,7 @@ pub fn is_model_config_option(option: &SessionConfigOption) -> bool {
     matches!(option.category, Some(SessionConfigOptionCategory::Model))
 }
 
+#[cfg(test)]
 fn config_shortcut_char(select_index: usize) -> Option<char> {
     (select_index < 9).then_some((b'1' + select_index as u8) as char)
 }
@@ -5601,6 +5667,12 @@ mod tests {
                 ranked: true,
             }],
             inventory: crate::roster::AcpInventory::default(),
+            primary_session_config_options: Vec::new(),
+            subagent_session_config_options: Vec::new(),
+            primary_session_config_source_id: None,
+            subagent_session_config_source_id: None,
+            primary_session_config_model: None,
+            subagent_session_config_model: None,
         });
 
         assert_eq!(state.model_choices.len(), 1);
@@ -6575,6 +6647,45 @@ mod tests {
             ConfigOptionUpdate::new(vec![option]),
         )));
         assert!(s.session_config_options.is_empty());
+    }
+
+    #[test]
+    fn detached_roster_metadata_does_not_replace_live_primary_options() {
+        let mut state = AppState::new();
+        let live = SessionConfigOption::select(
+            "live",
+            "Live",
+            "one",
+            vec![SessionConfigSelectOption::new("one", "One")],
+        );
+        let probe = SessionConfigOption::select(
+            "probe",
+            "Probe",
+            "one",
+            vec![SessionConfigSelectOption::new("one", "One")],
+        );
+        state.apply_event(UiEvent::SessionConfigOptions {
+            options: vec![live],
+            targets: vec![SessionConfigTarget::ConfigOption {
+                config_id: "live".into(),
+            }],
+            hidden_config_ids: Vec::new(),
+        });
+        state.apply_event(UiEvent::RosterUpdate {
+            choices: Vec::new(),
+            inventory: crate::roster::AcpInventory::default(),
+            primary_session_config_options: vec![probe],
+            subagent_session_config_options: Vec::new(),
+            primary_session_config_source_id: Some("probe-source".to_string()),
+            subagent_session_config_source_id: None,
+            primary_session_config_model: Some("probe-model".to_string()),
+            subagent_session_config_model: None,
+        });
+
+        assert_eq!(
+            state.active_primary_config_options[0].id.to_string(),
+            "live"
+        );
     }
 
     #[test]

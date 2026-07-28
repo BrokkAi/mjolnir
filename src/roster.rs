@@ -119,6 +119,17 @@ pub struct Roster {
     pub choices: Vec<ModelChoice>,
     pub warnings: Vec<String>,
     pub inventory: AcpInventory,
+    /// Detached-probe metadata for the currently configured seats. It is
+    /// cache-backed and remains available before any interactive session.
+    pub primary_session_config_options: Vec<agent_client_protocol::schema::v1::SessionConfigOption>,
+    pub subagent_session_config_options:
+        Vec<agent_client_protocol::schema::v1::SessionConfigOption>,
+    pub primary_session_config_source_id: String,
+    pub subagent_session_config_source_id: Option<String>,
+    /// Model identities paired with the detached metadata above. An adapter
+    /// can advertise different controls for different models.
+    pub primary_session_config_model: String,
+    pub subagent_session_config_model: Option<String>,
 }
 
 impl Roster {
@@ -566,12 +577,15 @@ fn option_matches(launch: &AdapterLaunch, option: &probe::ModelOption, row: &Row
 struct Discovery {
     available: Vec<ResolvedAgent>,
     adapter_errors: HashMap<String, String>,
+    session_config_options:
+        HashMap<String, Vec<agent_client_protocol::schema::v1::SessionConfigOption>>,
 }
 
 fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResult)>) -> Discovery {
     probes.sort_by_key(|(priority, _, _)| *priority);
     let mut resolved = Vec::new();
     let mut adapter_errors = HashMap::new();
+    let mut session_config_options = HashMap::new();
     let mut claimed_ranked = HashSet::new();
     for (_, launch, capabilities) in probes {
         let capabilities = match capabilities {
@@ -594,6 +608,12 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
             continue;
         }
         let options = capabilities.models;
+        let selectable_session_config_options = capabilities
+            .session_config_options
+            .into_iter()
+            .filter(|option| crate::app::config_option_choices(option).is_some())
+            .collect();
+        session_config_options.insert(launch.source_id.clone(), selectable_session_config_options);
         let matched_values = options
             .iter()
             .filter(|option| {
@@ -656,6 +676,7 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
     Discovery {
         available: resolved,
         adapter_errors,
+        session_config_options,
     }
 }
 
@@ -692,6 +713,7 @@ fn credentialed_provider_capabilities(
                 description: None,
             })
             .collect(),
+        session_config_options: Vec::new(),
     })
 }
 
@@ -914,9 +936,24 @@ pub async fn resolve_streaming(config: &Config, cwd: &Path) -> Result<StreamingR
     let mut results: Vec<(usize, AdapterLaunch, ProbeResult)> = Vec::new();
     let mut pending: Vec<(usize, AdapterLaunch)> = Vec::new();
     for (priority, launch) in configured_launches(&inventory).into_iter().enumerate() {
+        let cached = cached_probe_result(&launch).await;
         let instant = match credentialed_provider_capabilities(&launch, &rows) {
-            Some(capabilities) => Some(Ok(capabilities)),
-            None => cached_probe_result(&launch).await,
+            Some(capabilities) => {
+                // Credential discovery can bind the roster immediately, but
+                // it has no ACP session metadata. Reuse a fresh detached
+                // probe when available; otherwise keep the catalog binding
+                // and probe in the background for `/mjconfig`.
+                match cached {
+                    Some(Ok(capabilities)) if !capabilities.session_config_options.is_empty() => {
+                        Some(Ok(capabilities))
+                    }
+                    _ => {
+                        pending.push((priority, launch.clone()));
+                        Some(Ok(capabilities))
+                    }
+                }
+            }
+            None => cached,
         };
         match instant {
             Some(result) => results.push((priority, launch, result)),
@@ -1147,6 +1184,24 @@ fn assemble_roster(
         );
     }
     warnings.sort();
+    let primary_session_config_options = discovery
+        .session_config_options
+        .get(&primary.launch.source_id)
+        .cloned()
+        .unwrap_or_default();
+    let subagent_session_config_options = subagent_default
+        .as_ref()
+        .and_then(|role| discovery.session_config_options.get(&role.launch.source_id))
+        .cloned()
+        .unwrap_or_default();
+    let primary_session_config_source_id = primary.launch.source_id.clone();
+    let subagent_session_config_source_id = subagent_default
+        .as_ref()
+        .map(|role| role.launch.source_id.clone());
+    let primary_session_config_model = primary.model.model.clone();
+    let subagent_session_config_model = subagent_default
+        .as_ref()
+        .map(|role| role.model.model.clone());
     Ok(Roster {
         primary,
         subagent_default,
@@ -1154,6 +1209,12 @@ fn assemble_roster(
         choices,
         warnings,
         inventory,
+        primary_session_config_options,
+        subagent_session_config_options,
+        primary_session_config_source_id,
+        subagent_session_config_source_id,
+        primary_session_config_model,
+        subagent_session_config_model,
     })
 }
 
@@ -1214,7 +1275,21 @@ mod tests {
         Ok(probe::AdapterCapabilities {
             http_mcp,
             models: values.iter().map(|value| option(value)).collect(),
+            session_config_options: Vec::new(),
         })
+    }
+
+    fn selectable_option(id: &str) -> agent_client_protocol::schema::v1::SessionConfigOption {
+        agent_client_protocol::schema::v1::SessionConfigOption::select(
+            id.to_string(),
+            id.to_string(),
+            "default",
+            vec![
+                agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
+                    "default", "Default",
+                ),
+            ],
+        )
     }
 
     fn custom_launch(name: &str) -> AdapterLaunch {
@@ -1274,6 +1349,45 @@ mod tests {
 
         assert!(
             credentialed_provider_capabilities(&launch_for(AdapterKind::Anvil), &rows).is_none()
+        );
+    }
+
+    #[test]
+    fn detached_probe_metadata_populates_both_configured_roles_without_sessions() {
+        let rows = vec![
+            role_at("gpt-5-6-sol", 0.7, 1.0).model,
+            role_at("claude-sonnet-5", 0.6, 1.0).model,
+        ];
+        let mut primary = capabilities(true, &["gpt-5-6-sol"]).expect("capabilities");
+        primary.session_config_options = vec![selectable_option("primary-option")];
+        let mut worker = capabilities(true, &["claude-sonnet-5"]).expect("capabilities");
+        worker.session_config_options = vec![selectable_option("worker-option")];
+        let discovery = resolve_probes(
+            &rows,
+            vec![
+                (0, launch_for(AdapterKind::Codex), Ok(primary)),
+                (1, launch_for(AdapterKind::Claude), Ok(worker)),
+            ],
+        );
+        let mut config = Config::default();
+        config.agent.model = "gpt-5-6-sol".to_string();
+        config.subagents.model = "claude-sonnet-5".to_string();
+        let roster = assemble_roster(
+            &config,
+            &rows,
+            &Availability::detect(),
+            AcpInventory::default(),
+            discovery,
+        )
+        .expect("roster");
+
+        assert_eq!(
+            roster.primary_session_config_options[0].id.to_string(),
+            "primary-option"
+        );
+        assert_eq!(
+            roster.subagent_session_config_options[0].id.to_string(),
+            "worker-option"
         );
     }
 
@@ -1654,6 +1768,7 @@ mod tests {
         let discovery = Discovery {
             available,
             adapter_errors: HashMap::new(),
+            session_config_options: HashMap::new(),
         };
         let availability = Availability {
             codex_credentials: false,

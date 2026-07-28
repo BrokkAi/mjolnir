@@ -655,6 +655,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 }
                 SubagentEvent::SessionStarted { .. }
                 | SubagentEvent::TerminalOutput { .. }
+                | SubagentEvent::SessionConfigOptions { .. }
                 | SubagentEvent::CancelPendingPermissions { .. }
                 | SubagentEvent::Status { .. } => {}
             },

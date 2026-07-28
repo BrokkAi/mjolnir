@@ -100,6 +100,13 @@ pub struct Config {
     pub env: HashMap<String, String>,
     pub agent_stderr: Option<PathBuf>,
     pub role_config: Option<acp::RuntimeRoleConfig>,
+    /// Defaults captured from `/mjconfig`; applied when this worker starts.
+    pub saved_session_config: HashMap<String, String>,
+    live_defaults: Arc<RwLock<LiveDefaults>>,
+    /// Installed by the MCP server once its controller exists.  This is shared
+    /// by all config clones so `/mjconfig` can change admission for future
+    /// workers without touching existing ones.
+    controller: Arc<StdMutex<Option<Controller>>>,
     pub subagent_handoff_counter: Option<Arc<AtomicUsize>>,
     pub active_implementation_workers: ActiveSubagentWorkers,
     pub max_parallel: usize,
@@ -117,6 +124,14 @@ pub struct Config {
     usage_seat: Seat,
     retain_after_completion: bool,
     warm: Arc<WarmPool>,
+}
+
+#[derive(Clone, Default)]
+struct LiveDefaults {
+    model: String,
+    reasoning_effort: Option<String>,
+    session_config: HashMap<String, String>,
+    max_parallel: usize,
 }
 
 #[derive(Default)]
@@ -163,6 +178,7 @@ impl Config {
         role_pool: Option<crate::quota::RolePool>,
     ) -> Self {
         let reasoning_effort = role.reasoning_effort.clone();
+        let default_model = role.model.model.clone();
         Self {
             display_label: format!("subagent · {}", role.model.model),
             command: role.launch.command,
@@ -178,6 +194,14 @@ impl Config {
                 session_tag: None,
                 reasoning_effort,
             }),
+            saved_session_config: HashMap::new(),
+            live_defaults: Arc::new(RwLock::new(LiveDefaults {
+                model: default_model,
+                reasoning_effort: role.reasoning_effort.clone(),
+                session_config: HashMap::new(),
+                max_parallel: DEFAULT_MAX_PARALLEL,
+            })),
+            controller: Arc::default(),
             subagent_handoff_counter: None,
             active_implementation_workers: ActiveSubagentWorkers::default(),
             max_parallel: DEFAULT_MAX_PARALLEL,
@@ -201,6 +225,15 @@ impl Config {
         self
     }
 
+    pub fn with_session_config(mut self, saved_session_config: HashMap<String, String>) -> Self {
+        self.saved_session_config = saved_session_config;
+        self.live_defaults
+            .write()
+            .expect("subagent defaults poisoned")
+            .session_config = self.saved_session_config.clone();
+        self
+    }
+
     /// Share one id sequence with the discrete-review fan-out so pool subagents
     /// and review lanes never render under the same status-row id.
     pub fn with_id_allocator(mut self, allocator: SubagentIdAllocator) -> Self {
@@ -215,7 +248,84 @@ impl Config {
 
     pub fn with_max_parallel(mut self, max: usize) -> Self {
         self.max_parallel = max.clamp(1, MAX_PARALLEL_CAP);
+        self.live_defaults
+            .write()
+            .expect("subagent defaults poisoned")
+            .max_parallel = self.max_parallel;
         self
+    }
+
+    /// Changes defaults read by future workers only. No message is sent to a
+    /// retained or running worker session.
+    pub async fn update_live_defaults(&self, defaults: crate::config::SubagentsConfig) {
+        let max_parallel = defaults.max_parallel.clamp(1, MAX_PARALLEL_CAP);
+        let auto_failover = defaults.auto_failover;
+        {
+            let mut live = self
+                .live_defaults
+                .write()
+                .expect("subagent defaults poisoned");
+            live.model = defaults.model;
+            live.reasoning_effort = defaults.reasoning_effort;
+            live.session_config = defaults.session_config;
+            live.max_parallel = max_parallel;
+        }
+        let controller = {
+            self.controller
+                .lock()
+                .expect("subagent controller poisoned")
+                .clone()
+        };
+        if let Some(controller) = controller {
+            controller.update_max_parallel(max_parallel).await;
+        }
+        if let Some(pool) = self.role_pool.as_ref() {
+            pool.set_auto_failover(auto_failover);
+        }
+    }
+
+    fn attach_controller(&self, controller: Controller) {
+        *self
+            .controller
+            .lock()
+            .expect("subagent controller poisoned") = Some(controller);
+    }
+
+    fn live_max_parallel(&self) -> usize {
+        self.live_defaults
+            .read()
+            .expect("subagent defaults poisoned")
+            .max_parallel
+    }
+
+    fn live_model(&self) -> String {
+        self.live_defaults
+            .read()
+            .expect("subagent defaults poisoned")
+            .model
+            .clone()
+    }
+
+    fn apply_live_defaults(&mut self) {
+        let live = self
+            .live_defaults
+            .read()
+            .expect("subagent defaults poisoned")
+            .clone();
+        self.saved_session_config = live.session_config;
+        self.max_parallel = live.max_parallel;
+        if live.model != "auto"
+            && let Some(role) = self.role_pool.as_ref().and_then(|pool| {
+                pool.roles()
+                    .into_iter()
+                    .find(|role| role.model.model == live.model)
+            })
+        {
+            self.apply_role(role);
+        }
+        if let Some(role) = self.role_config.as_mut() {
+            role.reasoning_effort = live.reasoning_effort;
+        }
     }
 
     pub fn with_headless_permission_mode(mut self, mode: crate::config::PermissionPreset) -> Self {
@@ -314,12 +424,21 @@ impl Config {
     }
 
     fn role_key(&self) -> String {
+        let live = self
+            .live_defaults
+            .read()
+            .expect("subagent defaults poisoned");
         self.role_config
             .as_ref()
             .map(|role| {
                 format!(
-                    "{}\0{}\0{:?}",
-                    role.adapter_source_id, role.model_id, self.headless_permission_mode
+                    "{}\0{}\0{:?}\0{}\0{:?}\0{:?}",
+                    role.adapter_source_id,
+                    role.model_id,
+                    self.headless_permission_mode,
+                    live.model,
+                    live.reasoning_effort,
+                    live.session_config,
                 )
             })
             .unwrap_or_else(|| self.display_label.clone())
@@ -1222,7 +1341,7 @@ fn spawn_subagent_runtime(
         access_mode: context.access_mode,
         agent_source_id: None,
         config_path: None,
-        saved_session_config: HashMap::new(),
+        saved_session_config: config.saved_session_config.clone(),
         role_config,
         subagents: None,
         side_prompt_policy: false,
@@ -1325,6 +1444,7 @@ impl HttpServer {
                 config.id_allocator.clone(),
             )
             .await;
+        config.attach_controller(controller.clone());
         let mut token_bytes = [0_u8; 32];
         getrandom::fill(&mut token_bytes)
             .map_err(|error| anyhow!("generate subagent MCP bearer token: {error}"))?;
@@ -1560,6 +1680,12 @@ impl Controller {
         state.max_parallel = max_parallel.clamp(1, MAX_PARALLEL_CAP);
         state.active_workers = active_workers;
         state.next_id = id_allocator;
+    }
+
+    /// Changes admission for work requested after this call. Existing runs
+    /// keep their slots, even if the new limit is below the active count.
+    async fn update_max_parallel(&self, max_parallel: usize) {
+        self.state.lock().await.max_parallel = max_parallel.clamp(1, MAX_PARALLEL_CAP);
     }
 
     /// Admits one run against the shared pool, atomically returning its
@@ -2305,7 +2431,7 @@ async fn resume_retained_run(
         return Err(ResumeFailure::Running);
     }
     if let Err(full) = controller.resume_retained(subagent_id).await {
-        registry.reinstate_retained(subagent_id, run.control, config.max_parallel);
+        registry.reinstate_retained(subagent_id, run.control, config.live_max_parallel());
         return Err(ResumeFailure::PoolFull(full));
     }
     // Register before handing the worker the prompt: the worker can finish and
@@ -2550,8 +2676,13 @@ async fn run(
     match spec.role.clone() {
         Some(role) => config.apply_role(*role),
         None => {
+            // Saved defaults are a candidate preference, not an override of
+            // quota admission. The role selected below is therefore always
+            // the actual role that passed the pool's quota gate.
+            config.apply_live_defaults();
             if let Some(pool) = config.role_pool.clone() {
-                match pool.select_for_work().await {
+                let preferred_model = config.live_model();
+                match pool.select_for_work_preferred(Some(&preferred_model)).await {
                     Ok(selection) => {
                         quota_role = Some(selection.role.clone());
                         config.apply_role(selection.role);
@@ -2760,10 +2891,18 @@ async fn run(
                             }
                         }
                         UiEvent::SessionStarted { .. }
-                        | UiEvent::SessionConfigOptions { .. }
                         | UiEvent::RosterUpdate { .. }
                         | UiEvent::Workflow(_)
                         | UiEvent::WorkspaceDiff(_) => {}
+                        UiEvent::SessionConfigOptions { options, .. } => {
+                            let role = config.role_config.as_ref().expect("subagent role configuration");
+                            let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::SessionConfigOptions {
+                                subagent_id,
+                                source_id: role.adapter_source_id.clone(),
+                                model: role.model_id.clone(),
+                                options,
+                            }));
+                        }
                         UiEvent::SessionUpdate(update) => {
                             tool_lifecycle.observe(&update);
                             if let SessionUpdate::UsageUpdate(value) = &update {
@@ -3495,6 +3634,12 @@ mod tests {
             choices: Vec::new(),
             warnings: Vec::new(),
             inventory: AcpInventory::default(),
+            primary_session_config_options: Vec::new(),
+            subagent_session_config_options: Vec::new(),
+            primary_session_config_source_id: String::new(),
+            subagent_session_config_source_id: None,
+            primary_session_config_model: "gpt-x".to_string(),
+            subagent_session_config_model: Some("gpt-y".to_string()),
         }
     }
 
@@ -3514,6 +3659,9 @@ mod tests {
                 session_tag: None,
                 reasoning_effort: None,
             }),
+            saved_session_config: HashMap::new(),
+            live_defaults: Arc::default(),
+            controller: Arc::default(),
             subagent_handoff_counter: None,
             active_implementation_workers: ActiveSubagentWorkers::default(),
             max_parallel: 2,
@@ -3530,6 +3678,73 @@ mod tests {
             retain_after_completion: true,
             warm: Arc::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn quota_selected_role_wins_over_saved_model_defaults() {
+        let mut config = test_config();
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        config.role_pool = Some(crate::quota::RolePool::new(
+            vec![
+                role("gpt-y", "codex-acp", true),
+                role("claude-a", "claude-acp", true),
+            ],
+            crate::quota::Gate::new(PathBuf::from("."), ui_tx),
+            false,
+            "subagents",
+            mpsc::unbounded_channel().0,
+        ));
+        let defaults = crate::config::SubagentsConfig {
+            model: "claude-a".to_string(),
+            reasoning_effort: Some("high".to_string()),
+            session_config: HashMap::from([("config:mode".to_string(), "agent".to_string())]),
+            ..Default::default()
+        };
+        config.update_live_defaults(defaults).await;
+
+        config.apply_live_defaults();
+        let selected = role("gpt-y", "codex-acp", true);
+        config.apply_role(selected.clone());
+
+        assert_eq!(config.current_model(), selected.model.model);
+        assert_eq!(
+            config
+                .role_config
+                .as_ref()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            None
+        );
+        assert_eq!(config.saved_session_config["config:mode"], "agent");
+        assert!(
+            ui_rx.try_recv().is_err(),
+            "defaults must not message existing workers"
+        );
+    }
+
+    #[tokio::test]
+    async fn updated_max_parallel_applies_only_to_future_admissions() {
+        let controller = Controller::default();
+        controller
+            .configure(
+                2,
+                ActiveSubagentWorkers::default(),
+                SubagentIdAllocator::default(),
+            )
+            .await;
+        let first = controller.begin(PathBuf::from("/workspace")).await.unwrap();
+        let second = controller.begin(PathBuf::from("/workspace")).await.unwrap();
+
+        controller.update_max_parallel(1).await;
+
+        assert!(controller.termination(first.subagent_id).await.is_some());
+        assert!(controller.termination(second.subagent_id).await.is_some());
+        assert!(controller.begin(PathBuf::from("/workspace")).await.is_err());
+        controller.finish(first.subagent_id).await;
+        assert!(controller.begin(PathBuf::from("/workspace")).await.is_err());
+        controller.finish(second.subagent_id).await;
+        assert!(controller.begin(PathBuf::from("/workspace")).await.is_ok());
     }
 
     fn test_context() -> RunContext {

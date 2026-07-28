@@ -40,7 +40,7 @@ control](/remote/) for behavioral boundaries.
 
 | Command | Purpose |
 | --- | --- |
-| `/mjconfig` | Configure agents, ACP servers, and appearance |
+| `/mjconfig` | Configure Agents, Subagents, ACP Servers, and Appearance |
 | `/models` | Open configuration on the Agents tab |
 | `/agents` | Show the active model selections and per-seat usage |
 | `/review` | Choose a recent, uncommitted, or HEAD findings-only review |
@@ -57,7 +57,7 @@ installed version.
 - Enter sends a prompt or accepts the selected action.
 - Up/Down navigate autocomplete and permission choices.
 - PageUp/PageDown scroll the transcript.
-- F1–F9 edit the primary agent's visible session controls.
+- `/mjconfig` edits saved Agent and Subagents ACP option defaults.
 - F10 toggles help.
 - Esc dismisses autocomplete, clears input, or cancels a permission prompt.
 - Ctrl-C cancels the active turn together with every running subagent; on an

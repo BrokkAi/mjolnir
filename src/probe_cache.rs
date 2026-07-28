@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::probe::{AdapterCapabilities, ModelOption};
+use agent_client_protocol::schema::v1::SessionConfigOption;
 
 pub const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -30,6 +31,8 @@ struct Entry {
     fingerprint: Option<Fingerprint>,
     http_mcp: bool,
     models: Vec<ModelOption>,
+    #[serde(default)]
+    session_config_options: Vec<SessionConfigOption>,
 }
 
 /// Identity of the adapter binary the entry was captured from. `None` when
@@ -83,6 +86,7 @@ pub fn load(path: &Path, key: &str, command: &Path, ttl: Duration) -> Option<Ada
     Some(AdapterCapabilities {
         http_mcp: entry.http_mcp,
         models: entry.models,
+        session_config_options: entry.session_config_options,
     })
 }
 
@@ -98,6 +102,7 @@ pub fn store(path: &Path, key: &str, command: &Path, capabilities: &AdapterCapab
             fingerprint: command_fingerprint(command),
             http_mcp: capabilities.http_mcp,
             models: capabilities.models.clone(),
+            session_config_options: capabilities.session_config_options.clone(),
         },
     );
     let Some(parent) = path.parent() else {
@@ -153,6 +158,7 @@ mod tests {
                 name: model.to_string(),
                 description: None,
             }],
+            session_config_options: Vec::new(),
         }
     }
 
@@ -163,11 +169,25 @@ mod tests {
         let command = dir.path().join("agent");
         std::fs::write(&command, b"binary").expect("command");
 
-        store(&cache, "custom:company", &command, &capabilities("m1"));
+        let mut captured = capabilities("m1");
+        captured.session_config_options = vec![
+            agent_client_protocol::schema::v1::SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "safe",
+                vec![
+                    agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
+                        "safe", "Safe",
+                    ),
+                ],
+            ),
+        ];
+        store(&cache, "custom:company", &command, &captured);
         let loaded =
             load(&cache, "custom:company", &command, CACHE_TTL).expect("fresh cache entry");
         assert!(loaded.http_mcp);
         assert_eq!(loaded.models[0].value, "m1");
+        assert_eq!(loaded.session_config_options[0].id.to_string(), "mode");
 
         assert!(load(&cache, "other-key", &command, CACHE_TTL).is_none());
     }

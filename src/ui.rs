@@ -55,8 +55,8 @@ use crate::clipboard::{
 };
 use crate::config;
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, ReviewTarget, SubagentEvent,
-    SubagentOutcome, UiCommand, UiEvent,
+    PermissionDecision, PermissionPrompt, PromptImage, ReviewTarget, SessionConfigTarget,
+    SubagentEvent, SubagentOutcome, UiCommand, UiEvent,
 };
 use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
@@ -4626,12 +4626,60 @@ fn handle_mjconfig_menu_key(
 fn persist_mjconfig_selection(
     state: &mut AppState,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
-    config: config::Config,
+    mut config: config::Config,
 ) {
     let theme = config.theme;
     let style = config.spinner;
     let review_changed = state.review_enabled != config.agent.discrete_review;
+    // A live primary is authoritative. Cache its complete generic metadata
+    // under the adapter/model identity so `/mjconfig` remains useful before a
+    // later primary session is started. Keep this deliberately bounded.
+    if !state.active_primary_config_options.is_empty()
+        && let (Some(source_id), Some(model)) = (
+            state.active_primary_config_source_id.as_ref(),
+            state.active_primary_config_model.as_ref(),
+        )
+    {
+        let key = format!("{source_id}:{model}");
+        config
+            .agent
+            .session_config_metadata
+            .insert(key, state.active_primary_config_options.clone());
+        while config.agent.session_config_metadata.len() > 8 {
+            if let Some(key) = config.agent.session_config_metadata.keys().min().cloned() {
+                config.agent.session_config_metadata.remove(&key);
+            } else {
+                break;
+            }
+        }
+    }
+    if !state.active_subagent_config_options.is_empty()
+        && let (Some(source_id), Some(model)) = (
+            state.active_subagent_config_source_id.as_ref(),
+            state.active_subagent_config_model.as_ref(),
+        )
+    {
+        let key = format!("{source_id}:{model}");
+        config
+            .subagents
+            .session_config_metadata
+            .insert(key, state.active_subagent_config_options.clone());
+        while config.subagents.session_config_metadata.len() > 8 {
+            if let Some(key) = config
+                .subagents
+                .session_config_metadata
+                .keys()
+                .min()
+                .cloned()
+            {
+                config.subagents.session_config_metadata.remove(&key);
+            } else {
+                break;
+            }
+        }
+    }
     if let Some(path) = state.config_path.clone() {
+        let previous = config::Config::load(&path).ok();
         match config.save(&path) {
             Ok(()) => {
                 state.configured_models = config.model_names();
@@ -4642,6 +4690,46 @@ fn persist_mjconfig_selection(
                         enabled: config.agent.discrete_review,
                     });
                 }
+                // Persist first, then best-effort update the active primary.
+                // Subagent defaults intentionally have no runtime command:
+                // they are read by each newly launched worker.
+                if state.active_primary_config_is_live
+                    && let Some(previous) = previous
+                {
+                    for (key, value) in &config.agent.session_config {
+                        if previous.agent.session_config.get(key) == Some(value) {
+                            continue;
+                        }
+                        let Some(id) = key.strip_prefix("config:") else {
+                            continue;
+                        };
+                        let Some(option) = state
+                            .active_primary_config_options
+                            .iter()
+                            .find(|option| option.id.to_string() == id)
+                        else {
+                            continue;
+                        };
+                        if crate::app::config_option_choices(option).is_some_and(|choices| {
+                            choices
+                                .iter()
+                                .any(|choice| choice.value.to_string() == *value)
+                        }) {
+                            let _ = cmd_tx.send(UiCommand::SetSessionConfigOption {
+                                target: SessionConfigTarget::ConfigOption {
+                                    config_id: id.to_string().into(),
+                                },
+                                value: value.clone().into(),
+                            });
+                        }
+                    }
+                }
+                // The runtime shares these defaults with its subagent MCP
+                // service. Updating them affects only workers launched after
+                // this save; existing workers receive no ACP config command.
+                let _ = cmd_tx.send(UiCommand::SetSubagentDefaults {
+                    config: config.subagents.clone(),
+                });
                 state.record_status_message(
                     StatusKind::Info,
                     format!("config saved — theme {theme}, spinner {style}; model, permission, and ACP changes apply on /new or /clear"),
@@ -5468,69 +5556,8 @@ fn open_config_value_picker_for_shortcut(
     modifiers: KeyModifiers,
     code: KeyCode,
 ) -> bool {
-    let Some(shortcut) = config_shortcut_key(modifiers, code) else {
-        return false;
-    };
-
-    if state.is_streaming() {
-        state.record_status_message(
-            StatusKind::Warning,
-            "finish or cancel the current turn before changing config",
-        );
-        return true;
-    }
-    if state.session_id.is_none() {
-        state.announce_waiting_for_primary();
-        return true;
-    }
-
-    let Some((option_index, option_name)) = state
-        .selectable_config_options()
-        .into_iter()
-        .find(|(_, _, assigned_shortcut)| *assigned_shortcut == Some(shortcut))
-        .map(|(option_index, option, _)| (option_index, option.name.clone()))
-    else {
-        if state.selectable_config_options().is_empty() {
-            state.record_status_message(StatusKind::Warning, "no session config options available");
-            return true;
-        }
-        return false;
-    };
-
-    if state.open_config_value_picker(option_index) {
-        state.status_line = Some(StatusMessage::info(format!("editing {}", option_name)));
-    }
-    true
-}
-
-fn config_shortcut_key(modifiers: KeyModifiers, code: KeyCode) -> Option<char> {
-    if modifiers.is_empty()
-        && let KeyCode::F(n @ 1..=9) = code
-    {
-        return char::from_digit(n.into(), 10);
-    }
-
-    if !modifiers.contains(KeyModifiers::CONTROL)
-        || modifiers.intersects(
-            KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
-        )
-    {
-        return None;
-    }
-    match code {
-        KeyCode::Char(c @ '1'..='9') => Some(c),
-        // French AZERTY number-row keys emit these characters without Shift.
-        KeyCode::Char('&') => Some('1'),
-        KeyCode::Char('\u{e9}') => Some('2'),
-        KeyCode::Char('"') => Some('3'),
-        KeyCode::Char('\'') => Some('4'),
-        KeyCode::Char('(') => Some('5'),
-        KeyCode::Char('-') => Some('6'),
-        KeyCode::Char('\u{e8}') => Some('7'),
-        KeyCode::Char('_') => Some('8'),
-        KeyCode::Char('\u{e7}') => Some('9'),
-        _ => None,
-    }
+    let _ = (state, modifiers, code);
+    false
 }
 
 pub fn setup_fullscreen_terminal() -> Result<Terminal<TrackedBackend<Stdout>>> {
@@ -5801,7 +5828,6 @@ fn draw(
         return;
     }
 
-    let has_config_options = !state.selectable_config_options().is_empty();
     let usage_quota_rows = usage_quota_row_count(state, f.area().width) as u16;
 
     // Dynamic input height: borders (2) + chip rows + text lines, clamped.
@@ -5824,7 +5850,6 @@ fn draw(
             Constraint::Length(queued_row),
             Constraint::Length(input_height),
             Constraint::Length(usage_quota_rows),
-            Constraint::Length(if has_config_options { 1 } else { 0 }),
         ])
         .split(f.area());
 
@@ -5841,7 +5866,6 @@ fn draw(
     draw_queued_prompt_row(f, chunks[4], state);
     draw_input(f, chunks[5], state, mode);
     draw_usage_quota_row(f, chunks[6], state);
-    draw_config_shortcuts_row(f, chunks[7], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -6003,7 +6027,6 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
         return;
     }
 
-    let has_config_options = !state.selectable_config_options().is_empty();
     let usage_quota_rows = usage_quota_row_count(state, f.area().width) as u16;
     let queued_row = queued_prompt_row_count(state);
     let workflow_rows = workflow_progress_row_count(state);
@@ -6020,7 +6043,6 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
             Constraint::Length(queued_row),
             Constraint::Min(MIN_INPUT_HEIGHT),
             Constraint::Length(usage_quota_rows),
-            Constraint::Length(if has_config_options { 1 } else { 0 }),
         ])
         .split(f.area());
 
@@ -6031,7 +6053,6 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     draw_queued_prompt_row(f, chunks[4], state);
     draw_input(f, chunks[5], state, UiMode::InlineChat);
     draw_usage_quota_row(f, chunks[6], state);
-    draw_config_shortcuts_row(f, chunks[7], state);
 
     if state.autocomplete.visible
         && !state.has_pending_permission()
@@ -10219,32 +10240,6 @@ fn usage_quota_label(state: &AppState) -> Option<String> {
         })
 }
 
-fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-
-    let options = state.selectable_config_options();
-    if options.is_empty() {
-        return;
-    }
-
-    let mut chips = Vec::with_capacity(options.len());
-    for (_, option, shortcut) in options {
-        let current = config_option_current_value_label(option);
-        let chip = match shortcut {
-            Some(shortcut) => format!("[F{shortcut} {}: {current}]", option.name),
-            None => format!("[{}: {current}]", option.name),
-        };
-        chips.push(chip);
-    }
-
-    let text = chips.join(" ");
-
-    let paragraph = Paragraph::new(text).style(Style::default().fg(state.theme.primary));
-    f.render_widget(paragraph, area);
-}
-
 fn draw_permission_modal(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -11081,13 +11076,6 @@ fn help_modal_lines(
         help_binding_line(
             "F10 / Tab",
             "help toggle / accept selected slash command",
-            theme,
-        ),
-        help_blank_line(),
-        help_section_line("Config", theme),
-        help_binding_line(
-            "F1..F9 / Ctrl-1..9 / Up/Down",
-            "edit or move inside choices",
             theme,
         ),
         help_blank_line(),
@@ -16097,6 +16085,7 @@ mod tests {
 
         // ACP Servers tab: toggle Codex off.
         state.mjconfig_menu_key(KeyCode::Tab);
+        state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu.as_mut().expect("menu").editor.selected = 4;
         handle_mjconfig_menu_key(
             &mut state,
@@ -16145,6 +16134,89 @@ mod tests {
     }
 
     #[test]
+    fn mjconfig_only_sends_live_primary_changes_for_advertised_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let config = config::Config::default();
+        config.save(&path).expect("save initial config");
+        let option = SessionConfigOption::select(
+            "mode",
+            "Mode",
+            "safe",
+            vec![
+                SessionConfigSelectOption::new("safe", "Safe"),
+                SessionConfigSelectOption::new("fast", "Fast"),
+            ],
+        );
+        let mut state = AppState::new();
+        state.config_path = Some(path.clone());
+        state.active_primary_config_options = vec![option];
+        state.active_primary_config_is_live = true;
+        state.open_mjconfig_menu();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let mut changed = config::Config::load(&path).expect("load config");
+        changed
+            .agent
+            .session_config
+            .insert("config:mode".to_string(), "fast".to_string());
+        changed
+            .subagents
+            .session_config
+            .insert("config:mode".to_string(), "fast".to_string());
+        persist_mjconfig_selection(&mut state, &tx, changed);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption { .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(UiCommand::SetSubagentDefaults { .. })
+        ));
+
+        let mut invalid = config::Config::load(&path).expect("load config");
+        invalid
+            .agent
+            .session_config
+            .insert("config:mode".to_string(), "not-advertised".to_string());
+        persist_mjconfig_selection(&mut state, &tx, invalid);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(UiCommand::SetSubagentDefaults { .. })
+        ));
+        assert!(rx.try_recv().is_err(), "invalid saved values stay offline");
+    }
+
+    #[test]
+    fn mjconfig_probe_metadata_never_sends_a_live_primary_command() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        config::Config::default().save(&path).expect("save config");
+        let mut state = AppState::new();
+        state.config_path = Some(path.clone());
+        state.active_primary_config_options = vec![SessionConfigOption::select(
+            "mode",
+            "Mode",
+            "safe",
+            vec![SessionConfigSelectOption::new("safe", "Safe")],
+        )];
+        let mut changed = config::Config::load(&path).expect("load config");
+        changed
+            .agent
+            .session_config
+            .insert("config:mode".to_string(), "safe".to_string());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &tx, changed);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(UiCommand::SetSubagentDefaults { .. })
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn mjconfig_menu_cancel_reverts_live_preview() {
         let mut state = AppState::new();
         let orig_theme = state.theme_kind;
@@ -16153,6 +16225,7 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         // Preview different values in both sections.
+        state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Right);
@@ -16228,12 +16301,10 @@ mod tests {
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("mj config"), "rendered:\n{rendered}");
         assert!(rendered.contains("Agents"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Subagents"), "rendered:\n{rendered}");
         assert!(rendered.contains("ACP Servers"), "rendered:\n{rendered}");
         assert!(rendered.contains("Appearance"), "rendered:\n{rendered}");
-        assert!(
-            rendered.contains("primary model; plans, implements, and answers"),
-            "rendered:\n{rendered}"
-        );
+        assert!(rendered.contains("Primary model"), "rendered:\n{rendered}");
     }
 
     #[test]
@@ -20622,7 +20693,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_digit_opens_matching_config_value_picker() {
+    fn ctrl_digit_does_not_open_removed_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -20653,13 +20724,11 @@ mod tests {
             key_with_modifiers(KeyCode::Char('2'), KeyModifiers::CONTROL),
         );
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
-    fn ctrl_shift_digit_opens_matching_config_value_picker() {
+    fn ctrl_shift_digit_does_not_open_removed_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -20693,13 +20762,11 @@ mod tests {
             ),
         );
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
-    fn ctrl_azerty_number_row_key_opens_matching_config_value_picker() {
+    fn ctrl_azerty_number_row_key_does_not_open_removed_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -20730,13 +20797,11 @@ mod tests {
             key_with_modifiers(KeyCode::Char('\u{e9}'), KeyModifiers::CONTROL),
         );
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
-    fn function_key_opens_matching_config_value_picker() {
+    fn function_key_does_not_open_removed_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -20763,13 +20828,11 @@ mod tests {
 
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
-    fn inline_ctrl_digit_opens_matching_config_value_picker() {
+    fn inline_ctrl_digit_does_not_open_removed_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -20800,13 +20863,11 @@ mod tests {
             key_with_modifiers(KeyCode::Char('2'), KeyModifiers::CONTROL),
         );
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
-    fn inline_function_key_opens_matching_config_value_picker() {
+    fn inline_function_key_does_not_open_legacy_config_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -20833,13 +20894,11 @@ mod tests {
 
         handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
-    fn usage_quota_row_renders_between_input_and_config_shortcuts() {
+    fn usage_quota_row_has_no_legacy_config_shortcut_row() {
         let mut state = AppState::new();
         state.set_claude_usage(ClaudeUsageStatus::Available(ClaudeUsageReport {
             five_hour: Some(crate::claude_usage::ClaudeUsageWindow {
@@ -20858,22 +20917,20 @@ mod tests {
             vec![SessionConfigSelectOption::new("model-1", "Model 1")],
         )];
 
-        let backend = TestBackend::new(100, 2);
+        let backend = TestBackend::new(100, 1);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(1), Constraint::Length(1)])
+                    .constraints([Constraint::Length(1)])
                     .split(frame.area());
                 draw_usage_quota_row(frame, chunks[0], &state);
-                draw_config_shortcuts_row(frame, chunks[1], &state);
             })
             .expect("draw");
 
         let lines = buffer_lines(terminal.backend().buffer());
         assert!(lines[0].contains("Claude usage: 5H 88% left · week 63% left"));
-        assert!(lines[1].contains("[F1 Model: Model 1]"));
     }
 
     #[test]
@@ -21133,44 +21190,6 @@ mod tests {
             usage_quota_label(&state).as_deref(),
             Some("Codex usage unavailable: codex unavailable")
         );
-    }
-
-    #[test]
-    fn inline_config_picker_renders_after_shortcut_opens_it() {
-        let mut state = AppState::new();
-        state.session_id = Some("session-1".to_string());
-        state.session_config_options = vec![
-            SessionConfigOption::select(
-                "model",
-                "Model",
-                "model-1",
-                vec![
-                    SessionConfigSelectOption::new("model-1", "Model 1"),
-                    SessionConfigSelectOption::new("model-2", "Model 2"),
-                ],
-            ),
-            SessionConfigOption::select(
-                "mode",
-                "Mode",
-                "ask",
-                vec![
-                    SessionConfigSelectOption::new("ask", "Ask"),
-                    SessionConfigSelectOption::new("code", "Code"),
-                ],
-            ),
-        ];
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
-
-        let backend = TestBackend::new(100, INLINE_CHAT_HEIGHT);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| draw_inline_chat(frame, &mut state))
-            .expect("draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("Mode values"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Enter apply"), "rendered:\n{rendered}");
     }
 
     #[test]
