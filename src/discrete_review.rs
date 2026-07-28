@@ -368,6 +368,20 @@ impl ReviewDispatch {
         ids: Vec<ReviewAgentId>,
     ) -> Result<Vec<(ReviewAgentId, ReviewLaunch)>, String> {
         Self::validate(&ids)?;
+        let Some(workflow) = self.workflow.state(self.workflow_id) else {
+            return Err("the review workflow is no longer available".to_string());
+        };
+        if workflow.outcome.is_some()
+            || workflow.stage
+                >= crate::workflow::WorkflowStage::new(
+                    self.review_pass,
+                    crate::workflow::WorkflowPhase::Synthesis,
+                )
+        {
+            return Err(
+                "review synthesis has already started; no new lanes can launch".to_string(),
+            );
+        }
         tracing::info!(
             event = "review_subagents_requested",
             agents = ?ids.iter().map(|id| id.id()).collect::<Vec<_>>(),

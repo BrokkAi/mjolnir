@@ -14,6 +14,8 @@ use tokio::sync::mpsc;
 
 use crate::event::{SubagentOutcome, UiEvent};
 
+const MAX_RETAINED_WORKFLOWS: usize = 128;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WorkflowId {
     pub turn_id: u64,
@@ -196,7 +198,6 @@ impl WorkflowCoverage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // The reducer models terminal kinds not yet emitted by every workflow.
 pub enum WorkflowOutcome {
     Completed,
     Clean,
@@ -365,6 +366,11 @@ impl WorkflowStore {
         self.states.get(&id)
     }
 
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.states.len()
+    }
+
     pub fn apply(
         &mut self,
         event: &WorkflowEvent,
@@ -380,6 +386,7 @@ impl WorkflowStore {
                     ))
                 };
             }
+            self.make_room();
             self.states.insert(
                 event.workflow_id,
                 WorkflowState {
@@ -589,6 +596,14 @@ impl WorkflowStore {
                 state.coverage = *coverage;
             }
             WorkflowTransition::Terminal { outcome, coverage } => {
+                if state.coverage == WorkflowCoverage::Degraded
+                    && *coverage == WorkflowCoverage::Complete
+                {
+                    return Err(Self::error(
+                        event.workflow_id,
+                        "terminal coverage cannot undo degraded coverage",
+                    ));
+                }
                 if matches!(outcome, WorkflowOutcome::Clean)
                     && (*coverage != WorkflowCoverage::Complete
                         || state.actors.values().any(|actor| {
@@ -617,6 +632,20 @@ impl WorkflowStore {
             }
         }
         Ok(ApplyOutcome::Changed)
+    }
+
+    fn make_room(&mut self) {
+        while self.states.len() >= MAX_RETAINED_WORKFLOWS {
+            let oldest_terminal = self
+                .states
+                .iter()
+                .find_map(|(id, state)| state.outcome.is_some().then_some(*id));
+            let oldest = oldest_terminal.or_else(|| self.states.keys().next().copied());
+            let Some(oldest) = oldest else {
+                break;
+            };
+            self.states.remove(&oldest);
+        }
     }
 
     fn error(workflow_id: WorkflowId, message: &str) -> WorkflowTransitionError {
@@ -659,12 +688,12 @@ impl WorkflowEmitter {
         &self,
         event: WorkflowEvent,
     ) -> Result<ApplyOutcome, WorkflowTransitionError> {
-        let outcome = self
+        let mut store = self
             .inner
             .store
             .lock()
-            .expect("workflow state lock poisoned")
-            .apply(&event)?;
+            .expect("workflow state lock poisoned");
+        let outcome = store.apply(&event)?;
         if outcome == ApplyOutcome::Changed {
             let _ = self.inner.events.send(UiEvent::Workflow(event));
         }
@@ -900,5 +929,67 @@ mod tests {
                 ))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn terminal_transition_cannot_restore_degraded_coverage() {
+        let mut store = WorkflowStore::default();
+        store.apply(&started()).unwrap();
+        store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::CoverageChanged {
+                    coverage: WorkflowCoverage::Degraded,
+                },
+            ))
+            .unwrap();
+
+        let error = store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::Terminal {
+                    outcome: WorkflowOutcome::Degraded,
+                    coverage: WorkflowCoverage::Complete,
+                },
+            ))
+            .unwrap_err();
+
+        assert!(error.message.contains("cannot undo degraded coverage"));
+        assert_eq!(
+            store.get(review()).unwrap().coverage,
+            WorkflowCoverage::Degraded
+        );
+        assert_eq!(store.get(review()).unwrap().outcome, None);
+    }
+
+    #[test]
+    fn store_retains_only_the_newest_bounded_workflow_history() {
+        let mut store = WorkflowStore::default();
+        let total = MAX_RETAINED_WORKFLOWS as u64 + 5;
+        for turn_id in 1..=total {
+            let workflow_id = WorkflowId::delegation(turn_id);
+            store
+                .apply(&WorkflowEvent::new(
+                    workflow_id,
+                    WorkflowTransition::Started {
+                        kind: WorkflowKind::Delegation,
+                        stage: WorkflowStage::new(0, WorkflowPhase::Delegating),
+                    },
+                ))
+                .unwrap();
+            store
+                .apply(&WorkflowEvent::new(
+                    workflow_id,
+                    WorkflowTransition::Terminal {
+                        outcome: WorkflowOutcome::Completed,
+                        coverage: WorkflowCoverage::Complete,
+                    },
+                ))
+                .unwrap();
+        }
+
+        assert_eq!(store.len(), MAX_RETAINED_WORKFLOWS);
+        assert!(store.get(WorkflowId::delegation(1)).is_none());
+        assert!(store.get(WorkflowId::delegation(total)).is_some());
     }
 }

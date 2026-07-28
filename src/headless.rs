@@ -575,7 +575,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         subagent_id,
                         &label,
                         if resumed {
-                            "resumed"
+                            SUBAGENT_KIND_RESUMED
                         } else {
                             SUBAGENT_KIND_STARTED
                         },
@@ -860,6 +860,7 @@ fn apply_session_update(
 }
 
 const SUBAGENT_KIND_STARTED: &str = "started";
+const SUBAGENT_KIND_RESUMED: &str = "resumed";
 const SUBAGENT_KIND_ACTIVITY: &str = "activity";
 const SUBAGENT_KIND_FINISHED: &str = "finished";
 /// Label for a subagent whose `Started` event was never seen (a late attach or
@@ -889,18 +890,19 @@ fn emit_workflow(
     event: &crate::workflow::WorkflowEvent,
     workflows: &crate::workflow::WorkflowStore,
 ) -> Result<()> {
-    emit_json(&workflow_stream_record(event, workflows))
+    let Some(record) = workflow_stream_record(event, workflows) else {
+        return Ok(());
+    };
+    emit_json(&record)
 }
 
 fn workflow_stream_record(
     event: &crate::workflow::WorkflowEvent,
     workflows: &crate::workflow::WorkflowStore,
-) -> StreamRecord<'static> {
+) -> Option<StreamRecord<'static>> {
     use crate::workflow::{WorkflowActorLifecycle, WorkflowTransition};
 
-    let state = workflows
-        .get(event.workflow_id)
-        .expect("accepted workflow transition has resulting state");
+    let state = workflows.get(event.workflow_id)?;
     let (transition, actor_id, actor_role, actor_lifecycle, retained_session_id) = match &event
         .transition
     {
@@ -991,7 +993,7 @@ fn workflow_stream_record(
                 _ => None,
             })
     });
-    StreamRecord::Workflow(Box::new(WorkflowStreamRecord {
+    Some(StreamRecord::Workflow(Box::new(WorkflowStreamRecord {
         workflow_id: state.id.to_string(),
         turn_id: state.id.turn_id,
         operation: state.id.operation,
@@ -1015,7 +1017,7 @@ fn workflow_stream_record(
         actor_lifecycle,
         actor_error,
         retained_session_id,
-    }))
+    })))
 }
 
 /// One subagent lifecycle line. `stream-json` gets a structured record;
@@ -1514,7 +1516,9 @@ mod tests {
         workflows
             .apply(&waiting)
             .expect("valid workflow wait transition");
-        let waiting_record = record_json(&workflow_stream_record(&waiting, &workflows));
+        let waiting_record = record_json(
+            &workflow_stream_record(&waiting, &workflows).expect("workflow state exists"),
+        );
         assert_eq!(waiting_record["type"], "workflow");
         assert_eq!(waiting_record["workflow_id"], "turn-9-workflow-1");
         assert_eq!(waiting_record["running"], 0);
@@ -1535,7 +1539,9 @@ mod tests {
         workflows
             .apply(&resumed)
             .expect("valid workflow resume transition");
-        let resumed_record = record_json(&workflow_stream_record(&resumed, &workflows));
+        let resumed_record = record_json(
+            &workflow_stream_record(&resumed, &workflows).expect("workflow state exists"),
+        );
         assert_eq!(resumed_record["actor_id"], "subagent-4");
         assert_eq!(resumed_record["actor_lifecycle"], "running");
         assert_eq!(resumed_record["retained_session_id"], "supervisor-session");
@@ -1553,10 +1559,29 @@ mod tests {
         workflows
             .apply(&failed)
             .expect("valid workflow failure transition");
-        let failed_record = record_json(&workflow_stream_record(&failed, &workflows));
+        let failed_record = record_json(
+            &workflow_stream_record(&failed, &workflows).expect("workflow state exists"),
+        );
         assert_eq!(failed_record["actor_lifecycle"], "failed");
         assert_eq!(failed_record["actor_error"], "adapter exited");
         assert_eq!(failed_record["failed"], 1);
+    }
+
+    #[test]
+    fn workflow_stream_record_ignores_an_evicted_workflow() {
+        use crate::workflow::{
+            WorkflowEvent, WorkflowId, WorkflowPhase, WorkflowStage, WorkflowStore,
+            WorkflowTransition,
+        };
+
+        let event = WorkflowEvent::new(
+            WorkflowId::review(99),
+            WorkflowTransition::PhaseChanged {
+                stage: WorkflowStage::new(0, WorkflowPhase::Synthesis),
+            },
+        );
+
+        assert!(workflow_stream_record(&event, &WorkflowStore::default()).is_none());
     }
 
     #[test]

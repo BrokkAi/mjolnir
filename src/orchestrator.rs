@@ -1,6 +1,7 @@
 //! Shared primary-agent turn orchestration for interactive, headless, and
 //! remote sessions.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -176,7 +177,44 @@ fn outcome_label(outcome: &AgentCommandOutcome) -> String {
     }
 }
 
-fn observe_delegation_event(workflow: &WorkflowEmitter, turn_id: u64, event: &UiEvent) {
+const MAX_RETAINED_DELEGATION_SESSIONS: usize = 128;
+
+fn ensure_delegation_workflow(workflow: &WorkflowEmitter, workflow_id: WorkflowId) {
+    if workflow.state(workflow_id).is_some() {
+        return;
+    }
+    emit_workflow(
+        workflow,
+        WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Delegation,
+                stage: WorkflowStage::new(0, WorkflowPhase::Delegating),
+            },
+        ),
+    );
+}
+
+fn remember_delegation_session(
+    sessions: &mut BTreeMap<u64, String>,
+    subagent_id: u64,
+    session_id: String,
+) {
+    sessions.insert(subagent_id, session_id);
+    while sessions.len() > MAX_RETAINED_DELEGATION_SESSIONS {
+        let Some(oldest) = sessions.keys().next().copied() else {
+            break;
+        };
+        sessions.remove(&oldest);
+    }
+}
+
+fn observe_delegation_event(
+    workflow: &WorkflowEmitter,
+    turn_id: u64,
+    sessions: &mut BTreeMap<u64, String>,
+    event: &UiEvent,
+) {
     if turn_id == 0 {
         return;
     }
@@ -184,63 +222,91 @@ fn observe_delegation_event(workflow: &WorkflowEmitter, turn_id: u64, event: &Ui
     let UiEvent::Subagent(event) = event else {
         return;
     };
-    if workflow.state(workflow_id).is_none() {
-        emit_workflow(
-            workflow,
-            WorkflowEvent::new(
-                workflow_id,
-                WorkflowTransition::Started {
-                    kind: WorkflowKind::Delegation,
-                    stage: WorkflowStage::new(0, WorkflowPhase::Delegating),
-                },
-            ),
-        );
-    }
     match event {
         crate::event::SubagentEvent::Started {
             subagent_id,
             resumed,
             ..
         } => {
-            let transition = if *resumed {
+            ensure_delegation_workflow(workflow, workflow_id);
+            let actor_id = WorkflowActorId::Subagent(*subagent_id);
+            let actor_exists = workflow
+                .state(workflow_id)
+                .is_some_and(|state| state.actors.contains_key(&actor_id));
+            let transition = if *resumed && actor_exists {
                 WorkflowTransition::ActorResumed {
-                    actor_id: WorkflowActorId::Subagent(*subagent_id),
+                    actor_id: actor_id.clone(),
                 }
             } else {
                 WorkflowTransition::ActorStarted {
-                    actor_id: WorkflowActorId::Subagent(*subagent_id),
+                    actor_id: actor_id.clone(),
                     role: WorkflowActorRole::Implementation,
                 }
             };
             emit_workflow(workflow, WorkflowEvent::new(workflow_id, transition));
+            if !actor_exists && let Some(session_id) = sessions.get(subagent_id) {
+                emit_workflow(
+                    workflow,
+                    WorkflowEvent::new(
+                        workflow_id,
+                        WorkflowTransition::ActorSessionBound {
+                            actor_id,
+                            retained_session_id: session_id.clone(),
+                        },
+                    ),
+                );
+            }
         }
         crate::event::SubagentEvent::SessionStarted {
             subagent_id,
             session_id,
             ..
-        } => emit_workflow(
-            workflow,
-            WorkflowEvent::new(
-                workflow_id,
-                WorkflowTransition::ActorSessionBound {
-                    actor_id: WorkflowActorId::Subagent(*subagent_id),
-                    retained_session_id: session_id.clone(),
-                },
-            ),
-        ),
+        } => {
+            remember_delegation_session(sessions, *subagent_id, session_id.clone());
+            let actor_id = WorkflowActorId::Subagent(*subagent_id);
+            if workflow
+                .state(workflow_id)
+                .is_some_and(|state| state.actors.contains_key(&actor_id))
+            {
+                emit_workflow(
+                    workflow,
+                    WorkflowEvent::new(
+                        workflow_id,
+                        WorkflowTransition::ActorSessionBound {
+                            actor_id,
+                            retained_session_id: session_id.clone(),
+                        },
+                    ),
+                );
+            }
+        }
         crate::event::SubagentEvent::Finished {
             subagent_id,
             outcome,
-        } => emit_workflow(
-            workflow,
-            WorkflowEvent::new(
-                workflow_id,
-                WorkflowTransition::ActorFinished {
-                    actor_id: WorkflowActorId::Subagent(*subagent_id),
-                    outcome: outcome.clone(),
-                },
-            ),
-        ),
+        } => {
+            let actor_id = WorkflowActorId::Subagent(*subagent_id);
+            if workflow
+                .state(workflow_id)
+                .is_some_and(|state| state.actors.contains_key(&actor_id))
+            {
+                emit_workflow(
+                    workflow,
+                    WorkflowEvent::new(
+                        workflow_id,
+                        WorkflowTransition::ActorFinished {
+                            actor_id,
+                            outcome: outcome.clone(),
+                        },
+                    ),
+                );
+            }
+            if matches!(
+                outcome,
+                SubagentOutcome::Failed(_) | SubagentOutcome::Cancelled
+            ) {
+                sessions.remove(subagent_id);
+            }
+        }
         crate::event::SubagentEvent::Activity { .. }
         | crate::event::SubagentEvent::SessionUpdate { .. }
         | crate::event::SubagentEvent::TerminalOutput { .. }
@@ -347,6 +413,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
         let mut last_changed_turn: Option<ChangedTurnReview> = None;
         let mut manual_review_active = false;
         let mut review_pass = 0_u32;
+        let mut delegation_sessions = BTreeMap::new();
         // Bool marks a single-prompt/fallback review, whose primary completion
         // is terminal. Corrective primary work instead advances to another pass.
         let mut active_primary_review_actor: Option<(WorkflowActorId, bool)> = None;
@@ -413,11 +480,14 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         user_messages.lock().await.observe(update);
                     }
                     let active = turn.lock().await.clone();
-                    observe_delegation_event(&workflow, active.epoch, &event);
                     if matches!(event, UiEvent::ContextCompacted) {
                         continue;
                     }
                     if active.epoch != observed_epoch {
+                        terminate_delegation_at_boundary(
+                            &workflow,
+                            WorkflowId::delegation(observed_epoch),
+                        );
                         cancel_primary_review_actor(
                             &workflow,
                             observed_epoch,
@@ -440,6 +510,12 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         manual_review_active = false;
                         review_pass = 0;
                     }
+                    observe_delegation_event(
+                        &workflow,
+                        active.epoch,
+                        &mut delegation_sessions,
+                        &event,
+                    );
                     if active.epoch > 0 && !manual_review_active {
                         trajectory.observe(&event);
                     }
@@ -457,6 +533,15 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             update: latest_usage_update.take(),
                             session_id: session_id.clone(),
                         }));
+                    }
+                    if matches!(event, UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. })
+                        && config.subagent_report_bus.pending() == 0
+                        && pending_reports.is_empty()
+                    {
+                        terminal_delegation_workflow(
+                            &workflow,
+                            WorkflowId::delegation(active.epoch),
+                        );
                     }
                     if let UiEvent::PromptDone { stop_reason, .. } = &event
                         && let Some((actor_id, terminal_primary_review)) =
@@ -581,6 +666,15 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     let Some(report) = report else { continue; };
                     if matches!(report.outcome, SubagentOutcome::Cancelled) {
                         config.subagent_report_bus.close();
+                        if config.subagent_report_bus.pending() == 0
+                            && pending_reports.is_empty()
+                        {
+                            let active_epoch = turn.lock().await.epoch;
+                            terminal_delegation_workflow(
+                                &workflow,
+                                WorkflowId::delegation(active_epoch),
+                            );
+                        }
                         continue;
                     }
                     pending_reports.push(report);
@@ -1125,6 +1219,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 continue;
             }
             let event = held_completion.take().expect("completion held");
+            terminal_completed_review_workflow(&workflow, WorkflowId::review(active.epoch));
             if let Some(delta) = delta.filter(WorkspaceDelta::changed) {
                 last_changed_turn = Some(ChangedTurnReview {
                     task: active.task.clone(),
@@ -1150,6 +1245,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
         // The session is going away; lane subprocesses must not outlive it.
         cancel_review(&workflow, &mut review_in_flight).await;
         cancel_primary_review_actor(&workflow, observed_epoch, &mut active_primary_review_actor);
+        terminate_delegation_at_boundary(&workflow, WorkflowId::delegation(observed_epoch));
     });
     Running {
         handle,
@@ -1185,6 +1281,107 @@ fn workflow_coverage(workflow: &WorkflowEmitter, workflow_id: WorkflowId) -> Wor
     } else {
         WorkflowCoverage::Complete
     }
+}
+
+fn terminal_completed_review_workflow(workflow: &WorkflowEmitter, workflow_id: WorkflowId) {
+    let Some(state) = workflow.state(workflow_id) else {
+        return;
+    };
+    if state.kind != WorkflowKind::Review
+        || state.outcome.is_some()
+        || state.running_count() > 0
+        || state.waiting_count() > 0
+    {
+        return;
+    }
+    let coverage = workflow_coverage(workflow, workflow_id);
+    emit_workflow(
+        workflow,
+        WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Terminal {
+                outcome: if coverage == WorkflowCoverage::Complete {
+                    WorkflowOutcome::Completed
+                } else {
+                    WorkflowOutcome::Degraded
+                },
+                coverage,
+            },
+        ),
+    );
+}
+
+fn terminal_delegation_workflow(workflow: &WorkflowEmitter, workflow_id: WorkflowId) {
+    let Some(state) = workflow.state(workflow_id) else {
+        return;
+    };
+    if state.kind != WorkflowKind::Delegation
+        || state.outcome.is_some()
+        || state.running_count() > 0
+        || state.waiting_count() > 0
+    {
+        return;
+    }
+    let failed = state.actors.values().any(|actor| {
+        matches!(
+            actor.lifecycle,
+            crate::workflow::WorkflowActorLifecycle::Failed(_)
+        )
+    });
+    let cancelled = state.actors.values().any(|actor| {
+        matches!(
+            actor.lifecycle,
+            crate::workflow::WorkflowActorLifecycle::Cancelled
+        )
+    });
+    let coverage = if failed || cancelled {
+        WorkflowCoverage::Degraded
+    } else {
+        WorkflowCoverage::Complete
+    };
+    let outcome = if failed {
+        WorkflowOutcome::Failed
+    } else if cancelled {
+        WorkflowOutcome::Cancelled
+    } else {
+        WorkflowOutcome::Completed
+    };
+    emit_workflow(
+        workflow,
+        WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Terminal { outcome, coverage },
+        ),
+    );
+}
+
+fn terminate_delegation_at_boundary(workflow: &WorkflowEmitter, workflow_id: WorkflowId) {
+    let Some(state) = workflow.state(workflow_id) else {
+        return;
+    };
+    if state.kind != WorkflowKind::Delegation || state.outcome.is_some() {
+        return;
+    }
+    for (actor_id, actor) in state.actors {
+        if !matches!(
+            actor.lifecycle,
+            crate::workflow::WorkflowActorLifecycle::Completed
+                | crate::workflow::WorkflowActorLifecycle::Failed(_)
+                | crate::workflow::WorkflowActorLifecycle::Cancelled
+        ) {
+            emit_workflow(
+                workflow,
+                WorkflowEvent::new(
+                    workflow_id,
+                    WorkflowTransition::ActorFinished {
+                        actor_id,
+                        outcome: SubagentOutcome::Cancelled,
+                    },
+                ),
+            );
+        }
+    }
+    terminal_delegation_workflow(workflow, workflow_id);
 }
 
 fn terminal_cancelled_workflow(workflow: &WorkflowEmitter, workflow_id: WorkflowId) {
@@ -1409,6 +1606,96 @@ mod tests {
 
     fn text_chunk(text: &str) -> ContentChunk {
         ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+    }
+
+    #[test]
+    fn delegation_ignores_incidental_events_and_re_registers_cross_turn_resumes() {
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let workflow = WorkflowEmitter::new(events);
+        let mut sessions = BTreeMap::new();
+
+        observe_delegation_event(
+            &workflow,
+            1,
+            &mut sessions,
+            &UiEvent::Subagent(crate::event::SubagentEvent::Activity {
+                subagent_id: 7,
+                activity: "late status".to_string(),
+            }),
+        );
+        assert!(workflow.state(WorkflowId::delegation(1)).is_none());
+
+        observe_delegation_event(
+            &workflow,
+            1,
+            &mut sessions,
+            &UiEvent::Subagent(crate::event::SubagentEvent::Started {
+                subagent_id: 7,
+                resumed: false,
+                label: "implementation".to_string(),
+                model: Some("gpt-5.6".to_string()),
+                agent: "codex-acp".to_string(),
+                objective: "implement the change".to_string(),
+            }),
+        );
+        observe_delegation_event(
+            &workflow,
+            1,
+            &mut sessions,
+            &UiEvent::Subagent(crate::event::SubagentEvent::SessionStarted {
+                subagent_id: 7,
+                session_id: "retained-7".to_string(),
+            }),
+        );
+        observe_delegation_event(
+            &workflow,
+            1,
+            &mut sessions,
+            &UiEvent::Subagent(crate::event::SubagentEvent::Finished {
+                subagent_id: 7,
+                outcome: SubagentOutcome::Completed,
+            }),
+        );
+        terminal_delegation_workflow(&workflow, WorkflowId::delegation(1));
+        assert_eq!(
+            workflow
+                .state(WorkflowId::delegation(1))
+                .and_then(|state| state.outcome),
+            Some(WorkflowOutcome::Completed)
+        );
+
+        observe_delegation_event(
+            &workflow,
+            2,
+            &mut sessions,
+            &UiEvent::Subagent(crate::event::SubagentEvent::Started {
+                subagent_id: 7,
+                resumed: true,
+                label: "implementation".to_string(),
+                model: Some("gpt-5.6".to_string()),
+                agent: "codex-acp".to_string(),
+                objective: "continue the change".to_string(),
+            }),
+        );
+        let second = workflow
+            .state(WorkflowId::delegation(2))
+            .expect("cross-turn delegation workflow");
+        let actor = second
+            .actors
+            .get(&WorkflowActorId::Subagent(7))
+            .expect("retained actor re-registered");
+        assert!(matches!(
+            actor.lifecycle,
+            crate::workflow::WorkflowActorLifecycle::Running
+        ));
+        assert_eq!(actor.retained_session_id.as_deref(), Some("retained-7"));
+
+        terminate_delegation_at_boundary(&workflow, WorkflowId::delegation(2));
+        let terminated = workflow
+            .state(WorkflowId::delegation(2))
+            .expect("boundary-terminated delegation workflow");
+        assert_eq!(terminated.outcome, Some(WorkflowOutcome::Cancelled));
+        assert_eq!(terminated.coverage, WorkflowCoverage::Degraded);
     }
 
     #[test]
@@ -1910,17 +2197,34 @@ mod tests {
             .expect("send unchanged corrective completion");
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut workflow_completed = false;
         loop {
             let event = tokio::time::timeout_at(deadline, running.events.recv())
                 .await
                 .expect("unchanged correction released completion")
                 .expect("orchestrated event");
+            if matches!(
+                event,
+                UiEvent::Workflow(WorkflowEvent {
+                    transition: WorkflowTransition::Terminal {
+                        outcome: WorkflowOutcome::Completed,
+                        coverage: WorkflowCoverage::Complete,
+                    },
+                    ..
+                })
+            ) {
+                workflow_completed = true;
+            }
             if matches!(event, UiEvent::PromptDone { .. }) {
                 break;
             }
         }
         assert_eq!(1, passes.load(Ordering::SeqCst));
         assert!(command_rx.try_recv().is_err());
+        assert!(
+            workflow_completed,
+            "an unchanged correction must still terminate its review workflow"
+        );
 
         drop(runtime_tx);
         running.task.await.expect("orchestrator task");
