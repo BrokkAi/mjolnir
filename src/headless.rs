@@ -249,6 +249,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         additional_directories: cfg.additional_directories.clone(),
         mcp_servers: Vec::new(),
         resume_session: cfg.resume_session.clone(),
+        session_restore_mode: acp::SessionRestoreMode::Continue,
         env: primary_env,
         agent_stderr: cfg.agent_stderr.clone(),
         fs_max_text_bytes: cfg.fs_max_text_bytes,

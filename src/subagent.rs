@@ -1211,6 +1211,7 @@ fn spawn_subagent_runtime(
         additional_directories: context.additional_directories.clone(),
         mcp_servers: mcp_servers.to_vec(),
         resume_session: None,
+        session_restore_mode: crate::acp::SessionRestoreMode::Continue,
         env,
         agent_stderr: config.agent_stderr.clone(),
         fs_max_text_bytes: context.fs_max_text_bytes,

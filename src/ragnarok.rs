@@ -1886,6 +1886,7 @@ fn runtime_config(
         additional_directories: additional_directories.to_vec(),
         mcp_servers,
         resume_session,
+        session_restore_mode: acp::SessionRestoreMode::Continue,
         env: launch.env.clone(),
         agent_stderr: None,
         fs_max_text_bytes: acp::DEFAULT_FS_TEXT_BYTES,

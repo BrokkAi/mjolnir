@@ -49,6 +49,12 @@ use crate::paths::{WorkspaceRoots, normalize_spawn_program, path_is_under_any_ro
 use crate::subagent;
 use crate::{deepswe, model_resolve};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRestoreMode {
+    Continue,
+    Replay,
+}
+
 pub struct AcpRuntimeConfig {
     pub command: PathBuf,
     pub args: Vec<String>,
@@ -61,6 +67,9 @@ pub struct AcpRuntimeConfig {
     /// are appended.
     pub mcp_servers: Vec<McpServer>,
     pub resume_session: Option<String>,
+    /// Interactive restores replay transcript history so the user can see it;
+    /// internal continuation flows prefer `session/resume`.
+    pub session_restore_mode: SessionRestoreMode,
     /// Environment variables to inject into the spawned agent process.
     /// Used for agents that require knobs like `AUGMENT_DISABLE_AUTO_UPDATE=1`.
     pub env: HashMap<String, String>,
@@ -853,6 +862,7 @@ pub async fn run(
             cfg.additional_directories.clone(),
             cfg.mcp_servers.clone(),
             cfg.resume_session.clone(),
+            cfg.session_restore_mode,
             ui_tx.clone(),
             ui_rx,
             fatal_emitted.clone(),
@@ -1410,6 +1420,41 @@ where
         Vec::new(),
         Vec::new(),
         resume_session,
+        SessionRestoreMode::Continue,
+        ui_tx,
+        ui_rx,
+        fatal_emitted,
+        DEFAULT_FS_TEXT_BYTES,
+        RuntimeAccessMode::Full,
+        None,
+        None,
+        HashMap::new(),
+        None,
+        None,
+        false,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn drive_client_replaying_session<T>(
+    transport: T,
+    cwd: PathBuf,
+    session_id: String,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+    ui_rx: mpsc::UnboundedReceiver<UiCommand>,
+    fatal_emitted: Arc<AtomicBool>,
+) -> Result<()>
+where
+    T: ConnectTo<Client>,
+{
+    drive_client_with_fs_limit(
+        transport,
+        cwd,
+        Vec::new(),
+        Vec::new(),
+        Some(session_id),
+        SessionRestoreMode::Replay,
         ui_tx,
         ui_rx,
         fatal_emitted,
@@ -1444,6 +1489,7 @@ where
         additional_directories,
         Vec::new(),
         resume_session,
+        SessionRestoreMode::Continue,
         ui_tx,
         ui_rx,
         fatal_emitted,
@@ -1466,6 +1512,7 @@ async fn drive_client_with_fs_limit<T>(
     additional_directories: Vec<PathBuf>,
     mcp_servers: Vec<McpServer>,
     resume_session: Option<String>,
+    session_restore_mode: SessionRestoreMode,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     mut ui_rx: mpsc::UnboundedReceiver<UiCommand>,
     fatal_emitted: Arc<AtomicBool>,
@@ -1721,6 +1768,7 @@ where
                 additional_directories,
                 mcp_servers,
                 resume_session,
+                session_restore_mode,
                 &ui_tx,
                 &mut ui_rx,
                 fatal_emitted,
@@ -1766,6 +1814,7 @@ async fn drive_session(
     additional_directories: Vec<PathBuf>,
     mut mcp_servers: Vec<McpServer>,
     resume_session: Option<String>,
+    session_restore_mode: SessionRestoreMode,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     fatal_emitted: Arc<AtomicBool>,
@@ -1883,17 +1932,40 @@ async fn drive_session(
     let (mut session_id, initial_config, resumed) = match resume_session {
         Some(existing_session_id) => {
             let session_id = SessionId::from(existing_session_id.clone());
-            let initial_config = match resume_existing_session(
-                &conn,
-                session_id.clone(),
-                cwd.clone(),
-                &additional_directories,
-                &mcp_servers,
-                &init_resp.agent_capabilities,
-                &init_resp.auth_methods,
-            )
-            .await
+            // Agents stream replay notifications before replying to
+            // `session/load`, so the target must be active before the request.
+            // A restore error terminates this runtime immediately, making the
+            // briefly active target unobservable after failure.
+            session_state
+                .set_active_session_with_roots(session_id.clone(), &cwd, &additional_directories)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let restore = if session_restore_mode == SessionRestoreMode::Replay
+                && init_resp.agent_capabilities.load_session
             {
+                load_existing_session(
+                    &conn,
+                    session_id.clone(),
+                    cwd.clone(),
+                    &additional_directories,
+                    &mcp_servers,
+                    &init_resp.agent_capabilities,
+                    &init_resp.auth_methods,
+                )
+                .await
+            } else {
+                resume_existing_session(
+                    &conn,
+                    session_id.clone(),
+                    cwd.clone(),
+                    &additional_directories,
+                    &mcp_servers,
+                    &init_resp.agent_capabilities,
+                    &init_resp.auth_methods,
+                )
+                .await
+            };
+            let initial_config = match restore {
                 Ok(initial_config) => initial_config,
                 Err(launch_err) => {
                     let text = launch_err.to_string();
@@ -1901,10 +1973,6 @@ async fn drive_session(
                     return Err(anyhow::anyhow!(text));
                 }
             };
-            session_state
-                .set_active_session_with_roots(session_id.clone(), &cwd, &additional_directories)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
             (session_id, initial_config, true)
         }
         None => match conn
@@ -7543,6 +7611,102 @@ mod tests {
             .await;
     }
 
+    async fn run_mock_agent_restart_session_load(
+        stream: tokio::io::DuplexStream,
+        load_seen: Arc<StdAtomicBool>,
+        resume_seen: Arc<StdAtomicBool>,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let load_seen_for_req = load_seen.clone();
+        let resume_seen_for_req = resume_seen.clone();
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                            AgentCapabilities::new()
+                                .load_session(true)
+                                .session_capabilities(
+                                    SessionCapabilities::new()
+                                        .resume(SessionResumeCapabilities::new()),
+                                ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: LoadSessionRequest,
+                            responder,
+                            cx: ConnectionTo<agent_client_protocol::Client>| {
+                    assert_eq!(req.session_id.to_string(), "selected-session");
+                    load_seen_for_req.store(true, Ordering::SeqCst);
+                    let _ = cx.send_notification(SessionNotification::new(
+                        req.session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("replayed history"),
+                        ))),
+                    ));
+                    responder.respond(LoadSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: ResumeSessionRequest, responder, _cx| {
+                    resume_seen_for_req.store(true, Ordering::SeqCst);
+                    responder.respond(ResumeSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_resume_only(
+        stream: tokio::io::DuplexStream,
+        resume_seen: Arc<StdAtomicBool>,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let resume_seen_for_req = resume_seen.clone();
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                            AgentCapabilities::new().session_capabilities(
+                                SessionCapabilities::new().resume(SessionResumeCapabilities::new()),
+                            ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: ResumeSessionRequest, responder, _cx| {
+                    assert_eq!(req.session_id.to_string(), "selected-session");
+                    resume_seen_for_req.store(true, Ordering::SeqCst);
+                    responder.respond(ResumeSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
     async fn run_mock_agent_same_session_reload(
         stream: tokio::io::DuplexStream,
         load_seen: Arc<StdAtomicBool>,
@@ -9327,6 +9491,7 @@ mod tests {
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),
             resume_session: None,
+            session_restore_mode: SessionRestoreMode::Continue,
             env: HashMap::new(),
             agent_stderr: None,
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
@@ -9388,6 +9553,7 @@ mod tests {
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),
             resume_session: None,
+            session_restore_mode: SessionRestoreMode::Continue,
             env: HashMap::new(),
             agent_stderr: Some(bad_stderr),
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
@@ -9528,6 +9694,7 @@ mod tests {
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),
             resume_session: None,
+            session_restore_mode: SessionRestoreMode::Continue,
             env: HashMap::new(),
             agent_stderr: None,
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
@@ -9558,6 +9725,7 @@ mod tests {
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),
             resume_session: None,
+            session_restore_mode: SessionRestoreMode::Continue,
             env: HashMap::new(),
             agent_stderr: None,
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
@@ -9584,6 +9752,7 @@ mod tests {
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),
             resume_session: None,
+            session_restore_mode: SessionRestoreMode::Continue,
             env: HashMap::new(),
             agent_stderr: None,
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
@@ -9891,6 +10060,76 @@ mod tests {
             ui_rx.try_recv().is_err(),
             "second emit_fatal should be suppressed by the guard"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restart_based_load_prefers_session_load_and_replays_history() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let load_seen = Arc::new(StdAtomicBool::new(false));
+        let resume_seen = Arc::new(StdAtomicBool::new(false));
+        let agent_task = tokio::spawn(run_mock_agent_restart_session_load(
+            agent_side,
+            load_seen.clone(),
+            resume_seen.clone(),
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client_replaying_session(
+            client_transport,
+            std::env::temp_dir(),
+            "selected-session".to_string(),
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        let mut replayed_history = false;
+        while !replayed_history {
+            let event = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for replay")
+                .expect("channel closed");
+            if let UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(chunk)) = event
+                && let ContentBlock::Text(text) = chunk.content
+            {
+                replayed_history = text.text == "replayed history";
+            }
+        }
+
+        assert!(load_seen.load(Ordering::SeqCst));
+        assert!(!resume_seen.load(Ordering::SeqCst));
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_restore_falls_back_to_resume_when_load_is_unsupported() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let resume_seen = Arc::new(StdAtomicBool::new(false));
+        let agent_task = tokio::spawn(run_mock_agent_resume_only(agent_side, resume_seen.clone()));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client_replaying_session(
+            client_transport,
+            std::env::temp_dir(),
+            "selected-session".to_string(),
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "selected-session").await;
+        assert!(resume_seen.load(Ordering::SeqCst));
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

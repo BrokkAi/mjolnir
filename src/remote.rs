@@ -2566,6 +2566,7 @@ fn start_server_agent_session(
         additional_directories,
         mcp_servers: Vec::new(),
         resume_session: None,
+        session_restore_mode: acp::SessionRestoreMode::Continue,
         env: agent.env,
         agent_stderr: None,
         fs_max_text_bytes,
