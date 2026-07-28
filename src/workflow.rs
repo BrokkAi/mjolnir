@@ -366,6 +366,14 @@ impl WorkflowStore {
         self.states.get(&id)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &WorkflowState> {
+        self.states.values()
+    }
+
+    pub fn clear(&mut self) {
+        self.states.clear();
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.states.len()
