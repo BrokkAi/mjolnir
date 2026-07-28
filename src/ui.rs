@@ -1813,7 +1813,6 @@ fn should_show_spinner(state: &AppState) -> bool {
             | ConnectionState::Streaming
             | ConnectionState::Cancelling
             | ConnectionState::Forking
-            | ConnectionState::Transitioning
     )
 }
 
@@ -2399,7 +2398,7 @@ fn handle_crossterm(
                 return TerminalRequest::None;
             }
             (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
-                request_new_session(state);
+                state.exit_reason = Some(UiExitReason::NewSession);
                 return TerminalRequest::None;
             }
             (KeyModifiers::ALT, KeyCode::Char('t' | 'T')) if mode == UiMode::FullscreenTui => {
@@ -2584,7 +2583,7 @@ fn handle_crossterm(
             state.exit_reason = Some(UiExitReason::Quit);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
-            request_new_session(state);
+            state.exit_reason = Some(UiExitReason::NewSession);
         }
         (KeyModifiers::ALT, KeyCode::Char('t' | 'T')) if mode == UiMode::FullscreenTui => {
             toggle_latest_visible_tool(state, true);
@@ -3998,11 +3997,6 @@ fn input_text_with_attachments(input: &str, attachments: &[PastedAttachment]) ->
     combined
 }
 
-fn request_new_session(state: &mut AppState) {
-    state.mark_transitioning();
-    state.exit_reason = Some(UiExitReason::NewSession);
-}
-
 fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
     let combined = input_text_with_attachments(&state.input, &state.attachments);
 
@@ -4031,7 +4025,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         clear_attachments(state);
         state.input_cursor = 0;
         state.scroll_input_to_bottom();
-        request_new_session(state);
+        state.exit_reason = Some(UiExitReason::NewSession);
         return;
     }
 
@@ -6709,7 +6703,6 @@ fn turn_elapsed_value_label(state: &AppState) -> Option<String> {
         ConnectionState::Streaming | ConnectionState::Cancelling | ConnectionState::Forking => {
             state.active_turn_elapsed().map(format_duration)
         }
-        ConnectionState::Transitioning => None,
         ConnectionState::Closed | ConnectionState::Fatal => None,
     }
 }
@@ -9452,7 +9445,6 @@ fn busy_prompt_title(state: &AppState) -> Option<String> {
                 "Enter queue next".to_string()
             }
         }
-        ConnectionState::Transitioning => "starting new session".to_string(),
         ConnectionState::Launching
         | ConnectionState::Initializing
         | ConnectionState::Ready
@@ -15126,12 +15118,6 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
 
         assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
-        assert_eq!(state.connection_state(), ConnectionState::Transitioning);
-        assert!(should_show_spinner(&state));
-        assert_eq!(turn_elapsed_value_label(&state), None);
-        let title = busy_prompt_title(&state).expect("transition title");
-        assert!(title.contains("starting new session"), "{title}");
-        assert!(!title.contains("cancel"), "{title}");
         // Must not forward the command to the agent.
         assert!(cmd_rx.try_recv().is_err());
     }
@@ -20394,8 +20380,6 @@ mod tests {
 
         assert!(state.config_picker.is_none());
         assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
-        assert_eq!(state.connection_state(), ConnectionState::Transitioning);
-        assert!(should_show_spinner(&state));
         assert!(cmd_rx.try_recv().is_err());
     }
 

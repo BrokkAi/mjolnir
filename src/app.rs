@@ -580,8 +580,6 @@ pub enum ConnectionState {
     Cancelling,
     /// A `session/fork` request is in flight.
     Forking,
-    /// The current UI is handing off to a new session requested by the user.
-    Transitioning,
     /// Runtime shut down cleanly (UI quit or agent EOF).
     Closed,
     /// Runtime ended with a fatal error.
@@ -1961,10 +1959,7 @@ impl AppState {
     pub fn is_busy(&self) -> bool {
         matches!(
             self.connection_state,
-            ConnectionState::Streaming
-                | ConnectionState::Cancelling
-                | ConnectionState::Forking
-                | ConnectionState::Transitioning
+            ConnectionState::Streaming | ConnectionState::Cancelling | ConnectionState::Forking
         )
     }
 
@@ -2124,10 +2119,6 @@ impl AppState {
         if self.connection_state == ConnectionState::Streaming {
             self.set_connection_state(ConnectionState::Cancelling);
         }
-    }
-
-    pub fn mark_transitioning(&mut self) {
-        self.set_connection_state(ConnectionState::Transitioning);
     }
 
     pub fn mark_forking(&mut self) {
@@ -8476,16 +8467,7 @@ mod tests {
         s.update_autocomplete();
         assert!(s.autocomplete.visible, "Ready: popover must be visible");
 
-        // Transitioning is busy for submission gating but not a prompt stream.
-        s.mark_transitioning();
-        assert_eq!(s.connection_state, ConnectionState::Transitioning);
-        assert!(
-            !s.is_streaming(),
-            "Transitioning must not count as streaming"
-        );
-        assert!(s.is_busy(), "Transitioning must count as busy");
-
-        // Forking is also busy for submission gating but not a prompt stream.
+        // Forking is busy for submission gating but not a prompt stream.
         s.mark_forking();
         assert_eq!(s.connection_state, ConnectionState::Forking);
         assert!(!s.is_streaming(), "Forking must not count as streaming");
