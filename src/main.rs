@@ -1155,6 +1155,36 @@ struct RunSessionResult {
     session_title: Option<String>,
     theme_kind: theme::TerminalThemeKind,
     spinner_style: spinner::SpinnerStyle,
+    new_session_loading: Option<NewSessionLoading>,
+}
+
+struct NewSessionLoading {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl NewSessionLoading {
+    fn start() -> Self {
+        print!("\rloading.   ");
+        let _ = std::io::stdout().flush();
+        let task = tokio::spawn(async {
+            let mut dots = 2;
+            loop {
+                tokio::time::sleep(Duration::from_millis(350)).await;
+                print!("\rloading{}   ", ".".repeat(dots));
+                let _ = std::io::stdout().flush();
+                dots = dots % 3 + 1;
+            }
+        });
+        Self { task }
+    }
+}
+
+impl Drop for NewSessionLoading {
+    fn drop(&mut self) {
+        self.task.abort();
+        print!("\r             \r");
+        let _ = std::io::stdout().flush();
+    }
 }
 
 struct ActiveSideRuntime {
@@ -1236,6 +1266,7 @@ impl From<ui::UiRunResult> for RunSessionResult {
             session_title: result.session_title,
             theme_kind: result.theme_kind,
             spinner_style: result.spinner_style,
+            new_session_loading: None,
         }
     }
 }
@@ -1431,6 +1462,7 @@ async fn run_app(
             UiExitReason::Quit => return Ok(session_result.session_id),
             UiExitReason::NewSession | UiExitReason::ClearSession => {
                 let show_new_session_boundary = session_result.reason == UiExitReason::NewSession;
+                let new_session_loading = session_result.new_session_loading;
                 cfg = Config::load(&config_path)?;
                 let resolution = resolve_roster_streaming_for_tui(&cfg, &cwd).await?;
                 roster = resolution.roster;
@@ -1442,6 +1474,7 @@ async fn run_app(
                 if session_result.reason == UiExitReason::ClearSession {
                     pending_models_boundary = Some(models_reload_message(&roster));
                 }
+                drop(new_session_loading);
                 continue;
             }
             UiExitReason::SwitchSession => {
@@ -2484,6 +2517,7 @@ async fn run_session(
                 session_title: current_session_title,
                 theme_kind,
                 spinner_style,
+                new_session_loading: None,
             });
         };
 
@@ -2498,6 +2532,7 @@ async fn run_session(
                 session_title: target_title,
                 theme_kind,
                 spinner_style,
+                new_session_loading: None,
             });
         }
 
@@ -2536,9 +2571,20 @@ async fn run_session(
                     session_title: target_title,
                     theme_kind,
                     spinner_style,
+                    new_session_loading: None,
                 });
             }
         }
+    };
+
+    let mut new_session_loading = if matches!(
+        ui_result.as_ref().map(|result| result.reason),
+        Ok(UiExitReason::NewSession)
+    ) {
+        terminal.restore_once();
+        Some(NewSessionLoading::start())
+    } else {
+        None
     };
 
     // Shutdown paths reaching this point:
@@ -2613,7 +2659,10 @@ async fn run_session(
         tracing::warn!("clear terminal for /clear failed: {e}");
     }
 
-    ui_result
+    ui_result.map(|mut result| {
+        result.new_session_loading = new_session_loading.take();
+        result
+    })
 }
 
 fn isolated_subagent_role(
@@ -3270,6 +3319,7 @@ mod tests {
             session_title: Some("Current".to_string()),
             theme_kind: theme::TerminalThemeKind::AnsiLight,
             spinner_style: spinner::SpinnerStyle::Bars,
+            new_session_loading: None,
         };
 
         apply_session_result_to_config(&mut cfg, &result);
