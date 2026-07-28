@@ -1899,6 +1899,13 @@ impl AppState {
         self.connection_state
     }
 
+    /// Show startup progress while the current runtime is torn down for
+    /// `/new`, before roster discovery and the next UI take over.
+    pub fn mark_session_restarting(&mut self) {
+        self.set_connection_state(ConnectionState::Launching);
+        self.set_status_line(StatusKind::Info, "starting new session");
+    }
+
     /// Sanitize an agent-supplied session title (stripping control characters
     /// and collapsing whitespace) and store it. Returns `true` when a
     /// non-empty title was set; empty/whitespace-only titles are ignored so

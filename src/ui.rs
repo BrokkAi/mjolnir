@@ -2317,6 +2317,7 @@ fn handle_crossterm(
                 return TerminalRequest::None;
             }
             (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+                state.mark_session_restarting();
                 state.exit_reason = Some(UiExitReason::NewSession);
                 return TerminalRequest::None;
             }
@@ -2502,6 +2503,7 @@ fn handle_crossterm(
             state.exit_reason = Some(UiExitReason::Quit);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+            state.mark_session_restarting();
             state.exit_reason = Some(UiExitReason::NewSession);
         }
         (KeyModifiers::ALT, KeyCode::Char('t' | 'T')) if mode == UiMode::FullscreenTui => {
@@ -3875,6 +3877,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         clear_attachments(state);
         state.input_cursor = 0;
         state.scroll_input_to_bottom();
+        state.mark_session_restarting();
         state.exit_reason = Some(UiExitReason::NewSession);
         return;
     }
@@ -14424,6 +14427,7 @@ mod tests {
     #[test]
     fn slash_new_triggers_new_session_exit_reason() {
         let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Ready);
         state.session_id = Some("s-1".to_string());
         state.input = "/new".to_string();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
@@ -14431,6 +14435,14 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
 
         assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
+        assert_eq!(state.connection_state(), ConnectionState::Launching);
+        assert_eq!(
+            state
+                .status_line
+                .as_ref()
+                .map(|status| status.text.as_str()),
+            Some("starting new session")
+        );
         // Must not forward the command to the agent.
         assert!(cmd_rx.try_recv().is_err());
     }
@@ -19536,6 +19548,7 @@ mod tests {
     #[test]
     fn ctrl_n_triggers_new_session_exit_reason() {
         let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Ready);
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![SessionConfigOption::select(
             "model",
@@ -19556,6 +19569,14 @@ mod tests {
 
         assert!(state.config_picker.is_none());
         assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
+        assert_eq!(state.connection_state(), ConnectionState::Launching);
+        assert_eq!(
+            state
+                .status_line
+                .as_ref()
+                .map(|status| status.text.as_str()),
+            Some("starting new session")
+        );
         assert!(cmd_rx.try_recv().is_err());
     }
 
