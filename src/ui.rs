@@ -45,8 +45,8 @@ use crate::app::{
     AppState, ArenaPane, ConfigValueChoice, ConnectionState, ElicitationView, Entry,
     PastedAttachment, PastedImageAttachment, PendingElicitation, PendingPermission,
     QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus, RagnarokFighterUi,
-    RagnarokUi, StatusKind, StatusMessage, ToolCallOutput, UiExitReason, classify_elicitation,
-    config_option_choices, config_option_current_value_label,
+    RagnarokUi, StatusKind, StatusMessage, SubagentStatus, ToolCallOutput, UiExitReason,
+    classify_elicitation, config_option_choices, config_option_current_value_label,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -406,6 +406,9 @@ fn inline_transcript_viewer_accepts_input(state: &AppState) -> bool {
 
 fn inline_reader_accepts_input(state: &AppState) -> bool {
     inline_transcript_viewer_accepts_input(state)
+        || (state.nested_agent_viewer
+            && !state.has_pending_permission()
+            && !state.has_pending_elicitation())
         || (state.workspace_diff_viewer
             && !state.has_pending_permission()
             && !state.has_pending_elicitation())
@@ -733,9 +736,10 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
         Entry::AgentMessage(_) => {
             !state.is_streaming() || state.agent_open_message_index() != Some(idx)
         }
-        Entry::SubagentMessage(_) => {
-            !state.subagent_active || state.subagent_open_message_index() != Some(idx)
-        }
+        // Nested prose now lives in an actor-owned transcript rather than the
+        // primary stream. Legacy/replayed entries that still reach the main
+        // transcript are therefore immutable.
+        Entry::SubagentMessage(_) => true,
         Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
             state.tool_calls.get(id).is_some_and(|view| {
                 matches!(
@@ -1466,6 +1470,7 @@ async fn ui_loop(
         // mid-read. Entries that go stable meanwhile are flushed on close.
         if mode == UiMode::InlineChat
             && !state.transcript_viewer
+            && !state.nested_agent_viewer
             && !state.workspace_diff_viewer
             && state.ragnarok.is_none()
             && !inline_resize_reflow.is_pending()
@@ -1693,6 +1698,7 @@ fn should_force_inline_repair_for_event(mode: UiMode, state: &AppState, ev: &CtE
         && !state.has_pending_elicitation()
         && state.config_picker.is_none()
         && !state.transcript_viewer
+        && !state.nested_agent_viewer
         && !state.workspace_diff_viewer
     {
         return true;
@@ -1889,7 +1895,10 @@ fn should_run_inline_resize_reflow(
     state: &AppState,
     now: Instant,
 ) -> bool {
-    reflow.is_due(now) && !state.transcript_viewer && !state.workspace_diff_viewer
+    reflow.is_due(now)
+        && !state.transcript_viewer
+        && !state.nested_agent_viewer
+        && !state.workspace_diff_viewer
 }
 
 struct InlineResizeReflowSnapshot {
@@ -2139,7 +2148,7 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
     // long histories are calm to page through. It outranks the compact
     // overlays below but yields to a pending permission prompt, which must
     // stay visible and actionable.
-    if (state.transcript_viewer || state.workspace_diff_viewer)
+    if (state.transcript_viewer || state.nested_agent_viewer || state.workspace_diff_viewer)
         && !state.has_pending_permission()
         && !state.has_pending_elicitation()
     {
@@ -2245,6 +2254,7 @@ fn handle_crossterm(
                 || state.mjconfig_menu.is_some()
                 || state.ragnarok.is_some()
                 || state.transcript_viewer
+                || state.nested_agent_viewer
                 || state.workspace_diff_viewer
             {
                 return TerminalRequest::None;
@@ -2256,7 +2266,7 @@ fn handle_crossterm(
         CtEvent::Mouse(mouse) => {
             // The diff reader does not support mouse scrolling yet. In
             // particular, do not mutate the hidden transcript's offset.
-            if state.workspace_diff_viewer {
+            if state.workspace_diff_viewer || state.nested_agent_viewer {
                 return TerminalRequest::None;
             } else if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
                 handle_transcript_viewer_mouse(state, mouse);
@@ -2327,6 +2337,22 @@ fn handle_crossterm(
         && state.agent_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers == KeyModifiers::CONTROL
+        && matches!(key.code, KeyCode::Char('l' | 'L'))
+    {
+        if state.nested_agent_viewer {
+            state.close_nested_agent_viewer();
+        } else if !state.open_nested_agent_viewer() {
+            state.status_line = Some(StatusMessage::info("no nested agents to inspect"));
+        }
+        return inline_repair_request(mode);
+    }
+
+    if !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+        && state.ragnarok.is_none()
+        && state.agent_picker.is_none()
+        && state.config_picker.is_none()
+        && key.modifiers == KeyModifiers::CONTROL
         && matches!(key.code, KeyCode::Char('g' | 'G'))
     {
         if state.workspace_diff_viewer {
@@ -2345,6 +2371,12 @@ fn handle_crossterm(
         && !state.has_pending_elicitation()
     {
         return handle_workspace_diff_viewer_key(state, key.modifiers, key.code, mode);
+    }
+    if state.nested_agent_viewer
+        && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+    {
+        return handle_nested_agent_viewer_key(state, key.modifiers, key.code, mode);
     }
     if state.transcript_viewer
         && !state.has_pending_permission()
@@ -3759,6 +3791,80 @@ fn handle_transcript_viewer_key(
     TerminalRequest::None
 }
 
+fn latest_nested_tool_call_id(state: &AppState) -> Option<String> {
+    state
+        .selected_nested_agent()?
+        .1
+        .transcript
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            Entry::SubagentToolCall(id) if state.tool_calls.contains_key(id) => Some(id.clone()),
+            _ => None,
+        })
+}
+
+fn handle_nested_agent_viewer_key(
+    state: &mut AppState,
+    modifiers: KeyModifiers,
+    code: KeyCode,
+    mode: UiMode,
+) -> TerminalRequest {
+    let ctrl_l = modifiers.contains(KeyModifiers::CONTROL)
+        && !modifiers.intersects(
+            KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
+        )
+        && matches!(code, KeyCode::Char('l' | 'L'));
+    if matches!(code, KeyCode::Esc)
+        || ctrl_l
+        || (modifiers.is_empty() && matches!(code, KeyCode::Char('q')))
+    {
+        state.close_nested_agent_viewer();
+        return inline_repair_request(mode);
+    }
+
+    if modifiers == KeyModifiers::ALT && matches!(code, KeyCode::Char('t' | 'T')) {
+        let Some(id) = latest_nested_tool_call_id(state) else {
+            state.status_line = Some(StatusMessage::info("no nested tool output to toggle"));
+            return TerminalRequest::None;
+        };
+        if !state.toggle_tool_detail(&id, true) {
+            state.status_line = Some(StatusMessage::info("no nested tool output to toggle"));
+        }
+        return TerminalRequest::None;
+    }
+
+    match code {
+        KeyCode::Left | KeyCode::Char('p') if modifiers.is_empty() => {
+            state.select_nested_agent(false)
+        }
+        KeyCode::Right | KeyCode::Char('n') | KeyCode::Tab if modifiers.is_empty() => {
+            state.select_nested_agent(true)
+        }
+        KeyCode::BackTab => state.select_nested_agent(false),
+        KeyCode::Up => {
+            state.nested_agent_scroll_offset = state.nested_agent_scroll_offset.saturating_sub(1)
+        }
+        KeyCode::Down => {
+            state.nested_agent_scroll_offset = state.nested_agent_scroll_offset.saturating_add(1)
+        }
+        KeyCode::PageUp => {
+            state.nested_agent_scroll_offset = state
+                .nested_agent_scroll_offset
+                .saturating_sub(TRANSCRIPT_SCROLL_PAGE_STEP)
+        }
+        KeyCode::PageDown => {
+            state.nested_agent_scroll_offset = state
+                .nested_agent_scroll_offset
+                .saturating_add(TRANSCRIPT_SCROLL_PAGE_STEP)
+        }
+        KeyCode::Home => state.nested_agent_scroll_offset = 0,
+        KeyCode::End => state.nested_agent_scroll_offset = usize::MAX,
+        _ => {}
+    }
+    TerminalRequest::None
+}
+
 fn handle_workspace_diff_viewer_key(
     state: &mut AppState,
     modifiers: KeyModifiers,
@@ -4017,20 +4123,36 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
-    if images.is_empty() && text == "/export" {
+    if images.is_empty() && matches!(text.as_str(), "/export" | "/export full") {
         state.input.clear();
         clear_attachments(state);
         state.input_cursor = 0;
         state.scroll_input_to_bottom();
-        match export_transcript(state) {
+        let include_nested = text == "/export full";
+        match export_transcript(state, include_nested) {
             Ok(path) => state.record_status_message(
                 StatusKind::Info,
-                format!("transcript exported to {}", path.display()),
+                format!(
+                    "{} transcript exported to {}",
+                    if include_nested { "full" } else { "primary" },
+                    path.display()
+                ),
             ),
             Err(e) => state.record_status_message(
                 StatusKind::Warning,
                 format!("transcript export failed: {e:#}"),
             ),
+        }
+        return;
+    }
+
+    if images.is_empty() && text == "/subagents" {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        if !state.open_nested_agent_viewer() {
+            state.record_status_message(StatusKind::Info, "no nested agents to inspect");
         }
         return;
     }
@@ -4294,12 +4416,12 @@ fn draw_mjconfig_menu(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     draw_settings_panel(f, area, &menu.editor, "mj config");
 }
 
-fn export_transcript(state: &AppState) -> Result<PathBuf> {
+fn export_transcript(state: &AppState, include_nested: bool) -> Result<PathBuf> {
     let Some(dir) = &state.transcript_export_dir else {
         anyhow::bail!("transcript export directory is not configured");
     };
     create_private_export_dir(dir)?;
-    let body = transcript_export_markdown(state);
+    let body = transcript_export_markdown_with_nested(state, include_nested);
     for suffix in 0..1000 {
         let path = export_path(dir, export_timestamp_millis(), suffix);
         match write_private_new_file(&path, body.as_bytes()) {
@@ -4358,7 +4480,12 @@ fn write_private_new_file(path: &Path, body: &[u8]) -> io::Result<()> {
     file.write_all(body)
 }
 
+#[cfg(test)]
 fn transcript_export_markdown(state: &AppState) -> String {
+    transcript_export_markdown_with_nested(state, false)
+}
+
+fn transcript_export_markdown_with_nested(state: &AppState, include_nested: bool) -> String {
     let mut out = String::from("# Mjolnir Transcript\n\n");
     if let Some(title) = &state.session_title {
         out.push_str(&format!("- Session: {}\n", escape_markdown_text(title)));
@@ -4374,14 +4501,49 @@ fn transcript_export_markdown(state: &AppState) -> String {
     }
     out.push('\n');
 
-    for entry in &state.transcript {
+    push_export_entries(&mut out, &state.transcript, state);
+
+    if include_nested && state.nested_agents().next().is_some() {
+        out.push_str("# Nested Agent Transcripts\n\n");
+        for (subagent_id, actor) in state.nested_agents() {
+            let role = actor
+                .role
+                .as_ref()
+                .map(crate::app::nested_role_label)
+                .unwrap_or_else(|| "subagent".to_string());
+            let backend = nested_actor_backend(actor);
+            let state_label = nested_actor_state_label(actor);
+            out.push_str(&format!(
+                "## Subagent #{}: {}\n\n- Role: {}\n- Backend: {}\n- State: {}\n",
+                subagent_id,
+                escape_markdown_text(&actor.label),
+                escape_markdown_text(&role),
+                escape_markdown_text(&backend),
+                escape_markdown_text(&state_label),
+            ));
+            if !actor.objective.is_empty() {
+                out.push_str(&format!(
+                    "- Objective: {}\n",
+                    escape_markdown_text(&actor.objective)
+                ));
+            }
+            out.push('\n');
+            push_export_entries(&mut out, &actor.transcript, state);
+        }
+    }
+
+    out
+}
+
+fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
+    for entry in entries {
         match entry {
-            Entry::UserPrompt(text) => push_export_text(&mut out, "You", text),
-            Entry::AgentMessage(text) => push_export_text(&mut out, "Agent", text),
-            Entry::AgentThought(thought) => push_export_text(&mut out, "Thought", &thought.text),
-            Entry::SubagentMessage(text) => push_export_text(&mut out, "subagent", text),
+            Entry::UserPrompt(text) => push_export_text(out, "You", text),
+            Entry::AgentMessage(text) => push_export_text(out, "Agent", text),
+            Entry::AgentThought(thought) => push_export_text(out, "Thought", &thought.text),
+            Entry::SubagentMessage(text) => push_export_text(out, "subagent", text),
             Entry::SubagentThought(thought) => {
-                push_export_text(&mut out, "subagent Thought", &thought.text)
+                push_export_text(out, "subagent Thought", &thought.text)
             }
             Entry::InternalMessage(message) => {
                 let heading = match message.kind {
@@ -4401,10 +4563,10 @@ fn transcript_export_markdown(state: &AppState) -> String {
                         format!("{} review synthesis", message.source)
                     }
                 };
-                push_export_text(&mut out, &heading, &message.text);
+                push_export_text(out, &heading, &message.text);
             }
-            Entry::System(text) => push_export_text(&mut out, "System", text),
-            Entry::SessionBoundary(text) => push_export_text(&mut out, "Session", text),
+            Entry::System(text) => push_export_text(out, "System", text),
+            Entry::SessionBoundary(text) => push_export_text(out, "Session", text),
             Entry::Plan(entries) | Entry::SubagentPlan(entries) => {
                 let heading = if matches!(entry, Entry::SubagentPlan(_)) {
                     "## subagent Plan\n\n"
@@ -4436,14 +4598,12 @@ fn transcript_export_markdown(state: &AppState) -> String {
                         tool_status_label(view.status)
                     ));
                     for output in &view.body {
-                        push_export_tool_output(&mut out, output, view.status);
+                        push_export_tool_output(out, output, view.status);
                     }
                 }
             }
         }
     }
-
-    out
 }
 
 fn push_export_text(out: &mut String, heading: &str, text: &str) {
@@ -5418,7 +5578,9 @@ fn draw(
         ])
         .split(f.area());
 
-    if state.workspace_diff_viewer {
+    if state.nested_agent_viewer {
+        draw_nested_agent_viewer(f, chunks[0], state, false);
+    } else if state.workspace_diff_viewer {
         draw_workspace_diff_viewer(f, chunks[0], state, false);
     } else {
         draw_transcript(f, chunks[0], state, transcript_scroll);
@@ -5577,6 +5739,11 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
 
     if state.transcript_viewer {
         draw_inline_transcript_viewer(f, f.area(), state);
+        return;
+    }
+
+    if state.nested_agent_viewer {
+        draw_nested_agent_viewer(f, f.area(), state, true);
         return;
     }
 
@@ -5904,6 +6071,365 @@ fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut
         )
             .style(Style::default().fg(state.theme.muted)),
         layout[1],
+    );
+}
+
+fn nested_actor_backend(actor: &SubagentStatus) -> String {
+    match (actor.adapter.trim(), actor.model.as_deref().map(str::trim)) {
+        ("", None | Some("")) => "unknown backend".to_string(),
+        (adapter, None | Some("")) => adapter.to_string(),
+        ("", Some(model)) => model.to_string(),
+        (adapter, Some(model)) => format!("{adapter}/{model}"),
+    }
+}
+
+fn nested_actor_state_label(actor: &SubagentStatus) -> String {
+    use crate::workflow::WorkflowActorLifecycle;
+
+    match actor.lifecycle.as_ref() {
+        Some(WorkflowActorLifecycle::Running) => "running".to_string(),
+        Some(WorkflowActorLifecycle::Waiting {
+            dependency,
+            remaining,
+            requires_user_action,
+        }) => {
+            let mut label = format!("waiting on {dependency}");
+            if let Some(remaining) = remaining {
+                label.push_str(&format!(" ({remaining} remaining)"));
+            }
+            if *requires_user_action {
+                label.push_str(" · user action required");
+            }
+            label
+        }
+        Some(WorkflowActorLifecycle::Completed) => "completed".to_string(),
+        Some(WorkflowActorLifecycle::Failed(message)) => {
+            format!("failed: {}", ragnarok::first_line(message, 80))
+        }
+        Some(WorkflowActorLifecycle::Cancelled) => "cancelled".to_string(),
+        None => actor
+            .outcome()
+            .map(SubagentOutcome::label)
+            .unwrap_or("starting")
+            .to_string(),
+    }
+}
+
+fn nested_agent_roster_line(
+    subagent_id: u64,
+    actor: &SubagentStatus,
+    selected: bool,
+    now: Instant,
+    width: usize,
+    theme: TerminalTheme,
+) -> Line<'static> {
+    let marker = if selected { "›" } else { " " };
+    let role = actor
+        .role
+        .as_ref()
+        .map(crate::app::nested_role_label)
+        .unwrap_or_else(|| "subagent".to_string());
+    let outcome = actor
+        .outcome()
+        .map(|outcome| format!(" · outcome {}", outcome.label()))
+        .unwrap_or_default();
+    let text = format!(
+        "{marker} #{subagent_id} {} · {role} · {} · {} · {} · {}{outcome}",
+        actor.label,
+        nested_actor_backend(actor),
+        nested_actor_state_label(actor),
+        ragnarok::first_line(&actor.activity, 80),
+        format_duration(actor.elapsed_at(now)),
+    );
+    Line::from(Span::styled(
+        fit_width(text, width),
+        if selected {
+            Style::default()
+                .fg(theme.selection_fg)
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.muted)
+        },
+    ))
+}
+
+fn nested_internal_message_title(message: &crate::event::InternalMessage) -> String {
+    let chars = message.text.chars().count();
+    match message.kind {
+        crate::event::InternalMessageKind::Delegation => {
+            format!("delegation brief · {}", message_size_label(chars))
+        }
+        crate::event::InternalMessageKind::DiscreteReview => {
+            format!("review brief · {}", message_size_label(chars))
+        }
+        crate::event::InternalMessageKind::ReviewLane => {
+            format!("specialist report · {}", message_size_label(chars))
+        }
+        crate::event::InternalMessageKind::ReviewProgress => {
+            format!("supervisor checkpoint · {}", message_size_label(chars))
+        }
+        crate::event::InternalMessageKind::ReviewSynthesis => {
+            format!("final synthesis · {}", message_size_label(chars))
+        }
+    }
+}
+
+fn nested_internal_message_style(
+    kind: crate::event::InternalMessageKind,
+    theme: TerminalTheme,
+) -> Style {
+    let color = match kind {
+        crate::event::InternalMessageKind::ReviewProgress => theme.secondary,
+        crate::event::InternalMessageKind::ReviewSynthesis => theme.accent,
+        crate::event::InternalMessageKind::ReviewLane => theme.tool,
+        crate::event::InternalMessageKind::Delegation
+        | crate::event::InternalMessageKind::DiscreteReview => theme.muted,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn render_nested_agent_lines(
+    state: &AppState,
+    actor: &SubagentStatus,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    for (entry_index, entry) in actor.transcript.iter().enumerate() {
+        match entry {
+            Entry::UserPrompt(text) => {
+                push_speaker_name(&mut out, "prompt", state.theme);
+                push_plain_message(&mut out, text, false, state.theme);
+            }
+            Entry::AgentMessage(text) | Entry::SubagentMessage(text) => {
+                push_speaker_name(&mut out, "message", state.theme);
+                push_markdown_message(&mut out, text, false, width, state.theme);
+            }
+            Entry::AgentThought(thought) | Entry::SubagentThought(thought) => {
+                push_thinking(
+                    &mut out,
+                    &thought.text,
+                    thought.completed,
+                    false,
+                    state.theme,
+                );
+            }
+            Entry::InternalMessage(message) => {
+                out.push(Line::from(Span::styled(
+                    nested_internal_message_title(message),
+                    nested_internal_message_style(message.kind, state.theme),
+                )));
+                push_markdown_message(&mut out, &message.text, false, width, state.theme);
+            }
+            Entry::Plan(entries) | Entry::SubagentPlan(entries) => {
+                out.push(Line::from(Span::styled(
+                    "plan",
+                    Style::default()
+                        .fg(state.theme.tool)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                for entry in entries {
+                    out.push(plan_row(entry, state.theme));
+                }
+                out.push(Line::from(""));
+            }
+            Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
+                if let Some(view) = state.tool_calls.get(id) {
+                    let color = tool_status_color(view.status, state.theme);
+                    let terminal_exit_status = view.body.iter().rev().find_map(|output| {
+                        if let ToolCallOutput::Terminal { exit_status, .. } = output {
+                            exit_status.as_ref()
+                        } else {
+                            None
+                        }
+                    });
+                    let status = match (view.status, terminal_exit_status) {
+                        (ToolCallStatus::Completed, _) | (_, Some(_)) => String::new(),
+                        _ => format!("[{}] ", tool_status_label(view.status)),
+                    };
+                    let mut spans = vec![Span::styled(
+                        format!("{status}{} {}", tool_kind_label(view.kind), view.title),
+                        Style::default()
+                            .fg(state.theme.muted)
+                            .add_modifier(Modifier::ITALIC),
+                    )];
+                    if let Some(exit_status) = terminal_exit_status {
+                        spans.push(Span::styled(
+                            format!(" · {}", terminal_header_outcome_label(exit_status)),
+                            terminal_header_outcome_style(exit_status, state.theme),
+                        ));
+                    }
+                    let content_width = width.saturating_sub(TOOL_GUTTER_WIDTH);
+                    let mut block = vec![Line::from(spans)];
+                    let collapse_limit = match state.tool_detail_expanded(id) {
+                        Some(false) => Some(TOOL_OUTPUT_COLLAPSED_LINES),
+                        _ => None,
+                    };
+                    push_tool_outputs(
+                        &mut block,
+                        &view.body,
+                        view.status,
+                        content_width,
+                        collapse_limit,
+                        state.theme,
+                    );
+                    for line in block {
+                        for row in wrap_tool_line(line, content_width as usize) {
+                            out.push(with_tool_gutter(row, color));
+                        }
+                    }
+                    let next_is_tool = actor.transcript.get(entry_index + 1).is_some_and(|next| {
+                        matches!(
+                            next,
+                            Entry::ToolCall(next_id) | Entry::SubagentToolCall(next_id)
+                                if state.tool_calls.contains_key(next_id)
+                        )
+                    });
+                    if !next_is_tool {
+                        out.push(Line::from(""));
+                    }
+                }
+            }
+            Entry::System(text) => {
+                push_styled_message(&mut out, text, state.theme.accent, false, state.theme);
+            }
+            Entry::SessionBoundary(text) => {
+                out.push(Line::from(""));
+                out.push(session_boundary_line(text, width, state.theme));
+                out.push(Line::from(""));
+            }
+        }
+    }
+    out
+}
+
+/// On-demand reader for every nested implementation and review actor. The
+/// same rendering path is used in inline and fullscreen modes so opening the
+/// reader never changes terminal ownership.
+fn draw_nested_agent_viewer(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    state: &mut AppState,
+    inline: bool,
+) {
+    if inline {
+        f.render_widget(Clear, area);
+    }
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let footer =
+        "Ctrl-L/Esc close · Left/Right agent · Up/Down PgUp/PgDn Home/End scroll · Alt-T tool";
+    let footer_height = Paragraph::new(footer)
+        .wrap(Wrap { trim: false })
+        .line_count(area.width)
+        .max(1)
+        .min(usize::from(u16::MAX)) as u16;
+    let roster_rows = state.nested_agents().count().clamp(1, 5) as u16;
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(roster_rows.saturating_add(2)),
+            Constraint::Min(1),
+            Constraint::Length(footer_height),
+        ])
+        .split(area);
+
+    let now = Instant::now();
+    let roster_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" nested agents — retained for this session ")
+        .style(Style::default().fg(state.theme.agent));
+    let roster_inner = roster_block.inner(layout[0]);
+    f.render_widget(roster_block, layout[0]);
+    if roster_inner.width > 0 && roster_inner.height > 0 {
+        let roster = state
+            .nested_agents()
+            .map(|(id, actor)| {
+                nested_agent_roster_line(
+                    id,
+                    actor,
+                    state.nested_agent_selected == Some(id),
+                    now,
+                    usize::from(roster_inner.width),
+                    state.theme,
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected = state
+            .nested_agent_selected
+            .and_then(|selected| state.nested_agents().position(|(id, _)| id == selected))
+            .unwrap_or(0);
+        let visible = usize::from(roster_inner.height);
+        let start = selected
+            .saturating_sub(visible.saturating_sub(1))
+            .min(roster.len().saturating_sub(visible));
+        f.render_widget(
+            Paragraph::new(
+                roster
+                    .into_iter()
+                    .skip(start)
+                    .take(visible)
+                    .collect::<Vec<_>>(),
+            ),
+            roster_inner,
+        );
+    }
+
+    let selected = state.selected_nested_agent().map(|(id, actor)| {
+        let title = format!(
+            " #{} {} · {} · {} ",
+            id,
+            actor.label,
+            actor
+                .role
+                .as_ref()
+                .map(crate::app::nested_role_label)
+                .unwrap_or_else(|| "subagent".to_string()),
+            nested_actor_backend(actor),
+        );
+        let lines = render_nested_agent_lines(state, actor, layout[1].width.saturating_sub(2));
+        (title, lines)
+    });
+    let title = selected
+        .as_ref()
+        .map(|(title, _)| title.as_str())
+        .unwrap_or(" nested agent transcript ");
+    let transcript_block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(Style::default().fg(state.theme.secondary));
+    let transcript_inner = transcript_block.inner(layout[1]);
+    f.render_widget(transcript_block, layout[1]);
+    if transcript_inner.width > 0 && transcript_inner.height > 0 {
+        let lines = selected
+            .map(|(_, lines)| lines)
+            .filter(|lines| !lines.is_empty())
+            .unwrap_or_else(|| {
+                vec![Line::from(Span::styled(
+                    "No nested transcript events have arrived yet.",
+                    Style::default().fg(state.theme.muted),
+                ))]
+            });
+        let total = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(transcript_inner.width);
+        let max_offset = total.saturating_sub(usize::from(transcript_inner.height));
+        state.nested_agent_scroll_offset = state.nested_agent_scroll_offset.min(max_offset);
+        f.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((
+                state.nested_agent_scroll_offset.min(u16::MAX as usize) as u16,
+                0,
+            )),
+            transcript_inner,
+        );
+    }
+    f.render_widget(
+        Paragraph::new(footer)
+            .style(Style::default().fg(state.theme.muted))
+            .wrap(Wrap { trim: false }),
+        layout[2],
     );
 }
 
@@ -9460,15 +9986,14 @@ fn permission_view_lines(
     theme: TerminalTheme,
 ) -> Vec<Line<'static>> {
     let selected = clamp_permission_selected(pending.selected, pending.prompt.options.len());
-    let source = if pending.subagent {
-        "subagent permission"
-    } else {
-        "permission request"
-    };
+    let source = pending
+        .subagent_id
+        .map(|id| format!("subagent #{id} permission"))
+        .unwrap_or_else(|| "permission request".to_string());
     let title = if queue_len > 1 {
         format!("{source} (1 of {queue_len})")
     } else {
-        source.to_string()
+        source
     };
     let mut lines = vec![Line::from(Span::styled(
         title,
@@ -9554,15 +10079,14 @@ fn elicitation_view_lines(
     theme: TerminalTheme,
 ) -> ElicitationContent {
     let view = classify_elicitation(&pending.prompt);
-    let source = if pending.subagent {
-        "subagent setup"
-    } else {
-        "setup request"
-    };
+    let source = pending
+        .subagent_id
+        .map(|id| format!("subagent #{id} setup"))
+        .unwrap_or_else(|| "setup request".to_string());
     let heading = if queue_len > 1 {
         format!("{source} (1 of {queue_len})")
     } else {
-        source.to_string()
+        source
     };
     let mut lines = vec![Line::from(Span::styled(
         heading,
@@ -10138,6 +10662,11 @@ fn help_modal_lines(
     lines.extend([
         help_section_line("Overlays", theme),
         help_binding_line(
+            "Ctrl-L / /subagents",
+            "inspect retained implementation and review agent transcripts",
+            theme,
+        ),
+        help_binding_line(
             "F10 / Tab",
             "help toggle / accept selected slash command",
             theme,
@@ -10152,7 +10681,7 @@ fn help_modal_lines(
         help_blank_line(),
         help_command_line(
             "Built-in commands:",
-            "/clear keeps model; /new applies saved models; /load opens session picker",
+            "/clear keeps model; /new applies saved models; /load opens session picker; /export full includes nested agents",
             theme,
         ),
     ]);
@@ -12996,7 +13525,7 @@ mod tests {
             },
             selected,
             scroll_offset: None,
-            subagent: false,
+            subagent_id: None,
         }
     }
 
@@ -13044,7 +13573,7 @@ mod tests {
             selected: 0,
             scroll_offset: None,
             input: String::new(),
-            subagent: false,
+            subagent_id: None,
         };
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -13078,7 +13607,7 @@ mod tests {
             selected: 0,
             scroll_offset: None,
             input: String::new(),
-            subagent: false,
+            subagent_id: None,
         };
         let backend = TestBackend::new(100, 60);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -13233,7 +13762,7 @@ mod tests {
             selected: 0,
             scroll_offset: None,
             input: "sk-or-abc".to_string(),
-            subagent: false,
+            subagent_id: None,
         };
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -13526,6 +14055,112 @@ mod tests {
         assert!(rendered[1].contains("done"), "{rendered:?}");
         assert!(rendered[2].contains("✘ build"), "{rendered:?}");
         assert!(rendered[2].contains("adapter exited"), "{rendered:?}");
+    }
+
+    #[test]
+    fn nested_agent_viewer_switches_between_separate_implementation_and_review_histories() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        start_subagent(&mut state, 1, "implementer", "build the feature");
+        state.apply_event(UiEvent::Subagent(SubagentEvent::SessionUpdate {
+            subagent_id: 1,
+            update: SessionUpdate::AgentMessageChunk(text_chunk("IMPLEMENTATION_ONLY")),
+        }));
+
+        let workflow_id = WorkflowId::review(3);
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::SpecialistReview),
+            },
+        )));
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: WorkflowActorId::Subagent(2),
+                role: WorkflowActorRole::SpecialistReviewer {
+                    lane: "Týr".to_string(),
+                },
+            },
+        )));
+        start_subagent(&mut state, 2, "review · Týr", "inspect correctness");
+        state.apply_event(UiEvent::Subagent(SubagentEvent::SessionUpdate {
+            subagent_id: 2,
+            update: SessionUpdate::AgentThoughtChunk(text_chunk("REVIEW_ONLY")),
+        }));
+
+        assert!(state.open_nested_agent_viewer());
+        assert_eq!(state.nested_agent_selected, Some(1));
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_nested_agent_viewer(frame, frame.area(), &mut state, false))
+            .expect("draw implementation");
+        let implementation = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            implementation.contains("IMPLEMENTATION_ONLY"),
+            "{implementation}"
+        );
+        assert!(!implementation.contains("REVIEW_ONLY"), "{implementation}");
+
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Right));
+        assert_eq!(state.nested_agent_selected, Some(2));
+        terminal
+            .draw(|frame| draw_nested_agent_viewer(frame, frame.area(), &mut state, false))
+            .expect("draw reviewer");
+        let reviewer = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(reviewer.contains("reviewer Týr"), "{reviewer}");
+        assert!(reviewer.contains("REVIEW_ONLY"), "{reviewer}");
+        assert!(!reviewer.contains("IMPLEMENTATION_ONLY"), "{reviewer}");
+    }
+
+    #[test]
+    fn nested_agent_viewer_is_inline_safe_when_narrow_and_permissions_keep_attribution() {
+        let mut state = AppState::new();
+        for id in 1..=7 {
+            start_subagent(&mut state, id, &format!("actor-{id}"), "work");
+        }
+        assert!(state.open_nested_agent_viewer());
+        for _ in 1..7 {
+            state.select_nested_agent(true);
+        }
+        assert_eq!(state.nested_agent_selected, Some(7));
+        state.close_nested_agent_viewer();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let request = handle_inline_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('l'), KeyModifiers::CONTROL),
+        );
+        assert!(state.nested_agent_viewer);
+        assert_ne!(request, TerminalRequest::None);
+
+        let backend = TestBackend::new(24, 9);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_nested_agent_viewer(frame, frame.area(), &mut state, true))
+            .expect("narrow inline viewer");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("#7"), "{rendered}");
+
+        let mut pending =
+            permission_pending_with_options("run a long command", &["Allow", "Reject"], 0);
+        pending.subagent_id = Some(7);
+        let permission = permission_view_lines(&pending, 1, 24, state.theme)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            permission.contains("subagent #7 permission"),
+            "{permission}"
+        );
     }
 
     #[test]
@@ -14623,6 +15258,21 @@ mod tests {
     }
 
     #[test]
+    fn slash_subagents_opens_the_retained_actor_viewer_locally() {
+        let mut state = AppState::new();
+        start_subagent(&mut state, 7, "implementation", "fix the parser");
+        state.input = "/subagents".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(state.nested_agent_viewer);
+        assert_eq!(state.nested_agent_selected, Some(7));
+        assert!(state.input.is_empty());
+    }
+
+    #[test]
     fn mjconfig_menu_previews_live_and_persists_on_accept() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
@@ -14842,6 +15492,27 @@ mod tests {
         assert_eq!(files.len(), 1);
         let body = std::fs::read_to_string(files[0].path()).expect("export body");
         assert!(body.contains("## You\n\nhello"));
+    }
+
+    #[test]
+    fn full_export_includes_nested_transcripts_but_default_export_does_not() {
+        let mut state = AppState::new();
+        state
+            .transcript
+            .push(Entry::UserPrompt("delegate privately".to_string()));
+        start_subagent(&mut state, 1, "implementer", "private objective");
+        state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
+            text_chunk("PRIVATE_NESTED_RESULT"),
+        )));
+
+        let primary = transcript_export_markdown_with_nested(&state, false);
+        let full = transcript_export_markdown_with_nested(&state, true);
+
+        assert!(!primary.contains("PRIVATE_NESTED_RESULT"));
+        assert!(!primary.contains("Nested Agent Transcripts"));
+        assert!(full.contains("Nested Agent Transcripts"));
+        assert!(full.contains("Subagent #1: implementer"));
+        assert!(full.contains("PRIVATE\\_NESTED\\_RESULT"));
     }
 
     #[test]
@@ -15590,18 +16261,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             flushed,
-            vec![
-                "agent",
-                "thought · 1 line",
-                "subagent",
-                "thought · 1 line",
-                "done",
-                "",
-                "agent",
-                "Here is the result",
-                "",
-            ]
+            vec!["agent", "thought · 1 line", "Here is the result", "",]
         );
+        let nested =
+            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(nested.contains("implementing"), "{nested}");
+        assert!(nested.contains("done"), "{nested}");
     }
 
     #[test]
@@ -15812,6 +16481,7 @@ mod tests {
             target: "subagent".to_string(),
             kind: crate::event::InternalMessageKind::Delegation,
             text: "forge the change".to_string(),
+            owner_subagent_id: Some(1),
         }));
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
@@ -15845,9 +16515,18 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(streamed.contains("forge the change"), "{streamed}");
-        assert!(streamed.contains("completed nested command"), "{streamed}");
+        assert!(streamed.contains("subagent #1"), "{streamed}");
+        assert!(!streamed.contains("completed nested command"), "{streamed}");
         assert!(!streamed.contains("mcp.mj-subagents"), "{streamed}");
+        let nested =
+            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(nested.contains("delegation brief"), "{nested}");
+        assert!(nested.contains("forge the change"), "{nested}");
+        assert!(nested.contains("completed nested command"), "{nested}");
         assert!(inline_transcript_tail_lines(&state, 80).is_empty());
     }
 
@@ -15863,6 +16542,7 @@ mod tests {
             target: "subagent #1".to_string(),
             kind: crate::event::InternalMessageKind::Delegation,
             text: "trace startup".to_string(),
+            owner_subagent_id: Some(1),
         }));
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
@@ -15882,14 +16562,25 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(streamed.contains("delegated to subagent #1"), "{streamed}");
+        assert!(streamed.contains("subagent #1"), "{streamed}");
         let live = inline_transcript_tail_lines(&state, 80)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(live.contains("searching entry points"), "{live}");
-        assert!(transcript_export_markdown(&state).contains("primary → subagent #1 delegation"));
+        assert!(!live.contains("searching entry points"), "{live}");
+        let nested =
+            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(nested.contains("searching entry points"), "{nested}");
+        assert!(!transcript_export_markdown(&state).contains("delegation"));
+        assert!(
+            transcript_export_markdown_with_nested(&state, true)
+                .contains("primary → subagent #1 delegation")
+        );
     }
 
     #[test]
@@ -15928,9 +16619,7 @@ mod tests {
                 "agent",
                 "planning the handoff",
                 "subagent #1 · subagent · gpt-builder · started",
-                "",
-                "subagent",
-                "working now"
+                ""
             ]
         );
         assert!(inline_transcript_tail_row_count(&state, 80) > 0);
@@ -15964,12 +16653,17 @@ mod tests {
                 "planning the handoff",
                 "subagent #1 · subagent · gpt-builder · started",
                 "",
-                "subagent",
-                "thought · 1 line",
                 "subagent #1 · subagent · gpt-builder · completed · 0s",
                 ""
             ]
         );
+        let nested =
+            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(nested.contains("working now"), "{nested}");
         terminal
             .draw(|frame| draw_header(frame, frame.area(), &state))
             .expect("draw restored header");
@@ -15995,6 +16689,7 @@ mod tests {
             target: "subagent".to_string(),
             kind: crate::event::InternalMessageKind::Delegation,
             text: "forge it".to_string(),
+            owner_subagent_id: Some(1),
         }));
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
@@ -16011,7 +16706,7 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(handoff.contains("delegated to subagent"), "{handoff}");
+        assert!(handoff.contains("subagent #1"), "{handoff}");
 
         state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
             text_chunk("first subagent segment"),
@@ -16023,7 +16718,7 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(live.contains("first subagent segment"), "{live}");
+        assert!(!live.contains("first subagent segment"), "{live}");
 
         state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
             text_chunk("subagent final"),
@@ -16037,10 +16732,19 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(subagent_final.contains("completed"), "{subagent_final}");
         assert!(
-            subagent_final.contains("subagent final"),
+            !subagent_final.contains("subagent final"),
             "{subagent_final}"
         );
+        let nested =
+            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(nested.contains("first subagent segment"), "{nested}");
+        assert!(nested.contains("subagent final"), "{nested}");
 
         state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
             text_chunk("primary resumed"),
@@ -16109,16 +16813,18 @@ mod tests {
         assert!(sink.pending_lines(&state, 20).is_empty());
         assert!(matches!(
             state.transcript.as_slice(),
-            [
-                Entry::UserPrompt(_),
-                Entry::System(_),
-                Entry::SubagentMessage(result),
-                Entry::AgentThought(thought)
-            ]
-                if result == &full_result
-                    && thought.text
+            [Entry::UserPrompt(_), Entry::System(_), Entry::AgentThought(thought)]
+                if thought.text
                         == "waiting for the subagent's first result; coordinating the next step"
                     && !thought.completed
+        ));
+        assert!(matches!(
+            state
+                .nested_agent(1)
+                .expect("nested actor")
+                .transcript
+                .as_slice(),
+            [Entry::SubagentMessage(result)] if result == &full_result
         ));
 
         state.apply_event(subagent_finished(SubagentOutcome::Completed));
@@ -16128,8 +16834,8 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(subagent.contains("SUB-FIRST"), "{subagent}");
-        assert!(subagent.contains("SUB-SECOND"), "{subagent}");
+        assert!(!subagent.contains("SUB-FIRST"), "{subagent}");
+        assert!(!subagent.contains("SUB-SECOND"), "{subagent}");
         assert!(!subagent.contains("waiting for the subagent"), "{subagent}");
 
         state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
@@ -17192,6 +17898,7 @@ mod tests {
                 target: "subagent".to_string(),
                 kind: crate::event::InternalMessageKind::Delegation,
                 text: long,
+                owner_subagent_id: None,
             }),
         ]);
 
@@ -17296,6 +18003,7 @@ mod tests {
                 target: "subagent".to_string(),
                 kind: crate::event::InternalMessageKind::Delegation,
                 text: full.clone(),
+                owner_subagent_id: None,
             }));
 
         let compact = render_transcript_lines(&state, 100)

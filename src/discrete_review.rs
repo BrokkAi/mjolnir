@@ -1089,6 +1089,7 @@ async fn run_async(
         "review supervisor",
         InternalMessageKind::ReviewLane,
         &intent.body,
+        None,
     );
 
     let changed_functions = match changed_functions_task {
@@ -1212,6 +1213,7 @@ async fn run_async(
                 "review supervisor",
                 InternalMessageKind::ReviewProgress,
                 "Adversarial review started. The supervisor may launch visible asynchronous Norse reviewers and will return a verdict after their reports are vetted.",
+                Some(started.subagent_id),
             );
             drive_supervisor(SupervisorDriver {
                 supervisor_pool: &supervisor_pool,
@@ -1237,6 +1239,7 @@ async fn run_async(
                         "primary",
                         InternalMessageKind::ReviewSynthesis,
                         &result.text,
+                        Some(started.subagent_id),
                     );
                     match synthesis_verdict(&result.text) {
                         ReviewVerdict::Findings { synthesis, .. } => ReviewVerdict::Findings {
@@ -1388,6 +1391,7 @@ async fn drive_supervisor(driver: SupervisorDriver<'_>) -> Result<SupervisorResu
                 "review supervisor",
                 InternalMessageKind::ReviewLane,
                 &report.final_message,
+                Some(supervisor_id),
             );
             queued.push(report);
         }
@@ -1406,6 +1410,7 @@ async fn drive_supervisor(driver: SupervisorDriver<'_>) -> Result<SupervisorResu
                 "review supervisor",
                 InternalMessageKind::ReviewLane,
                 &prompt,
+                Some(supervisor_id),
             );
             supervisor_pool
                 .resume(supervisor_id, prompt)
@@ -1438,6 +1443,7 @@ async fn drive_supervisor(driver: SupervisorDriver<'_>) -> Result<SupervisorResu
                         "review supervisor",
                         InternalMessageKind::ReviewLane,
                         &report.final_message,
+                        Some(supervisor_id),
                     );
                     queued.push(report);
                 }
@@ -1496,6 +1502,7 @@ async fn drive_supervisor(driver: SupervisorDriver<'_>) -> Result<SupervisorResu
                     "review supervisor",
                     InternalMessageKind::ReviewLane,
                     &report.final_message,
+                    Some(supervisor_id),
                 );
                 queued.push(report);
             }
@@ -1891,12 +1898,14 @@ fn emit_internal(
     target: &str,
     kind: InternalMessageKind,
     text: &str,
+    owner_subagent_id: Option<u64>,
 ) {
     let _ = events.send(UiEvent::InternalMessage(InternalMessage {
         source: source.to_string(),
         target: target.to_string(),
         kind,
         text: text.to_string(),
+        owner_subagent_id,
     }));
 }
 

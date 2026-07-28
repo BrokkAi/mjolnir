@@ -6448,6 +6448,7 @@ mod tests {
             target: "primary".to_string(),
             kind: crate::event::InternalMessageKind::ReviewProgress,
             text: "Adversarial synthesis started.".to_string(),
+            owner_subagent_id: None,
         }));
 
         let snapshot = state.snapshot().expect("snapshot");

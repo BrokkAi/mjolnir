@@ -43,14 +43,18 @@ pub struct WorkspaceDiffEvent {
     pub truncated: bool,
 }
 
-/// An orchestration prompt shown as ordinary transcript prose while
-/// retaining its complete text for expansion and export.
+/// An orchestration packet retained by its owning nested actor. Primary
+/// consumers may summarize the packet without exposing its full payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InternalMessage {
     pub source: String,
     pub target: String,
     pub kind: InternalMessageKind,
     pub text: String,
+    /// Nested actor whose private transcript owns this orchestration packet.
+    /// `None` means it belongs to primary orchestration and is summarized
+    /// rather than exposed as nested ACP detail.
+    pub owner_subagent_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

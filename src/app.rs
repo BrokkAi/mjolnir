@@ -47,14 +47,22 @@ pub const SUBAGENT_DONE_TTL: Duration = Duration::from_secs(5);
 /// permanent transcript record.
 const SUBAGENT_RECORD_LINE_CHARS: usize = 160;
 
-/// One subagent's live progress line in the dedicated status area. The
-/// transcript keeps only the permanent start/finish records; everything that
-/// changes many times per turn lives here instead, so a chatty subagent never
-/// rewrites transcript history.
+/// Durable UI state for one nested ACP actor. The live status area reads the
+/// lifecycle fields while the on-demand viewer reads `transcript`; completed
+/// actors stay here for the whole primary session even after their five-second
+/// status row expires.
 #[derive(Debug, Clone)]
 pub struct SubagentStatus {
     pub label: String,
     pub model: Option<String>,
+    pub adapter: String,
+    pub objective: String,
+    pub role: Option<crate::workflow::WorkflowActorRole>,
+    pub lifecycle: Option<crate::workflow::WorkflowActorLifecycle>,
+    pub session_id: Option<String>,
+    pub transcript: Vec<Entry>,
+    open_message_index: Option<usize>,
+    plan_index: Option<usize>,
     /// Latest distilled one-liner: the objective at spawn, then whatever the
     /// subagent is doing now.
     pub activity: String,
@@ -66,6 +74,28 @@ pub struct SubagentStatus {
 }
 
 impl SubagentStatus {
+    fn placeholder(role: Option<crate::workflow::WorkflowActorRole>, now: Instant) -> Self {
+        let label = role
+            .as_ref()
+            .map(nested_role_label)
+            .unwrap_or_else(|| "subagent".to_string());
+        Self {
+            label: label.clone(),
+            model: None,
+            adapter: String::new(),
+            objective: String::new(),
+            role,
+            lifecycle: Some(crate::workflow::WorkflowActorLifecycle::Running),
+            session_id: None,
+            transcript: Vec::new(),
+            open_message_index: None,
+            plan_index: None,
+            activity: "starting".to_string(),
+            started_at: now,
+            finished: None,
+        }
+    }
+
     /// Wall-clock the row displays: still counting while running, frozen at the
     /// finish for a done row.
     pub fn elapsed_at(&self, now: Instant) -> Duration {
@@ -87,6 +117,19 @@ impl SubagentStatus {
     }
 }
 
+pub fn nested_role_label(role: &crate::workflow::WorkflowActorRole) -> String {
+    match role {
+        crate::workflow::WorkflowActorRole::Implementation => "implementation".to_string(),
+        crate::workflow::WorkflowActorRole::IntentAnalyst => "review intent".to_string(),
+        crate::workflow::WorkflowActorRole::ReviewSupervisor => "review supervisor".to_string(),
+        crate::workflow::WorkflowActorRole::SpecialistReviewer { lane } => {
+            format!("reviewer {lane}")
+        }
+        crate::workflow::WorkflowActorRole::PrimaryCorrection => "primary correction".to_string(),
+        crate::workflow::WorkflowActorRole::FallbackReviewer => "fallback reviewer".to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnvilQuotaSource {
     Bedrock,
@@ -104,6 +147,7 @@ const BUILTIN_EXPORT_COMMAND: &str = "export";
 const BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
 const BUILTIN_MODELS_COMMAND: &str = "models";
 const BUILTIN_AGENTS_COMMAND: &str = "agents";
+const BUILTIN_SUBAGENTS_COMMAND: &str = "subagents";
 const BUILTIN_REVIEW_COMMAND: &str = "review";
 const BUILTIN_RAGNAROK_COMMAND: &str = "ragnarok";
 const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
@@ -145,7 +189,10 @@ fn builtin_side_command() -> AvailableCommand {
 }
 
 fn builtin_export_command() -> AvailableCommand {
-    AvailableCommand::new(BUILTIN_EXPORT_COMMAND, "export transcript to markdown")
+    AvailableCommand::new(
+        BUILTIN_EXPORT_COMMAND,
+        "export primary transcript; add full for nested agents",
+    )
 }
 
 fn builtin_mjconfig_command() -> AvailableCommand {
@@ -163,6 +210,13 @@ fn builtin_agents_command() -> AvailableCommand {
     AvailableCommand::new(
         BUILTIN_AGENTS_COMMAND,
         "show active model selections and usage",
+    )
+}
+
+fn builtin_subagents_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_SUBAGENTS_COMMAND,
+        "inspect implementation and review agent transcripts",
     )
 }
 
@@ -196,6 +250,7 @@ fn install_builtin_commands(
             && command.name != BUILTIN_MJCONFIG_COMMAND
             && command.name != BUILTIN_MODELS_COMMAND
             && command.name != BUILTIN_AGENTS_COMMAND
+            && command.name != BUILTIN_SUBAGENTS_COMMAND
             && command.name != BUILTIN_REVIEW_COMMAND
             && command.name != BUILTIN_RAGNAROK_COMMAND
     });
@@ -208,6 +263,7 @@ fn install_builtin_commands(
     commands.insert(0, builtin_ragnarok_command());
     commands.insert(0, builtin_mjconfig_command());
     commands.insert(0, builtin_review_command());
+    commands.insert(0, builtin_subagents_command());
     commands.insert(0, builtin_agents_command());
     commands.insert(0, builtin_models_command());
     commands.insert(0, builtin_export_command());
@@ -229,6 +285,7 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
             BUILTIN_MJCONFIG_COMMAND,
             BUILTIN_MODELS_COMMAND,
             BUILTIN_AGENTS_COMMAND,
+            BUILTIN_SUBAGENTS_COMMAND,
             BUILTIN_REVIEW_COMMAND,
             BUILTIN_RAGNAROK_COMMAND,
         ]
@@ -771,18 +828,6 @@ pub struct AppState {
     /// Keeping that ownership separate from transcript position prevents a
     /// later primary row from splitting a subagent's result into immutable pieces.
     agent_open_message_index: Option<usize>,
-    subagent_open_message_index: Option<usize>,
-    /// Owner of the one mutable subagent message slot. Transcript entries do
-    /// not carry an actor id, so switching between concurrent subagents closes
-    /// the previous slot before opening another instead of merging their text.
-    subagent_open_message_owner: Option<u64>,
-    /// Owner of the one unfinished subagent thought entry. As with messages,
-    /// an actor switch creates a transcript boundary rather than interleaving
-    /// two sessions into one thought.
-    subagent_open_thought_owner: Option<u64>,
-    /// Latest plan entry for each subagent. A global "last subagent plan"
-    /// lookup lets one concurrent worker overwrite another worker's plan.
-    subagent_plan_indices: HashMap<u64, usize>,
     pub tool_calls: HashMap<String, ToolCallView>,
     /// Per-tool expansion choices, keyed by ACP tool-call ID. `true` means
     /// expanded; entries matching the renderer's default are omitted.
@@ -865,6 +910,11 @@ pub struct AppState {
     /// messages and tool outputs fully expanded. Inline scrollback is immutable once
     /// flushed, so this reader is how users re-read earlier output in full.
     pub transcript_viewer: bool,
+    /// On-demand roster and transcript reader for nested implementation and
+    /// review actors. It is available in inline and fullscreen modes.
+    pub nested_agent_viewer: bool,
+    pub nested_agent_selected: Option<u64>,
+    pub nested_agent_scroll_offset: usize,
     /// Dedicated reader for the most recent native workspace-diff event.
     /// Its selection and scroll state intentionally do not share transcript
     /// state: workspace changes are not transcript entries.
@@ -880,9 +930,8 @@ pub struct AppState {
     pub subagent_label: Option<String>,
     /// Number of subagents currently running in the background.
     pub active_subagents: usize,
-    /// One row per subagent for the dedicated status area, keyed by id so the
-    /// map iterates in spawn order. Finished rows linger for
-    /// [`SUBAGENT_DONE_TTL`] and are pruned lazily.
+    /// Durable nested-agent state keyed by stable subagent id. Rendering
+    /// filters expired live rows without deleting their inspectable history.
     subagents: BTreeMap<u64, SubagentStatus>,
     /// Canonical runtime-owned workflow state. Transcript prose and display
     /// labels never mutate this store.
@@ -982,7 +1031,7 @@ pub struct PendingPermission {
     pub prompt: PermissionPrompt,
     pub selected: usize,
     pub scroll_offset: Option<usize>,
-    pub subagent: bool,
+    pub subagent_id: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -998,7 +1047,7 @@ pub struct PendingElicitation {
     /// append/backspace at the end (the cursor renders after the last char);
     /// empty for every other view.
     pub input: String,
-    pub subagent: bool,
+    pub subagent_id: Option<u64>,
 }
 
 /// How a pending elicitation should be rendered and resolved, derived once
@@ -1206,10 +1255,6 @@ impl AppState {
             side_main_notice: None,
             transcript: Vec::new(),
             agent_open_message_index: None,
-            subagent_open_message_index: None,
-            subagent_open_message_owner: None,
-            subagent_open_thought_owner: None,
-            subagent_plan_indices: HashMap::new(),
             tool_calls: HashMap::new(),
             tool_detail_overrides: HashMap::new(),
             workspace_diffs: Vec::new(),
@@ -1235,6 +1280,9 @@ impl AppState {
             scroll_offset: 0,
             expand_transcript_details: false,
             transcript_viewer: false,
+            nested_agent_viewer: false,
+            nested_agent_selected: None,
+            nested_agent_scroll_offset: 0,
             workspace_diff_viewer: false,
             workspace_diff_selected_file: 0,
             workspace_diff_scroll_offset: 0,
@@ -1316,10 +1364,6 @@ impl AppState {
 
     pub(crate) fn agent_open_message_index(&self) -> Option<usize> {
         self.agent_open_message_index
-    }
-
-    pub(crate) fn subagent_open_message_index(&self) -> Option<usize> {
-        self.subagent_open_message_index
     }
 
     /// Select the Anvil provider reported by valid metadata and clear its stale peer.
@@ -1766,6 +1810,7 @@ impl AppState {
     /// the newest line (`scroll_offset` is reused as the top-visible line
     /// index and clamped to the last screen during draw).
     pub fn open_transcript_viewer(&mut self) {
+        self.close_nested_agent_viewer();
         self.close_workspace_diff_viewer();
         self.transcript_viewer = true;
         self.scroll_offset = usize::MAX;
@@ -1777,9 +1822,66 @@ impl AppState {
         self.scroll_offset = 0;
     }
 
+    pub fn open_nested_agent_viewer(&mut self) -> bool {
+        let selected = self
+            .nested_agent_selected
+            .filter(|id| self.subagents.contains_key(id))
+            .or_else(|| self.subagents.keys().next().copied());
+        let Some(selected) = selected else {
+            return false;
+        };
+        self.close_transcript_viewer();
+        self.close_workspace_diff_viewer();
+        self.nested_agent_viewer = true;
+        self.nested_agent_selected = Some(selected);
+        self.nested_agent_scroll_offset = usize::MAX;
+        true
+    }
+
+    pub fn close_nested_agent_viewer(&mut self) {
+        self.nested_agent_viewer = false;
+        self.nested_agent_scroll_offset = 0;
+    }
+
+    pub fn select_nested_agent(&mut self, next: bool) {
+        let ids = self.subagents.keys().copied().collect::<Vec<_>>();
+        if ids.is_empty() {
+            self.nested_agent_selected = None;
+            self.nested_agent_scroll_offset = 0;
+            return;
+        }
+        let current = self
+            .nested_agent_selected
+            .and_then(|selected| ids.iter().position(|id| *id == selected))
+            .unwrap_or(0);
+        let selected = if next {
+            (current + 1) % ids.len()
+        } else if current == 0 {
+            ids.len() - 1
+        } else {
+            current - 1
+        };
+        self.nested_agent_selected = Some(ids[selected]);
+        self.nested_agent_scroll_offset = 0;
+    }
+
+    pub fn nested_agents(&self) -> impl Iterator<Item = (u64, &SubagentStatus)> {
+        self.subagents.iter().map(|(id, state)| (*id, state))
+    }
+
+    pub fn nested_agent(&self, id: u64) -> Option<&SubagentStatus> {
+        self.subagents.get(&id)
+    }
+
+    pub fn selected_nested_agent(&self) -> Option<(u64, &SubagentStatus)> {
+        let id = self.nested_agent_selected?;
+        self.nested_agent(id).map(|state| (id, state))
+    }
+
     /// Open the native workspace-diff reader. It always starts at the first
     /// retained file and top of that file, including when there are no diffs.
     pub fn open_workspace_diff_viewer(&mut self) {
+        self.close_nested_agent_viewer();
         self.close_transcript_viewer();
         self.workspace_diff_viewer = true;
         self.workspace_diff_selected_file = 0;
@@ -1962,7 +2064,6 @@ impl AppState {
 
     pub fn push_session_boundary(&mut self, text: impl Into<String>) {
         self.finalize_message(EntryKind::Agent);
-        self.finalize_message(EntryKind::Subagent);
         self.transcript.push(Entry::SessionBoundary(text.into()));
         self.bump_transcript_revision();
     }
@@ -2230,8 +2331,6 @@ impl AppState {
     pub fn record_user_prompt(&mut self, text: String) {
         self.pending_workspace_diff_total = None;
         self.agent_open_message_index = None;
-        self.subagent_open_message_index = None;
-        self.subagent_open_message_owner = None;
         let prompt_index = self.transcript.len();
         self.transcript.push(Entry::UserPrompt(text.clone()));
         self.prompt_turns.push(PromptTurn {
@@ -2538,6 +2637,12 @@ impl AppState {
                     self.workspace_diffs.clear();
                     self.pending_workspace_diff_total = None;
                     self.close_workspace_diff_viewer();
+                    self.close_nested_agent_viewer();
+                    self.nested_agent_selected = None;
+                    self.subagents.clear();
+                    self.subagent_active = false;
+                    self.subagent_label = None;
+                    self.active_subagents = 0;
                     if !self.tool_detail_overrides.is_empty() {
                         self.tool_detail_overrides.clear();
                         self.bump_transcript_revision();
@@ -2580,7 +2685,6 @@ impl AppState {
                 // turn's chunks silently append onto the stale entry.
                 self.finalize_thinking(EntryKind::Thought);
                 self.finalize_message(EntryKind::Agent);
-                self.finalize_message(EntryKind::Subagent);
                 // A discrete review starts a fresh orchestrator-initiated
                 // turn after the user's turn already completed. Re-enter the
                 // streaming state so submissions queue behind it instead of
@@ -2594,8 +2698,9 @@ impl AppState {
                     self.turn_started_at = Some(Instant::now());
                     self.last_turn_elapsed = None;
                 }
-                self.transcript.push(Entry::InternalMessage(message));
-                self.bump_transcript_revision();
+                if let Some(subagent_id) = message.owner_subagent_id {
+                    self.append_nested_internal_message(subagent_id, message);
+                }
             }
             UiEvent::AgentUsage(record) => self.agent_usage.observe(record),
             UiEvent::SubagentPoolModelChanged { model } => {
@@ -2620,7 +2725,7 @@ impl AppState {
                     prompt,
                     selected: 0,
                     scroll_offset: None,
-                    subagent: false,
+                    subagent_id: None,
                 });
                 self.update_autocomplete();
             }
@@ -2642,20 +2747,24 @@ impl AppState {
                     selected: 0,
                     scroll_offset: None,
                     input: String::new(),
-                    subagent: false,
+                    subagent_id: None,
                 });
                 self.update_autocomplete();
             }
             UiEvent::Subagent(event) => self.apply_subagent_event(event),
-            UiEvent::Workflow(event) => {
-                if let Err(error) = self.workflows.apply(&event) {
+            UiEvent::Workflow(event) => match self.workflows.apply(&event) {
+                Ok(crate::workflow::ApplyOutcome::Changed) => {
+                    self.apply_workflow_transition(&event);
+                }
+                Ok(crate::workflow::ApplyOutcome::Duplicate) => {}
+                Err(error) => {
                     tracing::warn!(
                         event = "workflow_transition_rejected_by_ui",
                         error = %error,
                         "ignoring an invalid workflow transition"
                     );
                 }
-            }
+            },
             UiEvent::RemotePermissionDecision {
                 request_id,
                 option_id,
@@ -2665,7 +2774,6 @@ impl AppState {
             UiEvent::PromptDone { stop_reason, usage } => {
                 self.finalize_thinking(EntryKind::Thought);
                 self.finalize_message(EntryKind::Agent);
-                self.finalize_message(EntryKind::Subagent);
                 self.finish_prompt_turn(matches!(stop_reason, StopReason::Cancelled));
                 if let Some(usage) = usage {
                     self.token_usage.apply_prompt_usage(usage);
@@ -2702,7 +2810,6 @@ impl AppState {
             UiEvent::PromptFailed { message } => {
                 self.finalize_thinking(EntryKind::Thought);
                 self.finalize_message(EntryKind::Agent);
-                self.finalize_message(EntryKind::Subagent);
                 self.finish_prompt_turn(true);
                 self.pending_workspace_diff_total = None;
                 // Drop queued prompts: finish_prompt_turn flips back to
@@ -2741,11 +2848,127 @@ impl AppState {
             UiEvent::Fatal(msg) => {
                 self.finalize_thinking(EntryKind::Thought);
                 self.finalize_message(EntryKind::Agent);
-                self.finalize_message(EntryKind::Subagent);
                 self.set_connection_state(ConnectionState::Fatal);
                 self.record_status_message(StatusKind::Fatal, msg);
                 self.mark_runtime_closed();
             }
+        }
+    }
+
+    fn apply_workflow_transition(&mut self, event: &crate::workflow::WorkflowEvent) {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorLifecycle, WorkflowKind, WorkflowOutcome,
+            WorkflowTransition,
+        };
+
+        match &event.transition {
+            WorkflowTransition::Started { kind, .. } => {
+                if *kind == WorkflowKind::Review {
+                    self.push_system_message("review started");
+                }
+            }
+            WorkflowTransition::ActorStarted { actor_id, role } => {
+                if let WorkflowActorId::Subagent(subagent_id) = actor_id {
+                    let now = Instant::now();
+                    let state = self
+                        .subagents
+                        .entry(*subagent_id)
+                        .or_insert_with(|| SubagentStatus::placeholder(Some(role.clone()), now));
+                    state.role = Some(role.clone());
+                    state.lifecycle = Some(WorkflowActorLifecycle::Running);
+                    if state.label == "subagent" {
+                        state.label = nested_role_label(role);
+                    }
+                }
+            }
+            WorkflowTransition::ActorSessionBound {
+                actor_id,
+                retained_session_id,
+            } => {
+                if let WorkflowActorId::Subagent(subagent_id) = actor_id {
+                    self.ensure_subagent_state(*subagent_id).session_id =
+                        Some(retained_session_id.clone());
+                }
+            }
+            WorkflowTransition::ActorWaiting {
+                actor_id,
+                dependency,
+                remaining,
+                requires_user_action,
+            } => {
+                if let WorkflowActorId::Subagent(subagent_id) = actor_id {
+                    self.ensure_subagent_state(*subagent_id).lifecycle =
+                        Some(WorkflowActorLifecycle::Waiting {
+                            dependency: dependency.clone(),
+                            remaining: *remaining,
+                            requires_user_action: *requires_user_action,
+                        });
+                }
+            }
+            WorkflowTransition::ActorResumed { actor_id } => {
+                if let WorkflowActorId::Subagent(subagent_id) = actor_id {
+                    self.ensure_subagent_state(*subagent_id).lifecycle =
+                        Some(WorkflowActorLifecycle::Running);
+                }
+            }
+            WorkflowTransition::ActorFinished { actor_id, outcome } => {
+                if let WorkflowActorId::Subagent(subagent_id) = actor_id {
+                    self.ensure_subagent_state(*subagent_id).lifecycle = Some(match outcome {
+                        SubagentOutcome::Completed => WorkflowActorLifecycle::Completed,
+                        SubagentOutcome::Cancelled => WorkflowActorLifecycle::Cancelled,
+                        SubagentOutcome::Failed(message) => {
+                            WorkflowActorLifecycle::Failed(message.clone())
+                        }
+                    });
+                }
+            }
+            WorkflowTransition::Waiting {
+                remaining,
+                requires_user_action,
+                ..
+            } => {
+                let summary = self.workflows.get(event.workflow_id).and_then(|state| {
+                    (state.kind == WorkflowKind::Review).then(|| {
+                        if *requires_user_action {
+                            "review · waiting for user action".to_string()
+                        } else {
+                            let selected = state.selected_count();
+                            match remaining {
+                                Some(remaining) if selected > 0 => format!(
+                                    "review · waiting for {remaining} of {selected} selected reviewers"
+                                ),
+                                Some(remaining) => {
+                                    format!("review · waiting for {remaining} reviewers")
+                                }
+                                None => "review · waiting for reviewer reports".to_string(),
+                            }
+                        }
+                    })
+                });
+                if let Some(summary) = summary {
+                    self.push_system_message(summary);
+                }
+            }
+            WorkflowTransition::Terminal { outcome, .. } => {
+                let summary = self.workflows.get(event.workflow_id).and_then(|state| {
+                    (state.kind == WorkflowKind::Review).then(|| match outcome {
+                        WorkflowOutcome::Clean => {
+                            "review complete · no material findings".to_string()
+                        }
+                        WorkflowOutcome::Completed => "review complete".to_string(),
+                        WorkflowOutcome::Degraded => {
+                            "review complete · degraded coverage".to_string()
+                        }
+                        WorkflowOutcome::Failed => "review failed".to_string(),
+                        WorkflowOutcome::Cancelled => "review cancelled".to_string(),
+                    })
+                });
+                if let Some(summary) = summary {
+                    self.push_system_message(summary);
+                }
+            }
+            WorkflowTransition::PhaseChanged { .. }
+            | WorkflowTransition::CoverageChanged { .. } => {}
         }
     }
 
@@ -2764,33 +2987,65 @@ impl AppState {
                 self.subagent_token_usage = TokenUsage::default();
                 let objective = objective.trim().to_string();
                 let now = Instant::now();
-                self.subagents
+                let row = self
+                    .subagents
                     .entry(subagent_id)
                     .and_modify(|status| {
                         status.label = label.clone();
                         status.model = model.clone();
-                        status.activity = objective.clone();
+                        status.adapter = agent.clone();
+                        if status.objective.is_empty() {
+                            status.objective = objective.clone();
+                        }
+                        status.activity = if objective.is_empty() {
+                            ragnarok::first_line(&status.objective, SUBAGENT_RECORD_LINE_CHARS)
+                        } else {
+                            ragnarok::first_line(&objective, SUBAGENT_RECORD_LINE_CHARS)
+                        };
+                        status.lifecycle = Some(crate::workflow::WorkflowActorLifecycle::Running);
                         status.started_at = now;
                         status.finished = None;
                     })
                     .or_insert_with(|| SubagentStatus {
                         label: label.clone(),
                         model: model.clone(),
+                        adapter: agent.clone(),
+                        objective: objective.clone(),
+                        role: None,
+                        lifecycle: Some(crate::workflow::WorkflowActorLifecycle::Running),
+                        session_id: None,
+                        transcript: Vec::new(),
+                        open_message_index: None,
+                        plan_index: None,
                         activity: objective.clone(),
                         started_at: now,
                         finished: None,
                     });
+                let role = row.role.clone();
+                let objective = row.objective.clone();
                 self.active_subagents = self.running_subagent_count();
-                let backend = match model {
+                let backend = match model.as_deref() {
                     Some(model) => format!("{agent}/{model}"),
-                    None => agent,
+                    None => agent.clone(),
                 };
                 if !resumed {
                     // A retained actor has one identity across ACP turns. Its
                     // later resumes update the live row without manufacturing
                     // another permanent "started" record.
                     let headline = ragnarok::first_line(&objective, SUBAGENT_RECORD_LINE_CHARS);
-                    let started = if headline.is_empty() {
+                    let actor = role
+                        .as_ref()
+                        .filter(|role| {
+                            !matches!(role, crate::workflow::WorkflowActorRole::Implementation)
+                        })
+                        .map(nested_role_label);
+                    let started = if let Some(actor) = actor {
+                        if headline.is_empty() {
+                            format!("{actor} #{subagent_id} · started")
+                        } else {
+                            format!("{actor} #{subagent_id} · started · {headline}")
+                        }
+                    } else if headline.is_empty() {
                         format!("subagent #{subagent_id} · {label} · started")
                     } else {
                         format!("subagent #{subagent_id} · {label} · started · {headline}")
@@ -2800,9 +3055,11 @@ impl AppState {
                 self.set_status_line(
                     StatusKind::Info,
                     if resumed {
-                        format!("subagent #{subagent_id} · {label} resumed ({backend})")
+                        format!(
+                            "subagent #{subagent_id} · {label} resumed ({backend}) · Ctrl-L inspect"
+                        )
                     } else {
-                        format!("subagent #{subagent_id} · {label} ({backend})")
+                        format!("subagent #{subagent_id} · {label} ({backend}) · Ctrl-L inspect")
                     },
                 );
             }
@@ -2813,11 +3070,16 @@ impl AppState {
                 // Status-row only: no transcript entry, no revision bump. An
                 // in-place transcript rewrite here is what used to corrupt
                 // already-flushed inline scrollback.
-                if let Some(status) = self.subagents.get_mut(&subagent_id) {
-                    status.activity = activity;
+                if let Some(state) = self.subagents.get_mut(&subagent_id) {
+                    state.activity = activity;
                 }
             }
-            SubagentEvent::SessionStarted { .. } => {}
+            SubagentEvent::SessionStarted {
+                subagent_id,
+                session_id,
+            } => {
+                self.ensure_subagent_state(subagent_id).session_id = Some(session_id);
+            }
             SubagentEvent::SessionUpdate {
                 subagent_id,
                 update,
@@ -2848,24 +3110,22 @@ impl AppState {
                     prompt,
                     selected: 0,
                     scroll_offset: None,
-                    subagent: true,
+                    subagent_id: Some(subagent_id),
                 });
                 self.update_autocomplete();
             }
             SubagentEvent::ElicitationRequest {
                 subagent_id,
-                mut prompt,
+                prompt,
             } => {
                 self.finalize_subagent_thinking(subagent_id);
                 self.help_overlay = false;
-                // Concurrent subagents can each raise a form; say which one.
-                prompt.message = format!("subagent #{subagent_id} · {}", prompt.message);
                 self.elicitation_queue.push_back(PendingElicitation {
                     prompt,
                     selected: 0,
                     scroll_offset: None,
                     input: String::new(),
-                    subagent: true,
+                    subagent_id: Some(subagent_id),
                 });
                 self.update_autocomplete();
             }
@@ -2879,7 +3139,10 @@ impl AppState {
                 message,
             } => {
                 self.finalize_subagent_thinking(subagent_id);
-                self.push_system_message(format!("subagent #{subagent_id} · {message}"));
+                self.finalize_subagent_message(subagent_id);
+                let state = self.ensure_subagent_state(subagent_id);
+                state.activity = message.clone();
+                state.transcript.push(Entry::System(message));
             }
             SubagentEvent::Finished {
                 subagent_id,
@@ -2888,7 +3151,6 @@ impl AppState {
                 self.finalize_subagent_thinking(subagent_id);
                 self.finalize_subagent_message(subagent_id);
                 self.cancel_subagent_prompts(subagent_id);
-                self.subagent_plan_indices.remove(&subagent_id);
                 self.finish_subagent_row(subagent_id, &outcome);
                 self.active_subagents = self.running_subagent_count();
                 if self.active_subagents == 0 {
@@ -2898,13 +3160,13 @@ impl AppState {
                 match outcome {
                     SubagentOutcome::Completed => self.set_status_line(
                         StatusKind::Info,
-                        format!("subagent #{subagent_id} complete"),
+                        format!("subagent #{subagent_id} complete · Ctrl-L inspect"),
                     ),
                     SubagentOutcome::Cancelled => {
                         self.mark_subagent_tools_failed(subagent_id, "tool call cancelled");
                         self.set_status_line(
                             StatusKind::Info,
-                            format!("subagent #{subagent_id} cancelled"),
+                            format!("subagent #{subagent_id} cancelled · Ctrl-L inspect"),
                         );
                     }
                     SubagentOutcome::Failed(message) => {
@@ -2913,7 +3175,7 @@ impl AppState {
                         // this subagent's permanent transcript entry.
                         self.set_status_line(
                             StatusKind::Warning,
-                            format!("subagent #{subagent_id} failed · {message}"),
+                            format!("subagent #{subagent_id} failed · {message} · Ctrl-L inspect"),
                         );
                     }
                 }
@@ -2921,9 +3183,9 @@ impl AppState {
         }
     }
 
-    /// Closes out a subagent's status row and appends its one permanent
-    /// transcript record. The row survives for [`SUBAGENT_DONE_TTL`] so the
-    /// outcome is readable, then a later render prunes it.
+    /// Closes out a subagent's live row, retains its private transcript for the
+    /// session, and appends only a compact lifecycle summary to the primary
+    /// transcript.
     fn finish_subagent_row(&mut self, subagent_id: u64, outcome: &SubagentOutcome) {
         let now = Instant::now();
         let status = match outcome {
@@ -2937,22 +3199,51 @@ impl AppState {
         let record = match self.subagents.get_mut(&subagent_id) {
             Some(row) => {
                 row.finished = Some((outcome.clone(), now));
-                format!(
-                    "subagent #{subagent_id} · {} · {status} · {}",
-                    row.label,
-                    crate::ui::format_duration(row.elapsed_at(now))
-                )
+                row.lifecycle = Some(match outcome {
+                    SubagentOutcome::Completed => {
+                        crate::workflow::WorkflowActorLifecycle::Completed
+                    }
+                    SubagentOutcome::Cancelled => {
+                        crate::workflow::WorkflowActorLifecycle::Cancelled
+                    }
+                    SubagentOutcome::Failed(message) => {
+                        crate::workflow::WorkflowActorLifecycle::Failed(message.clone())
+                    }
+                });
+                row.open_message_index = None;
+                row.plan_index = None;
+                row.transcript.push(Entry::System(status.clone()));
+                let elapsed = crate::ui::format_duration(row.elapsed_at(now));
+                match (&row.role, outcome) {
+                    (
+                        Some(crate::workflow::WorkflowActorRole::SpecialistReviewer { lane }),
+                        SubagentOutcome::Completed,
+                    ) => Some(format!("reviewer {lane} · report delivered · {elapsed}")),
+                    (Some(role), SubagentOutcome::Completed)
+                        if matches!(
+                            role,
+                            crate::workflow::WorkflowActorRole::IntentAnalyst
+                                | crate::workflow::WorkflowActorRole::ReviewSupervisor
+                        ) =>
+                    {
+                        Some(format!(
+                            "{} #{subagent_id} · completed · {elapsed}",
+                            nested_role_label(role)
+                        ))
+                    }
+                    _ => Some(format!(
+                        "subagent #{subagent_id} · {} · {status} · {elapsed}",
+                        row.label
+                    )),
+                }
             }
             // A `Finished` with no row (a start this UI never saw) still gets
             // its record; there is simply no elapsed time to report.
-            None => format!("subagent #{subagent_id} · {status}"),
+            None => Some(format!("subagent #{subagent_id} · {status}")),
         };
-        self.push_system_message(record);
-        self.prune_finished_subagents(now);
-    }
-
-    fn prune_finished_subagents(&mut self, now: Instant) {
-        self.subagents.retain(|_, row| !row.expired_at(now));
+        if let Some(record) = record {
+            self.push_system_message(record);
+        }
     }
 
     /// Status rows in render order: everything still running first (in spawn
@@ -2995,18 +3286,11 @@ impl AppState {
         if finalize_active_thinking(&mut self.transcript, kind) {
             self.bump_transcript_revision();
         }
-        if kind == EntryKind::SubagentThought {
-            self.subagent_open_thought_owner = None;
-        }
     }
 
     fn finalize_message(&mut self, kind: EntryKind) {
         match kind {
             EntryKind::Agent => self.agent_open_message_index = None,
-            EntryKind::Subagent => {
-                self.subagent_open_message_index = None;
-                self.subagent_open_message_owner = None;
-            }
             _ => unreachable!("finalize_message requires a message entry kind"),
         }
     }
@@ -3014,7 +3298,6 @@ impl AppState {
     fn append_message_chunk(&mut self, kind: EntryKind, text: String) {
         let open_entry = match kind {
             EntryKind::Agent => &mut self.agent_open_message_index,
-            EntryKind::Subagent => &mut self.subagent_open_message_index,
             _ => unreachable!("append_message_chunk requires a message entry kind"),
         };
         *open_entry = Some(append_or_start_owned(
@@ -3031,43 +3314,50 @@ impl AppState {
         format!("{SUBAGENT_ID_PREFIX}{subagent_id}:")
     }
 
+    fn ensure_subagent_state(&mut self, subagent_id: u64) -> &mut SubagentStatus {
+        self.subagents
+            .entry(subagent_id)
+            .or_insert_with(|| SubagentStatus::placeholder(None, Instant::now()))
+    }
+
     fn finalize_subagent_thinking(&mut self, subagent_id: u64) {
-        if self.subagent_open_thought_owner != Some(subagent_id) {
-            return;
+        if let Some(state) = self.subagents.get_mut(&subagent_id) {
+            finalize_active_thinking(&mut state.transcript, EntryKind::SubagentThought);
         }
-        self.finalize_thinking(EntryKind::SubagentThought);
     }
 
     fn finalize_subagent_message(&mut self, subagent_id: u64) {
-        if self.subagent_open_message_owner == Some(subagent_id) {
-            self.finalize_message(EntryKind::Subagent);
+        if let Some(state) = self.subagents.get_mut(&subagent_id) {
+            state.open_message_index = None;
         }
     }
 
     fn append_subagent_message_chunk(&mut self, subagent_id: u64, text: String) {
-        if self.subagent_open_message_owner != Some(subagent_id) {
-            // Only one transcript entry can be advertised to the renderer as
-            // mutable. Close the previous actor's segment on an actor switch;
-            // later chunks from it start a new, correctly separated segment.
-            self.subagent_open_message_index = None;
-            self.subagent_open_message_owner = Some(subagent_id);
-        }
-        self.subagent_open_message_index = Some(append_or_start_owned(
-            &mut self.transcript,
+        let state = self.ensure_subagent_state(subagent_id);
+        state.open_message_index = Some(append_or_start_owned(
+            &mut state.transcript,
             EntryKind::Subagent,
             text,
-            self.subagent_open_message_index,
+            state.open_message_index,
         ));
     }
 
     fn append_subagent_thinking_chunk(&mut self, subagent_id: u64, text: String) {
-        if self.subagent_open_thought_owner != Some(subagent_id) {
-            // `Entry::SubagentThought` has no actor field. Finish the prior
-            // actor's segment before using the generic append helper.
-            self.finalize_thinking(EntryKind::SubagentThought);
-            self.subagent_open_thought_owner = Some(subagent_id);
+        let state = self.ensure_subagent_state(subagent_id);
+        append_thinking_chunk(&mut state.transcript, EntryKind::SubagentThought, text);
+    }
+
+    fn append_nested_internal_message(&mut self, subagent_id: u64, message: InternalMessage) {
+        self.finalize_subagent_thinking(subagent_id);
+        self.finalize_subagent_message(subagent_id);
+        let state = self.ensure_subagent_state(subagent_id);
+        if state.objective.is_empty()
+            && matches!(message.kind, crate::event::InternalMessageKind::Delegation)
+        {
+            state.objective = message.text.clone();
+            state.activity = ragnarok::first_line(&message.text, SUBAGENT_RECORD_LINE_CHARS);
         }
-        append_thinking_chunk(&mut self.transcript, EntryKind::SubagentThought, text);
+        state.transcript.push(Entry::InternalMessage(message));
     }
 
     fn apply_subagent_update(&mut self, subagent_id: u64, update: SessionUpdate) {
@@ -3078,7 +3368,6 @@ impl AppState {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 self.finalize_subagent_thinking(subagent_id);
                 self.append_subagent_message_chunk(subagent_id, content_block_text(&chunk.content));
-                self.bump_transcript_revision();
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 self.finalize_subagent_message(subagent_id);
@@ -3086,7 +3375,6 @@ impl AppState {
                     subagent_id,
                     content_block_text(&chunk.content),
                 );
-                self.bump_transcript_revision();
             }
             SessionUpdate::ToolCall(tool_call) => {
                 self.finalize_subagent_thinking(subagent_id);
@@ -3095,8 +3383,9 @@ impl AppState {
                 let mut view = ToolCallView::from_tool_call(&tool_call);
                 view.namespace_terminal_ids(prefix);
                 self.tool_calls.insert(key.clone(), view);
-                self.transcript.push(Entry::SubagentToolCall(key));
-                self.bump_transcript_revision();
+                self.ensure_subagent_state(subagent_id)
+                    .transcript
+                    .push(Entry::SubagentToolCall(key));
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 self.finalize_subagent_thinking(subagent_id);
@@ -3121,23 +3410,24 @@ impl AppState {
                         view.namespace_terminal_ids(prefix);
                     }
                     self.tool_calls.insert(key.clone(), view);
-                    self.transcript.push(Entry::SubagentToolCall(key));
+                    self.ensure_subagent_state(subagent_id)
+                        .transcript
+                        .push(Entry::SubagentToolCall(key));
                 }
-                self.bump_transcript_revision();
             }
             SessionUpdate::Plan(Plan { entries, .. }) => {
                 self.finalize_subagent_thinking(subagent_id);
                 self.finalize_subagent_message(subagent_id);
-                if let Some(index) = self.subagent_plan_indices.get(&subagent_id).copied()
-                    && let Some(Entry::SubagentPlan(existing)) = self.transcript.get_mut(index)
+                let state = self.ensure_subagent_state(subagent_id);
+                if let Some(index) = state.plan_index
+                    && let Some(Entry::SubagentPlan(existing)) = state.transcript.get_mut(index)
                 {
                     *existing = entries;
                 } else {
-                    let index = self.transcript.len();
-                    self.transcript.push(Entry::SubagentPlan(entries));
-                    self.subagent_plan_indices.insert(subagent_id, index);
+                    let index = state.transcript.len();
+                    state.transcript.push(Entry::SubagentPlan(entries));
+                    state.plan_index = Some(index);
                 }
-                self.bump_transcript_revision();
             }
             SessionUpdate::UsageUpdate(update) => {
                 let _ = self.subagent_token_usage.apply_usage_update(update);
@@ -3151,7 +3441,7 @@ impl AppState {
         let permission_prefix = format!("subagent-{subagent_id}:");
         let mut primary_permissions = VecDeque::new();
         while let Some(pending) = self.permission_queue.pop_front() {
-            if pending.subagent
+            if pending.subagent_id == Some(subagent_id)
                 && pending
                     .prompt
                     .tool_call
@@ -3166,10 +3456,9 @@ impl AppState {
         }
         self.permission_queue = primary_permissions;
 
-        let elicitation_prefix = format!("subagent #{subagent_id} · ");
         let mut primary_elicitations = VecDeque::new();
         while let Some(pending) = self.elicitation_queue.pop_front() {
-            if pending.subagent && pending.prompt.message.starts_with(&elicitation_prefix) {
+            if pending.subagent_id == Some(subagent_id) {
                 let _ = pending.prompt.responder.send(ElicitationOutcome::Cancel);
             } else {
                 primary_elicitations.push_back(pending);
@@ -3274,7 +3563,6 @@ impl AppState {
                     return;
                 }
                 self.finalize_message(EntryKind::Agent);
-                self.finalize_message(EntryKind::Subagent);
                 let text = content_block_text(&c.content);
                 append_or_start(&mut self.transcript, EntryKind::User, text);
                 self.bump_transcript_revision();
@@ -4736,8 +5024,12 @@ mod tests {
 
         assert!(matches!(
             state.transcript.as_slice(),
-            [Entry::System(started), Entry::SubagentThought(text)]
-                if started.contains("subagent #1") && text.text == "forging now" && !text.completed
+            [Entry::System(started)] if started.contains("subagent #1")
+        ));
+        assert!(matches!(
+            state.subagents.get(&1).expect("actor").transcript.as_slice(),
+            [Entry::SubagentThought(text)]
+                if text.text == "forging now" && !text.completed
         ));
     }
 
@@ -4760,7 +5052,10 @@ mod tests {
             SessionUpdate::AgentMessageChunk(text_chunk("one-b")),
         ));
 
-        let messages: Vec<&str> = state
+        let actor_one_messages: Vec<&str> = state
+            .subagents
+            .get(&1)
+            .expect("actor one")
             .transcript
             .iter()
             .filter_map(|entry| match entry {
@@ -4768,7 +5063,25 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(messages, ["one-a", "two", "one-b"]);
+        let actor_two_messages: Vec<&str> = state
+            .subagents
+            .get(&2)
+            .expect("actor two")
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::SubagentMessage(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actor_one_messages, ["one-aone-b"]);
+        assert_eq!(actor_two_messages, ["two"]);
+        assert!(
+            !state.transcript.iter().any(|entry| matches!(
+                entry,
+                Entry::SubagentMessage(_) | Entry::SubagentThought(_)
+            ))
+        );
 
         state.apply_event(subagent_session_update_for(
             1,
@@ -4783,7 +5096,21 @@ mod tests {
             SessionUpdate::AgentThoughtChunk(text_chunk("thought-one-again")),
         ));
 
-        let thoughts: Vec<(&str, bool)> = state
+        let actor_one_thoughts: Vec<(&str, bool)> = state
+            .subagents
+            .get(&1)
+            .expect("actor one")
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::SubagentThought(thought) => Some((thought.text.as_str(), thought.completed)),
+                _ => None,
+            })
+            .collect();
+        let actor_two_thoughts: Vec<(&str, bool)> = state
+            .subagents
+            .get(&2)
+            .expect("actor two")
             .transcript
             .iter()
             .filter_map(|entry| match entry {
@@ -4792,13 +5119,10 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            thoughts,
-            [
-                ("thought-one", true),
-                ("thought-two", true),
-                ("thought-one-again", false),
-            ]
+            actor_one_thoughts,
+            [("thought-onethought-one-again", false)]
         );
+        assert_eq!(actor_two_thoughts, [("thought-two", false)]);
     }
 
     #[test]
@@ -4816,15 +5140,23 @@ mod tests {
         state.apply_event(subagent_session_update_for(2, plan("two")));
         state.apply_event(subagent_session_update_for(1, plan("one-new")));
 
-        let plans: Vec<&str> = state
-            .transcript
-            .iter()
-            .filter_map(|entry| match entry {
-                Entry::SubagentPlan(entries) => entries.first().map(|entry| entry.content.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(plans, ["one-new", "two"]);
+        let plan_for = |id| {
+            state
+                .subagents
+                .get(&id)
+                .expect("actor")
+                .transcript
+                .iter()
+                .find_map(|entry| match entry {
+                    Entry::SubagentPlan(entries) => {
+                        entries.first().map(|entry| entry.content.as_str())
+                    }
+                    _ => None,
+                })
+                .expect("plan")
+        };
+        assert_eq!(plan_for(1), "one-new");
+        assert_eq!(plan_for(2), "two");
     }
 
     #[test]
@@ -4872,10 +5204,14 @@ mod tests {
 
         assert!(matches!(
             state.transcript.as_slice(),
-            [Entry::System(started), Entry::SubagentThought(thought), Entry::System(finished)]
+            [Entry::System(started), Entry::System(finished)]
                 if started.contains("started")
-                    && thought.text == "forging" && thought.completed
                     && finished.contains("completed")
+        ));
+        assert!(matches!(
+            state.subagents.get(&1).expect("actor").transcript.as_slice(),
+            [Entry::SubagentThought(thought), Entry::System(finished)]
+                if thought.text == "forging" && thought.completed && finished == "completed"
         ));
     }
 
@@ -4902,16 +5238,14 @@ mod tests {
 
         assert!(matches!(
             state.transcript.as_slice(),
-            [
-                Entry::AgentThought(primary),
-                Entry::System(started),
-                Entry::SubagentThought(sub),
-                Entry::SubagentMessage(message)
-            ]
+            [Entry::AgentThought(primary), Entry::System(started)]
                 if primary.text == "planning" && !primary.completed
                     && started.contains("subagent #1")
-                    && sub.text == "forging" && sub.completed
-                    && message == "built"
+        ));
+        assert!(matches!(
+            state.subagents.get(&1).expect("actor").transcript.as_slice(),
+            [Entry::SubagentThought(sub), Entry::SubagentMessage(message)]
+                if sub.text == "forging" && sub.completed && message == "built"
         ));
 
         state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
@@ -4925,14 +5259,11 @@ mod tests {
             [
                 Entry::AgentThought(primary),
                 Entry::System(started),
-                Entry::SubagentThought(sub),
-                Entry::SubagentMessage(sub_message),
                 Entry::AgentMessage(primary_message)
             ]
                 if primary.text == "planning more" && primary.completed
                     && started.contains("subagent #1")
-                    && sub.text == "forging" && sub.completed
-                    && sub_message == "built" && primary_message == "answer"
+                    && primary_message == "answer"
         ));
     }
 
@@ -4963,14 +5294,17 @@ mod tests {
 
         assert!(matches!(
             state.transcript.as_slice(),
+            [Entry::System(_), Entry::System(finished)]
+                if finished.starts_with("subagent #1 · subagent · completed · ")
+        ));
+        assert!(matches!(
+            state.subagents.get(&1).expect("actor").transcript.as_slice(),
             [
-                Entry::System(_),
                 Entry::SubagentThought(thought),
                 Entry::SubagentMessage(text),
                 Entry::System(finished)
-            ]
-                if thought.text == "forging" && thought.completed && text == "done"
-                    && finished.starts_with("subagent #1 · subagent · completed · ")
+            ] if thought.text == "forging" && thought.completed && text == "done"
+                && finished == "completed"
         ));
     }
 
@@ -5095,6 +5429,10 @@ mod tests {
         }
         assert_eq!(state.subagent_status_rows_at(now).count(), 0);
         assert!(!state.has_live_subagent_rows());
+        assert!(
+            state.nested_agent(1).is_some(),
+            "the five-second TTL hides only the compact status row"
+        );
     }
 
     #[test]
@@ -5173,6 +5511,7 @@ mod tests {
             target: "primary".to_string(),
             kind: crate::event::InternalMessageKind::Delegation,
             text: "boundary note".to_string(),
+            owner_subagent_id: None,
         }));
         assert_eq!(
             state.connection_state,
@@ -5185,6 +5524,7 @@ mod tests {
             target: "primary".to_string(),
             kind: crate::event::InternalMessageKind::DiscreteReview,
             text: "review the completed work".to_string(),
+            owner_subagent_id: None,
         }));
         assert_eq!(state.connection_state, ConnectionState::Streaming);
         assert!(state.is_busy());
@@ -5197,13 +5537,14 @@ mod tests {
     }
 
     #[test]
-    fn internal_coordination_stays_inline_in_transcript_order() {
+    fn internal_coordination_is_retained_only_by_its_nested_actor() {
         let mut state = AppState::new();
         state.apply_event(UiEvent::InternalMessage(InternalMessage {
             source: "primary".to_string(),
             target: "subagent".to_string(),
             kind: crate::event::InternalMessageKind::Delegation,
             text: "implementation brief".to_string(),
+            owner_subagent_id: Some(1),
         }));
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
@@ -5219,11 +5560,14 @@ mod tests {
 
         assert!(matches!(
             state.transcript.as_slice(),
-            [Entry::InternalMessage(message), Entry::System(started), Entry::SubagentMessage(text)]
+            [Entry::System(started)] if started.contains("subagent #1")
+        ));
+        assert!(matches!(
+            state.subagents.get(&1).expect("actor").transcript.as_slice(),
+            [Entry::InternalMessage(message), Entry::SubagentMessage(text)]
                 if message.source == "primary"
                     && message.target == "subagent"
                     && message.text == "implementation brief"
-                    && started.contains("subagent #1")
                     && text == "working"
         ));
         assert!(
@@ -5232,6 +5576,115 @@ mod tests {
                 .iter()
                 .any(|entry| matches!(entry, Entry::SessionBoundary(_)))
         );
+    }
+
+    #[test]
+    fn workflow_roles_and_supervisor_packets_attach_to_stable_nested_actors() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowCoverage, WorkflowEvent, WorkflowId,
+            WorkflowKind, WorkflowOutcome, WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        let workflow_id = WorkflowId::review(9);
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+            },
+        )));
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: WorkflowActorId::Subagent(42),
+                role: WorkflowActorRole::ReviewSupervisor,
+            },
+        )));
+        state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
+            subagent_id: 42,
+            resumed: false,
+            model: Some("gpt-review".to_string()),
+            agent: "codex-acp".to_string(),
+            objective: "review the patch".to_string(),
+            label: "review · supervisor".to_string(),
+        }));
+        for (kind, text) in [
+            (
+                crate::event::InternalMessageKind::ReviewProgress,
+                "two specialists remain",
+            ),
+            (
+                crate::event::InternalMessageKind::ReviewSynthesis,
+                "No material findings.",
+            ),
+        ] {
+            state.apply_event(UiEvent::InternalMessage(InternalMessage {
+                source: "review supervisor".to_string(),
+                target: "primary".to_string(),
+                kind,
+                text: text.to_string(),
+                owner_subagent_id: Some(42),
+            }));
+        }
+
+        let actor = state.nested_agent(42).expect("supervisor actor");
+        assert_eq!(actor.role, Some(WorkflowActorRole::ReviewSupervisor));
+        assert_eq!(actor.adapter, "codex-acp");
+        assert_eq!(actor.model.as_deref(), Some("gpt-review"));
+        assert!(matches!(
+            actor.transcript.as_slice(),
+            [Entry::InternalMessage(progress), Entry::InternalMessage(synthesis)]
+                if progress.kind == crate::event::InternalMessageKind::ReviewProgress
+                    && synthesis.kind == crate::event::InternalMessageKind::ReviewSynthesis
+        ));
+        assert!(
+            !state.transcript.iter().any(|entry| matches!(
+                entry,
+                Entry::InternalMessage(message)
+                    if message.text == "two specialists remain"
+                        || message.text == "No material findings."
+            )),
+            "review envelopes stay out of the primary transcript"
+        );
+
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorFinished {
+                actor_id: WorkflowActorId::Subagent(42),
+                outcome: SubagentOutcome::Completed,
+            },
+        )));
+        state.apply_event(UiEvent::Subagent(SubagentEvent::Finished {
+            subagent_id: 42,
+            outcome: SubagentOutcome::Completed,
+        }));
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Clean,
+                coverage: WorkflowCoverage::Complete,
+            },
+        )));
+        let summaries = state
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::System(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            summaries
+                .iter()
+                .any(|text| text.starts_with("review supervisor #42 · started"))
+        );
+        assert!(
+            summaries
+                .iter()
+                .any(|text| text.starts_with("review supervisor #42 · completed"))
+        );
+        assert!(summaries.contains(&"review complete · no material findings"));
     }
 
     #[test]
@@ -6949,13 +7402,12 @@ mod tests {
             Ok(ElicitationOutcome::Cancel)
         ));
         assert_eq!(state.pending_elicitation_count(), 1);
-        assert!(
+        assert_eq!(
             state
                 .pending_elicitation()
                 .expect("second subagent elicitation remains")
-                .prompt
-                .message
-                .starts_with("subagent #2 · ")
+                .subagent_id,
+            Some(2)
         );
     }
 
@@ -7522,8 +7974,17 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "new", "clear", "compact", "load", "export", "models", "agents", "review",
-                "mjconfig", "ragnarok"
+                "new",
+                "clear",
+                "compact",
+                "load",
+                "export",
+                "models",
+                "agents",
+                "subagents",
+                "review",
+                "mjconfig",
+                "ragnarok"
             ]
         );
     }
@@ -7552,8 +8013,18 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "new", "clear", "compact", "load", "export", "models", "agents", "review",
-                "mjconfig", "ragnarok", "fork"
+                "new",
+                "clear",
+                "compact",
+                "load",
+                "export",
+                "models",
+                "agents",
+                "subagents",
+                "review",
+                "mjconfig",
+                "ragnarok",
+                "fork"
             ]
         );
     }
@@ -7595,6 +8066,7 @@ mod tests {
                 "export",
                 "models",
                 "agents",
+                "subagents",
                 "review",
                 "mjconfig",
                 "ragnarok",
@@ -7617,7 +8089,7 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[4].description,
-            "export transcript to markdown"
+            "export primary transcript; add full for nested agents"
         );
         assert_eq!(s.available_commands[5].description, "open model settings");
         assert_eq!(
@@ -7625,7 +8097,7 @@ mod tests {
             "show active model selections and usage"
         );
         assert_eq!(
-            s.available_commands[10].description,
+            s.available_commands[11].description,
             "fork the current session (unstable ACP extension)"
         );
     }
@@ -7655,6 +8127,7 @@ mod tests {
                 "export",
                 "models",
                 "agents",
+                "subagents",
                 "review",
                 "mjconfig",
                 "ragnarok",

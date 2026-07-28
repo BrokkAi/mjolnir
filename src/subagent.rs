@@ -2613,6 +2613,7 @@ async fn run(
         target: format!("subagent #{subagent_id}"),
         kind: InternalMessageKind::Delegation,
         text: task.clone(),
+        owner_subagent_id: Some(subagent_id),
     }));
     let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Started {
         subagent_id,

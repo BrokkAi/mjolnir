@@ -1181,6 +1181,7 @@ mod tests {
             target: "primary".to_string(),
             kind: crate::event::InternalMessageKind::DiscreteReview,
             text: "correct these findings".to_string(),
+            owner_subagent_id: None,
         };
 
         reset_superseded_headless_answer(&mut state, &mut collecting, &message);

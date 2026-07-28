@@ -1595,6 +1595,7 @@ fn emit_internal(
         target: target.to_string(),
         kind,
         text: text.to_string(),
+        owner_subagent_id: None,
     }));
 }
 
