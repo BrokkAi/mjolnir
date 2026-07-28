@@ -13,8 +13,9 @@ the **subagents** it launches:
   answering;
 - `create_subagent` launches background subagents (up to 16 in parallel, all
   write-capable, each in a fresh session) and returns immediately;
-- live status rows show every subagent's model, current activity, and elapsed
-  time while it runs;
+- stable workflow progress rows summarize delegation and review phases,
+  aggregate actor outcomes, and elapsed time; `/subagents` opens retained
+  nested detail;
 - each finished subagent's report, activity log, and diff are pushed back into
   the primary session as a new user message — nothing polls.
 

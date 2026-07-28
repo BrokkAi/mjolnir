@@ -1823,10 +1823,9 @@ impl AppState {
     }
 
     pub fn open_nested_agent_viewer(&mut self) -> bool {
-        let selected = self
-            .nested_agent_selected
-            .filter(|id| self.subagents.contains_key(id))
-            .or_else(|| self.subagents.keys().next().copied());
+        // Opening the viewer should land on work the user can act on, not the
+        // oldest completed actor retained for session history.
+        let selected = self.nested_agent_viewer_ids().into_iter().next();
         let Some(selected) = selected else {
             return false;
         };
@@ -1844,7 +1843,7 @@ impl AppState {
     }
 
     pub fn select_nested_agent(&mut self, next: bool) {
-        let ids = self.subagents.keys().copied().collect::<Vec<_>>();
+        let ids = self.nested_agent_viewer_ids();
         if ids.is_empty() {
             self.nested_agent_selected = None;
             self.nested_agent_scroll_offset = 0;
@@ -1862,11 +1861,24 @@ impl AppState {
             current - 1
         };
         self.nested_agent_selected = Some(ids[selected]);
-        self.nested_agent_scroll_offset = 0;
+        self.nested_agent_scroll_offset = usize::MAX;
     }
 
     pub fn nested_agents(&self) -> impl Iterator<Item = (u64, &SubagentStatus)> {
         self.subagents.iter().map(|(id, state)| (*id, state))
+    }
+
+    pub fn nested_agent_viewer_ids(&self) -> Vec<u64> {
+        let mut ids = self.subagents.keys().copied().collect::<Vec<_>>();
+        ids.sort_by(|left_id, right_id| {
+            let left = &self.subagents[left_id];
+            let right = &self.subagents[right_id];
+            left.finished
+                .is_some()
+                .cmp(&right.finished.is_some())
+                .then_with(|| right_id.cmp(left_id))
+        });
+        ids
     }
 
     pub fn nested_agent(&self, id: u64) -> Option<&SubagentStatus> {
@@ -2648,7 +2660,6 @@ impl AppState {
                     self.subagent_active = false;
                     self.subagent_label = None;
                     self.active_subagents = 0;
-                    self.workflows.clear();
                     self.workflow_clocks.clear();
                     if !self.tool_detail_overrides.is_empty() {
                         self.tool_detail_overrides.clear();
@@ -2991,7 +3002,14 @@ impl AppState {
                             let completed = state.completed_count();
                             let failed = state.failed_count();
                             let cancelled = state.cancelled_count();
-                            let mut parts = vec!["subagents complete".to_string()];
+                            let head = match outcome {
+                                WorkflowOutcome::Completed
+                                | WorkflowOutcome::Clean
+                                | WorkflowOutcome::Degraded => "subagents complete",
+                                WorkflowOutcome::Failed => "subagents failed",
+                                WorkflowOutcome::Cancelled => "subagents cancelled",
+                            };
+                            let mut parts = vec![head.to_string()];
                             if completed > 0 {
                                 parts.push(format!("{completed} completed"));
                             }
@@ -3004,7 +3022,6 @@ impl AppState {
                             if state.coverage == crate::workflow::WorkflowCoverage::Degraded {
                                 parts.push("degraded coverage".to_string());
                             }
-                            parts.push("F11 inspect".to_string());
                             parts.join(" · ")
                         }
                     });
@@ -3106,10 +3123,10 @@ impl AppState {
                     StatusKind::Info,
                     if resumed {
                         format!(
-                            "subagent #{subagent_id} · {label} resumed ({backend}) · F11 inspect"
+                            "subagent #{subagent_id} · {label} resumed ({backend}) · /subagents"
                         )
                     } else {
-                        format!("subagent #{subagent_id} · {label} ({backend}) · F11 inspect")
+                        format!("subagent #{subagent_id} · {label} ({backend}) · /subagents")
                     },
                 );
             }
@@ -3217,13 +3234,13 @@ impl AppState {
                 match outcome {
                     SubagentOutcome::Completed => self.set_status_line(
                         StatusKind::Info,
-                        format!("subagent #{subagent_id} complete · F11 inspect"),
+                        format!("subagent #{subagent_id} complete · /subagents"),
                     ),
                     SubagentOutcome::Cancelled => {
                         self.mark_subagent_tools_failed(subagent_id, "tool call cancelled");
                         self.set_status_line(
                             StatusKind::Info,
-                            format!("subagent #{subagent_id} cancelled · F11 inspect"),
+                            format!("subagent #{subagent_id} cancelled · /subagents"),
                         );
                     }
                     SubagentOutcome::Failed(message) => {
@@ -3232,7 +3249,7 @@ impl AppState {
                         // this subagent's permanent transcript entry.
                         self.set_status_line(
                             StatusKind::Warning,
-                            format!("subagent #{subagent_id} failed · {message} · F11 inspect"),
+                            format!("subagent #{subagent_id} failed · {message} · /subagents"),
                         );
                     }
                 }
@@ -4668,6 +4685,17 @@ mod tests {
         })
     }
 
+    fn apply_workflow(
+        state: &mut AppState,
+        workflow_id: crate::workflow::WorkflowId,
+        transition: crate::workflow::WorkflowTransition,
+    ) {
+        state.apply_event(UiEvent::Workflow(crate::workflow::WorkflowEvent::new(
+            workflow_id,
+            transition,
+        )));
+    }
+
     fn subagent_started(subagent_id: u64, label: &str, objective: &str) -> UiEvent {
         UiEvent::Subagent(SubagentEvent::Started {
             subagent_id,
@@ -5086,6 +5114,24 @@ mod tests {
             [Entry::SubagentThought(text)]
                 if text.text == "forging now" && !text.completed
         ));
+    }
+
+    #[test]
+    fn nested_viewer_orders_every_actor_with_newest_running_first() {
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(1, "old-complete", "done"));
+        state.apply_event(subagent_started(2, "older-running", "work"));
+        state.apply_event(finished_subagent(1, SubagentOutcome::Completed));
+        state.apply_event(subagent_started(3, "newest-running", "work"));
+
+        assert_eq!(state.nested_agent_viewer_ids(), vec![3, 2, 1]);
+        assert!(state.open_nested_agent_viewer());
+        assert_eq!(state.nested_agent_selected, Some(3));
+        state.select_nested_agent(true);
+        assert_eq!(state.nested_agent_selected, Some(2));
+        assert_eq!(state.nested_agent_scroll_offset, usize::MAX);
+        state.select_nested_agent(true);
+        assert_eq!(state.nested_agent_selected, Some(1));
     }
 
     #[test]
@@ -5656,6 +5702,186 @@ mod tests {
                 kind: StatusKind::Warning,
                 ref text,
             }) if text == "subagent #7 · adapter authentication expires soon"
+        ));
+    }
+
+    #[test]
+    fn delegation_terminal_summary_matches_the_authoritative_outcome() {
+        use crate::workflow::{
+            WorkflowCoverage, WorkflowId, WorkflowKind, WorkflowOutcome, WorkflowPhase,
+            WorkflowStage, WorkflowTransition,
+        };
+
+        for (turn_id, outcome, coverage, expected) in [
+            (
+                1,
+                WorkflowOutcome::Completed,
+                WorkflowCoverage::Complete,
+                "subagents complete",
+            ),
+            (
+                2,
+                WorkflowOutcome::Failed,
+                WorkflowCoverage::Degraded,
+                "subagents failed · degraded coverage",
+            ),
+            (
+                3,
+                WorkflowOutcome::Cancelled,
+                WorkflowCoverage::Degraded,
+                "subagents cancelled · degraded coverage",
+            ),
+        ] {
+            let mut state = AppState::new();
+            let workflow_id = WorkflowId::delegation(turn_id);
+            apply_workflow(
+                &mut state,
+                workflow_id,
+                WorkflowTransition::Started {
+                    kind: WorkflowKind::Delegation,
+                    stage: WorkflowStage::new(0, WorkflowPhase::Delegating),
+                },
+            );
+            apply_workflow(
+                &mut state,
+                workflow_id,
+                WorkflowTransition::Terminal { outcome, coverage },
+            );
+
+            assert!(matches!(
+                state.transcript.last(),
+                Some(Entry::System(summary)) if summary == expected
+            ));
+            assert!(
+                !state.transcript.iter().any(
+                    |entry| matches!(entry, Entry::System(summary) if summary.contains("F11"))
+                ),
+                "permanent scrollback must not bake in a keybinding hint"
+            );
+        }
+    }
+
+    #[test]
+    fn next_prompt_retires_only_terminal_workflow_rows_and_clock_stays_frozen() {
+        use crate::workflow::{
+            WorkflowCoverage, WorkflowId, WorkflowKind, WorkflowOutcome, WorkflowPhase,
+            WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        let unfinished = WorkflowId::delegation(10);
+        let terminal = WorkflowId::review(10);
+        for (workflow_id, kind, phase) in [
+            (
+                unfinished,
+                WorkflowKind::Delegation,
+                WorkflowPhase::Delegating,
+            ),
+            (terminal, WorkflowKind::Review, WorkflowPhase::Supervision),
+        ] {
+            apply_workflow(
+                &mut state,
+                workflow_id,
+                WorkflowTransition::Started {
+                    kind,
+                    stage: WorkflowStage::new(0, phase),
+                },
+            );
+        }
+        apply_workflow(
+            &mut state,
+            terminal,
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Clean,
+                coverage: WorkflowCoverage::Complete,
+            },
+        );
+
+        let now = Instant::now();
+        assert_eq!(
+            state.workflow_elapsed_at(terminal, now),
+            state.workflow_elapsed_at(terminal, now + Duration::from_secs(60)),
+            "terminal elapsed time must stay frozen"
+        );
+
+        state.record_user_prompt("next turn".to_string());
+        let visible = state
+            .visible_workflows()
+            .map(|workflow| workflow.id)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec![unfinished]);
+        assert!(state.workflows.get(terminal).is_some());
+    }
+
+    #[test]
+    fn session_switch_hides_progress_without_clearing_in_flight_reducer_state() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowCoverage, WorkflowId, WorkflowKind,
+            WorkflowOutcome, WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "one".to_string(),
+            resumed: false,
+        });
+        let workflow_id = WorkflowId::delegation(20);
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Delegation,
+                stage: WorkflowStage::new(0, WorkflowPhase::Delegating),
+            },
+        );
+
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "two".to_string(),
+            resumed: false,
+        });
+        assert!(state.visible_workflows().next().is_none());
+        assert!(state.workflows.get(workflow_id).is_some());
+
+        let actor_id = WorkflowActorId::Subagent(77);
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: actor_id.clone(),
+                role: WorkflowActorRole::Implementation,
+            },
+        );
+        assert_eq!(
+            state.nested_agent(77).and_then(|actor| actor.role.clone()),
+            Some(WorkflowActorRole::Implementation)
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::ActorFinished {
+                actor_id,
+                outcome: SubagentOutcome::Completed,
+            },
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Completed,
+                coverage: WorkflowCoverage::Complete,
+            },
+        );
+
+        assert_eq!(
+            state
+                .workflows
+                .get(workflow_id)
+                .and_then(|workflow| workflow.outcome),
+            Some(WorkflowOutcome::Completed)
+        );
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::System(summary)) if summary == "subagents complete · 1 completed"
         ));
     }
 

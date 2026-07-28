@@ -77,13 +77,33 @@ impl SpinnerStyle {
     /// and stays in sync across every place it is shown.
     pub fn current_frame(self) -> &'static str {
         let frames = self.frames();
-        let idx = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| (elapsed.as_millis() / SPINNER_FRAME_INTERVAL_MS) as usize)
-            .unwrap_or(0)
-            % frames.len();
-        frames[idx].as_str()
+        frames[current_frame_index(frames.len())].as_str()
     }
+
+    /// Single-column animation frame for compact progress surfaces. This is a
+    /// separate contract from the twelve-column prompt ornament: callers never
+    /// need to infer a usable glyph from the internals of a wide frame.
+    pub fn compact_frame(self) -> &'static str {
+        let frames = self.compact_frames();
+        frames[current_frame_index(frames.len())]
+    }
+
+    fn compact_frames(self) -> &'static [&'static str] {
+        match self {
+            Self::Pulse => &["·", "∙", "•", "●", "•", "∙"],
+            Self::Wave => &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+            Self::Bars => &["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▅", "▃"],
+            Self::Shimmer => &["·", "∙", "•", "●", "•", "∙"],
+        }
+    }
+}
+
+fn current_frame_index(frame_count: usize) -> usize {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| (elapsed.as_millis() / SPINNER_FRAME_INTERVAL_MS) as usize)
+        .unwrap_or(0)
+        % frame_count
 }
 
 impl fmt::Display for SpinnerStyle {
@@ -275,6 +295,13 @@ mod tests {
                 SPINNER_WIDTH,
                 "{style} idle wrong width"
             );
+            for frame in style.compact_frames() {
+                assert_eq!(
+                    UnicodeWidthStr::width(*frame),
+                    1,
+                    "{style} compact frame {frame:?} must be one column"
+                );
+            }
         }
     }
 

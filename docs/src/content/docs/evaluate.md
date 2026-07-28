@@ -77,8 +77,10 @@ python3 -m unittest -v, and explain the result. Do not change anything else.
 Expected observations:
 
 1. The primary agent launches a subagent and ends its turn instead of waiting.
-2. A `subagent #1 · …` row appears in the status area with a live activity line
-   and elapsed time, then clears a few seconds after it finishes.
+2. A stable `Subagents` workflow row appears with elapsed time and aggregate
+   running/completed/failed/cancelled counts. `/subagents` opens actor #1's live
+   detail and transcript; the terminal outcome remains until the next user
+   turn.
 3. Any requested permission remains fully readable before you decide, and is
    labelled with the subagent's id.
 4. When the subagent finishes, its report is injected as a new user turn and the
@@ -86,7 +88,8 @@ Expected observations:
 5. The returned change is limited to `weather.py` and `test_weather.py`.
 6. `python3 -m unittest -v` reports four passing tests.
 7. Because a subagent changed the workspace, a discrete review may run before
-   the turn is released; `review · …` rows appear in the status area.
+   the turn is released; a stable `Review` workflow row shows its current phase
+   and reviewer progress.
 
 The exact wording and tool sequence can differ by model. If the primary ignores
 the explicit delegation, polls for a result, or the change is wrong, record the

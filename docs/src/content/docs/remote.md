@@ -22,9 +22,10 @@ and downloaded transcripts as secrets.
 
 ## Subagents in the viewer
 
-The viewer mirrors the terminal's subagent status area: one row per background
+The browser keeps an actor-level subagent list: one row per background
 subagent, running rows first in spawn order, each showing its id, label, latest
-activity, and elapsed time, and finished rows marked `✔`, `✘`, or `⊘`.
+activity, and elapsed time, and finished rows marked `✔`, `✘`, or `⊘`. This is
+more granular than the terminal's aggregate workflow progress rows.
 Permission requests raised by a subagent carry its id, so a remote user answers
 the right nested request while several run at once. MCP approvals for
 `mcp__mj_subagents__create_subagent` and `mcp__mj_subagents__subagent_cancel`

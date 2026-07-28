@@ -29,7 +29,8 @@ the main failure mode of a push-delivered design.
 
 1. The primary calls `create_subagent` with a complete standalone brief.
 2. Mjolnir admits the run against the pool, spawns a fresh ACP session, and
-   returns the id immediately. A row appears in the subagent status area.
+   returns the id immediately. The stable `Subagents` workflow row reflects the
+   run, and `/subagents` opens its retained actor transcript.
 3. The primary keeps working or ends its turn. The turn is not held open.
 4. When the subagent finishes, Mjolnir **injects its report into the primary
    session as a new user message**, which starts a normal turn.
@@ -141,26 +142,30 @@ once, so a provider with 5% or less remaining fails fast instead of stalling
 inside the adapter. Adapters that snapshot the tool list at session start see
 the inventory as it was at startup.
 
-## The status area
+## Workflow progress
 
-Running subagents get a dedicated area between the header and the input box, in
-both inline and fullscreen modes:
+Delegation and review workflows get a dedicated area between the header and the
+input box, in both inline and fullscreen modes:
 
 ```text
- ⠹ fix-tests (gpt-5.6-sol) · running the parser tests · 1m04s
- ⠹ docs-sweep (fable) · reading docs/src/content · 42s
- … 2 more
+ ⠹ Subagents [/subagents] · 1m04s · delegating · 3 running · 2 done
+ ⠹ Review [/subagents] · 42s · specialist review · waiting for 1 automatic result · reviewers 2/3
 ```
 
-Each row shows a spinner, the label, the model, the most recent tool objective,
-and elapsed time. Finished rows stay for five seconds marked `✔` completed,
-`✘` failed, or `⊘` cancelled, then disappear. Four rows are shown at a time and
-the rest fold into a `… N more` line, with running rows preferred over finished
-ones. The area collapses to nothing when no subagent is active.
+Each row represents one authoritative workflow, not one actor. It shows the
+current phase, aggregate actor counts, waits, coverage, and elapsed time, so
+workers starting or finishing cannot move the input area. A terminal outcome
+freezes in place until the next user turn instead of disappearing on a timer.
+If the area overflows, active and newer workflows keep the visible slots.
 
-Every start and finish also lands in the transcript as a permanent
-`subagent #N · label · …` line. Live activity updates only the status row, so
-scrollback is never rewritten.
+Run `/subagents` to open the session-wide actor roster and inspect labels,
+models, activity, tool calls, and retained transcripts. The roster allocates a
+row to every retained actor, with running actors first and the newest actor
+selected when it opens. Use PageUp/PageDown to move through long output; on a
+MacBook, Fn+Up/Fn+Down send those keys. Every start and finish also lands in the
+primary transcript as a permanent
+`subagent #N · label · …` line. Live activity stays in the nested transcript,
+so primary scrollback and terminal geometry are not rewritten.
 
 ## Discrete review
 
@@ -170,8 +175,9 @@ turn. A visible supervisor on the primary model investigates the immutable
 change packet and asynchronously launches only the useful read-only Norse
 reviewers. Their reports return to the same supervisor session for vetting, and
 surviving findings come back as a corrective turn. The supervisor and reviewers
-use the same status and streaming machinery as ordinary subagents but do not
-receive implementation write access or recursive delegation tools. See
+use the same workflow progress and nested transcript machinery as ordinary
+subagents but do not receive implementation write access or recursive
+delegation tools. See
 [Delegation and review](/delegation-review/).
 
 ## Turning subagents off
