@@ -1310,10 +1310,8 @@ mod tests {
         editor.inventory.servers[server_index].detected = false;
         editor.inventory.servers[server_index].policy = AcpServerPolicy::Auto;
 
-        assert_eq!(
-            editor.handle_key(KeyCode::Char(' ')),
-            SettingsAction::Changed
-        );
+        // Exercise the transition without refreshing host-specific discovery.
+        assert_eq!(editor.toggle_selected(), SettingsAction::Changed);
         assert_eq!(editor.config.acp.policy("anvil"), AcpServerPolicy::Enabled);
     }
 

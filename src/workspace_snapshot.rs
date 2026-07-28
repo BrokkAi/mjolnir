@@ -1089,7 +1089,10 @@ mod tests {
             .review_snapshot()
             .expect("exact review snapshot")
             .clone();
-        assert_eq!(review.repo_root(), root);
+        assert_eq!(
+            review.repo_root(),
+            std::fs::canonicalize(root).expect("canonical repository root")
+        );
         assert_ne!(review.base_tree(), review.target_tree());
         assert_eq!(review.changed_line_count(), 2);
         assert!(review.diffstat().contains("state.txt"));
@@ -1142,7 +1145,10 @@ mod tests {
             .await
             .expect("corrective interval");
 
-        assert_eq!(interval.repo_root(), root);
+        assert_eq!(
+            interval.repo_root(),
+            std::fs::canonicalize(root).expect("canonical repository root")
+        );
         assert_eq!(interval.object_dir(), current.object_dir());
         assert_eq!(interval.base_tree(), previous.target_tree());
         assert_eq!(interval.target_tree(), current.target_tree());
@@ -1297,8 +1303,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn configured_runtime_artifact_with_literal_backslash_is_exact() {
-        use std::os::unix::ffi::OsStringExt;
-
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path();
         init_repo(root);
@@ -1307,17 +1311,14 @@ mod tests {
         commit_all(root);
 
         let runtime_log = root.join(r"logs\agent.log");
-        let non_utf8_runtime_log = root.join(OsString::from_vec(b"runtime-\xff.log".to_vec()));
         let user_log = root.join("logs/agent.log");
         let snapshot = WorkspaceSnapshot::capture_excluding(
             &[root.to_path_buf()],
-            &[runtime_log.clone(), non_utf8_runtime_log.clone()],
+            std::slice::from_ref(&runtime_log),
         )
         .await;
 
         std::fs::write(&runtime_log, "Mjolnir runtime output\n").expect("runtime log");
-        std::fs::write(&non_utf8_runtime_log, "non-UTF-8 runtime output\n")
-            .expect("non-UTF-8 runtime log");
         std::fs::write(&user_log, "agent-created output\n").expect("user log");
 
         let delta = snapshot.delta().await;
@@ -1325,6 +1326,33 @@ mod tests {
         let patch = delta.review_patch().expect("review patch");
         assert!(patch.contains("logs/agent.log"), "{patch}");
         assert!(!patch.contains("Mjolnir runtime output"), "{patch}");
+    }
+
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    #[tokio::test]
+    async fn configured_non_utf8_runtime_artifact_is_excluded() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        init_repo(root);
+        std::fs::write(root.join("tracked.txt"), "baseline\n").expect("tracked baseline");
+        commit_all(root);
+
+        let runtime_log = root.join(OsString::from_vec(b"runtime-\xff.log".to_vec()));
+        let snapshot = WorkspaceSnapshot::capture_excluding(
+            &[root.to_path_buf()],
+            std::slice::from_ref(&runtime_log),
+        )
+        .await;
+
+        std::fs::write(&runtime_log, "non-UTF-8 runtime output\n").expect("non-UTF-8 runtime log");
+        std::fs::write(root.join("tracked.txt"), "changed\n").expect("tracked change");
+
+        let delta = snapshot.delta().await;
+        assert!(delta.changed());
+        let patch = delta.review_patch().expect("review patch");
+        assert!(patch.contains("tracked.txt"), "{patch}");
         assert!(!patch.contains("non-UTF-8 runtime output"), "{patch}");
     }
 
