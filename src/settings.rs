@@ -439,11 +439,19 @@ impl SettingsEditor {
                 let selected = self.priority_selected;
                 self.priority_mut(seat).swap(selected, selected - 1);
                 self.priority_selected -= 1;
+                self.notice = Some(
+                    "Priority updated; start a new session or restart Mjolnir to apply it."
+                        .to_string(),
+                );
             }
             KeyCode::Right | KeyCode::Char('l') if self.priority_selected + 1 < len => {
                 let selected = self.priority_selected;
                 self.priority_mut(seat).swap(selected, selected + 1);
                 self.priority_selected += 1;
+                self.notice = Some(
+                    "Priority updated; start a new session or restart Mjolnir to apply it."
+                        .to_string(),
+                );
             }
             KeyCode::Char('r') => {
                 *self.priority_mut(seat) = crate::config::DEFAULT_ACP_PRIORITY
@@ -451,7 +459,10 @@ impl SettingsEditor {
                     .map(str::to_string)
                     .collect();
                 self.priority_selected = 0;
-                self.notice = Some("ACP priority reset to default".to_string());
+                self.notice = Some(
+                    "Priority reset; start a new session or restart Mjolnir to apply it."
+                        .to_string(),
+                );
             }
             _ => return SettingsAction::None,
         }
@@ -1513,6 +1524,10 @@ mod tests {
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(editor.config.agent.acp_priority[0], "claude-acp");
         assert_eq!(editor.config.subagents.acp_priority[0], "codex-acp");
+        assert_eq!(
+            editor.notice.as_deref(),
+            Some("Priority updated; start a new session or restart Mjolnir to apply it.")
+        );
         editor.handle_key(KeyCode::Enter);
 
         editor.selected = 1;
@@ -1531,7 +1546,7 @@ mod tests {
         );
         assert_eq!(
             editor.notice.as_deref(),
-            Some("ACP priority reset to default")
+            Some("Priority reset; start a new session or restart Mjolnir to apply it.")
         );
     }
 
