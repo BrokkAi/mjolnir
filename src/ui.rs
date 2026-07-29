@@ -16121,6 +16121,7 @@ mod tests {
 
         // Appearance tab: preview theme and spinner live.
         state.mjconfig_menu_key(KeyCode::Tab);
+        state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Right);
         let previewed_theme = state.theme_kind;
         state.mjconfig_menu_key(KeyCode::Down);
@@ -16166,6 +16167,7 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         // Preview different values in both sections.
+        state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Right);
