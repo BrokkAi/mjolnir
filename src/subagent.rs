@@ -3495,6 +3495,7 @@ mod tests {
             choices: Vec::new(),
             warnings: Vec::new(),
             inventory: AcpInventory::default(),
+            subagent_acp_priority: Vec::new(),
         }
     }
 

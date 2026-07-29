@@ -15,6 +15,7 @@ use crate::theme::TerminalThemeKind;
 
 pub const DISABLED_MODEL: &str = "disabled";
 pub const CONFIG_VERSION: u32 = 3;
+pub const DEFAULT_ACP_PRIORITY: [&str; 4] = ["codex-acp", "claude-acp", "kimi", "anvil"];
 /// Schema version this build can migrate forward from.
 const MIGRATABLE_VERSION: u32 = 2;
 
@@ -87,13 +88,29 @@ fn default_auto() -> String {
     "auto".to_string()
 }
 
-/// The model names currently bound to each seat, for display only.
+fn default_acp_priority() -> Vec<String> {
+    DEFAULT_ACP_PRIORITY
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn is_default_acp_priority(priority: &[String]) -> bool {
+    priority.iter().map(String::as_str).eq(DEFAULT_ACP_PRIORITY)
+}
+
+/// The model and resolved ACP source currently bound to each seat, for display
+/// only. Configured (not yet running) selections leave the sources absent.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ModelsConfig {
     #[serde(default = "default_auto")]
     pub primary: String,
     #[serde(default = "default_auto")]
     pub subagent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_source: Option<String>,
 }
 
 impl Default for ModelsConfig {
@@ -101,6 +118,8 @@ impl Default for ModelsConfig {
         Self {
             primary: default_auto(),
             subagent: default_auto(),
+            primary_source: None,
+            subagent_source: None,
         }
     }
 }
@@ -109,6 +128,13 @@ impl Default for ModelsConfig {
 pub struct AgentConfig {
     #[serde(default = "default_auto")]
     pub model: String,
+    /// Preferred ACP sources when more than one enabled adapter offers the
+    /// selected model. Unlisted sources follow in discovery order.
+    #[serde(
+        default = "default_acp_priority",
+        skip_serializing_if = "is_default_acp_priority"
+    )]
+    pub acp_priority: Vec<String>,
     /// Per-invocation reasoning-effort override for the primary agent's ACP
     /// session (e.g. from `--model MODEL+high`). Not meaningful outside a
     /// single `--print` invocation; never written to the on-disk default.
@@ -122,6 +148,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             model: default_auto(),
+            acp_priority: default_acp_priority(),
             reasoning_effort: None,
             discrete_review: true,
         }
@@ -138,6 +165,13 @@ impl AgentConfig {
 pub struct SubagentsConfig {
     #[serde(default = "default_auto")]
     pub model: String,
+    /// Preferred ACP sources when more than one enabled adapter offers the
+    /// selected worker model. Unlisted sources follow in discovery order.
+    #[serde(
+        default = "default_acp_priority",
+        skip_serializing_if = "is_default_acp_priority"
+    )]
+    pub acp_priority: Vec<String>,
     /// Per-invocation reasoning-effort override for subagent ACP sessions
     /// (e.g. from `--subagent-model MODEL+high`). Not meaningful outside a
     /// single `--print` invocation; never written to the on-disk default.
@@ -146,7 +180,7 @@ pub struct SubagentsConfig {
     /// Concurrency cap for the shared subagent pool.
     #[serde(default = "default_max_parallel")]
     pub max_parallel: usize,
-    /// Move the pool to a fallback model when a provider nears its quota.
+    /// Move the pool to the next route when an ACP source nears its quota.
     #[serde(default = "default_true")]
     pub auto_failover: bool,
 }
@@ -155,6 +189,7 @@ impl Default for SubagentsConfig {
     fn default() -> Self {
         Self {
             model: default_auto(),
+            acp_priority: default_acp_priority(),
             reasoning_effort: None,
             max_parallel: default_max_parallel(),
             auto_failover: true,
@@ -327,6 +362,8 @@ impl Config {
         ModelsConfig {
             primary: self.agent.model.clone(),
             subagent: self.subagents.model.clone(),
+            primary_source: None,
+            subagent_source: None,
         }
     }
 
@@ -387,6 +424,22 @@ impl Config {
     fn normalize(&mut self) -> Result<()> {
         if self.subagents.model.eq_ignore_ascii_case("none") {
             self.subagents.model = DISABLED_MODEL.to_string();
+        }
+        for (seat, priority) in [
+            ("agent", &self.agent.acp_priority),
+            ("subagents", &self.subagents.acp_priority),
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            for source_id in priority {
+                anyhow::ensure!(
+                    !source_id.trim().is_empty(),
+                    "{seat}.acp_priority contains an empty source id"
+                );
+                anyhow::ensure!(
+                    seen.insert(source_id),
+                    "{seat}.acp_priority contains duplicate source id '{source_id}'"
+                );
+            }
         }
         anyhow::ensure!(
             self.subagents.max_parallel <= 16,
@@ -520,11 +573,13 @@ fn migrate_v2(body: &str) -> Result<Config> {
         spinner: old.spinner,
         agent: AgentConfig {
             model: old.thor.model,
+            acp_priority: default_acp_priority(),
             reasoning_effort: old.thor.reasoning_effort,
             discrete_review: old.thor.discrete_review,
         },
         subagents: SubagentsConfig {
             model: old.eitri.model,
+            acp_priority: default_acp_priority(),
             reasoning_effort: old.eitri.reasoning_effort,
             max_parallel: old.eitri.max_parallel_explores,
             auto_failover: old.council.auto_failover,
@@ -700,6 +755,26 @@ mod tests {
         assert_eq!(cfg.model_names(), ModelsConfig::default());
         assert!(cfg.agent.discrete_review);
         assert_eq!(cfg.subagents.model, "auto");
+        assert_eq!(
+            cfg.agent.acp_priority,
+            DEFAULT_ACP_PRIORITY.map(str::to_string)
+        );
+        assert_eq!(cfg.agent.acp_priority, cfg.subagents.acp_priority);
+    }
+
+    #[test]
+    fn independent_acp_priorities_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.agent.acp_priority = vec!["claude-acp".into(), "anvil".into()];
+        cfg.subagents.acp_priority = vec!["anvil".into(), "codex-acp".into()];
+
+        cfg.save(&path).expect("save");
+        let loaded = Config::load(&path).expect("load");
+
+        assert_eq!(loaded.agent.acp_priority, cfg.agent.acp_priority);
+        assert_eq!(loaded.subagents.acp_priority, cfg.subagents.acp_priority);
     }
 
     #[test]
@@ -883,6 +958,7 @@ origin = "custom"
             theme: TerminalThemeKind::Light,
             agent: AgentConfig {
                 model: "gpt-5-6-sol".to_string(),
+                acp_priority: default_acp_priority(),
                 reasoning_effort: None,
                 discrete_review: false,
             },

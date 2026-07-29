@@ -41,6 +41,9 @@ snapshot is available when the ranking endpoint cannot be refreshed. Read
 - The primary prefers the strongest launchable eligible row.
 - The default subagent model prefers a cost-efficient qualifying model on the
   current quality frontier, but can reuse the primary's model.
+- When several adapters offer the selected model, the primary and subagent
+  seats apply their independent ACP priority lists. Both lists default to
+  Codex, Claude, Kimi, then Anvil.
 - Every launchable model stays individually addressable: `create_subagent`
   advertises the whole inventory so one call can pick a different agent or
   model than the default.
@@ -67,9 +70,10 @@ COMPANY_REGION = "dev"
 ```
 
 Custom commands launch directly without a shell, inherit Mjolnir's environment,
-and run in the active workspace directory. Configuration order sets custom-route
-precedence. Use an absolute command path where possible and avoid putting secret
-values directly in a committed config file.
+and run in the active workspace directory. New custom routes follow the saved
+seat priorities until the user reorders them. Use an absolute command path
+where possible and avoid putting secret values directly in a committed config
+file.
 
 ACP servers are model agents. They are not the same as MCP servers: Mjolnir does
 not expose a generic user-facing MCP-server list here. Its internal `mj-subagents`

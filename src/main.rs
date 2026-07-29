@@ -2134,7 +2134,10 @@ async fn run_session(
     let export_dir = transcript_export_dir();
     let config_path = config::default_config_path();
     // Pre-fill the UI header with the immutable model selected for this session.
-    let agent_display_name = Some(roster.primary.model.model.clone());
+    let agent_display_name = Some(format!(
+        "{} via {}",
+        roster.primary.model.model, roster.primary.launch.source_id
+    ));
     // Stable runtime route identifier used by remote session state.
     let agent_source_id = Some(agent.source_id.clone());
     let tracker_project_label = header_labels.project.clone();
@@ -2460,11 +2463,16 @@ async fn run_session(
                     .unwrap_or_default(),
                 active_models: config::ModelsConfig {
                     primary: roster.primary.model.model.clone(),
+                    primary_source: Some(roster.primary.launch.source_id.clone()),
                     subagent: roster
                         .subagent_default
                         .as_ref()
                         .map(|role| role.model.model.clone())
                         .unwrap_or_else(|| "off".to_string()),
+                    subagent_source: roster
+                        .subagent_default
+                        .as_ref()
+                        .map(|role| role.launch.source_id.clone()),
                 },
                 review_enabled: agent_config.discrete_review,
                 ragnarok_models: roster.available.clone(),
@@ -3188,6 +3196,7 @@ mod tests {
             choices: Vec::new(),
             warnings: Vec::new(),
             inventory: roster::AcpInventory::default(),
+            subagent_acp_priority: Vec::new(),
         };
 
         assert_eq!(

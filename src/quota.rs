@@ -271,11 +271,16 @@ impl RolePool {
             state.current = next;
             state.announced_block = false;
             let _ = self.ui_tx.send(UiEvent::Info(format!(
-                "{} quota guard switched {} to {}",
-                self.label, failed.model.model, replacement.model.model
+                "{} quota guard switched {} via {} to {} via {}",
+                self.label,
+                failed.model.model,
+                failed.launch.source_id,
+                replacement.model.model,
+                replacement.launch.source_id,
             )));
             let _ = self.ui_tx.send(UiEvent::SubagentPoolModelChanged {
                 model: replacement.model.model.clone(),
+                source_id: replacement.launch.source_id.clone(),
             });
             return true;
         }

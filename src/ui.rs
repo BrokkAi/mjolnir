@@ -7046,10 +7046,18 @@ fn seat_usage_label(usage: &crate::agent_usage::RoleUsage) -> String {
 /// models did work.
 fn active_models_and_usage_report(state: &AppState) -> String {
     let usage = &state.agent_usage;
+    let primary = state.active_models.primary_source.as_deref().map_or_else(
+        || state.active_models.primary.clone(),
+        |source| format!("{} via {source}", state.active_models.primary),
+    );
+    let subagent = state.active_models.subagent_source.as_deref().map_or_else(
+        || state.active_models.subagent.clone(),
+        |source| format!("{} via {source}", state.active_models.subagent),
+    );
     let mut report = format!(
         "Active models\nprimary    {}\nsubagents  {}\n\nUsage (tokens)\nprimary    {}\nsubagents  {}\nreview     {}",
-        state.active_models.primary,
-        state.active_models.subagent,
+        primary,
+        subagent,
         seat_usage_label(&usage.primary),
         seat_usage_label(&usage.subagents),
         seat_usage_label(&usage.review),
@@ -13733,6 +13741,8 @@ mod tests {
         state.active_models = crate::config::ModelsConfig {
             primary: "claude-opus".to_string(),
             subagent: "gpt-worker".to_string(),
+            primary_source: None,
+            subagent_source: None,
         };
         for (seat, model, total) in [
             (crate::agent_usage::Seat::Primary, "claude-opus", 100),
@@ -16043,6 +16053,8 @@ mod tests {
         state.active_models = crate::config::ModelsConfig {
             primary: "claude-opus".to_string(),
             subagent: "gpt-5.5".to_string(),
+            primary_source: Some("claude-acp".to_string()),
+            subagent_source: Some("anvil".to_string()),
         };
         state.input = "/agents".to_string();
         state.input_cursor = 2;
@@ -16064,7 +16076,7 @@ mod tests {
             state.transcript.last(),
             Some(Entry::System(text))
                 if text
-                    == "Active models\nprimary    claude-opus\nsubagents  gpt-5.5\n\nUsage (tokens)\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
+                    == "Active models\nprimary    claude-opus via claude-acp\nsubagents  gpt-5.5 via anvil\n\nUsage (tokens)\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
         ));
     }
 

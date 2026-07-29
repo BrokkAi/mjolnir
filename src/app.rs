@@ -2747,8 +2747,9 @@ impl AppState {
                 }
             }
             UiEvent::AgentUsage(record) => self.agent_usage.observe(record),
-            UiEvent::SubagentPoolModelChanged { model } => {
+            UiEvent::SubagentPoolModelChanged { model, source_id } => {
                 self.active_models.subagent = model;
+                self.active_models.subagent_source = Some(source_id);
             }
             UiEvent::WorkspaceDiff(diff) => {
                 self.pending_workspace_diff_total = Some(diff.total_files);

@@ -119,16 +119,18 @@ pub struct Roster {
     pub choices: Vec<ModelChoice>,
     pub warnings: Vec<String>,
     pub inventory: AcpInventory,
+    pub(crate) subagent_acp_priority: Vec<String>,
 }
 
 impl Roster {
-    /// The subagent pool's model preference order: its bound default first,
-    /// then every other ranked model as quota failover.
+    /// The subagent pool's route preference order: its bound default first,
+    /// then the same model through other ACP sources in configured priority
+    /// order, followed by the remaining ranked models and their routes.
     pub fn subagent_failover_roles(&self) -> Vec<ResolvedAgent> {
         let Some(initial) = self.subagent_default.clone() else {
             return Vec::new();
         };
-        failover_roles(initial, &self.available, false)
+        failover_roles(initial, &self.available, false, &self.subagent_acp_priority)
     }
 }
 
@@ -136,6 +138,7 @@ fn failover_roles(
     initial: ResolvedAgent,
     available: &[ResolvedAgent],
     prefer_other_provider: bool,
+    acp_priority: &[String],
 ) -> Vec<ResolvedAgent> {
     let mut roles = vec![initial.clone()];
     let mut alternatives = available
@@ -150,6 +153,22 @@ fn failover_roles(
     if prefer_other_provider {
         alternatives
             .sort_by_key(|candidate| candidate.launch.source_id == initial.launch.source_id);
+    } else {
+        let mut model_order = HashMap::new();
+        for (index, candidate) in available.iter().enumerate() {
+            model_order
+                .entry(candidate.model.model.as_str())
+                .or_insert(index);
+        }
+        alternatives.sort_by_key(|candidate| {
+            (
+                model_order
+                    .get(candidate.model.model.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX),
+                source_priority(&candidate.launch.source_id, acp_priority),
+            )
+        });
     }
     for candidate in alternatives {
         if !roles.iter().any(|role| {
@@ -160,6 +179,13 @@ fn failover_roles(
         }
     }
     roles
+}
+
+fn source_priority(source_id: &str, priority: &[String]) -> usize {
+    priority
+        .iter()
+        .position(|candidate| candidate == source_id)
+        .unwrap_or(priority.len())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -603,7 +629,6 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
     probes.sort_by_key(|(priority, _, _)| *priority);
     let mut resolved = Vec::new();
     let mut adapter_errors = HashMap::new();
-    let mut claimed_ranked = HashSet::new();
     for (_, launch, capabilities) in probes {
         let capabilities = match capabilities {
             Ok(capabilities) => capabilities,
@@ -639,14 +664,10 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
             .iter()
             .filter(|row| adapter_accepts_model(launch.kind, &row.model))
         {
-            if claimed_ranked.contains(&row.model) {
-                continue;
-            }
             if let Some(option) = options
                 .iter()
                 .find(|option| option_matches(&launch, option, row))
             {
-                claimed_ranked.insert(row.model.clone());
                 resolved.push(ResolvedAgent {
                     model: row.clone(),
                     model_value: option.value.clone(),
@@ -757,11 +778,9 @@ fn explicit<'a>(
     selector: &str,
     rows: &[Row],
     available: &'a [ResolvedAgent],
+    acp_priority: &[String],
 ) -> Result<&'a ResolvedAgent> {
-    if let Some(candidate) = available
-        .iter()
-        .find(|candidate| candidate.model.model == selector)
-    {
+    if let Some(candidate) = preferred_route(selector, available, acp_priority) {
         return Ok(candidate);
     }
     if selector.starts_with("custom/") {
@@ -779,21 +798,38 @@ fn explicit<'a>(
     bail!("{seat} model '{selector}' is unavailable: no HTTP-MCP-capable ACP adapter advertised it")
 }
 
-fn choose_subagent_default<'a>(
-    rows: &[Row],
+fn preferred_route<'a>(
+    model: &str,
     available: &'a [ResolvedAgent],
+    acp_priority: &[String],
 ) -> Option<&'a ResolvedAgent> {
+    acp_priority
+        .iter()
+        .find_map(|source| {
+            available.iter().find(|candidate| {
+                candidate.model.model == model && candidate.launch.source_id == *source
+            })
+        })
+        .or_else(|| {
+            available
+                .iter()
+                .find(|candidate| candidate.model.model == model)
+        })
+}
+
+fn choose_subagent_default(
+    rows: &[Row],
+    available: &[ResolvedAgent],
+    acp_priority: &[String],
+) -> Option<ResolvedAgent> {
     let anchor = deepswe::sonnet_anchor(rows)?;
     let launchable_rows: Vec<Row> = available
         .iter()
         .filter(|role| role.ranked)
         .map(|role| role.model.clone())
         .collect();
-    deepswe::subagent_frontier_choice(&launchable_rows, anchor.pass_at_1).and_then(|row| {
-        available
-            .iter()
-            .find(|candidate| candidate.model.model == row.model)
-    })
+    deepswe::subagent_frontier_choice(&launchable_rows, anchor.pass_at_1)
+        .and_then(|row| preferred_route(&row.model, available, acp_priority).cloned())
 }
 
 fn resolve_subagent_default(
@@ -801,6 +837,7 @@ fn resolve_subagent_default(
     rows: &[Row],
     available: &[ResolvedAgent],
     excluded_models: &[&str],
+    acp_priority: &[String],
 ) -> Result<Option<ResolvedAgent>> {
     if selector == crate::config::DISABLED_MODEL || selector == "none" {
         Ok(None)
@@ -810,11 +847,10 @@ fn resolve_subagent_default(
             .filter(|role| !excluded_models.contains(&role.model.model.as_str()))
             .cloned()
             .collect::<Vec<_>>();
-        Ok(choose_subagent_default(rows, &distinct)
-            .or_else(|| choose_subagent_default(rows, available))
-            .cloned())
+        Ok(choose_subagent_default(rows, &distinct, acp_priority)
+            .or_else(|| choose_subagent_default(rows, available, acp_priority)))
     } else {
-        explicit("Subagent", selector, rows, available).map(|role| Some(role.clone()))
+        explicit("Subagent", selector, rows, available, acp_priority).map(|role| Some(role.clone()))
     }
 }
 
@@ -1133,16 +1169,31 @@ fn assemble_roster(
         bail!("the primary agent cannot be disabled");
     }
     let primary = if config.agent.model == "auto" {
-        available
+        let model = &available
             .iter()
             .find(|candidate| candidate.ranked)
             .ok_or_else(|| anyhow!("Agent Auto requires at least one ranked DeepSWE model"))?
+            .model
+            .model;
+        preferred_route(model, &available, &config.agent.acp_priority)
+            .expect("auto-selected model has a launchable route")
     } else {
-        explicit("Agent", &config.agent.model, rows, &available)?
+        explicit(
+            "Agent",
+            &config.agent.model,
+            rows,
+            &available,
+            &config.agent.acp_priority,
+        )?
     };
     let occupied = vec![primary.model.model.as_str()];
-    let mut subagent_default =
-        resolve_subagent_default(&config.subagents.model, rows, &available, &occupied)?;
+    let mut subagent_default = resolve_subagent_default(
+        &config.subagents.model,
+        rows,
+        &available,
+        &occupied,
+        &config.subagents.acp_priority,
+    )?;
 
     // Attach each seat's per-invocation reasoning-effort override (from
     // `--model`/`--subagent-model MODEL+effort`, threaded via `Config`). This
@@ -1185,6 +1236,7 @@ fn assemble_roster(
         choices,
         warnings,
         inventory,
+        subagent_acp_priority: config.subagents.acp_priority.clone(),
     })
 }
 
@@ -1527,6 +1579,58 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_model_routes_are_retained_and_each_seat_uses_its_priority() {
+        let rows = vec![role_at("gpt-5-5", 0.6, 5.0).model];
+        let discovery = resolve_probes(
+            &rows,
+            vec![
+                (
+                    0,
+                    launch_for(AdapterKind::Codex),
+                    capabilities(true, &["gpt-5-5"]),
+                ),
+                (
+                    1,
+                    launch_for(AdapterKind::Anvil),
+                    capabilities(true, &["openai/gpt-5-5"]),
+                ),
+            ],
+        );
+        assert_eq!(discovery.available.len(), 2);
+
+        let mut config = Config::default();
+        config.agent.model = "gpt-5-5".to_string();
+        config.agent.acp_priority = vec!["anvil".to_string(), "codex-acp".to_string()];
+        config.subagents.model = "gpt-5-5".to_string();
+        config.subagents.acp_priority = vec!["codex-acp".to_string(), "anvil".to_string()];
+        let availability = Availability {
+            codex_credentials: true,
+            claude_status: ClaudeAuthStatus::NotLoggedIn,
+            kimi_credentials: false,
+            kimi: None,
+            anvil: Some(PathBuf::from("anvil")),
+        };
+        let roster = assemble_roster(
+            &config,
+            &rows,
+            &availability,
+            AcpInventory::default(),
+            discovery,
+        )
+        .expect("resolve independent seat priorities");
+
+        assert_eq!(roster.primary.launch.source_id, "anvil");
+        assert_eq!(
+            roster
+                .subagent_default
+                .expect("subagent route")
+                .launch
+                .source_id,
+            "codex-acp"
+        );
+    }
+
+    #[test]
     fn incompatible_and_failed_adapters_are_excluded_with_sanitized_reasons() {
         let rows = vec![role_at("gpt-5-5", 0.6, 5.0).model];
         let discovery = resolve_probes(
@@ -1591,6 +1695,7 @@ mod tests {
             "custom/bpr-agent/openrouter::moonshotai/kimi-k2.7-code",
             &rows,
             &discovery.available,
+            &[],
         )
         .expect("exact custom selector");
 
@@ -1636,7 +1741,7 @@ mod tests {
             kimi: None,
             anvil: None,
         };
-        let error = explicit("Agent", "gpt-5-6-sol", &rows, &[])
+        let error = explicit("Agent", "gpt-5-6-sol", &rows, &[], &[])
             .expect_err("must reject unavailable explicit model");
         assert!(
             error
@@ -1661,7 +1766,7 @@ mod tests {
         ];
 
         assert_eq!(
-            choose_subagent_default(&rows, &available)
+            choose_subagent_default(&rows, &available, &[])
                 .expect("subagent default choice")
                 .model
                 .model,
@@ -1674,7 +1779,7 @@ mod tests {
         let rows = vec![role_at("gpt-5-6-sol", 0.694, 3.47).model];
         let available = vec![role_at("claude-fable-5", 0.64, 4.0)];
 
-        let error = resolve_subagent_default("gpt-5-6-sol", &rows, &available, &[])
+        let error = resolve_subagent_default("gpt-5-6-sol", &rows, &available, &[], &[])
             .expect_err("explicit unavailable subagent model must fail");
         assert!(
             error
@@ -1692,7 +1797,7 @@ mod tests {
 
         let _ = &primary;
         assert!(
-            resolve_subagent_default("none", &rows, &available, &[])
+            resolve_subagent_default("none", &rows, &available, &[], &[])
                 .unwrap()
                 .is_none()
         );
@@ -1744,7 +1849,7 @@ mod tests {
         let available = vec![subagent];
 
         assert_eq!(
-            resolve_subagent_default("auto", &rows, &available, &["gpt-5-6-terra"])
+            resolve_subagent_default("auto", &rows, &available, &["gpt-5-6-terra"], &[])
                 .unwrap()
                 .unwrap()
                 .model
@@ -1768,11 +1873,17 @@ mod tests {
         ];
 
         assert_eq!(
-            resolve_subagent_default("auto", &rows, &available, &["gpt-5-6-sol", "gpt-5-6-terra"])
-                .unwrap()
-                .unwrap()
-                .model
-                .model,
+            resolve_subagent_default(
+                "auto",
+                &rows,
+                &available,
+                &["gpt-5-6-sol", "gpt-5-6-terra"],
+                &[],
+            )
+            .unwrap()
+            .unwrap()
+            .model
+            .model,
             "claude-fable-5"
         );
     }

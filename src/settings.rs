@@ -90,6 +90,12 @@ struct InstallingServer {
     abort: tokio::task::AbortHandle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrioritySeat {
+    Primary,
+    Subagents,
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsEditor {
     pub config: Config,
@@ -102,6 +108,8 @@ pub struct SettingsEditor {
     acp_view: AcpView,
     registry: RegistryState,
     installing: Option<InstallingServer>,
+    priority_editor: Option<PrioritySeat>,
+    priority_selected: usize,
 }
 
 impl SettingsEditor {
@@ -118,6 +126,8 @@ impl SettingsEditor {
             acp_view: AcpView::Servers,
             registry: RegistryState::NotLoaded,
             installing: None,
+            priority_editor: None,
+            priority_selected: 0,
         }
     }
 
@@ -135,6 +145,9 @@ impl SettingsEditor {
 
     pub fn handle_key(&mut self, code: KeyCode) -> SettingsAction {
         self.poll_background();
+        if self.priority_editor.is_some() {
+            return self.handle_priority_key(code);
+        }
         if self.tab == SettingsTab::AcpServers {
             match self.acp_view {
                 AcpView::Catalog { .. } => return self.handle_catalog_key(code),
@@ -166,6 +179,14 @@ impl SettingsEditor {
                 if self.tab == SettingsTab::AcpServers && self.selected == ADD_SERVER_INDEX =>
             {
                 self.open_catalog();
+                SettingsAction::None
+            }
+            KeyCode::Enter if self.tab == SettingsTab::Agents && self.selected == 5 => {
+                self.open_priority_editor(PrioritySeat::Primary);
+                SettingsAction::None
+            }
+            KeyCode::Enter if self.tab == SettingsTab::Agents && self.selected == 6 => {
+                self.open_priority_editor(PrioritySeat::Subagents);
                 SettingsAction::None
             }
             KeyCode::Enter => SettingsAction::Save,
@@ -205,7 +226,7 @@ impl SettingsEditor {
 
     fn row_count(&self) -> usize {
         match self.tab {
-            SettingsTab::Agents => 5,
+            SettingsTab::Agents => 7,
             SettingsTab::AcpServers => self.inventory.servers.len() + SERVER_ROW_OFFSET,
             SettingsTab::Appearance => 2,
         }
@@ -353,6 +374,86 @@ impl SettingsEditor {
         choices
     }
 
+    fn priority(&self, seat: PrioritySeat) -> &Vec<String> {
+        match seat {
+            PrioritySeat::Primary => &self.config.agent.acp_priority,
+            PrioritySeat::Subagents => &self.config.subagents.acp_priority,
+        }
+    }
+
+    fn priority_mut(&mut self, seat: PrioritySeat) -> &mut Vec<String> {
+        match seat {
+            PrioritySeat::Primary => &mut self.config.agent.acp_priority,
+            PrioritySeat::Subagents => &mut self.config.subagents.acp_priority,
+        }
+    }
+
+    fn effective_priority(&self, seat: PrioritySeat) -> Vec<String> {
+        let mut priority = self.priority(seat).clone();
+        for server in &self.inventory.servers {
+            if !priority.contains(&server.id) {
+                priority.push(server.id.clone());
+            }
+        }
+        priority
+    }
+
+    fn open_priority_editor(&mut self, seat: PrioritySeat) {
+        let priority = self.effective_priority(seat);
+        *self.priority_mut(seat) = priority;
+        self.priority_editor = Some(seat);
+        self.priority_selected = 0;
+        self.notice = None;
+    }
+
+    fn handle_priority_key(&mut self, code: KeyCode) -> SettingsAction {
+        let Some(seat) = self.priority_editor else {
+            return SettingsAction::None;
+        };
+        let len = self.priority(seat).len();
+        match code {
+            KeyCode::Esc | KeyCode::Enter => {
+                self.priority_editor = None;
+                self.notice = None;
+            }
+            KeyCode::Up | KeyCode::Char('k') if len > 0 => {
+                self.priority_selected = self
+                    .priority_selected
+                    .checked_sub(1)
+                    .unwrap_or(len.saturating_sub(1));
+            }
+            KeyCode::Down | KeyCode::Char('j') if len > 0 => {
+                self.priority_selected = (self.priority_selected + 1) % len;
+            }
+            KeyCode::Left | KeyCode::Char('h') if self.priority_selected > 0 => {
+                let selected = self.priority_selected;
+                self.priority_mut(seat).swap(selected, selected - 1);
+                self.priority_selected -= 1;
+            }
+            KeyCode::Right | KeyCode::Char('l') if self.priority_selected + 1 < len => {
+                let selected = self.priority_selected;
+                self.priority_mut(seat).swap(selected, selected + 1);
+                self.priority_selected += 1;
+            }
+            _ => return SettingsAction::None,
+        }
+        SettingsAction::Changed
+    }
+
+    fn priority_summary(&self, seat: PrioritySeat) -> String {
+        self.effective_priority(seat)
+            .iter()
+            .map(|id| {
+                self.inventory
+                    .servers
+                    .iter()
+                    .find(|server| server.id == *id)
+                    .map_or_else(|| id.clone(), |server| server.label.clone())
+            })
+            .collect::<Vec<_>>()
+            .join(" → ")
+    }
+
     fn staged_model_detail(&self, model: &str) -> String {
         if model == "auto" {
             return "automatic selection".to_string();
@@ -372,15 +473,14 @@ impl SettingsEditor {
                     .unwrap_or("no launchable ACP route")
             );
         }
-        let adapter = choice.adapter.as_deref().unwrap_or("adapter unknown");
         if choice.ranked {
             format!(
-                "{adapter}; Pass@1 {:.1}%; ${:.2}",
+                "Pass@1 {:.1}%; ${:.2}",
                 choice.pass_at_1 * 100.0,
                 choice.mean_cost_usd
             )
         } else {
-            format!("{adapter}; unranked")
+            "unranked".to_string()
         }
     }
 
@@ -388,10 +488,13 @@ impl SettingsEditor {
         let Some(models) = self.active_models.as_ref() else {
             return "not running".to_string();
         };
-        let model = match role {
-            0 => &models.primary,
-            _ => &models.subagent,
+        let (model, source) = match role {
+            0 => (&models.primary, models.primary_source.as_deref()),
+            _ => (&models.subagent, models.subagent_source.as_deref()),
         };
+        if let Some(source) = source {
+            return format!("{model} via {source}");
+        }
         let adapter = self
             .choices
             .iter()
@@ -800,22 +903,26 @@ pub fn draw_settings_panel(
             rows[2],
         );
     }
-    let footer = match editor.acp_view {
-        AcpView::Catalog { .. } if editor.installing.is_some() => "Esc cancel install view",
-        AcpView::Catalog { .. } => "Type filter · ↑/↓ select · Enter add · Esc back",
-        AcpView::Custom { .. } => "Tab field · Enter add · Esc back",
-        AcpView::Servers
-            if editor.tab == SettingsTab::AcpServers && editor.selected < ACCOUNT_COUNT =>
-        {
-            "Enter sign in · ↑/↓ select · Tab view · Esc cancel"
-        }
-        AcpView::Servers
-            if editor.tab == SettingsTab::AcpServers && editor.selected == ADD_SERVER_INDEX =>
-        {
-            "Enter add server · ↑/↓ select · Tab view · Esc cancel"
-        }
-        AcpView::Servers => {
-            "Tab view · ↑/↓ select · ←/→ change · Space toggle · Enter save · Esc cancel"
+    let footer = if editor.priority_editor.is_some() {
+        "↑/↓ select · ←/→ move priority · Enter done · Esc back"
+    } else {
+        match editor.acp_view {
+            AcpView::Catalog { .. } if editor.installing.is_some() => "Esc cancel install view",
+            AcpView::Catalog { .. } => "Type filter · ↑/↓ select · Enter add · Esc back",
+            AcpView::Custom { .. } => "Tab field · Enter add · Esc back",
+            AcpView::Servers
+                if editor.tab == SettingsTab::AcpServers && editor.selected < ACCOUNT_COUNT =>
+            {
+                "Enter sign in · ↑/↓ select · Tab view · Esc cancel"
+            }
+            AcpView::Servers
+                if editor.tab == SettingsTab::AcpServers && editor.selected == ADD_SERVER_INDEX =>
+            {
+                "Enter add server · ↑/↓ select · Tab view · Esc cancel"
+            }
+            AcpView::Servers => {
+                "Tab view · ↑/↓ select · ←/→ change · Space toggle · Enter save · Esc cancel"
+            }
         }
     };
     frame.render_widget(
@@ -854,6 +961,34 @@ fn draw_agents(
     editor: &SettingsEditor,
     theme: TerminalTheme,
 ) {
+    if let Some(seat) = editor.priority_editor {
+        let title = match seat {
+            PrioritySeat::Primary => "Primary ACP priority",
+            PrioritySeat::Subagents => "Subagent ACP priority",
+        };
+        let mut lines = vec![
+            Line::styled(
+                format!("{title} · first matching adapter wins"),
+                Style::default().fg(theme.muted),
+            ),
+            Line::raw(""),
+        ];
+        for (index, id) in editor.priority(seat).iter().enumerate() {
+            let label = editor
+                .inventory
+                .servers
+                .iter()
+                .find(|server| server.id == *id)
+                .map_or(id.as_str(), |server| server.label.as_str());
+            lines.push(selected_line(
+                editor.priority_selected == index,
+                format!("{}. {label} ({id})", index + 1),
+                theme,
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        return;
+    }
     let mut lines = vec![
         Line::styled(
             "The running session keeps its models until /new or /clear reloads the saved selection.",
@@ -913,6 +1048,23 @@ fn draw_agents(
         "         quota changes reload with /new or /clear",
         Style::default().fg(theme.muted),
     )));
+    lines.push(Line::raw(""));
+    lines.push(selected_line(
+        editor.selected == 5,
+        format!(
+            "Primary ACP order    {}",
+            editor.priority_summary(PrioritySeat::Primary)
+        ),
+        theme,
+    ));
+    lines.push(selected_line(
+        editor.selected == 6,
+        format!(
+            "Subagent ACP order   {}",
+            editor.priority_summary(PrioritySeat::Subagents)
+        ),
+        theme,
+    ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
@@ -1305,6 +1457,25 @@ mod tests {
         editor.selected = 1;
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(editor.config.subagents.model, crate::config::DISABLED_MODEL);
+    }
+
+    #[test]
+    fn primary_and_subagent_acp_priorities_reorder_independently() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.selected = 5;
+        assert_eq!(editor.handle_key(KeyCode::Enter), SettingsAction::None);
+        assert_eq!(editor.priority_editor, Some(PrioritySeat::Primary));
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.agent.acp_priority[0], "claude-acp");
+        assert_eq!(editor.config.subagents.acp_priority[0], "codex-acp");
+        editor.handle_key(KeyCode::Enter);
+
+        editor.selected = 6;
+        editor.handle_key(KeyCode::Enter);
+        editor.handle_key(KeyCode::Right);
+        assert_eq!(editor.config.subagents.acp_priority[0], "claude-acp");
+        assert_eq!(editor.config.agent.acp_priority[0], "claude-acp");
+        assert_eq!(editor.config.agent.acp_priority[1], "codex-acp");
     }
 
     #[test]

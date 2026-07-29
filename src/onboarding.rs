@@ -39,10 +39,13 @@ pub async fn run(
     if let Some(roster) = roster {
         editor = editor.with_active_models(crate::config::ModelsConfig {
             primary: roster.primary.model.model,
+            primary_source: Some(roster.primary.launch.source_id),
             subagent: roster
                 .subagent_default
-                .map(|role| role.model.model)
+                .as_ref()
+                .map(|role| role.model.model.clone())
                 .unwrap_or_else(|| "off".to_string()),
+            subagent_source: roster.subagent_default.map(|role| role.launch.source_id),
         });
     }
     let mut events = EventStream::new();
@@ -156,6 +159,7 @@ mod tests {
             }],
             warnings: Vec::new(),
             inventory: crate::roster::AcpInventory::default(),
+            subagent_acp_priority: Vec::new(),
         }
     }
 

@@ -32,16 +32,35 @@ set `model = "disabled"` (or `"none"`) to turn subagents off entirely.
 | Key | Meaning |
 | --- | --- |
 | `agent.model` | Primary model, or `auto` |
+| `agent.acp_priority` | ACP source preference when several enabled adapters offer the primary model |
 | `agent.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `agent.discrete_review` | Run the end-of-turn discrete review |
 | `subagents.model` | Default subagent model, `auto`, or `disabled` |
+| `subagents.acp_priority` | Independent ACP source preference for the default worker model |
 | `subagents.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `subagents.max_parallel` | Concurrent subagents, default 6, maximum 16 |
-| `subagents.auto_failover` | Move the default pool to another roster model when the current provider's quota runs low |
+| `subagents.auto_failover` | Move the default pool to the next roster route when the current ACP source's quota runs low; the model may stay the same |
 
 Explicit model IDs can come from `/models`; availability is checked when the
 next session starts. A `max_parallel` above 16 is a configuration error, not a
 silently clamped value.
+
+Both ACP priority lists default to `codex-acp`, `claude-acp`, `kimi`, then
+`anvil`, preserving the automatic behavior of earlier configurations. Reorder
+them independently from the Agents tab, or configure stable source IDs directly:
+
+```toml
+[agent]
+acp_priority = ["codex-acp", "claude-acp", "anvil", "kimi"]
+
+[subagents]
+acp_priority = ["anvil", "codex-acp", "claude-acp", "kimi"]
+```
+
+The ACP Servers tab still controls eligibility. Priority only decides which
+enabled adapter supplies a selected model when more than one advertises it.
+Sources absent from a saved list are appended in discovery order, so installing
+a new adapter does not unexpectedly move it ahead of an explicit preference.
 
 ## Migrating from version 2
 
