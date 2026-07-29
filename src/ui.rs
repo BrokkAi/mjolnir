@@ -16241,6 +16241,7 @@ mod tests {
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("mj config"), "rendered:\n{rendered}");
         assert!(rendered.contains("Agents"), "rendered:\n{rendered}");
+        assert!(rendered.contains("ACP Priority"), "rendered:\n{rendered}");
         assert!(rendered.contains("ACP Servers"), "rendered:\n{rendered}");
         assert!(rendered.contains("Appearance"), "rendered:\n{rendered}");
         assert!(

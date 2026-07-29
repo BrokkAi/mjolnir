@@ -47,7 +47,8 @@ silently clamped value.
 
 Both ACP priority lists default to `codex-acp`, `claude-acp`, `kimi`, then
 `anvil`, preserving the automatic behavior of earlier configurations. Reorder
-them independently from the Agents tab, or configure stable source IDs directly:
+or reset them independently from the ACP Priority tab, or configure stable
+source IDs directly:
 
 ```toml
 [agent]

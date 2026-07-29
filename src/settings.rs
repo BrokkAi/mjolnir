@@ -29,16 +29,23 @@ pub(crate) const SERVER_ROW_OFFSET: usize = ACCOUNT_COUNT + 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     Agents,
+    AcpPriority,
     AcpServers,
     Appearance,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 3] = [Self::Agents, Self::AcpServers, Self::Appearance];
+    const ALL: [Self; 4] = [
+        Self::Agents,
+        Self::AcpPriority,
+        Self::AcpServers,
+        Self::Appearance,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Agents => "Agents",
+            Self::AcpPriority => "ACP Priority",
             Self::AcpServers => "ACP Servers",
             Self::Appearance => "Appearance",
         }
@@ -181,11 +188,11 @@ impl SettingsEditor {
                 self.open_catalog();
                 SettingsAction::None
             }
-            KeyCode::Enter if self.tab == SettingsTab::Agents && self.selected == 5 => {
+            KeyCode::Enter if self.tab == SettingsTab::AcpPriority && self.selected == 0 => {
                 self.open_priority_editor(PrioritySeat::Primary);
                 SettingsAction::None
             }
-            KeyCode::Enter if self.tab == SettingsTab::Agents && self.selected == 6 => {
+            KeyCode::Enter if self.tab == SettingsTab::AcpPriority && self.selected == 1 => {
                 self.open_priority_editor(PrioritySeat::Subagents);
                 SettingsAction::None
             }
@@ -226,7 +233,8 @@ impl SettingsEditor {
 
     fn row_count(&self) -> usize {
         match self.tab {
-            SettingsTab::Agents => 7,
+            SettingsTab::Agents => 5,
+            SettingsTab::AcpPriority => 2,
             SettingsTab::AcpServers => self.inventory.servers.len() + SERVER_ROW_OFFSET,
             SettingsTab::Appearance => 2,
         }
@@ -246,6 +254,7 @@ impl SettingsEditor {
                 self.config.subagents.max_parallel =
                     (self.config.subagents.max_parallel as i32 + delta).rem_euclid(17) as usize;
             }
+            SettingsTab::AcpPriority => return SettingsAction::None,
             SettingsTab::AcpServers => {
                 let Some(index) = self.selected.checked_sub(SERVER_ROW_OFFSET) else {
                     return SettingsAction::None;
@@ -306,6 +315,7 @@ impl SettingsEditor {
             SettingsTab::Agents if self.selected == 4 => {
                 self.config.subagents.auto_failover = !self.config.subagents.auto_failover;
             }
+            SettingsTab::AcpPriority => return SettingsAction::None,
             SettingsTab::AcpServers => {
                 let Some(index) = self.selected.checked_sub(SERVER_ROW_OFFSET) else {
                     return SettingsAction::None;
@@ -434,6 +444,14 @@ impl SettingsEditor {
                 let selected = self.priority_selected;
                 self.priority_mut(seat).swap(selected, selected + 1);
                 self.priority_selected += 1;
+            }
+            KeyCode::Char('r') => {
+                *self.priority_mut(seat) = crate::config::DEFAULT_ACP_PRIORITY
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                self.priority_selected = 0;
+                self.notice = Some("ACP priority reset to default".to_string());
             }
             _ => return SettingsAction::None,
         }
@@ -892,6 +910,7 @@ pub fn draw_settings_panel(
     draw_tabs(frame, rows[0], editor, theme);
     match editor.tab {
         SettingsTab::Agents => draw_agents(frame, rows[1], editor, theme),
+        SettingsTab::AcpPriority => draw_acp_priority(frame, rows[1], editor, theme),
         SettingsTab::AcpServers => draw_servers(frame, rows[1], editor, theme),
         SettingsTab::Appearance => draw_appearance(frame, rows[1], editor, theme),
     }
@@ -904,7 +923,7 @@ pub fn draw_settings_panel(
         );
     }
     let footer = if editor.priority_editor.is_some() {
-        "↑/↓ select · ←/→ move priority · Enter done · Esc back"
+        "↑/↓ select · ←/→ move · r reset default · Enter done · Esc back"
     } else {
         match editor.acp_view {
             AcpView::Catalog { .. } if editor.installing.is_some() => "Esc cancel install view",
@@ -961,34 +980,6 @@ fn draw_agents(
     editor: &SettingsEditor,
     theme: TerminalTheme,
 ) {
-    if let Some(seat) = editor.priority_editor {
-        let title = match seat {
-            PrioritySeat::Primary => "Primary ACP priority",
-            PrioritySeat::Subagents => "Subagent ACP priority",
-        };
-        let mut lines = vec![
-            Line::styled(
-                format!("{title} · first matching adapter wins"),
-                Style::default().fg(theme.muted),
-            ),
-            Line::raw(""),
-        ];
-        for (index, id) in editor.priority(seat).iter().enumerate() {
-            let label = editor
-                .inventory
-                .servers
-                .iter()
-                .find(|server| server.id == *id)
-                .map_or(id.as_str(), |server| server.label.as_str());
-            lines.push(selected_line(
-                editor.priority_selected == index,
-                format!("{}. {label} ({id})", index + 1),
-                theme,
-            ));
-        }
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-        return;
-    }
     let mut lines = vec![
         Line::styled(
             "The running session keeps its models until /new or /clear reloads the saved selection.",
@@ -1048,23 +1039,76 @@ fn draw_agents(
         "         quota changes reload with /new or /clear",
         Style::default().fg(theme.muted),
     )));
-    lines.push(Line::raw(""));
-    lines.push(selected_line(
-        editor.selected == 5,
-        format!(
-            "Primary ACP order    {}",
-            editor.priority_summary(PrioritySeat::Primary)
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn draw_acp_priority(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    editor: &SettingsEditor,
+    theme: TerminalTheme,
+) {
+    if let Some(seat) = editor.priority_editor {
+        let title = match seat {
+            PrioritySeat::Primary => "Primary ACP priority",
+            PrioritySeat::Subagents => "Subagent ACP priority",
+        };
+        let mut lines = vec![
+            Line::styled(
+                format!("{title} · first matching adapter wins"),
+                Style::default().fg(theme.muted),
+            ),
+            Line::styled(
+                "r resets to Codex → Claude → Kimi → Anvil",
+                Style::default().fg(theme.muted),
+            ),
+            Line::raw(""),
+        ];
+        for (index, id) in editor.priority(seat).iter().enumerate() {
+            let label = editor
+                .inventory
+                .servers
+                .iter()
+                .find(|server| server.id == *id)
+                .map_or(id.as_str(), |server| server.label.as_str());
+            lines.push(selected_line(
+                editor.priority_selected == index,
+                format!("{}. {label} ({id})", index + 1),
+                theme,
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        return;
+    }
+
+    let lines = vec![
+        Line::styled(
+            "Choose which enabled ACP source supplies a model when several match.",
+            Style::default().fg(theme.muted),
         ),
-        theme,
-    ));
-    lines.push(selected_line(
-        editor.selected == 6,
-        format!(
-            "Subagent ACP order   {}",
-            editor.priority_summary(PrioritySeat::Subagents)
+        Line::raw(""),
+        selected_line(
+            editor.selected == 0,
+            format!(
+                "Primary   [Enter] {}",
+                editor.priority_summary(PrioritySeat::Primary)
+            ),
+            theme,
         ),
-        theme,
-    ));
+        selected_line(
+            editor.selected == 1,
+            format!(
+                "Subagents [Enter] {}",
+                editor.priority_summary(PrioritySeat::Subagents)
+            ),
+            theme,
+        ),
+        Line::raw(""),
+        Line::styled(
+            "ACP Servers controls eligibility; this tab controls preference order.",
+            Style::default().fg(theme.muted),
+        ),
+    ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
@@ -1405,6 +1449,8 @@ mod tests {
         );
         assert!(!editor.config.agent.discrete_review);
         editor.handle_key(KeyCode::Tab);
+        assert_eq!(editor.tab, SettingsTab::AcpPriority);
+        editor.handle_key(KeyCode::Tab);
         assert_eq!(editor.tab, SettingsTab::AcpServers);
         editor.selected = editor
             .inventory
@@ -1462,7 +1508,8 @@ mod tests {
     #[test]
     fn primary_and_subagent_acp_priorities_reorder_independently() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        editor.selected = 5;
+        editor.tab = SettingsTab::AcpPriority;
+        editor.selected = 0;
         assert_eq!(editor.handle_key(KeyCode::Enter), SettingsAction::None);
         assert_eq!(editor.priority_editor, Some(PrioritySeat::Primary));
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
@@ -1470,12 +1517,47 @@ mod tests {
         assert_eq!(editor.config.subagents.acp_priority[0], "codex-acp");
         editor.handle_key(KeyCode::Enter);
 
-        editor.selected = 6;
+        editor.selected = 1;
         editor.handle_key(KeyCode::Enter);
         editor.handle_key(KeyCode::Right);
         assert_eq!(editor.config.subagents.acp_priority[0], "claude-acp");
         assert_eq!(editor.config.agent.acp_priority[0], "claude-acp");
         assert_eq!(editor.config.agent.acp_priority[1], "codex-acp");
+        assert_eq!(
+            editor.handle_key(KeyCode::Char('r')),
+            SettingsAction::Changed
+        );
+        assert_eq!(
+            editor.config.subagents.acp_priority,
+            crate::config::DEFAULT_ACP_PRIORITY.map(str::to_string)
+        );
+        assert_eq!(
+            editor.notice.as_deref(),
+            Some("ACP priority reset to default")
+        );
+    }
+
+    #[test]
+    fn acp_priority_tab_exposes_both_seat_editors() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::AcpPriority;
+        let backend = ratatui::backend::TestBackend::new(90, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_settings_panel(frame, frame.area(), &editor, "mj config"))
+            .expect("draw");
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("ACP Priority"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("Primary   [Enter]"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Subagents [Enter]"),
+            "rendered:\n{rendered}"
+        );
     }
 
     #[test]
