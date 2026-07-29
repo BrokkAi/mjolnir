@@ -21861,7 +21861,7 @@ mod tests {
         state.input = "hello abcdef".to_string();
         state.input_cursor = state.input.chars().count();
 
-        let mut terminal = Terminal::new(TestBackend::new(16, 6)).expect("terminal");
+        let mut terminal = Terminal::new(TestBackend::new(14, 6)).expect("terminal");
         terminal
             .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::FullscreenTui))
             .expect("draw");
@@ -21879,7 +21879,7 @@ mod tests {
         );
         terminal
             .backend_mut()
-            .assert_cursor_position(Position::new(10, 3));
+            .assert_cursor_position(Position::new(9, 3));
     }
 
     #[test]
