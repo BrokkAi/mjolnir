@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 /// Display width (terminal columns) of every spinner frame, for every style.
 pub const SPINNER_WIDTH: usize = 12;
 
+/// Resting ornament shown when no turn is in flight.
+const IDLE_GLYPH: char = '─';
+
 /// Wall-clock dwell per animation frame. Kept deliberately calmer than
 /// streaming redraws so progress reads as steady activity without making
 /// queued prompt typing feel visually noisy.
@@ -186,7 +189,7 @@ fn build_pulse() -> FrameSet {
         .collect();
     FrameSet {
         animated,
-        idle: "·".repeat(w),
+        idle: IDLE_GLYPH.to_string().repeat(w),
     }
 }
 
@@ -218,7 +221,7 @@ fn build_wave() -> FrameSet {
         .collect();
     FrameSet {
         animated,
-        idle: levels[1].to_string().repeat(w),
+        idle: IDLE_GLYPH.to_string().repeat(w),
     }
 }
 
@@ -243,7 +246,7 @@ fn build_bars() -> FrameSet {
         .collect();
     FrameSet {
         animated,
-        idle: "▁".repeat(w),
+        idle: IDLE_GLYPH.to_string().repeat(w),
     }
 }
 
@@ -254,7 +257,7 @@ fn build_shimmer() -> FrameSet {
     let animated = ramp.iter().map(|c| row(c.to_string().repeat(w))).collect();
     FrameSet {
         animated,
-        idle: "·".repeat(w),
+        idle: IDLE_GLYPH.to_string().repeat(w),
     }
 }
 
@@ -302,6 +305,14 @@ mod tests {
                     "{style} compact frame {frame:?} must be one column"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_style_uses_a_solid_horizontal_line_when_idle() {
+        let expected = IDLE_GLYPH.to_string().repeat(SPINNER_WIDTH);
+        for style in SpinnerStyle::ALL {
+            assert_eq!(style.idle_frame(), expected, "{style} idle frame");
         }
     }
 
