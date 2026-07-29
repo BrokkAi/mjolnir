@@ -10057,7 +10057,9 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     } else {
         Style::default()
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .title(title);
 
     // Build lines with attachment chips interleaved with input text.
     let mut lines: Vec<Line> = Vec::new();
@@ -10065,9 +10067,9 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
     f.render_widget(block, area);
 
     let inner = Rect::new(
-        area.x.saturating_add(1),
+        area.x,
         area.y.saturating_add(1),
-        area.width.saturating_sub(2),
+        area.width,
         area.height.saturating_sub(2),
     );
     if inner.width == 0 || inner.height == 0 {
@@ -18984,7 +18986,7 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("············ (Enter send"),
+            rendered.contains("──────────── (Enter send"),
             "rendered:\n{rendered}"
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
@@ -19010,6 +19012,34 @@ mod tests {
     }
 
     #[test]
+    fn input_box_omits_side_borders() {
+        let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Ready);
+        let backend = TestBackend::new(80, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::InlineChat))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer());
+        assert!(
+            rendered.first().is_some_and(|line| line.contains('─')),
+            "top border missing:\n{}",
+            rendered.join("\n")
+        );
+        assert!(
+            rendered.last().is_some_and(|line| line.contains('─')),
+            "bottom border missing:\n{}",
+            rendered.join("\n")
+        );
+        for line in &rendered[1..rendered.len() - 1] {
+            assert!(!line.starts_with('│'), "left border rendered: {line:?}");
+            assert!(!line.ends_with('│'), "right border rendered: {line:?}");
+        }
+    }
+
+    #[test]
     fn inline_input_title_omits_text_selection_shortcut() {
         let mut state = AppState::new();
         state.set_connection_state(ConnectionState::Ready);
@@ -19022,7 +19052,7 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("············ (Enter send"),
+            rendered.contains("──────────── (Enter send"),
             "rendered:\n{rendered}"
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
@@ -19044,7 +19074,7 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("············ 0s (Enter send"),
+            rendered.contains("──────────── 0s (Enter send"),
             "rendered:\n{rendered}"
         );
         assert!(!rendered.contains("prompt"), "rendered:\n{rendered}");
