@@ -196,7 +196,7 @@ pub struct ModelChoice {
 #[derive(Debug, Clone)]
 pub struct Availability {
     pub codex_credentials: bool,
-    pub claude_credentials: bool,
+    pub claude_status: ClaudeAuthStatus,
     pub kimi_credentials: bool,
     pub kimi: Option<PathBuf>,
     pub anvil: Option<PathBuf>,
@@ -206,7 +206,7 @@ impl Availability {
     pub fn detect() -> Self {
         Self {
             codex_credentials: codex_credentials_available(),
-            claude_credentials: claude_credentials_available(),
+            claude_status: claude_auth_status(),
             kimi_credentials: kimi_credentials_available(),
             kimi: crate::kimi::detect().path,
             anvil: crate::anvil::detect().path,
@@ -216,7 +216,9 @@ impl Availability {
     pub fn missing_reason(&self, model: &str) -> Option<&'static str> {
         match adapter_kind(model) {
             AdapterKind::Codex if !self.codex_credentials => Some("Codex credentials not found"),
-            AdapterKind::Claude if !self.claude_credentials => Some("Claude credentials not found"),
+            AdapterKind::Claude if !self.claude_status.logged_in() => {
+                Some(self.claude_status.unavailable_reason())
+            }
             AdapterKind::Kimi if !self.kimi_credentials => Some("Kimi credentials not found"),
             AdapterKind::Kimi if self.kimi.is_none() => Some("Kimi Code is not installed"),
             AdapterKind::Anvil if self.anvil.is_none() => Some("managed Anvil is not ready"),
@@ -254,8 +256,46 @@ fn codex_credentials_available() -> bool {
     crate::auth::detect(crate::auth::AuthVendor::OpenAi).available()
 }
 
-fn claude_credentials_available() -> bool {
-    crate::auth::detect(crate::auth::AuthVendor::Anthropic).available()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeAuthStatus {
+    LoggedIn,
+    NotLoggedIn,
+    NotInstalled,
+    Unavailable,
+}
+
+impl ClaudeAuthStatus {
+    fn logged_in(self) -> bool {
+        self == Self::LoggedIn
+    }
+
+    fn unavailable_reason(self) -> &'static str {
+        match self {
+            Self::LoggedIn => "Claude Code is logged in",
+            Self::NotLoggedIn => "Claude Code is not logged in",
+            Self::NotInstalled => "Claude Code is not installed",
+            Self::Unavailable => "Claude Code login status is unavailable",
+        }
+    }
+}
+
+fn claude_auth_status() -> ClaudeAuthStatus {
+    let output = match std::process::Command::new("claude")
+        .args(["auth", "status"])
+        .stdin(std::process::Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ClaudeAuthStatus::NotInstalled;
+        }
+        Err(_) => return ClaudeAuthStatus::Unavailable,
+    };
+    if claude_auth_status_logged_in(&output.stdout) {
+        ClaudeAuthStatus::LoggedIn
+    } else {
+        ClaudeAuthStatus::NotLoggedIn
+    }
 }
 
 fn kimi_credentials_available() -> bool {
@@ -281,23 +321,11 @@ fn codex_detection() -> Option<String> {
     )
 }
 
-fn claude_detection() -> Option<String> {
-    for name in [
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-    ] {
-        if nonempty_env(&[name]) {
-            return Some(format!("{name} is set"));
-        }
-    }
-    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))?;
-    credential_file_evidence(
-        &root.join(".credentials.json"),
-        &["/claudeAiOauth/accessToken", "/claudeAiOauth/refreshToken"],
-    )
+fn claude_auth_status_logged_in(output: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(output)
+        .ok()
+        .and_then(|status| status.get("loggedIn").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
 }
 
 fn adapter_kind(model: &str) -> AdapterKind {
@@ -373,8 +401,11 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
         ),
         (
             AdapterKind::Claude,
-            claude_detection(),
-            "Claude credentials not found".to_string(),
+            availability
+                .claude_status
+                .logged_in()
+                .then(|| "authenticated via `claude auth status`".to_string()),
+            availability.claude_status.unavailable_reason().to_string(),
         ),
         (
             AdapterKind::Kimi,
@@ -814,7 +845,7 @@ fn unavailable_reason(
                 || config.acp.policy("codex-acp") == AcpServerPolicy::Enabled
         }
         AdapterKind::Claude => {
-            availability.claude_credentials
+            availability.claude_status.logged_in()
                 || config.acp.policy("claude-acp") == AcpServerPolicy::Enabled
         }
         AdapterKind::Kimi => {
@@ -1160,6 +1191,28 @@ fn assemble_roster(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_auth_status_requires_explicit_logged_in_true() {
+        assert!(claude_auth_status_logged_in(
+            br#"{"loggedIn":true,"authMethod":"claude.ai"}"#
+        ));
+        assert!(!claude_auth_status_logged_in(
+            br#"{"loggedIn":false,"authMethod":"none"}"#
+        ));
+        assert!(!claude_auth_status_logged_in(
+            br#"{"authMethod":"claude.ai"}"#
+        ));
+        assert!(!claude_auth_status_logged_in(b"not json"));
+        assert_eq!(
+            ClaudeAuthStatus::NotInstalled.unavailable_reason(),
+            "Claude Code is not installed"
+        );
+        assert_eq!(
+            ClaudeAuthStatus::NotLoggedIn.unavailable_reason(),
+            "Claude Code is not logged in"
+        );
+    }
 
     #[test]
     fn permission_presets_map_to_provider_controls() {
@@ -1553,7 +1606,7 @@ mod tests {
     fn missing_reasons_are_based_on_adapter_presence() {
         let availability = Availability {
             codex_credentials: false,
-            claude_credentials: false,
+            claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
             anvil: None,
@@ -1578,7 +1631,7 @@ mod tests {
         }];
         let availability = Availability {
             codex_credentials: false,
-            claude_credentials: false,
+            claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
             anvil: None,
@@ -1657,7 +1710,7 @@ mod tests {
         };
         let availability = Availability {
             codex_credentials: false,
-            claude_credentials: false,
+            claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
             anvil: None,

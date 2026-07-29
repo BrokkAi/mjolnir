@@ -4601,10 +4601,8 @@ fn handle_mjconfig_menu_key(
                         Some("Wait for the current turn or prompt before signing in".to_string());
                 }
                 TerminalRequest::None
-            } else if matches!(
-                vendor,
-                crate::auth::AuthVendor::OpenAi | crate::auth::AuthVendor::Anthropic
-            ) && crate::auth::executable(vendor).is_none()
+            } else if vendor == crate::auth::AuthVendor::OpenAi
+                && crate::auth::executable(vendor).is_none()
             {
                 if let Some(menu) = state.mjconfig_menu.as_mut() {
                     menu.editor.notice = Some(format!(
@@ -16099,7 +16097,8 @@ mod tests {
 
         // ACP Servers tab: toggle Codex off.
         state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu.as_mut().expect("menu").editor.selected = 4;
+        state.mjconfig_menu.as_mut().expect("menu").editor.selected =
+            crate::settings::SERVER_ROW_OFFSET;
         handle_mjconfig_menu_key(
             &mut state,
             &cmd_tx,
