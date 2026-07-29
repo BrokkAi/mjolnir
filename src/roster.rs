@@ -196,7 +196,9 @@ pub struct ModelChoice {
 #[derive(Debug, Clone)]
 pub struct Availability {
     pub codex_credentials: bool,
-    pub claude_credentials: bool,
+    pub claude_code: Option<PathBuf>,
+    pub claude_credentials: Option<String>,
+    pub claude_auth_error: Option<String>,
     pub kimi_credentials: bool,
     pub kimi: Option<PathBuf>,
     pub anvil: Option<PathBuf>,
@@ -204,9 +206,19 @@ pub struct Availability {
 
 impl Availability {
     pub fn detect() -> Self {
+        let claude_code = crate::auth::find_on_path("claude");
+        let (claude_credentials, claude_auth_error) = match claude_code.as_deref() {
+            Some(executable) => match claude_auth_detection(executable) {
+                Ok(credentials) => (credentials, None),
+                Err(error) => (None, Some(error)),
+            },
+            None => (None, None),
+        };
         Self {
             codex_credentials: codex_credentials_available(),
-            claude_credentials: claude_credentials_available(),
+            claude_code,
+            claude_credentials,
+            claude_auth_error,
             kimi_credentials: kimi_credentials_available(),
             kimi: crate::kimi::detect().path,
             anvil: crate::anvil::detect().path,
@@ -216,11 +228,38 @@ impl Availability {
     pub fn missing_reason(&self, model: &str) -> Option<&'static str> {
         match adapter_kind(model) {
             AdapterKind::Codex if !self.codex_credentials => Some("Codex credentials not found"),
-            AdapterKind::Claude if !self.claude_credentials => Some("Claude credentials not found"),
+            AdapterKind::Claude if self.claude_code.is_none() => {
+                Some("Claude Code is not installed")
+            }
+            AdapterKind::Claude if self.claude_auth_error.is_some() => {
+                Some("Claude Code sign-in status could not be checked")
+            }
+            AdapterKind::Claude if self.claude_credentials.is_none() => {
+                Some("Claude Code is not signed in")
+            }
             AdapterKind::Kimi if !self.kimi_credentials => Some("Kimi credentials not found"),
             AdapterKind::Kimi if self.kimi.is_none() => Some("Kimi Code is not installed"),
             AdapterKind::Anvil if self.anvil.is_none() => Some("managed Anvil is not ready"),
             _ => None,
+        }
+    }
+
+    fn claude_detection(&self) -> Option<String> {
+        let executable = self.claude_code.as_ref()?;
+        let credentials = self.claude_credentials.as_ref()?;
+        Some(format!(
+            "Claude Code detected at {}; {credentials}",
+            executable.display()
+        ))
+    }
+
+    fn claude_missing_evidence(&self) -> String {
+        if self.claude_code.is_none() {
+            "Claude Code is not installed".to_string()
+        } else if let Some(error) = &self.claude_auth_error {
+            error.clone()
+        } else {
+            "Claude Code is not signed in".to_string()
         }
     }
 }
@@ -254,10 +293,6 @@ fn codex_credentials_available() -> bool {
     crate::auth::detect(crate::auth::AuthVendor::OpenAi).available()
 }
 
-fn claude_credentials_available() -> bool {
-    crate::auth::detect(crate::auth::AuthVendor::Anthropic).available()
-}
-
 fn kimi_credentials_available() -> bool {
     crate::auth::detect(crate::auth::AuthVendor::Kimi).available()
 }
@@ -281,23 +316,35 @@ fn codex_detection() -> Option<String> {
     )
 }
 
-fn claude_detection() -> Option<String> {
-    for name in [
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-    ] {
-        if nonempty_env(&[name]) {
-            return Some(format!("{name} is set"));
-        }
+fn claude_auth_detection(executable: &Path) -> Result<Option<String>, String> {
+    let output = std::process::Command::new(executable)
+        .args(["auth", "status"])
+        .output()
+        .map_err(|error| format!("Claude Code sign-in check failed: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Claude Code sign-in check exited with {}",
+            output.status
+        ));
     }
-    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))?;
-    credential_file_evidence(
-        &root.join(".credentials.json"),
-        &["/claudeAiOauth/accessToken", "/claudeAiOauth/refreshToken"],
-    )
+    parse_claude_auth_status(&output.stdout)
+}
+
+fn parse_claude_auth_status(output: &[u8]) -> Result<Option<String>, String> {
+    let status = serde_json::from_slice::<serde_json::Value>(output)
+        .map_err(|error| format!("Claude Code returned invalid sign-in status: {error}"))?;
+    let Some(logged_in) = status.get("loggedIn").and_then(serde_json::Value::as_bool) else {
+        return Err("Claude Code sign-in status did not include `loggedIn`".to_string());
+    };
+    if !logged_in {
+        return Ok(None);
+    }
+    let method = status
+        .get("authMethod")
+        .and_then(serde_json::Value::as_str)
+        .filter(|method| !method.trim().is_empty())
+        .unwrap_or("Claude Code");
+    Ok(Some(format!("signed in via {method}")))
 }
 
 fn adapter_kind(model: &str) -> AdapterKind {
@@ -373,8 +420,8 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
         ),
         (
             AdapterKind::Claude,
-            claude_detection(),
-            "Claude credentials not found".to_string(),
+            availability.claude_detection(),
+            availability.claude_missing_evidence(),
         ),
         (
             AdapterKind::Kimi,
@@ -393,14 +440,23 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
         .map(|(kind, evidence, missing)| {
             let launch = launch_for(kind);
             let policy = config.acp.policy(&launch.source_id);
-            let detected = evidence.is_some();
+            let prerequisites_ready = evidence.is_some();
+            let detected = builtin_server_detected(kind, policy, prerequisites_ready);
+            let evidence = if kind == AdapterKind::Claude
+                && policy != AcpServerPolicy::Enabled
+                && prerequisites_ready
+            {
+                evidence
+                    .map(|evidence| format!("{evidence}; enable to install the Claude ACP server"))
+            } else {
+                evidence
+            };
             AcpServerInfo {
                 id: launch.source_id.clone(),
                 label: kind.display_name().to_string(),
                 policy,
                 detected,
-                selected: policy == AcpServerPolicy::Enabled
-                    || (policy == AcpServerPolicy::Auto && detected),
+                selected: builtin_server_selected(kind, policy, detected),
                 evidence: evidence.unwrap_or(missing),
                 launch,
                 model_count: 0,
@@ -461,12 +517,31 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
     AcpInventory { servers }
 }
 
+fn builtin_server_detected(
+    kind: AdapterKind,
+    policy: AcpServerPolicy,
+    prerequisites_ready: bool,
+) -> bool {
+    if kind == AdapterKind::Claude {
+        return policy == AcpServerPolicy::Enabled && prerequisites_ready;
+    }
+    prerequisites_ready
+}
+
+fn builtin_server_selected(kind: AdapterKind, policy: AcpServerPolicy, detected: bool) -> bool {
+    if kind == AdapterKind::Claude {
+        return policy == AcpServerPolicy::Enabled && detected;
+    }
+    policy == AcpServerPolicy::Enabled || (policy == AcpServerPolicy::Auto && detected)
+}
+
 fn inventory_server_is_visible(server: &AcpServerInfo) -> bool {
     server.detected
         || server.installing
         || server.error.is_some()
         || server.origin.is_some()
         || server.id == "anvil"
+        || server.id == "claude-acp"
         || server.policy != AcpServerPolicy::Auto
 }
 
@@ -814,8 +889,7 @@ fn unavailable_reason(
                 || config.acp.policy("codex-acp") == AcpServerPolicy::Enabled
         }
         AdapterKind::Claude => {
-            availability.claude_credentials
-                || config.acp.policy("claude-acp") == AcpServerPolicy::Enabled
+            availability.claude_code.is_some() && availability.claude_credentials.is_some()
         }
         AdapterKind::Kimi => {
             (availability.kimi_credentials && availability.kimi.is_some())
@@ -1294,6 +1368,27 @@ mod tests {
     }
 
     #[test]
+    fn claude_auth_status_requires_a_logged_in_response() {
+        assert_eq!(
+            parse_claude_auth_status(
+                br#"{"loggedIn":true,"authMethod":"claude.ai","email":"private@example.com"}"#
+            )
+            .unwrap()
+            .as_deref(),
+            Some("signed in via claude.ai")
+        );
+        assert!(
+            parse_claude_auth_status(
+                br#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(parse_claude_auth_status(b"not json").is_err());
+        assert!(parse_claude_auth_status(br#"{"authMethod":"claude.ai"}"#).is_err());
+    }
+
+    #[test]
     fn anvil_launch_uses_inventory_resolved_binary() {
         let launch = launch_for(AdapterKind::Anvil);
         assert_eq!(launch.command, PathBuf::from("anvil"));
@@ -1405,6 +1500,65 @@ mod tests {
         assert!(inventory_server_is_visible(&server));
         server.policy = AcpServerPolicy::Auto;
         assert!(!inventory_server_is_visible(&server));
+    }
+
+    #[test]
+    fn claude_server_stays_visible_without_mjolnir_managed_sign_in() {
+        let launch = launch_for(AdapterKind::Claude);
+        let server = AcpServerInfo {
+            id: launch.source_id.clone(),
+            label: "Claude Code".to_string(),
+            policy: AcpServerPolicy::Auto,
+            detected: false,
+            selected: false,
+            evidence: "Claude Code is not installed".to_string(),
+            launch,
+            model_count: 0,
+            error: None,
+            installing: false,
+            origin: None,
+        };
+
+        assert!(inventory_server_is_visible(&server));
+    }
+
+    #[test]
+    fn enabling_claude_does_not_bypass_cli_and_login_detection() {
+        assert!(!builtin_server_detected(
+            AdapterKind::Claude,
+            AcpServerPolicy::Auto,
+            true
+        ));
+        assert!(builtin_server_detected(
+            AdapterKind::Claude,
+            AcpServerPolicy::Enabled,
+            true
+        ));
+        assert!(!builtin_server_selected(
+            AdapterKind::Claude,
+            AcpServerPolicy::Auto,
+            false
+        ));
+        assert!(!builtin_server_selected(
+            AdapterKind::Claude,
+            AcpServerPolicy::Auto,
+            true
+        ));
+        assert!(!builtin_server_selected(
+            AdapterKind::Claude,
+            AcpServerPolicy::Enabled,
+            false
+        ));
+        assert!(builtin_server_selected(
+            AdapterKind::Claude,
+            AcpServerPolicy::Enabled,
+            true
+        ));
+        assert!(!builtin_server_selected(
+            AdapterKind::Claude,
+            AcpServerPolicy::Disabled,
+            true
+        ));
     }
 
     #[test]
@@ -1551,9 +1705,11 @@ mod tests {
 
     #[test]
     fn missing_reasons_are_based_on_adapter_presence() {
-        let availability = Availability {
+        let mut availability = Availability {
             codex_credentials: false,
-            claude_credentials: false,
+            claude_code: None,
+            claude_credentials: None,
+            claude_auth_error: None,
             kimi_credentials: false,
             kimi: None,
             anvil: None,
@@ -1561,6 +1717,33 @@ mod tests {
         assert_eq!(
             availability.missing_reason("gpt-5-6-sol"),
             Some("Codex credentials not found")
+        );
+        assert_eq!(
+            availability.missing_reason("claude-sonnet-5"),
+            Some("Claude Code is not installed")
+        );
+        availability.claude_code = Some(PathBuf::from("/usr/local/bin/claude"));
+        assert_eq!(
+            availability.missing_reason("claude-sonnet-5"),
+            Some("Claude Code is not signed in")
+        );
+        assert!(availability.claude_detection().is_none());
+        availability.claude_auth_error =
+            Some("Claude Code sign-in check exited with status 1".to_string());
+        assert_eq!(
+            availability.missing_reason("claude-sonnet-5"),
+            Some("Claude Code sign-in status could not be checked")
+        );
+        assert_eq!(
+            availability.claude_missing_evidence(),
+            "Claude Code sign-in check exited with status 1"
+        );
+        availability.claude_auth_error = None;
+        availability.claude_credentials = Some("CLAUDE_CODE_OAUTH_TOKEN is set".to_string());
+        assert_eq!(availability.missing_reason("claude-sonnet-5"), None);
+        assert_eq!(
+            availability.claude_detection().as_deref(),
+            Some("Claude Code detected at /usr/local/bin/claude; CLAUDE_CODE_OAUTH_TOKEN is set")
         );
         assert_eq!(
             availability.missing_reason("glm-5-2"),
@@ -1578,7 +1761,9 @@ mod tests {
         }];
         let availability = Availability {
             codex_credentials: false,
-            claude_credentials: false,
+            claude_code: None,
+            claude_credentials: None,
+            claude_auth_error: None,
             kimi_credentials: false,
             kimi: None,
             anvil: None,
@@ -1657,7 +1842,9 @@ mod tests {
         };
         let availability = Availability {
             codex_credentials: false,
-            claude_credentials: false,
+            claude_code: None,
+            claude_credentials: None,
+            claude_auth_error: None,
             kimi_credentials: false,
             kimi: None,
             anvil: None,

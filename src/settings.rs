@@ -23,6 +23,10 @@ pub const ROLE_DESCRIPTIONS: [(&str, &str); 2] = [
     ("Subagents", "default model for create_subagent delegations"),
 ];
 
+const ACCOUNT_ROWS: usize = crate::auth::AuthVendor::ALL.len();
+const ADD_SERVER_ROW: usize = ACCOUNT_ROWS;
+const SERVER_ROWS_START: usize = ADD_SERVER_ROW + 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     Agents,
@@ -140,7 +144,7 @@ impl SettingsEditor {
                     if code == KeyCode::Char('r')
                         && self
                             .selected
-                            .checked_sub(4)
+                            .checked_sub(SERVER_ROWS_START)
                             .and_then(|index| self.inventory.servers.get(index))
                             .is_some_and(|server| {
                                 server.id == "anvil" && server.error.is_some()
@@ -154,10 +158,14 @@ impl SettingsEditor {
         }
         match code {
             KeyCode::Esc => SettingsAction::Cancel,
-            KeyCode::Enter if self.tab == SettingsTab::AcpServers && self.selected < 3 => {
+            KeyCode::Enter
+                if self.tab == SettingsTab::AcpServers && self.selected < ACCOUNT_ROWS =>
+            {
                 SettingsAction::Authenticate(crate::auth::AuthVendor::ALL[self.selected])
             }
-            KeyCode::Enter if self.tab == SettingsTab::AcpServers && self.selected == 3 => {
+            KeyCode::Enter
+                if self.tab == SettingsTab::AcpServers && self.selected == ADD_SERVER_ROW =>
+            {
                 self.open_catalog();
                 SettingsAction::None
             }
@@ -199,7 +207,7 @@ impl SettingsEditor {
     fn row_count(&self) -> usize {
         match self.tab {
             SettingsTab::Agents => 5,
-            SettingsTab::AcpServers => self.inventory.servers.len() + 4,
+            SettingsTab::AcpServers => self.inventory.servers.len() + SERVER_ROWS_START,
             SettingsTab::Appearance => 2,
         }
     }
@@ -219,7 +227,7 @@ impl SettingsEditor {
                     (self.config.subagents.max_parallel as i32 + delta).rem_euclid(17) as usize;
             }
             SettingsTab::AcpServers => {
-                let Some(index) = self.selected.checked_sub(4) else {
+                let Some(index) = self.selected.checked_sub(SERVER_ROWS_START) else {
                     return SettingsAction::None;
                 };
                 let Some(server) = self.inventory.servers.get(index) else {
@@ -279,7 +287,7 @@ impl SettingsEditor {
                 self.config.subagents.auto_failover = !self.config.subagents.auto_failover;
             }
             SettingsTab::AcpServers => {
-                let Some(index) = self.selected.checked_sub(4) else {
+                let Some(index) = self.selected.checked_sub(SERVER_ROWS_START) else {
                     return SettingsAction::None;
                 };
                 let Some(server) = self.inventory.servers.get(index) else {
@@ -797,10 +805,14 @@ pub fn draw_settings_panel(
         AcpView::Catalog { .. } if editor.installing.is_some() => "Esc cancel install view",
         AcpView::Catalog { .. } => "Type filter · ↑/↓ select · Enter add · Esc back",
         AcpView::Custom { .. } => "Tab field · Enter add · Esc back",
-        AcpView::Servers if editor.tab == SettingsTab::AcpServers && editor.selected < 3 => {
+        AcpView::Servers
+            if editor.tab == SettingsTab::AcpServers && editor.selected < ACCOUNT_ROWS =>
+        {
             "Enter sign in · ↑/↓ select · Tab view · Esc cancel"
         }
-        AcpView::Servers if editor.tab == SettingsTab::AcpServers && editor.selected == 3 => {
+        AcpView::Servers
+            if editor.tab == SettingsTab::AcpServers && editor.selected == ADD_SERVER_ROW =>
+        {
             "Enter add server · ↑/↓ select · Tab view · Esc cancel"
         }
         AcpView::Servers => {
@@ -956,7 +968,7 @@ fn draw_servers(
     }
     lines.push(Line::raw(""));
     lines.push(selected_line(
-        editor.selected == 3,
+        editor.selected == ADD_SERVER_ROW,
         "+ Add server".to_string(),
         theme,
     ));
@@ -968,7 +980,7 @@ fn draw_servers(
             .add_modifier(Modifier::BOLD),
     ));
     let rows_available = area.height.saturating_sub(lines.len() as u16) as usize / 2;
-    let selected_server = editor.selected.saturating_sub(4);
+    let selected_server = editor.selected.saturating_sub(SERVER_ROWS_START);
     let start = selected_server.saturating_sub(rows_available.saturating_sub(1));
     for (index, server) in editor
         .inventory
@@ -996,7 +1008,7 @@ fn draw_servers(
             "not ready".to_string()
         };
         lines.push(selected_line(
-            editor.selected == index + 4,
+            editor.selected == index + SERVER_ROWS_START,
             format!(
                 "[{}] {:<16} {status}",
                 if server.installing {
@@ -1249,7 +1261,7 @@ mod tests {
             .iter()
             .position(|server| server.id == "codex-acp")
             .expect("codex")
-            + 4;
+            + SERVER_ROWS_START;
         assert_eq!(
             editor.handle_key(KeyCode::Char(' ')),
             SettingsAction::Changed
@@ -1306,7 +1318,7 @@ mod tests {
             .iter()
             .position(|server| server.id == "anvil")
             .expect("anvil");
-        editor.selected = server_index + 4;
+        editor.selected = server_index + SERVER_ROWS_START;
         editor.inventory.servers[server_index].detected = false;
         editor.inventory.servers[server_index].policy = AcpServerPolicy::Auto;
 
@@ -1348,13 +1360,13 @@ mod tests {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::AcpServers;
 
-        editor.selected = 2;
+        editor.selected = 1;
         assert_eq!(
             editor.handle_key(KeyCode::Enter),
             SettingsAction::Authenticate(crate::auth::AuthVendor::Kimi)
         );
 
-        editor.selected = 3;
+        editor.selected = ADD_SERVER_ROW;
         assert_eq!(editor.handle_key(KeyCode::Enter), SettingsAction::None);
         assert!(matches!(editor.acp_view, AcpView::Catalog { .. }));
     }

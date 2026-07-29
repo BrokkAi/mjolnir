@@ -7,17 +7,15 @@ use anyhow::{Context, Result, bail};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthVendor {
     OpenAi,
-    Anthropic,
     Kimi,
 }
 
 impl AuthVendor {
-    pub const ALL: [Self; 3] = [Self::OpenAi, Self::Anthropic, Self::Kimi];
+    pub const ALL: [Self; 2] = [Self::OpenAi, Self::Kimi];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::OpenAi => "OpenAI / ChatGPT",
-            Self::Anthropic => "Anthropic",
             Self::Kimi => "Kimi",
         }
     }
@@ -25,7 +23,6 @@ impl AuthVendor {
     pub fn enables(self) -> &'static str {
         match self {
             Self::OpenAi => "Codex, Anvil",
-            Self::Anthropic => "Claude Code",
             Self::Kimi => "Kimi Code, Anvil",
         }
     }
@@ -55,7 +52,6 @@ impl CredentialSource {
 pub fn detect(vendor: AuthVendor) -> CredentialSource {
     match vendor {
         AuthVendor::OpenAi => detect_openai(),
-        AuthVendor::Anthropic => detect_anthropic(),
         AuthVendor::Kimi => detect_kimi(),
     }
 }
@@ -63,7 +59,6 @@ pub fn detect(vendor: AuthVendor) -> CredentialSource {
 pub fn executable(vendor: AuthVendor) -> Option<PathBuf> {
     let name = match vendor {
         AuthVendor::OpenAi => "codex",
-        AuthVendor::Anthropic => "claude",
         AuthVendor::Kimi => "kimi",
     };
     find_on_path(name)
@@ -72,7 +67,6 @@ pub fn executable(vendor: AuthVendor) -> Option<PathBuf> {
 pub fn install_hint(vendor: AuthVendor) -> &'static str {
     match vendor {
         AuthVendor::OpenAi => "npm install -g @openai/codex",
-        AuthVendor::Anthropic => "npm install -g @anthropic-ai/claude-code",
         AuthVendor::Kimi => "install Kimi Code from the ACP registry",
     }
 }
@@ -93,25 +87,6 @@ fn detect_openai() -> CredentialSource {
             "/tokens/access_token",
             "/tokens/refresh_token",
         ],
-    )
-}
-
-fn detect_anthropic() -> CredentialSource {
-    for name in [
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-    ] {
-        if nonempty_env(name) {
-            return CredentialSource::Environment(name);
-        }
-    }
-    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")));
-    detect_file(
-        root.map(|root| root.join(".credentials.json")),
-        &["/claudeAiOauth/accessToken", "/claudeAiOauth/refreshToken"],
     )
 }
 
@@ -162,18 +137,43 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for directory in std::env::split_paths(&path) {
         let candidate = directory.join(name);
-        if candidate.is_file() {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
         #[cfg(windows)]
         for extension in ["exe", "cmd", "bat"] {
             let candidate = directory.join(format!("{name}.{extension}"));
-            if candidate.is_file() {
+            if is_executable_file(&candidate) {
                 return Some(candidate);
             }
         }
     }
     None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: `path` is a live, NUL-terminated C string for the duration
+        // of the call. `access` performs no writes through this pointer.
+        unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 pub async fn run_login(vendor: AuthVendor) -> Result<String> {
@@ -222,7 +222,6 @@ pub async fn run_login(vendor: AuthVendor) -> Result<String> {
                 vec!["login"]
             }
         }
-        AuthVendor::Anthropic => vec!["auth", "login", "--claudeai"],
         AuthVendor::Kimi => vec!["login"],
     };
     println!(
@@ -250,7 +249,6 @@ pub async fn run_login(vendor: AuthVendor) -> Result<String> {
             crate::probe_cache::remove(&cache, "codex-acp");
             crate::probe_cache::remove(&cache, "anvil");
         }
-        AuthVendor::Anthropic => crate::probe_cache::remove(&cache, "claude-acp"),
         AuthVendor::Kimi => {
             crate::probe_cache::remove(&cache, "kimi");
             crate::probe_cache::remove(&cache, "anvil");
@@ -274,5 +272,23 @@ mod tests {
         assert!(credential_file_has_any(&path, &["/tokens/access_token"]));
         std::fs::write(&path, r#"{"tokens":{"access_token":"  "}}"#).unwrap();
         assert!(!credential_file_has_any(&path, &["/tokens/access_token"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_detection_rejects_regular_files_without_execute_permission() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude");
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable_file(&path));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o001)).unwrap();
+        assert!(!is_executable_file(&path));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o100)).unwrap();
+        assert!(is_executable_file(&path));
     }
 }

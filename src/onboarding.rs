@@ -65,7 +65,7 @@ pub async fn run(
                             return Ok(Outcome::Cancel);
                         }
                         SettingsAction::Authenticate(vendor) => {
-                            if matches!(vendor, crate::auth::AuthVendor::OpenAi | crate::auth::AuthVendor::Anthropic)
+                            if vendor == crate::auth::AuthVendor::OpenAi
                                 && crate::auth::executable(vendor).is_none()
                             {
                                 editor.notice = Some(format!(
