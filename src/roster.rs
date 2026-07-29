@@ -321,13 +321,14 @@ fn claude_auth_detection(executable: &Path) -> Result<Option<String>, String> {
         .args(["auth", "status"])
         .output()
         .map_err(|error| format!("Claude Code sign-in check failed: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
+    match parse_claude_auth_status(&output.stdout) {
+        Ok(status) => Ok(status),
+        Err(_) if !output.status.success() => Err(format!(
             "Claude Code sign-in check exited with {}",
             output.status
-        ));
+        )),
+        Err(error) => Err(error),
     }
-    parse_claude_auth_status(&output.stdout)
 }
 
 fn parse_claude_auth_status(output: &[u8]) -> Result<Option<String>, String> {
@@ -1386,6 +1387,23 @@ mod tests {
         );
         assert!(parse_claude_auth_status(b"not json").is_err());
         assert!(parse_claude_auth_status(br#"{"authMethod":"claude.ai"}"#).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_auth_status_accepts_signed_out_json_from_exit_one() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("claude");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":false,\"authMethod\":\"none\"}'\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(claude_auth_detection(&executable).unwrap(), None);
     }
 
     #[test]
