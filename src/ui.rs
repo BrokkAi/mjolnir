@@ -2469,7 +2469,6 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
             + usize::from(workflow_progress_row_count(state))
             + usize::from(current_branch_pr_row_count(state))
             + usage_quota_row_count(state, width)
-            + inline_transcript_tail_row_count(state, width)
     };
 
     (desired.min(usize::from(u16::MAX)) as u16).clamp(INLINE_CHAT_HEIGHT, max_height)
@@ -5905,17 +5904,6 @@ fn inline_transcript_tail_lines(state: &AppState, width: u16) -> Vec<Line<'stati
     )
 }
 
-fn inline_transcript_tail_row_count(state: &AppState, width: u16) -> usize {
-    let lines = inline_transcript_tail_lines(state, width);
-    if lines.is_empty() {
-        return 0;
-    }
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .line_count(width)
-        .min(INLINE_TRANSCRIPT_TAIL_MAX_ROWS)
-}
-
 fn draw_inline_transcript_tail(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -5936,6 +5924,41 @@ fn draw_inline_transcript_tail(f: &mut ratatui::Frame, area: Rect, state: &AppSt
             .scroll((top, 0)),
         area,
     );
+}
+
+fn inline_transcript_tail_height(state: &AppState, area: Rect) -> u16 {
+    if state.help_overlay {
+        return 0;
+    }
+    let has_config_options = !state.selectable_config_options().is_empty();
+    let reserved_rows = 1u16
+        .saturating_add(workflow_progress_row_count(state))
+        .saturating_add(current_branch_pr_row_count(state))
+        .saturating_add(queued_prompt_row_count(state))
+        .saturating_add(MIN_INPUT_HEIGHT)
+        .saturating_add(usage_quota_row_count(state, area.width) as u16)
+        .saturating_add(u16::from(has_config_options));
+    area.height
+        .saturating_sub(reserved_rows)
+        .min(INLINE_TRANSCRIPT_TAIL_MAX_ROWS as u16)
+}
+
+fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 8] {
+    let has_config_options = !state.selectable_config_options().is_empty();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(inline_transcript_tail_height(state, area)),
+            Constraint::Length(1),
+            Constraint::Length(workflow_progress_row_count(state)),
+            Constraint::Length(current_branch_pr_row_count(state)),
+            Constraint::Length(queued_prompt_row_count(state)),
+            Constraint::Min(MIN_INPUT_HEIGHT),
+            Constraint::Length(usage_quota_row_count(state, area.width) as u16),
+            Constraint::Length(if has_config_options { 1 } else { 0 }),
+        ])
+        .split(area);
+    std::array::from_fn(|index| chunks[index])
 }
 
 fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
@@ -6001,26 +6024,7 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
         return;
     }
 
-    let has_config_options = !state.selectable_config_options().is_empty();
-    let usage_quota_rows = usage_quota_row_count(state, f.area().width) as u16;
-    let queued_row = queued_prompt_row_count(state);
-    let workflow_rows = workflow_progress_row_count(state);
-    let current_pr_rows = current_branch_pr_row_count(state);
-    let live_rows = inline_transcript_tail_row_count(state, f.area().width)
-        .min(usize::from(f.area().height)) as u16;
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(live_rows),
-            Constraint::Length(1),
-            Constraint::Length(workflow_rows),
-            Constraint::Length(current_pr_rows),
-            Constraint::Length(queued_row),
-            Constraint::Min(MIN_INPUT_HEIGHT),
-            Constraint::Length(usage_quota_rows),
-            Constraint::Length(if has_config_options { 1 } else { 0 }),
-        ])
-        .split(f.area());
+    let chunks = inline_chat_layout(state, f.area());
 
     draw_inline_transcript_tail(f, chunks[0], state);
     draw_header(f, chunks[1], state);
@@ -17434,15 +17438,16 @@ mod tests {
                 ""
             ]
         );
-        assert!(inline_transcript_tail_row_count(&state, 80) > 0);
-        assert!(
+        assert_eq!(
             desired_inline_height(
                 &state,
                 Size {
                     width: 80,
                     height: 40,
                 },
-            ) > INLINE_CHAT_HEIGHT
+            ),
+            INLINE_CHAT_HEIGHT,
+            "streamed transcript rows must not resize the inline viewport"
         );
 
         let backend = TestBackend::new(120, 1);
@@ -17481,6 +17486,70 @@ mod tests {
             .expect("draw restored header");
         let restored = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(restored.contains("gpt-primary"), "{restored}");
+    }
+
+    #[test]
+    fn streamed_wrap_boundaries_keep_inline_geometry_and_input_height_stable() {
+        let mut state = AppState::new();
+        state.record_user_prompt("write a long answer".to_string());
+        let terminal_size = Size {
+            width: 40,
+            height: 30,
+        };
+        let baseline = desired_inline_height(&state, terminal_size);
+        let area = Rect::new(0, 0, terminal_size.width, baseline);
+        let baseline_tail_height = inline_transcript_tail_height(&state, area);
+        let baseline_input_area = inline_chat_layout(&state, area)[5];
+        let mut terminal =
+            Terminal::new(TestBackend::new(terminal_size.width, baseline)).expect("terminal");
+        terminal
+            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .expect("draw empty tail");
+        let baseline_header_row = buffer_lines(terminal.backend().buffer())
+            .iter()
+            .position(|line| line.contains(&mjolnir_version_label()))
+            .expect("header row");
+
+        for chunk in [
+            "one two three four five six seven eight nine ten ",
+            "eleven twelve thirteen fourteen fifteen sixteen ",
+            "seventeen eighteen nineteen twenty twenty-one ",
+        ] {
+            state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                text_chunk(chunk),
+            )));
+            assert_eq!(
+                desired_inline_height(&state, terminal_size),
+                baseline,
+                "crossing a streamed wrap boundary must not resize the viewport"
+            );
+            assert_eq!(
+                inline_transcript_tail_height(&state, area),
+                baseline_tail_height,
+                "streamed rows must not change the space reserved above the header"
+            );
+        }
+
+        terminal
+            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .expect("draw streamed tail");
+        let streamed_header_row = buffer_lines(terminal.backend().buffer())
+            .iter()
+            .position(|line| line.contains(&mjolnir_version_label()))
+            .expect("header row");
+        assert_eq!(
+            streamed_header_row, baseline_header_row,
+            "streaming must not move the header inside the fixed viewport"
+        );
+        let streamed_input_area = inline_chat_layout(&state, area)[5];
+        assert_eq!(
+            streamed_input_area, baseline_input_area,
+            "the input panel rendered by the inline layout must not move or resize"
+        );
+        assert_eq!(
+            streamed_input_area.height, MIN_INPUT_HEIGHT,
+            "the compact inline layout must retain the full input allocation"
+        );
     }
 
     #[test]
