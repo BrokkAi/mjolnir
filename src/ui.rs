@@ -814,7 +814,8 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
         | Entry::SessionBoundary(_)
         | Entry::Plan(_)
         | Entry::SubagentPlan(_)
-        | Entry::InternalMessage(_) => true,
+        | Entry::InternalMessage(_)
+        | Entry::InternalMessageSummary(_) => true,
         Entry::AgentThought(thought) => thought.completed,
         Entry::SubagentThought(thought) => thought.completed,
         // An actor may append coordination activity after its active message.
@@ -4813,6 +4814,18 @@ fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
                 };
                 push_export_text(out, &heading, &message.text);
             }
+            Entry::InternalMessageSummary(summary) => {
+                let heading =
+                    internal_message_heading(&summary.source, &summary.target, summary.kind);
+                push_export_text(
+                    out,
+                    &heading,
+                    &format!(
+                        "Internal message payload withheld ({}).",
+                        message_size_label(summary.payload_chars)
+                    ),
+                );
+            }
             Entry::System(text) => push_export_text(out, "System", text),
             Entry::SessionBoundary(text) => push_export_text(out, "Session", text),
             Entry::Plan(entries) | Entry::SubagentPlan(entries) => {
@@ -6429,6 +6442,14 @@ fn nested_internal_message_title(message: &crate::event::InternalMessage) -> Str
     }
 }
 
+fn internal_message_heading(
+    source: &str,
+    target: &str,
+    kind: crate::event::InternalMessageKind,
+) -> String {
+    format!("{source} → {target} {}", internal_message_kind_label(kind))
+}
+
 fn nested_internal_message_style(
     kind: crate::event::InternalMessageKind,
     theme: TerminalTheme,
@@ -6441,6 +6462,33 @@ fn nested_internal_message_style(
         | crate::event::InternalMessageKind::DiscreteReview => theme.muted,
     };
     Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn internal_message_kind_label(kind: crate::event::InternalMessageKind) -> &'static str {
+    match kind {
+        crate::event::InternalMessageKind::Delegation => "delegation",
+        crate::event::InternalMessageKind::DiscreteReview => "discrete review",
+        crate::event::InternalMessageKind::ReviewLane => "review lane",
+        crate::event::InternalMessageKind::ReviewProgress => "review progress",
+        crate::event::InternalMessageKind::ReviewSynthesis => "review synthesis",
+    }
+}
+
+fn nested_agent_roster_visible_ids(
+    actor_ids: &[u64],
+    selected: Option<u64>,
+    rows: usize,
+) -> &[u64] {
+    if rows == 0 || actor_ids.len() <= rows {
+        return actor_ids;
+    }
+    let selected_index = selected
+        .and_then(|id| actor_ids.iter().position(|candidate| *candidate == id))
+        .unwrap_or(0);
+    let start = selected_index
+        .saturating_sub(rows / 2)
+        .min(actor_ids.len() - rows);
+    &actor_ids[start..start + rows]
 }
 
 fn render_nested_agent_lines(
@@ -6474,6 +6522,24 @@ fn render_nested_agent_lines(
                     nested_internal_message_style(message.kind, state.theme),
                 )));
                 push_markdown_message(&mut out, &message.text, false, width, state.theme);
+            }
+            Entry::InternalMessageSummary(summary) => {
+                out.push(Line::from(Span::styled(
+                    format!(
+                        "{} → {} · {} · {}",
+                        summary.source,
+                        summary.target,
+                        internal_message_kind_label(summary.kind),
+                        message_size_label(summary.payload_chars),
+                    ),
+                    Style::default()
+                        .fg(state.theme.muted)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                out.push(Line::from(Span::styled(
+                    "internal message payload withheld",
+                    Style::default().fg(state.theme.muted),
+                )));
             }
             Entry::Plan(entries) | Entry::SubagentPlan(entries) => {
                 out.push(Line::from(Span::styled(
@@ -6584,7 +6650,7 @@ fn draw_nested_agent_viewer(
         .line_count(area.width)
         .max(1)
         .min(usize::from(u16::MAX)) as u16;
-    let actor_ids = state.nested_agent_viewer_ids();
+    let actor_ids = state.nested_agent_viewer_roster_ids();
     let actor_count = state.nested_agents().count();
     let roster_rows = actor_ids.len().clamp(1, usize::from(u16::MAX)) as u16;
     let layout = Layout::default()
@@ -6599,7 +6665,7 @@ fn draw_nested_agent_viewer(
     let now = Instant::now();
     let roster_title = if actor_count > actor_ids.len() {
         format!(
-            " nested agents — {} newest of {actor_count} retained ",
+            " nested agents — {} of {actor_count} retained ",
             actor_ids.len()
         )
     } else {
@@ -6612,38 +6678,25 @@ fn draw_nested_agent_viewer(
     let roster_inner = roster_block.inner(layout[0]);
     f.render_widget(roster_block, layout[0]);
     if roster_inner.width > 0 && roster_inner.height > 0 {
-        let roster = actor_ids
-            .iter()
-            .filter_map(|id| {
-                let actor = state.nested_agent(*id)?;
-                Some(nested_agent_roster_line(
-                    *id,
-                    actor,
-                    state.nested_agent_selected == Some(*id),
-                    now,
-                    usize::from(roster_inner.width),
-                    state.theme,
-                ))
-            })
-            .collect::<Vec<_>>();
-        let selected = state
-            .nested_agent_selected
-            .and_then(|selected| actor_ids.iter().position(|id| *id == selected))
-            .unwrap_or(0);
-        let visible = usize::from(roster_inner.height);
-        let start = selected
-            .saturating_sub(visible.saturating_sub(1))
-            .min(roster.len().saturating_sub(visible));
-        f.render_widget(
-            Paragraph::new(
-                roster
-                    .into_iter()
-                    .skip(start)
-                    .take(visible)
-                    .collect::<Vec<_>>(),
-            ),
-            roster_inner,
-        );
+        let roster = nested_agent_roster_visible_ids(
+            &actor_ids,
+            state.nested_agent_selected,
+            usize::from(roster_inner.height),
+        )
+        .iter()
+        .filter_map(|id| {
+            let actor = state.nested_agent(*id)?;
+            Some(nested_agent_roster_line(
+                *id,
+                actor,
+                state.nested_agent_selected == Some(*id),
+                now,
+                usize::from(roster_inner.width),
+                state.theme,
+            ))
+        })
+        .collect::<Vec<_>>();
+        f.render_widget(Paragraph::new(roster), roster_inner);
     }
 
     let selected = state.selected_nested_agent().map(|(id, actor)| {
@@ -7195,8 +7248,21 @@ fn render_transcript_entry_range(
         .iter()
         .filter_map(entry_speaker)
         .next_back();
+    // System records are primary-owned narration. They need their own stable
+    // speaker run rather than inheriting the preceding actor's label. Derive
+    // this from the original transcript (rather than emitted rows) so inline
+    // scrollback batches and compacted entries preserve the same boundary.
+    let mut system_run = state.transcript[..entry_range.start]
+        .last()
+        .is_some_and(|entry| matches!(entry, Entry::System(_)));
+    if system_run {
+        speaker = Some("Mjolnir".to_string());
+    }
     for (offset, entry) in state.transcript[entry_range.clone()].iter().enumerate() {
         let entry_index = entry_range.start + offset;
+        if !matches!(entry, Entry::System(_)) {
+            system_run = false;
+        }
         // The streaming reveal controller deliberately withholds an active
         // prose entry until it has a safe chunk to show. Do not leave its
         // speaker label and trailing blank row behind in the meantime: that
@@ -7279,31 +7345,20 @@ fn render_transcript_entry_range(
             ),
             Entry::InternalMessage(message) => {
                 let chars = message.text.chars().count();
-                let title = match message.kind {
-                    crate::event::InternalMessageKind::Delegation => {
-                        format!(
-                            "delegated to {} · {}",
-                            message.target,
-                            message_size_label(chars)
-                        )
-                    }
-                    crate::event::InternalMessageKind::DiscreteReview => {
-                        format!("discrete review brief · {}", message_size_label(chars))
-                    }
-                    crate::event::InternalMessageKind::ReviewLane => {
-                        format!(
-                            "review lane {} · {}",
-                            message.source,
-                            message_size_label(chars)
-                        )
-                    }
-                    crate::event::InternalMessageKind::ReviewProgress => {
-                        format!("review supervisor · {}", message_size_label(chars))
-                    }
-                    crate::event::InternalMessageKind::ReviewSynthesis => {
-                        format!("review synthesis · {}", message_size_label(chars))
-                    }
+                let kind = match message.kind {
+                    crate::event::InternalMessageKind::Delegation => "delegation",
+                    crate::event::InternalMessageKind::DiscreteReview => "discrete review",
+                    crate::event::InternalMessageKind::ReviewLane => "review lane",
+                    crate::event::InternalMessageKind::ReviewProgress => "review progress",
+                    crate::event::InternalMessageKind::ReviewSynthesis => "review synthesis",
                 };
+                let title = format!(
+                    "{} → {} · {} · {}",
+                    message.source,
+                    message.target,
+                    kind,
+                    message_size_label(chars)
+                );
                 out.push(Line::from(Span::styled(
                     title,
                     Style::default()
@@ -7311,6 +7366,25 @@ fn render_transcript_entry_range(
                         .add_modifier(Modifier::BOLD),
                 )));
                 push_markdown_message(&mut out, &message.text, collapse_message, width, theme);
+            }
+            Entry::InternalMessageSummary(summary) => {
+                let title = format!(
+                    "{} → {} · {} · {}",
+                    summary.source,
+                    summary.target,
+                    internal_message_kind_label(summary.kind),
+                    message_size_label(summary.payload_chars),
+                );
+                out.push(Line::from(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(theme.muted)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                out.push(Line::from(Span::styled(
+                    "internal message payload withheld",
+                    Style::default().fg(theme.muted),
+                )));
             }
             Entry::Plan(entries) | Entry::SubagentPlan(entries) => {
                 out.push(Line::from(Span::styled(
@@ -7398,6 +7472,11 @@ fn render_transcript_entry_range(
                 }
             }
             Entry::System(text) => {
+                if !system_run {
+                    push_speaker_name(&mut out, "Mjolnir", theme);
+                    speaker = Some("Mjolnir".to_string());
+                    system_run = true;
+                }
                 push_styled_message(&mut out, text, theme.accent, collapse_message, theme);
             }
             Entry::SessionBoundary(text) => {
@@ -7484,6 +7563,7 @@ fn entry_speaker(entry: &Entry) -> Option<String> {
         | Entry::SubagentToolCall(_)
         | Entry::SubagentPlan(_) => Some("subagent".to_string()),
         Entry::InternalMessage(message) => Some(message.source.clone()),
+        Entry::InternalMessageSummary(summary) => Some(summary.source.clone()),
         Entry::System(_) | Entry::SessionBoundary(_) => None,
     }
 }
@@ -14860,7 +14940,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_agent_viewer_shows_ten_newest_actors_and_keeps_attribution() {
+    fn nested_agent_viewer_shows_a_bounded_roster_window_for_an_older_selection() {
         let mut state = AppState::new();
         for id in 1..=15 {
             start_subagent(&mut state, id, &format!("actor-{id}"), "work");
@@ -14915,7 +14995,18 @@ mod tests {
                 "older actor #{id} must not displace a recent actor:\n{rendered}"
             );
         }
-        assert!(rendered.contains("nested agents — 10 ne"), "{rendered}");
+        assert!(rendered.contains("nested agents — 10 of"), "{rendered}");
+        for _ in 0..14 {
+            handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Right));
+        }
+        assert_eq!(state.nested_agent_selected, Some(1));
+        terminal
+            .draw(|frame| draw_nested_agent_viewer(frame, frame.area(), &mut state, true))
+            .expect("draw older selection");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("#1 "), "{rendered}");
+        assert!(!rendered.contains("#15 "), "{rendered}");
+        assert!(rendered.contains("nested agents — 10 of"), "{rendered}");
         #[cfg(target_os = "macos")]
         assert!(rendered.contains("Fn+Up/Down"), "{rendered}");
         handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(11)));
@@ -16381,6 +16472,66 @@ mod tests {
     }
 
     #[test]
+    fn ownerless_review_synthesis_is_labelled_in_primary_transcript_and_export() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::InternalMessage(InternalMessage {
+            source: "Council".to_string(),
+            target: "Mjolnir".to_string(),
+            kind: crate::event::InternalMessageKind::ReviewSynthesis,
+            text: "PUBLIC_SYNTHESIS".to_string(),
+            owner_subagent_id: None,
+        }));
+        state.apply_event(UiEvent::InternalMessage(InternalMessage {
+            source: "Council".to_string(),
+            target: "reviewer".to_string(),
+            kind: crate::event::InternalMessageKind::ReviewLane,
+            text: "PRIVATE_LANE_REPORT".to_string(),
+            owner_subagent_id: Some(7),
+        }));
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|line| { line.contains("Council → Mjolnir · review synthesis") })
+        );
+        assert!(rendered.iter().any(|line| line.contains("16 chars")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("payload withheld"))
+        );
+        assert!(
+            !rendered
+                .iter()
+                .any(|line| line.contains("PUBLIC_SYNTHESIS"))
+        );
+
+        let primary = transcript_export_markdown(&state);
+        assert!(primary.contains("## Council → Mjolnir review synthesis"));
+        assert!(primary.contains("payload withheld \\(16 chars\\)"));
+        assert!(!primary.contains("PUBLIC\\_SYNTHESIS"));
+        assert!(!primary.contains("PRIVATE\\_LANE\\_REPORT"));
+    }
+
+    #[test]
+    fn nested_agent_roster_scrolls_to_keep_selected_actor_visible() {
+        let actor_ids = (1..=10).collect::<Vec<_>>();
+
+        assert_eq!(
+            nested_agent_roster_visible_ids(&actor_ids, Some(9), 3),
+            &[8, 9, 10]
+        );
+        assert_eq!(
+            nested_agent_roster_visible_ids(&actor_ids, Some(1), 3),
+            &[1, 2, 3]
+        );
+    }
+
+    #[test]
     fn slash_fork_sends_fork_session_command() {
         let mut state = AppState::new();
         state.session_id = Some("s-1".to_string());
@@ -16650,7 +16801,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(first, vec!["first", ""]);
+        assert_eq!(first, vec!["Mjolnir", "first", ""]);
 
         assert!(sink.pending_lines(&state, 80).is_empty());
 
@@ -17483,6 +17634,7 @@ mod tests {
             vec![
                 "agent",
                 "planning the handoff",
+                "Mjolnir",
                 "subagent #1 · subagent · gpt-builder · started",
                 ""
             ]
@@ -17516,6 +17668,7 @@ mod tests {
             vec![
                 "agent",
                 "planning the handoff",
+                "Mjolnir",
                 "subagent #1 · subagent · gpt-builder · started",
                 "",
                 "subagent #1 · subagent · gpt-builder · completed · 0s",
@@ -18752,6 +18905,121 @@ mod tests {
     }
 
     #[test]
+    fn primary_system_records_share_one_mjolnir_boundary_per_contiguous_run() {
+        let mut state = AppState::new();
+        state.transcript.extend([
+            Entry::System("first system record".to_string()),
+            Entry::System("second system record".to_string()),
+            Entry::UserPrompt("user boundary".to_string()),
+            Entry::System("after user".to_string()),
+            Entry::AgentMessage("agent boundary".to_string()),
+            Entry::System("after agent".to_string()),
+            Entry::ToolCall("missing-tool-still-breaks-the-run".to_string()),
+            Entry::System("after tool".to_string()),
+            Entry::AgentThought(crate::app::ThoughtEntry {
+                text: "thought boundary".to_string(),
+                completed: true,
+            }),
+            Entry::System("after thought".to_string()),
+            Entry::InternalMessage(InternalMessage {
+                source: "Mjolnir".to_string(),
+                target: "primary".to_string(),
+                kind: crate::event::InternalMessageKind::ReviewProgress,
+                text: "internal boundary".to_string(),
+                owner_subagent_id: None,
+            }),
+            Entry::System("after internal message".to_string()),
+        ]);
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 100)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|line| line.as_str() == "Mjolnir")
+                .count(),
+            6,
+            // Keeping the internal actor name as Mjolnir catches accidental
+            // reuse of ordinary speaker state as the system-run boundary.
+            "rendered: {rendered:?}"
+        );
+        for text in [
+            "first system record",
+            "second system record",
+            "after user",
+            "after agent",
+            "after tool",
+            "after thought",
+            "after internal message",
+        ] {
+            assert!(
+                rendered.iter().any(|line| line == text),
+                "rendered: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_system_records_keep_nested_actor_framing_without_mjolnir_label() {
+        let mut state = AppState::new();
+        start_subagent(&mut state, 1, "implementer", "check the renderer");
+        state.apply_event(UiEvent::Subagent(SubagentEvent::Activity {
+            subagent_id: 1,
+            activity: "reading transcript code".to_string(),
+        }));
+
+        let rendered: Vec<String> =
+            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
+                .iter()
+                .map(line_text)
+                .collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "activity: reading transcript code"),
+            "rendered: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line == "Mjolnir"),
+            "nested system records must retain their actor-owned framing: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn inline_system_run_keeps_mjolnir_as_the_following_speaker_boundary() {
+        let mut state = AppState::new();
+        state.transcript.extend([
+            Entry::AgentMessage("before system".to_string()),
+            Entry::System("first system record".to_string()),
+            Entry::System("second system record".to_string()),
+            Entry::AgentMessage("after system".to_string()),
+        ]);
+
+        let rendered: Vec<String> = render_transcript_entry_range(
+            &state,
+            100,
+            2..state.transcript.len(),
+            None,
+            state.theme,
+            false,
+        )
+        .iter()
+        .map(line_text)
+        .collect();
+
+        assert!(
+            rendered.iter().any(|line| line == "agent"),
+            "the later agent response must not inherit the earlier agent speaker across a system run: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line == "Mjolnir"),
+            "a continued inline system run must not repeat its already-rendered Mjolnir label: {rendered:?}"
+        );
+    }
+
+    #[test]
     fn stable_long_prose_entries_share_one_collapse_policy() {
         let mut state = AppState::new();
         let long = (1..=7)
@@ -19564,6 +19832,7 @@ mod tests {
         assert_eq!(
             rendered,
             vec![
+                "Mjolnir",
                 "Active models",
                 "",
                 "Configured",

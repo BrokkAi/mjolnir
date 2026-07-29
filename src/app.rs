@@ -41,6 +41,11 @@ pub const QUEUED_PROMPT_PREVIEW_WIDTH: usize = 40;
 /// Longest excerpt of an objective or failure message kept in a subagent's
 /// permanent transcript record.
 const SUBAGENT_RECORD_LINE_CHARS: usize = 160;
+/// Retain enough recent progress checkpoints to explain a completed nested
+/// turn without allowing a chatty adapter to grow its private transcript
+/// without bound.
+const SUBAGENT_ACTIVITY_SNAPSHOT_LIMIT: usize = 32;
+const SUBAGENT_ACTIVITY_SNAPSHOT_PREFIX: &str = "activity: ";
 const NESTED_AGENT_VIEWER_LIMIT: usize = 10;
 
 /// Durable UI state for one nested ACP actor. The on-demand viewer reads its
@@ -310,6 +315,29 @@ pub struct ThoughtEntry {
     pub completed: bool,
 }
 
+/// Provenance-only representation of an ownerless orchestration packet.
+///
+/// The primary transcript deliberately retains no packet payload; full packets
+/// stay exclusively in the transcript of their owning nested actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalMessageSummary {
+    pub source: String,
+    pub target: String,
+    pub kind: crate::event::InternalMessageKind,
+    pub payload_chars: usize,
+}
+
+impl From<&InternalMessage> for InternalMessageSummary {
+    fn from(message: &InternalMessage) -> Self {
+        Self {
+            source: message.source.clone(),
+            target: message.target.clone(),
+            kind: message.kind,
+            payload_chars: message.text.chars().count(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Entry {
     /// Plain user prompt (echoed locally as soon as it is sent).
@@ -330,6 +358,8 @@ pub enum Entry {
     SubagentPlan(Vec<PlanEntry>),
     /// Orchestration prompt retained in full but normally rendered compactly.
     InternalMessage(InternalMessage),
+    /// Ownerless orchestration packet with payload deliberately omitted.
+    InternalMessageSummary(InternalMessageSummary),
     /// System-level note (errors, warnings, mode changes).
     System(String),
     /// Visual separator inserted at local session boundaries so a freshly
@@ -1894,8 +1924,25 @@ impl AppState {
                 .cmp(&right.finished.is_some())
                 .then_with(|| right_id.cmp(left_id))
         });
-        ids.truncate(NESTED_AGENT_VIEWER_LIMIT);
         ids
+    }
+
+    /// The nested-agent reader keeps its roster compact while its navigation
+    /// covers every retained actor. Center the compact window on the selected
+    /// actor when possible, so an older selection remains discoverable.
+    pub fn nested_agent_viewer_roster_ids(&self) -> Vec<u64> {
+        let ids = self.nested_agent_viewer_ids();
+        let selected = self
+            .nested_agent_selected
+            .and_then(|selected| ids.iter().position(|id| *id == selected))
+            .unwrap_or(0);
+        let start = selected
+            .saturating_sub(NESTED_AGENT_VIEWER_LIMIT / 2)
+            .min(ids.len().saturating_sub(NESTED_AGENT_VIEWER_LIMIT));
+        ids.into_iter()
+            .skip(start)
+            .take(NESTED_AGENT_VIEWER_LIMIT)
+            .collect()
     }
 
     pub fn nested_agent(&self, id: u64) -> Option<&SubagentStatus> {
@@ -1961,6 +2008,7 @@ impl AppState {
             | Entry::Plan(_)
             | Entry::SubagentPlan(_)
             | Entry::InternalMessage(_)
+            | Entry::InternalMessageSummary(_)
             | Entry::System(_)
             | Entry::SessionBoundary(_) => None,
         })
@@ -2738,11 +2786,13 @@ impl AppState {
                         self.append_nested_internal_message(subagent_id, message);
                     }
                     None => {
-                        // Primary-owned orchestration packets are model input,
-                        // not user transcript. Their visible state is carried
-                        // by typed workflow transitions and adjacent
-                        // info/warning events, while full nested packets live
-                        // only under an explicitly identified actor.
+                        // Retain only provenance for ownerless orchestration in
+                        // the primary transcript. Packets with an explicit
+                        // nested owner remain private in that actor's
+                        // transcript above.
+                        self.transcript
+                            .push(Entry::InternalMessageSummary((&message).into()));
+                        self.bump_transcript_revision();
                     }
                 }
             }
@@ -3151,10 +3201,15 @@ impl AppState {
                 subagent_id,
                 activity,
             } => {
-                // Status-row only: no transcript entry, no revision bump. An
-                // in-place transcript rewrite here is what used to corrupt
-                // already-flushed inline scrollback.
+                // Keep the live roster value while retaining a bounded,
+                // private history for the actor-owned transcript. This must
+                // never affect the primary transcript or its scrollback.
+                // Activity is a chronological boundary: later stream chunks
+                // must append after it rather than mutate an earlier entry.
+                self.finalize_subagent_thinking(subagent_id);
+                self.finalize_subagent_message(subagent_id);
                 if let Some(state) = self.subagents.get_mut(&subagent_id) {
+                    Self::append_subagent_activity_snapshot(state, &activity);
                     state.activity = activity;
                 }
             }
@@ -3434,6 +3489,38 @@ impl AppState {
     fn append_subagent_thinking_chunk(&mut self, subagent_id: u64, text: String) {
         let state = self.ensure_subagent_state(subagent_id);
         append_thinking_chunk(&mut state.transcript, EntryKind::SubagentThought, text);
+    }
+
+    fn append_subagent_activity_snapshot(state: &mut SubagentStatus, activity: &str) {
+        let snapshot = format!(
+            "{SUBAGENT_ACTIVITY_SNAPSHOT_PREFIX}{}",
+            ragnarok::first_line(activity, SUBAGENT_RECORD_LINE_CHARS)
+        );
+        if matches!(state.transcript.last(), Some(Entry::System(existing)) if existing == &snapshot)
+        {
+            return;
+        }
+
+        let retained = state
+            .transcript
+            .iter()
+            .filter(|entry| {
+                matches!(entry, Entry::System(text) if text.starts_with(SUBAGENT_ACTIVITY_SNAPSHOT_PREFIX))
+            })
+            .count();
+        if retained >= SUBAGENT_ACTIVITY_SNAPSHOT_LIMIT
+            && let Some(index) = state.transcript.iter().position(|entry| {
+                matches!(entry, Entry::System(text) if text.starts_with(SUBAGENT_ACTIVITY_SNAPSHOT_PREFIX))
+            })
+        {
+            state.transcript.remove(index);
+            if let Some(plan_index) = state.plan_index
+                && plan_index > index
+            {
+                state.plan_index = Some(plan_index - 1);
+            }
+        }
+        state.transcript.push(Entry::System(snapshot));
     }
 
     fn append_nested_internal_message(&mut self, subagent_id: u64, message: InternalMessage) {
@@ -5457,7 +5544,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_agent_viewer_keeps_the_ten_most_recent_actors() {
+    fn nested_agent_viewer_reaches_every_retained_actor_with_a_bounded_roster() {
         let mut state = AppState::new();
         for id in 1..=15 {
             state.apply_event(subagent_started(id, &format!("actor-{id}"), "work"));
@@ -5465,9 +5552,19 @@ mod tests {
 
         assert_eq!(
             state.nested_agent_viewer_ids(),
-            (6..=15).rev().collect::<Vec<_>>()
+            (1..=15).rev().collect::<Vec<_>>()
         );
         assert_eq!(state.nested_agents().count(), 15);
+        assert!(state.open_nested_agent_viewer());
+        for _ in 0..14 {
+            state.select_nested_agent(true);
+        }
+        assert_eq!(state.nested_agent_selected, Some(1));
+        assert_eq!(
+            state.nested_agent_viewer_roster_ids().len(),
+            NESTED_AGENT_VIEWER_LIMIT
+        );
+        assert!(state.nested_agent_viewer_roster_ids().contains(&1));
     }
 
     #[test]
@@ -5498,33 +5595,163 @@ mod tests {
     }
 
     #[test]
-    fn subagent_activity_updates_durable_state_without_touching_the_transcript() {
+    fn subagent_activity_snapshots_survive_completion_in_their_owner_only() {
         let mut state = AppState::new();
         state.apply_event(subagent_started(1, "explore", "look around"));
-        let entries = state.transcript.len();
+        state.apply_event(subagent_started(2, "verify", "check it"));
         let revision = state.transcript_revision();
 
         state.apply_event(subagent_activity(1, "reading src/main.rs"));
         state.apply_event(subagent_activity(1, "running cargo test"));
+        assert_eq!(
+            state.transcript_revision(),
+            revision,
+            "private activity must not invalidate primary scrollback"
+        );
+        assert!(!state.transcript.iter().any(|entry| {
+            matches!(entry, Entry::System(text) if text.starts_with(SUBAGENT_ACTIVITY_SNAPSHOT_PREFIX))
+        }));
+
+        state.apply_event(finished_subagent(1, SubagentOutcome::Completed));
 
         assert_eq!(
             state.nested_agent(1).expect("actor").activity,
             "running cargo test"
         );
-        assert_eq!(
-            state.transcript.len(),
-            entries,
-            "activity must never append a transcript entry"
-        );
-        assert_eq!(
-            state.transcript_revision(),
-            revision,
-            "activity must not invalidate already-flushed scrollback"
+        assert!(matches!(
+            state.nested_agent(1).expect("actor").transcript.as_slice(),
+            [
+                Entry::System(first),
+                Entry::System(second),
+                Entry::System(finished),
+            ] if first == "activity: reading src/main.rs"
+                && second == "activity: running cargo test"
+                && finished == "completed"
+        ));
+        assert!(
+            state
+                .nested_agent(2)
+                .expect("other actor")
+                .transcript
+                .is_empty(),
+            "activity belongs only to its owning actor"
         );
 
         // An activity for an unknown id is dropped rather than resurrecting a row.
         state.apply_event(subagent_activity(99, "ghost"));
         assert!(state.nested_agent(99).is_none());
+    }
+
+    #[test]
+    fn consecutive_identical_subagent_activity_is_coalesced() {
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(1, "explore", "look around"));
+
+        state.apply_event(subagent_activity(1, "reading src/main.rs"));
+        state.apply_event(subagent_activity(1, "reading src/main.rs"));
+
+        assert!(matches!(
+            state.nested_agent(1).expect("actor").transcript.as_slice(),
+            [Entry::System(activity)] if activity == "activity: reading src/main.rs"
+        ));
+    }
+
+    #[test]
+    fn subagent_activity_preserves_interleaved_stream_order() {
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(1, "explore", "look around"));
+
+        state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
+            text_chunk("first"),
+        )));
+        state.apply_event(subagent_activity(1, "running checks"));
+        state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
+            text_chunk(" second"),
+        )));
+        state.apply_event(subagent_session_update(SessionUpdate::AgentThoughtChunk(
+            text_chunk("plan one"),
+        )));
+        state.apply_event(subagent_activity(1, "reading output"));
+        state.apply_event(subagent_session_update(SessionUpdate::AgentThoughtChunk(
+            text_chunk(" plan two"),
+        )));
+
+        assert!(matches!(
+            state.nested_agent(1).expect("actor").transcript.as_slice(),
+            [
+                Entry::SubagentMessage(first),
+                Entry::System(first_activity),
+                Entry::SubagentMessage(second),
+                Entry::SubagentThought(first_thought),
+                Entry::System(second_activity),
+                Entry::SubagentThought(second_thought),
+            ] if first == "first"
+                && first_activity == "activity: running checks"
+                && second == " second"
+                && first_thought.text == "plan one"
+                && first_thought.completed
+                && second_activity == "activity: reading output"
+                && second_thought.text == " plan two"
+                && !second_thought.completed
+        ));
+    }
+
+    #[test]
+    fn subagent_activity_snapshots_are_bounded() {
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(1, "explore", "look around"));
+
+        for index in 0..=SUBAGENT_ACTIVITY_SNAPSHOT_LIMIT {
+            state.apply_event(subagent_activity(1, &format!("step {index}")));
+        }
+
+        let snapshots: Vec<&str> = state
+            .nested_agent(1)
+            .expect("actor")
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::System(text) if text.starts_with(SUBAGENT_ACTIVITY_SNAPSHOT_PREFIX) => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(snapshots.len(), SUBAGENT_ACTIVITY_SNAPSHOT_LIMIT);
+        assert_eq!(snapshots.first(), Some(&"activity: step 1"));
+        assert_eq!(snapshots.last(), Some(&"activity: step 32"));
+    }
+
+    #[test]
+    fn activity_eviction_preserves_the_nested_plan_update_slot() {
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(1, "explore", "look around"));
+        let plan = |text: &str| {
+            SessionUpdate::Plan(Plan::new(vec![PlanEntry::new(
+                text,
+                PlanEntryPriority::Medium,
+                PlanEntryStatus::Pending,
+            )]))
+        };
+
+        for index in 0..SUBAGENT_ACTIVITY_SNAPSHOT_LIMIT {
+            state.apply_event(subagent_activity(1, &format!("step {index}")));
+        }
+        state.apply_event(subagent_session_update(plan("old plan")));
+        state.apply_event(subagent_activity(1, "step 32"));
+        state.apply_event(subagent_session_update(plan("new plan")));
+
+        let plans = state
+            .nested_agent(1)
+            .expect("actor")
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::SubagentPlan(entries) => entries.first().map(|entry| entry.content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(plans, ["new plan"]);
     }
 
     #[test]
@@ -5625,10 +5852,12 @@ mod tests {
             ConnectionState::Ready,
             "delegation notes ride held completions and must not change state"
         );
-        assert!(
-            state.transcript.is_empty(),
-            "primary-owned orchestration packets are intentionally not transcript entries"
-        );
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::InternalMessageSummary(summary)]
+                if summary.kind == crate::event::InternalMessageKind::Delegation
+                    && summary.payload_chars == "boundary note".chars().count()
+        ));
 
         state.apply_event(UiEvent::InternalMessage(InternalMessage {
             source: "primary".to_string(),
@@ -5639,10 +5868,12 @@ mod tests {
         }));
         assert_eq!(state.connection_state, ConnectionState::Streaming);
         assert!(state.is_busy());
-        assert!(
-            state.transcript.is_empty(),
-            "review envelopes stay hidden behind typed workflow summaries"
-        );
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::InternalMessageSummary(_), Entry::InternalMessageSummary(summary)]
+                if summary.kind == crate::event::InternalMessageKind::DiscreteReview
+                    && summary.payload_chars == "review the completed work".chars().count()
+        ));
 
         state.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
@@ -5691,6 +5922,28 @@ mod tests {
                 .iter()
                 .any(|entry| matches!(entry, Entry::SessionBoundary(_)))
         );
+    }
+
+    #[test]
+    fn ownerless_review_lane_is_summarized_in_the_primary_transcript() {
+        let mut state = AppState::new();
+
+        state.apply_event(UiEvent::InternalMessage(InternalMessage {
+            source: "Council".to_string(),
+            target: "Mjolnir".to_string(),
+            kind: crate::event::InternalMessageKind::ReviewLane,
+            text: "check the error path".to_string(),
+            owner_subagent_id: None,
+        }));
+
+        assert!(matches!(
+            state.transcript.as_slice(),
+            [Entry::InternalMessageSummary(summary)]
+                if summary.source == "Council"
+                    && summary.target == "Mjolnir"
+                    && summary.kind == crate::event::InternalMessageKind::ReviewLane
+                    && summary.payload_chars == "check the error path".chars().count()
+        ));
     }
 
     #[test]
