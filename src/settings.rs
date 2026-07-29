@@ -37,8 +37,8 @@ pub enum SettingsTab {
 impl SettingsTab {
     const ALL: [Self; 4] = [
         Self::Agents,
-        Self::AcpPriority,
         Self::AcpServers,
+        Self::AcpPriority,
         Self::Appearance,
     ];
 
@@ -1448,8 +1448,6 @@ mod tests {
             SettingsAction::Changed
         );
         assert!(!editor.config.agent.discrete_review);
-        editor.handle_key(KeyCode::Tab);
-        assert_eq!(editor.tab, SettingsTab::AcpPriority);
         editor.handle_key(KeyCode::Tab);
         assert_eq!(editor.tab, SettingsTab::AcpServers);
         editor.selected = editor
