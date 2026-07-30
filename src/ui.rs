@@ -4204,22 +4204,10 @@ const PROMPT_NEWLINE_HINT: &str = "Shift/Alt+Enter";
 fn is_prompt_newline_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
     // Shift+Enter requires keyboard enhancement support; Alt+Enter is
     // reported only when the terminal treats Alt/Option as a modifier.
-    if matches!(
+    matches!(
         (modifiers, code),
         (KeyModifiers::SHIFT, KeyCode::Enter) | (KeyModifiers::ALT, KeyCode::Enter)
-    ) {
-        return true;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Char('j'))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+    ) || (modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Char('j')))
 }
 
 fn should_open_help(modifiers: KeyModifiers, code: KeyCode) -> bool {
@@ -21499,9 +21487,8 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err(), "must not submit");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn ctrl_j_inserts_newline_without_submitting_on_macos() {
+    fn ctrl_j_inserts_newline_without_submitting() {
         let mut state = AppState::new();
         state.session_id = Some("s-1".to_string());
         state.input = "first".to_string();
