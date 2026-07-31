@@ -95,6 +95,14 @@ pub fn configure_permissions(
     })
 }
 
+pub(crate) fn runtime_permission_config_id(kind: AdapterKind) -> Option<&'static str> {
+    match kind {
+        AdapterKind::Codex | AdapterKind::Claude => Some("mode"),
+        AdapterKind::Kimi => None,
+        AdapterKind::Anvil | AdapterKind::Custom => Some("permission_mode"),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedAgent {
     pub model: Row,

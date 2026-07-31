@@ -50,7 +50,7 @@ pub struct Config {
     /// ACP adapter enablement and explicit user-provisioned servers.
     #[serde(default, skip_serializing_if = "AcpConfig::is_default")]
     pub acp: AcpConfig,
-    /// ACP session option overrides, keyed by ACP server id.
+    /// Agent-owned ACP session options, keyed by ACP server id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub session_config: BTreeMap<String, AcpSessionConfig>,
     /// `/ragnarok` battle knobs.
