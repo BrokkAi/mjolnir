@@ -2049,6 +2049,11 @@ async fn drive_session(
         options: session_config_options,
         targets: session_config_targets,
     };
+    let hidden_config_ids = role_config
+        .as_ref()
+        .and_then(|role| role.permission.as_ref())
+        .map(|permission| vec![permission.config_id.clone()])
+        .unwrap_or_default();
     if let Some(role) = role_config.as_ref() {
         match apply_runtime_role_config(&conn, &session_id, &mut session_config, role).await {
             Ok(warnings) => {
@@ -2080,6 +2085,7 @@ async fn drive_session(
             &session_id,
             &mut session_config,
             &saved_session_config,
+            &hidden_config_ids,
             ui_tx,
         )
         .await;
@@ -2102,11 +2108,6 @@ async fn drive_session(
             "ACP session started"
         );
     }
-    let hidden_config_ids = role_config
-        .as_ref()
-        .and_then(|role| role.permission.as_ref())
-        .map(|permission| vec![permission.config_id.clone()])
-        .unwrap_or_default();
     if !session_config.options.is_empty() {
         let _ = ui_tx.send(UiEvent::SessionConfigOptions {
             options: session_config.options.clone(),
@@ -4271,7 +4272,7 @@ fn current_session_config_values(session_config: &SessionConfigCache) -> HashMap
         .collect()
 }
 
-fn session_config_option_contains_value(
+pub(crate) fn session_config_option_contains_value(
     option: &SessionConfigOption,
     value: &SessionConfigValueId,
 ) -> bool {
@@ -4340,6 +4341,7 @@ async fn apply_saved_session_config(
     session_id: &SessionId,
     session_config: &mut SessionConfigCache,
     saved: &HashMap<String, String>,
+    hidden_config_ids: &[String],
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
 ) {
     let changes: Vec<_> = session_config
@@ -4347,6 +4349,9 @@ async fn apply_saved_session_config(
         .iter()
         .zip(session_config.targets.iter())
         .filter_map(|(option, target)| {
+            if !session_config_option_is_agent_owned(option, target, hidden_config_ids) {
+                return None;
+            }
             let saved_value = saved.get(&session_config_target_key(target))?;
             let value = SessionConfigValueId::from(saved_value.clone());
             if config_option_current_value(option) == Some(&value)
@@ -4655,6 +4660,14 @@ async fn drive_config_update(
     agent_source_id: Option<&str>,
     model_id: Option<&str>,
 ) -> Result<bool> {
+    let agent_owned = session_config
+        .options
+        .iter()
+        .zip(session_config.targets.iter())
+        .find(|(_, candidate)| *candidate == &target)
+        .is_some_and(|(option, candidate)| {
+            session_config_option_is_agent_owned(option, candidate, hidden_config_ids)
+        });
     let update = send_config_update(conn, session_id, target.clone(), value.clone());
     tokio::pin!(update);
 
@@ -4692,7 +4705,7 @@ async fn drive_config_update(
                     }
                 }
                 if accepted
-                    && session_config_target_is_agent_owned(&target, hidden_config_ids)
+                    && agent_owned
                     && let (Some(path), Some(source_id), Some(model_id)) =
                         (config_path, agent_source_id, model_id)
                     && let Err(error) = crate::config::persist_accepted_session_config(
@@ -4759,14 +4772,27 @@ async fn drive_config_update(
     }
 }
 
-fn session_config_target_is_agent_owned(
+pub(crate) fn session_config_option_is_agent_owned(
+    option: &SessionConfigOption,
     target: &SessionConfigTarget,
     hidden_config_ids: &[String],
 ) -> bool {
     match target {
-        SessionConfigTarget::ConfigOption { config_id } => !hidden_config_ids
-            .iter()
-            .any(|hidden| hidden == &config_id.to_string()),
+        SessionConfigTarget::ConfigOption { config_id } => {
+            matches!(option.kind, SessionConfigKind::Select(_))
+                && !matches!(
+                    option.category,
+                    Some(
+                        SessionConfigOptionCategory::Model
+                            | SessionConfigOptionCategory::ModelConfig
+                            | SessionConfigOptionCategory::ThoughtLevel
+                    )
+                )
+                && config_id.to_string() != REASONING_EFFORT_CONFIG_ID
+                && !hidden_config_ids
+                    .iter()
+                    .any(|hidden| hidden == &config_id.to_string())
+        }
         SessionConfigTarget::LegacyModel => false,
         SessionConfigTarget::LegacyMode => true,
     }
@@ -7243,6 +7269,36 @@ mod tests {
 
     /// Answers a session config update only after a delay, then serves
     /// prompts normally -- the rig for "a prompt raced a config update".
+    fn slow_config_options() -> Vec<SessionConfigOption> {
+        vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-a",
+                vec![SessionConfigSelectOption::new("model-a", "Model A")],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "service_tier",
+                "Service tier",
+                "default",
+                vec![
+                    SessionConfigSelectOption::new("default", "Default"),
+                    SessionConfigSelectOption::new("priority", "Priority"),
+                ],
+            ),
+            SessionConfigOption::select(
+                "response_style",
+                "Response style",
+                "balanced",
+                vec![
+                    SessionConfigSelectOption::new("balanced", "Balanced"),
+                    SessionConfigSelectOption::new("concise", "Concise"),
+                ],
+            ),
+        ]
+    }
+
     async fn run_mock_agent_with_slow_config(stream: tokio::io::DuplexStream) {
         let (r, w) = split(stream);
         let transport = ByteStreams::new(w.compat_write(), r.compat());
@@ -7263,35 +7319,8 @@ mod tests {
                             responder,
                             _cx| {
                     responder.respond(
-                        NewSessionResponse::new(SessionId::new("test-session")).config_options(
-                            vec![
-                                SessionConfigOption::select(
-                                    "model",
-                                    "Model",
-                                    "model-a",
-                                    vec![SessionConfigSelectOption::new("model-a", "Model A")],
-                                )
-                                .category(SessionConfigOptionCategory::Model),
-                                SessionConfigOption::select(
-                                    "service_tier",
-                                    "Service tier",
-                                    "default",
-                                    vec![
-                                        SessionConfigSelectOption::new("default", "Default"),
-                                        SessionConfigSelectOption::new("priority", "Priority"),
-                                    ],
-                                ),
-                                SessionConfigOption::select(
-                                    "response_style",
-                                    "Response style",
-                                    "balanced",
-                                    vec![
-                                        SessionConfigSelectOption::new("balanced", "Balanced"),
-                                        SessionConfigSelectOption::new("concise", "Concise"),
-                                    ],
-                                ),
-                            ],
-                        ),
+                        NewSessionResponse::new(SessionId::new("test-session"))
+                            .config_options(slow_config_options()),
                     )
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -7300,7 +7329,8 @@ mod tests {
                 async move |_req: SetSessionConfigOptionRequest, responder, _cx| {
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(300)).await;
-                        let _ = responder.respond(SetSessionConfigOptionResponse::new(Vec::new()));
+                        let _ = responder
+                            .respond(SetSessionConfigOptionResponse::new(slow_config_options()));
                     });
                     Ok(())
                 },

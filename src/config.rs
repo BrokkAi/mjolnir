@@ -483,10 +483,14 @@ impl Config {
                 .with_context(|| format!("create config dir {}", parent.display()))?;
         }
         let body = toml::to_string_pretty(self).context("serialize config")?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)
+            .with_context(|| format!("create temporary config in {}", parent.display()))?;
+        std::io::Write::write_all(&mut tmp, body.as_bytes())
+            .with_context(|| format!("write temporary config in {}", parent.display()))?;
+        tmp.persist(path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("replace {}", path.display()))?;
         Ok(())
     }
 
@@ -721,6 +725,37 @@ pub fn load_saved_session_config(
 }
 
 static SESSION_CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn save_user_config_preserving_session_routes(path: &Path, config: &mut Config) -> Result<()> {
+    let _guard = SESSION_CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let latest = Config::load(path)?;
+    for (source_id, saved) in latest.session_config {
+        let changed_defaults = config
+            .session_config
+            .get(&source_id)
+            .map(|edited| {
+                edited
+                    .defaults
+                    .iter()
+                    .filter(|(key, value)| saved.defaults.get(*key) != Some(*value))
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !saved.models.is_empty() {
+            let routes = &mut config.session_config.entry(source_id).or_default().models;
+            routes.clone_from(&saved.models);
+            for route in routes.values_mut() {
+                for key in &changed_defaults {
+                    route.remove(key);
+                }
+            }
+        }
+    }
+    config.save(path)
+}
 
 pub fn persist_accepted_session_config(
     path: &Path,
@@ -1282,6 +1317,74 @@ origin = "custom"
         assert_eq!(
             loaded.session_config["codex-acp"].models["model-b"]["config:service_tier"],
             "economy"
+        );
+    }
+
+    #[test]
+    fn settings_save_preserves_a_concurrent_accepted_route() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut editor_snapshot = Config::default();
+        editor_snapshot
+            .session_config
+            .entry("codex-acp".to_string())
+            .or_default()
+            .defaults
+            .insert("config:service_tier".to_string(), "default".to_string());
+        editor_snapshot.save(&path).expect("save editor snapshot");
+
+        persist_accepted_session_config(
+            &path,
+            "codex-acp",
+            "model-a",
+            "config:service_tier".to_string(),
+            "priority".to_string(),
+        )
+        .expect("persist accepted route");
+        editor_snapshot.theme = TerminalThemeKind::Dark;
+        save_user_config_preserving_session_routes(&path, &mut editor_snapshot)
+            .expect("save settings");
+
+        let loaded = Config::load(&path).expect("load merged config");
+        assert_eq!(loaded.theme, TerminalThemeKind::Dark);
+        assert_eq!(
+            loaded.session_config["codex-acp"].models["model-a"]["config:service_tier"],
+            "priority"
+        );
+    }
+
+    #[test]
+    fn changing_a_default_clears_that_key_from_saved_routes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        let saved = config
+            .session_config
+            .entry("codex-acp".to_string())
+            .or_default();
+        saved
+            .defaults
+            .insert("config:service_tier".to_string(), "default".to_string());
+        saved
+            .models
+            .entry("model-a".to_string())
+            .or_default()
+            .insert("config:service_tier".to_string(), "priority".to_string());
+        config.save(&path).expect("save initial config");
+
+        config
+            .session_config
+            .get_mut("codex-acp")
+            .unwrap()
+            .defaults
+            .insert("config:service_tier".to_string(), "economy".to_string());
+        save_user_config_preserving_session_routes(&path, &mut config)
+            .expect("save changed default");
+
+        let loaded = Config::load(&path).expect("load config");
+        assert!(
+            !loaded.session_config["codex-acp"].models["model-a"]
+                .contains_key("config:service_tier")
         );
     }
 

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions,
+    SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,
 };
 use crossterm::event::KeyCode;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::config::{AcpServerOrigin, AcpServerPolicy, Config, ConfiguredAcpServer, ModelsConfig};
+use crate::event::SessionConfigTarget;
 use crate::install::Progress;
 use crate::palette::TerminalTheme;
 use crate::registry::{Agent, DistributionKind, Registry};
@@ -319,10 +320,15 @@ impl SettingsEditor {
                 let next = (index as i32 + delta).rem_euclid(choices.len() as i32) as usize;
                 self.config
                     .session_config
-                    .entry(server_id)
+                    .entry(server_id.clone())
                     .or_default()
                     .defaults
-                    .insert(option_key, choices[next].0.clone());
+                    .insert(option_key.clone(), choices[next].0.clone());
+                if let Some(saved) = self.config.session_config.get_mut(&server_id) {
+                    for route in saved.models.values_mut() {
+                        route.remove(&option_key);
+                    }
+                }
             }
             SettingsTab::Appearance if self.selected == 0 => {
                 let current = TerminalThemeKind::ALL
@@ -1026,19 +1032,14 @@ fn session_option_is_user_owned(
     server: &crate::roster::AcpServerInfo,
     option: &SessionConfigOption,
 ) -> bool {
-    let option_id = option.id.to_string();
-    let permission_id = crate::roster::runtime_permission_config_id(server.launch.kind);
-    matches!(option.kind, SessionConfigKind::Select(_))
-        && !matches!(
-            option.category,
-            Some(
-                SessionConfigOptionCategory::Model
-                    | SessionConfigOptionCategory::ModelConfig
-                    | SessionConfigOptionCategory::ThoughtLevel
-            )
-        )
-        && permission_id != Some(option_id.as_str())
-        && option_id != crate::acp::REASONING_EFFORT_CONFIG_ID
+    let hidden = crate::roster::runtime_permission_config_id(server.launch.kind)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let target = SessionConfigTarget::ConfigOption {
+        config_id: option.id.clone(),
+    };
+    crate::acp::session_config_option_is_agent_owned(option, &target, &hidden)
 }
 
 fn session_option_choices(option: &SessionConfigOption) -> Vec<(String, String)> {
@@ -1627,7 +1628,9 @@ fn on_off(enabled: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
+    use agent_client_protocol::schema::v1::{
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    };
 
     #[test]
     fn acp_session_tab_saves_agent_owned_option_per_server() {
@@ -1647,6 +1650,15 @@ mod tests {
                 SessionConfigSelectOption::new("priority", "Priority"),
             ],
         )];
+        editor
+            .config
+            .session_config
+            .entry(server_id.clone())
+            .or_default()
+            .models
+            .entry("model-a".to_string())
+            .or_default()
+            .insert("config:service_tier".to_string(), "default".to_string());
         editor.tab = SettingsTab::AcpSessions;
 
         assert_eq!(editor.session_option_rows().len(), 1);
@@ -1658,6 +1670,10 @@ mod tests {
         assert_eq!(
             editor.config.session_config[&server_id].defaults["config:service_tier"],
             "priority"
+        );
+        assert!(
+            !editor.config.session_config[&server_id].models["model-a"]
+                .contains_key("config:service_tier")
         );
     }
 

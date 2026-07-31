@@ -12,6 +12,7 @@ use crate::probe::{AdapterCapabilities, ModelOption};
 use agent_client_protocol::schema::v1::SessionConfigOption;
 
 pub const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const CACHE_FORMAT_VERSION: u32 = 2;
 
 pub fn default_cache_path() -> PathBuf {
     dirs::cache_dir()
@@ -22,6 +23,7 @@ pub fn default_cache_path() -> PathBuf {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CacheFile {
+    version: u32,
     entries: HashMap<String, Entry>,
 }
 
@@ -68,10 +70,18 @@ fn now_unix() -> u64 {
 }
 
 fn read(path: &Path) -> CacheFile {
-    std::fs::read(path)
+    let file: CacheFile = std::fs::read(path)
         .ok()
         .and_then(|contents| serde_json::from_slice(&contents).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if file.version == CACHE_FORMAT_VERSION {
+        file
+    } else {
+        CacheFile {
+            version: CACHE_FORMAT_VERSION,
+            ..CacheFile::default()
+        }
+    }
 }
 
 /// Fresh cached capabilities for `key`, or `None` when the entry is missing,
@@ -98,6 +108,7 @@ pub fn load(path: &Path, key: &str, command: &Path, ttl: Duration) -> Option<Ada
 /// a full TTL. Best-effort: cache write errors are ignored.
 pub fn store(path: &Path, key: &str, command: &Path, capabilities: &AdapterCapabilities) {
     let mut file = read(path);
+    file.version = CACHE_FORMAT_VERSION;
     file.entries.insert(
         key.to_string(),
         Entry {
@@ -194,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn older_cache_entries_mark_session_config_unknown() {
+    fn older_cache_formats_are_invalidated() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = dir.path().join("probes.json");
         let command = dir.path().join("agent");
@@ -212,9 +223,7 @@ mod tests {
         std::fs::write(&cache, serde_json::to_vec(&contents).expect("serialize"))
             .expect("write old cache");
 
-        let loaded = load(&cache, "codex-acp", &command, CACHE_TTL).expect("old cache loads");
-        assert!(!loaded.session_config_known);
-        assert!(loaded.session_config.is_empty());
+        assert!(load(&cache, "codex-acp", &command, CACHE_TTL).is_none());
     }
 
     #[test]

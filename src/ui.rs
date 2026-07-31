@@ -4631,14 +4631,14 @@ fn handle_mjconfig_menu_key(
 fn persist_mjconfig_selection(
     state: &mut AppState,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
-    config: config::Config,
+    mut config: config::Config,
 ) {
     let theme = config.theme;
     let style = config.spinner;
     let review_changed = state.review_enabled != config.agent.discrete_review;
     let live_session_updates = live_primary_session_config_updates(state, &config);
     if let Some(path) = state.config_path.clone() {
-        match config.save(&path) {
+        match config::save_user_config_preserving_session_routes(&path, &mut config) {
             Ok(()) => {
                 state.configured_models = config.model_names();
                 state.acp_inventory =
@@ -4692,8 +4692,11 @@ fn live_primary_session_config_updates(
         .filter_map(|(option, target)| {
             let desired = defaults.get(&crate::acp::session_config_option_key(&option.id))?;
             let current = crate::app::config_option_current_value_id(option)?;
-            (current.to_string() != *desired)
-                .then(|| (target.clone(), SessionConfigValueId::from(desired.clone())))
+            let desired_value = SessionConfigValueId::from(desired.clone());
+            if !crate::acp::session_config_option_contains_value(option, &desired_value) {
+                return None;
+            }
+            (current.to_string() != *desired).then(|| (target.clone(), desired_value))
         })
         .collect()
 }
