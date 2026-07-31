@@ -965,18 +965,21 @@ fn preferred_route<'a>(
 fn choose_primary_auto<'a>(
     available: &'a [ResolvedAgent],
     subscriptions: &Subscriptions,
+    acp_priority: &[String],
 ) -> Option<&'a ResolvedAgent> {
-    let best = available.iter().find(|candidate| candidate.ranked);
+    let best_model = available.iter().find(|candidate| candidate.ranked)?;
+    let best = preferred_route(&best_model.model.model, available, acp_priority)
+        .expect("ranked model has a launchable route");
     let Some(favored) = subscriptions.favored() else {
-        return best;
+        return Some(best);
     };
     let Some(preferred) = available
         .iter()
         .find(|candidate| candidate.ranked && candidate.launch.kind == favored)
     else {
-        return best;
+        return Some(best);
     };
-    if best.is_some_and(|best| best.model.model != preferred.model.model) {
+    if best.model.model != preferred.model.model || best.launch.kind != preferred.launch.kind {
         tracing::info!(
             model = %preferred.model.model,
             adapter = %preferred.launch.source_id,
@@ -1403,12 +1406,12 @@ fn assemble_roster(
         bail!("the primary agent cannot be disabled");
     }
     let primary = if config.agent.model == "auto" {
-        let model = &choose_primary_auto(&available, &availability.subscriptions)
-            .ok_or_else(|| anyhow!("Agent Auto requires at least one ranked DeepSWE model"))?
-            .model
-            .model;
-        preferred_route(model, &available, &config.agent.acp_priority)
-            .expect("auto-selected model has a launchable route")
+        choose_primary_auto(
+            &available,
+            &availability.subscriptions,
+            &config.agent.acp_priority,
+        )
+        .ok_or_else(|| anyhow!("Agent Auto requires at least one ranked DeepSWE model"))?
     } else {
         explicit(
             "Agent",
@@ -1750,14 +1753,14 @@ mod tests {
         ];
 
         assert_eq!(
-            choose_primary_auto(&available, &plans("pro", "plus"))
+            choose_primary_auto(&available, &plans("pro", "plus"), &[])
                 .expect("ranked model")
                 .model
                 .model,
             "claude-fable-5"
         );
         assert_eq!(
-            choose_primary_auto(&available, &Subscriptions::default())
+            choose_primary_auto(&available, &Subscriptions::default(), &[])
                 .expect("ranked model")
                 .model
                 .model,
@@ -1775,12 +1778,13 @@ mod tests {
 
         // Claude Pro against ChatGPT Pro: the best Codex model wins the seat
         // even though the Claude model ranks higher.
-        let chosen = choose_primary_auto(&available, &plans("pro", "pro")).expect("favored model");
+        let chosen =
+            choose_primary_auto(&available, &plans("pro", "pro"), &[]).expect("favored model");
         assert_eq!(chosen.model.model, "gpt-5-6-sol");
         assert_eq!(chosen.launch.kind, AdapterKind::Codex);
 
         let chosen =
-            choose_primary_auto(&available, &plans("max20", "plus")).expect("favored model");
+            choose_primary_auto(&available, &plans("max20", "plus"), &[]).expect("favored model");
         assert_eq!(chosen.model.model, "claude-fable-5");
     }
 
@@ -1789,7 +1793,7 @@ mod tests {
         let available = vec![role("claude-fable-5", 0.70), role("claude-sonnet-5", 0.60)];
 
         assert_eq!(
-            choose_primary_auto(&available, &plans("pro", "pro"))
+            choose_primary_auto(&available, &plans("pro", "pro"), &[])
                 .expect("ranked fallback")
                 .model
                 .model,
@@ -1806,9 +1810,27 @@ mod tests {
         let available = vec![anvil_claude, role("gpt-5-6-sol", 0.68)];
 
         let chosen =
-            choose_primary_auto(&available, &plans("max20", "plus")).expect("ranked fallback");
+            choose_primary_auto(&available, &plans("max20", "plus"), &[]).expect("ranked fallback");
         assert_eq!(chosen.launch.kind, AdapterKind::Anvil);
         assert_eq!(chosen.model.model, "claude-fable-5");
+    }
+
+    #[test]
+    fn auto_primary_keeps_the_favored_vendor_route_over_custom_priority() {
+        let mut anvil_gpt = role("gpt-5-6-sol", 0.68);
+        anvil_gpt.launch = launch_for(AdapterKind::Anvil);
+        let available = vec![
+            role("claude-fable-5", 0.70),
+            anvil_gpt,
+            role("gpt-5-6-sol", 0.68),
+        ];
+        let priority = vec!["anvil".to_string(), "codex-acp".to_string()];
+
+        let chosen = choose_primary_auto(&available, &plans("pro", "pro"), &priority)
+            .expect("favored native route");
+
+        assert_eq!(chosen.model.model, "gpt-5-6-sol");
+        assert_eq!(chosen.launch.kind, AdapterKind::Codex);
     }
 
     #[test]
