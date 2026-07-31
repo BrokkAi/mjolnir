@@ -1687,6 +1687,7 @@ mod tests {
             .category(SessionConfigOptionCategory::ModelConfig);
         let service =
             SessionConfigOption::select("service_tier", "Service tier", "value", choice());
+        let server_id = server.id.clone();
         server.launch.kind = crate::roster::AdapterKind::Codex;
         server.session_config = vec![model, thought, permission, reasoning, fast, service];
         editor.tab = SettingsTab::AcpSessions;
@@ -1696,7 +1697,7 @@ mod tests {
             editor.selected = selected;
             assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         }
-        assert_eq!(editor.config.session_config["codex-acp"].defaults.len(), 6);
+        assert_eq!(editor.config.session_config[&server_id].defaults.len(), 6);
     }
 
     #[test]
