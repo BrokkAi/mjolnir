@@ -2032,11 +2032,9 @@ async fn run_session(
         let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel::<()>();
         let usage_ui_tx = ui_event_tx.clone();
         let usage_cwd = cwd.clone();
-        if codex_usage_env.is_some() {
-            let _ = tx.send(());
-        }
+        let _ = tx.send(());
         let handle = tokio::spawn(async move {
-            let mut completed_turns = 0_u64;
+            let mut usage_refresh_index = 0_u64;
             let mut codex_client = None;
             loop {
                 tokio::select! {
@@ -2044,8 +2042,18 @@ async fn run_session(
                     _ = shutdown_rx.recv() => break,
                     trigger = rx.recv() => if trigger.is_none() { break; },
                 }
-                completed_turns = completed_turns.saturating_add(1);
-                if completed_turns.is_multiple_of(2)
+                if let Some(env) = codex_usage_env.as_ref() {
+                    let status =
+                        codex_usage::refresh(&mut codex_client, usage_cwd.clone(), env.clone())
+                            .await;
+                    if usage_ui_tx
+                        .send(crate::event::UiEvent::CodexUsage(status))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                if should_refresh_claude_usage(usage_refresh_index)
                     && let Some(env) = claude_usage_env.as_ref()
                 {
                     let status = match claude_usage::query(usage_cwd.clone(), env.clone()).await {
@@ -2064,17 +2072,7 @@ async fn run_session(
                         break;
                     }
                 }
-                if let Some(env) = codex_usage_env.as_ref() {
-                    let status =
-                        codex_usage::refresh(&mut codex_client, usage_cwd.clone(), env.clone())
-                            .await;
-                    if usage_ui_tx
-                        .send(crate::event::UiEvent::CodexUsage(status))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
+                usage_refresh_index = usage_refresh_index.saturating_add(1);
             }
             if let Some(client) = codex_client {
                 client.shutdown().await;
@@ -3026,6 +3024,10 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SynchronizedFileWriter {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         }
     }
+}
+
+fn should_refresh_claude_usage(refresh_index: u64) -> bool {
+    refresh_index.is_multiple_of(2)
 }
 
 #[cfg(test)]
@@ -4161,5 +4163,14 @@ mod tests {
         let help = cmd.render_long_help().to_string();
         assert!(help.contains("resume"));
         assert!(help.contains("Resume an existing ACP session"));
+    }
+
+    #[test]
+    fn claude_usage_refreshes_at_startup_then_every_second_completed_turn() {
+        let refreshes = (0_u64..=4)
+            .filter(|index| should_refresh_claude_usage(*index))
+            .collect::<Vec<_>>();
+
+        assert_eq!(refreshes, vec![0, 2, 4]);
     }
 }

@@ -10194,15 +10194,44 @@ fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    let paragraph = if matches!(
+    let wraps = matches!(
         state.anvil_quota_source,
         Some(crate::app::AnvilQuotaSource::DeepSeek)
-    ) {
-        Paragraph::new(label).wrap(Wrap { trim: false })
+    );
+    let paragraph = if let Some(seat_labels) = attributed_usage_quota_labels(state) {
+        let mut spans = Vec::new();
+        for (index, (seat, quota)) in seat_labels.into_iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::styled(
+                    "  │  ",
+                    Style::default().fg(state.theme.muted),
+                ));
+            }
+            let (seat_label, color) = match seat {
+                UsageQuotaSeat::Primary => ("PRIMARY", state.theme.primary),
+                UsageQuotaSeat::Subagents => ("SUBAGENTS", state.theme.secondary),
+            };
+            spans.push(Span::styled(
+                format!("[{seat_label}]"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(quota, Style::default().fg(color)));
+        }
+        let paragraph = Paragraph::new(Line::from(spans));
+        if wraps {
+            paragraph.wrap(Wrap { trim: false })
+        } else {
+            paragraph
+        }
+    } else if wraps {
+        Paragraph::new(label)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(state.theme.warning))
     } else {
         Paragraph::new(truncate_text_to_width(label, area.width))
-    }
-    .style(Style::default().fg(state.theme.warning));
+            .style(Style::default().fg(state.theme.warning))
+    };
     f.render_widget(paragraph, area);
 }
 
@@ -10226,35 +10255,78 @@ fn usage_quota_row_count(state: &AppState, width: u16) -> usize {
 }
 
 fn usage_quota_label(state: &AppState) -> Option<String> {
-    let anvil_label = match state.anvil_quota_source {
-        Some(crate::app::AnvilQuotaSource::Bedrock) => state
-            .bedrock_credits
-            .as_ref()
-            .map(crate::bedrock_credits::BedrockCreditsStatus::compact_label),
-        Some(crate::app::AnvilQuotaSource::OpenRouter) => state
-            .openrouter_balance
-            .as_ref()
-            .map(crate::openrouter_balance::OpenRouterBalanceStatus::compact_label),
-        Some(crate::app::AnvilQuotaSource::DeepSeek) => state
-            .deepseek_balance
-            .as_ref()
-            .map(crate::deepseek_balance::DeepSeekBalanceStatus::compact_label),
-        None => None,
-    };
+    if let Some(seat_labels) = attributed_usage_quota_labels(state) {
+        return (!seat_labels.is_empty()).then(|| {
+            seat_labels
+                .into_iter()
+                .map(|(seat, label)| format!("{} {label}", seat.plain_label()))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        });
+    }
 
-    anvil_label
-        .or_else(|| {
-            state
-                .codex_usage
+    usage_quota_source_label(state, "anvil")
+        .or_else(|| usage_quota_source_label(state, "codex-acp"))
+        .or_else(|| usage_quota_source_label(state, "claude-acp"))
+}
+
+#[derive(Clone, Copy)]
+enum UsageQuotaSeat {
+    Primary,
+    Subagents,
+}
+
+impl UsageQuotaSeat {
+    fn plain_label(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Subagents => "subagents",
+        }
+    }
+}
+
+fn attributed_usage_quota_labels(state: &AppState) -> Option<Vec<(UsageQuotaSeat, String)>> {
+    let primary_source = state.active_models.primary_source.as_deref()?;
+    let mut labels = usage_quota_source_label(state, primary_source)
+        .map(|label| (UsageQuotaSeat::Primary, label))
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some(subagent_source) = state.active_models.subagent_source.as_deref()
+        && subagent_source != primary_source
+        && let Some(label) = usage_quota_source_label(state, subagent_source)
+    {
+        labels.push((UsageQuotaSeat::Subagents, label));
+    }
+    Some(labels)
+}
+
+fn usage_quota_source_label(state: &AppState, source: &str) -> Option<String> {
+    match source {
+        "anvil" => match state.anvil_quota_source {
+            Some(crate::app::AnvilQuotaSource::Bedrock) => state
+                .bedrock_credits
                 .as_ref()
-                .map(crate::codex_usage::CodexUsageStatus::compact_label)
-        })
-        .or_else(|| {
-            state
-                .claude_usage
+                .map(crate::bedrock_credits::BedrockCreditsStatus::compact_label),
+            Some(crate::app::AnvilQuotaSource::OpenRouter) => state
+                .openrouter_balance
                 .as_ref()
-                .map(crate::claude_usage::ClaudeUsageStatus::compact_label)
-        })
+                .map(crate::openrouter_balance::OpenRouterBalanceStatus::compact_label),
+            Some(crate::app::AnvilQuotaSource::DeepSeek) => state
+                .deepseek_balance
+                .as_ref()
+                .map(crate::deepseek_balance::DeepSeekBalanceStatus::compact_label),
+            None => None,
+        },
+        "codex-acp" => state
+            .codex_usage
+            .as_ref()
+            .map(crate::codex_usage::CodexUsageStatus::compact_label),
+        "claude-acp" => state
+            .claude_usage
+            .as_ref()
+            .map(crate::claude_usage::ClaudeUsageStatus::compact_label),
+        _ => None,
+    }
 }
 
 fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -21272,7 +21344,80 @@ mod tests {
     }
 
     #[test]
-    fn usage_quota_label_prefers_codex_over_claude_without_anvil_provider() {
+    fn usage_quota_label_attributes_distinct_primary_and_subagent_sources() {
+        let mut state = AppState::new();
+        state.active_models.primary_source = Some("claude-acp".to_string());
+        state.active_models.subagent_source = Some("codex-acp".to_string());
+        state.set_claude_usage(ClaudeUsageStatus::Unavailable(
+            "claude unavailable".to_string(),
+        ));
+        state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
+            "codex unavailable".to_string(),
+        ));
+        assert_eq!(
+            usage_quota_label(&state).as_deref(),
+            Some(
+                "primary Claude usage unavailable: claude unavailable · subagents Codex usage unavailable: codex unavailable"
+            )
+        );
+
+        let backend = TestBackend::new(160, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_lines(buffer)[0].clone();
+        let subagents_x = rendered.find("[SUBAGENTS]").expect("subagents label") as u16;
+        assert!(rendered.starts_with("[PRIMARY] Claude usage unavailable"));
+        assert_eq!(
+            buffer.cell((1, 0)).expect("primary cell").style().fg,
+            Some(state.theme.primary)
+        );
+        let primary_quota_x = rendered.find("Claude usage").expect("primary quota") as u16;
+        assert_eq!(
+            buffer
+                .cell((primary_quota_x, 0))
+                .expect("primary quota cell")
+                .style()
+                .fg,
+            Some(state.theme.primary)
+        );
+        assert_eq!(
+            buffer
+                .cell((subagents_x + 1, 0))
+                .expect("subagents cell")
+                .style()
+                .fg,
+            Some(state.theme.secondary)
+        );
+        let subagent_quota_x = rendered.find("Codex usage").expect("subagent quota") as u16;
+        assert_eq!(
+            buffer
+                .cell((subagent_quota_x, 0))
+                .expect("subagent quota cell")
+                .style()
+                .fg,
+            Some(state.theme.secondary)
+        );
+    }
+
+    #[test]
+    fn usage_quota_label_omits_duplicate_shared_adapter_quota() {
+        let mut state = AppState::new();
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.active_models.subagent_source = Some("codex-acp".to_string());
+        state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
+            "codex unavailable".to_string(),
+        ));
+        assert_eq!(
+            usage_quota_label(&state).as_deref(),
+            Some("primary Codex usage unavailable: codex unavailable")
+        );
+    }
+
+    #[test]
+    fn usage_quota_label_uses_priority_fallback_without_seat_attribution() {
         let mut state = AppState::new();
         state.set_claude_usage(ClaudeUsageStatus::Unavailable(
             "claude unavailable".to_string(),
