@@ -10265,13 +10265,13 @@ fn usage_quota_row_count(state: &AppState, width: u16) -> usize {
 
 fn usage_quota_label(state: &AppState) -> Option<String> {
     if let Some(quota_items) = attributed_usage_quota_items(state) {
-        return (!quota_items.is_empty()).then(|| {
+        return Some(
             quota_items
                 .into_iter()
                 .map(|(owner, label)| format!("{} {label}", owner.plain_label()))
                 .collect::<Vec<_>>()
-                .join(" · ")
-        });
+                .join(" · "),
+        );
     }
 
     usage_quota_source_label(state, "anvil")
@@ -10323,7 +10323,10 @@ fn attributed_usage_quota_items(state: &AppState) -> Option<Vec<(UsageQuotaOwner
     {
         labels.push((UsageQuotaOwner::Anvil, label));
     }
-    Some(labels)
+    // No seat resolved to a quota provider (e.g. an `anvil` primary with no
+    // configured anvil balance source). Fall through to the priority chain so a
+    // still-live poller keeps the row populated instead of blanking it.
+    (!labels.is_empty()).then_some(labels)
 }
 
 fn usage_quota_source_label(state: &AppState, source: &str) -> Option<String> {
@@ -21473,7 +21476,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_attributed_rows_under_deepseek_wrap() {
+    fn usage_quota_rows_match_rendered_lines_when_deepseek_wraps() {
         let mut state = AppState::new();
         state.active_models.primary_source = Some("claude-acp".to_string());
         state.active_models.subagent_source = Some("codex-acp".to_string());
@@ -21499,10 +21502,6 @@ mod tests {
                 .expect("draw");
             let rendered = buffer_lines(terminal.backend().buffer());
             let non_blank = rendered.iter().filter(|l| !l.trim().is_empty()).count();
-            eprintln!("width={width} count={count} rendered_non_blank={non_blank}");
-            for line in rendered.iter().take(count as usize + 6) {
-                eprintln!("    |{line}|");
-            }
             assert_eq!(
                 count as usize, non_blank,
                 "width {width} row count mismatch"
@@ -21511,32 +21510,51 @@ mod tests {
     }
 
     #[test]
-    fn probe_anvil_primary_seat() {
+    fn usage_quota_label_reports_shared_anvil_seats_once_as_primary() {
         let mut state = AppState::new();
         state.active_models.primary_source = Some("anvil".to_string());
         state.active_models.subagent_source = Some("anvil".to_string());
         state.set_bedrock_credits(crate::bedrock_credits::BedrockCreditsStatus::Unavailable(
             "bedrock unavailable".to_string(),
         ));
-        eprintln!("anvil primary label = {:?}", usage_quota_label(&state));
 
-        let mut kimi = AppState::new();
-        kimi.active_models.primary_source = Some("kimi".to_string());
-        kimi.active_models.subagent_source = Some("codex-acp".to_string());
-        kimi.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
-            "codex unavailable".to_string(),
-        ));
-        eprintln!("kimi primary label = {:?}", usage_quota_label(&kimi));
-
-        let mut none_state = AppState::new();
-        none_state.active_models.primary_source = Some("anvil".to_string());
-        none_state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
-            "codex unavailable".to_string(),
-        ));
-        eprintln!(
-            "anvil primary, no anvil data, codex poller alive = {:?}",
-            usage_quota_label(&none_state)
+        assert_eq!(
+            usage_quota_label(&state).as_deref(),
+            Some("primary Bedrock credits unavailable: bedrock unavailable")
         );
+        assert_eq!(usage_quota_row_count(&state, 160), 1);
+    }
+
+    #[test]
+    fn usage_quota_label_skips_primary_seat_without_a_quota_source() {
+        let mut state = AppState::new();
+        state.active_models.primary_source = Some("kimi".to_string());
+        state.active_models.subagent_source = Some("codex-acp".to_string());
+        state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
+            "codex unavailable".to_string(),
+        ));
+
+        assert_eq!(
+            usage_quota_label(&state).as_deref(),
+            Some("subagents Codex usage unavailable: codex unavailable")
+        );
+        assert_eq!(usage_quota_row_count(&state, 160), 1);
+    }
+
+    #[test]
+    fn usage_quota_label_falls_back_when_no_seat_resolves_a_quota_source() {
+        let mut state = AppState::new();
+        state.active_models.primary_source = Some("anvil".to_string());
+        state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
+            "codex unavailable".to_string(),
+        ));
+
+        assert!(attributed_usage_quota_items(&state).is_none());
+        assert_eq!(
+            usage_quota_label(&state).as_deref(),
+            Some("Codex usage unavailable: codex unavailable")
+        );
+        assert_eq!(usage_quota_row_count(&state, 160), 1);
     }
 
     #[test]

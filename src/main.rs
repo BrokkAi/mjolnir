@@ -2035,20 +2035,26 @@ async fn run_session(
     }
     let has_usage_poller = claude_usage_env.is_some() || codex_usage_env.is_some();
     let (usage_turn_tx, usage_shutdown_tx, usage_task) = if has_usage_poller {
-        let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<UsageRefreshTrigger>();
         let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel::<()>();
         let usage_ui_tx = ui_event_tx.clone();
         let usage_cwd = cwd.clone();
-        let _ = tx.send(());
+        let _ = tx.send(UsageRefreshTrigger::Startup);
         let handle = tokio::spawn(async move {
-            let mut usage_refresh_index = 0_u64;
+            let mut completed_turns = 0_u64;
             let mut codex_client = None;
             loop {
-                tokio::select! {
+                let trigger = tokio::select! {
                     biased;
                     _ = shutdown_rx.recv() => break,
-                    trigger = rx.recv() => if trigger.is_none() { break; },
-                }
+                    trigger = rx.recv() => {
+                        let Some(trigger) = trigger else { break; };
+                        if matches!(trigger, UsageRefreshTrigger::CompletedTurn) {
+                            completed_turns = completed_turns.saturating_add(1);
+                        }
+                        trigger
+                    },
+                };
                 if let Some(env) = codex_usage_env.as_ref() {
                     let status =
                         codex_usage::refresh(&mut codex_client, usage_cwd.clone(), env.clone())
@@ -2060,7 +2066,7 @@ async fn run_session(
                         break;
                     }
                 }
-                if should_refresh_claude_usage(usage_refresh_index)
+                if should_refresh_claude_usage(trigger, completed_turns)
                     && let Some(env) = claude_usage_env.as_ref()
                 {
                     let status = match claude_usage::query(usage_cwd.clone(), env.clone()).await {
@@ -2079,7 +2085,6 @@ async fn run_session(
                         break;
                     }
                 }
-                usage_refresh_index = usage_refresh_index.saturating_add(1);
             }
             if let Some(client) = codex_client {
                 client.shutdown().await;
@@ -2233,7 +2238,7 @@ async fn run_session(
                 && matches!(event, UiEvent::PromptFailed { .. })
                 && let Some(tx) = event_usage_turn_tx.as_ref()
             {
-                let _ = tx.send(());
+                let _ = tx.send(UsageRefreshTrigger::CodexOnly);
             }
             let completed = matches!(event, UiEvent::PromptDone { .. });
             event_tracker.observe_event(&event);
@@ -2241,7 +2246,7 @@ async fn run_session(
                 break;
             }
             if completed && let Some(tx) = event_usage_turn_tx.as_ref() {
-                let _ = tx.send(());
+                let _ = tx.send(UsageRefreshTrigger::CompletedTurn);
             }
         }
         let _ = orchestrated.task.await;
@@ -2604,7 +2609,7 @@ async fn run_session(
                 if roster.primary.launch.source_id == "codex-acp"
                     && let Some(tx) = usage_turn_tx.as_ref()
                 {
-                    let _ = tx.send(());
+                    let _ = tx.send(UsageRefreshTrigger::CodexOnly);
                 }
                 // A fresh terminal starts unrestored, so the exit path will
                 // restore it again — no manual bookkeeping needed.
@@ -3042,8 +3047,17 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SynchronizedFileWriter {
     }
 }
 
-fn should_refresh_claude_usage(refresh_index: u64) -> bool {
-    refresh_index.is_multiple_of(2)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UsageRefreshTrigger {
+    Startup,
+    CompletedTurn,
+    CodexOnly,
+}
+
+fn should_refresh_claude_usage(trigger: UsageRefreshTrigger, completed_turns: u64) -> bool {
+    matches!(trigger, UsageRefreshTrigger::Startup)
+        || (matches!(trigger, UsageRefreshTrigger::CompletedTurn)
+            && completed_turns.is_multiple_of(2))
 }
 
 #[cfg(test)]
@@ -4197,8 +4211,20 @@ mod tests {
 
     #[test]
     fn claude_usage_refreshes_at_startup_then_every_second_completed_turn() {
-        let refreshes = (0_u64..=4)
-            .filter(|index| should_refresh_claude_usage(*index))
+        let triggers = [
+            (UsageRefreshTrigger::Startup, 0),
+            (UsageRefreshTrigger::CodexOnly, 0),
+            (UsageRefreshTrigger::CompletedTurn, 1),
+            (UsageRefreshTrigger::CodexOnly, 1),
+            (UsageRefreshTrigger::CompletedTurn, 2),
+            (UsageRefreshTrigger::CompletedTurn, 3),
+            (UsageRefreshTrigger::CompletedTurn, 4),
+        ];
+        let refreshes = triggers
+            .into_iter()
+            .filter_map(|(trigger, completed_turns)| {
+                should_refresh_claude_usage(trigger, completed_turns).then_some(completed_turns)
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(refreshes, vec![0, 2, 4]);
