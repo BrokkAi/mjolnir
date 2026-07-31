@@ -16,7 +16,7 @@ exactly two tools:
 
 | Tool | Arguments | Purpose |
 | --- | --- | --- |
-| `create_subagent` | `prompt`, optional `agent`, `model`, `label`, `cwd`, `resume` | Launch one background subagent |
+| `create_subagent` | `prompt`, optional `label`, `cwd`, `resume` | Launch one background subagent |
 | `subagent_cancel` | `subagent_id` | Interrupt a running subagent or release a finished one |
 
 `create_subagent` returns as soon as the subagent has started. The tool result
@@ -114,33 +114,12 @@ An explicit `cwd` must be an absolute directory inside the workspace roots
 Mjolnir already authorized (`--cwd` plus any `--additional-directory`). A
 subagent cannot use those roots to reach an arbitrary sibling directory.
 
-## Choosing an agent and a model per call
+## Choosing the subagent model
 
-`agent` and `model` are optional. Omit both and the subagent runs on the
-configured default pool, with quota failover across the roster when
-`subagents.auto_failover` is on.
-
-The `create_subagent` description carries the live inventory, generated from the
-launchable roster:
-
-```text
-Available agents and models:
-- codex-acp (Codex): gpt-5.6-sol*, gpt-5.6-terra, gpt-5.5
-- claude-acp (Claude): fable, opus, sonnet
-(* = default when agent and model are omitted)
-```
-
-Resolution rules:
-
-- both given — the pair is validated against the inventory;
-- `model` only — the first agent that advertises that model;
-- `agent` only — that agent's best ranked model;
-- no match — an `invalid_params` error listing the valid agents and models.
-
-An explicit pick bypasses the failover pool but still consults the quota gate
-once, so a provider with 5% or less remaining fails fast instead of stalling
-inside the adapter. Adapters that snapshot the tool list at session start see
-the inventory as it was at startup.
+Subagents run on the model selected by Mjolnir's `[subagents]` configuration.
+When `subagents.auto_failover` is on, Mjolnir can move the configured pool to
+another launchable route as provider quota changes. The primary agent cannot
+override the model or ACP adapter on an individual `create_subagent` call.
 
 ## Workflow progress
 
@@ -171,7 +150,7 @@ so primary scrollback and terminal geometry are not rewritten.
 
 When a turn that used at least one subagent completes with the pool drained and
 the workspace changed, Mjolnir reviews the finished work before releasing the
-turn. A visible supervisor on the primary model investigates the immutable
+turn. A visible supervisor on the configured review model investigates the immutable
 change packet and asynchronously launches only the useful read-only Norse
 reviewers. Their reports return to the same supervisor session for vetting, and
 surviving findings come back as a corrective turn. The supervisor and reviewers

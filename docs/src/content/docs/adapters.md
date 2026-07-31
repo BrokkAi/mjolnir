@@ -44,14 +44,14 @@ adapter. The current session keeps its already-bound models.
 ## Auto selection
 
 - The primary prefers the strongest launchable eligible row.
+- The review supervisor prefers the strongest distinct model after the primary,
+  first from another provider when available, then from the primary provider if
+  needed.
 - The default subagent model prefers a cost-efficient qualifying model on the
   current quality frontier, but can reuse the primary's model.
-- When several adapters offer the selected model, the primary and subagent
-  seats apply their independent ACP priority lists. Both lists default to
-  Codex, Claude, Kimi, then Anvil.
-- Every launchable model stays individually addressable: `create_subagent`
-  advertises the whole inventory so one call can pick a different agent or
-  model than the default.
+- When several adapters offer the selected model, the primary, review, and
+  subagent seats apply their independent ACP priority lists. All lists default
+  to Codex, Claude, Kimi, then Anvil.
 - Unranked custom models are selectable explicitly but do not participate in
   Auto or Ragnarok.
 

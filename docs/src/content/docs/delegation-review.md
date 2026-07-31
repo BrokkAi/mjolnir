@@ -40,10 +40,9 @@ When two share a workspace, neither report can show an isolated diff and you are
 told to inspect `git diff` yourself — treat that note as a sign the split was
 too coarse.
 
-Ask for a specific `agent` or `model` when a task deserves a different backend
-than the default pool; the available combinations are listed in the
-`create_subagent` tool description. Use `resume` for a follow-up on work a
-subagent already did, so its context is not rebuilt from scratch.
+Subagents use the model and ACP routing selected in Mjolnir's `[subagents]`
+configuration. Use `resume` for a follow-up on work a subagent already did, so
+its context is not rebuilt from scratch.
 
 ## Cancellation and permissions
 
@@ -64,7 +63,7 @@ before releasing it:
 1. A single self-contained user prompt goes directly to review without another
    model call. For multi-message histories, a read-only intent analyst extracts
    the governing contract and reconciles earlier corrections or requirements.
-2. A first-class internal review supervisor on the primary model receives
+2. A first-class internal review supervisor on the configured review model receives
    Bifrost core navigation tools and an immutable change packet. It runs in a
    detached read-only session but is not a subagent. Changes under 200 lines
    include the complete captured diff; larger changes include the complete

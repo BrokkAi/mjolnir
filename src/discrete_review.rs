@@ -82,7 +82,6 @@ const SYNTHESIS_LIMIT: usize = 32 * 1024;
 const LANE_DIFF_LIMIT: usize = 96 * 1024;
 const LANE_TRAJECTORY_LIMIT: usize = 16 * 1024;
 const SMALL_DIFF_CHANGED_LINES: usize = 200;
-const LARGE_DIFF_FALLBACK_LIMIT: usize = 96 * 1024;
 const REVIEW_MCP_PATH: &str = "/mcp";
 const REVIEW_MCP_SERVER_NAME: &str = "mj-review";
 
@@ -709,8 +708,8 @@ pub(crate) enum ReviewVerdict {
     },
     /// The supervisor vetted everything away; the held completion is released.
     Clean,
-    /// The fan-out could not produce a usable verdict. The orchestrator falls
-    /// back to the single-prompt review so review value is never lost.
+    /// Required review work failed. The orchestrator surfaces the reason and
+    /// terminates the review instead of substituting weaker review coverage.
     Failed { reason: String },
 }
 
@@ -1122,10 +1121,16 @@ async fn run_async(
             };
             match result {
                 Ok(Ok(functions)) => SupplementalContext::available(functions),
-                Ok(Err(reason)) => SupplementalContext::unavailable(reason),
-                Err(error) => SupplementalContext::unavailable(format!(
-                    "bifrost analyze_diff task failed: {error}"
-                )),
+                Ok(Err(reason)) => {
+                    return ReviewVerdict::Failed {
+                        reason: format!("bifrost analyze_diff failed: {reason}"),
+                    };
+                }
+                Err(error) => {
+                    return ReviewVerdict::Failed {
+                        reason: format!("bifrost analyze_diff task failed: {error}"),
+                    };
+                }
             }
         }
     };
@@ -1561,25 +1566,11 @@ fn supervisor_change_packet(
             job.diff
         )
     } else {
-        let packet = format!(
+        format!(
             "<captured_diffstat status=\"complete\" source=\"immutable turn snapshot\" trust=\"deterministic\">\n{diffstat}\n</captured_diffstat>\n\n\
-             <changed_functions status=\"{}\" source=\"bifrost analyze_diff CLI\" trust=\"supplemental evidence\" changed_lines=\"{changed_line_count}\">\n{}\n</changed_functions>",
-            if changed_functions.unavailable {
-                "unavailable"
-            } else {
-                "available"
-            },
+             <changed_functions status=\"available\" source=\"bifrost analyze_diff CLI\" trust=\"supplemental evidence\" changed_lines=\"{changed_line_count}\">\n{}\n</changed_functions>",
             changed_functions.body
-        );
-        if changed_functions.unavailable {
-            format!(
-                "{packet}\n\n\
-                 <workspace_diff_fallback status=\"degraded\" reason=\"analyze_diff unavailable; inspect paths and hunks directly\">\n{}\n</workspace_diff_fallback>",
-                bound_review_section(&job.diff, LARGE_DIFF_FALLBACK_LIMIT, "large diff fallback")
-            )
-        } else {
-            packet
-        }
+        )
     }
 }
 

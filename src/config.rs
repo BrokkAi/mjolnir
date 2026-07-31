@@ -19,11 +19,14 @@ pub const DEFAULT_ACP_PRIORITY: [&str; 4] = ["codex-acp", "claude-acp", "kimi", 
 /// Schema version this build can migrate forward from.
 const MIGRATABLE_VERSION: u32 = 2;
 
-/// Per-invocation model overrides (`--model` / `--subagent-model`).
+/// Per-invocation model overrides (`--model` / `--review-model` /
+/// `--subagent-model`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModelOverrides {
     pub primary: Option<String>,
     pub primary_effort: Option<String>,
+    pub review: Option<String>,
+    pub review_effort: Option<String>,
     pub subagent: Option<String>,
     pub subagent_effort: Option<String>,
 }
@@ -38,6 +41,9 @@ pub struct Config {
     /// The primary agent's model and review behavior.
     #[serde(default, skip_serializing_if = "AgentConfig::is_default")]
     pub agent: AgentConfig,
+    /// The discrete review supervisor's model preference.
+    #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
+    pub review: ReviewConfig,
     /// Defaults for the shared subagent pool.
     #[serde(default, skip_serializing_if = "SubagentsConfig::is_default")]
     pub subagents: SubagentsConfig,
@@ -56,6 +62,7 @@ impl Default for Config {
             theme: TerminalThemeKind::default(),
             spinner: SpinnerStyle::default(),
             agent: AgentConfig::default(),
+            review: ReviewConfig::default(),
             subagents: SubagentsConfig::default(),
             acp: AcpConfig::default(),
             ragnarok: RagnarokConfig::default(),
@@ -106,9 +113,13 @@ pub struct ModelsConfig {
     #[serde(default = "default_auto")]
     pub primary: String,
     #[serde(default = "default_auto")]
+    pub review: String,
+    #[serde(default = "default_auto")]
     pub subagent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_source: Option<String>,
 }
@@ -117,8 +128,10 @@ impl Default for ModelsConfig {
     fn default() -> Self {
         Self {
             primary: default_auto(),
+            review: default_auto(),
             subagent: default_auto(),
             primary_source: None,
+            review_source: None,
             subagent_source: None,
         }
     }
@@ -156,6 +169,42 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReviewConfig {
+    #[serde(default = "default_auto")]
+    pub model: String,
+    /// Preferred ACP sources when more than one enabled adapter offers the
+    /// selected review supervisor model. Unlisted sources follow in discovery
+    /// order.
+    #[serde(
+        default = "default_acp_priority",
+        skip_serializing_if = "is_default_acp_priority"
+    )]
+    pub acp_priority: Vec<String>,
+    /// Per-invocation reasoning-effort override for the review supervisor's
+    /// ACP session (e.g. from `--review-model MODEL+high`). Not meaningful
+    /// outside a single `--print` invocation; never written to the on-disk
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            model: default_auto(),
+            acp_priority: default_acp_priority(),
+            reasoning_effort: None,
+        }
+    }
+}
+
+impl ReviewConfig {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -336,6 +385,10 @@ impl Config {
             self.agent.model.clone_from(model);
             self.agent.reasoning_effort = overrides.primary_effort.clone();
         }
+        if let Some(model) = &overrides.review {
+            self.review.model.clone_from(model);
+            self.review.reasoning_effort = overrides.review_effort.clone();
+        }
         if let Some(model) = &overrides.subagent {
             self.subagents.model.clone_from(model);
             self.subagents.reasoning_effort = overrides.subagent_effort.clone();
@@ -361,8 +414,10 @@ impl Config {
     pub fn model_names(&self) -> ModelsConfig {
         ModelsConfig {
             primary: self.agent.model.clone(),
+            review: self.review.model.clone(),
             subagent: self.subagents.model.clone(),
             primary_source: None,
+            review_source: None,
             subagent_source: None,
         }
     }
@@ -427,6 +482,7 @@ impl Config {
         }
         for (seat, priority) in [
             ("agent", &self.agent.acp_priority),
+            ("review", &self.review.acp_priority),
             ("subagents", &self.subagents.acp_priority),
         ] {
             let mut seen = std::collections::HashSet::new();
@@ -499,6 +555,8 @@ struct ConfigV2 {
     #[serde(default)]
     thor: ThorV2,
     #[serde(default)]
+    loki: LokiV2,
+    #[serde(default)]
     eitri: EitriV2,
     #[serde(default)]
     council: CouncilV2,
@@ -524,6 +582,23 @@ impl Default for ThorV2 {
             model: default_auto(),
             reasoning_effort: None,
             discrete_review: true,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LokiV2 {
+    #[serde(default = "default_auto")]
+    model: String,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+}
+
+impl Default for LokiV2 {
+    fn default() -> Self {
+        Self {
+            model: default_auto(),
+            reasoning_effort: None,
         }
     }
 }
@@ -562,9 +637,9 @@ impl Default for CouncilV2 {
     }
 }
 
-/// Map a `version = 2` document onto the current schema. `[loki]` and
-/// `council.permission_mode` are dropped: Loki is gone and the permission
-/// preset is no longer persisted.
+/// Map a `version = 2` document onto the current schema.
+/// `council.permission_mode` is dropped: the permission preset is no longer
+/// persisted.
 fn migrate_v2(body: &str) -> Result<Config> {
     let old: ConfigV2 = toml::from_str(body).context("parse v2 config")?;
     Ok(Config {
@@ -576,6 +651,11 @@ fn migrate_v2(body: &str) -> Result<Config> {
             acp_priority: default_acp_priority(),
             reasoning_effort: old.thor.reasoning_effort,
             discrete_review: old.thor.discrete_review,
+        },
+        review: ReviewConfig {
+            model: old.loki.model,
+            acp_priority: default_acp_priority(),
+            reasoning_effort: old.loki.reasoning_effort,
         },
         subagents: SubagentsConfig {
             model: old.eitri.model,
@@ -759,6 +839,7 @@ mod tests {
             cfg.agent.acp_priority,
             DEFAULT_ACP_PRIORITY.map(str::to_string)
         );
+        assert_eq!(cfg.agent.acp_priority, cfg.review.acp_priority);
         assert_eq!(cfg.agent.acp_priority, cfg.subagents.acp_priority);
     }
 
@@ -768,12 +849,14 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut cfg = Config::default();
         cfg.agent.acp_priority = vec!["claude-acp".into(), "anvil".into()];
+        cfg.review.acp_priority = vec!["kimi".into(), "codex-acp".into()];
         cfg.subagents.acp_priority = vec!["anvil".into(), "codex-acp".into()];
 
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
 
         assert_eq!(loaded.agent.acp_priority, cfg.agent.acp_priority);
+        assert_eq!(loaded.review.acp_priority, cfg.review.acp_priority);
         assert_eq!(loaded.subagents.acp_priority, cfg.subagents.acp_priority);
     }
 
@@ -826,6 +909,7 @@ max_parallel_explores = 9
 
 [loki]
 model = "claude-fable-5"
+reasoning_effort = "xhigh"
 
 [council]
 auto_failover = false
@@ -854,6 +938,8 @@ origin = "custom"
         assert_eq!(cfg.agent.model, "gpt-5-6-sol");
         assert_eq!(cfg.agent.reasoning_effort.as_deref(), Some("high"));
         assert!(!cfg.agent.discrete_review);
+        assert_eq!(cfg.review.model, "claude-fable-5");
+        assert_eq!(cfg.review.reasoning_effort.as_deref(), Some("xhigh"));
         assert_eq!(cfg.subagents.model, "gpt-5-6-terra");
         assert_eq!(cfg.subagents.max_parallel, 9);
         assert!(!cfg.subagents.auto_failover);
@@ -997,6 +1083,8 @@ origin = "custom"
         invocation.apply_model_overrides(&ModelOverrides {
             primary: Some("gpt-test".to_string()),
             primary_effort: Some("high".to_string()),
+            review: Some("claude-review".to_string()),
+            review_effort: Some("xhigh".to_string()),
             subagent: Some("qwen-test".to_string()),
             subagent_effort: Some("medium".to_string()),
         });
@@ -1004,6 +1092,8 @@ origin = "custom"
         assert_eq!(saved.model_names(), ModelsConfig::default());
         assert_eq!(invocation.agent.model, "gpt-test");
         assert_eq!(invocation.agent.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(invocation.review.model, "claude-review");
+        assert_eq!(invocation.review.reasoning_effort.as_deref(), Some("xhigh"));
         assert_eq!(invocation.subagents.model, "qwen-test");
         assert_eq!(
             invocation.subagents.reasoning_effort.as_deref(),
@@ -1017,6 +1107,8 @@ origin = "custom"
         invocation.apply_model_overrides(&ModelOverrides {
             primary: Some("deepseek-v4-pro".to_string()),
             primary_effort: None,
+            review: None,
+            review_effort: None,
             subagent: None,
             subagent_effort: None,
         });

@@ -348,10 +348,6 @@ struct ReviewInFlight {
     /// The primary's withheld `PromptDone`. Released on a `Clean` verdict, dropped on
     /// `Findings` (the corrective turn produces the real completion).
     completion: UiEvent,
-    /// Evidence packet for the single-prompt fallback.
-    context: String,
-    task: String,
-    initial_result: String,
     /// `last_changed_turn` update to apply if the verdict releases the turn.
     saved_turn: Option<ChangedTurnReview>,
     /// Exact workspace state reviewed by this pass. A findings correction that
@@ -692,9 +688,6 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         workflow_id,
                         review_pass: completed_pass,
                         completion,
-                        context,
-                        task,
-                        initial_result,
                         saved_turn,
                         reviewed_workspace_fingerprint,
                         reviewed_snapshot,
@@ -812,45 +805,37 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                 &workflow,
                                 WorkflowEvent::new(
                                     workflow_id,
-                                    WorkflowTransition::PhaseChanged {
-                                        stage: WorkflowStage::new(
-                                            completed_pass,
-                                            WorkflowPhase::Fallback,
-                                        ),
-                                    },
-                                ),
-                            );
-                            emit_workflow(
-                                &workflow,
-                                WorkflowEvent::new(
-                                    workflow_id,
                                     WorkflowTransition::CoverageChanged {
                                         coverage: WorkflowCoverage::Degraded,
                                     },
                                 ),
                             );
-                            let actor_id =
-                                WorkflowActorId::Named("primary-fallback-review".to_string());
                             emit_workflow(
                                 &workflow,
                                 WorkflowEvent::new(
                                     workflow_id,
-                                    WorkflowTransition::ActorStarted {
-                                        actor_id: actor_id.clone(),
-                                        role: WorkflowActorRole::FallbackReviewer,
+                                    WorkflowTransition::Terminal {
+                                        outcome: WorkflowOutcome::Failed,
+                                        coverage: WorkflowCoverage::Degraded,
                                     },
                                 ),
                             );
-                            active_primary_review_actor = Some((actor_id, true));
-                            fall_back_to_single_prompt_review(
-                                &events_tx,
-                                &config.runtime_commands,
-                                &reason,
-                                &task,
-                                &initial_result,
-                                &context,
-                            );
-                            primary_review_prompt_active = true;
+                            let _ = events_tx.send(UiEvent::Warning(format!(
+                                "discrete review failed: {reason}"
+                            )));
+                            let _ = events_tx.send(completion);
+                            reset_turn_state(
+                                &workflow,
+                                &mut trajectory,
+                                &mut held_completion,
+                                &mut discrete_review_started,
+                                &mut review_in_flight,
+                                &mut correction_review_base,
+                                &mut primary_review_prompt_active,
+                                &mut review_cancel_pending,
+                            )
+                            .await;
+                            idle_epoch = Some(epoch);
                         }
                     }
                 }
@@ -1156,9 +1141,6 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         workflow_id,
                         review_pass,
                         completion,
-                        context,
-                        task: active.task.clone(),
-                        initial_result,
                         saved_turn,
                         reviewed_workspace_fingerprint,
                         reviewed_snapshot: review_snapshot,
@@ -1465,36 +1447,6 @@ async fn await_review_task(task: tokio::task::JoinHandle<()>) {
             "discrete review task ended unexpectedly"
         );
     }
-}
-
-/// Shared `Failed` handling: the fan-out produced no usable verdict, so the
-/// turn falls back to the single-prompt discrete review rather than losing
-/// review entirely. Mutates no loop state -- the held completion is already
-/// gone and the corrective turn resolves the turn from here.
-fn fall_back_to_single_prompt_review(
-    events: &mpsc::UnboundedSender<UiEvent>,
-    runtime_commands: &mpsc::UnboundedSender<UiCommand>,
-    reason: &str,
-    task: &str,
-    initial_result: &str,
-    context: &str,
-) {
-    let _ = events.send(UiEvent::Warning(format!(
-        "specialist review lanes unavailable ({reason}); falling back to single-prompt review"
-    )));
-    let prompt = discrete_review_prompt(task, initial_result, context);
-    let _ = events.send(UiEvent::Info("reviewing the completed work…".to_string()));
-    emit_internal(
-        events,
-        "primary",
-        "primary",
-        InternalMessageKind::DiscreteReview,
-        &prompt,
-    );
-    let _ = runtime_commands.send(UiCommand::SendPrompt {
-        text: prompt,
-        images: Vec::new(),
-    });
 }
 
 /// A discrete review audits the finished work of one user turn, so it must not
@@ -2232,7 +2184,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_post_correction_snapshot_fails_safe_to_another_review() {
+    async fn unavailable_post_correction_snapshot_fails_review_loudly() {
         let temp = tempfile::tempdir().expect("tempdir");
         let snapshot = changed_workspace(temp.path()).await;
         let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
@@ -2260,7 +2212,7 @@ mod tests {
                 verdict,
             });
         });
-        let running = spawn(runtime_rx, fanout_config(command_tx, spawner));
+        let mut running = spawn(runtime_rx, fanout_config(command_tx, spawner));
         running
             .handle
             .begin_turn(1, "change behavior".to_string(), Vec::new(), snapshot)
@@ -2278,12 +2230,40 @@ mod tests {
             .send(completion())
             .expect("send corrective completion");
 
-        let fallback = next_prompt(&mut command_rx).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut surfaced_reason = false;
+        let mut workflow_failed = false;
+        loop {
+            let event = tokio::time::timeout_at(deadline, running.events.recv())
+                .await
+                .expect("snapshot failure was surfaced")
+                .expect("orchestrated event");
+            if let UiEvent::Warning(message) = &event {
+                surfaced_reason |=
+                    message.contains("discrete review failed: exact review snapshot unavailable");
+            }
+            if matches!(
+                event,
+                UiEvent::Workflow(WorkflowEvent {
+                    transition: WorkflowTransition::Terminal {
+                        outcome: WorkflowOutcome::Failed,
+                        coverage: WorkflowCoverage::Degraded,
+                    },
+                    ..
+                })
+            ) {
+                workflow_failed = true;
+            }
+            if matches!(event, UiEvent::PromptDone { .. }) {
+                break;
+            }
+        }
+        assert!(surfaced_reason);
+        assert!(workflow_failed);
         assert!(
-            fallback.contains("Perform a discrete review"),
-            "an unknown post-correction tree must fail safe to the primary reviewer"
+            command_rx.try_recv().is_err(),
+            "snapshot failure must not dispatch a fallback review"
         );
-        assert!(fallback.contains("workspace delta unavailable"));
         assert_eq!(2, passes.load(Ordering::SeqCst));
 
         drop(runtime_tx);
@@ -2436,40 +2416,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_after_failed_verdict_queues_cancel_after_fallback_prompt() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let snapshot = changed_workspace(temp.path()).await;
-        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
-        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
-        let spawner = discrete_review::Spawner::stub(|job, _events, _cancel, outcomes| {
-            let _ = outcomes.send(discrete_review::ReviewOutcome {
-                epoch: job.epoch,
-                verdict: discrete_review::ReviewVerdict::Failed {
-                    reason: "exact review snapshot unavailable".to_string(),
-                },
-            });
-        });
-        let running = spawn(runtime_rx, fanout_config(command_tx, spawner));
-        running
-            .handle
-            .begin_turn(1, "change behavior".to_string(), Vec::new(), snapshot)
-            .await;
-        runtime_tx.send(completion()).expect("send completion");
-
-        let fallback = next_prompt(&mut command_rx).await;
-        assert!(fallback.contains("Perform a discrete review"));
-        running.handle.cancel_review();
-        let command = tokio::time::timeout(Duration::from_secs(5), command_rx.recv())
-            .await
-            .expect("cancel was queued after fallback prompt")
-            .expect("command channel open");
-        assert!(matches!(command, UiCommand::CancelPrompt));
-
-        drop(runtime_tx);
-        running.task.await.expect("orchestrator task");
-    }
-
-    #[tokio::test]
     async fn fanout_clean_verdict_releases_the_held_completion() {
         let temp = tempfile::tempdir().expect("tempdir");
         let snapshot = changed_workspace(temp.path()).await;
@@ -2525,7 +2471,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fanout_failure_falls_back_to_the_single_prompt_review() {
+    async fn fanout_failure_is_loudly_fatal_without_fallback_review() {
         let temp = tempfile::tempdir().expect("tempdir");
         let snapshot = changed_workspace(temp.path()).await;
         let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
@@ -2545,23 +2491,17 @@ mod tests {
             .await;
         runtime_tx.send(completion()).expect("send completion");
 
-        let prompt = next_prompt(&mut command_rx).await;
-        assert!(
-            prompt.contains("Perform a discrete review"),
-            "review value must survive a failed fan-out"
-        );
-        assert!(prompt.contains("<original_task>\nadd a retry"));
-        runtime_tx
-            .send(UiEvent::PromptFailed {
-                message: "primary fallback failed".to_string(),
-            })
-            .expect("send fallback failure");
         let mut workflow_failed = false;
+        let mut surfaced_reason = false;
         loop {
             let event = tokio::time::timeout(Duration::from_secs(5), running.events.recv())
                 .await
-                .expect("fallback failure was surfaced")
+                .expect("fan-out failure was surfaced")
                 .expect("orchestrated event");
+            if let UiEvent::Warning(message) = &event {
+                surfaced_reason |=
+                    message.contains("discrete review failed: every specialist review lane failed");
+            }
             if matches!(
                 event,
                 UiEvent::Workflow(WorkflowEvent {
@@ -2574,13 +2514,21 @@ mod tests {
             ) {
                 workflow_failed = true;
             }
-            if matches!(event, UiEvent::PromptFailed { .. }) {
+            if matches!(event, UiEvent::PromptDone { .. }) {
                 break;
             }
         }
         assert!(
             workflow_failed,
-            "the failed fallback must terminate the authoritative review workflow"
+            "the failed fan-out must terminate the authoritative review workflow"
+        );
+        assert!(
+            surfaced_reason,
+            "the fan-out failure reason must be visible to the user"
+        );
+        assert!(
+            command_rx.try_recv().is_err(),
+            "failed fan-out must not dispatch a fallback review prompt"
         );
 
         drop(runtime_tx);

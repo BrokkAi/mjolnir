@@ -96,15 +96,21 @@ async function prepareMcp() {
   if (!instructions.includes("<mj-subagent-policy>")) {
     throw new Error("mj-subagents server instructions are missing the subagent policy");
   }
+  if (instructions.includes("Available agents and models:")) {
+    throw new Error("MCP server instructions leaked the model inventory");
+  }
   directiveCount += 1; append(primaryLog, `session-directive:${directiveCount}`);
   const listed = await postMcp({ jsonrpc: "2.0", id: "list", method: "tools/list", params: {} });
   const tools = listed.message?.result?.tools ?? [];
   const spawn = tools.find((tool) => tool.name === SPAWN_TOOL);
   if (!spawn) throw new Error(`${SPAWN_TOOL} missing`);
   if (!tools.some((tool) => tool.name === "subagent_cancel")) throw new Error("subagent_cancel missing");
-  // The spawn tool's description must carry the live agent/model inventory.
-  if (!spawn.description?.includes("Available agents and models:")) {
-    throw new Error("create_subagent description is missing the agent inventory");
+  if (spawn.description?.includes("Available agents and models:")) {
+    throw new Error("create_subagent description leaked the model inventory");
+  }
+  const properties = spawn.inputSchema?.properties ?? {};
+  if ("agent" in properties || "model" in properties) {
+    throw new Error("create_subagent schema still exposes per-call model routing");
   }
   append(primaryLog, `tools:${tools.map((tool) => tool.name).sort().join(",")}`);
   return unauthorized.status;

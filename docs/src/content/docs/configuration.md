@@ -22,6 +22,9 @@ version = 3
 model = "auto"
 discrete_review = true
 
+[review]
+model = "auto"
+
 [subagents]
 model = "auto"
 max_parallel = 6
@@ -29,8 +32,10 @@ auto_failover = true
 ```
 
 `[agent]` is the primary agent: the session that owns every user turn. It cannot
-be disabled. `[subagents]` configures the default backing for `create_subagent`;
-set `model = "disabled"` (or `"none"`) to turn subagents off entirely.
+be disabled. `[review]` configures the discrete-review supervisor model; review
+is still enabled or disabled with `agent.discrete_review`. `[subagents]`
+configures the default backing for `create_subagent`; set `model = "disabled"`
+(or `"none"`) to turn subagents off entirely.
 
 | Key | Meaning |
 | --- | --- |
@@ -38,6 +43,9 @@ set `model = "disabled"` (or `"none"`) to turn subagents off entirely.
 | `agent.acp_priority` | ACP source preference when several enabled adapters offer the primary model |
 | `agent.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `agent.discrete_review` | Run the end-of-turn discrete review |
+| `review.model` | Review supervisor model, or `auto` |
+| `review.acp_priority` | ACP source preference for the review supervisor model |
+| `review.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `subagents.model` | Default subagent model, `auto`, or `disabled` |
 | `subagents.acp_priority` | Independent ACP source preference for the default worker model |
 | `subagents.reasoning_effort` | Optional per-seat ACP reasoning effort |
@@ -48,14 +56,17 @@ Explicit model IDs can come from `/models`; availability is checked when the
 next session starts. A `max_parallel` above 16 is a configuration error, not a
 silently clamped value.
 
-Both ACP priority lists default to `codex-acp`, `claude-acp`, `kimi`, then
-`anvil`, preserving the automatic behavior of earlier configurations. Reorder
-or reset them independently from the ACP Priority tab, or configure stable
-source IDs directly:
+ACP priority lists default to `codex-acp`, `claude-acp`, `kimi`, then `anvil`,
+preserving the automatic behavior of earlier configurations. Reorder or reset
+them independently from the ACP Priority tab, or configure stable source IDs
+directly:
 
 ```toml
 [agent]
 acp_priority = ["codex-acp", "claude-acp", "anvil", "kimi"]
+
+[review]
+acp_priority = ["claude-acp", "codex-acp", "anvil", "kimi"]
 
 [subagents]
 acp_priority = ["anvil", "codex-acp", "claude-acp", "kimi"]
@@ -113,6 +124,7 @@ Headless runs can override models without changing the saved file:
 ```bash
 mj --print \
   --model provider/model-id \
+  --review-model provider/review-model-id \
   --subagent-model disabled \
   "summarize this repository"
 ```

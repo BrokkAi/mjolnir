@@ -251,8 +251,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     record.adapter_source_id
                 )
             })?;
+        resolved.rebind_auto_review_for_primary(&app_config);
     }
     let primary = resolved.primary.clone();
+    let review_supervisor = resolved.review_supervisor.clone();
     let provenance_primary = primary.clone();
     let provenance_cwd = cfg.cwd.clone();
 
@@ -267,7 +269,6 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let quota_gate = crate::quota::Gate::new(cfg.cwd.clone(), event_tx.clone());
     let (subagent_roles, _subagent_codex_home) =
         crate::isolated_subagent_roles(resolved.subagent_failover_roles(), "subagent")?;
-    let headless_quota_gate = quota_gate.clone();
     let subagent_pool = (!subagent_roles.is_empty()).then(|| {
         crate::quota::RolePool::new(
             subagent_roles,
@@ -285,9 +286,6 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let subagent_ids = subagent::SubagentIdAllocator::default();
     let active_implementation_workers = subagent::ActiveSubagentWorkers::default();
     let (subagent_reports, subagent_report_rx) = subagent::SubagentReportBus::channel();
-    let subagent_inventory = Arc::new(std::sync::RwLock::new(
-        subagent::SubagentInventory::from_roster(&resolved),
-    ));
     let mut primary_env = primary.launch.env.clone();
     let primary_permission = cfg.permission_config_mode.and_then(|mode| {
         roster::configure_permissions(primary.launch.kind, mode, &mut primary_env)
@@ -323,8 +321,6 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 .with_active_implementation_workers(active_implementation_workers.clone())
                 .with_max_parallel(app_config.subagents.max_parallel)
                 .with_headless_permission_mode(cfg.permission_mode.into())
-                .with_quota_gate(headless_quota_gate)
-                .with_inventory(subagent_inventory)
                 .with_reports(subagent_reports.clone())
                 .with_prewarm(subagent::RunContext {
                     cwd: cfg.cwd.clone(),
@@ -358,19 +354,21 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             discrete_review: app_config.agent.discrete_review,
             primary_model: Some(primary.model.model.clone()),
             review_root: cfg.cwd.clone(),
-            review_fanout: review_workers.map(|workers| {
-                crate::discrete_review::Spawner::live(crate::discrete_review::FanoutConfig {
-                    workers,
-                    supervisor: primary.clone(),
-                    cwd: cfg.cwd.clone(),
-                    additional_directories: cfg.additional_directories.clone(),
-                    session_tag: Some(format!("headless-{}", std::process::id())),
-                    agent_stderr: cfg.agent_stderr.clone(),
-                    snapshot_exclusions: cfg.snapshot_exclusions.clone(),
-                    fs_max_text_bytes: cfg.fs_max_text_bytes,
-                    id_allocator: subagent_ids.clone(),
-                })
-            }),
+            review_fanout: review_workers
+                .zip(review_supervisor)
+                .map(|(workers, supervisor)| {
+                    crate::discrete_review::Spawner::live(crate::discrete_review::FanoutConfig {
+                        workers,
+                        supervisor,
+                        cwd: cfg.cwd.clone(),
+                        additional_directories: cfg.additional_directories.clone(),
+                        session_tag: Some(format!("headless-{}", std::process::id())),
+                        agent_stderr: cfg.agent_stderr.clone(),
+                        snapshot_exclusions: cfg.snapshot_exclusions.clone(),
+                        fs_max_text_bytes: cfg.fs_max_text_bytes,
+                        id_allocator: subagent_ids.clone(),
+                    })
+                }),
         },
     );
     let primary_orchestrator = orchestrated.handle.clone();

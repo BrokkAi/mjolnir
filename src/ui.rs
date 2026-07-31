@@ -4204,22 +4204,10 @@ const PROMPT_NEWLINE_HINT: &str = "Shift/Alt+Enter";
 fn is_prompt_newline_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
     // Shift+Enter requires keyboard enhancement support; Alt+Enter is
     // reported only when the terminal treats Alt/Option as a modifier.
-    if matches!(
+    matches!(
         (modifiers, code),
         (KeyModifiers::SHIFT, KeyCode::Enter) | (KeyModifiers::ALT, KeyCode::Enter)
-    ) {
-        return true;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Char('j'))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+    ) || (modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Char('j')))
 }
 
 fn should_open_help(modifiers: KeyModifiers, code: KeyCode) -> bool {
@@ -7077,13 +7065,18 @@ fn active_models_and_usage_report(state: &AppState) -> String {
         || state.active_models.primary.clone(),
         |source| format!("{} via {source}", state.active_models.primary),
     );
+    let review = state.active_models.review_source.as_deref().map_or_else(
+        || state.active_models.review.clone(),
+        |source| format!("{} via {source}", state.active_models.review),
+    );
     let subagent = state.active_models.subagent_source.as_deref().map_or_else(
         || state.active_models.subagent.clone(),
         |source| format!("{} via {source}", state.active_models.subagent),
     );
     let mut report = format!(
-        "Active models\nprimary    {}\nsubagents  {}\n\nUsage (tokens)\nprimary    {}\nsubagents  {}\nreview     {}",
+        "Active models\nprimary    {}\nreview     {}\nsubagents  {}\n\nUsage (tokens)\nprimary    {}\nsubagents  {}\nreview     {}",
         primary,
+        review,
         subagent,
         seat_usage_label(&usage.primary),
         seat_usage_label(&usage.subagents),
@@ -13842,8 +13835,10 @@ mod tests {
         let mut state = AppState::new();
         state.active_models = crate::config::ModelsConfig {
             primary: "claude-opus".to_string(),
+            review: "gpt-worker".to_string(),
             subagent: "gpt-worker".to_string(),
             primary_source: None,
+            review_source: None,
             subagent_source: None,
         };
         for (seat, model, total) in [
@@ -16166,8 +16161,10 @@ mod tests {
         let mut state = AppState::new();
         state.active_models = crate::config::ModelsConfig {
             primary: "claude-opus".to_string(),
+            review: "gpt-5.6".to_string(),
             subagent: "gpt-5.5".to_string(),
             primary_source: Some("claude-acp".to_string()),
+            review_source: Some("codex-acp".to_string()),
             subagent_source: Some("anvil".to_string()),
         };
         state.input = "/agents".to_string();
@@ -16190,7 +16187,7 @@ mod tests {
             state.transcript.last(),
             Some(Entry::System(text))
                 if text
-                    == "Active models\nprimary    claude-opus via claude-acp\nsubagents  gpt-5.5 via anvil\n\nUsage (tokens)\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
+                    == "Active models\nprimary    claude-opus via claude-acp\nreview     gpt-5.6 via codex-acp\nsubagents  gpt-5.5 via anvil\n\nUsage (tokens)\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
         ));
     }
 
@@ -16244,7 +16241,7 @@ mod tests {
 
         // Agents tab: toggle discrete review and apply it to the running session.
         state.mjconfig_menu_key(KeyCode::Tab);
-        for _ in 0..2 {
+        for _ in 0..3 {
             state.mjconfig_menu_key(KeyCode::Down);
         }
         state.mjconfig_menu_key(KeyCode::Char(' '));
@@ -21644,9 +21641,8 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err(), "must not submit");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn ctrl_j_inserts_newline_without_submitting_on_macos() {
+    fn ctrl_j_inserts_newline_without_submitting() {
         let mut state = AppState::new();
         state.session_id = Some("s-1".to_string());
         state.input = "first".to_string();

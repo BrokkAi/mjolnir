@@ -13,6 +13,7 @@ description: Common commands, options, slash commands, and terminal controls.
 | `--output-format text\|json\|stream-json` | Select headless output |
 | `--permission-mode manual\|auto\|yolo` | Set headless permission behavior |
 | `--model MODEL[+EFFORT]` | Override the primary agent's model for one headless invocation |
+| `--review-model MODEL[+EFFORT]` | Override the review supervisor model for one headless invocation |
 | `--subagent-model MODEL[+EFFORT]\|disabled` | Override or disable the default subagent model for one headless invocation |
 | `-w, --worktree [NAME]` | Create or reuse a linked worktree |
 | `--fullscreen-tui` | Use the alternate-screen UI instead of inline mode |
@@ -21,9 +22,9 @@ description: Common commands, options, slash commands, and terminal controls.
 | `--no-update-check` | Skip the startup release check |
 | `--anvil-path PATH` | Use a development Anvil binary |
 
-`--model` and `--subagent-model` require `--print` and explicit model IDs. The
-optional `+EFFORT` suffix (`off`, `none`, `minimal`, `low`, `medium`, `high`,
-`xhigh`) sets that seat's ACP reasoning effort.
+`--model`, `--review-model`, and `--subagent-model` require `--print` and
+explicit model IDs. The optional `+EFFORT` suffix (`off`, `none`, `minimal`,
+`low`, `medium`, `high`, `xhigh`) sets that seat's ACP reasoning effort.
 
 ## Subcommands
 

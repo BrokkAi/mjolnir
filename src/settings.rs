@@ -18,8 +18,9 @@ use crate::roster::{AcpInventory, ModelChoice};
 use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
 
-pub const ROLE_DESCRIPTIONS: [(&str, &str); 2] = [
+pub const ROLE_DESCRIPTIONS: [(&str, &str); 3] = [
     ("Agent", "primary model; plans, implements, and answers"),
+    ("Review", "supervisor model for discrete review"),
     ("Subagents", "default model for create_subagent delegations"),
 ];
 const ACCOUNT_COUNT: usize = crate::auth::AuthVendor::ALL.len();
@@ -100,6 +101,7 @@ struct InstallingServer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrioritySeat {
     Primary,
+    Review,
     Subagents,
 }
 
@@ -193,6 +195,10 @@ impl SettingsEditor {
                 SettingsAction::None
             }
             KeyCode::Enter if self.tab == SettingsTab::AcpPriority && self.selected == 1 => {
+                self.open_priority_editor(PrioritySeat::Review);
+                SettingsAction::None
+            }
+            KeyCode::Enter if self.tab == SettingsTab::AcpPriority && self.selected == 2 => {
                 self.open_priority_editor(PrioritySeat::Subagents);
                 SettingsAction::None
             }
@@ -233,8 +239,8 @@ impl SettingsEditor {
 
     fn row_count(&self) -> usize {
         match self.tab {
-            SettingsTab::Agents => 5,
-            SettingsTab::AcpPriority => 2,
+            SettingsTab::Agents => 6,
+            SettingsTab::AcpPriority => 3,
             SettingsTab::AcpServers => self.inventory.servers.len() + SERVER_ROW_OFFSET,
             SettingsTab::Appearance => 2,
         }
@@ -249,8 +255,8 @@ impl SettingsEditor {
 
     fn change_selected(&mut self, delta: i32) -> SettingsAction {
         match self.tab {
-            SettingsTab::Agents if self.selected < 2 => self.cycle_model(self.selected, delta),
-            SettingsTab::Agents if self.selected == 3 => {
+            SettingsTab::Agents if self.selected < 3 => self.cycle_model(self.selected, delta),
+            SettingsTab::Agents if self.selected == 4 => {
                 self.config.subagents.max_parallel =
                     (self.config.subagents.max_parallel as i32 + delta).rem_euclid(17) as usize;
             }
@@ -309,10 +315,10 @@ impl SettingsEditor {
 
     fn toggle_selected(&mut self) -> SettingsAction {
         match self.tab {
-            SettingsTab::Agents if self.selected == 2 => {
+            SettingsTab::Agents if self.selected == 3 => {
                 self.config.agent.discrete_review = !self.config.agent.discrete_review;
             }
-            SettingsTab::Agents if self.selected == 4 => {
+            SettingsTab::Agents if self.selected == 5 => {
                 self.config.subagents.auto_failover = !self.config.subagents.auto_failover;
             }
             SettingsTab::AcpPriority => return SettingsAction::None,
@@ -353,7 +359,8 @@ impl SettingsEditor {
         let choices = self.model_choices(role);
         let current = match role {
             0 => &self.config.agent.model,
-            1 => &self.config.subagents.model,
+            1 => &self.config.review.model,
+            2 => &self.config.subagents.model,
             _ => return,
         };
         let index = choices
@@ -363,7 +370,8 @@ impl SettingsEditor {
         let next = (index as i32 + delta).rem_euclid(choices.len() as i32) as usize;
         match role {
             0 => self.config.agent.model.clone_from(&choices[next]),
-            1 => self.config.subagents.model.clone_from(&choices[next]),
+            1 => self.config.review.model.clone_from(&choices[next]),
+            2 => self.config.subagents.model.clone_from(&choices[next]),
             _ => {}
         }
     }
@@ -372,7 +380,7 @@ impl SettingsEditor {
         let mut seen = HashSet::new();
         let mut choices = vec!["auto".to_string()];
         seen.insert("auto".to_string());
-        if role != 0 {
+        if role == 2 {
             choices.push(crate::config::DISABLED_MODEL.to_string());
             seen.insert(crate::config::DISABLED_MODEL.to_string());
         }
@@ -387,6 +395,7 @@ impl SettingsEditor {
     fn priority(&self, seat: PrioritySeat) -> &Vec<String> {
         match seat {
             PrioritySeat::Primary => &self.config.agent.acp_priority,
+            PrioritySeat::Review => &self.config.review.acp_priority,
             PrioritySeat::Subagents => &self.config.subagents.acp_priority,
         }
     }
@@ -394,6 +403,7 @@ impl SettingsEditor {
     fn priority_mut(&mut self, seat: PrioritySeat) -> &mut Vec<String> {
         match seat {
             PrioritySeat::Primary => &mut self.config.agent.acp_priority,
+            PrioritySeat::Review => &mut self.config.review.acp_priority,
             PrioritySeat::Subagents => &mut self.config.subagents.acp_priority,
         }
     }
@@ -519,6 +529,7 @@ impl SettingsEditor {
         };
         let (model, source) = match role {
             0 => (&models.primary, models.primary_source.as_deref()),
+            1 => (&models.review, models.review_source.as_deref()),
             _ => (&models.subagent, models.subagent_source.as_deref()),
         };
         if let Some(source) = source {
@@ -1001,6 +1012,7 @@ fn draw_agents(
     for (index, (role, description)) in ROLE_DESCRIPTIONS.iter().enumerate() {
         let model = match index {
             0 => &editor.config.agent.model,
+            1 => &editor.config.review.model,
             _ => &editor.config.subagents.model,
         };
         lines.push(selected_line(
@@ -1023,7 +1035,7 @@ fn draw_agents(
     }
     lines.push(Line::raw(""));
     lines.push(selected_line(
-        editor.selected == 2,
+        editor.selected == 3,
         format!(
             "Discrete review [{}]",
             on_off(editor.config.agent.discrete_review)
@@ -1031,7 +1043,7 @@ fn draw_agents(
         theme,
     ));
     lines.push(selected_line(
-        editor.selected == 3,
+        editor.selected == 4,
         format!(
             "Parallel subagents < {} >",
             editor.config.subagents.max_parallel
@@ -1039,7 +1051,7 @@ fn draw_agents(
         theme,
     ));
     lines.push(selected_line(
-        editor.selected == 4,
+        editor.selected == 5,
         format!(
             "Automatic quota failover [{}]",
             on_off(editor.config.subagents.auto_failover)
@@ -1062,6 +1074,7 @@ fn draw_acp_priority(
     if let Some(seat) = editor.priority_editor {
         let title = match seat {
             PrioritySeat::Primary => "Primary ACP priority",
+            PrioritySeat::Review => "Review ACP priority",
             PrioritySeat::Subagents => "Subagent ACP priority",
         };
         let mut lines = vec![
@@ -1108,6 +1121,14 @@ fn draw_acp_priority(
         ),
         selected_line(
             editor.selected == 1,
+            format!(
+                "Review   [Enter] {}",
+                editor.priority_summary(PrioritySeat::Review)
+            ),
+            theme,
+        ),
+        selected_line(
+            editor.selected == 2,
             format!(
                 "Subagents [Enter] {}",
                 editor.priority_summary(PrioritySeat::Subagents)
@@ -1444,6 +1465,10 @@ mod tests {
         );
         assert_eq!(
             ROLE_DESCRIPTIONS[1].1,
+            "supervisor model for discrete review"
+        );
+        assert_eq!(
+            ROLE_DESCRIPTIONS[2].1,
             "default model for create_subagent delegations"
         );
     }
@@ -1453,7 +1478,7 @@ mod tests {
         let mut config = Config::default();
         config.set_acp_server_policy("codex-acp", AcpServerPolicy::Enabled);
         let mut editor = SettingsEditor::new(config, Vec::new(), None);
-        editor.selected = 2;
+        editor.selected = 3;
         assert_eq!(
             editor.handle_key(KeyCode::Char(' ')),
             SettingsAction::Changed
@@ -1481,7 +1506,7 @@ mod tests {
     #[test]
     fn quota_failover_can_be_disabled() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        editor.selected = 4;
+        editor.selected = 5;
         assert_eq!(
             editor.handle_key(KeyCode::Char(' ')),
             SettingsAction::Changed
@@ -1499,8 +1524,14 @@ mod tests {
                 .any(|choice| choice == "disabled")
         );
         assert!(
-            editor
+            !editor
                 .model_choices(1)
+                .iter()
+                .any(|choice| choice == "disabled")
+        );
+        assert!(
+            editor
+                .model_choices(2)
                 .iter()
                 .any(|choice| choice == "disabled")
         );
@@ -1509,7 +1540,7 @@ mod tests {
     #[test]
     fn optional_model_selection_can_disable_subagents() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        editor.selected = 1;
+        editor.selected = 2;
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(editor.config.subagents.model, crate::config::DISABLED_MODEL);
     }
@@ -1530,7 +1561,7 @@ mod tests {
         );
         editor.handle_key(KeyCode::Enter);
 
-        editor.selected = 1;
+        editor.selected = 2;
         editor.handle_key(KeyCode::Enter);
         editor.handle_key(KeyCode::Right);
         assert_eq!(editor.config.subagents.acp_priority[0], "claude-acp");

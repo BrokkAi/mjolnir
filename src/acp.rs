@@ -9447,10 +9447,8 @@ mod tests {
                     assert!(matches!(stop_reason, StopReason::EndTurn));
                     done += 1;
                 }
-                UiEvent::Info(message) => {
-                    if message.contains("queued") {
-                        saw_queued_info = true;
-                    }
+                UiEvent::Info(message) if message.contains("queued") => {
+                    saw_queued_info = true;
                 }
                 UiEvent::Warning(message) => {
                     assert!(

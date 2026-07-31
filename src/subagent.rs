@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{
@@ -49,7 +49,7 @@ use crate::event::{
     SubagentStatusKind, UiCommand, UiEvent, content_block_text,
 };
 use crate::ragnarok::PromptToolLifecycle;
-use crate::roster::{ResolvedAgent, Roster};
+use crate::roster::ResolvedAgent;
 use crate::trajectory::{BoundaryTracker, Checkpoint};
 use crate::workspace_snapshot::{WorkspaceDelta, WorkspaceSnapshot};
 
@@ -74,7 +74,7 @@ Review every report critically against the actual repository. A report is the su
 
 resume continues a finished subagent's retained session with a new prompt, preserving its context; use it for targeted follow-up on work that subagent already did. subagent_cancel interrupts a running subagent or releases a finished one; it never reverts edits.
 
-The optional agent and model parameters pick which ACP backend and model runs the subagent, from the inventory listed in the create_subagent tool description. Omit them to use the configured default.
+Subagents use the model and ACP routing configured by Mjolnir.
 
 Prefer your own tools for small local edits, known-path lookups, and quick single-step questions; delegation is worth it when the work is clearly larger than writing the brief and reviewing the result. Apply this policy while handling each user request; do not acknowledge or summarize it.
 </mj-subagent-policy>"#;
@@ -109,8 +109,6 @@ pub struct Config {
     pub id_allocator: SubagentIdAllocator,
     headless_permission_mode: Option<crate::config::PermissionPreset>,
     role_pool: Option<crate::quota::RolePool>,
-    quota_gate: Option<crate::quota::Gate>,
-    inventory: Arc<RwLock<SubagentInventory>>,
     reports: Option<SubagentReportBus>,
     preamble: String,
     mcp_servers: Vec<McpServer>,
@@ -185,8 +183,6 @@ impl Config {
             id_allocator: SubagentIdAllocator::default(),
             headless_permission_mode: None,
             role_pool,
-            quota_gate: None,
-            inventory: Arc::default(),
             reports: None,
             preamble: SUBAGENT_PREAMBLE.to_string(),
             mcp_servers: Vec::new(),
@@ -223,11 +219,6 @@ impl Config {
         self
     }
 
-    pub fn with_quota_gate(mut self, gate: crate::quota::Gate) -> Self {
-        self.quota_gate = Some(gate);
-        self
-    }
-
     pub fn with_reports(mut self, reports: SubagentReportBus) -> Self {
         self.reports = Some(reports);
         self
@@ -255,13 +246,6 @@ impl Config {
 
     pub(crate) fn with_retain_after_completion(mut self, retain: bool) -> Self {
         self.retain_after_completion = retain;
-        self
-    }
-
-    /// Shared inventory handle so the caller can keep refreshing the advertised
-    /// agents and models as background adapter probes land.
-    pub fn with_inventory(mut self, inventory: Arc<RwLock<SubagentInventory>>) -> Self {
-        self.inventory = inventory;
         self
     }
 
@@ -360,71 +344,20 @@ impl Config {
             .unwrap_or_default()
     }
 
-    fn rendered_inventory(&self) -> String {
-        self.inventory
-            .read()
-            .expect("subagent inventory poisoned")
-            .render(&self.current_agent(), &self.current_model())
-    }
-
-    /// Resolves the caller's optional `agent`/`model` pair to the ACP session a
-    /// run should use. Both omitted keeps today's behavior: the configured
-    /// `RolePool` picks (and can fail over) at worker start. An explicit pick
-    /// bypasses the pool but still consults the quota gate once, so a blocked
-    /// provider fails fast instead of stalling inside the adapter.
-    fn resolve_session(
-        &self,
-        agent: Option<&str>,
-        model: Option<&str>,
-    ) -> std::result::Result<SessionSpec, McpError> {
-        if agent.is_none() && model.is_none() {
-            return Ok(SessionSpec {
-                agent: self.current_agent(),
-                model: self.current_model(),
-                role: None,
-            });
+    fn configured_session(&self) -> SessionSpec {
+        SessionSpec {
+            agent: self.current_agent(),
+            model: self.current_model(),
         }
-        let inventory = self
-            .inventory
-            .read()
-            .expect("subagent inventory poisoned")
-            .clone();
-        let role = inventory.resolve(agent, model)?;
-        Ok(SessionSpec {
-            agent: role.launch.source_id.clone(),
-            model: role.model.model.clone(),
-            role: Some(Box::new(role)),
-        })
-    }
-
-    async fn check_explicit_quota(
-        &self,
-        role: &ResolvedAgent,
-    ) -> std::result::Result<(), McpError> {
-        let Some(gate) = self.quota_gate.as_ref() else {
-            return Ok(());
-        };
-        if let crate::quota::Check::NearLimit { .. } = gate.check(role).await {
-            return Err(McpError::invalid_params(
-                format!(
-                    "{} quota has 5% or less remaining, so {} was not started; pick another agent or omit agent and model to use the configured default",
-                    role.launch.source_id, role.model.model
-                ),
-                None,
-            ));
-        }
-        Ok(())
     }
 }
 
-/// Which ACP session a run should use. `role: None` means "let the configured
-/// `RolePool` choose at worker start", preserving quota failover for the
-/// default path.
+/// The configured ACP session advertised while the `RolePool` makes the final
+/// routing choice at worker start, preserving quota failover.
 #[derive(Debug, Clone)]
 struct SessionSpec {
     agent: String,
     model: String,
-    role: Option<Box<ResolvedAgent>>,
 }
 
 /// Observable lifetime of subagent workers. The count reaches zero only after
@@ -567,242 +500,6 @@ fn format_report_elapsed(elapsed: Duration) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Inventory
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default)]
-pub struct SubagentInventory {
-    pub servers: Vec<SubagentServer>,
-    pub default_label: String,
-    roles: Vec<ResolvedAgent>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubagentServer {
-    pub id: String,
-    pub label: String,
-    pub models: Vec<SubagentModel>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubagentModel {
-    pub id: String,
-    pub value: String,
-    pub ranked: bool,
-    pub default: bool,
-}
-
-impl SubagentInventory {
-    /// Groups every launchable role by the ACP server that advertises it. The
-    /// `(role, launch.source_id)` pairing already exists on `ResolvedAgent`;
-    /// this only reshapes it for per-call selection and tool-description
-    /// rendering.
-    pub fn from_roster(roster: &Roster) -> Self {
-        let default = roster.subagent_default.as_ref();
-        let mut servers: Vec<SubagentServer> = Vec::new();
-        for role in &roster.available {
-            let is_default = default.is_some_and(|other| {
-                other.model.model == role.model.model
-                    && other.launch.source_id == role.launch.source_id
-            });
-            let model = SubagentModel {
-                id: role.model.model.clone(),
-                value: role.model_value.clone(),
-                ranked: role.ranked,
-                default: is_default,
-            };
-            match servers
-                .iter_mut()
-                .find(|server| server.id == role.launch.source_id)
-            {
-                Some(server) => {
-                    if !server.models.iter().any(|other| other.id == model.id) {
-                        server.models.push(model);
-                    }
-                }
-                None => servers.push(SubagentServer {
-                    id: role.launch.source_id.clone(),
-                    label: crate::roster::AdapterKind::from_source_id(&role.launch.source_id)
-                        .map(|kind| kind.display_name().to_string())
-                        .unwrap_or_else(|| role.launch.source_id.clone()),
-                    models: vec![model],
-                }),
-            }
-        }
-        Self {
-            servers,
-            default_label: default
-                .map(|role| role.model.model.clone())
-                .unwrap_or_default(),
-            roles: roster.available.clone(),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.servers.is_empty()
-    }
-
-    /// The block appended to `create_subagent`'s description and to the MCP
-    /// server instructions.
-    pub fn render(&self, default_agent: &str, default_model: &str) -> String {
-        if self.is_empty() {
-            return String::new();
-        }
-        let mut out = String::from("Available agents and models:");
-        for server in &self.servers {
-            let models = server
-                .models
-                .iter()
-                .map(|model| {
-                    let is_default = model.default
-                        || (server.id == default_agent && model.id == default_model)
-                        || (!self.default_label.is_empty() && model.id == self.default_label);
-                    if is_default {
-                        format!("{}*", model.id)
-                    } else {
-                        model.id.clone()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            out.push_str(&format!("\n- {} ({}): {}", server.id, server.label, models));
-        }
-        out.push_str("\n(* = default when agent and model are omitted)");
-        out
-    }
-
-    fn valid_options(&self) -> String {
-        let agents = self
-            .servers
-            .iter()
-            .map(|server| server.id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let models = self
-            .servers
-            .iter()
-            .flat_map(|server| server.models.iter().map(|model| model.id.as_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("valid agents: [{agents}]; valid models: [{models}]")
-    }
-
-    fn server_for(&self, agent: &str) -> Option<&SubagentServer> {
-        self.servers
-            .iter()
-            .find(|server| server.id.eq_ignore_ascii_case(agent))
-    }
-
-    fn role(&self, agent: &str, model_id: &str) -> Option<ResolvedAgent> {
-        self.roles
-            .iter()
-            .find(|role| {
-                role.launch.source_id.eq_ignore_ascii_case(agent) && role.model.model == model_id
-            })
-            .cloned()
-    }
-
-    /// `model` matches on the model id first, then on the raw advertised value,
-    /// both case-insensitively.
-    fn find_model<'a>(server: &'a SubagentServer, model: &str) -> Option<&'a SubagentModel> {
-        server
-            .models
-            .iter()
-            .find(|candidate| candidate.id.eq_ignore_ascii_case(model))
-            .or_else(|| {
-                server
-                    .models
-                    .iter()
-                    .find(|candidate| candidate.value.eq_ignore_ascii_case(model))
-            })
-    }
-
-    fn best_model(server: &SubagentServer) -> Option<&SubagentModel> {
-        server
-            .models
-            .iter()
-            .find(|model| model.default)
-            .or_else(|| server.models.iter().find(|model| model.ranked))
-            .or_else(|| server.models.first())
-    }
-
-    fn resolve(
-        &self,
-        agent: Option<&str>,
-        model: Option<&str>,
-    ) -> std::result::Result<ResolvedAgent, McpError> {
-        if self.is_empty() {
-            return Err(McpError::invalid_params(
-                "no subagent agents or models are currently launchable; omit agent and model to use the configured default",
-                None,
-            ));
-        }
-        match (agent, model) {
-            (Some(agent), Some(model)) => {
-                let server = self
-                    .server_for(agent)
-                    .ok_or_else(|| self.unknown_agent(agent))?;
-                let candidate = Self::find_model(server, model).ok_or_else(|| {
-                    McpError::invalid_params(
-                        format!(
-                            "agent {agent} does not advertise model {model}; {}",
-                            self.valid_options()
-                        ),
-                        None,
-                    )
-                })?;
-                self.role(&server.id, &candidate.id)
-                    .ok_or_else(|| self.unresolvable(&server.id, &candidate.id))
-            }
-            (Some(agent), None) => {
-                let server = self
-                    .server_for(agent)
-                    .ok_or_else(|| self.unknown_agent(agent))?;
-                let candidate = Self::best_model(server).ok_or_else(|| {
-                    McpError::invalid_params(
-                        format!("agent {agent} advertises no launchable model"),
-                        None,
-                    )
-                })?;
-                self.role(&server.id, &candidate.id)
-                    .ok_or_else(|| self.unresolvable(&server.id, &candidate.id))
-            }
-            (None, Some(model)) => {
-                let hit = self.servers.iter().find_map(|server| {
-                    Self::find_model(server, model).map(|candidate| (server, candidate))
-                });
-                let Some((server, candidate)) = hit else {
-                    return Err(McpError::invalid_params(
-                        format!(
-                            "no agent advertises model {model}; {}",
-                            self.valid_options()
-                        ),
-                        None,
-                    ));
-                };
-                self.role(&server.id, &candidate.id)
-                    .ok_or_else(|| self.unresolvable(&server.id, &candidate.id))
-            }
-            (None, None) => unreachable!("the default path is resolved before reaching here"),
-        }
-    }
-
-    fn unknown_agent(&self, agent: &str) -> McpError {
-        McpError::invalid_params(
-            format!("unknown agent {agent}; {}", self.valid_options()),
-            None,
-        )
-    }
-
-    fn unresolvable(&self, agent: &str, model: &str) -> McpError {
-        McpError::invalid_params(
-            format!("{agent}/{model} is advertised but not currently launchable"),
-            None,
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunContext {
     pub cwd: PathBuf,
@@ -881,12 +578,6 @@ impl RunPolicy {
 pub struct CreateSubagentArgs {
     /// Complete, standalone brief for the subagent.
     pub prompt: String,
-    /// Optional ACP server id from the inventory in this tool's description.
-    #[serde(default)]
-    pub agent: Option<String>,
-    /// Optional model id from the inventory in this tool's description.
-    #[serde(default)]
-    pub model: Option<String>,
     /// Optional short display label for this subagent.
     #[serde(default)]
     pub label: Option<String>,
@@ -935,7 +626,7 @@ impl McpHandler {
 
     #[tool(
         name = "create_subagent",
-        description = "LAUNCH A BACKGROUND SUBAGENT. Starts one subagent on a fresh ACP process and session and RETURNS IMMEDIATELY with its subagentId; it does not carry the result. The subagent's report arrives on its own as a new user message containing a <subagent_result> block when it finishes. Never poll, never wait idle, never call another tool to check on it: after launching, do other work or end your turn. The subagent has zero memory of this conversation, so `prompt` must be a complete standalone brief: the task, the context and decisions needed to start immediately, the constraints, and the report you expect. Several subagents run concurrently and ALL of them can write to the workspace, so give each one non-overlapping work and do not edit files a running subagent owns. Optional `agent` and `model` pick the backend from the inventory below; omit them for the default. Optional `label` is a short display name. Optional `cwd` must be an absolute directory inside the authorized workspace roots. Optional `resume` continues a finished subagent's retained session with this prompt instead of starting a fresh one. Prefer your own tools for small edits and quick lookups."
+        description = "LAUNCH A BACKGROUND SUBAGENT. Starts one subagent on a fresh ACP process and session using Mjolnir's configured subagent model and RETURNS IMMEDIATELY with its subagentId; it does not carry the result. The subagent's report arrives on its own as a new user message containing a <subagent_result> block when it finishes. Never poll, never wait idle, never call another tool to check on it: after launching, do other work or end your turn. The subagent has zero memory of this conversation, so `prompt` must be a complete standalone brief: the task, the context and decisions needed to start immediately, the constraints, and the report you expect. Several subagents run concurrently and ALL of them can write to the workspace, so give each one non-overlapping work and do not edit files a running subagent owns. Optional `label` is a short display name. Optional `cwd` must be an absolute directory inside the authorized workspace roots. Optional `resume` continues a finished subagent's retained session with this prompt instead of starting a fresh one. Prefer your own tools for small edits and quick lookups."
     )]
     async fn create_subagent(
         &self,
@@ -945,12 +636,7 @@ impl McpHandler {
             return Err(McpError::invalid_params("prompt must not be empty", None));
         }
         let context = resolve_subagent_context(&self.context, args.cwd.as_deref()).await?;
-        let spec = self
-            .config
-            .resolve_session(args.agent.as_deref(), args.model.as_deref())?;
-        if let Some(role) = spec.role.as_deref() {
-            self.config.check_explicit_quota(role).await?;
-        }
+        let spec = self.config.configured_session();
         let label = args
             .label
             .as_deref()
@@ -1241,36 +927,13 @@ fn spawn_subagent_runtime(
 
 impl McpHandler {
     fn server_info(&self) -> ServerInfo {
-        let inventory = self.config.rendered_inventory();
-        let instructions = if inventory.is_empty() {
-            format!("{SERVER_DELEGATION_GUIDANCE}\n\n{PRIMARY_SESSION_DIRECTIVE}")
-        } else {
-            format!("{SERVER_DELEGATION_GUIDANCE}\n\n{inventory}\n\n{PRIMARY_SESSION_DIRECTIVE}")
-        };
+        let instructions = format!("{SERVER_DELEGATION_GUIDANCE}\n\n{PRIMARY_SESSION_DIRECTIVE}");
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
                 MCP_SERVER_NAME,
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(instructions)
-    }
-
-    /// `list_tools` is hand-implemented so `create_subagent`'s description can
-    /// carry the live agent/model inventory. Adapters that snapshot the tool
-    /// list at session start see the startup inventory only.
-    fn described_tools(&self) -> Vec<Tool> {
-        let inventory = self.config.rendered_inventory();
-        self.tool_router
-            .list_all()
-            .into_iter()
-            .map(|mut tool| {
-                if tool.name == "create_subagent" && !inventory.is_empty() {
-                    let base = tool.description.as_deref().unwrap_or_default().to_string();
-                    tool.description = Some(format!("{base}\n\n{inventory}").into());
-                }
-                tool
-            })
-            .collect()
     }
 }
 
@@ -1284,7 +947,9 @@ impl ServerHandler for McpHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = std::result::Result<ListToolsResult, McpError>> + Send + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(self.described_tools())))
+        std::future::ready(Ok(ListToolsResult::with_all_items(
+            self.tool_router.list_all(),
+        )))
     }
 
     fn call_tool(
@@ -1297,9 +962,7 @@ impl ServerHandler for McpHandler {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.described_tools()
-            .into_iter()
-            .find(|tool| tool.name == name)
+        self.tool_router.get(name).cloned()
     }
 }
 
@@ -1874,10 +1537,7 @@ impl ProgrammaticPool {
         if job.prompt.trim().is_empty() {
             bail!("programmatic agent prompt must not be empty");
         }
-        let spec = self
-            .config
-            .resolve_session(None, None)
-            .map_err(|error| anyhow!(error.to_string()))?;
+        let spec = self.config.configured_session();
         let policy = RunPolicy::programmatic(&self.config, &job);
         let subagent_id = admit_and_launch_run(
             &self.controller,
@@ -2545,44 +2205,39 @@ async fn run(
     if let Some(workflow) = policy.workflow.as_ref() {
         workflow.started(subagent_id);
     }
-    let use_warm = spec.role.is_none() && policy.allow_warm_runtime;
+    let use_warm = policy.allow_warm_runtime;
     let mut quota_role = None;
-    match spec.role.clone() {
-        Some(role) => config.apply_role(*role),
-        None => {
-            if let Some(pool) = config.role_pool.clone() {
-                match pool.select_for_work().await {
-                    Ok(selection) => {
-                        quota_role = Some(selection.role.clone());
-                        config.apply_role(selection.role);
-                    }
-                    Err(message) => {
-                        deliver_report(
-                            &config,
-                            SubagentReport {
-                                subagent_id,
-                                label: label.clone(),
-                                agent: spec.agent.clone(),
-                                model: spec.model.clone(),
-                                outcome: SubagentOutcome::Failed(message.clone()),
-                                final_message: format!(
-                                    "{message}. The subagent was not started; decide how to proceed yourself."
-                                ),
-                                slim_activity: render_activity_log(&[]),
-                                workspace_diff: None,
-                                elapsed: Duration::ZERO,
-                            },
-                        );
-                        let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Finished {
-                            subagent_id,
-                            outcome: SubagentOutcome::Failed(message.clone()),
-                        }));
-                        if let Some(workflow) = policy.workflow.as_ref() {
-                            workflow.finished(subagent_id, SubagentOutcome::Failed(message));
-                        }
-                        return;
-                    }
+    if let Some(pool) = config.role_pool.clone() {
+        match pool.select_for_work().await {
+            Ok(selection) => {
+                quota_role = Some(selection.role.clone());
+                config.apply_role(selection.role);
+            }
+            Err(message) => {
+                deliver_report(
+                    &config,
+                    SubagentReport {
+                        subagent_id,
+                        label: label.clone(),
+                        agent: spec.agent.clone(),
+                        model: spec.model.clone(),
+                        outcome: SubagentOutcome::Failed(message.clone()),
+                        final_message: format!(
+                            "{message}. The subagent was not started; decide how to proceed yourself."
+                        ),
+                        slim_activity: render_activity_log(&[]),
+                        workspace_diff: None,
+                        elapsed: Duration::ZERO,
+                    },
+                );
+                let _ = ui_tx.send(UiEvent::Subagent(SubagentEvent::Finished {
+                    subagent_id,
+                    outcome: SubagentOutcome::Failed(message.clone()),
+                }));
+                if let Some(workflow) = policy.workflow.as_ref() {
+                    workflow.finished(subagent_id, SubagentOutcome::Failed(message));
                 }
+                return;
             }
         }
     }
@@ -3474,7 +3129,7 @@ fn with_workspace_diff(
 mod tests {
     use super::*;
     use crate::deepswe::Row;
-    use crate::roster::{AcpInventory, AdapterKind, AdapterLaunch};
+    use crate::roster::{AdapterKind, AdapterLaunch};
     use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, TextContent, ToolCallUpdate, ToolCallUpdateFields,
     };
@@ -3520,24 +3175,6 @@ mod tests {
         }
     }
 
-    fn test_roster() -> Roster {
-        let default = role("gpt-y", "codex-acp", true);
-        Roster {
-            primary: role("gpt-x", "codex-acp", true),
-            subagent_default: Some(default.clone()),
-            available: vec![
-                role("gpt-x", "codex-acp", true),
-                default,
-                role("claude-a", "claude-acp", true),
-                role("claude-b", "claude-acp", false),
-            ],
-            choices: Vec::new(),
-            warnings: Vec::new(),
-            inventory: AcpInventory::default(),
-            subagent_acp_priority: Vec::new(),
-        }
-    }
-
     fn test_config() -> Config {
         Config {
             display_label: "subagent".into(),
@@ -3561,8 +3198,6 @@ mod tests {
             id_allocator: SubagentIdAllocator::default(),
             headless_permission_mode: None,
             role_pool: None,
-            quota_gate: None,
-            inventory: Arc::new(RwLock::new(SubagentInventory::from_roster(&test_roster()))),
             reports: None,
             preamble: SUBAGENT_PREAMBLE.to_string(),
             mcp_servers: Vec::new(),
@@ -3655,17 +3290,25 @@ mod tests {
         let minimal: CreateSubagentArgs =
             serde_json::from_str(r#"{"prompt":"fix it"}"#).expect("valid arguments");
         assert_eq!(minimal.prompt, "fix it");
-        assert_eq!(minimal.agent, None);
         assert_eq!(minimal.resume, None);
 
         let full: CreateSubagentArgs = serde_json::from_str(
-            r#"{"prompt":"fix it","agent":"codex-acp","model":"gpt-y","label":"fix","cwd":"/tmp/worktree","resume":3}"#,
+            r#"{"prompt":"fix it","label":"fix","cwd":"/tmp/worktree","resume":3}"#,
         )
         .expect("valid arguments");
-        assert_eq!(full.agent.as_deref(), Some("codex-acp"));
         assert_eq!(full.cwd, Some(PathBuf::from("/tmp/worktree")));
         assert_eq!(full.resume, Some(3));
 
+        assert!(
+            serde_json::from_str::<CreateSubagentArgs>(
+                r#"{"prompt":"fix it","agent":"codex-acp"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<CreateSubagentArgs>(r#"{"prompt":"fix it","model":"gpt-y"}"#)
+                .is_err()
+        );
         assert!(
             serde_json::from_str::<CreateSubagentArgs>(r#"{"prompt":"fix it","extra":true}"#)
                 .is_err()
@@ -3692,128 +3335,23 @@ mod tests {
     }
 
     #[test]
-    fn server_info_and_tool_description_carry_the_inventory_and_policy() {
+    fn server_info_carries_policy_without_model_catalog() {
         let handler = test_mcp_handler(Controller::default());
         let info = handler.server_info();
         let instructions = info.instructions.as_deref().expect("server instructions");
         assert!(instructions.contains(SERVER_DELEGATION_GUIDANCE));
         assert!(instructions.contains(PRIMARY_SESSION_DIRECTIVE));
-        assert!(instructions.contains("- codex-acp (Codex): gpt-x, gpt-y*"));
+        assert!(!instructions.contains("Available agents and models:"));
 
-        let tools = handler.described_tools();
+        let tools = handler.tool_router.list_all();
         let create = tools
             .iter()
             .find(|tool| tool.name == "create_subagent")
             .expect("create_subagent is advertised");
         let description = create.description.as_deref().expect("description");
         assert!(description.contains("RETURNS IMMEDIATELY"));
-        assert!(description.contains("Available agents and models:"));
-        assert!(description.contains("- claude-acp (Claude Code): claude-a, claude-b"));
-        assert!(description.contains("(* = default when agent and model are omitted)"));
-
-        let cancel = tools
-            .iter()
-            .find(|tool| tool.name == "subagent_cancel")
-            .expect("subagent_cancel is advertised");
-        assert!(
-            !cancel
-                .description
-                .as_deref()
-                .expect("description")
-                .contains("Available agents"),
-            "only the spawn tool carries the inventory"
-        );
-    }
-
-    #[test]
-    fn resolve_session_matrix() {
-        let config = test_config();
-
-        let default = config.resolve_session(None, None).expect("default session");
-        assert_eq!(default.agent, "codex-acp");
-        assert_eq!(default.model, "gpt-y");
-        assert!(
-            default.role.is_none(),
-            "the default path keeps the RolePool (and its quota failover)"
-        );
-
-        let by_model = config
-            .resolve_session(None, Some("CLAUDE-A"))
-            .expect("model-only routing is case-insensitive");
-        assert_eq!(by_model.agent, "claude-acp");
-        assert_eq!(by_model.model, "claude-a");
-        assert!(
-            by_model.role.is_some(),
-            "an explicit pick bypasses the pool"
-        );
-
-        let by_value = config
-            .resolve_session(None, Some("claude-b-value"))
-            .expect("the raw advertised value also resolves");
-        assert_eq!(by_value.model, "claude-b");
-
-        let by_agent = config
-            .resolve_session(Some("claude-acp"), None)
-            .expect("agent-only picks that server's best ranked model");
-        assert_eq!(by_agent.model, "claude-a");
-
-        let pair = config
-            .resolve_session(Some("codex-acp"), Some("gpt-x"))
-            .expect("a valid pair");
-        assert_eq!(
-            (pair.agent.as_str(), pair.model.as_str()),
-            ("codex-acp", "gpt-x")
-        );
-
-        let unknown_agent = config
-            .resolve_session(Some("nope-acp"), None)
-            .expect_err("unknown agent");
-        assert!(unknown_agent.message.contains("unknown agent nope-acp"));
-        assert!(
-            unknown_agent
-                .message
-                .contains("valid agents: [codex-acp, claude-acp]")
-        );
-
-        let unknown_model = config
-            .resolve_session(None, Some("gpt-z"))
-            .expect_err("unknown model");
-        assert!(
-            unknown_model
-                .message
-                .contains("no agent advertises model gpt-z")
-        );
-        assert!(unknown_model.message.contains("valid models:"));
-
-        let mismatch = config
-            .resolve_session(Some("codex-acp"), Some("claude-a"))
-            .expect_err("pair mismatch");
-        assert!(
-            mismatch
-                .message
-                .contains("agent codex-acp does not advertise model claude-a")
-        );
-    }
-
-    #[test]
-    fn an_empty_inventory_rejects_explicit_picks_and_renders_nothing() {
-        let inventory = SubagentInventory::default();
-        assert!(inventory.render("codex-acp", "gpt-y").is_empty());
-        let error = inventory
-            .resolve(Some("codex-acp"), None)
-            .expect_err("nothing is launchable");
-        assert!(error.message.contains("omit agent and model"));
-    }
-
-    #[tokio::test]
-    async fn quota_blocked_explicit_picks_fail_fast() {
-        let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
-        let mut config = test_config();
-        config.quota_gate = Some(crate::quota::Gate::new(PathBuf::from("."), ui_tx));
-        // Kimi/Anvil/Custom report `Unavailable`, never `NearLimit`, so a gate
-        // that cannot answer must not block the launch.
-        let role = role("claude-a", "claude-acp", true);
-        assert!(config.check_explicit_quota(&role).await.is_ok());
+        assert!(description.contains("configured subagent model"));
+        assert!(!description.contains("Available agents and models:"));
     }
 
     #[tokio::test]
@@ -3998,10 +3536,7 @@ mod tests {
             )
             .await;
         let handler = test_mcp_handler(controller);
-        let spec = handler
-            .config
-            .resolve_session(None, None)
-            .expect("default session");
+        let spec = handler.config.configured_session();
 
         let unknown = handler
             .resume_subagent(99, "keep going".to_string(), "label", &spec)
@@ -4043,8 +3578,6 @@ mod tests {
             handler
                 .create_subagent(Parameters(CreateSubagentArgs {
                     prompt: "  ".to_string(),
-                    agent: None,
-                    model: None,
                     label: None,
                     cwd: None,
                     resume: None,
@@ -4060,8 +3593,6 @@ mod tests {
         let rejected = handler
             .create_subagent(Parameters(CreateSubagentArgs {
                 prompt: "do the thing".to_string(),
-                agent: None,
-                model: None,
                 label: None,
                 cwd: None,
                 resume: None,
@@ -4091,10 +3622,7 @@ mod tests {
         let mut config = test_config();
         config.subagent_handoff_counter = Some(counter.clone());
         let handler = McpHandler::new(config, test_context(), ui_tx, controller.clone());
-        let spec = handler
-            .config
-            .resolve_session(None, None)
-            .expect("default session");
+        let spec = handler.config.configured_session();
 
         // Rejected by a full pool: nothing started, so nothing is counted.
         let occupied = controller
@@ -4104,8 +3632,6 @@ mod tests {
         let rejected = handler
             .create_subagent(Parameters(CreateSubagentArgs {
                 prompt: "do the thing".to_string(),
-                agent: None,
-                model: None,
                 label: None,
                 cwd: None,
                 resume: None,
@@ -4649,7 +4175,6 @@ mod tests {
             SessionSpec {
                 agent: "codex-acp".to_string(),
                 model: "gpt-y".to_string(),
-                role: None,
             },
             policy,
             ui_tx,

@@ -77,9 +77,10 @@ current release, not an unversioned promise that fields will never grow.
 
 ## One-shot model selection
 
-`--model MODEL` and `--subagent-model MODEL|disabled` override the saved models
-for one invocation. They require explicit IDs, accept an optional `+<effort>`
-suffix, and are never written back to the config file.
+`--model MODEL`, `--review-model MODEL`, and
+`--subagent-model MODEL|disabled` override the saved models for one invocation.
+They require explicit IDs, accept an optional `+<effort>` suffix, and are never
+written back to the config file.
 
 For a controlled first run, use the [10-minute evaluation](/evaluate/). For
 networked access to an interactive session, continue with [Remote

@@ -2575,12 +2575,6 @@ fn start_server_agent_session(
     let subagent_ids = subagent::SubagentIdAllocator::default();
     let active_implementation_workers = subagent::ActiveSubagentWorkers::default();
     let (subagent_reports, subagent_report_rx) = subagent::SubagentReportBus::channel();
-    let subagent_inventory = std::sync::Arc::new(std::sync::RwLock::new(
-        roster
-            .as_ref()
-            .map(subagent::SubagentInventory::from_roster)
-            .unwrap_or_default(),
-    ));
     // The discrete review's specialist lanes run on the subagent pool and share
     // the primary's workspace roots, so both have to be cloned before they move
     // into the subagent config and the runtime config respectively.
@@ -2592,7 +2586,6 @@ fn start_server_agent_session(
             .with_id_allocator(subagent_ids.clone())
             .with_active_implementation_workers(active_implementation_workers.clone())
             .with_max_parallel(app_config.subagents.max_parallel)
-            .with_inventory(subagent_inventory)
             .with_reports(subagent_reports.clone())
             .with_prewarm(subagent::RunContext {
                 cwd: cwd.clone(),
@@ -2642,11 +2635,15 @@ fn start_server_agent_session(
                 .map(|resolved| resolved.primary.model.model.clone()),
             review_root: provenance_cwd.clone(),
             review_fanout: review_workers
-                .zip(roster.as_ref())
-                .map(|(workers, resolved)| {
+                .zip(
+                    roster
+                        .as_ref()
+                        .and_then(|resolved| resolved.review_supervisor.clone()),
+                )
+                .map(|(workers, supervisor)| {
                     crate::discrete_review::Spawner::live(crate::discrete_review::FanoutConfig {
                         workers,
-                        supervisor: resolved.primary.clone(),
+                        supervisor,
                         cwd: provenance_cwd.clone(),
                         additional_directories: review_additional_directories,
                         session_tag: Some(format!("remote-{}", std::process::id())),

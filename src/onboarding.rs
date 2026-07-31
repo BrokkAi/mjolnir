@@ -40,6 +40,12 @@ pub async fn run(
         editor = editor.with_active_models(crate::config::ModelsConfig {
             primary: roster.primary.model.model,
             primary_source: Some(roster.primary.launch.source_id),
+            review: roster
+                .review_supervisor
+                .as_ref()
+                .map(|role| role.model.model.clone())
+                .unwrap_or_else(|| "off".to_string()),
+            review_source: roster.review_supervisor.map(|role| role.launch.source_id),
             subagent: roster
                 .subagent_default
                 .as_ref()
@@ -146,6 +152,7 @@ mod tests {
         let primary = role("gpt-test", "codex-acp");
         Roster {
             primary: primary.clone(),
+            review_supervisor: None,
             subagent_default: None,
             available: vec![primary],
             choices: vec![ModelChoice {

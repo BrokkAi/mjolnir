@@ -113,6 +113,9 @@ pub struct ResolvedAgent {
 pub struct Roster {
     /// The agent that owns the conversation.
     pub primary: ResolvedAgent,
+    /// The discrete review supervisor. `None` disables the agentic review
+    /// fan-out and lets the orchestrator use its existing degraded fallback.
+    pub review_supervisor: Option<ResolvedAgent>,
     /// Default model for `create_subagent` delegations. `None` disables them.
     pub subagent_default: Option<ResolvedAgent>,
     pub available: Vec<ResolvedAgent>,
@@ -131,6 +134,34 @@ impl Roster {
             return Vec::new();
         };
         failover_roles(initial, &self.available, false, &self.subagent_acp_priority)
+    }
+
+    /// Rebind the auto-selected review supervisor after resume provenance pins
+    /// the primary to a different launchable role. Explicit review selections
+    /// are user-forced and remain bound as-is, even when they match the pinned
+    /// primary model.
+    pub fn rebind_auto_review_for_primary(&mut self, config: &Config) {
+        if !config.agent.discrete_review {
+            self.review_supervisor = None;
+            return;
+        }
+        if config.review.model != "auto" {
+            return;
+        }
+        self.review_supervisor =
+            choose_review_auto(&self.primary, &self.available, &config.review.acp_priority);
+        if let Some(review_supervisor) = self.review_supervisor.as_mut() {
+            review_supervisor.reasoning_effort = config.review.reasoning_effort.clone();
+        }
+    }
+}
+
+fn provider_key(model: &str) -> &str {
+    let provider = deepswe::model_provider(model);
+    if provider.is_empty() {
+        model.split_once('-').map_or(model, |(prefix, _)| prefix)
+    } else {
+        provider
     }
 }
 
@@ -877,6 +908,48 @@ fn choose_subagent_default(
         .and_then(|row| preferred_route(&row.model, available, acp_priority).cloned())
 }
 
+fn choose_review_auto(
+    primary: &ResolvedAgent,
+    available: &[ResolvedAgent],
+    acp_priority: &[String],
+) -> Option<ResolvedAgent> {
+    let primary_provider = provider_key(&primary.model.model);
+    let distinct = available
+        .iter()
+        .filter(|candidate| candidate.ranked)
+        .filter(|candidate| candidate.model.model != primary.model.model)
+        .collect::<Vec<_>>();
+    distinct
+        .iter()
+        .find(|candidate| provider_key(&candidate.model.model) != primary_provider)
+        .copied()
+        .or_else(|| distinct.first().copied())
+        .and_then(|candidate| {
+            preferred_route(&candidate.model.model, available, acp_priority).cloned()
+        })
+}
+
+fn resolve_review_supervisor(
+    selector: &str,
+    primary: &ResolvedAgent,
+    rows: &[Row],
+    available: &[ResolvedAgent],
+    acp_priority: &[String],
+    review_enabled: bool,
+) -> Result<Option<ResolvedAgent>> {
+    if !review_enabled {
+        return Ok(None);
+    }
+    if matches!(selector, crate::config::DISABLED_MODEL | "none") {
+        bail!("Review model cannot be disabled; use agent.discrete_review = false");
+    }
+    Ok(if selector == "auto" {
+        choose_review_auto(primary, available, acp_priority)
+    } else {
+        Some(explicit("Review", selector, rows, available, acp_priority)?.clone())
+    })
+}
+
 fn resolve_subagent_default(
     selector: &str,
     rows: &[Row],
@@ -1231,6 +1304,14 @@ fn assemble_roster(
             &config.agent.acp_priority,
         )?
     };
+    let mut review_supervisor = resolve_review_supervisor(
+        &config.review.model,
+        primary,
+        rows,
+        &available,
+        &config.review.acp_priority,
+        config.agent.discrete_review,
+    )?;
     let occupied = vec![primary.model.model.as_str()];
     let mut subagent_default = resolve_subagent_default(
         &config.subagents.model,
@@ -1246,6 +1327,9 @@ fn assemble_roster(
     // alternates discovered elsewhere in `available` are unaffected.
     let mut primary = primary.clone();
     primary.reasoning_effort = config.agent.reasoning_effort.clone();
+    if let Some(review_supervisor) = review_supervisor.as_mut() {
+        review_supervisor.reasoning_effort = config.review.reasoning_effort.clone();
+    }
     if let Some(subagent_default) = subagent_default.as_mut() {
         subagent_default.reasoning_effort = config.subagents.reasoning_effort.clone();
     }
@@ -1273,9 +1357,18 @@ fn assemble_roster(
                 .to_string(),
         );
     }
+    if config.agent.discrete_review && review_supervisor.is_none() {
+        warnings.push(
+            "agentic review supervisor is disabled: no distinct launchable review model is available. \
+             Install or authenticate another supported ACP adapter, select an explicit review model, \
+             or turn off discrete review."
+                .to_string(),
+        );
+    }
     warnings.sort();
     Ok(Roster {
         primary,
+        review_supervisor,
         subagent_default,
         available,
         choices,
@@ -1436,6 +1529,117 @@ mod tests {
             ranked: true,
             reasoning_effort: None,
         }
+    }
+
+    #[test]
+    fn auto_review_chooses_best_model_from_another_provider() {
+        let available = vec![
+            role("gpt-5-6-sol", 0.70),
+            role("gpt-5-5", 0.65),
+            role("claude-fable-5", 0.64),
+            role("gemini-3-1-pro-preview", 0.60),
+        ];
+
+        assert_eq!(
+            choose_review_auto(&available[0], &available, &[])
+                .expect("cross-provider review model")
+                .model
+                .model,
+            "claude-fable-5"
+        );
+    }
+
+    #[test]
+    fn auto_review_falls_back_to_next_same_provider_model() {
+        let available = vec![role("gpt-5-6-sol", 0.70), role("gpt-5-5", 0.65)];
+
+        assert_eq!(
+            choose_review_auto(&available[0], &available, &[])
+                .expect("same-provider fallback")
+                .model
+                .model,
+            "gpt-5-5"
+        );
+    }
+
+    #[test]
+    fn auto_review_is_unavailable_when_no_distinct_model_exists() {
+        let available = vec![role("gpt-5-6-sol", 0.70)];
+
+        assert!(choose_review_auto(&available[0], &available, &[]).is_none());
+    }
+
+    #[test]
+    fn explicit_review_can_match_primary_model() {
+        let available = vec![role("gpt-5-6-sol", 0.70), role("gpt-5-5", 0.65)];
+        let rows = available
+            .iter()
+            .map(|candidate| candidate.model.clone())
+            .collect::<Vec<_>>();
+
+        let review =
+            resolve_review_supervisor("gpt-5-6-sol", &available[0], &rows, &available, &[], true)
+                .expect("explicit review is user-forced")
+                .expect("review role");
+
+        assert_eq!(review.model.model, "gpt-5-6-sol");
+    }
+
+    #[test]
+    fn auto_review_rebinds_after_primary_is_pinned() {
+        let mut config = Config::default();
+        config.review.reasoning_effort = Some("high".to_string());
+        let gpt = role("gpt-5-6-sol", 0.70);
+        let claude = role("claude-fable-5", 0.64);
+        let gemini = role("gemini-3-1-pro-preview", 0.60);
+        let mut roster = Roster {
+            primary: gpt.clone(),
+            review_supervisor: Some(claude.clone()),
+            subagent_default: None,
+            available: vec![gpt, claude.clone(), gemini.clone()],
+            choices: Vec::new(),
+            warnings: Vec::new(),
+            inventory: AcpInventory::default(),
+            subagent_acp_priority: Vec::new(),
+        };
+
+        roster.primary = claude;
+        roster.rebind_auto_review_for_primary(&config);
+
+        let review = roster.review_supervisor.expect("review rebound");
+        assert_eq!(review.model.model, "gpt-5-6-sol");
+        assert_eq!(review.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn explicit_review_is_not_rebound_after_primary_is_pinned() {
+        let mut config = Config::default();
+        config.review.model = "claude-fable-5".to_string();
+        let gpt = role("gpt-5-6-sol", 0.70);
+        let claude = role("claude-fable-5", 0.64);
+        let gemini = role("gemini-3-1-pro-preview", 0.60);
+        let mut roster = Roster {
+            primary: gpt.clone(),
+            review_supervisor: Some(claude.clone()),
+            subagent_default: None,
+            available: vec![gpt, claude.clone(), gemini],
+            choices: Vec::new(),
+            warnings: Vec::new(),
+            inventory: AcpInventory::default(),
+            subagent_acp_priority: Vec::new(),
+        };
+
+        roster.primary = claude;
+        roster.rebind_auto_review_for_primary(&config);
+
+        assert_eq!(
+            roster
+                .review_supervisor
+                .expect("explicit review kept")
+                .model
+                .model,
+            "claude-fable-5"
+        );
     }
 
     #[test]
