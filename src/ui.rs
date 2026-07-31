@@ -277,13 +277,14 @@ impl StreamRevealController {
         self.flush_entries(state, entries)
     }
 
-    fn observe(&mut self, state: &mut AppState) {
-        self.observe_at(state, Instant::now());
+    fn observe(&mut self, state: &mut AppState) -> bool {
+        self.observe_at(state, Instant::now())
     }
 
-    fn observe_at(&mut self, state: &mut AppState, now: Instant) {
+    fn observe_at(&mut self, state: &mut AppState, now: Instant) -> bool {
         let mut active = BTreeSet::new();
         let mut visibility_updates = Vec::new();
+        let mut changed = false;
 
         for (entry_index, entry) in state.transcript.iter().enumerate() {
             if transcript_entry_is_stable(state, entry_index, entry) {
@@ -329,11 +330,12 @@ impl StreamRevealController {
             .collect::<Vec<_>>();
         for entry_index in closed {
             self.lanes.remove(&entry_index);
-            state.clear_stream_visible_bytes(entry_index);
+            changed |= state.clear_stream_visible_bytes(entry_index);
         }
         for (entry_index, visible_bytes) in visibility_updates {
-            state.set_stream_visible_bytes(entry_index, visible_bytes);
+            changed |= state.set_stream_visible_bytes(entry_index, visible_bytes);
         }
+        changed
     }
 
     fn commit_one(&mut self, state: &mut AppState) -> bool {
@@ -1427,7 +1429,7 @@ async fn ui_loop(
                             && matches!(&ev, UiEvent::Fatal(_));
                         let flushed_prose = stream_reveal.flush_for_event(&mut state, &ev);
                         state.apply_event(ev);
-                        stream_reveal.observe(&mut state);
+                        let visibility_changed = stream_reveal.observe(&mut state);
                         finalize_startup_prompt(&mut state);
                         if failed_side_start {
                             state.side_exit_requested = true;
@@ -1486,7 +1488,7 @@ async fn ui_loop(
                             &mut notification_backend,
                             notification.as_deref(),
                         );
-                        if !prose_event || flushed_prose {
+                        if !prose_event || flushed_prose || visibility_changed {
                             pending_redraw.mark(redraw_cause);
                         }
                     }
@@ -13194,7 +13196,7 @@ mod tests {
         let entry_index = state.agent_open_message_index().expect("open message");
         let mut reveal = StreamRevealController::default();
 
-        reveal.observe(&mut state);
+        let _ = reveal.observe(&mut state);
         let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
             panic!("expected agent message");
         };
@@ -13228,7 +13230,7 @@ mod tests {
         let entry_index = state.agent_open_message_index().expect("open message");
         let mut reveal = StreamRevealController::default();
 
-        reveal.observe(&mut state);
+        let _ = reveal.observe(&mut state);
         assert!(reveal.commit_one(&mut state));
         let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
             panic!("expected agent message");
@@ -13248,7 +13250,7 @@ mod tests {
         let observed_at = Instant::now();
         let mut reveal = StreamRevealController::default();
 
-        reveal.observe_at(&mut state, observed_at);
+        let _ = reveal.observe_at(&mut state, observed_at);
         let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
             panic!("expected agent message");
         };
@@ -13276,7 +13278,7 @@ mod tests {
         )));
         let entry_index = state.agent_open_message_index().expect("open message");
         let mut reveal = StreamRevealController::default();
-        reveal.observe(&mut state);
+        let _ = reveal.observe(&mut state);
         assert!(reveal.commit_one(&mut state));
 
         reveal.release(&mut state);
@@ -13314,7 +13316,7 @@ mod tests {
             text_chunk(" then streamed"),
         )));
         let observed_at = Instant::now();
-        reveal.observe_at(&mut state, observed_at);
+        let _ = reveal.observe_at(&mut state, observed_at);
         let Entry::AgentMessage(source) = &state.transcript[entry_index] else {
             panic!("expected agent message");
         };
@@ -13327,6 +13329,37 @@ mod tests {
             panic!("expected agent message");
         };
         assert_eq!(state.stream_visible_text(entry_index, source), source);
+    }
+
+    #[test]
+    fn stream_reveal_reports_when_completed_prose_becomes_fully_visible() {
+        let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Streaming);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk("visible line\nhidden commentary"),
+        )));
+        let entry_index = state.transcript.len() - 1;
+        let mut reveal = StreamRevealController::default();
+        let _ = reveal.observe(&mut state);
+        assert!(reveal.commit_one(&mut state));
+
+        let Entry::AgentThought(thought) = &mut state.transcript[entry_index] else {
+            panic!("expected agent thought");
+        };
+        thought.completed = true;
+
+        assert!(
+            reveal.observe(&mut state),
+            "removing the live prefix must request a redraw"
+        );
+        let Entry::AgentThought(thought) = &state.transcript[entry_index] else {
+            panic!("expected agent thought");
+        };
+        assert_eq!(
+            state.stream_visible_text(entry_index, &thought.text),
+            thought.text
+        );
+        assert!(!reveal.has_pending());
     }
 
     use agent_client_protocol::schema::v1::{
