@@ -2519,7 +2519,8 @@ fn handle_crossterm(
         CtEvent::Mouse(mouse) => {
             // The diff reader does not support mouse scrolling yet. In
             // particular, do not mutate the hidden transcript's offset.
-            if state.workspace_diff_viewer || state.nested_agent_viewer {
+            if state.workspace_diff_viewer || state.nested_agent_viewer || state.review_issue_viewer
+            {
                 return TerminalRequest::None;
             } else if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
                 handle_transcript_viewer_mouse(state, mouse);
@@ -2590,6 +2591,22 @@ fn handle_crossterm(
         && state.agent_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers.is_empty()
+        && matches!(key.code, KeyCode::F(9))
+    {
+        if state.review_issue_viewer {
+            state.close_review_issue_viewer();
+        } else {
+            state.open_review_issue_viewer();
+        }
+        return inline_repair_request(mode);
+    }
+
+    if !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+        && state.ragnarok.is_none()
+        && state.agent_picker.is_none()
+        && state.config_picker.is_none()
+        && key.modifiers.is_empty()
         && matches!(key.code, KeyCode::F(11))
     {
         if state.nested_agent_viewer {
@@ -2624,6 +2641,34 @@ fn handle_crossterm(
         && !state.has_pending_elicitation()
     {
         return handle_workspace_diff_viewer_key(state, key.modifiers, key.code, mode);
+    }
+    if state.review_issue_viewer
+        && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+    {
+        match key.code {
+            KeyCode::Esc | KeyCode::F(9) => state.close_review_issue_viewer(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.review_issue_scroll_offset =
+                    state.review_issue_scroll_offset.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.review_issue_scroll_offset =
+                    state.review_issue_scroll_offset.saturating_add(1)
+            }
+            KeyCode::PageUp => {
+                state.review_issue_scroll_offset =
+                    state.review_issue_scroll_offset.saturating_sub(5)
+            }
+            KeyCode::PageDown => {
+                state.review_issue_scroll_offset =
+                    state.review_issue_scroll_offset.saturating_add(5)
+            }
+            KeyCode::Home => state.review_issue_scroll_offset = 0,
+            KeyCode::End => state.review_issue_scroll_offset = usize::MAX,
+            _ => {}
+        }
+        return inline_repair_request(mode);
     }
     if state.nested_agent_viewer
         && !state.has_pending_permission()
@@ -5796,7 +5841,9 @@ fn draw(
         ])
         .split(f.area());
 
-    if state.nested_agent_viewer {
+    if state.review_issue_viewer {
+        draw_review_issue_viewer(f, chunks[0], state);
+    } else if state.nested_agent_viewer {
         draw_nested_agent_viewer(f, chunks[0], state, false);
     } else if state.workspace_diff_viewer {
         draw_workspace_diff_viewer(f, chunks[0], state, false);
@@ -5977,6 +6024,11 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
 
     if state.transcript_viewer {
         draw_inline_transcript_viewer(f, f.area(), state);
+        return;
+    }
+
+    if state.review_issue_viewer {
+        draw_review_issue_viewer(f, f.area(), state);
         return;
     }
 
@@ -6290,6 +6342,97 @@ fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut
         Paragraph::new(
             "Alt-T latest tool · Up/Down PgUp/PgDn scroll · Home/End top/bottom · Esc or Ctrl-T to close",
         )
+            .style(Style::default().fg(state.theme.muted)),
+        layout[1],
+    );
+}
+
+fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
+    use crate::workflow::ReviewIssueStatus;
+
+    f.render_widget(Clear, area);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" review issues — session ledger ")
+        .style(Style::default().fg(state.theme.agent));
+    let inner = block.inner(layout[0]);
+    f.render_widget(block, layout[0]);
+
+    let mut issues = state
+        .workflows
+        .iter()
+        .flat_map(|workflow| {
+            workflow
+                .issues
+                .iter()
+                .map(move |issue| (workflow.id, issue))
+        })
+        .collect::<Vec<_>>();
+    issues
+        .sort_by_key(|(workflow_id, issue)| (workflow_id.turn_id, workflow_id.operation, issue.id));
+    let found = issues.len();
+    let validated = issues
+        .iter()
+        .filter(|(_, issue)| issue.status == ReviewIssueStatus::Validated)
+        .count();
+    let fixed = issues
+        .iter()
+        .filter(|(_, issue)| issue.status == ReviewIssueStatus::Fixed)
+        .count();
+    let invalidated = issues
+        .iter()
+        .filter(|(_, issue)| issue.status == ReviewIssueStatus::Invalidated)
+        .count();
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            " found {found} · validated {validated} · fixed {fixed} · invalidated {invalidated}"
+        ),
+        Style::default()
+            .fg(state.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    if issues.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " No review issues recorded yet.",
+            Style::default().fg(state.theme.muted),
+        )));
+    } else {
+        lines.extend(issues.into_iter().map(|(_, issue)| {
+            let color = match issue.status {
+                ReviewIssueStatus::Validated => state.theme.warning,
+                ReviewIssueStatus::Fixed => state.theme.success,
+                ReviewIssueStatus::Invalidated => state.theme.muted,
+            };
+            Line::from(Span::styled(
+                format!(
+                    " #{} · {} · pass {} · {}",
+                    issue.id,
+                    issue.status.as_str(),
+                    issue.pass + 1,
+                    issue.summary
+                ),
+                Style::default().fg(color),
+            ))
+        }));
+    }
+    let total = Paragraph::new(lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(inner.width);
+    let max_offset = total.saturating_sub(usize::from(inner.height));
+    state.review_issue_scroll_offset = state.review_issue_scroll_offset.min(max_offset);
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((
+            state.review_issue_scroll_offset.min(u16::MAX as usize) as u16,
+            0,
+        )),
+        inner,
+    );
+    f.render_widget(
+        Paragraph::new("F9/Esc close · Up/Down PgUp/PgDn Home/End scroll")
             .style(Style::default().fg(state.theme.muted)),
         layout[1],
     );
@@ -9936,6 +10079,28 @@ fn workflow_progress_line(
     if completed > 0 {
         details.push(format!("{completed} done"));
     }
+    if !workflow.issues.is_empty() {
+        use crate::workflow::ReviewIssueStatus;
+        let validated = workflow
+            .issues
+            .iter()
+            .filter(|issue| issue.status == ReviewIssueStatus::Validated)
+            .count();
+        let fixed = workflow
+            .issues
+            .iter()
+            .filter(|issue| issue.status == ReviewIssueStatus::Fixed)
+            .count();
+        let invalidated = workflow
+            .issues
+            .iter()
+            .filter(|issue| issue.status == ReviewIssueStatus::Invalidated)
+            .count();
+        details.push(format!(
+            "issues {} found · {validated} validated · {fixed} fixed · {invalidated} invalidated · F9",
+            workflow.issues.len()
+        ));
+    }
 
     let requires_user_action = workflow
         .waiting
@@ -11177,6 +11342,8 @@ fn help_modal_lines(
             "inspect retained implementation and review agent transcripts",
             theme,
         ),
+        help_binding_line("F9", "open the review issue ledger and status counters", theme),
+        help_binding_line("F11", "open retained subagent transcripts", theme),
         help_binding_line(
             "F10 / Tab",
             "help toggle / accept selected slash command",

@@ -1015,6 +1015,10 @@ fn workflow_stream_record(
         ),
         WorkflowTransition::Waiting { .. } => ("waiting", None, None, None, None),
         WorkflowTransition::CoverageChanged { .. } => ("coverage_changed", None, None, None, None),
+        WorkflowTransition::IssuesValidated { .. } => ("issues_validated", None, None, None, None),
+        WorkflowTransition::IssuesResolved { status, .. } => {
+            (status.as_str(), None, None, None, None)
+        }
         WorkflowTransition::Terminal { .. } => ("terminal", None, None, None, None),
     };
     let waiting_on = state

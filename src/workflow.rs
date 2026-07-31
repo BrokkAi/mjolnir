@@ -226,6 +226,31 @@ pub enum WorkflowOutcome {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewIssueStatus {
+    Validated,
+    Fixed,
+    Invalidated,
+}
+
+impl ReviewIssueStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Validated => "validated",
+            Self::Fixed => "fixed",
+            Self::Invalidated => "invalidated",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewIssue {
+    pub id: usize,
+    pub pass: u32,
+    pub summary: String,
+    pub status: ReviewIssueStatus,
+}
+
 impl WorkflowOutcome {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -247,6 +272,7 @@ pub struct WorkflowState {
     pub waiting: Option<WorkflowWait>,
     pub coverage: WorkflowCoverage,
     pub outcome: Option<WorkflowOutcome>,
+    pub issues: Vec<ReviewIssue>,
 }
 
 impl WorkflowState {
@@ -350,6 +376,14 @@ pub enum WorkflowTransition {
     CoverageChanged {
         coverage: WorkflowCoverage,
     },
+    IssuesValidated {
+        pass: u32,
+        summaries: Vec<String>,
+    },
+    IssuesResolved {
+        pass: u32,
+        status: ReviewIssueStatus,
+    },
     Terminal {
         outcome: WorkflowOutcome,
         coverage: WorkflowCoverage,
@@ -421,6 +455,7 @@ impl WorkflowStore {
                     waiting: None,
                     coverage: WorkflowCoverage::Unknown,
                     outcome: None,
+                    issues: Vec::new(),
                 },
             );
             return Ok(ApplyOutcome::Changed);
@@ -618,6 +653,43 @@ impl WorkflowStore {
                     ));
                 }
                 state.coverage = *coverage;
+            }
+            WorkflowTransition::IssuesValidated { pass, summaries } => {
+                if summaries.is_empty() {
+                    return Err(Self::error(
+                        event.workflow_id,
+                        "validated issue list is empty",
+                    ));
+                }
+                if state.issues.iter().any(|issue| issue.pass == *pass) {
+                    return Ok(ApplyOutcome::Duplicate);
+                }
+                let first_id = state.issues.len() + 1;
+                state
+                    .issues
+                    .extend(
+                        summaries
+                            .iter()
+                            .enumerate()
+                            .map(|(index, summary)| ReviewIssue {
+                                id: first_id + index,
+                                pass: *pass,
+                                summary: summary.clone(),
+                                status: ReviewIssueStatus::Validated,
+                            }),
+                    );
+            }
+            WorkflowTransition::IssuesResolved { pass, status } => {
+                let mut changed = false;
+                for issue in state.issues.iter_mut().filter(|issue| issue.pass == *pass) {
+                    if issue.status == ReviewIssueStatus::Validated {
+                        issue.status = *status;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    return Ok(ApplyOutcome::Duplicate);
+                }
             }
             WorkflowTransition::Terminal { outcome, coverage } => {
                 if state.coverage == WorkflowCoverage::Degraded
@@ -952,6 +1024,62 @@ mod tests {
                     },
                 ))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn review_issues_move_from_validated_to_fixed_or_invalidated() {
+        let mut store = WorkflowStore::default();
+        store.apply(&started()).unwrap();
+        store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::IssuesValidated {
+                    pass: 0,
+                    summaries: vec!["[P1] src/a.rs:1 -- broken".to_string()],
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            store.get(review()).unwrap().issues[0].status,
+            ReviewIssueStatus::Validated
+        );
+
+        store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::IssuesResolved {
+                    pass: 0,
+                    status: ReviewIssueStatus::Fixed,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            store.get(review()).unwrap().issues[0].status,
+            ReviewIssueStatus::Fixed
+        );
+
+        store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::IssuesValidated {
+                    pass: 1,
+                    summaries: vec!["[P2] src/b.rs:2 -- stale claim".to_string()],
+                },
+            ))
+            .unwrap();
+        store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::IssuesResolved {
+                    pass: 1,
+                    status: ReviewIssueStatus::Invalidated,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            store.get(review()).unwrap().issues[1].status,
+            ReviewIssueStatus::Invalidated
         );
     }
 

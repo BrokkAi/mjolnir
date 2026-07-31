@@ -940,6 +940,9 @@ pub struct AppState {
     pub nested_agent_viewer: bool,
     pub nested_agent_selected: Option<u64>,
     pub nested_agent_scroll_offset: usize,
+    /// Session-wide review finding ledger, opened with F9.
+    pub review_issue_viewer: bool,
+    pub review_issue_scroll_offset: usize,
     /// Dedicated reader for the most recent native workspace-diff event.
     /// Its selection and scroll state intentionally do not share transcript
     /// state: workspace changes are not transcript entries.
@@ -1316,6 +1319,8 @@ impl AppState {
             nested_agent_viewer: false,
             nested_agent_selected: None,
             nested_agent_scroll_offset: 0,
+            review_issue_viewer: false,
+            review_issue_scroll_offset: 0,
             workspace_diff_viewer: false,
             workspace_diff_selected_file: 0,
             workspace_diff_scroll_offset: 0,
@@ -1869,6 +1874,7 @@ impl AppState {
         };
         self.close_transcript_viewer();
         self.close_workspace_diff_viewer();
+        self.close_review_issue_viewer();
         self.nested_agent_viewer = true;
         self.nested_agent_selected = Some(selected);
         self.nested_agent_scroll_offset = usize::MAX;
@@ -1878,6 +1884,19 @@ impl AppState {
     pub fn close_nested_agent_viewer(&mut self) {
         self.nested_agent_viewer = false;
         self.nested_agent_scroll_offset = 0;
+    }
+
+    pub fn open_review_issue_viewer(&mut self) {
+        self.close_nested_agent_viewer();
+        self.close_transcript_viewer();
+        self.close_workspace_diff_viewer();
+        self.review_issue_viewer = true;
+        self.review_issue_scroll_offset = 0;
+    }
+
+    pub fn close_review_issue_viewer(&mut self) {
+        self.review_issue_viewer = false;
+        self.review_issue_scroll_offset = 0;
     }
 
     pub fn select_nested_agent(&mut self, next: bool) {
@@ -1934,6 +1953,7 @@ impl AppState {
     pub fn open_workspace_diff_viewer(&mut self) {
         self.close_nested_agent_viewer();
         self.close_transcript_viewer();
+        self.close_review_issue_viewer();
         self.workspace_diff_viewer = true;
         self.workspace_diff_selected_file = 0;
         self.workspace_diff_scroll_offset = 0;
@@ -3072,6 +3092,33 @@ impl AppState {
                 if let Some(summary) = summary {
                     self.push_system_message(summary);
                 }
+            }
+            WorkflowTransition::IssuesValidated { summaries, .. } => {
+                self.set_status_line(
+                    StatusKind::Warning,
+                    format!(
+                        "review found {} validated issue{} · F9 details",
+                        summaries.len(),
+                        if summaries.len() == 1 { "" } else { "s" }
+                    ),
+                );
+            }
+            WorkflowTransition::IssuesResolved { status, .. } => {
+                let count = self
+                    .workflows
+                    .get(event.workflow_id)
+                    .map(|workflow| {
+                        workflow
+                            .issues
+                            .iter()
+                            .filter(|issue| issue.status == *status)
+                            .count()
+                    })
+                    .unwrap_or(0);
+                self.set_status_line(
+                    StatusKind::Info,
+                    format!("review issues {}: {count} · F9 details", status.as_str()),
+                );
             }
             WorkflowTransition::PhaseChanged { .. }
             | WorkflowTransition::CoverageChanged { .. } => {}

@@ -700,6 +700,16 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             synthesis,
                             evidence,
                         } => {
+                            emit_workflow(
+                                &workflow,
+                                WorkflowEvent::new(
+                                    workflow_id,
+                                    WorkflowTransition::IssuesValidated {
+                                        pass: completed_pass,
+                                        summaries: review_issue_summaries(&synthesis),
+                                    },
+                                ),
+                            );
                             // The withheld completion is deliberately dropped:
                             // the corrective turn produces the real one, the
                             // same way today's single-prompt review does.
@@ -1022,6 +1032,23 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 delta.as_ref().and_then(WorkspaceDelta::review_fingerprint)
                     != Some(reviewed.fingerprint.as_str())
             });
+            if correction_review_base.is_some() {
+                let status = if correction_changed {
+                    crate::workflow::ReviewIssueStatus::Fixed
+                } else {
+                    crate::workflow::ReviewIssueStatus::Invalidated
+                };
+                emit_workflow(
+                    &workflow,
+                    WorkflowEvent::new(
+                        WorkflowId::review(active.epoch),
+                        WorkflowTransition::IssuesResolved {
+                            pass: review_pass.saturating_sub(1),
+                            status,
+                        },
+                    ),
+                );
+            }
             if should_start_discrete_review(
                 review,
                 discrete_review_started && !correction_changed,
@@ -1234,6 +1261,30 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
         events,
         task,
     }
+}
+
+fn review_issue_summaries(synthesis: &str) -> Vec<String> {
+    let mut summaries = synthesis
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            let line = line.strip_prefix(['-', '*']).map(str::trim).unwrap_or(line);
+            matches!(
+                line.get(..4),
+                Some("[P0]") | Some("[P1]") | Some("[P2]") | Some("[P3]")
+            )
+        })
+        .map(|line| {
+            line.strip_prefix(['-', '*'])
+                .map(str::trim)
+                .unwrap_or(line)
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    if summaries.is_empty() {
+        summaries.push(crate::ragnarok::first_line(synthesis, 240));
+    }
+    summaries
 }
 
 fn emit_workflow(workflow: &WorkflowEmitter, event: WorkflowEvent) {
