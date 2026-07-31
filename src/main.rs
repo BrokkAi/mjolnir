@@ -1269,10 +1269,7 @@ fn isolated_side_runtime_config(
         access_mode: acp::RuntimeAccessMode::Full,
         agent_source_id: None,
         config_path: None,
-        saved_session_config: config::load_saved_session_config(
-            &config::default_config_path(),
-            &agent.source_id,
-        ),
+        saved_session_config: std::collections::HashMap::new(),
         role_config: None,
         subagents: None,
         side_prompt_policy: true,
@@ -2119,11 +2116,12 @@ async fn run_session(
         agent_stderr: runtime_options.agent_stderr.clone(),
         fs_max_text_bytes: runtime_options.fs_max_text_bytes,
         access_mode: acp::RuntimeAccessMode::Full,
-        agent_source_id: Some(agent.source_id.clone()),
+        agent_source_id: Some(roster.primary.launch.source_id.clone()),
         config_path: Some(config::default_config_path()),
         saved_session_config: config::load_saved_session_config(
             &config::default_config_path(),
-            &agent.source_id,
+            &roster.primary.launch.source_id,
+            &roster.primary.model.model,
         ),
         role_config: Some(acp::RuntimeRoleConfig {
             label: "primary".to_string(),

@@ -897,12 +897,13 @@ fn spawn_subagent_runtime(
     let agent_source_id = role_config
         .as_ref()
         .map(|role| role.adapter_source_id.clone());
-    let saved_session_config = agent_source_id
-        .as_deref()
-        .map(|source_id| {
+    let saved_session_config = role_config
+        .as_ref()
+        .map(|role| {
             crate::config::load_saved_session_config(
                 &crate::config::default_config_path(),
-                source_id,
+                &role.adapter_source_id,
+                &role.model_id,
             )
         })
         .unwrap_or_default();

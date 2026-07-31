@@ -1822,8 +1822,8 @@ async fn drive_session(
     terminals: Arc<ManagedTerminals>,
     access_mode: RuntimeAccessMode,
     fs_max_text_bytes: u64,
-    _agent_source_id: Option<String>,
-    _config_path: Option<PathBuf>,
+    agent_source_id: Option<String>,
+    config_path: Option<PathBuf>,
     saved_session_config: HashMap<String, String>,
     role_config: Option<RuntimeRoleConfig>,
     subagents: Option<subagent::Config>,
@@ -2126,13 +2126,18 @@ async fn drive_session(
     // orchestrator-injected subagent report that loses a microsecond race
     // against a user prompt must still reach the agent.
     let mut deferred_prompts: VecDeque<(String, Vec<PromptImage>)> = VecDeque::new();
+    let mut deferred_config_updates: VecDeque<(SessionConfigTarget, SessionConfigValueId)> =
+        VecDeque::new();
 
     loop {
-        let cmd = match deferred_prompts.pop_front() {
-            Some((text, images)) => UiCommand::SendPrompt { text, images },
-            None => match ui_rx.recv().await {
-                Some(cmd) => cmd,
-                None => break,
+        let cmd = match deferred_config_updates.pop_front() {
+            Some((target, value)) => UiCommand::SetSessionConfigOption { target, value },
+            None => match deferred_prompts.pop_front() {
+                Some((text, images)) => UiCommand::SendPrompt { text, images },
+                None => match ui_rx.recv().await {
+                    Some(cmd) => cmd,
+                    None => break,
+                },
             },
         };
         match cmd {
@@ -2175,6 +2180,7 @@ async fn drive_session(
                     &subagent_controller,
                     session_has_history,
                     &mut deferred_prompts,
+                    &mut deferred_config_updates,
                 )
                 .await?;
                 session_has_history = true;
@@ -2194,6 +2200,10 @@ async fn drive_session(
                     ui_tx,
                     ui_rx,
                     &mut deferred_prompts,
+                    &mut deferred_config_updates,
+                    config_path.as_deref(),
+                    agent_source_id.as_deref(),
+                    role_config.as_ref().map(|role| role.model_id.as_str()),
                 )
                 .await?
                 {
@@ -4640,6 +4650,10 @@ async fn drive_config_update(
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>)>,
+    deferred_config_updates: &mut VecDeque<(SessionConfigTarget, SessionConfigValueId)>,
+    config_path: Option<&Path>,
+    agent_source_id: Option<&str>,
+    model_id: Option<&str>,
 ) -> Result<bool> {
     let update = send_config_update(conn, session_id, target.clone(), value.clone());
     tokio::pin!(update);
@@ -4647,6 +4661,7 @@ async fn drive_config_update(
     loop {
         tokio::select! {
             result = &mut update => {
+                let accepted = result.is_ok();
                 match result {
                     Ok(Some(options)) => {
                         session_config.targets = config_option_targets(&options);
@@ -4676,6 +4691,22 @@ async fn drive_config_update(
                         )));
                     }
                 }
+                if accepted
+                    && session_config_target_is_agent_owned(&target, hidden_config_ids)
+                    && let (Some(path), Some(source_id), Some(model_id)) =
+                        (config_path, agent_source_id, model_id)
+                    && let Err(error) = crate::config::persist_accepted_session_config(
+                        path,
+                        source_id,
+                        model_id,
+                        session_config_target_key(&target),
+                        value.to_string(),
+                    )
+                {
+                    let _ = ui_tx.send(UiEvent::Warning(format!(
+                        "session config changed but could not be saved: {error:#}"
+                    )));
+                }
                 return Ok(true);
             }
             maybe_cmd = ui_rx.recv() => {
@@ -4690,9 +4721,10 @@ async fn drive_config_update(
                                 .to_string(),
                         ));
                     }
-                    Some(UiCommand::SetSessionConfigOption { .. }) => {
-                        let _ = ui_tx.send(UiEvent::Warning(
-                            "config update already in flight".to_string(),
+                    Some(UiCommand::SetSessionConfigOption { target, value }) => {
+                        deferred_config_updates.push_back((target, value));
+                        let _ = ui_tx.send(UiEvent::Info(
+                            "session config update queued".to_string(),
                         ));
                     }
                     Some(UiCommand::ForkSession) => {
@@ -4724,6 +4756,19 @@ async fn drive_config_update(
                 }
             }
         }
+    }
+}
+
+fn session_config_target_is_agent_owned(
+    target: &SessionConfigTarget,
+    hidden_config_ids: &[String],
+) -> bool {
+    match target {
+        SessionConfigTarget::ConfigOption { config_id } => !hidden_config_ids
+            .iter()
+            .any(|hidden| hidden == &config_id.to_string()),
+        SessionConfigTarget::LegacyModel => false,
+        SessionConfigTarget::LegacyMode => true,
     }
 }
 
@@ -4790,6 +4835,7 @@ async fn drive_prompt_turn(
     subagent_controller: &subagent::Controller,
     side_source_has_history: bool,
     deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>)>,
+    deferred_config_updates: &mut VecDeque<(SessionConfigTarget, SessionConfigValueId)>,
 ) -> Result<bool> {
     let turn_diff_tracker =
         TurnDiffTracker::snapshot(diff_config.workspace_roots, diff_config.max_text_bytes).await;
@@ -4856,9 +4902,11 @@ async fn drive_prompt_turn(
                                 .to_string(),
                         ));
                     }
-                    Some(UiCommand::SetSessionConfigOption { .. }) => {
-                        let _ = ui_tx.send(UiEvent::Warning(
-                            "config updates are only supported while idle".to_string(),
+                    Some(UiCommand::SetSessionConfigOption { target, value }) => {
+                        deferred_config_updates.push_back((target, value));
+                        let _ = ui_tx.send(UiEvent::Info(
+                            "session config update queued until the current turn completes"
+                                .to_string(),
                         ));
                     }
                     Some(UiCommand::ForkSession) => {
@@ -7214,7 +7262,37 @@ mod tests {
                 async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
                             responder,
                             _cx| {
-                    responder.respond(NewSessionResponse::new(SessionId::new("test-session")))
+                    responder.respond(
+                        NewSessionResponse::new(SessionId::new("test-session")).config_options(
+                            vec![
+                                SessionConfigOption::select(
+                                    "model",
+                                    "Model",
+                                    "model-a",
+                                    vec![SessionConfigSelectOption::new("model-a", "Model A")],
+                                )
+                                .category(SessionConfigOptionCategory::Model),
+                                SessionConfigOption::select(
+                                    "service_tier",
+                                    "Service tier",
+                                    "default",
+                                    vec![
+                                        SessionConfigSelectOption::new("default", "Default"),
+                                        SessionConfigSelectOption::new("priority", "Priority"),
+                                    ],
+                                ),
+                                SessionConfigOption::select(
+                                    "response_style",
+                                    "Response style",
+                                    "balanced",
+                                    vec![
+                                        SessionConfigSelectOption::new("balanced", "Balanced"),
+                                        SessionConfigSelectOption::new("concise", "Concise"),
+                                    ],
+                                ),
+                            ],
+                        ),
+                    )
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -9543,6 +9621,100 @@ mod tests {
             .expect("drive_client did not return after shutdown");
         join.expect("client task panicked")
             .expect("drive_client returned error");
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accepted_live_config_update_persists_for_the_exact_route() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let agent_task = tokio::spawn(run_mock_agent_with_slow_config(agent_side));
+        let config_dir = tempfile::tempdir().expect("config dir");
+        let config_path = config_dir.path().join("config.toml");
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client_with_fs_limit(
+            client_transport,
+            std::env::temp_dir(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            SessionRestoreMode::Continue,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+            DEFAULT_FS_TEXT_BYTES,
+            RuntimeAccessMode::Full,
+            Some("codex-acp".to_string()),
+            Some(config_path.clone()),
+            HashMap::new(),
+            Some(RuntimeRoleConfig {
+                label: "primary".to_string(),
+                model_id: "model-a".to_string(),
+                model_value: "model-a".to_string(),
+                adapter_source_id: "codex-acp".to_string(),
+                permission: None,
+                session_tag: None,
+                reasoning_effort: None,
+            }),
+            None,
+            false,
+        ));
+
+        while !matches!(
+            tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("handshake timeout")
+                .expect("channel closed"),
+            UiEvent::SessionStarted { .. }
+        ) {}
+        cmd_tx
+            .send(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption {
+                    config_id: SessionConfigId::new("service_tier"),
+                },
+                value: SessionConfigValueId::new("priority"),
+            })
+            .expect("send config update");
+        cmd_tx
+            .send(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption {
+                    config_id: SessionConfigId::new("response_style"),
+                },
+                value: SessionConfigValueId::new("concise"),
+            })
+            .expect("queue second config update");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let loaded = crate::config::Config::load(&config_path).expect("load config");
+            let route = loaded
+                .session_config
+                .get("codex-acp")
+                .and_then(|saved| saved.models.get("model-a"));
+            if route
+                .and_then(|values| values.get("config:service_tier"))
+                .is_some_and(|value| value == "priority")
+                && route
+                    .and_then(|values| values.get("config:response_style"))
+                    .is_some_and(|value| value == "concise")
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "accepted value was not persisted"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(2), client_task)
+            .await
+            .expect("client shutdown timeout")
+            .expect("client task")
+            .expect("client result");
         agent_task.abort();
     }
 

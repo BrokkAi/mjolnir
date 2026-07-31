@@ -50,12 +50,22 @@ pub struct Config {
     /// ACP adapter enablement and explicit user-provisioned servers.
     #[serde(default, skip_serializing_if = "AcpConfig::is_default")]
     pub acp: AcpConfig,
-    /// Default agent-owned ACP session options, keyed by ACP server id.
+    /// Agent-owned ACP session options, keyed by ACP server id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub session_config: BTreeMap<String, BTreeMap<String, String>>,
+    pub session_config: BTreeMap<String, AcpSessionConfig>,
     /// `/ragnarok` battle knobs.
     #[serde(default, skip_serializing_if = "RagnarokConfig::is_default")]
     pub ragnarok: RagnarokConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AcpSessionConfig {
+    /// Defaults chosen in `/mjconfig` for future sessions on this server.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub defaults: BTreeMap<String, String>,
+    /// Values accepted by live sessions, keyed by configured model identity.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Default for Config {
@@ -683,14 +693,22 @@ pub fn default_config_path() -> PathBuf {
         .join("config.toml")
 }
 
-pub fn load_saved_session_config(path: &Path, source_id: &str) -> HashMap<String, String> {
+pub fn load_saved_session_config(
+    path: &Path,
+    source_id: &str,
+    model_id: &str,
+) -> HashMap<String, String> {
     match Config::load(path) {
-        Ok(config) => config
-            .session_config
-            .get(source_id)
-            .cloned()
-            .map(|values| values.into_iter().collect())
-            .unwrap_or_default(),
+        Ok(config) => {
+            let Some(saved) = config.session_config.get(source_id) else {
+                return HashMap::new();
+            };
+            let mut values: HashMap<_, _> = saved.defaults.clone().into_iter().collect();
+            if let Some(route) = saved.models.get(model_id) {
+                values.extend(route.clone());
+            }
+            values
+        }
         Err(error) => {
             tracing::warn!(
                 path = %path.display(),
@@ -700,6 +718,30 @@ pub fn load_saved_session_config(path: &Path, source_id: &str) -> HashMap<String
             HashMap::new()
         }
     }
+}
+
+static SESSION_CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn persist_accepted_session_config(
+    path: &Path,
+    source_id: &str,
+    model_id: &str,
+    key: String,
+    value: String,
+) -> Result<()> {
+    let _guard = SESSION_CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut config = Config::load(path)?;
+    config
+        .session_config
+        .entry(source_id.to_string())
+        .or_default()
+        .models
+        .entry(model_id.to_string())
+        .or_default()
+        .insert(key, value);
+    config.save(path)
 }
 
 /// Directory for exported conversation transcripts:
@@ -1161,14 +1203,85 @@ origin = "custom"
         cfg.session_config
             .entry("codex-acp".to_string())
             .or_default()
+            .defaults
             .insert("config:service_tier".to_string(), "priority".to_string());
 
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
 
         assert_eq!(
-            loaded.session_config["codex-acp"]["config:service_tier"],
+            loaded.session_config["codex-acp"].defaults["config:service_tier"],
             "priority"
+        );
+    }
+
+    #[test]
+    fn saved_session_config_merges_server_defaults_with_model_route() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        let saved = cfg
+            .session_config
+            .entry("codex-acp".to_string())
+            .or_default();
+        saved
+            .defaults
+            .insert("config:service_tier".to_string(), "default".to_string());
+        saved
+            .models
+            .entry("model-a".to_string())
+            .or_default()
+            .insert("config:service_tier".to_string(), "priority".to_string());
+        cfg.save(&path).expect("save");
+
+        assert_eq!(
+            load_saved_session_config(&path, "codex-acp", "model-a")["config:service_tier"],
+            "priority"
+        );
+        assert_eq!(
+            load_saved_session_config(&path, "codex-acp", "model-b")["config:service_tier"],
+            "default"
+        );
+    }
+
+    #[test]
+    fn accepted_session_config_is_route_isolated_and_merge_safe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config {
+            theme: TerminalThemeKind::Dark,
+            ..Config::default()
+        };
+        cfg.agent.discrete_review = false;
+        cfg.save(&path).expect("save initial config");
+
+        persist_accepted_session_config(
+            &path,
+            "codex-acp",
+            "model-a",
+            "config:service_tier".to_string(),
+            "priority".to_string(),
+        )
+        .expect("persist model a");
+        persist_accepted_session_config(
+            &path,
+            "codex-acp",
+            "model-b",
+            "config:service_tier".to_string(),
+            "economy".to_string(),
+        )
+        .expect("persist model b");
+
+        let loaded = Config::load(&path).expect("load merged config");
+        assert_eq!(loaded.theme, TerminalThemeKind::Dark);
+        assert!(!loaded.agent.discrete_review);
+        assert_eq!(
+            loaded.session_config["codex-acp"].models["model-a"]["config:service_tier"],
+            "priority"
+        );
+        assert_eq!(
+            loaded.session_config["codex-acp"].models["model-b"]["config:service_tier"],
+            "economy"
         );
     }
 

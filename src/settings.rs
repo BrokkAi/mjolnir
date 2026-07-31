@@ -309,7 +309,7 @@ impl SettingsEditor {
                     .config
                     .session_config
                     .get(&server_id)
-                    .and_then(|values| values.get(&option_key))
+                    .and_then(|saved| saved.defaults.get(&option_key))
                     .cloned()
                     .unwrap_or_else(|| session_option_current_value(option));
                 let index = choices
@@ -321,6 +321,7 @@ impl SettingsEditor {
                     .session_config
                     .entry(server_id)
                     .or_default()
+                    .defaults
                     .insert(option_key, choices[next].0.clone());
             }
             SettingsTab::Appearance if self.selected == 0 => {
@@ -1106,7 +1107,11 @@ fn draw_acp_sessions(
             .config
             .session_config
             .get(&server.id)
-            .and_then(|values| values.get(&crate::acp::session_config_option_key(&option.id)))
+            .and_then(|saved| {
+                saved
+                    .defaults
+                    .get(&crate::acp::session_config_option_key(&option.id))
+            })
             .cloned()
             .unwrap_or_else(|| session_option_current_value(option));
         let label = session_option_choices(option)
@@ -1651,7 +1656,7 @@ mod tests {
         );
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(
-            editor.config.session_config[&server_id]["config:service_tier"],
+            editor.config.session_config[&server_id].defaults["config:service_tier"],
             "priority"
         );
     }

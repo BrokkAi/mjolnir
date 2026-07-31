@@ -17,7 +17,8 @@ use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::v1::{
-    AvailableCommandInput, SessionConfigOption, SessionUpdate, StopReason, ToolCallStatus,
+    AvailableCommandInput, SessionConfigOption, SessionConfigValueId, SessionUpdate, StopReason,
+    ToolCallStatus,
 };
 use anyhow::{Context, Result};
 use crossterm::cursor::MoveTo;
@@ -55,8 +56,8 @@ use crate::clipboard::{
 };
 use crate::config;
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, ReviewTarget, SubagentEvent,
-    SubagentOutcome, UiCommand, UiEvent,
+    PermissionDecision, PermissionPrompt, PromptImage, ReviewTarget, SessionConfigTarget,
+    SubagentEvent, SubagentOutcome, UiCommand, UiEvent,
 };
 use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
@@ -4635,6 +4636,7 @@ fn persist_mjconfig_selection(
     let theme = config.theme;
     let style = config.spinner;
     let review_changed = state.review_enabled != config.agent.discrete_review;
+    let live_session_updates = live_primary_session_config_updates(state, &config);
     if let Some(path) = state.config_path.clone() {
         match config.save(&path) {
             Ok(()) => {
@@ -4647,9 +4649,12 @@ fn persist_mjconfig_selection(
                         enabled: config.agent.discrete_review,
                     });
                 }
+                for (target, value) in live_session_updates {
+                    let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { target, value });
+                }
                 state.record_status_message(
                     StatusKind::Info,
-                    format!("config saved — theme {theme}, spinner {style}; model, permission, and ACP changes apply on /new or /clear"),
+                    format!("config saved — theme {theme}, spinner {style}; session options update the active primary, while model, permission, and ACP routing changes apply on /new or /clear"),
                 );
             }
             Err(e) => state.record_status_message(
@@ -4660,6 +4665,37 @@ fn persist_mjconfig_selection(
     } else {
         state.record_status_message(StatusKind::Info, format!("theme {theme}, spinner {style}"));
     }
+}
+
+fn live_primary_session_config_updates(
+    state: &AppState,
+    config: &config::Config,
+) -> Vec<(SessionConfigTarget, SessionConfigValueId)> {
+    if state.session_id.is_none() {
+        return Vec::new();
+    }
+    let Some(source_id) = state.active_models.primary_source.as_deref() else {
+        return Vec::new();
+    };
+    let Some(defaults) = config
+        .session_config
+        .get(source_id)
+        .map(|saved| &saved.defaults)
+    else {
+        return Vec::new();
+    };
+
+    state
+        .session_config_options
+        .iter()
+        .zip(state.session_config_targets.iter())
+        .filter_map(|(option, target)| {
+            let desired = defaults.get(&crate::acp::session_config_option_key(&option.id))?;
+            let current = crate::app::config_option_current_value_id(option)?;
+            (current.to_string() != *desired)
+                .then(|| (target.clone(), SessionConfigValueId::from(desired.clone())))
+        })
+        .collect()
 }
 
 fn draw_mjconfig_menu(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -16258,6 +16294,46 @@ mod tests {
             .find(|server| server.id == server_id)
             .expect("same server");
         assert_eq!(server.session_config[0].id.to_string(), "service_tier");
+    }
+
+    #[test]
+    fn saving_mjconfig_updates_the_live_primary_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config
+            .session_config
+            .entry("codex-acp".to_string())
+            .or_default()
+            .defaults
+            .insert("config:service_tier".to_string(), "priority".to_string());
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.session_config_options = vec![SessionConfigOption::select(
+            "service_tier",
+            "Service tier",
+            "default",
+            vec![
+                SessionConfigSelectOption::new("default", "Default"),
+                SessionConfigSelectOption::new("priority", "Priority"),
+            ],
+        )];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "service_tier".into(),
+        }];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, config);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == "service_tier" && value.to_string() == "priority"
+        ));
     }
 
     #[test]
