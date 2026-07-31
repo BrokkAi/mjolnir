@@ -497,8 +497,20 @@ pub(crate) fn format_report_injection(
             .filter(|text| !text.is_empty())
             .map(|text| format!("<debrief>\n{text}\n</debrief>\n"))
             .unwrap_or_default();
+        // The resume affordance must live here, at the decision point: the
+        // tool description's one-clause mention produced zero resume uptake
+        // across 63 delegations in a 20-task sweep (2026-07-31) because the
+        // report the coordinator reads when planning follow-up work never
+        // said the session was still warm.
+        let session_note = match &report.outcome {
+            SubagentOutcome::Completed => format!(
+                "<session>\nThis subagent's session is retained with its full working context. For follow-up work that needs the same context, create_subagent with resume={id} continues it and is far cheaper than a new subagent loading that context from scratch. Work needing different context is better served by a fresh subagent. subagent_cancel with subagent_id {id} releases it.\n</session>\n",
+                id = report.subagent_id
+            ),
+            _ => String::new(),
+        };
         out.push_str(&format!(
-            "<subagent_result id=\"{id}\" label=\"{label}\" agent=\"{agent}\" model=\"{model}\" outcome=\"{outcome}\" elapsed=\"{elapsed}\">\n<report>\n{report_text}\n</report>\n{debrief}<activity_summary>\n{activity}\n</activity_summary>\n<workspace_diff>\n{diff}\n</workspace_diff>\n</subagent_result>\n\n",
+            "<subagent_result id=\"{id}\" label=\"{label}\" agent=\"{agent}\" model=\"{model}\" outcome=\"{outcome}\" elapsed=\"{elapsed}\">\n<report>\n{report_text}\n</report>\n{debrief}<activity_summary>\n{activity}\n</activity_summary>\n<workspace_diff>\n{diff}\n</workspace_diff>\n{session_note}</subagent_result>\n\n",
             id = report.subagent_id,
             label = escape_report_attribute(&report.label),
             agent = escape_report_attribute(&report.agent),
@@ -3433,7 +3445,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "<subagent_result id=\"7\" label=\"review\" agent=\"codex-acp\" model=\"gpt-y\" outcome=\"completed\" elapsed=\"1s\">\n<report>\none finding\n</report>\n<debrief>\nVERIFIED: cargo test\nUNVERIFIED: integration\n</debrief>\n<activity_summary>\nread the caller\n</activity_summary>\n<workspace_diff>\ndiff body\n</workspace_diff>\n</subagent_result>\n\nVet this report."
+            "<subagent_result id=\"7\" label=\"review\" agent=\"codex-acp\" model=\"gpt-y\" outcome=\"completed\" elapsed=\"1s\">\n<report>\none finding\n</report>\n<debrief>\nVERIFIED: cargo test\nUNVERIFIED: integration\n</debrief>\n<activity_summary>\nread the caller\n</activity_summary>\n<workspace_diff>\ndiff body\n</workspace_diff>\n<session>\nThis subagent's session is retained with its full working context. For follow-up work that needs the same context, create_subagent with resume=7 continues it and is far cheaper than a new subagent loading that context from scratch. Work needing different context is better served by a fresh subagent. subagent_cancel with subagent_id 7 releases it.\n</session>\n</subagent_result>\n\nVet this report."
         );
     }
 
@@ -3456,9 +3468,35 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "<subagent_result id=\"8\" label=\"review\" agent=\"codex-acp\" model=\"gpt-y\" outcome=\"completed\" elapsed=\"2s\">\n<report>\ndone\n</report>\n<activity_summary>\nactivity\n</activity_summary>\n<workspace_diff>\ndiff\n</workspace_diff>\n</subagent_result>\n\nVet this report."
+            "<subagent_result id=\"8\" label=\"review\" agent=\"codex-acp\" model=\"gpt-y\" outcome=\"completed\" elapsed=\"2s\">\n<report>\ndone\n</report>\n<activity_summary>\nactivity\n</activity_summary>\n<workspace_diff>\ndiff\n</workspace_diff>\n<session>\nThis subagent's session is retained with its full working context. For follow-up work that needs the same context, create_subagent with resume=8 continues it and is far cheaper than a new subagent loading that context from scratch. Work needing different context is better served by a fresh subagent. subagent_cancel with subagent_id 8 releases it.\n</session>\n</subagent_result>\n\nVet this report."
         );
         assert!(!rendered.contains("<debrief>"));
+    }
+
+    #[test]
+    fn report_injection_omits_session_note_for_non_completed_outcomes() {
+        for outcome in [
+            SubagentOutcome::Cancelled,
+            SubagentOutcome::Failed("boom".to_string()),
+        ] {
+            let report = SubagentReport {
+                subagent_id: 9,
+                label: "review".to_string(),
+                agent: "codex-acp".to_string(),
+                model: "gpt-y".to_string(),
+                outcome,
+                final_message: "ended".to_string(),
+                slim_activity: "activity".to_string(),
+                workspace_diff: None,
+                debrief: None,
+                elapsed: Duration::from_secs(2),
+            };
+            let rendered = format_report_injection(&[report], "Vet this report.");
+            assert!(
+                !rendered.contains("<session>"),
+                "only completed subagents may advertise a resumable session: {rendered}"
+            );
+        }
     }
 
     fn test_mcp_handler(controller: Controller) -> McpHandler {
