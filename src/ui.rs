@@ -7268,13 +7268,18 @@ fn render_transcript_entry_range(
                     speaker = Some("agent".to_string());
                 }
             }
-            Entry::AgentMessage(text) | Entry::SubagentMessage(text) => push_markdown_message(
-                &mut out,
-                state.stream_visible_text(entry_index, text),
-                collapse_message,
-                width,
-                theme,
-            ),
+            Entry::AgentMessage(text) | Entry::SubagentMessage(text) => {
+                // Answers are the durable result of a turn. Keep every answer
+                // fully readable in the transcript, including older primary
+                // answers and nested-agent answers.
+                push_markdown_message(
+                    &mut out,
+                    state.stream_visible_text(entry_index, text),
+                    false,
+                    width,
+                    theme,
+                )
+            }
             Entry::AgentThought(thought) | Entry::SubagentThought(thought) => push_thinking(
                 &mut out,
                 state.stream_visible_text(entry_index, &thought.text),
@@ -18818,7 +18823,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_long_prose_entries_share_one_collapse_policy() {
+    fn stable_agent_answers_never_collapse() {
         let mut state = AppState::new();
         let long = (1..=7)
             .map(|line| format!("line {line}"))
@@ -18840,10 +18845,17 @@ mod tests {
                 .iter()
                 .filter(|line| line.as_str() == "… details hidden")
                 .count(),
-            4,
+            2,
             "rendered: {rendered:?}"
         );
-        assert!(!rendered.iter().any(|line| line == "line 7"));
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|line| line.as_str() == "line 7")
+                .count(),
+            2,
+            "primary and subagent answer tails must remain visible: {rendered:?}"
+        );
     }
 
     #[test]
