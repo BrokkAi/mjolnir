@@ -2409,6 +2409,7 @@ impl AppState {
 
     /// Open the value picker for one config option. Returns `true` if it
     /// became visible.
+    #[cfg(test)]
     pub fn open_config_value_picker(&mut self, option_index: usize) -> bool {
         if self.runtime_closed {
             return false;
@@ -3926,6 +3927,7 @@ impl AppState {
 
     /// Return select-style config options in agent order, together with
     /// their original index and optional `Ctrl-1..9` shortcut.
+    #[cfg(test)]
     pub fn selectable_config_options(&self) -> Vec<(usize, &SessionConfigOption, Option<char>)> {
         self.session_config_options
             .iter()
@@ -4103,6 +4105,7 @@ pub fn is_model_config_option(option: &SessionConfigOption) -> bool {
     matches!(option.category, Some(SessionConfigOptionCategory::Model))
 }
 
+#[cfg(test)]
 fn config_shortcut_char(select_index: usize) -> Option<char> {
     (select_index < 9).then_some((b'1' + select_index as u8) as char)
 }

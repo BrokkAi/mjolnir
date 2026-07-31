@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::probe::{AdapterCapabilities, ModelOption};
+use agent_client_protocol::schema::v1::SessionConfigOption;
 
 pub const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -30,6 +31,8 @@ struct Entry {
     fingerprint: Option<Fingerprint>,
     http_mcp: bool,
     models: Vec<ModelOption>,
+    #[serde(default)]
+    session_config: Vec<SessionConfigOption>,
 }
 
 /// Identity of the adapter binary the entry was captured from. `None` when
@@ -83,6 +86,7 @@ pub fn load(path: &Path, key: &str, command: &Path, ttl: Duration) -> Option<Ada
     Some(AdapterCapabilities {
         http_mcp: entry.http_mcp,
         models: entry.models,
+        session_config: entry.session_config,
     })
 }
 
@@ -98,6 +102,7 @@ pub fn store(path: &Path, key: &str, command: &Path, capabilities: &AdapterCapab
             fingerprint: command_fingerprint(command),
             http_mcp: capabilities.http_mcp,
             models: capabilities.models.clone(),
+            session_config: capabilities.session_config.clone(),
         },
     );
     let Some(parent) = path.parent() else {
@@ -142,6 +147,7 @@ mod tests {
                 name: model.to_string(),
                 description: None,
             }],
+            session_config: Vec::new(),
         }
     }
 

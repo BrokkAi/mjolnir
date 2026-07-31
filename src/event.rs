@@ -106,12 +106,12 @@ pub enum UiEvent {
     SessionConfigOptions {
         options: Vec<SessionConfigOption>,
         targets: Vec<SessionConfigTarget>,
-        /// Provider permission controls owned by the ACP harness rather
-        /// than the active-session config picker.
+        /// Provider permission controls owned by the ACP harness rather than
+        /// user-configurable ACP session defaults.
         hidden_config_ids: Vec<String>,
     },
     /// A background ACP adapter probe finished after startup: refreshed model
-    /// choices and server inventory for the /models and /mjconfig editors.
+    /// choices and server inventory for the /mjconfig editor.
     /// Never rebinds the running session's bound seats.
     RosterUpdate {
         choices: Vec<crate::roster::ModelChoice>,

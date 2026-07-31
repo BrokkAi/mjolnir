@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    DeleteSessionRequest, ErrorCode, InitializeRequest, NewSessionRequest,
+    DeleteSessionRequest, ErrorCode, InitializeRequest, NewSessionRequest, SessionConfigOption,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -101,6 +101,7 @@ pub struct ModelOption {
 pub struct AdapterCapabilities {
     pub http_mcp: bool,
     pub models: Vec<ModelOption>,
+    pub session_config: Vec<SessionConfigOption>,
 }
 
 /// Launch an ACP adapter once and capture both its initialize capabilities and
@@ -169,9 +170,8 @@ where
                 }
                 Err(err) => return Ok(Err(format!("session/new failed: {err}"))),
             };
-            let models = session
-                .config_options
-                .unwrap_or_default()
+            let session_config = session.config_options.unwrap_or_default();
+            let models = session_config
                 .iter()
                 .filter(|option| crate::app::is_model_config_option(option))
                 .filter_map(crate::app::config_option_choices)
@@ -196,6 +196,7 @@ where
             Ok(Ok(AdapterCapabilities {
                 http_mcp: init_resp.agent_capabilities.mcp_capabilities.http,
                 models,
+                session_config,
             }))
         })
         .await;

@@ -2730,10 +2730,6 @@ fn handle_crossterm(
         return handle_config_picker_key(state, cmd_tx, key.modifiers, key.code, mode);
     }
 
-    if open_config_value_picker_for_shortcut(state, key.modifiers, key.code) {
-        return TerminalRequest::None;
-    }
-
     if matches!(key.code, KeyCode::BackTab) {
         if !state.open_agent_picker() {
             state.status_line = Some(StatusMessage::info(
@@ -5384,10 +5380,6 @@ fn handle_config_picker_key(
     code: KeyCode,
     mode: UiMode,
 ) -> TerminalRequest {
-    if open_config_value_picker_for_shortcut(state, modifiers, code) {
-        return TerminalRequest::None;
-    }
-
     let action = if matches!(code, KeyCode::Tab) {
         PickerKeyAction::Accept
     } else {
@@ -5468,76 +5460,6 @@ fn handle_review_picker_key(
             TerminalRequest::None
         }
         PickerKeyAction::Other => TerminalRequest::None,
-    }
-}
-
-fn open_config_value_picker_for_shortcut(
-    state: &mut AppState,
-    modifiers: KeyModifiers,
-    code: KeyCode,
-) -> bool {
-    let Some(shortcut) = config_shortcut_key(modifiers, code) else {
-        return false;
-    };
-
-    if state.is_streaming() {
-        state.record_status_message(
-            StatusKind::Warning,
-            "finish or cancel the current turn before changing config",
-        );
-        return true;
-    }
-    if state.session_id.is_none() {
-        state.announce_waiting_for_primary();
-        return true;
-    }
-
-    let Some((option_index, option_name)) = state
-        .selectable_config_options()
-        .into_iter()
-        .find(|(_, _, assigned_shortcut)| *assigned_shortcut == Some(shortcut))
-        .map(|(option_index, option, _)| (option_index, option.name.clone()))
-    else {
-        if state.selectable_config_options().is_empty() {
-            state.record_status_message(StatusKind::Warning, "no session config options available");
-            return true;
-        }
-        return false;
-    };
-
-    if state.open_config_value_picker(option_index) {
-        state.status_line = Some(StatusMessage::info(format!("editing {}", option_name)));
-    }
-    true
-}
-
-fn config_shortcut_key(modifiers: KeyModifiers, code: KeyCode) -> Option<char> {
-    if modifiers.is_empty()
-        && let KeyCode::F(n @ 1..=9) = code
-    {
-        return char::from_digit(n.into(), 10);
-    }
-
-    if !modifiers.contains(KeyModifiers::CONTROL)
-        || modifiers.intersects(
-            KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
-        )
-    {
-        return None;
-    }
-    match code {
-        KeyCode::Char(c @ '1'..='9') => Some(c),
-        // French AZERTY number-row keys emit these characters without Shift.
-        KeyCode::Char('&') => Some('1'),
-        KeyCode::Char('\u{e9}') => Some('2'),
-        KeyCode::Char('"') => Some('3'),
-        KeyCode::Char('\'') => Some('4'),
-        KeyCode::Char('(') => Some('5'),
-        KeyCode::Char('-') => Some('6'),
-        KeyCode::Char('\u{e8}') => Some('7'),
-        KeyCode::Char('_') => Some('8'),
-        KeyCode::Char('\u{e7}') => Some('9'),
-        _ => None,
     }
 }
 
@@ -5809,7 +5731,6 @@ fn draw(
         return;
     }
 
-    let has_config_options = !state.selectable_config_options().is_empty();
     let usage_quota_rows = usage_quota_row_count(state, f.area().width) as u16;
 
     // Dynamic input height: borders (2) + chip rows + text lines, clamped.
@@ -5832,7 +5753,6 @@ fn draw(
             Constraint::Length(queued_row),
             Constraint::Length(input_height),
             Constraint::Length(usage_quota_rows),
-            Constraint::Length(if has_config_options { 1 } else { 0 }),
         ])
         .split(f.area());
 
@@ -5849,7 +5769,6 @@ fn draw(
     draw_queued_prompt_row(f, chunks[4], state);
     draw_input(f, chunks[5], state, mode);
     draw_usage_quota_row(f, chunks[6], state);
-    draw_config_shortcuts_row(f, chunks[7], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -5941,21 +5860,18 @@ fn inline_transcript_tail_height(state: &AppState, area: Rect) -> u16 {
     if state.help_overlay {
         return 0;
     }
-    let has_config_options = !state.selectable_config_options().is_empty();
     let reserved_rows = 1u16
         .saturating_add(workflow_progress_row_count(state))
         .saturating_add(current_branch_pr_row_count(state))
         .saturating_add(queued_prompt_row_count(state))
         .saturating_add(MIN_INPUT_HEIGHT)
-        .saturating_add(usage_quota_row_count(state, area.width) as u16)
-        .saturating_add(u16::from(has_config_options));
+        .saturating_add(usage_quota_row_count(state, area.width) as u16);
     area.height
         .saturating_sub(reserved_rows)
         .min(INLINE_TRANSCRIPT_TAIL_MAX_ROWS as u16)
 }
 
-fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 8] {
-    let has_config_options = !state.selectable_config_options().is_empty();
+fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 7] {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -5966,7 +5882,6 @@ fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 8] {
             Constraint::Length(queued_prompt_row_count(state)),
             Constraint::Min(MIN_INPUT_HEIGHT),
             Constraint::Length(usage_quota_row_count(state, area.width) as u16),
-            Constraint::Length(if has_config_options { 1 } else { 0 }),
         ])
         .split(area);
     std::array::from_fn(|index| chunks[index])
@@ -6044,7 +5959,6 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     draw_queued_prompt_row(f, chunks[4], state);
     draw_input(f, chunks[5], state, UiMode::InlineChat);
     draw_usage_quota_row(f, chunks[6], state);
-    draw_config_shortcuts_row(f, chunks[7], state);
 
     if state.autocomplete.visible
         && !state.has_pending_permission()
@@ -10363,6 +10277,7 @@ fn usage_quota_source_label(state: &AppState, source: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -16274,6 +16189,7 @@ mod tests {
         // Appearance tab: preview theme and spinner live.
         state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
+        state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Right);
         let previewed_theme = state.theme_kind;
         state.mjconfig_menu_key(KeyCode::Down);
@@ -16319,6 +16235,7 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         // Preview different values in both sections.
+        state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
@@ -20890,7 +20807,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_digit_opens_matching_config_value_picker() {
+    fn ctrl_digit_no_longer_opens_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -20921,13 +20838,11 @@ mod tests {
             key_with_modifiers(KeyCode::Char('2'), KeyModifiers::CONTROL),
         );
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
-    fn ctrl_shift_digit_opens_matching_config_value_picker() {
+    fn ctrl_shift_digit_no_longer_opens_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -20961,13 +20876,11 @@ mod tests {
             ),
         );
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
-    fn ctrl_azerty_number_row_key_opens_matching_config_value_picker() {
+    fn ctrl_azerty_number_row_key_no_longer_opens_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -20998,13 +20911,11 @@ mod tests {
             key_with_modifiers(KeyCode::Char('\u{e9}'), KeyModifiers::CONTROL),
         );
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
-    fn function_key_opens_matching_config_value_picker() {
+    fn function_key_no_longer_opens_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -21031,13 +20942,11 @@ mod tests {
 
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
-    fn inline_ctrl_digit_opens_matching_config_value_picker() {
+    fn inline_ctrl_digit_no_longer_opens_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -21068,13 +20977,11 @@ mod tests {
             key_with_modifiers(KeyCode::Char('2'), KeyModifiers::CONTROL),
         );
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
-    fn inline_function_key_opens_matching_config_value_picker() {
+    fn inline_function_key_no_longer_opens_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -21101,9 +21008,7 @@ mod tests {
 
         handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
 
-        let picker = state.config_picker.as_ref().expect("picker");
-        assert_eq!(picker.selected_option, 1);
-        assert_eq!(picker.selected_value, 0);
+        assert!(state.config_picker.is_none());
     }
 
     #[test]
@@ -21585,7 +21490,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_config_picker_renders_after_shortcut_opens_it() {
+    fn inline_config_shortcut_does_not_open_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
         state.session_config_options = vec![
@@ -21618,8 +21523,8 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("Mode values"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Enter apply"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Mode values"), "rendered:\n{rendered}");
+        assert!(state.config_picker.is_none());
     }
 
     #[test]

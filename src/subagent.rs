@@ -894,6 +894,20 @@ fn spawn_subagent_runtime(
     {
         role.permission = crate::roster::configure_permissions(kind, mode, &mut env);
     }
+    let agent_source_id = role_config
+        .as_ref()
+        .map(|role| role.adapter_source_id.clone());
+    let saved_session_config = agent_source_id
+        .as_deref()
+        .and_then(|source_id| {
+            crate::config::Config::load(&crate::config::default_config_path())
+                .ok()?
+                .session_config
+                .get(source_id)
+                .cloned()
+        })
+        .map(|values| values.into_iter().collect())
+        .unwrap_or_default();
     let runtime_config = AcpRuntimeConfig {
         command: config.command.clone(),
         args: config.args.clone(),
@@ -906,9 +920,9 @@ fn spawn_subagent_runtime(
         agent_stderr: config.agent_stderr.clone(),
         fs_max_text_bytes: context.fs_max_text_bytes,
         access_mode: context.access_mode,
-        agent_source_id: None,
-        config_path: None,
-        saved_session_config: HashMap::new(),
+        agent_source_id,
+        config_path: Some(crate::config::default_config_path()),
+        saved_session_config,
         role_config,
         subagents: None,
         side_prompt_policy: false,

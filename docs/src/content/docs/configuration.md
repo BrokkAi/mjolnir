@@ -135,10 +135,10 @@ configuration remains unchanged.
 
 ## Appearance and session controls
 
-Theme and spinner preferences are persistent. The primary agent's ACP session
-controls are available on F1–F9, but model and thought-level selection belong to
-Mjolnir's own configuration and are edited through `/mjconfig` rather than those
-session controls.
+Theme and spinner preferences are persistent. Agent-owned ACP session defaults
+are listed per configured server on the **ACP Sessions** tab in `/mjconfig`.
+Model and thought-level selection remain in Mjolnir's **Agents** configuration.
+Saved ACP session defaults take effect when that server starts a new session.
 
 Platform config locations come from the operating system rather than a literal
 cross-platform `~/.config` contract. See [Storage and network

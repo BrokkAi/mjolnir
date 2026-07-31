@@ -50,6 +50,9 @@ pub struct Config {
     /// ACP adapter enablement and explicit user-provisioned servers.
     #[serde(default, skip_serializing_if = "AcpConfig::is_default")]
     pub acp: AcpConfig,
+    /// Default agent-owned ACP session options, keyed by ACP server id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_config: BTreeMap<String, BTreeMap<String, String>>,
     /// `/ragnarok` battle knobs.
     #[serde(default, skip_serializing_if = "RagnarokConfig::is_default")]
     pub ragnarok: RagnarokConfig,
@@ -65,6 +68,7 @@ impl Default for Config {
             review: ReviewConfig::default(),
             subagents: SubagentsConfig::default(),
             acp: AcpConfig::default(),
+            session_config: BTreeMap::new(),
             ragnarok: RagnarokConfig::default(),
         }
     }
@@ -665,6 +669,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
             auto_failover: old.council.auto_failover,
         },
         acp: old.acp,
+        session_config: BTreeMap::new(),
         ragnarok: old.ragnarok,
     })
 }
