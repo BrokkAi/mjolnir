@@ -2080,12 +2080,13 @@ async fn drive_session(
     // available when delegation is needed.
     context_usage.reset_for_session();
     if !resumed && !saved_session_config.is_empty() {
+        // `/mjconfig` session values are explicit ACP overrides, so apply them
+        // after the role's routed defaults.
         apply_saved_session_config(
             &conn,
             &session_id,
             &mut session_config,
             &saved_session_config,
-            &hidden_config_ids,
             ui_tx,
         )
         .await;
@@ -4341,7 +4342,6 @@ async fn apply_saved_session_config(
     session_id: &SessionId,
     session_config: &mut SessionConfigCache,
     saved: &HashMap<String, String>,
-    hidden_config_ids: &[String],
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
 ) {
     let changes: Vec<_> = session_config
@@ -4349,7 +4349,7 @@ async fn apply_saved_session_config(
         .iter()
         .zip(session_config.targets.iter())
         .filter_map(|(option, target)| {
-            if !session_config_option_is_agent_owned(option, target, hidden_config_ids) {
+            if !session_config_option_is_persistable(option, target) {
                 return None;
             }
             let saved_value = saved.get(&session_config_target_key(target))?;
@@ -4660,14 +4660,12 @@ async fn drive_config_update(
     agent_source_id: Option<&str>,
     model_id: Option<&str>,
 ) -> Result<bool> {
-    let agent_owned = session_config
+    let persistable = session_config
         .options
         .iter()
         .zip(session_config.targets.iter())
         .find(|(_, candidate)| *candidate == &target)
-        .is_some_and(|(option, candidate)| {
-            session_config_option_is_agent_owned(option, candidate, hidden_config_ids)
-        });
+        .is_some_and(|(option, candidate)| session_config_option_is_persistable(option, candidate));
     let update = send_config_update(conn, session_id, target.clone(), value.clone());
     tokio::pin!(update);
 
@@ -4705,7 +4703,7 @@ async fn drive_config_update(
                     }
                 }
                 if accepted
-                    && agent_owned
+                    && persistable
                     && let (Some(path), Some(source_id), Some(model_id)) =
                         (config_path, agent_source_id, model_id)
                     && let Err(error) = crate::config::persist_accepted_session_config(
@@ -4772,26 +4770,13 @@ async fn drive_config_update(
     }
 }
 
-pub(crate) fn session_config_option_is_agent_owned(
+fn session_config_option_is_persistable(
     option: &SessionConfigOption,
     target: &SessionConfigTarget,
-    hidden_config_ids: &[String],
 ) -> bool {
     match target {
-        SessionConfigTarget::ConfigOption { config_id } => {
+        SessionConfigTarget::ConfigOption { .. } => {
             matches!(option.kind, SessionConfigKind::Select(_))
-                && !matches!(
-                    option.category,
-                    Some(
-                        SessionConfigOptionCategory::Model
-                            | SessionConfigOptionCategory::ModelConfig
-                            | SessionConfigOptionCategory::ThoughtLevel
-                    )
-                )
-                && config_id.to_string() != REASONING_EFFORT_CONFIG_ID
-                && !hidden_config_ids
-                    .iter()
-                    .any(|hidden| hidden == &config_id.to_string())
         }
         SessionConfigTarget::LegacyModel => false,
         SessionConfigTarget::LegacyMode => true,

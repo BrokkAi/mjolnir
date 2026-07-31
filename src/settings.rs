@@ -14,7 +14,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::config::{AcpServerOrigin, AcpServerPolicy, Config, ConfiguredAcpServer, ModelsConfig};
-use crate::event::SessionConfigTarget;
 use crate::install::Progress;
 use crate::palette::TerminalTheme;
 use crate::registry::{Agent, DistributionKind, Registry};
@@ -407,7 +406,7 @@ impl SettingsEditor {
                     .session_config
                     .iter()
                     .enumerate()
-                    .filter(|(_, option)| session_option_is_user_owned(server, option))
+                    .filter(|(_, option)| matches!(option.kind, SessionConfigKind::Select(_)))
                     .map(move |(option_index, _)| (server_index, option_index))
             })
             .collect()
@@ -1028,20 +1027,6 @@ pub fn draw_settings_panel(
     );
 }
 
-fn session_option_is_user_owned(
-    server: &crate::roster::AcpServerInfo,
-    option: &SessionConfigOption,
-) -> bool {
-    let hidden = crate::roster::runtime_permission_config_id(server.launch.kind)
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let target = SessionConfigTarget::ConfigOption {
-        config_id: option.id.clone(),
-    };
-    crate::acp::session_config_option_is_agent_owned(option, &target, &hidden)
-}
-
 fn session_option_choices(option: &SessionConfigOption) -> Vec<(String, String)> {
     let SessionConfigKind::Select(select) = &option.kind else {
         return Vec::new();
@@ -1077,7 +1062,7 @@ fn draw_acp_sessions(
     if rows.is_empty() {
         frame.render_widget(
             Paragraph::new(
-                "No agent-owned session options were reported by configured ACP servers.",
+                "No selectable session options were reported by configured ACP servers.",
             )
             .style(Style::default().fg(theme.muted))
             .wrap(Wrap { trim: false }),
@@ -1633,7 +1618,7 @@ mod tests {
     };
 
     #[test]
-    fn acp_session_tab_saves_agent_owned_option_per_server() {
+    fn acp_session_tab_saves_option_per_server() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         let server = editor
             .inventory
@@ -1678,42 +1663,40 @@ mod tests {
     }
 
     #[test]
-    fn acp_session_tab_excludes_mjolnir_owned_options() {
-        let editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        let mut server = editor
+    fn acp_session_tab_lists_and_edits_all_select_options() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let server = editor
             .inventory
             .servers
-            .first()
-            .expect("visible ACP server")
-            .clone();
-        server.launch.kind = crate::roster::AdapterKind::Codex;
+            .first_mut()
+            .expect("visible ACP server");
         let choice = || vec![SessionConfigSelectOption::new("value", "Value")];
         let model = SessionConfigOption::select("model", "Model", "value", choice())
             .category(SessionConfigOptionCategory::Model);
         let thought =
             SessionConfigOption::select("thought_level", "Thought level", "value", choice())
                 .category(SessionConfigOptionCategory::ThoughtLevel);
-        let permission = SessionConfigOption::select(
-            crate::roster::runtime_permission_config_id(server.launch.kind)
-                .unwrap_or("permission_mode"),
-            "Permission",
-            "value",
-            choice(),
-        );
+        let permission = SessionConfigOption::select("mode", "Permission", "value", choice());
         let reasoning = SessionConfigOption::select(
             crate::acp::REASONING_EFFORT_CONFIG_ID,
             "Reasoning effort",
             "value",
             choice(),
         );
+        let fast = SessionConfigOption::select("fast_mode", "Fast mode", "value", choice())
+            .category(SessionConfigOptionCategory::ModelConfig);
         let service =
             SessionConfigOption::select("service_tier", "Service tier", "value", choice());
+        server.launch.kind = crate::roster::AdapterKind::Codex;
+        server.session_config = vec![model, thought, permission, reasoning, fast, service];
+        editor.tab = SettingsTab::AcpSessions;
 
-        assert!(!session_option_is_user_owned(&server, &model));
-        assert!(!session_option_is_user_owned(&server, &thought));
-        assert!(!session_option_is_user_owned(&server, &permission));
-        assert!(!session_option_is_user_owned(&server, &reasoning));
-        assert!(session_option_is_user_owned(&server, &service));
+        assert_eq!(editor.session_option_rows().len(), 6);
+        for selected in 0..6 {
+            editor.selected = selected;
+            assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        }
+        assert_eq!(editor.config.session_config["codex-acp"].defaults.len(), 6);
     }
 
     #[test]
