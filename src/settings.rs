@@ -1391,6 +1391,10 @@ fn draw_servers(
         } else {
             "not ready".to_string()
         };
+        let status = match &server.subscription {
+            Some(subscription) => format!("{status} · {subscription}"),
+            None => status,
+        };
         lines.push(selected_line(
             editor.selected == index + SERVER_ROW_OFFSET,
             format!(

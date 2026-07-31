@@ -47,6 +47,7 @@ mod settings;
 mod speech;
 mod spinner;
 mod subagent;
+mod subscription;
 mod tailscale;
 mod term;
 mod termination;
