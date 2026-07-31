@@ -21473,6 +21473,73 @@ mod tests {
     }
 
     #[test]
+    fn probe_attributed_rows_under_deepseek_wrap() {
+        let mut state = AppState::new();
+        state.active_models.primary_source = Some("claude-acp".to_string());
+        state.active_models.subagent_source = Some("codex-acp".to_string());
+        state.set_claude_usage(ClaudeUsageStatus::Unavailable(
+            "claude quota request timed out after thirty seconds".to_string(),
+        ));
+        state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
+            "codex quota request timed out after thirty seconds".to_string(),
+        ));
+        state.set_deepseek_balance(crate::deepseek_balance::DeepSeekBalanceStatus::Unavailable(
+            crate::deepseek_balance::DeepSeekBalanceUnavailable {
+                reason: "billing credentials are unavailable".to_string(),
+                as_of: "2026-07-15T18:43:00Z".to_string(),
+            },
+        ));
+
+        for width in [40u16, 60, 80] {
+            let count = usage_quota_row_count(&state, width) as u16;
+            let backend = TestBackend::new(width, count.max(1) + 6);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
+                .expect("draw");
+            let rendered = buffer_lines(terminal.backend().buffer());
+            let non_blank = rendered.iter().filter(|l| !l.trim().is_empty()).count();
+            eprintln!("width={width} count={count} rendered_non_blank={non_blank}");
+            for line in rendered.iter().take(count as usize + 6) {
+                eprintln!("    |{line}|");
+            }
+            assert_eq!(
+                count as usize, non_blank,
+                "width {width} row count mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_anvil_primary_seat() {
+        let mut state = AppState::new();
+        state.active_models.primary_source = Some("anvil".to_string());
+        state.active_models.subagent_source = Some("anvil".to_string());
+        state.set_bedrock_credits(crate::bedrock_credits::BedrockCreditsStatus::Unavailable(
+            "bedrock unavailable".to_string(),
+        ));
+        eprintln!("anvil primary label = {:?}", usage_quota_label(&state));
+
+        let mut kimi = AppState::new();
+        kimi.active_models.primary_source = Some("kimi".to_string());
+        kimi.active_models.subagent_source = Some("codex-acp".to_string());
+        kimi.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
+            "codex unavailable".to_string(),
+        ));
+        eprintln!("kimi primary label = {:?}", usage_quota_label(&kimi));
+
+        let mut none_state = AppState::new();
+        none_state.active_models.primary_source = Some("anvil".to_string());
+        none_state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
+            "codex unavailable".to_string(),
+        ));
+        eprintln!(
+            "anvil primary, no anvil data, codex poller alive = {:?}",
+            usage_quota_label(&none_state)
+        );
+    }
+
+    #[test]
     fn usage_quota_label_uses_priority_fallback_without_seat_attribution() {
         let mut state = AppState::new();
         state.set_claude_usage(ClaudeUsageStatus::Unavailable(
