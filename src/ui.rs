@@ -10191,27 +10191,26 @@ fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         state.anvil_quota_source,
         Some(crate::app::AnvilQuotaSource::DeepSeek)
     );
-    let paragraph = if let Some(seat_labels) = attributed_usage_quota_labels(state) {
-        let mut spans = Vec::new();
-        for (index, (seat, quota)) in seat_labels.into_iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::styled(
-                    "  │  ",
-                    Style::default().fg(state.theme.muted),
-                ));
-            }
-            let (seat_label, color) = match seat {
-                UsageQuotaSeat::Primary => ("PRIMARY", state.theme.primary),
-                UsageQuotaSeat::Subagents => ("SUBAGENTS", state.theme.secondary),
-            };
-            spans.push(Span::styled(
-                format!("[{seat_label}]"),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(quota, Style::default().fg(color)));
-        }
-        let paragraph = Paragraph::new(Line::from(spans));
+    let paragraph = if let Some(quota_items) = attributed_usage_quota_items(state) {
+        let lines = quota_items
+            .into_iter()
+            .map(|(owner, quota)| {
+                let color = match owner {
+                    UsageQuotaOwner::Primary => state.theme.primary,
+                    UsageQuotaOwner::Subagents => state.theme.secondary,
+                    UsageQuotaOwner::Anvil => state.theme.warning,
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("[{}]", owner.display_label()),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(quota, Style::default().fg(color)),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let paragraph = Paragraph::new(lines);
         if wraps {
             paragraph.wrap(Wrap { trim: false })
         } else {
@@ -10235,6 +10234,23 @@ fn usage_quota_row_count(state: &AppState, width: u16) -> usize {
     if width == 0 {
         return 0;
     }
+    if let Some(quota_items) = attributed_usage_quota_items(state) {
+        if !matches!(
+            state.anvil_quota_source,
+            Some(crate::app::AnvilQuotaSource::DeepSeek)
+        ) {
+            return quota_items.len();
+        }
+        return quota_items
+            .into_iter()
+            .map(|(owner, quota)| {
+                Paragraph::new(format!("[{}] {quota}", owner.display_label()))
+                    .wrap(Wrap { trim: false })
+                    .line_count(width)
+                    .max(1)
+            })
+            .sum();
+    }
     if !matches!(
         state.anvil_quota_source,
         Some(crate::app::AnvilQuotaSource::DeepSeek)
@@ -10248,11 +10264,11 @@ fn usage_quota_row_count(state: &AppState, width: u16) -> usize {
 }
 
 fn usage_quota_label(state: &AppState) -> Option<String> {
-    if let Some(seat_labels) = attributed_usage_quota_labels(state) {
-        return (!seat_labels.is_empty()).then(|| {
-            seat_labels
+    if let Some(quota_items) = attributed_usage_quota_items(state) {
+        return (!quota_items.is_empty()).then(|| {
+            quota_items
                 .into_iter()
-                .map(|(seat, label)| format!("{} {label}", seat.plain_label()))
+                .map(|(owner, label)| format!("{} {label}", owner.plain_label()))
                 .collect::<Vec<_>>()
                 .join(" · ")
         });
@@ -10264,31 +10280,48 @@ fn usage_quota_label(state: &AppState) -> Option<String> {
 }
 
 #[derive(Clone, Copy)]
-enum UsageQuotaSeat {
+enum UsageQuotaOwner {
     Primary,
     Subagents,
+    Anvil,
 }
 
-impl UsageQuotaSeat {
+impl UsageQuotaOwner {
+    fn display_label(self) -> &'static str {
+        match self {
+            Self::Primary => "PRIMARY",
+            Self::Subagents => "SUBAGENTS",
+            Self::Anvil => "ANVIL",
+        }
+    }
+
     fn plain_label(self) -> &'static str {
         match self {
             Self::Primary => "primary",
             Self::Subagents => "subagents",
+            Self::Anvil => "anvil",
         }
     }
 }
 
-fn attributed_usage_quota_labels(state: &AppState) -> Option<Vec<(UsageQuotaSeat, String)>> {
+fn attributed_usage_quota_items(state: &AppState) -> Option<Vec<(UsageQuotaOwner, String)>> {
     let primary_source = state.active_models.primary_source.as_deref()?;
     let mut labels = usage_quota_source_label(state, primary_source)
-        .map(|label| (UsageQuotaSeat::Primary, label))
+        .map(|label| (UsageQuotaOwner::Primary, label))
         .into_iter()
         .collect::<Vec<_>>();
-    if let Some(subagent_source) = state.active_models.subagent_source.as_deref()
+    let subagent_source = state.active_models.subagent_source.as_deref();
+    if let Some(subagent_source) = subagent_source
         && subagent_source != primary_source
         && let Some(label) = usage_quota_source_label(state, subagent_source)
     {
-        labels.push((UsageQuotaSeat::Subagents, label));
+        labels.push((UsageQuotaOwner::Subagents, label));
+    }
+    if primary_source != "anvil"
+        && subagent_source != Some("anvil")
+        && let Some(label) = usage_quota_source_label(state, "anvil")
+    {
+        labels.push((UsageQuotaOwner::Anvil, label));
     }
     Some(labels)
 }
@@ -21358,20 +21391,22 @@ mod tests {
             )
         );
 
-        let backend = TestBackend::new(160, 1);
+        assert_eq!(usage_quota_row_count(&state, 160), 2);
+
+        let backend = TestBackend::new(160, 2);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
             .expect("draw");
         let buffer = terminal.backend().buffer();
-        let rendered = buffer_lines(buffer)[0].clone();
-        let subagents_x = rendered.find("[SUBAGENTS]").expect("subagents label") as u16;
-        assert!(rendered.starts_with("[PRIMARY] Claude usage unavailable"));
+        let rendered = buffer_lines(buffer);
+        assert!(rendered[0].starts_with("[PRIMARY] Claude usage unavailable"));
+        assert!(rendered[1].starts_with("[SUBAGENTS] Codex usage unavailable"));
         assert_eq!(
             buffer.cell((1, 0)).expect("primary cell").style().fg,
             Some(state.theme.primary)
         );
-        let primary_quota_x = rendered.find("Claude usage").expect("primary quota") as u16;
+        let primary_quota_x = rendered[0].find("Claude usage").expect("primary quota") as u16;
         assert_eq!(
             buffer
                 .cell((primary_quota_x, 0))
@@ -21381,17 +21416,13 @@ mod tests {
             Some(state.theme.primary)
         );
         assert_eq!(
-            buffer
-                .cell((subagents_x + 1, 0))
-                .expect("subagents cell")
-                .style()
-                .fg,
+            buffer.cell((1, 1)).expect("subagents cell").style().fg,
             Some(state.theme.secondary)
         );
-        let subagent_quota_x = rendered.find("Codex usage").expect("subagent quota") as u16;
+        let subagent_quota_x = rendered[1].find("Codex usage").expect("subagent quota") as u16;
         assert_eq!(
             buffer
-                .cell((subagent_quota_x, 0))
+                .cell((subagent_quota_x, 1))
                 .expect("subagent quota cell")
                 .style()
                 .fg,
@@ -21411,6 +21442,34 @@ mod tests {
             usage_quota_label(&state).as_deref(),
             Some("primary Codex usage unavailable: codex unavailable")
         );
+    }
+
+    #[test]
+    fn usage_quota_rows_include_background_anvil_balance() {
+        let mut state = AppState::new();
+        state.active_models.primary_source = Some("claude-acp".to_string());
+        state.active_models.subagent_source = Some("codex-acp".to_string());
+        state.set_claude_usage(ClaudeUsageStatus::Unavailable(
+            "claude unavailable".to_string(),
+        ));
+        state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
+            "codex unavailable".to_string(),
+        ));
+        state.set_bedrock_credits(crate::bedrock_credits::BedrockCreditsStatus::Unavailable(
+            "bedrock unavailable".to_string(),
+        ));
+
+        assert_eq!(usage_quota_row_count(&state, 160), 3);
+
+        let backend = TestBackend::new(160, 3);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer());
+        assert!(rendered[0].starts_with("[PRIMARY] Claude usage unavailable"));
+        assert!(rendered[1].starts_with("[SUBAGENTS] Codex usage unavailable"));
+        assert!(rendered[2].starts_with("[ANVIL] Bedrock credits unavailable"));
     }
 
     #[test]
