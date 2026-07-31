@@ -9864,6 +9864,22 @@ mod tests {
         }
     }
 
+    /// Build a subprocess command that stays alive until mjolnir terminates
+    /// it. This avoids wall-clock races in tests of requested shutdown.
+    fn hang_command() -> (PathBuf, Vec<String>) {
+        if cfg!(windows) {
+            (
+                PathBuf::from("cmd"),
+                vec!["/C".into(), "ping 127.0.0.1 -t > nul".into()],
+            )
+        } else {
+            (
+                PathBuf::from("/bin/sh"),
+                vec!["-c".into(), "head -c 200 >/dev/null; sleep 3600".into()],
+            )
+        }
+    }
+
     /// Agent exits *immediately*, before mjolnir's `initialize` send can
     /// complete. With `biased; drive_result` first, the drive future is
     /// polled, gets a broken-pipe error, and returns Err quickly. The
@@ -9928,8 +9944,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_treats_requested_termination_before_clean_child_exit_as_shutdown() {
-        let (command, args) = hang_then_exit_command();
+    async fn run_treats_requested_termination_as_shutdown() {
+        let (command, args) = hang_command();
         let termination = CancellationToken::new();
         let cfg = AcpRuntimeConfig {
             command,
@@ -9955,11 +9971,9 @@ mod tests {
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
         let run_task = tokio::spawn(run(cfg, ui_tx, cmd_rx));
 
-        // The helper child exits after a short platform-specific delay. Mark
-        // teardown expected while it is still alive, matching headless after
-        // it receives PromptDone and before the adapter observes the queued
-        // shutdown.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Cancellation is sticky, so this remains deterministic even if the
+        // runtime task has not reached its select yet. The helper cannot exit
+        // independently and win the race first.
         termination.cancel();
 
         let result = tokio::time::timeout(Duration::from_secs(5), run_task)
