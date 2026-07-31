@@ -1269,11 +1269,10 @@ fn isolated_side_runtime_config(
         access_mode: acp::RuntimeAccessMode::Full,
         agent_source_id: None,
         config_path: None,
-        saved_session_config: config::Config::load(&config::default_config_path())
-            .ok()
-            .and_then(|config| config.session_config.get(&agent.source_id).cloned())
-            .map(|values| values.into_iter().collect())
-            .unwrap_or_default(),
+        saved_session_config: config::load_saved_session_config(
+            &config::default_config_path(),
+            &agent.source_id,
+        ),
         role_config: None,
         subagents: None,
         side_prompt_policy: true,
@@ -2122,11 +2121,10 @@ async fn run_session(
         access_mode: acp::RuntimeAccessMode::Full,
         agent_source_id: Some(agent.source_id.clone()),
         config_path: Some(config::default_config_path()),
-        saved_session_config: config::Config::load(&config::default_config_path())
-            .ok()
-            .and_then(|config| config.session_config.get(&agent.source_id).cloned())
-            .map(|values| values.into_iter().collect())
-            .unwrap_or_default(),
+        saved_session_config: config::load_saved_session_config(
+            &config::default_config_path(),
+            &agent.source_id,
+        ),
         role_config: Some(acp::RuntimeRoleConfig {
             label: "primary".to_string(),
             model_id: roster.primary.model.model.clone(),

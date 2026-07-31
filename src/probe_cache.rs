@@ -33,6 +33,8 @@ struct Entry {
     models: Vec<ModelOption>,
     #[serde(default)]
     session_config: Vec<SessionConfigOption>,
+    #[serde(default)]
+    session_config_known: bool,
 }
 
 /// Identity of the adapter binary the entry was captured from. `None` when
@@ -87,6 +89,7 @@ pub fn load(path: &Path, key: &str, command: &Path, ttl: Duration) -> Option<Ada
         http_mcp: entry.http_mcp,
         models: entry.models,
         session_config: entry.session_config,
+        session_config_known: entry.session_config_known,
     })
 }
 
@@ -103,6 +106,7 @@ pub fn store(path: &Path, key: &str, command: &Path, capabilities: &AdapterCapab
             http_mcp: capabilities.http_mcp,
             models: capabilities.models.clone(),
             session_config: capabilities.session_config.clone(),
+            session_config_known: capabilities.session_config_known,
         },
     );
     let Some(parent) = path.parent() else {
@@ -138,6 +142,7 @@ pub fn clear(path: &Path) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
 
     fn capabilities(model: &str) -> AdapterCapabilities {
         AdapterCapabilities {
@@ -148,6 +153,7 @@ mod tests {
                 description: None,
             }],
             session_config: Vec::new(),
+            session_config_known: true,
         }
     }
 
@@ -158,11 +164,20 @@ mod tests {
         let command = dir.path().join("agent");
         std::fs::write(&command, b"binary").expect("command");
 
-        store(&cache, "custom:company", &command, &capabilities("m1"));
+        let mut capabilities = capabilities("m1");
+        capabilities.session_config = vec![SessionConfigOption::select(
+            "service_tier",
+            "Service tier",
+            "default",
+            vec![SessionConfigSelectOption::new("default", "Default")],
+        )];
+        store(&cache, "custom:company", &command, &capabilities);
         let loaded =
             load(&cache, "custom:company", &command, CACHE_TTL).expect("fresh cache entry");
         assert!(loaded.http_mcp);
         assert_eq!(loaded.models[0].value, "m1");
+        assert!(loaded.session_config_known);
+        assert_eq!(loaded.session_config[0].id.to_string(), "service_tier");
 
         assert!(load(&cache, "other-key", &command, CACHE_TTL).is_none());
     }
@@ -176,6 +191,30 @@ mod tests {
 
         store(&cache, "anvil", &command, &capabilities("m1"));
         assert!(load(&cache, "anvil", &command, Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn older_cache_entries_mark_session_config_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = dir.path().join("probes.json");
+        let command = dir.path().join("agent");
+        std::fs::write(&command, b"binary").expect("command");
+        let contents = serde_json::json!({
+            "entries": {
+                "codex-acp": {
+                    "captured_at_unix": now_unix(),
+                    "fingerprint": command_fingerprint(&command),
+                    "http_mcp": true,
+                    "models": []
+                }
+            }
+        });
+        std::fs::write(&cache, serde_json::to_vec(&contents).expect("serialize"))
+            .expect("write old cache");
+
+        let loaded = load(&cache, "codex-acp", &command, CACHE_TTL).expect("old cache loads");
+        assert!(!loaded.session_config_known);
+        assert!(loaded.session_config.is_empty());
     }
 
     #[test]

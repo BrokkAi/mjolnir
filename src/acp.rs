@@ -4229,9 +4229,15 @@ struct SessionConfigCache {
     targets: Vec<SessionConfigTarget>,
 }
 
+pub(crate) fn session_config_option_key(
+    config_id: &agent_client_protocol::schema::v1::SessionConfigId,
+) -> String {
+    format!("config:{config_id}")
+}
+
 fn session_config_target_key(target: &SessionConfigTarget) -> String {
     match target {
-        SessionConfigTarget::ConfigOption { config_id } => format!("config:{config_id}"),
+        SessionConfigTarget::ConfigOption { config_id } => session_config_option_key(config_id),
         SessionConfigTarget::LegacyModel => "legacy:model".to_string(),
         SessionConfigTarget::LegacyMode => "legacy:mode".to_string(),
     }
@@ -4438,7 +4444,7 @@ fn select_role_model(
 /// "off" sentinel (anvil's `REASONING_EFFORT_OFF_VALUE`, session.rs), which
 /// explicitly disables reasoning rather than falling back to the model's
 /// default.
-const REASONING_EFFORT_CONFIG_ID: &str = "reasoning_effort";
+pub(crate) const REASONING_EFFORT_CONFIG_ID: &str = "reasoning_effort";
 
 /// Locates the session's reasoning-effort selector, if the adapter
 /// advertises one.

@@ -683,6 +683,25 @@ pub fn default_config_path() -> PathBuf {
         .join("config.toml")
 }
 
+pub fn load_saved_session_config(path: &Path, source_id: &str) -> HashMap<String, String> {
+    match Config::load(path) {
+        Ok(config) => config
+            .session_config
+            .get(source_id)
+            .cloned()
+            .map(|values| values.into_iter().collect())
+            .unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                adapter = source_id,
+                "could not load saved ACP session config: {error:#}"
+            );
+            HashMap::new()
+        }
+    }
+}
+
 /// Directory for exported conversation transcripts:
 /// `$XDG_CONFIG_HOME/mj/transcripts`.
 pub fn transcript_export_dir() -> Option<PathBuf> {
@@ -1132,6 +1151,25 @@ origin = "custom"
         };
         cfg.save(&path).expect("save");
         assert!(path.exists());
+    }
+
+    #[test]
+    fn session_config_round_trips_per_server() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.session_config
+            .entry("codex-acp".to_string())
+            .or_default()
+            .insert("config:service_tier".to_string(), "priority".to_string());
+
+        cfg.save(&path).expect("save");
+        let loaded = Config::load(&path).expect("load");
+
+        assert_eq!(
+            loaded.session_config["codex-acp"]["config:service_tier"],
+            "priority"
+        );
     }
 
     #[test]

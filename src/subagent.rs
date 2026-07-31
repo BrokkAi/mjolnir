@@ -899,14 +899,12 @@ fn spawn_subagent_runtime(
         .map(|role| role.adapter_source_id.clone());
     let saved_session_config = agent_source_id
         .as_deref()
-        .and_then(|source_id| {
-            crate::config::Config::load(&crate::config::default_config_path())
-                .ok()?
-                .session_config
-                .get(source_id)
-                .cloned()
+        .map(|source_id| {
+            crate::config::load_saved_session_config(
+                &crate::config::default_config_path(),
+                source_id,
+            )
         })
-        .map(|values| values.into_iter().collect())
         .unwrap_or_default();
     let runtime_config = AcpRuntimeConfig {
         command: config.command.clone(),

@@ -4639,7 +4639,8 @@ fn persist_mjconfig_selection(
         match config.save(&path) {
             Ok(()) => {
                 state.configured_models = config.model_names();
-                state.acp_inventory = crate::roster::discover_inventory(&config);
+                state.acp_inventory =
+                    crate::roster::rediscover_inventory(&config, &state.acp_inventory);
                 state.review_enabled = config.agent.discrete_review;
                 if review_changed {
                     let _ = cmd_tx.send(UiCommand::SetReviewPolicy {
@@ -11145,8 +11146,8 @@ fn help_modal_lines(
         help_blank_line(),
         help_section_line("Config", theme),
         help_binding_line(
-            "F1..F9 / Ctrl-1..9 / Up/Down",
-            "edit or move inside choices",
+            "/mjconfig → ACP Sessions",
+            "edit per-server session defaults",
             theme,
         ),
         help_blank_line(),
@@ -16224,6 +16225,39 @@ mod tests {
             cmd_rx.try_recv(),
             Ok(UiCommand::SetReviewPolicy { enabled: false })
         ));
+    }
+
+    #[test]
+    fn saving_mjconfig_preserves_probed_session_options() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let config = config::Config::default();
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.acp_inventory = crate::roster::discover_inventory(&config);
+        let server = state
+            .acp_inventory
+            .servers
+            .first_mut()
+            .expect("visible ACP server");
+        let server_id = server.id.clone();
+        server.session_config = vec![SessionConfigOption::select(
+            "service_tier",
+            "Service tier",
+            "default",
+            vec![SessionConfigSelectOption::new("default", "Default")],
+        )];
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, config);
+
+        let server = state
+            .acp_inventory
+            .servers
+            .iter()
+            .find(|server| server.id == server_id)
+            .expect("same server");
+        assert_eq!(server.session_config[0].id.to_string(), "service_tier");
     }
 
     #[test]

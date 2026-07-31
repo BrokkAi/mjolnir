@@ -300,7 +300,7 @@ impl SettingsEditor {
                 let Some((server_id, option)) = self.selected_session_option() else {
                     return SettingsAction::None;
                 };
-                let option_id = option.id.to_string();
+                let option_key = crate::acp::session_config_option_key(&option.id);
                 let choices = session_option_choices(option);
                 if choices.is_empty() {
                     return SettingsAction::None;
@@ -309,7 +309,7 @@ impl SettingsEditor {
                     .config
                     .session_config
                     .get(&server_id)
-                    .and_then(|values| values.get(&format!("config:{option_id}")))
+                    .and_then(|values| values.get(&option_key))
                     .cloned()
                     .unwrap_or_else(|| session_option_current_value(option));
                 let index = choices
@@ -321,7 +321,7 @@ impl SettingsEditor {
                     .session_config
                     .entry(server_id)
                     .or_default()
-                    .insert(format!("config:{option_id}"), choices[next].0.clone());
+                    .insert(option_key, choices[next].0.clone());
             }
             SettingsTab::Appearance if self.selected == 0 => {
                 let current = TerminalThemeKind::ALL
@@ -669,22 +669,7 @@ impl SettingsEditor {
                 Err(error) => self.notice = Some(format!("Install failed: {error}")),
             }
         }
-        let mut refreshed = crate::roster::discover_inventory(&self.config);
-        for server in &mut refreshed.servers {
-            if let Some(previous) = self
-                .inventory
-                .servers
-                .iter()
-                .find(|previous| previous.id == server.id)
-            {
-                server.model_count = previous.model_count;
-                server.session_config.clone_from(&previous.session_config);
-                if server.id != "anvil" {
-                    server.error.clone_from(&previous.error);
-                }
-            }
-        }
-        self.inventory = refreshed;
+        self.refresh_inventory();
     }
 
     pub(crate) fn refresh_after_auth(&mut self, notice: String) {
@@ -693,22 +678,8 @@ impl SettingsEditor {
     }
 
     fn refresh_inventory(&mut self) {
-        let mut refreshed = crate::roster::discover_inventory(&self.config);
-        for server in &mut refreshed.servers {
-            if let Some(previous) = self
-                .inventory
-                .servers
-                .iter()
-                .find(|previous| previous.id == server.id)
-            {
-                server.model_count = previous.model_count;
-                server.session_config.clone_from(&previous.session_config);
-                if server.id != "anvil" {
-                    server.error.clone_from(&previous.error);
-                }
-            }
-        }
-        self.inventory = refreshed;
+        self.inventory = crate::roster::rediscover_inventory(&self.config, &self.inventory);
+        self.selected = self.selected.min(self.row_count().saturating_sub(1));
     }
 
     fn filtered_agents(&self) -> Vec<&Agent> {
@@ -1054,12 +1025,8 @@ fn session_option_is_user_owned(
     server: &crate::roster::AcpServerInfo,
     option: &SessionConfigOption,
 ) -> bool {
-    let permission_id = crate::roster::configure_permissions(
-        server.launch.kind,
-        crate::config::PermissionPreset::Auto,
-        &mut std::collections::HashMap::new(),
-    )
-    .map(|permission| permission.config_id);
+    let option_id = option.id.to_string();
+    let permission_id = crate::roster::runtime_permission_config_id(server.launch.kind);
     matches!(option.kind, SessionConfigKind::Select(_))
         && !matches!(
             option.category,
@@ -1069,7 +1036,8 @@ fn session_option_is_user_owned(
                     | SessionConfigOptionCategory::ThoughtLevel
             )
         )
-        && permission_id.as_deref() != Some(option.id.to_string().as_str())
+        && permission_id != Some(option_id.as_str())
+        && option_id != crate::acp::REASONING_EFFORT_CONFIG_ID
 }
 
 fn session_option_choices(option: &SessionConfigOption) -> Vec<(String, String)> {
@@ -1118,6 +1086,7 @@ fn draw_acp_sessions(
 
     let mut lines = Vec::new();
     let mut last_server = None;
+    let mut selected_line_index = 0;
     for (row_index, (server_index, option_index)) in rows.into_iter().enumerate() {
         let server = &editor.inventory.servers[server_index];
         let option = &server.session_config[option_index];
@@ -1137,20 +1106,36 @@ fn draw_acp_sessions(
             .config
             .session_config
             .get(&server.id)
-            .and_then(|values| values.get(&format!("config:{}", option.id)))
+            .and_then(|values| values.get(&crate::acp::session_config_option_key(&option.id)))
             .cloned()
             .unwrap_or_else(|| session_option_current_value(option));
         let label = session_option_choices(option)
             .into_iter()
             .find_map(|(candidate, label)| (candidate == value).then_some(label))
             .unwrap_or(value);
+        let selected = editor.selected == row_index;
+        if selected {
+            selected_line_index = lines.len();
+        }
         lines.push(selected_line(
-            editor.selected == row_index,
+            selected,
             format!("  {}: {label}", option.name),
             theme,
         ));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    let visible = usize::from(area.height);
+    let start = selected_line_index.saturating_sub(visible.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(start)
+                .take(visible)
+                .collect::<Vec<_>>(),
+        )
+        .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn draw_tabs(
@@ -1669,6 +1654,45 @@ mod tests {
             editor.config.session_config[&server_id]["config:service_tier"],
             "priority"
         );
+    }
+
+    #[test]
+    fn acp_session_tab_excludes_mjolnir_owned_options() {
+        let editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut server = editor
+            .inventory
+            .servers
+            .first()
+            .expect("visible ACP server")
+            .clone();
+        server.launch.kind = crate::roster::AdapterKind::Codex;
+        let choice = || vec![SessionConfigSelectOption::new("value", "Value")];
+        let model = SessionConfigOption::select("model", "Model", "value", choice())
+            .category(SessionConfigOptionCategory::Model);
+        let thought =
+            SessionConfigOption::select("thought_level", "Thought level", "value", choice())
+                .category(SessionConfigOptionCategory::ThoughtLevel);
+        let permission = SessionConfigOption::select(
+            crate::roster::runtime_permission_config_id(server.launch.kind)
+                .unwrap_or("permission_mode"),
+            "Permission",
+            "value",
+            choice(),
+        );
+        let reasoning = SessionConfigOption::select(
+            crate::acp::REASONING_EFFORT_CONFIG_ID,
+            "Reasoning effort",
+            "value",
+            choice(),
+        );
+        let service =
+            SessionConfigOption::select("service_tier", "Service tier", "value", choice());
+
+        assert!(!session_option_is_user_owned(&server, &model));
+        assert!(!session_option_is_user_owned(&server, &thought));
+        assert!(!session_option_is_user_owned(&server, &permission));
+        assert!(!session_option_is_user_owned(&server, &reasoning));
+        assert!(session_option_is_user_owned(&server, &service));
     }
 
     #[test]
