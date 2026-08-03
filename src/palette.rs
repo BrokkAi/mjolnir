@@ -73,7 +73,7 @@ impl TerminalThemeKind {
             Self::Dark => TerminalTheme {
                 kind: self,
                 text: Color::White,
-                muted: Color::DarkGray,
+                muted: Color::Gray,
                 subtle: Color::Gray,
                 header: Color::White,
                 primary: Color::Cyan,
@@ -86,14 +86,14 @@ impl TerminalThemeKind {
                 selection_bg: Color::Cyan,
                 user: Color::Cyan,
                 agent: Color::Green,
-                thought: Color::DarkGray,
+                thought: Color::Gray,
                 tool: Color::Magenta,
                 code: Color::Yellow,
                 terminal: Color::LightYellow,
                 quote: Color::Gray,
                 diff_added: Color::Green,
                 diff_removed: Color::Red,
-                diff_context: Color::DarkGray,
+                diff_context: Color::Gray,
                 diff_added_bg: Some(Color::Rgb(18, 53, 30)),
                 diff_removed_bg: Some(Color::Rgb(70, 22, 22)),
                 diff_added_emph_bg: Some(Color::Rgb(24, 100, 48)),
@@ -203,5 +203,13 @@ mod tests {
             assert_ne!(palette.selection_fg, palette.selection_bg);
             assert_ne!(palette.text, palette.muted);
         }
+    }
+
+    #[test]
+    fn dark_palette_does_not_use_near_black_text() {
+        let palette = TerminalThemeKind::Dark.palette();
+        assert_ne!(palette.muted, Color::DarkGray);
+        assert_ne!(palette.thought, Color::DarkGray);
+        assert_ne!(palette.diff_context, Color::DarkGray);
     }
 }

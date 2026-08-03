@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::bedrock_credits::BedrockCreditsStatus;
@@ -42,6 +43,37 @@ pub const QUEUED_PROMPT_PREVIEW_WIDTH: usize = 40;
 /// permanent transcript record.
 const SUBAGENT_RECORD_LINE_CHARS: usize = 160;
 const NESTED_AGENT_VIEWER_LIMIT: usize = 10;
+/// Completed nested histories larger than this are offloaded even when the
+/// session as a whole is still below its budget.
+const NESTED_ACTOR_RESIDENT_BUDGET: usize = 2 * 1024 * 1024;
+/// Soft cap for completed nested transcript/tool/terminal state kept in RAM.
+/// Protected actors may temporarily take the resident total above this cap.
+const NESTED_SESSION_RESIDENT_BUDGET: usize = 8 * 1024 * 1024;
+static NESTED_HISTORY_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+struct NestedHistoryDir(Option<PathBuf>);
+
+impl NestedHistoryDir {
+    fn path(&self) -> &PathBuf {
+        self.0.as_ref().expect("nested history directory is live")
+    }
+
+    fn remove(&mut self) -> std::io::Result<()> {
+        let Some(path) = self.0.take() else {
+            return Ok(());
+        };
+        std::fs::remove_dir_all(path)
+    }
+}
+
+impl Drop for NestedHistoryDir {
+    fn drop(&mut self) {
+        if let Err(error) = self.remove() {
+            tracing::warn!(%error, "failed to remove nested-agent history directory");
+        }
+    }
+}
 
 /// Durable UI state for one nested ACP actor. The on-demand viewer reads its
 /// lifecycle and `transcript`; completed actors stay here for the whole
@@ -57,6 +89,10 @@ pub struct SubagentStatus {
     pub lifecycle: Option<crate::workflow::WorkflowActorLifecycle>,
     pub session_id: Option<String>,
     pub transcript: Vec<Entry>,
+    /// Full Markdown history after a completed actor is evicted from RAM.
+    /// The path belongs to this primary session and is removed on session
+    /// replacement or when the owning AppState is dropped.
+    archived_history: Option<PathBuf>,
     open_message_index: Option<usize>,
     plan_index: Option<usize>,
     /// Latest distilled one-liner: the objective at spawn, then whatever the
@@ -85,6 +121,7 @@ impl SubagentStatus {
             lifecycle: Some(crate::workflow::WorkflowActorLifecycle::Running),
             session_id: None,
             transcript: Vec::new(),
+            archived_history: None,
             open_message_index: None,
             plan_index: None,
             activity: "starting".to_string(),
@@ -111,6 +148,16 @@ impl SubagentStatus {
         self.role
             .as_ref()
             .is_none_or(|role| !role.is_internal_review_session())
+    }
+
+    pub fn archived_history_markdown(&self) -> Option<String> {
+        let path = self.archived_history.as_ref()?;
+        Some(std::fs::read_to_string(path).unwrap_or_else(|error| {
+            format!(
+                "_Offloaded nested-agent history could not be read from `{}`: {error}_\n",
+                path.display()
+            )
+        }))
     }
 }
 
@@ -960,6 +1007,7 @@ pub struct AppState {
     pub active_subagents: usize,
     /// Durable nested-agent state keyed by stable subagent id.
     subagents: BTreeMap<u64, SubagentStatus>,
+    nested_history_dir: Option<NestedHistoryDir>,
     /// Canonical runtime-owned workflow state. Transcript prose and display
     /// labels never mutate this store.
     pub workflows: crate::workflow::WorkflowStore,
@@ -1492,6 +1540,7 @@ impl AppState {
             subagent_label: None,
             active_subagents: 0,
             subagents: BTreeMap::new(),
+            nested_history_dir: None,
             workflows: crate::workflow::WorkflowStore::default(),
             workflow_clocks: BTreeMap::new(),
             agent_usage: crate::agent_usage::Snapshot::default(),
@@ -3032,12 +3081,17 @@ impl AppState {
                     self.finish_turn_timer();
                 }
                 if self.session_id.as_deref() != Some(&session_id) {
+                    self.cleanup_nested_history();
                     self.workspace_diffs.clear();
                     self.pending_workspace_diff_total = None;
                     self.close_workspace_diff_viewer();
                     self.close_nested_agent_viewer();
                     self.nested_agent_selected = None;
                     self.subagents.clear();
+                    self.tool_calls
+                        .retain(|id, _| !id.starts_with(SUBAGENT_ID_PREFIX));
+                    self.terminal_outputs
+                        .retain(|id, _| !id.starts_with(SUBAGENT_ID_PREFIX));
                     self.subagent_active = false;
                     self.subagent_label = None;
                     self.active_subagents = 0;
@@ -3484,6 +3538,7 @@ impl AppState {
                         lifecycle: Some(crate::workflow::WorkflowActorLifecycle::Running),
                         session_id: None,
                         transcript: Vec::new(),
+                        archived_history: None,
                         open_message_index: None,
                         plan_index: None,
                         activity: objective.clone(),
@@ -3669,6 +3724,7 @@ impl AppState {
                         );
                     }
                 }
+                self.enforce_nested_history_budget();
             }
         }
     }
@@ -3734,6 +3790,154 @@ impl AppState {
             None => format!("subagent #{subagent_id} · {status}"),
         };
         self.push_system_message(record);
+    }
+
+    fn nested_actor_resident_bytes(&self, subagent_id: u64) -> usize {
+        let Some(actor) = self.subagents.get(&subagent_id) else {
+            return 0;
+        };
+        if actor.archived_history.is_some() {
+            return 0;
+        }
+        let prefix = Self::subagent_id_prefix(subagent_id);
+        let transcript_and_tools = crate::ui::nested_actor_history_markdown(self, actor).len();
+        let terminal_snapshots = self
+            .terminal_outputs
+            .iter()
+            .filter(|(id, _)| id.starts_with(&prefix))
+            .map(|(id, snapshot)| id.len() + format!("{snapshot:?}").len())
+            .sum::<usize>();
+        let overrides = self
+            .tool_detail_overrides
+            .keys()
+            .filter(|id| id.starts_with(&prefix))
+            .map(String::len)
+            .sum::<usize>();
+        transcript_and_tools + terminal_snapshots + overrides
+    }
+
+    fn nested_actor_is_protected(&self, subagent_id: u64) -> bool {
+        self.nested_agent_selected == Some(subagent_id)
+            || self
+                .subagents
+                .get(&subagent_id)
+                .is_some_and(|actor| actor.finished.is_none())
+            || self
+                .permission_queue
+                .iter()
+                .any(|pending| pending.subagent_id == Some(subagent_id))
+            || self
+                .elicitation_queue
+                .iter()
+                .any(|pending| pending.subagent_id == Some(subagent_id))
+    }
+
+    fn nested_history_dir(&mut self) -> std::io::Result<PathBuf> {
+        if let Some(path) = &self.nested_history_dir {
+            return Ok(path.path().clone());
+        }
+        let sequence = NESTED_HISTORY_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "mjolnir-nested-history-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        self.nested_history_dir = Some(NestedHistoryDir(Some(path.clone())));
+        Ok(path)
+    }
+
+    fn offload_nested_actor(&mut self, subagent_id: u64) -> std::io::Result<()> {
+        let Some(actor) = self.subagents.get(&subagent_id) else {
+            return Ok(());
+        };
+        if actor.archived_history.is_some() || self.nested_actor_is_protected(subagent_id) {
+            return Ok(());
+        }
+        let markdown = crate::ui::nested_actor_history_markdown(self, actor);
+        let dir = self.nested_history_dir()?;
+        let path = dir.join(format!("actor-{subagent_id}.md"));
+        let partial_path = dir.join(format!("actor-{subagent_id}.partial"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        use std::io::Write;
+        let write_result = (|| {
+            let mut file = options.open(&partial_path)?;
+            file.write_all(markdown.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&partial_path, &path)
+        })();
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&partial_path);
+            return Err(error);
+        }
+
+        let prefix = Self::subagent_id_prefix(subagent_id);
+        if let Some(actor) = self.subagents.get_mut(&subagent_id) {
+            actor.transcript.clear();
+            actor.transcript.shrink_to_fit();
+            actor.archived_history = Some(path);
+            actor.open_message_index = None;
+            actor.plan_index = None;
+        }
+        self.tool_calls.retain(|id, _| !id.starts_with(&prefix));
+        self.terminal_outputs
+            .retain(|id, _| !id.starts_with(&prefix));
+        self.tool_detail_overrides
+            .retain(|id, _| !id.starts_with(&prefix));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_offload_nested_actor_for_test(&mut self, subagent_id: u64) {
+        self.offload_nested_actor(subagent_id)
+            .expect("offload nested actor in test");
+    }
+
+    fn enforce_nested_history_budget(&mut self) {
+        let mut candidates = self
+            .subagents
+            .iter()
+            .filter_map(|(id, actor)| {
+                (actor.finished.is_some() && actor.archived_history.is_none())
+                    .then_some((*id, actor.finished.as_ref().map(|(_, at)| *at)))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|(_, finished)| *finished);
+        let sizes = candidates
+            .iter()
+            .map(|(id, _)| (*id, self.nested_actor_resident_bytes(*id)))
+            .collect::<HashMap<_, _>>();
+        let mut total = sizes.values().sum::<usize>();
+        for (id, _) in candidates {
+            let size = sizes.get(&id).copied().unwrap_or(0);
+            if self.nested_actor_is_protected(id)
+                || (size <= NESTED_ACTOR_RESIDENT_BUDGET && total <= NESTED_SESSION_RESIDENT_BUDGET)
+            {
+                continue;
+            }
+            match self.offload_nested_actor(id) {
+                Ok(()) => total = total.saturating_sub(size),
+                Err(error) => self.record_status_message(
+                    StatusKind::Warning,
+                    format!("could not offload nested-agent history: {error}"),
+                ),
+            }
+        }
+    }
+
+    fn cleanup_nested_history(&mut self) {
+        self.nested_history_dir = None;
     }
 
     pub fn visible_workflows(&self) -> impl Iterator<Item = &crate::workflow::WorkflowState> {
@@ -5550,6 +5754,201 @@ mod tests {
         assert_eq!(state.nested_agent_scroll_offset, usize::MAX);
         state.select_nested_agent(true);
         assert_eq!(state.nested_agent_selected, Some(1));
+    }
+
+    #[test]
+    fn oversized_completed_nested_history_is_offloaded_and_cleaned_with_session() {
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(1, "large", "retain everything"));
+        state.apply_event(subagent_session_update_for(
+            1,
+            SessionUpdate::AgentMessageChunk(text_chunk("actor prose")),
+        ));
+        let mut fields = agent_client_protocol::schema::v1::ToolCallUpdateFields::default();
+        fields.title = Some("large tool".to_string());
+        fields.content = Some(vec![
+            ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
+                "tool payload ".repeat(100_000),
+            )))),
+            ToolCallContent::Terminal(Terminal::new(
+                agent_client_protocol::schema::v1::TerminalId::new("large-terminal"),
+            )),
+        ]);
+        state.apply_event(subagent_session_update_for(
+            1,
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new("large-tool", fields)),
+        ));
+        state.apply_event(UiEvent::Subagent(SubagentEvent::TerminalOutput {
+            subagent_id: 1,
+            snapshot: TerminalOutputSnapshot {
+                terminal_id: "large-terminal".to_string(),
+                output: "terminal payload ".repeat(100_000),
+                truncated: false,
+                exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+            },
+        }));
+        assert!(state.toggle_tool_detail("subagent-1:large-tool", false));
+        state.apply_event(finished_subagent(1, SubagentOutcome::Completed));
+
+        let actor = state.nested_agent(1).expect("retained actor metadata");
+        let archive = actor.archived_history.clone().expect("offloaded history");
+        assert!(actor.transcript.is_empty());
+        assert!(!state.tool_calls.contains_key("subagent-1:large-tool"));
+        assert!(
+            !state
+                .terminal_outputs
+                .contains_key("subagent-1:large-terminal")
+        );
+        assert!(
+            !state
+                .tool_detail_overrides
+                .contains_key("subagent-1:large-tool")
+        );
+        let history = actor.archived_history_markdown().expect("history");
+        assert!(history.contains("tool payload"));
+        assert!(history.contains("terminal payload"));
+        assert!(history.contains("large tool"));
+        assert!(archive.exists());
+
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "replacement".to_string(),
+            resumed: false,
+        });
+        assert!(!archive.exists());
+        assert!(state.subagents.is_empty());
+    }
+
+    #[test]
+    fn selected_completed_nested_actor_is_never_offloaded() {
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(1, "selected", "inspect me"));
+        state.nested_agent_selected = Some(1);
+        state.apply_event(subagent_session_update_for(
+            1,
+            SessionUpdate::AgentMessageChunk(text_chunk(&"selected ".repeat(300_000))),
+        ));
+        state.apply_event(finished_subagent(1, SubagentOutcome::Completed));
+
+        let actor = state.nested_agent(1).expect("selected actor");
+        assert!(actor.archived_history.is_none());
+        assert!(!actor.transcript.is_empty());
+    }
+
+    #[test]
+    fn oversized_running_nested_actor_is_never_offloaded() {
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(1, "running", "keep active"));
+        state.apply_event(subagent_session_update_for(
+            1,
+            SessionUpdate::AgentMessageChunk(text_chunk(&"running ".repeat(300_000))),
+        ));
+
+        state.enforce_nested_history_budget();
+
+        let actor = state.nested_agent(1).expect("running actor");
+        assert!(actor.archived_history.is_none());
+        assert!(!actor.transcript.is_empty());
+    }
+
+    #[test]
+    fn primary_session_change_reclaims_resident_nested_tool_and_terminal_state() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "first".to_string(),
+            resumed: false,
+        });
+        state.tool_calls.insert(
+            "primary-tool".to_string(),
+            ToolCallView {
+                title: "primary".to_string(),
+                kind: ToolKind::Other,
+                status: ToolCallStatus::Completed,
+                body: Vec::new(),
+            },
+        );
+        state.apply_event(subagent_session_update_for(
+            1,
+            SessionUpdate::ToolCall(ToolCall::new("nested-tool", "nested")),
+        ));
+        state.apply_event(UiEvent::Subagent(SubagentEvent::TerminalOutput {
+            subagent_id: 1,
+            snapshot: TerminalOutputSnapshot {
+                terminal_id: "nested-terminal".to_string(),
+                output: "large output".to_string(),
+                truncated: false,
+                exit_status: None,
+            },
+        }));
+
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "second".to_string(),
+            resumed: false,
+        });
+
+        assert!(state.tool_calls.contains_key("primary-tool"));
+        assert!(!state.tool_calls.contains_key("subagent-1:nested-tool"));
+        assert!(
+            !state
+                .terminal_outputs
+                .contains_key("subagent-1:nested-terminal")
+        );
+    }
+
+    #[test]
+    fn failed_archive_attempt_removes_partial_file_and_can_retry() {
+        let mut state = AppState::new();
+        state.apply_event(subagent_started(1, "retry", "archive"));
+        state.apply_event(subagent_session_update_for(
+            1,
+            SessionUpdate::AgentMessageChunk(text_chunk("history")),
+        ));
+        state.apply_event(finished_subagent(1, SubagentOutcome::Completed));
+        let dir = state.nested_history_dir().expect("history directory");
+        let partial = dir.join("actor-1.partial");
+        std::fs::write(&partial, "stale partial").expect("seed stale partial");
+
+        assert!(state.offload_nested_actor(1).is_err());
+        assert!(!partial.exists());
+        state.offload_nested_actor(1).expect("retry succeeds");
+        assert!(
+            state
+                .nested_agent(1)
+                .expect("actor")
+                .archived_history
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn session_budget_offloads_oldest_completed_review_cycles() {
+        let mut state = AppState::new();
+        for id in 1..=5 {
+            state.apply_event(subagent_started(id, "review", "review cycle"));
+            state.apply_event(subagent_session_update_for(
+                id,
+                SessionUpdate::AgentMessageChunk(text_chunk(&"cycle ".repeat(280_000))),
+            ));
+            state.apply_event(finished_subagent(id, SubagentOutcome::Completed));
+        }
+
+        assert!(
+            state
+                .nested_agent(1)
+                .expect("oldest actor")
+                .archived_history
+                .is_some()
+        );
+        assert!(
+            state
+                .nested_agent(5)
+                .expect("newest actor")
+                .archived_history
+                .is_none()
+        );
+        let resident = (1..=5)
+            .map(|id| state.nested_actor_resident_bytes(id))
+            .sum::<usize>();
+        assert!(resident <= NESTED_SESSION_RESIDENT_BUDGET);
     }
 
     #[test]
