@@ -64,6 +64,7 @@ enum NoticeTone {
 struct State {
     kind: Kind,
     screen: Screen,
+    original_config: Config,
     editor: SettingsEditor,
     roster: Option<Roster>,
     inventory: AcpInventory,
@@ -78,6 +79,7 @@ struct State {
 
 impl State {
     fn new(kind: Kind, config: Config, roster: Option<Roster>, notice: Option<String>) -> Self {
+        let original_config = config.clone();
         let inventory = roster
             .as_ref()
             .map(|roster| roster.inventory.clone())
@@ -122,6 +124,7 @@ impl State {
         let mut state = Self {
             kind,
             screen,
+            original_config,
             editor,
             roster,
             inventory,
@@ -159,6 +162,12 @@ impl State {
 
     fn visited_config(&self) -> Config {
         let mut config = self.editor.config.clone();
+        config.onboarding_version = ONBOARDING_CONTENT_VERSION;
+        config
+    }
+
+    fn skipped_config(&self) -> Config {
+        let mut config = self.original_config.clone();
         config.onboarding_version = ONBOARDING_CONTENT_VERSION;
         config
     }
@@ -404,6 +413,7 @@ impl State {
 
     fn resolution_failed(&mut self, error: impl std::fmt::Display) {
         let error = error.to_string();
+        self.roster = None;
         self.inventory = crate::roster::discover_inventory(&self.editor.config);
         self.screen = Screen::Connections;
         self.selected = if error.to_ascii_lowercase().contains("kimi") {
@@ -473,7 +483,7 @@ pub async fn run(
                     }
                     Action::Skip => {
                         state.editor.cancel_background();
-                        return Ok(Outcome::Skip(Box::new(state.visited_config())));
+                        return Ok(Outcome::Skip(Box::new(state.skipped_config())));
                     }
                     Action::Finish => {
                         let Some(roster) = state.roster.take() else {
@@ -487,19 +497,28 @@ pub async fn run(
                         ));
                     }
                     Action::Authenticate(vendor) => {
-                        let notice = if crate::auth::executable(vendor).is_none() {
-                            format!(
-                                "{} CLI is not installed. Run `{}` and retry.",
-                                vendor.label(),
-                                crate::auth::install_hint(vendor)
+                        let (notice, login_succeeded) = if crate::auth::executable(vendor).is_none() {
+                            (
+                                format!(
+                                    "{} CLI is not installed. Run `{}` and retry.",
+                                    vendor.label(),
+                                    crate::auth::install_hint(vendor)
+                                ),
+                                false,
                             )
                         } else {
                             crate::ui::restore_terminal_for_auth(terminal, crate::ui::UiMode::FullscreenTui)?;
                             let login = crate::auth::run_login(vendor).await;
                             crate::ui::resume_terminal_after_auth(terminal, crate::ui::UiMode::FullscreenTui)?;
-                            login.unwrap_or_else(|error| format!("Sign-in failed: {error:#}"))
+                            match login {
+                                Ok(outcome) => {
+                                    let succeeded = outcome.succeeded();
+                                    (outcome.into_message(), succeeded)
+                                }
+                                Err(error) => (format!("Sign-in failed: {error:#}"), false),
+                            }
                         };
-                        let signed_in = crate::auth::detect(vendor).available();
+                        let signed_in = login_succeeded && crate::auth::detect(vendor).available();
                         if state.screen == Screen::Customize {
                             state.editor.refresh_after_auth(notice);
                         } else {
@@ -547,6 +566,7 @@ fn draw(frame: &mut ratatui::Frame, state: &mut State) {
 
     let theme = state.config().theme.palette();
     let panel_width = onboarding_panel_width(frame.area());
+    let content_width = panel_width.saturating_sub(2).max(1);
     let mut lines = screen_lines(state, theme);
     if let Some(notice) = &state.notice {
         let (label, color) = match state.notice_tone {
@@ -560,12 +580,21 @@ fn draw(frame: &mut ratatui::Frame, state: &mut State) {
     }
     let measured_lines = Paragraph::new(lines.clone())
         .wrap(Wrap { trim: false })
-        .line_count(panel_width.saturating_sub(2).max(1));
-    let footer_height = if panel_width.saturating_sub(2) < 72 {
-        2
+        .line_count(content_width);
+    let base_footer = footer_line(state.screen, content_width, false, theme);
+    let base_footer_height = wrapped_line_height(&base_footer, content_width);
+    let available_height = if frame.area().height > 2 {
+        frame.area().height - 2
     } else {
-        1
+        frame.area().height
     };
+    let available_height = available_height.min(PANEL_MAX_HEIGHT);
+    let required_height = u16::try_from(measured_lines)
+        .unwrap_or(PANEL_MAX_HEIGHT)
+        .saturating_add(5 + base_footer_height);
+    let scrollable = required_height > available_height;
+    let footer = footer_line(state.screen, content_width, scrollable, theme);
+    let footer_height = wrapped_line_height(&footer, content_width).clamp(1, 4);
     let preferred_height = u16::try_from(measured_lines)
         .unwrap_or(PANEL_MAX_HEIGHT)
         .saturating_add(7 + footer_height)
@@ -580,6 +609,7 @@ fn draw(frame: &mut ratatui::Frame, state: &mut State) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    let footer_height = footer_height.min(inner.height.saturating_sub(4).max(1));
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -634,16 +664,16 @@ fn draw(frame: &mut ratatui::Frame, state: &mut State) {
         rows[2]
     };
     frame.render_widget(paragraph.scroll((state.scroll, 0)), body_area);
-    frame.render_widget(
-        Paragraph::new(footer_line(
-            state.screen,
-            inner.width,
-            max_scroll > 0,
-            theme,
-        ))
-        .wrap(Wrap { trim: false }),
-        rows[3],
-    );
+    frame.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), rows[3]);
+}
+
+fn wrapped_line_height(line: &Line<'static>, width: u16) -> u16 {
+    u16::try_from(
+        Paragraph::new(line.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width.max(1)),
+    )
+    .unwrap_or(u16::MAX)
 }
 
 fn onboarding_panel_width(area: Rect) -> u16 {
@@ -1053,15 +1083,24 @@ fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
             .iter()
             .map(|server| server.model_count)
             .sum();
-        lines.push(Line::styled(
-            format!("     ✓ {ready} runtime(s) ready  ·  {models} model route(s)"),
-            Style::default().fg(theme.success),
-        ));
+        if ready == 0 {
+            lines.push(Line::styled(
+                "     No launchable ACP runtime is ready yet",
+                Style::default().fg(theme.warning),
+            ));
+        } else {
+            lines.push(Line::styled(
+                format!("     ✓ {ready} runtime(s) ready  ·  {models} model route(s)"),
+                Style::default().fg(theme.success),
+            ));
+        }
         for server in &state.inventory.servers {
             let issue = if server.installing {
                 Some("installing".to_string())
             } else if let Some(error) = &server.error {
                 Some(format!("needs repair: {error}"))
+            } else if server.selected && !server.detected {
+                Some(format!("not detected: {}", server.evidence))
             } else if server.detected && server.model_count == 0 {
                 Some("detected, but has no launchable model route".to_string())
             } else {
@@ -1223,27 +1262,28 @@ fn footer_line(
             action("C", "Review setup");
             action("S", "Dismiss");
         }
-        Screen::Connections if width < 72 => {
-            action("Enter", "Choose");
-            action("Esc", "Back");
-            if scrollable {
-                action("PgUp/PgDn", "Scroll");
-            }
-        }
         Screen::Connections => {
+            action("↑↓", "Select");
             action("Enter", "Choose");
-            action("C", "Customize");
-            action("R", "Recheck");
+            if width >= 52 {
+                action("C", "Customize");
+            }
+            if width >= 68 {
+                action("R", "Recheck");
+            }
             action("Esc", "Back");
         }
         Screen::Readiness => {
             action("Enter", "Start session");
             action("C", "Customize");
+            if width >= 68 {
+                action("R", "Recheck");
+            }
             action("Esc", "Back");
         }
         Screen::Customize => {}
     }
-    if scrollable && width >= 82 {
+    if scrollable {
         action("PgUp/PgDn", "Scroll");
     }
     Line::from(spans).centered()
@@ -1360,6 +1400,22 @@ mod tests {
     }
 
     #[test]
+    fn failed_customization_invalidates_the_stale_upgrade_roster() {
+        let mut state = State::new(Kind::Upgrade, Config::default(), Some(roster()), None);
+        assert_eq!(state.handle_key(KeyCode::Char('c')), Action::None);
+        state.editor.config.agent.acp_source = Some("missing-acp".to_string());
+        assert_eq!(state.handle_key(KeyCode::Enter), Action::Resolve);
+
+        state.resolution_failed("adapter missing");
+
+        assert!(state.roster.is_none());
+        assert_eq!(state.screen, Screen::Connections);
+        assert_eq!(state.handle_key(KeyCode::Esc), Action::None);
+        assert_eq!(state.screen, Screen::WhatsNew);
+        assert_eq!(state.handle_key(KeyCode::Enter), Action::Resolve);
+    }
+
+    #[test]
     fn upgrade_education_is_versioned_separately_from_provider_setup() {
         let mut state = State::new(Kind::Upgrade, Config::default(), Some(roster()), None);
         assert_eq!(state.screen, Screen::WhatsNew);
@@ -1400,10 +1456,30 @@ mod tests {
         let mut state = State::new(Kind::Upgrade, config, Some(roster()), None);
 
         assert_eq!(state.handle_key(KeyCode::Esc), Action::Skip);
-        let visited = state.visited_config();
+        let visited = state.skipped_config();
 
         assert_eq!(visited.onboarding_version, ONBOARDING_CONTENT_VERSION);
         assert_eq!(visited.agent.acp_source.as_deref(), Some("claude-acp"));
+    }
+
+    #[test]
+    fn upgrade_dismiss_after_failed_customization_preserves_original_routes() {
+        let mut config = Config {
+            onboarding_version: 1,
+            ..Config::default()
+        };
+        config.agent.acp_source = Some("claude-acp".to_string());
+        let mut state = State::new(Kind::Upgrade, config, Some(roster()), None);
+        assert_eq!(state.handle_key(KeyCode::Char('c')), Action::None);
+        state.editor.config.agent.acp_source = Some("missing-acp".to_string());
+        assert_eq!(state.handle_key(KeyCode::Enter), Action::Resolve);
+        state.resolution_failed("adapter missing");
+        assert_eq!(state.handle_key(KeyCode::Esc), Action::None);
+        assert_eq!(state.handle_key(KeyCode::Char('s')), Action::Skip);
+
+        let skipped = state.skipped_config();
+        assert_eq!(skipped.onboarding_version, ONBOARDING_CONTENT_VERSION);
+        assert_eq!(skipped.agent.acp_source.as_deref(), Some("claude-acp"));
     }
 
     #[test]
@@ -1423,6 +1499,7 @@ mod tests {
             .expect("draw");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("ONE REQUEST"), "rendered:\n{rendered}");
+        assert!(rendered.contains("PgUp/PgDn"), "rendered:\n{rendered}");
         assert_eq!(state.handle_key(KeyCode::PageDown), Action::None);
         terminal
             .draw(|frame| draw(frame, &mut state))
@@ -1448,6 +1525,7 @@ mod tests {
             "rendered:\n{rendered}"
         );
         assert!(rendered.contains("PgUp/PgDn"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Select"), "rendered:\n{rendered}");
 
         assert_eq!(state.handle_key(KeyCode::Down), Action::None);
         terminal
@@ -1486,6 +1564,47 @@ mod tests {
     }
 
     #[test]
+    fn common_width_connection_card_keeps_selection_and_scroll_help_visible() {
+        let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
+        state.change_screen(Screen::Connections);
+        state.notice = Some(format!(
+            "{} notice-tail",
+            "provider validation failed with detailed context; ".repeat(8)
+        ));
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &mut state))
+            .expect("draw");
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("Select"), "rendered:\n{rendered}");
+        assert!(rendered.contains("PgUp/PgDn"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn minimum_width_connection_footer_keeps_navigation_visible() {
+        let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
+        state.change_screen(Screen::Connections);
+        state.notice = Some("route check needs attention".to_string());
+        let backend = TestBackend::new(28, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &mut state))
+            .expect("draw");
+
+        let rendered = terminal.backend().to_string();
+        for expected in ["Select", "Choose", "Back", "PgUp/PgDn"] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?}:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn long_setup_notice_remains_reachable_at_narrow_width() {
         let mut state = State::new(Kind::Fresh, Config::default(), None, None);
         state.screen = Screen::Connections;
@@ -1507,6 +1626,38 @@ mod tests {
             "rendered:\n{rendered}"
         );
         assert!(state.scroll > 0);
+    }
+
+    #[test]
+    fn zero_ready_inventory_is_not_rendered_as_success() {
+        let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
+        state.change_screen(Screen::Connections);
+        let launch = role("gpt-test", "codex-acp").launch;
+        state.inventory.servers = vec![crate::roster::AcpServerInfo {
+            id: "codex-acp".to_string(),
+            label: "Codex".to_string(),
+            policy: crate::config::AcpServerPolicy::Enabled,
+            detected: false,
+            selected: true,
+            evidence: "credentials missing".to_string(),
+            launch,
+            model_count: 0,
+            error: None,
+            installing: false,
+            origin: None,
+            session_config: Vec::new(),
+            subscription: None,
+        }];
+
+        let text = connection_lines(&state, state.config().theme.palette())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("No launchable ACP runtime is ready yet"));
+        assert!(text.contains("not detected: credentials missing"));
+        assert!(!text.contains("✓ 0 runtime"));
     }
 
     #[test]

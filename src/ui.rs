@@ -3118,7 +3118,7 @@ async fn apply_terminal_request(
             let login = crate::auth::run_login(vendor).await;
             let resumed = resume_terminal_after_auth(terminal, mode);
             let notice = match (login, resumed) {
-                (Ok(message), Ok(())) => message,
+                (Ok(outcome), Ok(())) => outcome.into_message(),
                 (Err(error), Ok(())) => format!("Sign-in failed: {error:#}"),
                 (_, Err(error)) => return Err(error.context("restore UI after sign-in")),
             };

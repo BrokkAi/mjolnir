@@ -35,6 +35,24 @@ pub enum CredentialSource {
     Missing,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginOutcome {
+    SignedIn(String),
+    Cancelled(String),
+}
+
+impl LoginOutcome {
+    pub fn succeeded(&self) -> bool {
+        matches!(self, Self::SignedIn(_))
+    }
+
+    pub fn into_message(self) -> String {
+        match self {
+            Self::SignedIn(message) | Self::Cancelled(message) => message,
+        }
+    }
+}
+
 impl CredentialSource {
     pub fn available(&self) -> bool {
         !matches!(self, Self::Missing)
@@ -151,7 +169,7 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-pub async fn run_login(vendor: AuthVendor) -> Result<String> {
+pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
     let command = match vendor {
         AuthVendor::Kimi => match executable(vendor) {
             Some(command) => command,
@@ -189,7 +207,9 @@ pub async fn run_login(vendor: AuthVendor) -> Result<String> {
                 0,
             )?
             else {
-                return Ok("OpenAI / ChatGPT sign-in cancelled".to_string());
+                return Ok(LoginOutcome::Cancelled(
+                    "OpenAI / ChatGPT sign-in cancelled".to_string(),
+                ));
             };
             if selected == 1 {
                 vec!["login", "--device-auth"]
@@ -224,15 +244,26 @@ pub async fn run_login(vendor: AuthVendor) -> Result<String> {
     // source IDs that do not match the persisted cache keys.
     crate::roster::invalidate_model_cache()
         .context("signed in, but failed to clear the model capability cache")?;
-    Ok(format!(
+    Ok(LoginOutcome::SignedIn(format!(
         "Signed in to {}; models refresh on /new or /clear",
         vendor.label()
-    ))
+    )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_outcome_distinguishes_success_from_cancellation() {
+        let signed_in = LoginOutcome::SignedIn("connected".to_string());
+        assert!(signed_in.succeeded());
+        assert_eq!(signed_in.into_message(), "connected");
+
+        let cancelled = LoginOutcome::Cancelled("cancelled".to_string());
+        assert!(!cancelled.succeeded());
+        assert_eq!(cancelled.into_message(), "cancelled");
+    }
 
     #[test]
     fn credential_files_require_nonempty_strings() {
