@@ -1,0 +1,74 @@
+#!/usr/bin/env node
+
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import path from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+import { nativeBinaryName, platformPackageFor } from "../lib/platform.mjs";
+
+const require = createRequire(import.meta.url);
+
+function resolveNativeBinary() {
+  const selected = platformPackageFor(process.platform, process.arch);
+  let packageJson;
+  try {
+    packageJson = require.resolve(`${selected.alias}/package.json`);
+  } catch (error) {
+    throw new Error(
+      `The native ${selected.alias} payload is missing. ` +
+        "Reinstall brokk-mjolnir with optional dependencies enabled.",
+      { cause: error },
+    );
+  }
+
+  return path.join(
+    path.dirname(packageJson),
+    "vendor",
+    selected.target,
+    nativeBinaryName(process.platform),
+  );
+}
+
+let binary;
+try {
+  binary = resolveNativeBinary();
+} catch (error) {
+  console.error(`Error: ${error.message}`);
+  process.exit(1);
+}
+
+const binaryDirectory = path.dirname(binary);
+const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+const child = spawn(binary, process.argv.slice(2), {
+  env: {
+    ...process.env,
+    // npm owns this installation. Product updates must arrive through
+    // `npm update`, not by modifying files inside node_modules in place.
+    MJOLNIR_NO_UPDATE_CHECK: process.env.MJOLNIR_NO_UPDATE_CHECK ?? "1",
+    [pathKey]: `${binaryDirectory}${path.delimiter}${process.env[pathKey] ?? ""}`,
+  },
+  stdio: "inherit",
+});
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => {
+    if (!child.killed) {
+      child.kill(signal);
+    }
+  });
+}
+
+child.on("error", (error) => {
+  console.error(`Error: failed to launch ${binary}: ${error.message}`);
+  process.exit(1);
+});
+
+child.on("exit", (code, signal) => {
+  if (signal) {
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code ?? 1);
+});

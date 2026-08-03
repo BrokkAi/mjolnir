@@ -1,0 +1,163 @@
+name: Build and publish npm packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing Mjolnir GitHub release tag to package
+        required: true
+        type: string
+      publish:
+        description: Publish after building and smoke-testing the packages
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  npm:
+    name: npm packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out npm packaging tooling
+        uses: actions/checkout@v6
+
+      - name: Check out release source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          path: release-source
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Verify release version
+        id: version
+        shell: bash
+        run: |
+          version="${{ inputs.tag }}"
+          version="${version#v}"
+          manifest_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' release-source/Cargo.toml | head -1)"
+          if [[ "$version" != "$manifest_version" ]]; then
+            echo "Tag version ($version) does not match Cargo.toml ($manifest_version)" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download release bundles and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mkdir artifacts
+          gh release download "${{ inputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --dir artifacts \
+            --pattern 'brokk-mjolnir-*.tar.gz' \
+            --pattern 'brokk-mjolnir-*.tar.gz.sha256' \
+            --pattern 'brokk-mjolnir-*.zip' \
+            --pattern 'brokk-mjolnir-*.zip.sha256'
+
+      - name: Verify release checksums
+        shell: bash
+        working-directory: artifacts
+        run: |
+          for checksum in *.sha256; do
+            sha256sum -c "$checksum"
+          done
+
+      - name: Extract release bundles
+        id: bundles
+        shell: bash
+        run: |
+          mkdir -p bundles/{android-arm64,darwin-universal,linux-arm64,linux-x64,win32-x64}
+
+          tar -xzf artifacts/*-aarch64-linux-android.tar.gz -C bundles/android-arm64
+          tar -xzf artifacts/*-universal-apple-darwin.tar.gz -C bundles/darwin-universal
+          tar -xzf artifacts/*-aarch64-unknown-linux-gnu.tar.gz -C bundles/linux-arm64
+          tar -xzf artifacts/*-x86_64-unknown-linux-gnu.tar.gz -C bundles/linux-x64
+          unzip -q artifacts/*-x86_64-pc-windows-msvc.zip -d bundles/win32-x64
+
+          for platform in android-arm64 darwin-universal linux-arm64 linux-x64 win32-x64; do
+            bundle="$(find "bundles/$platform" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+            if [[ -z "$bundle" ]]; then
+              echo "No extracted release bundle found for $platform" >&2
+              exit 1
+            fi
+            output_name="${platform//-/_}"
+            echo "$output_name=$bundle" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Build npm tarballs
+        shell: bash
+        run: |
+          node npm/scripts/build-packages.mjs \
+            --version "${{ steps.version.outputs.value }}" \
+            --output-dir dist/npm \
+            --repository-root release-source \
+            --bundle "android-arm64=${{ steps.bundles.outputs.android_arm64 }}" \
+            --bundle "darwin-universal=${{ steps.bundles.outputs.darwin_universal }}" \
+            --bundle "linux-arm64=${{ steps.bundles.outputs.linux_arm64 }}" \
+            --bundle "linux-x64=${{ steps.bundles.outputs.linux_x64 }}" \
+            --bundle "win32-x64=${{ steps.bundles.outputs.win32_x64 }}"
+
+      - name: Smoke-test npm and npx launcher payload
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          install_root="$RUNNER_TEMP/brokk-mjolnir-npm-smoke"
+          root_package="$install_root/node_modules/brokk-mjolnir"
+          native_package="$install_root/node_modules/brokk-mjolnir-linux-x64"
+          mkdir -p "$root_package" "$native_package"
+          tar -xzf "dist/npm/brokk-mjolnir-${version}.tgz" -C "$root_package" --strip-components=1
+          tar -xzf "dist/npm/brokk-mjolnir-${version}-linux-x64.tgz" -C "$native_package" --strip-components=1
+          node "$root_package/bin/mj.js" --version | grep -Fx "mj $version"
+          test -x "$native_package/vendor/x86_64-unknown-linux-gnu/mj"
+          test -x "$native_package/vendor/x86_64-unknown-linux-gnu/anvil"
+          test -x "$native_package/vendor/x86_64-unknown-linux-gnu/mj-voice-worker"
+
+      - name: Upload npm tarballs
+        uses: actions/upload-artifact@v7
+        with:
+          name: brokk-mjolnir-npm-${{ steps.version.outputs.value }}
+          path: dist/npm/*.tgz
+          if-no-files-found: error
+
+      - name: Publish platform packages
+        if: ${{ inputs.publish }}
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          publish_variant() {
+            local suffix="$1"
+            local tag="$2"
+            if npm view "brokk-mjolnir@${version}-${suffix}" version >/dev/null 2>&1; then
+              echo "brokk-mjolnir@${version}-${suffix} is already published"
+              return
+            fi
+            npm publish "dist/npm/brokk-mjolnir-${version}-${suffix}.tgz" --access public --tag "$tag"
+          }
+          publish_variant android-arm64 android-arm64
+          publish_variant darwin-universal darwin-universal
+          publish_variant linux-arm64 linux-arm64
+          publish_variant linux-x64 linux-x64
+          publish_variant win32-x64 win32-x64
+
+      - name: Publish root package last
+        if: ${{ inputs.publish }}
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          if npm view "brokk-mjolnir@${version}" version >/dev/null 2>&1; then
+            echo "brokk-mjolnir@${version} is already published"
+          else
+            npm publish "dist/npm/brokk-mjolnir-${version}.tgz" --access public --tag latest
+          fi
+          npm view brokk-mjolnir dist-tags --json
