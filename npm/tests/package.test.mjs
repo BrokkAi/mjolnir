@@ -28,11 +28,11 @@ test("root package exposes mj and pins every optional native payload", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mjolnir-npm-root-test-"));
   try {
     const packageJson = createRootStage({ stageDir: root, version: "1.4.0" });
-    assert.equal(packageJson.name, "@brokkai/brokk-mjolnir");
+    assert.equal(packageJson.name, "@brokkai/mjolnir");
     assert.deepEqual(packageJson.bin, { mj: "bin/mj.js" });
     assert.equal(
-      packageJson.optionalDependencies["@brokkai/brokk-mjolnir-linux-x64"],
-      "npm:@brokkai/brokk-mjolnir@1.4.0-linux-x64",
+      packageJson.optionalDependencies["@brokkai/mjolnir-linux-x64"],
+      "npm:@brokkai/mjolnir@1.4.0-linux-x64",
     );
     assert.equal(Object.keys(packageJson.optionalDependencies).length, 5);
     assert.ok(fs.existsSync(path.join(root, "bin", "mj.js")));
@@ -138,7 +138,7 @@ test(
     fs.writeFileSync(
       path.join(nativeRoot, "package.json"),
       JSON.stringify({
-        name: "@brokkai/brokk-mjolnir",
+        name: "@brokkai/mjolnir",
         version: `1.4.0-${selected.npmTag}`,
       }),
     );

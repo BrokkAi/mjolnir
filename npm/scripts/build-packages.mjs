@@ -12,7 +12,7 @@ import { platformPackages } from "../lib/platform.mjs";
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const NPM_DIR = path.resolve(SCRIPT_DIR, "..");
 const DEFAULT_REPOSITORY_ROOT = path.resolve(NPM_DIR, "..");
-const PACKAGE_NAME = "@brokkai/brokk-mjolnir";
+const PACKAGE_NAME = "@brokkai/mjolnir";
 
 function copyFile(source, destination) {
   fs.mkdirSync(path.dirname(destination), { recursive: true });

@@ -1,6 +1,6 @@
-# @brokkai/brokk-mjolnir npm packaging
+# @brokkai/mjolnir npm packaging
 
-This directory builds the public `@brokkai/brokk-mjolnir` npm package and its native
+This directory builds the public `@brokkai/mjolnir` npm package and its native
 platform payloads. The root package provides the `mj` launcher. Each platform
 payload contains the existing Mjolnir release bundle so `anvil` and
 `mj-voice-worker` remain siblings of the native `mj` executable. Desktop
@@ -34,7 +34,7 @@ clean test environment.
 
 The `Build and publish npm packages` GitHub Actions workflow packages an
 existing GitHub release. It defaults to build and smoke-test only. Set its
-`publish` input only after the initial `@brokkai/brokk-mjolnir` package exists and its
+`publish` input only after the initial `@brokkai/mjolnir` package exists and its
 npm trusted publisher is configured for `BrokkAi/mjolnir` and
 `publish-npm.yml`.
 

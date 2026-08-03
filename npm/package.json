@@ -1,5 +1,5 @@
 {
-  "name": "@brokkai/brokk-mjolnir-npm-packaging",
+  "name": "@brokkai/mjolnir-npm-packaging",
   "private": true,
   "type": "module",
   "scripts": {
