@@ -943,7 +943,7 @@ async fn receive_report(
         _ = cancel.cancelled() => Err(format!("{stage} was cancelled")),
         report = reports.recv() => {
             let report = report.ok_or_else(|| format!("{stage} report channel closed"))?;
-            bus.close();
+            bus.close(report.subagent_id);
             Ok(report)
         }
     }
@@ -1473,7 +1473,7 @@ async fn drive_supervisor(driver: SupervisorDriver<'_>) -> Result<SupervisorResu
     let mut lane_evidence = Vec::new();
     loop {
         while let Ok(report) = reviewer_reports.try_recv() {
-            reviewer_bus.close();
+            reviewer_bus.close(report.subagent_id);
             record_lane_evidence(&mut lane_evidence, &report);
             emit_internal(
                 events,
@@ -1517,7 +1517,7 @@ async fn drive_supervisor(driver: SupervisorDriver<'_>) -> Result<SupervisorResu
             }
             report = supervisor_reports.recv() => {
                 let report = report.ok_or_else(|| "review supervisor report channel closed".to_string())?;
-                supervisor_bus.close();
+                supervisor_bus.close(report.subagent_id);
                 if report.subagent_id != supervisor_id {
                     return Err(format!(
                         "review supervisor pool returned unexpected agent #{}",
@@ -1527,7 +1527,7 @@ async fn drive_supervisor(driver: SupervisorDriver<'_>) -> Result<SupervisorResu
                 let text = report_text(report, "review supervisor")?;
                 supervisor_idle = true;
                 while let Ok(report) = reviewer_reports.try_recv() {
-                    reviewer_bus.close();
+                    reviewer_bus.close(report.subagent_id);
                     record_lane_evidence(&mut lane_evidence, &report);
                     emit_internal(
                         events,
@@ -1586,7 +1586,7 @@ async fn drive_supervisor(driver: SupervisorDriver<'_>) -> Result<SupervisorResu
             }
             report = reviewer_reports.recv() => {
                 let report = report.ok_or_else(|| "reviewer report channel closed".to_string())?;
-                reviewer_bus.close();
+                reviewer_bus.close(report.subagent_id);
                 record_lane_evidence(&mut lane_evidence, &report);
                 emit_internal(
                     events,

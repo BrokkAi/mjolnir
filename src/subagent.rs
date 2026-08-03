@@ -457,15 +457,20 @@ pub struct SubagentReport {
 }
 
 /// The channel finished subagent reports travel on, plus the outstanding-report
-/// counter headless uses to decide when it is safe to exit. `open` happens at
+/// set headless uses to decide when it is safe to exit. `open` happens at
 /// admission -- synchronously inside `create_subagent`, so it is always visible
 /// before the primary's turn can complete -- and `close` once the orchestrator
 /// has handled the matching report.
 #[derive(Clone, Debug)]
 pub struct SubagentReportBus {
     tx: mpsc::UnboundedSender<SubagentReport>,
-    pending: Arc<AtomicUsize>,
-    claimed: Arc<StdMutex<HashSet<u64>>>,
+    accounting: Arc<StdMutex<SubagentReportAccounting>>,
+}
+
+#[derive(Debug, Default)]
+struct SubagentReportAccounting {
+    pending: HashSet<u64>,
+    claimed: HashSet<u64>,
 }
 
 impl SubagentReportBus {
@@ -474,59 +479,57 @@ impl SubagentReportBus {
         (
             Self {
                 tx,
-                pending: Arc::new(AtomicUsize::new(0)),
-                claimed: Arc::default(),
+                accounting: Arc::default(),
             },
             rx,
         )
     }
 
     pub fn pending(&self) -> usize {
-        self.pending.load(Ordering::Acquire)
+        self.lock_accounting().pending.len()
     }
 
     /// Record that a `subagent_cancel` result already carried this run's report
     /// back to the primary. A report can be in flight to the orchestrator (or
     /// queued for the next turn boundary) when the cancel lands, and the primary
-    /// must not receive the same content twice. Claiming also accounts the report
-    /// immediately: there may be no later report to wake the orchestrator and
-    /// drain the claimed copy.
+    /// must not receive the same content twice. Claiming also settles this id if
+    /// it is still outstanding: there may be no later report to wake the
+    /// orchestrator and drain the claimed copy. An already handled id is absent
+    /// from `pending`, so claiming it cannot settle another subagent's report.
     pub(crate) fn claim(&self, subagent_id: u64) {
-        if self.lock_claimed().insert(subagent_id) {
-            self.close();
+        let mut accounting = self.lock_accounting();
+        if accounting.claimed.insert(subagent_id) {
+            accounting.pending.remove(&subagent_id);
         }
     }
 
-    /// Consumes a claim, if any. A claimed report was already accounted when the
-    /// claim was made, so the orchestrator only needs to drop it.
+    /// Consumes a claim, if any. A claimed report was settled by id when the
+    /// claim was made, so the orchestrator only needs to drop its queued copy.
     pub(crate) fn take_claim(&self, subagent_id: u64) -> bool {
-        self.lock_claimed().remove(&subagent_id)
+        self.lock_accounting().claimed.remove(&subagent_id)
     }
 
-    fn lock_claimed(&self) -> std::sync::MutexGuard<'_, HashSet<u64>> {
-        self.claimed
+    fn lock_accounting(&self) -> std::sync::MutexGuard<'_, SubagentReportAccounting> {
+        self.accounting
             .lock()
             .expect("subagent report claim lock poisoned")
     }
 
-    pub(crate) fn open(&self) {
-        self.pending.fetch_add(1, Ordering::AcqRel);
+    pub(crate) fn open(&self, subagent_id: u64) {
+        self.lock_accounting().pending.insert(subagent_id);
     }
 
     pub(crate) fn deliver(&self, report: SubagentReport) {
+        let subagent_id = report.subagent_id;
         if self.tx.send(report).is_err() {
-            self.close();
+            self.close(subagent_id);
         }
     }
 
     /// Called by the orchestrator once a report has been handled (injected or
     /// deliberately dropped).
-    pub fn close(&self) {
-        let _ = self
-            .pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                Some(current.saturating_sub(1))
-            });
+    pub fn close(&self, subagent_id: u64) {
+        self.lock_accounting().pending.remove(&subagent_id);
     }
 }
 
@@ -2199,7 +2202,7 @@ async fn admit_and_launch_run(
     let admission = controller.begin(root).await?;
     let subagent_id = admission.subagent_id;
     if let Some(reports) = config.reports.as_ref() {
-        reports.open();
+        reports.open(subagent_id);
     }
     launch_subagent_worker(
         controller.clone(),
@@ -2243,7 +2246,7 @@ async fn resume_retained_run(
     // mark itself retained on the very next poll.
     registry.insert_running(subagent_id, run.label.clone(), run.control.clone());
     if let Some(reports) = config.reports.as_ref() {
-        reports.open();
+        reports.open(subagent_id);
     }
     if run
         .control
@@ -2253,7 +2256,7 @@ async fn resume_retained_run(
         registry.take(subagent_id);
         controller.finish(subagent_id).await;
         if let Some(reports) = config.reports.as_ref() {
-            reports.close();
+            reports.close(subagent_id);
         }
         return Err(ResumeFailure::WorkerUnavailable);
     }
@@ -4594,8 +4597,8 @@ mod tests {
     fn report_bus_accounting_opens_at_admission_and_closes_on_handling() {
         let (bus, mut rx) = SubagentReportBus::channel();
         assert_eq!(bus.pending(), 0);
-        bus.open();
-        bus.open();
+        bus.open(1);
+        bus.open(2);
         assert_eq!(bus.pending(), 2);
         bus.deliver(SubagentReport {
             subagent_id: 1,
@@ -4615,9 +4618,9 @@ mod tests {
             "delivery alone does not close the account"
         );
         assert!(rx.try_recv().is_ok());
-        bus.close();
-        bus.close();
-        bus.close();
+        bus.close(1);
+        bus.close(2);
+        bus.close(2);
         assert_eq!(bus.pending(), 0, "closing saturates rather than wrapping");
     }
 
@@ -4870,7 +4873,7 @@ mod tests {
         let registry = SubagentRegistry::default();
         let (ui_tx, ui_events) = mpsc::unbounded_channel();
         let subagent_id = admission.subagent_id;
-        bus.open();
+        bus.open(subagent_id);
         let mut policy = RunPolicy::configured(&config);
         policy.defer_finished_while_retained = defer_finished_while_retained;
         launch_subagent_worker(
@@ -5110,7 +5113,7 @@ mod tests {
                 }),
             });
         });
-        bus.open();
+        bus.open(7);
 
         let result = handler
             .subagent_cancel(Parameters(SubagentCancelArgs { subagent_id: 7 }))
