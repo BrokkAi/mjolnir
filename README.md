@@ -6,10 +6,9 @@
   </a>
 </p>
 
-Mjolnir (`mj`) is the self-hosted power frontend for **Codex**. It adds a fast
-native terminal, authenticated remote control, isolated worktrees, local voice
-dictation, nested-agent oversight, durable sessions, and adversarial review
-around your existing Codex account.
+Mjolnir (`mj`) is the self-hosted power frontend for **Codex**. It wraps your
+existing Codex account in self-hosted remote control, a worktree-first workflow,
+cross-platform voice input, and integrated adversarial review.
 
 Codex remains in charge of the turn while Mjolnir provides the operating
 environment around it:
@@ -35,16 +34,15 @@ and remote workflow stay consistent across those routes.
 
 - **Self-hosted remote control:** keep the workspace and control plane on your
   machine and drive the session from another browser or device.
-- **Isolated worktrees:** start Codex in a linked Git worktree so agent changes
-  stay separate from your current checkout and remain easy to inspect.
+- **Worktree-first workflow:** start Codex in a linked Git worktree so agent
+  changes stay separate from your current checkout and remain easy to inspect.
 - **Cross-platform desktop voice:** dictate prompts locally on macOS, Linux,
   and Windows with Ctrl-R.
-- **Nested-agent oversight:** follow subagent status, activity, permissions,
-  reports, and diffs from the terminal or remote viewer.
-- **Adversarial review:** challenge workspace changes with a separate review
-  supervisor and targeted specialist lanes before a delegated turn completes.
-- **Operational control:** readable permissions, resumable sessions, headless
-  JSON output, and Codex quota visibility.
+- **Integrated adversarial review:** challenge workspace changes with a
+  separate review supervisor and targeted specialist lanes before a delegated
+  turn completes.
+- **Optional agent routes:** add Claude, Kimi, Anvil, or a custom ACP server
+  without replacing the Codex-first workflow.
 
 Mjolnir itself, its remote-control server, transcripts, and workspace tools run
 on infrastructure you control. Codex model requests still use OpenAI under the

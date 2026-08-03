@@ -11,14 +11,11 @@ and operating environment around that session.
 
 | Capability | What it changes |
 | --- | --- |
-| Native terminal | Inline streaming, readable permissions, tool activity, session controls, and keyboard-driven configuration |
-| Remote control | Drive the session from another browser or device while the repository and Mjolnir server remain on your machine |
-| Isolated worktrees | Start Codex in a linked Git worktree so agent changes stay separate from your current checkout and easy to inspect |
-| Voice dictation | Add locally transcribed prompts with Ctrl-R on supported desktop platforms |
-| Nested-agent oversight | Follow subagent status, activity, permissions, reports, and diffs from the terminal or remote viewer |
-| Adversarial review | Hold a delegated, workspace-changing turn while a separate supervisor challenges the diff and vets targeted specialist findings |
-| Durable sessions | Resume the original Codex route with its transcript and routing intact |
-| Automation | Run the same setup headlessly with text, JSON, or newline-delimited stream output |
+| Self-hosted remote control | Drive the session from another browser or device while the repository and Mjolnir server remain on your machine |
+| Worktree-first workflow | Start Codex in a linked Git worktree so agent changes stay separate from your current checkout and easy to inspect |
+| Cross-platform voice | Add locally transcribed prompts with Ctrl-R on supported desktop platforms |
+| Integrated adversarial review | Hold a delegated, workspace-changing turn while a separate supervisor challenges the diff and vets targeted specialist findings |
+| Optional agent routes | Add Claude, Kimi, Anvil, or a custom ACP server without replacing the Codex-first workflow |
 
 Mjolnir, its transcript storage, remote server, and Mjolnir-hosted tools run on
 infrastructure you control. Codex model requests still go to OpenAI under the
