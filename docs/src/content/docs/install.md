@@ -25,7 +25,7 @@ The npm package ships the native release bundle for your platform — no Rust
 toolchain and no first-run product download:
 
 ```bash
-npm install -g brokk-mjolnir
+npm install -g @brokkai/mjolnir
 mj --version
 ```
 
@@ -33,15 +33,15 @@ Run one-shot without a global install, optionally pinned to an exact
 release:
 
 ```bash
-npx -y brokk-mjolnir
-npx -y brokk-mjolnir@1.4.0
+npx -y @brokkai/mjolnir
+npx -y @brokkai/mjolnir@1.4.0
 ```
 
 Upgrade and uninstall through npm:
 
 ```bash
-npm update -g brokk-mjolnir
-npm uninstall -g brokk-mjolnir
+npm update -g @brokkai/mjolnir
+npm uninstall -g @brokkai/mjolnir
 ```
 
 Desktop installs place `anvil` and the `mj-voice-worker` voice sidecar next
@@ -154,7 +154,7 @@ Interactive startup checks GitHub for a newer Mjolnir release unless
 `MJOLNIR_NO_UPDATE_CHECK=1` or `--no-update-check` is set. The in-app updater
 requires the matching checksum asset. npm installations set
 `MJOLNIR_NO_UPDATE_CHECK` automatically and are upgraded with
-`npm update -g brokk-mjolnir` instead.
+`npm update -g @brokkai/mjolnir` instead.
 
 To uninstall a release-installer deployment, remove `mj`, `bifrost`, and
 `mj-voice-worker` from the selected install directory. Review [Storage and

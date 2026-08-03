@@ -16,7 +16,6 @@ import {
   rootPackageJson,
   sha256File,
   variantPackageJson,
-  variantVersion,
   verifyChecksum,
   versionFromTag,
 } from '../lib.mjs';
@@ -33,14 +32,15 @@ test('platform matrix covers the five declared release targets', () => {
 });
 
 test('platform matrix invariants', () => {
-  const aliases = new Set();
-  const distTags = new Set();
+  const pkgs = new Set();
   for (const p of PLATFORMS) {
-    assert.ok(!aliases.has(p.alias), `duplicate alias ${p.alias}`);
-    aliases.add(p.alias);
-    assert.ok(!distTags.has(p.distTag), `duplicate dist-tag ${p.distTag}`);
-    distTags.add(p.distTag);
-    assert.match(p.distTag, /^platform-/, 'variant dist-tags must never be latest');
+    assert.ok(!pkgs.has(p.pkg), `duplicate package ${p.pkg}`);
+    pkgs.add(p.pkg);
+    assert.match(
+      p.pkg,
+      /^@brokkai\/mjolnir-[a-z0-9-]+$/,
+      'platform packages live under the brokkai org scope',
+    );
     assert.ok(p.os.length > 0 && p.cpu.length > 0);
     if (p.os.includes('linux')) {
       assert.deepEqual(p.libc, ['glibc'], 'linux variants are glibc-only');
@@ -78,11 +78,11 @@ test('release asset names match release.yml packaging', () => {
   );
 });
 
-test('variant package.json carries platform constraints and suffixed version', () => {
+test('variant package.json carries platform constraints at the release version', () => {
   const linux = PLATFORMS.find((p) => p.target === 'x86_64-unknown-linux-gnu');
   const pkg = variantPackageJson('1.4.0', linux, basePackageFields());
-  assert.equal(pkg.name, PACKAGE_NAME);
-  assert.equal(pkg.version, '1.4.0-x86_64-unknown-linux-gnu');
+  assert.equal(pkg.name, '@brokkai/mjolnir-linux-x64-gnu');
+  assert.equal(pkg.version, '1.4.0');
   assert.deepEqual(pkg.os, ['linux']);
   assert.deepEqual(pkg.cpu, ['x64']);
   assert.deepEqual(pkg.libc, ['glibc']);
@@ -90,16 +90,18 @@ test('variant package.json carries platform constraints and suffixed version', (
   assert.equal(pkg.bin, undefined, 'variants expose no bin; the root launcher does');
 });
 
-test('root package.json aliases every variant as an optional dependency', () => {
+test('root package.json pins every platform package as an optional dependency', () => {
   const pkg = rootPackageJson('1.4.0', basePackageFields());
+  assert.equal(pkg.name, PACKAGE_NAME);
   assert.equal(pkg.version, '1.4.0');
   assert.deepEqual(pkg.bin, { mj: 'bin/mj.js' });
   assert.equal(pkg.os, undefined, 'root package must install everywhere');
   assert.equal(Object.keys(pkg.optionalDependencies).length, PLATFORMS.length);
   for (const p of PLATFORMS) {
     assert.equal(
-      pkg.optionalDependencies[p.alias],
-      `npm:${PACKAGE_NAME}@${variantVersion('1.4.0', p)}`,
+      pkg.optionalDependencies[p.pkg],
+      '1.4.0',
+      'platform payloads are pinned to the exact release version',
     );
   }
 });

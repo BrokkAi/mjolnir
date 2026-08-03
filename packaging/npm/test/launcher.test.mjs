@@ -11,38 +11,38 @@ import { PLATFORMS } from '../lib.mjs';
 
 const require = createRequire(import.meta.url);
 const launcherPath = fileURLToPath(new URL('../launcher/bin/mj.js', import.meta.url));
-const { selectAlias, NATIVE_ALIASES } = require(launcherPath);
+const { selectPackage, NATIVE_PACKAGES } = require(launcherPath);
 
-test('launcher alias map stays in sync with the platform matrix', () => {
-  const matrixAliases = new Set(PLATFORMS.map((p) => p.alias));
-  const launcherAliases = new Set(Object.values(NATIVE_ALIASES));
-  assert.deepEqual([...launcherAliases].sort(), [...matrixAliases].sort());
+test('launcher package map stays in sync with the platform matrix', () => {
+  const matrixPkgs = new Set(PLATFORMS.map((p) => p.pkg));
+  const launcherPkgs = new Set(Object.values(NATIVE_PACKAGES));
+  assert.deepEqual([...launcherPkgs].sort(), [...matrixPkgs].sort());
 
   // Every os/cpu combination declared in the matrix must be routable.
   for (const p of PLATFORMS) {
     for (const os of p.os) {
       for (const cpu of p.cpu) {
         assert.equal(
-          NATIVE_ALIASES[`${os}-${cpu}`],
-          p.alias,
-          `launcher must route ${os}-${cpu} to ${p.alias}`,
+          NATIVE_PACKAGES[`${os}-${cpu}`],
+          p.pkg,
+          `launcher must route ${os}-${cpu} to ${p.pkg}`,
         );
       }
     }
   }
 });
 
-test('selectAlias routes supported platforms and rejects unsupported ones', () => {
-  assert.equal(selectAlias('darwin', 'arm64', false).alias, 'brokk-mjolnir-darwin-universal');
-  assert.equal(selectAlias('darwin', 'x64', false).alias, 'brokk-mjolnir-darwin-universal');
-  assert.equal(selectAlias('linux', 'x64', false).alias, 'brokk-mjolnir-linux-x64-gnu');
-  assert.equal(selectAlias('linux', 'arm64', false).alias, 'brokk-mjolnir-linux-arm64-gnu');
-  assert.equal(selectAlias('android', 'arm64', false).alias, 'brokk-mjolnir-android-arm64');
-  assert.equal(selectAlias('win32', 'x64', false).alias, 'brokk-mjolnir-win32-x64');
+test('selectPackage routes supported platforms and rejects unsupported ones', () => {
+  assert.equal(selectPackage('darwin', 'arm64', false).pkg, '@brokkai/mjolnir-darwin-universal');
+  assert.equal(selectPackage('darwin', 'x64', false).pkg, '@brokkai/mjolnir-darwin-universal');
+  assert.equal(selectPackage('linux', 'x64', false).pkg, '@brokkai/mjolnir-linux-x64-gnu');
+  assert.equal(selectPackage('linux', 'arm64', false).pkg, '@brokkai/mjolnir-linux-arm64-gnu');
+  assert.equal(selectPackage('android', 'arm64', false).pkg, '@brokkai/mjolnir-android-arm64');
+  assert.equal(selectPackage('win32', 'x64', false).pkg, '@brokkai/mjolnir-win32-x64');
 
-  assert.match(selectAlias('linux', 'x64', true).error, /musl/);
-  assert.match(selectAlias('freebsd', 'x64', false).error, /does not ship a native build/);
-  assert.match(selectAlias('win32', 'arm64', false).error, /does not ship a native build/);
+  assert.match(selectPackage('linux', 'x64', true).error, /musl/);
+  assert.match(selectPackage('freebsd', 'x64', false).error, /does not ship a native build/);
+  assert.match(selectPackage('win32', 'arm64', false).error, /does not ship a native build/);
 });
 
 test(

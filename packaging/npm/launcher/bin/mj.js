@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-// Launcher for the brokk-mjolnir npm package. The native Mjolnir release
+// Launcher for the @brokkai/mjolnir npm package. The native Mjolnir release
 // bundle is installed by one of the platform-constrained optional
 // dependencies; this script locates it, prepends the bundle directory to PATH
 // so `mj` finds its `anvil` and `mj-voice-worker` siblings, and hands the
@@ -14,13 +14,13 @@ const path = require('node:path');
 
 // Keep in sync with PLATFORMS in packaging/npm/lib.mjs; a packaging test
 // asserts the two stay identical.
-const NATIVE_ALIASES = {
-  'darwin-x64': 'brokk-mjolnir-darwin-universal',
-  'darwin-arm64': 'brokk-mjolnir-darwin-universal',
-  'linux-x64': 'brokk-mjolnir-linux-x64-gnu',
-  'linux-arm64': 'brokk-mjolnir-linux-arm64-gnu',
-  'android-arm64': 'brokk-mjolnir-android-arm64',
-  'win32-x64': 'brokk-mjolnir-win32-x64',
+const NATIVE_PACKAGES = {
+  'darwin-x64': '@brokkai/mjolnir-darwin-universal',
+  'darwin-arm64': '@brokkai/mjolnir-darwin-universal',
+  'linux-x64': '@brokkai/mjolnir-linux-x64-gnu',
+  'linux-arm64': '@brokkai/mjolnir-linux-arm64-gnu',
+  'android-arm64': '@brokkai/mjolnir-android-arm64',
+  'win32-x64': '@brokkai/mjolnir-win32-x64',
 };
 
 function isMusl() {
@@ -33,25 +33,25 @@ function isMusl() {
   }
 }
 
-// Returns { alias } or { error } for the current platform. Exported for
-// tests; `platform`, `arch`, and `musl` are injectable for the same reason.
-function selectAlias(platform, arch, musl) {
+// Returns { pkg } or { error } for the current platform. Exported for tests;
+// `platform`, `arch`, and `musl` are injectable for the same reason.
+function selectPackage(platform, arch, musl) {
   if (platform === 'linux' && musl) {
     return {
       error:
-        'brokk-mjolnir ships glibc Linux builds only; musl-based systems are not supported. ' +
+        '@brokkai/mjolnir ships glibc Linux builds only; musl-based systems are not supported. ' +
         'See https://mjolnir.brokk.ai/install/ for other installation methods.',
     };
   }
-  const alias = NATIVE_ALIASES[`${platform}-${arch}`];
-  if (!alias) {
+  const pkg = NATIVE_PACKAGES[`${platform}-${arch}`];
+  if (!pkg) {
     return {
       error:
-        `brokk-mjolnir does not ship a native build for ${platform}-${arch}. ` +
+        `@brokkai/mjolnir does not ship a native build for ${platform}-${arch}. ` +
         'See https://mjolnir.brokk.ai/install/ for supported platforms and alternatives.',
     };
   }
-  return { alias };
+  return { pkg };
 }
 
 function nativeBundleDir() {
@@ -62,19 +62,19 @@ function nativeBundleDir() {
     }
     return override;
   }
-  const selected = selectAlias(process.platform, process.arch, isMusl());
+  const selected = selectPackage(process.platform, process.arch, isMusl());
   if (selected.error) fail(selected.error);
   let manifest;
   try {
-    manifest = require.resolve(`${selected.alias}/package.json`, {
+    manifest = require.resolve(`${selected.pkg}/package.json`, {
       paths: [path.join(__dirname, '..')],
     });
   } catch {
     fail(
-      `the native package ${selected.alias} is not installed. ` +
+      `the native package ${selected.pkg} is not installed. ` +
         'Optional dependencies may have been skipped (for example with ' +
-        '`npm install --omit=optional`); reinstall brokk-mjolnir with optional ' +
-        'dependencies enabled.',
+        '`npm install --omit=optional`); reinstall @brokkai/mjolnir with ' +
+        'optional dependencies enabled.',
     );
   }
   return path.dirname(manifest);
@@ -123,6 +123,6 @@ function main() {
   });
 }
 
-module.exports = { selectAlias, NATIVE_ALIASES };
+module.exports = { selectPackage, NATIVE_PACKAGES };
 
 if (require.main === module) main();

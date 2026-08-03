@@ -1,12 +1,14 @@
-// Build the brokk-mjolnir npm packages from downloaded GitHub release assets.
+// Build the @brokkai/mjolnir npm packages from downloaded GitHub release
+// assets.
 //
 // Usage:
 //   node packaging/npm/build.mjs --tag v1.4.0 --assets <dir> --out <dir> [--cargo-toml Cargo.toml]
 //
 // For every platform in the matrix this verifies the release archive against
 // its .sha256 sidecar, extracts it, checks that the required sibling binaries
-// are present, and packs a platform-suffixed version of brokk-mjolnir. It then
-// packs the JavaScript wrapper as the root package and writes
+// are present, and packs the scoped platform package (for example
+// @brokkai/mjolnir-linux-x64-gnu) at the release version. It then packs the
+// JavaScript wrapper as the root @brokkai/mjolnir package and writes
 // <out>/manifest.json describing the publish order.
 
 import { execFileSync } from 'node:child_process';
@@ -35,7 +37,6 @@ import {
   releaseAssetName,
   rootPackageJson,
   variantPackageJson,
-  variantVersion,
   verifyChecksum,
   versionFromTag,
 } from './lib.mjs';
@@ -134,7 +135,7 @@ function buildVariant(args, version, platform, stagingDir, outDir) {
       chmodSync(join(pkgDir, bin), 0o755);
     }
   }
-  guardPayload(pkgDir, `${PACKAGE_NAME}@${variantVersion(version, platform)}`);
+  guardPayload(pkgDir, `${platform.pkg}@${version}`);
 
   writeFileSync(
     join(pkgDir, 'package.json'),
@@ -144,9 +145,8 @@ function buildVariant(args, version, platform, stagingDir, outDir) {
   rmSync(extractDir, { recursive: true, force: true });
   return {
     target: platform.target,
-    alias: platform.alias,
-    version: variantVersion(version, platform),
-    distTag: platform.distTag,
+    pkg: platform.pkg,
+    version,
     tarball,
   };
 }
@@ -159,18 +159,18 @@ function buildRoot(version, stagingDir, outDir) {
   copyFileSync(join(REPO_ROOT, 'LICENSE'), join(pkgDir, 'LICENSE'));
   writeFileSync(
     join(pkgDir, 'README.md'),
-    `# brokk-mjolnir
+    `# @brokkai/mjolnir
 
 Mjolnir is a forge-grade terminal client for any Agent Client Protocol (ACP)
 server. This npm package installs the native \`mj\` binary for your platform —
 no Rust toolchain and no first-run product download.
 
 \`\`\`bash
-npm install -g brokk-mjolnir
+npm install -g @brokkai/mjolnir
 mj --version
 
 # or run one-shot
-npx -y brokk-mjolnir
+npx -y @brokkai/mjolnir
 \`\`\`
 
 Supported platforms: macOS (universal), Linux x86-64 and ARM64 (glibc),
@@ -178,7 +178,7 @@ Windows x86-64, and Android ARM64. Desktop installs bundle the \`anvil\`
 runtime and the \`mj-voice-worker\` voice sidecar next to \`mj\`; Android
 bundles \`mj\` and \`anvil\`.
 
-Upgrades are owned by npm (\`npm update -g brokk-mjolnir\`); the in-place
+Upgrades are owned by npm (\`npm update -g @brokkai/mjolnir\`); the in-place
 self-updater is disabled under this installation method.
 
 Documentation: https://mjolnir.brokk.ai/install/

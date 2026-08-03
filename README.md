@@ -66,18 +66,18 @@ Install the native `mj` binary from npm — macOS, Linux (glibc), Windows, and
 Android ARM64, no Rust toolchain required:
 
 ```bash
-npm install -g brokk-mjolnir
+npm install -g @brokkai/mjolnir
 ```
 
 Or run it one-shot without installing:
 
 ```bash
-npx -y brokk-mjolnir
+npx -y @brokkai/mjolnir
 ```
 
 The npm package bundles the Anvil runtime, and desktop platforms include the
 `mj-voice-worker` voice sidecar. It does not install Bifrost; npm owns
-upgrades (`npm update -g brokk-mjolnir`).
+upgrades (`npm update -g @brokkai/mjolnir`).
 
 The release installer supports macOS and Linux on x86-64 or ARM64, plus Android ARM64:
 

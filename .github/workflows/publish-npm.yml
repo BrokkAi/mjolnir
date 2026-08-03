@@ -1,13 +1,13 @@
 name: Publish npm
 
-# Packages an existing GitHub release as the brokk-mjolnir npm package.
+# Packages an existing GitHub release as the @brokkai/mjolnir npm package.
 #
 # Manual-only. The default run builds and smoke-tests without touching the
-# registry; setting `publish: true` publishes every missing platform variant
-# under its non-latest platform dist-tag and then the root wrapper as
-# `latest`. Publishing uses npm trusted publishing (OIDC) — no long-lived
-# write token exists in this repository. The run is safe to retry after a
-# partial publish: already-published versions are detected and skipped.
+# registry; setting `publish: true` publishes every missing platform package
+# (@brokkai/mjolnir-<platform>) and then the root wrapper @brokkai/mjolnir.
+# Publishing uses npm trusted publishing (OIDC) — no long-lived write token
+# exists in this repository. The run is safe to retry after a partial
+# publish: already-published versions are detected and skipped.
 #
 # See packaging/npm/README.md for the one-time registry bootstrap steps.
 
@@ -88,21 +88,21 @@ jobs:
           version="$(jq -r .version npm-dist/manifest.json)"
           variant_tarball="$(jq -r '.variants[] | select(.target == "x86_64-unknown-linux-gnu") | .tarball' npm-dist/manifest.json)"
           root_tarball="$(jq -r .root.tarball npm-dist/manifest.json)"
-          alias_name="$(jq -r '.variants[] | select(.target == "x86_64-unknown-linux-gnu") | .alias' npm-dist/manifest.json)"
+          variant_pkg="$(jq -r '.variants[] | select(.target == "x86_64-unknown-linux-gnu") | .pkg' npm-dist/manifest.json)"
 
-          # Recreate the installed layout without a registry: the variant
-          # extracted under its alias name next to the root wrapper.
-          mkdir -p smoke/node_modules/"$alias_name" smoke/node_modules/brokk-mjolnir
-          tar -xzf "npm-dist/$variant_tarball" -C smoke/node_modules/"$alias_name" --strip-components=1
-          tar -xzf "npm-dist/$root_tarball" -C smoke/node_modules/brokk-mjolnir --strip-components=1
+          # Recreate the installed layout without a registry: the platform
+          # package extracted under its scoped name next to the root wrapper.
+          mkdir -p smoke/node_modules/"$variant_pkg" smoke/node_modules/@brokkai/mjolnir
+          tar -xzf "npm-dist/$variant_tarball" -C smoke/node_modules/"$variant_pkg" --strip-components=1
+          tar -xzf "npm-dist/$root_tarball" -C smoke/node_modules/@brokkai/mjolnir --strip-components=1
 
-          out="$(node smoke/node_modules/brokk-mjolnir/bin/mj.js --version)"
+          out="$(node smoke/node_modules/@brokkai/mjolnir/bin/mj.js --version)"
           echo "mj --version -> $out"
           echo "$out" | grep -F "$version"
 
           # Voice support requires both sibling binaries as executables.
-          test -x smoke/node_modules/"$alias_name"/anvil
-          test -x smoke/node_modules/"$alias_name"/mj-voice-worker
+          test -x smoke/node_modules/"$variant_pkg"/anvil
+          test -x smoke/node_modules/"$variant_pkg"/mj-voice-worker
 
       - name: Upload npm tarballs
         uses: actions/upload-artifact@v7
@@ -113,46 +113,44 @@ jobs:
             npm-dist/manifest.json
           if-no-files-found: error
 
-      - name: Publish platform variants
+      - name: Publish platform packages
         if: ${{ inputs.publish }}
         run: |
           set -euo pipefail
-          published_version() {
-            npm view "brokk-mjolnir@$1" version 2>/dev/null || true
-          }
+          version="$(jq -r .version npm-dist/manifest.json)"
           jq -c '.variants[]' npm-dist/manifest.json | while read -r variant; do
-            version="$(echo "$variant" | jq -r .version)"
+            pkg="$(echo "$variant" | jq -r .pkg)"
             tarball="$(echo "$variant" | jq -r .tarball)"
-            dist_tag="$(echo "$variant" | jq -r .distTag)"
-            if [ -n "$(published_version "$version")" ]; then
-              echo "skip: brokk-mjolnir@$version already published"
+            if [ -n "$(npm view "$pkg@$version" version 2>/dev/null || true)" ]; then
+              echo "skip: $pkg@$version already published"
               continue
             fi
-            echo "publish: brokk-mjolnir@$version (tag $dist_tag)"
-            npm publish "npm-dist/$tarball" --tag "$dist_tag"
+            echo "publish: $pkg@$version"
+            npm publish "npm-dist/$tarball" --access public
           done
 
-      - name: Verify all variants before root publish
+      - name: Verify all platform packages before root publish
         if: ${{ inputs.publish }}
         run: |
           set -euo pipefail
+          version="$(jq -r .version npm-dist/manifest.json)"
           missing=0
-          for version in $(jq -r '.variants[].version' npm-dist/manifest.json); do
-            if [ -z "$(npm view "brokk-mjolnir@$version" version 2>/dev/null || true)" ]; then
-              echo "missing variant: brokk-mjolnir@$version"
+          for pkg in $(jq -r '.variants[].pkg' npm-dist/manifest.json); do
+            if [ -z "$(npm view "$pkg@$version" version 2>/dev/null || true)" ]; then
+              echo "missing platform package: $pkg@$version"
               missing=1
             fi
           done
           exit "$missing"
 
-      - name: Publish root package as latest
+      - name: Publish root package
         if: ${{ inputs.publish }}
         run: |
           set -euo pipefail
           version="$(jq -r .version npm-dist/manifest.json)"
           tarball="$(jq -r .root.tarball npm-dist/manifest.json)"
-          if [ -n "$(npm view "brokk-mjolnir@$version" version 2>/dev/null || true)" ]; then
-            echo "skip: brokk-mjolnir@$version already published"
+          if [ -n "$(npm view "@brokkai/mjolnir@$version" version 2>/dev/null || true)" ]; then
+            echo "skip: @brokkai/mjolnir@$version already published"
           else
-            npm publish "npm-dist/$tarball" --tag latest
+            npm publish "npm-dist/$tarball" --access public
           fi

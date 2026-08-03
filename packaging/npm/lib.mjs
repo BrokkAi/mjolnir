@@ -1,4 +1,4 @@
-// Shared logic for building the brokk-mjolnir npm packages from a GitHub
+// Shared logic for building the @brokkai/mjolnir npm packages from a GitHub
 // release. Pure helpers live here so packaging/npm/test can exercise them
 // without touching the network or the npm registry.
 
@@ -6,16 +6,21 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-// One entry per published native variant. `target` matches the Rust target
-// triple used by release.yml asset names; `alias` is the local-only npm alias
-// name the root package declares; `distTag` is the non-latest dist-tag each
-// variant is published under so the registry never serves a native payload as
-// `latest`.
+export const PACKAGE_NAME = '@brokkai/mjolnir';
+
+// Prefix of the GitHub release archive names produced by release.yml. This is
+// the crate name and is independent of the npm package name.
+export const RELEASE_BUNDLE_PREFIX = 'brokk-mjolnir';
+
+// One entry per published native platform package. `target` matches the Rust
+// target triple used by release.yml asset names; `pkg` is the real scoped npm
+// package the payload is published as. Every platform package shares the root
+// package's version, and the root declares each one as a platform-constrained
+// optional dependency pinned to that exact version.
 export const PLATFORMS = [
   {
     target: 'universal-apple-darwin',
-    alias: 'brokk-mjolnir-darwin-universal',
-    distTag: 'platform-darwin-universal',
+    pkg: '@brokkai/mjolnir-darwin-universal',
     os: ['darwin'],
     cpu: ['x64', 'arm64'],
     archive: 'tar.gz',
@@ -23,8 +28,7 @@ export const PLATFORMS = [
   },
   {
     target: 'x86_64-unknown-linux-gnu',
-    alias: 'brokk-mjolnir-linux-x64-gnu',
-    distTag: 'platform-linux-x64-gnu',
+    pkg: '@brokkai/mjolnir-linux-x64-gnu',
     os: ['linux'],
     cpu: ['x64'],
     libc: ['glibc'],
@@ -33,8 +37,7 @@ export const PLATFORMS = [
   },
   {
     target: 'aarch64-unknown-linux-gnu',
-    alias: 'brokk-mjolnir-linux-arm64-gnu',
-    distTag: 'platform-linux-arm64-gnu',
+    pkg: '@brokkai/mjolnir-linux-arm64-gnu',
     os: ['linux'],
     cpu: ['arm64'],
     libc: ['glibc'],
@@ -43,8 +46,7 @@ export const PLATFORMS = [
   },
   {
     target: 'aarch64-linux-android',
-    alias: 'brokk-mjolnir-android-arm64',
-    distTag: 'platform-android-arm64',
+    pkg: '@brokkai/mjolnir-android-arm64',
     os: ['android'],
     cpu: ['arm64'],
     archive: 'tar.gz',
@@ -53,16 +55,13 @@ export const PLATFORMS = [
   },
   {
     target: 'x86_64-pc-windows-msvc',
-    alias: 'brokk-mjolnir-win32-x64',
-    distTag: 'platform-win32-x64',
+    pkg: '@brokkai/mjolnir-win32-x64',
     os: ['win32'],
     cpu: ['x64'],
     archive: 'zip',
     voice: true,
   },
 ];
-
-export const PACKAGE_NAME = 'brokk-mjolnir';
 
 export function versionFromTag(tag) {
   const m = /^v(\d+\.\d+\.\d+)$/.exec(tag);
@@ -80,12 +79,8 @@ export function cargoTomlVersion(cargoTomlText) {
   return m[1];
 }
 
-export function variantVersion(version, platform) {
-  return `${version}-${platform.target}`;
-}
-
 export function releaseAssetName(tag, platform) {
-  return `${PACKAGE_NAME}-${tag}-${platform.target}.${platform.archive}`;
+  return `${RELEASE_BUNDLE_PREFIX}-${tag}-${platform.target}.${platform.archive}`;
 }
 
 // Binary names expected inside a release bundle for a given platform. Desktop
@@ -136,8 +131,8 @@ export function verifyChecksum(assetPath, sidecarPath) {
 
 export function variantPackageJson(version, platform, base) {
   const pkg = {
-    name: PACKAGE_NAME,
-    version: variantVersion(version, platform),
+    name: platform.pkg,
+    version,
     description: `Native Mjolnir ${platform.target} payload for the ${PACKAGE_NAME} npm package`,
     ...base,
     os: platform.os,
@@ -150,8 +145,9 @@ export function variantPackageJson(version, platform, base) {
 export function rootPackageJson(version, base) {
   const optionalDependencies = {};
   for (const platform of PLATFORMS) {
-    optionalDependencies[platform.alias] =
-      `npm:${PACKAGE_NAME}@${variantVersion(version, platform)}`;
+    // Exact pin: `npx -y @brokkai/mjolnir@1.4.0` must resolve the matching
+    // native payload, never a newer one.
+    optionalDependencies[platform.pkg] = version;
   }
   return {
     name: PACKAGE_NAME,
