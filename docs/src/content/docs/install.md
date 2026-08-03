@@ -22,8 +22,7 @@ private repository.
 ### Homebrew
 
 ```bash
-brew tap brokkai/tap
-brew install mjolnir
+brew install brokkai/tap/mjolnir
 mj --version
 ```
 
@@ -33,7 +32,7 @@ SHA-256 checksum. `mj` lands on `PATH`; `mj-voice-worker` and a bundled Anvil
 stay in the formula's `libexec` next to `mj`. Bifrost is packaged separately:
 
 ```bash
-brew install bifrost
+brew install brokkai/tap/bifrost
 ```
 
 Upgrade and uninstall through Homebrew:
