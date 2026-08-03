@@ -66,12 +66,13 @@ On macOS (Apple Silicon and Intel) and Linux (x86-64 or ARM64 glibc), install
 from the Homebrew tap:
 
 ```bash
-brew install brokkai/tap/mjolnir
+brew tap brokkai/tap
+brew install mjolnir
 ```
 
 The formula puts `mj` on `PATH` and keeps `mj-voice-worker` and a bundled
 Anvil in its private `libexec`; it does not install Bifrost, which has its own
-formula (`brew install brokkai/tap/bifrost`). Upgrade with `brew upgrade
+formula in the same tap (`brew install bifrost`). Upgrade with `brew upgrade
 mjolnir`.
 
 The release installer supports macOS and Linux on x86-64 or ARM64, plus Android ARM64:
