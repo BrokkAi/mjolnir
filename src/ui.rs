@@ -4871,7 +4871,14 @@ fn transcript_export_markdown_with_nested(state: &AppState, include_nested: bool
                 ));
             }
             out.push('\n');
-            push_export_entries(&mut out, &actor.transcript, state);
+            if let Some(history) = actor.archived_history_markdown() {
+                out.push_str(&history);
+                if !history.ends_with('\n') {
+                    out.push('\n');
+                }
+            } else {
+                push_export_entries(&mut out, &actor.transcript, state);
+            }
         }
     }
 
@@ -4947,6 +4954,12 @@ fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
             }
         }
     }
+}
+
+pub(crate) fn nested_actor_history_markdown(state: &AppState, actor: &SubagentStatus) -> String {
+    let mut out = String::new();
+    push_export_entries(&mut out, &actor.transcript, state);
+    out
 }
 
 fn push_export_text(out: &mut String, heading: &str, text: &str) {
@@ -6597,6 +6610,10 @@ fn render_nested_agent_lines(
     width: u16,
 ) -> Vec<Line<'static>> {
     let mut out = Vec::new();
+    if let Some(history) = actor.archived_history_markdown() {
+        push_markdown_lines(&mut out, history, 0, width, state.theme);
+        return out;
+    }
     for (entry_index, entry) in actor.transcript.iter().enumerate() {
         match entry {
             Entry::UserPrompt(text) => {
@@ -17298,6 +17315,26 @@ mod tests {
         assert!(full.contains("Nested Agent Transcripts"));
         assert!(full.contains("Subagent #1: implementer"));
         assert!(full.contains("PRIVATE\\_NESTED\\_RESULT"));
+    }
+
+    #[test]
+    fn full_export_includes_offloaded_nested_history() {
+        let mut state = AppState::new();
+        start_subagent(&mut state, 1, "large", "offload me");
+        state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
+            text_chunk("history line\nOFFLOADED_EXACT_SUFFIX"),
+        )));
+        state.apply_event(subagent_finished(SubagentOutcome::Completed));
+        state.force_offload_nested_actor_for_test(1);
+
+        let full = transcript_export_markdown_with_nested(&state, true);
+        assert!(full.contains("OFFLOADED\\_EXACT\\_SUFFIX"));
+        let rendered =
+            render_nested_agent_lines(&state, state.nested_agent(1).expect("offloaded actor"), 100)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>();
+        assert!(rendered.iter().any(|line| line.contains("OFFLOADED")));
     }
 
     #[test]
