@@ -1,0 +1,158 @@
+name: Publish npm
+
+# Packages an existing GitHub release as the brokk-mjolnir npm package.
+#
+# Manual-only. The default run builds and smoke-tests without touching the
+# registry; setting `publish: true` publishes every missing platform variant
+# under its non-latest platform dist-tag and then the root wrapper as
+# `latest`. Publishing uses npm trusted publishing (OIDC) — no long-lived
+# write token exists in this repository. The run is safe to retry after a
+# partial publish: already-published versions are detected and skipped.
+#
+# See packaging/npm/README.md for the one-time registry bootstrap steps.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to package (for example v1.4.0)'
+        required: true
+        type: string
+      publish:
+        description: 'Publish to the npm registry (default: build and smoke-test only)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  package:
+    name: Package, smoke-test${{ inputs.publish && ', publish' || '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Update npm for trusted publishing
+        # OIDC-based publishing needs npm >= 11.5.1.
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - name: Run npm packaging tests
+        run: node --test packaging/npm/test/*.test.mjs
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir release-assets
+          gh release download '${{ inputs.tag }}' \
+            --repo '${{ github.repository }}' \
+            --dir release-assets \
+            --pattern 'brokk-mjolnir-*'
+          ls -l release-assets
+
+      - name: Verify release checksums
+        working-directory: release-assets
+        run: |
+          for sidecar in *.sha256; do
+            sha256sum -c "$sidecar"
+          done
+
+      - name: Build npm packages
+        run: node packaging/npm/build.mjs --tag '${{ inputs.tag }}' --assets release-assets --out npm-dist
+
+      - name: Inspect tarball contents
+        run: |
+          for tarball in npm-dist/*.tgz; do
+            echo "== $tarball"
+            tar -tzf "$tarball"
+          done
+
+      - name: Smoke-test the Linux package
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --assume-yes libasound2t64 || \
+            sudo apt-get install --no-install-recommends --assume-yes libasound2
+          version="$(jq -r .version npm-dist/manifest.json)"
+          variant_tarball="$(jq -r '.variants[] | select(.target == "x86_64-unknown-linux-gnu") | .tarball' npm-dist/manifest.json)"
+          root_tarball="$(jq -r .root.tarball npm-dist/manifest.json)"
+          alias_name="$(jq -r '.variants[] | select(.target == "x86_64-unknown-linux-gnu") | .alias' npm-dist/manifest.json)"
+
+          # Recreate the installed layout without a registry: the variant
+          # extracted under its alias name next to the root wrapper.
+          mkdir -p smoke/node_modules/"$alias_name" smoke/node_modules/brokk-mjolnir
+          tar -xzf "npm-dist/$variant_tarball" -C smoke/node_modules/"$alias_name" --strip-components=1
+          tar -xzf "npm-dist/$root_tarball" -C smoke/node_modules/brokk-mjolnir --strip-components=1
+
+          out="$(node smoke/node_modules/brokk-mjolnir/bin/mj.js --version)"
+          echo "mj --version -> $out"
+          echo "$out" | grep -F "$version"
+
+          # Voice support requires both sibling binaries as executables.
+          test -x smoke/node_modules/"$alias_name"/anvil
+          test -x smoke/node_modules/"$alias_name"/mj-voice-worker
+
+      - name: Upload npm tarballs
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-packages
+          path: |
+            npm-dist/*.tgz
+            npm-dist/manifest.json
+          if-no-files-found: error
+
+      - name: Publish platform variants
+        if: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          published_version() {
+            npm view "brokk-mjolnir@$1" version 2>/dev/null || true
+          }
+          jq -c '.variants[]' npm-dist/manifest.json | while read -r variant; do
+            version="$(echo "$variant" | jq -r .version)"
+            tarball="$(echo "$variant" | jq -r .tarball)"
+            dist_tag="$(echo "$variant" | jq -r .distTag)"
+            if [ -n "$(published_version "$version")" ]; then
+              echo "skip: brokk-mjolnir@$version already published"
+              continue
+            fi
+            echo "publish: brokk-mjolnir@$version (tag $dist_tag)"
+            npm publish "npm-dist/$tarball" --tag "$dist_tag"
+          done
+
+      - name: Verify all variants before root publish
+        if: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for version in $(jq -r '.variants[].version' npm-dist/manifest.json); do
+            if [ -z "$(npm view "brokk-mjolnir@$version" version 2>/dev/null || true)" ]; then
+              echo "missing variant: brokk-mjolnir@$version"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Publish root package as latest
+        if: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version npm-dist/manifest.json)"
+          tarball="$(jq -r .root.tarball npm-dist/manifest.json)"
+          if [ -n "$(npm view "brokk-mjolnir@$version" version 2>/dev/null || true)" ]; then
+            echo "skip: brokk-mjolnir@$version already published"
+          else
+            npm publish "npm-dist/$tarball" --tag latest
+          fi
