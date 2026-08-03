@@ -1243,14 +1243,16 @@ impl TrackerState {
     /// The status list is a live area, so only the most recent completions stay
     /// in it; the permanent record lives in the transcript.
     fn prune_finished_subagents(&mut self) {
-        let mut finished: Vec<(String, u64)> = self
+        let mut finished: Vec<(Option<DateTime<FixedOffset>>, u64)> = self
             .subagents
             .values()
             .filter_map(|record| {
-                record
-                    .finished_at
-                    .clone()
-                    .map(|finished_at| (finished_at, record.subagent_id))
+                record.finished_at.as_ref().map(|finished_at| {
+                    (
+                        DateTime::parse_from_rfc3339(finished_at).ok(),
+                        record.subagent_id,
+                    )
+                })
             })
             .collect();
         if finished.len() <= REMOTE_FINISHED_SUBAGENT_ROWS {
@@ -6404,6 +6406,64 @@ mod tests {
                 .count(),
             13
         );
+    }
+
+    #[test]
+    fn tracker_prunes_finished_subagents_by_chronological_timestamp() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        for (id, finished_at) in [
+            (1, "2026-08-01T12:00:00.9Z"),
+            (2, "2026-08-01T12:00:00.10Z"),
+            (3, "2026-08-01T12:00:01Z"),
+            (4, "2026-08-01T12:00:02Z"),
+            (5, "2026-08-01T12:00:03Z"),
+        ] {
+            state.subagents.insert(
+                id,
+                SubagentStatusRecord {
+                    subagent_id: id,
+                    label: format!("lane-{id}"),
+                    model: None,
+                    activity: "done".to_string(),
+                    started_at: "2026-08-01T11:00:00Z".to_string(),
+                    finished_at: Some(finished_at.to_string()),
+                    outcome: Some("completed".to_string()),
+                },
+            );
+        }
+
+        state.prune_finished_subagents();
+
+        assert!(!state.subagents.contains_key(&2));
+        assert!(state.subagents.contains_key(&1));
+    }
+
+    #[test]
+    fn tracker_prunes_malformed_finished_timestamp_before_valid_rows() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        for id in 1..=5 {
+            state.subagents.insert(
+                id,
+                SubagentStatusRecord {
+                    subagent_id: id,
+                    label: format!("lane-{id}"),
+                    model: None,
+                    activity: "done".to_string(),
+                    started_at: "2026-08-01T11:00:00Z".to_string(),
+                    finished_at: Some(if id == 1 {
+                        "not-a-timestamp".to_string()
+                    } else {
+                        format!("2026-08-01T12:00:0{id}Z")
+                    }),
+                    outcome: Some("completed".to_string()),
+                },
+            );
+        }
+
+        state.prune_finished_subagents();
+
+        assert!(!state.subagents.contains_key(&1));
+        assert_eq!(state.subagents.len(), REMOTE_FINISHED_SUBAGENT_ROWS);
     }
 
     #[test]
