@@ -488,13 +488,17 @@ impl SubagentReportBus {
     /// Record that a `subagent_cancel` result already carried this run's report
     /// back to the primary. A report can be in flight to the orchestrator (or
     /// queued for the next turn boundary) when the cancel lands, and the primary
-    /// must not receive the same content twice.
+    /// must not receive the same content twice. Claiming also accounts the report
+    /// immediately: there may be no later report to wake the orchestrator and
+    /// drain the claimed copy.
     pub(crate) fn claim(&self, subagent_id: u64) {
-        self.lock_claimed().insert(subagent_id);
+        if self.lock_claimed().insert(subagent_id) {
+            self.close();
+        }
     }
 
-    /// Consumes a claim, if any. The orchestrator accounts a claimed report the
-    /// same way it accounts an injected one and drops it.
+    /// Consumes a claim, if any. A claimed report was already accounted when the
+    /// claim was made, so the orchestrator only needs to drop it.
     pub(crate) fn take_claim(&self, subagent_id: u64) -> bool {
         self.lock_claimed().remove(&subagent_id)
     }
@@ -5121,8 +5125,8 @@ mod tests {
         );
         assert_eq!(
             bus.pending(),
-            1,
-            "the orchestrator still owes the accounting"
+            0,
+            "claiming the last report must not leave headless shutdown blocked"
         );
         worker.await.expect("stub worker");
     }

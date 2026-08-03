@@ -481,10 +481,6 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 // never has to ask what the rest are doing.
                 let progress = config.subagent_runs.progress_block().await;
                 let batch = std::mem::take(&mut pending_reports);
-                // Every report in the batch is accounted, injected or not.
-                for _ in 0..batch.len() {
-                    config.subagent_report_bus.close();
-                }
                 let injected = batch
                     .into_iter()
                     .filter(|report| {
@@ -497,6 +493,10 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                 subagent_id = report.subagent_id,
                                 "dropping a report already returned by subagent_cancel"
                             );
+                        } else {
+                            // Claims account their report immediately. Every
+                            // other report is accounted when this batch handles it.
+                            config.subagent_report_bus.close();
                         }
                         !claimed
                     })
