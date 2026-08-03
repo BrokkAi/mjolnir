@@ -14,9 +14,25 @@ private repository.
 | Method | Platforms | Installs |
 | --- | --- | --- |
 | Release installer | macOS/Linux on x86-64 or ARM64; Android ARM64 | `mj`, Bifrost, and on desktop `mj-voice-worker` |
+| Homebrew | macOS (Apple Silicon and Intel); Homebrew-on-Linux x86-64/ARM64 (glibc) | `mj`, `anvil`, `mj-voice-worker`; not Bifrost |
 | crates.io | Platforms supported by the Rust crates | `mj` and whichever crates you name; it does not install Bifrost |
 | Release archive | Linux, macOS, Windows, Android release targets | The binaries and legal files packaged for that target |
 | Build from source | Rust-supported development hosts | The workspace members you build |
+
+### Homebrew
+
+```bash
+brew install BrokkAi/tap/mjolnir
+```
+
+The formula installs `mj` together with its sibling binaries `anvil` and
+`mj-voice-worker`, so voice dictation works out of the box. It does not
+install Bifrost; use the release installer if you need it.
+
+Homebrew owns upgrades for this installation. Upgrade with `brew upgrade
+mjolnir` and uninstall with `brew uninstall mjolnir`. Do not use Mjolnir's
+in-place self-updater under brew; it would fall out of sync with what
+Homebrew tracks.
 
 ### Release installer
 

@@ -1,0 +1,97 @@
+name: Publish Homebrew
+
+# Generates Formula/mjolnir.rb for the BrokkAi/homebrew-tap repository from an
+# existing GitHub release.
+#
+# Manual-only. The default run generates and validates the formula without
+# touching the tap; setting `publish: true` commits the formula to
+# BrokkAi/homebrew-tap using the HOMEBREW_TAP_TOKEN secret (a fine-grained
+# personal access token with push access to that repository). The run is safe
+# to retry: when the tap already carries the generated formula, the publish
+# step exits cleanly without pushing.
+#
+# See packaging/homebrew/README.md for the one-time tap bootstrap steps.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to package (for example v1.4.0)'
+        required: true
+        type: string
+      publish:
+        description: 'Push the formula to BrokkAi/homebrew-tap (default: generate and validate only)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Generate, validate${{ inputs.publish && ', publish' || '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Run Homebrew packaging tests
+        run: node --test packaging/homebrew/test/*.test.mjs
+
+      - name: Download release checksum sidecars
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir release-assets
+          gh release download '${{ inputs.tag }}' \
+            --repo '${{ github.repository }}' \
+            --dir release-assets \
+            --pattern '*.sha256'
+          ls -l release-assets
+
+      - name: Generate the formula
+        run: |
+          node packaging/homebrew/generate.mjs \
+            --tag '${{ inputs.tag }}' \
+            --assets release-assets \
+            --out homebrew-dist/mjolnir.rb
+          cat homebrew-dist/mjolnir.rb
+
+      - name: Validate formula syntax
+        run: ruby -c homebrew-dist/mjolnir.rb
+
+      - name: Upload the formula
+        uses: actions/upload-artifact@v7
+        with:
+          name: homebrew-formula
+          path: homebrew-dist/mjolnir.rb
+          if-no-files-found: error
+
+      - name: Publish to BrokkAi/homebrew-tap
+        if: ${{ inputs.publish }}
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/BrokkAi/homebrew-tap.git" tap
+          if cmp -s homebrew-dist/mjolnir.rb tap/Formula/mjolnir.rb; then
+            echo "Formula/mjolnir.rb already matches mjolnir ${version}; nothing to publish"
+            exit 0
+          fi
+          mkdir -p tap/Formula
+          cp homebrew-dist/mjolnir.rb tap/Formula/mjolnir.rb
+          cd tap
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/mjolnir.rb
+          git commit -m "mjolnir ${version}"
+          git push origin HEAD

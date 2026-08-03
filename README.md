@@ -71,6 +71,15 @@ curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh |
 It installs `mj` and Bifrost; desktop installs also include
 `mj-voice-worker`. Windows users should use a release archive or Cargo.
 
+Homebrew users on macOS or Linux can install from the official tap:
+
+```bash
+brew install BrokkAi/tap/mjolnir
+```
+
+It installs `mj`, `anvil`, and `mj-voice-worker`; it does not install
+Bifrost. Upgrades come from `brew upgrade mjolnir`.
+
 Desktop users can install Mjolnir and its optional voice worker from crates.io:
 
 ```bash
