@@ -69,6 +69,17 @@ const hammerArt = [...hammerMask]
         </div>
       )
     }
+    <section class="hero-install" aria-label="Install Mjolnir">
+      <div class="hero-install-tabs">
+        <span>curl</span>
+      </div>
+      <div class="hero-install-command">
+        <span aria-hidden="true">❯</span>
+        <code>curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash</code>
+        <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy install command">Copy</button>
+      </div>
+      <p class="hero-install-status" data-install-status aria-live="polite"></p>
+    </section>
     <ul class="hero-facts" aria-label="What Mjolnir adds to Codex">
       <li><span>01 / CONTROL</span><strong>Self-hosted + remote</strong></li>
       <li><span>02 / INPUT</span><strong>Terminal + voice</strong></li>
@@ -217,11 +228,31 @@ const hammerArt = [...hammerMask]
     });
   };
 
+  const installCommand = 'curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash';
+  const enableInstallCopy = () => {
+    document.querySelectorAll<HTMLButtonElement>('[data-install-copy]').forEach((button) => {
+      if (button.dataset.ready === 'true') return;
+      button.dataset.ready = 'true';
+      button.addEventListener('click', async () => {
+        const status = button.closest('.hero-install')?.querySelector<HTMLElement>('[data-install-status]');
+        try {
+          await navigator.clipboard.writeText(installCommand);
+          button.textContent = 'Copied';
+          status!.textContent = 'Install command copied.';
+        } catch {
+          status!.textContent = 'Copy the command above to install Mjolnir.';
+        }
+      });
+    });
+  };
+
+  enableInstallCopy();
   animateHammers();
   rotateSeats();
   document.addEventListener('astro:page-load', () => {
     animateHammers();
     rotateSeats();
+    enableInstallCopy();
   });
 </script>
 
@@ -345,6 +376,55 @@ const hammerArt = [...hammerMask]
       border-color: var(--mj-line-strong);
       background: color-mix(in srgb, var(--mj-surface-raised) 92%, transparent);
     }
+
+    .hero-install {
+      width: 100%;
+      margin-top: 2.2rem;
+      border: 1px solid var(--mj-line-strong);
+      background: color-mix(in srgb, var(--mj-surface-raised) 42%, transparent);
+      box-shadow: 0 18px 42px color-mix(in srgb, var(--mj-violet) 10%, transparent), inset 0 1px var(--mj-highlight);
+      font-family: var(--sl-font-mono);
+    }
+    .hero-install-tabs { display: flex; padding: 0.45rem 0.45rem 0; border-bottom: 1px solid var(--mj-line); }
+    .hero-install-tabs span {
+      padding: 0.45rem 0.75rem;
+      border: 0;
+      border-bottom: 2px solid var(--mj-violet);
+      background: color-mix(in srgb, var(--mj-violet) 10%, transparent);
+      color: var(--mj-ink);
+      font: inherit;
+      font-size: 0.6rem;
+      font-weight: 750;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .hero-install-command { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0.75rem; align-items: center; padding: 0.85rem 0.9rem; background: color-mix(in srgb, var(--mj-surface-raised) 88%, transparent); }
+    .hero-install-command > span { color: var(--mj-gold); }
+    .hero-install-command code {
+      min-width: 0;
+      padding: 0;
+      overflow: hidden;
+      background: transparent;
+      color: var(--mj-ink);
+      font-size: clamp(0.63rem, 1.25vw, 0.76rem);
+      line-height: 1.55;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .hero-install-copy {
+      padding: 0.45rem 0.55rem;
+      border: 1px solid var(--mj-line-strong);
+      background: transparent;
+      color: var(--mj-violet-soft);
+      font: inherit;
+      font-size: 0.56rem;
+      font-weight: 750;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .hero-install-copy:hover, .hero-install-copy:focus-visible { border-color: var(--mj-violet); background: color-mix(in srgb, var(--mj-violet) 11%, transparent); color: var(--mj-ink); }
+    .hero-install-status { min-height: 1.1rem; margin: 0; padding: 0 0.9rem 0.55rem; color: var(--mj-muted); font-size: 0.56rem; }
 
     .hero-facts {
       display: grid;
