@@ -13,10 +13,38 @@ private repository.
 
 | Method | Platforms | Installs |
 | --- | --- | --- |
+| Homebrew | macOS on Apple Silicon or Intel; Linux on x86-64 or ARM64 glibc | `mj` on `PATH`, with `mj-voice-worker` and a bundled Anvil in the formula's `libexec`; not Bifrost |
 | Release installer | macOS/Linux on x86-64 or ARM64; Android ARM64 | `mj`, Bifrost, and on desktop `mj-voice-worker` |
 | crates.io | Platforms supported by the Rust crates | `mj` and whichever crates you name; it does not install Bifrost |
 | Release archive | Linux, macOS, Windows, Android release targets | The binaries and legal files packaged for that target |
 | Build from source | Rust-supported development hosts | The workspace members you build |
+
+### Homebrew
+
+```bash
+brew tap brokkai/tap
+brew install mjolnir
+mj --version
+```
+
+The formula in [BrokkAi/homebrew-tap](https://github.com/BrokkAi/homebrew-tap)
+installs the release archive for your platform and verifies its published
+SHA-256 checksum. `mj` lands on `PATH`; `mj-voice-worker` and a bundled Anvil
+stay in the formula's `libexec` next to `mj`. Bifrost is packaged separately:
+
+```bash
+brew install brokkai/tap/bifrost
+```
+
+Upgrade and uninstall through Homebrew:
+
+```bash
+brew upgrade mjolnir
+brew uninstall mjolnir
+```
+
+The tap regenerates its formulae from tagged releases on a schedule, so `brew
+upgrade` follows new Mjolnir releases without manual checksum changes.
 
 ### Release installer
 
