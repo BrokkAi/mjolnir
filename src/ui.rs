@@ -2945,7 +2945,12 @@ fn handle_crossterm(
             insert_text_at_cursor(state, "\n");
             state.update_autocomplete();
         }
-        (_, KeyCode::Enter) => submit_prompt(state, cmd_tx),
+        (_, KeyCode::Enter) => {
+            submit_prompt(state, cmd_tx);
+            if state.voice_input_active {
+                return TerminalRequest::StopDictation;
+            }
+        }
         (KeyModifiers::ALT, KeyCode::Backspace) => {
             delete_previous_word(state);
             state.update_autocomplete();
@@ -22422,6 +22427,27 @@ mod tests {
             dictation_request_for_state(&state, true),
             TerminalRequest::StopDictation
         );
+    }
+
+    #[test]
+    fn enter_while_dictating_submits_prompt_and_requests_stop() {
+        let mut state = ready_state_with_session();
+        state.voice_input_active = true;
+        state.input = "spoken prompt".to_string();
+        state.input_cursor = state.input.chars().count();
+        state.voice_input_range = Some((0, state.input_cursor));
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        let request = handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert_eq!(request, TerminalRequest::StopDictation);
+        match cmd_rx.try_recv().expect("spoken prompt dispatched") {
+            UiCommand::SendPrompt { text, images } => {
+                assert_eq!(text, "spoken prompt");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
