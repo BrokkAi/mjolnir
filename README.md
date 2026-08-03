@@ -7,17 +7,17 @@
 </p>
 
 Mjolnir (`mj`) is the self-hosted power frontend for **Codex**. It adds a fast
-native terminal, authenticated remote control, local voice dictation, parallel
-subagents, durable sessions, worktrees, and adversarial review around your
-existing Codex account.
+native terminal, authenticated remote control, isolated worktrees, local voice
+dictation, nested-agent oversight, durable sessions, and adversarial review
+around your existing Codex account.
 
 Codex remains in charge of the turn while Mjolnir provides the operating
 environment around it:
 
 - Codex owns every user turn — planning, delegating, implementing, and
   answering;
-- `create_subagent` launches background subagents (up to 16 in parallel, all
-  write-capable, each in a fresh session) and returns immediately;
+- Codex can launch background subagents (up to 16 in parallel, all
+  write-capable, each in a fresh session) while Mjolnir tracks them;
 - stable workflow progress rows summarize delegation and review phases,
   aggregate actor outcomes, and elapsed time; `/subagents` opens retained
   nested detail;
@@ -39,8 +39,8 @@ and remote workflow stay consistent across those routes.
   stay separate from your current checkout and remain easy to inspect.
 - **Cross-platform desktop voice:** dictate prompts locally on macOS, Linux,
   and Windows with Ctrl-R.
-- **Parallel subagents:** let Codex launch focused background sessions and
-  receive their reports without polling.
+- **Nested-agent oversight:** follow subagent status, activity, permissions,
+  reports, and diffs from the terminal or remote viewer.
 - **Adversarial review:** challenge workspace changes with a separate review
   supervisor and targeted specialist lanes before a delegated turn completes.
 - **Operational control:** readable permissions, resumable sessions, headless

@@ -15,7 +15,7 @@ and operating environment around that session.
 | Remote control | Drive the session from another browser or device while the repository and Mjolnir server remain on your machine |
 | Isolated worktrees | Start Codex in a linked Git worktree so agent changes stay separate from your current checkout and easy to inspect |
 | Voice dictation | Add locally transcribed prompts with Ctrl-R on supported desktop platforms |
-| Parallel subagents | Let Codex launch focused background sessions and receive their reports without polling |
+| Nested-agent oversight | Follow subagent status, activity, permissions, reports, and diffs from the terminal or remote viewer |
 | Adversarial review | Hold a delegated, workspace-changing turn while a separate supervisor challenges the diff and vets targeted specialist findings |
 | Durable sessions | Resume the original Codex route with its transcript and routing intact |
 | Automation | Run the same setup headlessly with text, JSON, or newline-delimited stream output |

@@ -585,7 +585,7 @@ fn whats_new_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
         Line::raw(""),
         heading("The power features stay up front", theme),
         Line::raw(
-            "Self-hosted remote control, isolated worktrees, local desktop voice, parallel subagents, and adversarial review remain part of the default Codex experience.",
+            "Self-hosted remote control, isolated worktrees, local desktop voice, nested-agent oversight, and adversarial review remain part of the default Codex experience.",
         ),
         Line::raw(""),
         heading("Your existing providers and settings stay in place", theme),

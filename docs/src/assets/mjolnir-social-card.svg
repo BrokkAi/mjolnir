@@ -46,7 +46,7 @@
     </text>
     <text x="2" y="206" fill="#b5aabd" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="19">
       <tspan x="2" y="206">Self-hosted remote control · Worktrees</tspan>
-      <tspan x="2" y="235">Voice · Parallel agents · Adversarial review</tspan>
+      <tspan x="2" y="235">Voice · Agent oversight · Adversarial review</tspan>
     </text>
   </g>
 
