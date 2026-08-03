@@ -8,10 +8,10 @@ use anyhow::{Context, Result};
 use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::Terminal;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, ONBOARDING_CONTENT_VERSION};
@@ -39,7 +39,6 @@ enum Screen {
     Welcome,
     WhatsNew,
     Connections,
-    ChoosePath,
     Customize,
     Readiness,
 }
@@ -55,6 +54,13 @@ enum Action {
     Finish,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeTone {
+    Info,
+    Success,
+    Warning,
+}
+
 struct State {
     kind: Kind,
     screen: Screen,
@@ -64,6 +70,10 @@ struct State {
     selected: usize,
     scroll: u16,
     notice: Option<String>,
+    notice_tone: NoticeTone,
+    customize_return: Screen,
+    customize_snapshot: Option<SettingsEditor>,
+    reveal_selection: bool,
 }
 
 impl State {
@@ -109,7 +119,7 @@ impl State {
         } else {
             Screen::Welcome
         };
-        Self {
+        let mut state = Self {
             kind,
             screen,
             editor,
@@ -118,7 +128,15 @@ impl State {
             selected: 0,
             scroll: 0,
             notice,
+            notice_tone: NoticeTone::Warning,
+            customize_return: screen,
+            customize_snapshot: None,
+            reveal_selection: screen == Screen::Connections,
+        };
+        if screen == Screen::Connections {
+            state.selected = Self::default_connection_selection();
         }
+        state
     }
 
     fn config(&self) -> &Config {
@@ -147,18 +165,60 @@ impl State {
 
     fn change_screen(&mut self, screen: Screen) {
         self.screen = screen;
-        self.selected = 0;
+        self.selected = if screen == Screen::Connections {
+            Self::default_connection_selection()
+        } else {
+            0
+        };
         self.scroll = 0;
         self.notice = None;
+        self.notice_tone = NoticeTone::Info;
+        self.reveal_selection = screen == Screen::Connections;
     }
 
     fn connection_item_count(&self) -> usize {
+        crate::auth::AuthVendor::ALL.len() + 2
+    }
+
+    fn recommended_index() -> usize {
+        crate::auth::AuthVendor::ALL.len()
+    }
+
+    fn customize_index() -> usize {
         crate::auth::AuthVendor::ALL.len() + 1
+    }
+
+    fn default_connection_selection() -> usize {
+        Self::connection_selection_for_openai(
+            crate::auth::detect(crate::auth::AuthVendor::OpenAi).available(),
+        )
+    }
+
+    fn connection_selection_for_openai(available: bool) -> usize {
+        if available {
+            Self::recommended_index()
+        } else {
+            crate::auth::AuthVendor::ALL
+                .iter()
+                .position(|vendor| *vendor == crate::auth::AuthVendor::OpenAi)
+                .unwrap_or(0)
+        }
+    }
+
+    fn open_customize(&mut self, return_to: Screen) {
+        self.customize_snapshot = Some(self.editor.clone());
+        self.customize_return = return_to;
+        self.change_screen(Screen::Customize);
+    }
+
+    fn terminal_resized(&mut self) {
+        self.reveal_selection = self.screen == Screen::Connections;
     }
 
     fn move_selected(&mut self, delta: i32, len: usize) {
         if len > 0 {
             self.selected = (self.selected as i32 + delta).rem_euclid(len as i32) as usize;
+            self.reveal_selection = true;
         }
     }
 
@@ -210,14 +270,13 @@ impl State {
             Screen::WhatsNew => match code {
                 KeyCode::Enter | KeyCode::Right | KeyCode::Char('n') => {
                     if self.roster.is_some() {
-                        self.change_screen(Screen::Readiness);
-                        Action::None
+                        Action::Finish
                     } else {
                         Action::Resolve
                     }
                 }
                 KeyCode::Char('c' | 'C') => {
-                    self.change_screen(Screen::ChoosePath);
+                    self.open_customize(Screen::WhatsNew);
                     Action::None
                 }
                 KeyCode::Char('s' | 'S') | KeyCode::Esc => Action::Skip,
@@ -243,13 +302,17 @@ impl State {
                 KeyCode::Enter if self.selected < crate::auth::AuthVendor::ALL.len() => {
                     Action::Authenticate(crate::auth::AuthVendor::ALL[self.selected])
                 }
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char('n') => {
-                    self.change_screen(Screen::ChoosePath);
+                KeyCode::Enter if self.selected == Self::recommended_index() => {
+                    Action::UseRecommended
+                }
+                KeyCode::Enter => {
+                    self.open_customize(Screen::Connections);
                     Action::None
                 }
+                KeyCode::Right | KeyCode::Char('n') => Action::UseRecommended,
                 KeyCode::Char('r' | 'R') => Action::Resolve,
                 KeyCode::Char('c' | 'C') => {
-                    self.change_screen(Screen::Customize);
+                    self.open_customize(Screen::Connections);
                     Action::None
                 }
                 KeyCode::Esc | KeyCode::Left => {
@@ -262,34 +325,17 @@ impl State {
                 }
                 _ => Action::None,
             },
-            Screen::ChoosePath => match code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.move_selected(-1, 2);
-                    Action::None
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.move_selected(1, 2);
-                    Action::None
-                }
-                KeyCode::Enter if self.selected == 0 => Action::UseRecommended,
-                KeyCode::Enter => {
-                    self.change_screen(Screen::Customize);
-                    Action::None
-                }
-                KeyCode::Esc | KeyCode::Left => {
-                    self.change_screen(if self.kind == Kind::Fresh {
-                        Screen::Connections
-                    } else {
-                        Screen::WhatsNew
-                    });
-                    Action::None
-                }
-                _ => Action::None,
-            },
             Screen::Customize => match self.editor.handle_key(code) {
-                SettingsAction::Save => Action::Resolve,
+                SettingsAction::Save => {
+                    self.customize_snapshot = None;
+                    Action::Resolve
+                }
                 SettingsAction::Cancel => {
-                    self.change_screen(Screen::ChoosePath);
+                    if let Some(editor) = self.customize_snapshot.take() {
+                        let mut changed = std::mem::replace(&mut self.editor, editor);
+                        changed.cancel_background();
+                    }
+                    self.change_screen(self.customize_return);
                     Action::None
                 }
                 SettingsAction::Authenticate(vendor) => Action::Authenticate(vendor),
@@ -298,7 +344,7 @@ impl State {
             Screen::Readiness => match code {
                 KeyCode::Enter => Action::Finish,
                 KeyCode::Char('c' | 'C') => {
-                    self.change_screen(Screen::Customize);
+                    self.open_customize(Screen::Readiness);
                     Action::None
                 }
                 KeyCode::Char('r' | 'R') => Action::Resolve,
@@ -311,7 +357,11 @@ impl State {
                     Action::None
                 }
                 KeyCode::Esc | KeyCode::Left => {
-                    self.change_screen(Screen::ChoosePath);
+                    self.change_screen(if self.kind == Kind::Fresh {
+                        Screen::Connections
+                    } else {
+                        Screen::WhatsNew
+                    });
                     Action::None
                 }
                 _ => Action::None,
@@ -368,9 +418,11 @@ impl State {
                 .unwrap_or(0)
         };
         self.scroll = 0;
+        self.reveal_selection = true;
         self.notice = Some(format!(
             "No launchable route yet: {error}. Sign in or repair a connection, then press R to retry."
         ));
+        self.notice_tone = NoticeTone::Warning;
     }
 }
 
@@ -398,7 +450,11 @@ pub async fn run(
                 let Some(event) = event else {
                     return Ok(Outcome::Cancel);
                 };
-                let CtEvent::Key(key) = event.context("onboarding event")? else {
+                let event = event.context("onboarding event")?;
+                if matches!(&event, CtEvent::Resize(_, _)) {
+                    state.terminal_resized();
+                }
+                let CtEvent::Key(key) = event else {
                     terminal.draw(|frame| draw(frame, &mut state))?;
                     continue;
                 };
@@ -443,10 +499,20 @@ pub async fn run(
                             crate::ui::resume_terminal_after_auth(terminal, crate::ui::UiMode::FullscreenTui)?;
                             login.unwrap_or_else(|error| format!("Sign-in failed: {error:#}"))
                         };
+                        let signed_in = crate::auth::detect(vendor).available();
                         if state.screen == Screen::Customize {
                             state.editor.refresh_after_auth(notice);
                         } else {
                             state.notice = Some(notice);
+                            state.notice_tone = if signed_in {
+                                NoticeTone::Success
+                            } else {
+                                NoticeTone::Warning
+                            };
+                            if signed_in && vendor == crate::auth::AuthVendor::OpenAi {
+                                state.selected = State::recommended_index();
+                                state.reveal_selection = true;
+                            }
                         }
                     }
                     action @ (Action::Resolve | Action::UseRecommended) => {
@@ -454,6 +520,7 @@ pub async fn run(
                             state.apply_recommended_setup();
                         }
                         state.notice = Some("Checking provider routes and role readiness…".to_string());
+                        state.notice_tone = NoticeTone::Info;
                         terminal.draw(|frame| draw(frame, &mut state))?;
                         match crate::roster::resolve_waiting_for_installs(&state.editor.config, cwd).await {
                             Ok(roster) => state.resolution_succeeded(roster),
@@ -468,68 +535,277 @@ pub async fn run(
     }
 }
 
+const PANEL_MAX_WIDTH: u16 = 104;
+const PANEL_MAX_HEIGHT: u16 = 30;
+const PANEL_MIN_HEIGHT: u16 = 14;
+
 fn draw(frame: &mut ratatui::Frame, state: &mut State) {
     if state.screen == Screen::Customize {
         draw_settings_panel(frame, frame.area(), &state.editor, "Customize Mjolnir");
         return;
     }
+
     let theme = state.config().theme.palette();
+    let panel_width = onboarding_panel_width(frame.area());
+    let mut lines = screen_lines(state, theme);
+    if let Some(notice) = &state.notice {
+        let (label, color) = match state.notice_tone {
+            NoticeTone::Info => ("SETUP STATUS", theme.primary),
+            NoticeTone::Success => ("CONNECTED", theme.success),
+            NoticeTone::Warning => ("NEEDS ATTENTION", theme.warning),
+        };
+        lines.push(Line::raw(""));
+        lines.push(section_heading(label, color));
+        lines.push(Line::styled(notice.clone(), Style::default().fg(color)));
+    }
+    let measured_lines = Paragraph::new(lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(panel_width.saturating_sub(2).max(1));
+    let footer_height = if panel_width.saturating_sub(2) < 72 {
+        2
+    } else {
+        1
+    };
+    let preferred_height = u16::try_from(measured_lines)
+        .unwrap_or(PANEL_MAX_HEIGHT)
+        .saturating_add(7 + footer_height)
+        .clamp(PANEL_MIN_HEIGHT, PANEL_MAX_HEIGHT);
+    let panel_area = onboarding_panel_area(frame.area(), preferred_height);
+    let panel = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.primary));
+    let inner = panel.inner(panel_area);
+    frame.render_widget(panel, panel_area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Min(6),
-            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(footer_height),
         ])
-        .split(frame.area());
+        .split(inner);
     frame.render_widget(
-        Paragraph::new(format!(" {} | guided setup ", mjolnir_version_label()))
-            .style(Style::default().add_modifier(Modifier::REVERSED)),
+        Paragraph::new(header_line(state, inner.width, theme)),
         rows[0],
     );
-    let (title, mut lines) = screen_lines(state, theme);
-    if let Some(notice) = &state.notice {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "Setup status",
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            notice.clone(),
-            Style::default().fg(theme.warning),
-        )));
-    }
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(rows[1]);
-    frame.render_widget(block.style(Style::default().fg(theme.primary)), rows[1]);
+    frame.render_widget(
+        Paragraph::new(progress_line(state, inner.width, theme)),
+        rows[1],
+    );
+
+    let selected_bounds = (state.screen == Screen::Connections && state.reveal_selection)
+        .then(|| connection_selection_bounds(&lines, rows[2].width));
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.text))
         .wrap(Wrap { trim: false });
-    let max_scroll = paragraph
-        .line_count(inner.width)
-        .saturating_sub(usize::from(inner.height))
+    let line_count = paragraph.line_count(rows[2].width);
+    let max_scroll = line_count
+        .saturating_sub(usize::from(rows[2].height))
         .min(u16::MAX as usize) as u16;
+    if let Some((start, end)) = selected_bounds {
+        let visible = usize::from(rows[2].height).max(1);
+        let current = usize::from(state.scroll);
+        let next = if end.saturating_sub(start) >= visible || start < current {
+            start
+        } else if end > current + visible {
+            end.saturating_sub(visible)
+        } else {
+            current
+        };
+        state.scroll = next.min(u16::MAX as usize) as u16;
+        state.reveal_selection = false;
+    }
     state.scroll = state.scroll.min(max_scroll);
-    frame.render_widget(paragraph.scroll((state.scroll, 0)), inner);
+    let body_area = if max_scroll == 0 && line_count < usize::from(rows[2].height) {
+        let height = u16::try_from(line_count).unwrap_or(rows[2].height).max(1);
+        Rect {
+            x: rows[2].x,
+            y: rows[2].y + (rows[2].height.saturating_sub(height) / 2),
+            width: rows[2].width,
+            height,
+        }
+    } else {
+        rows[2]
+    };
+    frame.render_widget(paragraph.scroll((state.scroll, 0)), body_area);
     frame.render_widget(
-        Paragraph::new(footer(state.screen)).style(Style::default().fg(theme.muted)),
-        rows[2],
+        Paragraph::new(footer_line(
+            state.screen,
+            inner.width,
+            max_scroll > 0,
+            theme,
+        ))
+        .wrap(Wrap { trim: false }),
+        rows[3],
     );
 }
 
-fn heading(text: impl Into<String>, theme: TerminalTheme) -> Line<'static> {
-    Line::from(Span::styled(
-        text.into(),
+fn onboarding_panel_width(area: Rect) -> u16 {
+    if area.width > PANEL_MAX_WIDTH + 2 {
+        PANEL_MAX_WIDTH
+    } else if area.width > 2 {
+        area.width - 2
+    } else {
+        area.width
+    }
+}
+
+fn onboarding_panel_area(area: Rect, preferred_height: u16) -> Rect {
+    let width = onboarding_panel_width(area);
+    let available_height = if area.height > 2 {
+        area.height - 2
+    } else {
+        area.height
+    };
+    let height = preferred_height.min(PANEL_MAX_HEIGHT).min(available_height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn header_line(state: &State, width: u16, theme: TerminalTheme) -> Line<'static> {
+    let brand = format!(" {} ", mjolnir_version_label().to_uppercase());
+    let context = match state.kind {
+        Kind::Fresh => "GUIDED SETUP",
+        Kind::Upgrade => "PRODUCT UPDATE",
+    };
+    let gap = usize::from(width).saturating_sub(brand.chars().count() + context.len());
+    let mut spans = vec![Span::styled(
+        brand,
         Style::default()
             .fg(theme.primary)
             .add_modifier(Modifier::BOLD),
-    ))
+    )];
+    if gap > 1 {
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(
+            context,
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    Line::from(spans)
 }
 
-fn selected_line(selected: bool, label: &str, detail: &str, theme: TerminalTheme) -> Line<'static> {
-    let marker = if selected { "> " } else { "  " };
+fn progress_line(state: &State, width: u16, theme: TerminalTheme) -> Line<'static> {
+    if state.kind == Kind::Upgrade {
+        let label = match state.screen {
+            Screen::WhatsNew => "WHAT'S NEW",
+            Screen::Connections => "CHECK CONNECTIONS",
+            Screen::Readiness => "CHANGES READY",
+            Screen::Welcome | Screen::Customize => "PRODUCT UPDATE",
+        };
+        return Line::styled(
+            label,
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        )
+        .centered();
+    }
+
+    let steps = &["WELCOME", "CONNECT", "READY"];
+    let current = match state.screen {
+        Screen::Welcome => 0,
+        Screen::Connections => 1,
+        Screen::Readiness => 2,
+        Screen::WhatsNew | Screen::Customize => 0,
+    };
+    if width < 58 {
+        return Line::styled(
+            format!(
+                "STEP {} OF {}  ·  {}",
+                current + 1,
+                steps.len(),
+                steps[current]
+            ),
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        )
+        .centered();
+    }
+
+    let mut spans = Vec::new();
+    for (index, label) in steps.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" ─── ", Style::default().fg(theme.subtle)));
+        }
+        let (marker, style) = if index < current {
+            (
+                "✓".to_string(),
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else if index == current {
+            (
+                (index + 1).to_string(),
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ((index + 1).to_string(), Style::default().fg(theme.muted))
+        };
+        spans.push(Span::styled(format!(" {marker} {label} "), style));
+    }
+    Line::from(spans).centered()
+}
+
+fn hero(
+    title: impl Into<String>,
+    subtitle: impl Into<String>,
+    theme: TerminalTheme,
+) -> Vec<Line<'static>> {
+    vec![
+        Line::styled(
+            title.into(),
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        )
+        .centered(),
+        Line::styled(subtitle.into(), Style::default().fg(theme.muted)).centered(),
+        Line::raw(""),
+    ]
+}
+
+fn section_heading(text: impl Into<String>, color: ratatui::style::Color) -> Line<'static> {
+    Line::styled(
+        format!("  {}", text.into()),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
+}
+
+fn role_line(
+    label: &str,
+    detail: impl Into<String>,
+    color: ratatui::style::Color,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("  {label:<12}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(detail.into()),
+    ])
+}
+
+fn choice_line(selected: bool, label: &str, status: &str, theme: TerminalTheme) -> Line<'static> {
+    let marker = if selected { ">" } else { " " };
+    let text = format!(" {marker} {label:<28} {status}");
     let style = if selected {
         Style::default()
             .fg(theme.selection_fg)
@@ -538,220 +814,439 @@ fn selected_line(selected: bool, label: &str, detail: &str, theme: TerminalTheme
     } else {
         Style::default().fg(theme.text)
     };
-    Line::from(Span::styled(format!("{marker}{label} — {detail}"), style))
+    Line::styled(text, style)
 }
 
-fn screen_lines(state: &State, theme: TerminalTheme) -> (&'static str, Vec<Line<'static>>) {
+fn connection_selection_bounds(lines: &[Line<'static>], width: u16) -> (usize, usize) {
+    let logical_line = lines
+        .iter()
+        .position(|line| line.to_string().trim_start().starts_with('>'))
+        .unwrap_or(0);
+    let width = width.max(1);
+    let start = Paragraph::new(lines[..logical_line].to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(width);
+    let end = Paragraph::new(lines[..=logical_line].to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(width);
+    (start, end)
+}
+
+fn detail_line(detail: impl Into<String>, theme: TerminalTheme) -> Line<'static> {
+    Line::styled(
+        format!("     {}", detail.into()),
+        Style::default().fg(theme.muted),
+    )
+}
+
+fn screen_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     match state.screen {
-        Screen::Welcome => (" How Mjolnir works ", welcome_lines(theme)),
-        Screen::WhatsNew => (" What changed ", whats_new_lines(theme)),
-        Screen::Connections => (" Connect Codex ", connection_lines(state, theme)),
-        Screen::ChoosePath => (" Choose your setup ", choose_path_lines(state, theme)),
-        Screen::Readiness => (" Ready to start ", readiness_lines(state, theme)),
+        Screen::Welcome => welcome_lines(theme),
+        Screen::WhatsNew => whats_new_lines(state, theme),
+        Screen::Connections => connection_lines(state, theme),
+        Screen::Readiness => readiness_lines(state, theme),
         Screen::Customize => unreachable!("custom settings draw separately"),
     }
 }
 
 fn welcome_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
-    vec![
-        heading("1. Codex owns your request", theme),
-        Line::raw(
-            "Codex keeps the conversation, overall plan, verification, corrections, and final answer. It decides what to do directly and what bounded work to delegate, then integrates the evidence that comes back.",
-        ),
-        Line::raw(""),
-        heading("2. Implementation subagents do bounded work", theme),
-        Line::raw(
-            "Subagents start fresh asynchronous sessions from standalone briefs. They can investigate, edit the authorized workspace, and test in parallel when tasks do not overlap. They may use different models or providers and report back; the primary must still verify their work.",
-        ),
-        Line::raw(""),
-        heading("3. The review team checks every changed turn", theme),
-        Line::raw(
-            "When automatic review is enabled, any completed turn that changed the workspace is reviewable after writers drain—even when the primary made every edit. A visible intent analyst reconstructs the contract; a supervisor on the primary route selects useful read-only specialists, vets their reports, and returns one verdict. Surviving findings go to the primary for correction, and changed corrections receive a focused delta review.",
-        ),
-        Line::raw(""),
-        heading("Codex first, other agents optional", theme),
-        Line::raw(
-            "The recommended setup keeps primary, subagent, and review work on Codex. Add other providers later for capacity, cost options, failover, or specialist diversity without changing Mjolnir's terminal, worktree, remote-control, voice, and review workflow.",
-        ),
-    ]
-}
-
-fn whats_new_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
-    vec![
-        heading("Mjolnir is now Codex-first", theme),
-        Line::raw(
-            "New users start with Codex as the primary, implementation-subagent, and review route. Other agents remain available as optional specialists or alternative routes.",
-        ),
-        Line::raw(""),
-        heading("The power features stay up front", theme),
-        Line::raw(
-            "Self-hosted remote control, a worktree-first workflow, local desktop voice, and integrated adversarial review remain part of the default Codex experience.",
-        ),
-        Line::raw(""),
-        heading("Your existing providers and settings stay in place", theme),
-        Line::raw(
-            "Continue to keep your saved routes unchanged, press C to customize them, or press S to skip this onboarding. Skipping records this onboarding version so it will not return.",
-        ),
-    ]
-}
-
-fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::raw(
-            "Codex is the recommended connection. Additional providers are optional and can add specialist models, capacity, failover, or cost choices later.",
-        ),
-        Line::raw(""),
-        heading("Account actions", theme),
-    ];
-    for (index, vendor) in crate::auth::AuthVendor::ALL.iter().copied().enumerate() {
-        lines.push(selected_line(
-            state.selected == index,
-            vendor.label(),
-            &format!(
-                "{}; provides {}",
-                crate::auth::detect(vendor).status(),
-                vendor.enables()
-            ),
-            theme,
-        ));
-    }
-    lines.push(selected_line(
-        state.selected == crate::auth::AuthVendor::ALL.len(),
-        "Continue",
-        "choose Codex or open full settings",
+    let mut lines = hero(
+        "ONE REQUEST. A COORDINATED TEAM.",
+        "Mjolnir gives Codex a team without splitting your conversation.",
         theme,
+    );
+    lines.push(
+        Line::from(vec![
+            Span::styled("YOU", Style::default().fg(theme.text)),
+            Span::styled("  ──►  ", Style::default().fg(theme.subtle)),
+            Span::styled(
+                "PRIMARY",
+                Style::default()
+                    .fg(theme.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ──►  ", Style::default().fg(theme.subtle)),
+            Span::styled(
+                "VERIFIED RESULT",
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+        .centered(),
+    );
+    lines.push(Line::raw(""));
+    lines.push(role_line(
+        "LEAD",
+        "Plans the work, coordinates the team, and owns the final answer",
+        theme.primary,
+    ));
+    lines.push(role_line(
+        "BUILD",
+        "Subagents investigate, implement, and test in parallel",
+        theme.secondary,
+    ));
+    lines.push(role_line(
+        "CHECK",
+        "Independent review challenges every changed turn",
+        theme.success,
     ));
     lines.push(Line::raw(""));
-    lines.push(heading("Detected runtimes", theme));
-    if state.inventory.servers.is_empty() {
-        lines.push(Line::raw("No ACP runtimes detected yet."));
-    } else {
-        for server in &state.inventory.servers {
-            let status = if server.installing {
-                "installing".to_string()
-            } else if let Some(error) = &server.error {
-                format!("needs repair: {error}")
-            } else if server.model_count > 0 {
-                format!("ready; {} model route(s)", server.model_count)
-            } else if server.detected {
-                "detected; no launchable model route".to_string()
-            } else {
-                "not detected".to_string()
-            };
-            lines.push(Line::raw(format!(
-                "  {} ({}) — {status}",
-                server.label, server.id
-            )));
-        }
-    }
+    lines.push(
+        Line::styled(
+            "One worktree  ·  visible delegation  ·  one verified result",
+            Style::default().fg(theme.muted),
+        )
+        .centered(),
+    );
     lines
 }
 
-fn choose_path_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
-    vec![
-        Line::raw(
-            "Start with automatic model selection constrained to Codex for every seat, or inspect every model and connection setting.",
-        ),
-        Line::raw(""),
-        selected_line(
-            state.selected == 0,
-            "Use Codex (recommended)",
-            "automatic Codex models for primary, subagents, and review",
+fn whats_new_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
+    let mut lines = hero(
+        "CODEX-FIRST, END TO END",
+        "New setups now use Codex for every role by default.",
+        theme,
+    );
+    lines.push(
+        Line::from(vec![
+            Span::styled("PRIMARY  CODEX", Style::default().fg(theme.primary)),
+            Span::styled("   ·   ", Style::default().fg(theme.subtle)),
+            Span::styled("BUILD  CODEX", Style::default().fg(theme.secondary)),
+            Span::styled("   ·   ", Style::default().fg(theme.subtle)),
+            Span::styled("CHECK  CODEX", Style::default().fg(theme.success)),
+        ])
+        .centered(),
+    );
+    lines.push(Line::raw(""));
+    lines.push(role_line(
+        "STILL HERE",
+        "Remote control, worktrees, local voice, and adversarial review",
+        theme.text,
+    ));
+    lines.push(Line::styled(
+        "  ✓  Your saved providers, routes, and settings will not change.",
+        Style::default()
+            .fg(theme.success)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if let Some(roster) = &state.roster {
+        lines.push(Line::raw(""));
+        lines.push(section_heading("YOUR CURRENT SETUP", theme.muted));
+        lines.push(role_line(
+            "PRIMARY",
+            format!(
+                "{}  ·  {}",
+                roster.primary.model.model, roster.primary.launch.source_id
+            ),
+            theme.primary,
+        ));
+        lines.push(role_line(
+            "BUILD",
+            roster.subagent_default.as_ref().map_or_else(
+                || "Primary only".to_string(),
+                |worker| {
+                    format!(
+                        "{}  ·  {}  ·  {} parallel",
+                        worker.model.model,
+                        worker.launch.source_id,
+                        state.config().subagents.max_parallel
+                    )
+                },
+            ),
+            theme.secondary,
+        ));
+        lines.push(role_line(
+            "CHECK",
+            roster.review_supervisor.as_ref().map_or_else(
+                || "No dedicated review supervisor".to_string(),
+                |reviewer| format!("{}  ·  {}", reviewer.model.model, reviewer.launch.source_id),
+            ),
+            theme.success,
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines.push(
+        Line::styled(
+            "Continue as-is, review the setup, or dismiss this update.",
+            Style::default().fg(theme.muted),
+        )
+        .centered(),
+    );
+    lines
+}
+
+fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
+    let mut lines = hero(
+        "START WITH CODEX",
+        "Use your existing ChatGPT or Codex sign-in. Other providers are optional.",
+        theme,
+    );
+    lines.push(section_heading("ACCOUNTS", theme.muted));
+    for (index, vendor) in crate::auth::AuthVendor::ALL.iter().copied().enumerate() {
+        let credential = crate::auth::detect(vendor);
+        let status = if credential.available() {
+            "✓ CONNECTED"
+        } else if vendor == crate::auth::AuthVendor::OpenAi {
+            "SIGN IN REQUIRED"
+        } else {
+            "OPTIONAL"
+        };
+        lines.push(choice_line(
+            state.selected == index,
+            vendor.label(),
+            status,
             theme,
-        ),
-        selected_line(
-            state.selected == 1,
-            "Customize",
-            "open full model, provider, review, parallelism, and appearance settings",
+        ));
+        lines.push(detail_line(
+            if credential.available() {
+                format!(
+                    "{}  ·  Enter to reconnect  ·  enables {}",
+                    credential.status(),
+                    vendor.enables()
+                )
+            } else {
+                format!("{}  ·  enables {}", credential.status(), vendor.enables())
+            },
             theme,
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines.push(section_heading("START", theme.muted));
+    lines.push(choice_line(
+        state.selected == State::recommended_index(),
+        "Use Codex defaults",
+        "RECOMMENDED",
+        theme,
+    ));
+    lines.push(detail_line(
+        format!(
+            "Automatic primary, builders, and review  ·  up to {} parallel",
+            state.config().subagents.max_parallel
         ),
-    ]
+        theme,
+    ));
+    lines.push(choice_line(
+        state.selected == State::customize_index(),
+        "Customize every route",
+        "ADVANCED",
+        theme,
+    ));
+    lines.push(detail_line(
+        "Models, providers, review, parallelism, and appearance",
+        theme,
+    ));
+    lines.push(Line::raw(""));
+    lines.push(section_heading("ROUTE CHECK", theme.muted));
+    if state.inventory.servers.is_empty() {
+        lines.push(detail_line("No ACP runtimes detected yet", theme));
+    } else {
+        let ready = state
+            .inventory
+            .servers
+            .iter()
+            .filter(|server| server.error.is_none() && server.model_count > 0)
+            .count();
+        let models: usize = state
+            .inventory
+            .servers
+            .iter()
+            .map(|server| server.model_count)
+            .sum();
+        lines.push(Line::styled(
+            format!("     ✓ {ready} runtime(s) ready  ·  {models} model route(s)"),
+            Style::default().fg(theme.success),
+        ));
+        for server in &state.inventory.servers {
+            let issue = if server.installing {
+                Some("installing".to_string())
+            } else if let Some(error) = &server.error {
+                Some(format!("needs repair: {error}"))
+            } else if server.detected && server.model_count == 0 {
+                Some("detected, but has no launchable model route".to_string())
+            } else {
+                None
+            };
+            if let Some(issue) = issue {
+                lines.push(Line::styled(
+                    format!("     {} ({})  ·  {issue}", server.label, server.id),
+                    Style::default().fg(theme.warning),
+                ));
+            }
+        }
+    }
+    lines
 }
 
 fn readiness_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     let Some(roster) = state.roster.as_ref() else {
-        return vec![Line::raw(
-            "Routes have not been resolved. Press R to retry.",
-        )];
+        return vec![
+            Line::styled(
+                "ROUTES NOT READY",
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .centered(),
+            Line::styled(
+                "Press R to check the configured routes again.",
+                Style::default().fg(theme.muted),
+            )
+            .centered(),
+        ];
     };
-    let mut lines = vec![
-        heading(
-            if roster.primary.launch.source_id == "codex-acp" {
-                "Codex Primary"
-            } else {
-                "Primary"
-            },
-            theme,
-        ),
-        Line::raw(format!(
-            "{} via {} — owns coordination, verification, correction, and the final answer",
+    let mut lines = hero(
+        "✓  YOUR CODING TEAM IS READY",
+        "Routes resolved. Nothing starts until you press Enter.",
+        theme,
+    );
+    lines.push(role_line(
+        "PRIMARY",
+        format!(
+            "{}  ·  {}",
             roster.primary.model.model, roster.primary.launch.source_id
-        )),
-        Line::raw(""),
-        heading("Implementation subagents", theme),
-    ];
+        ),
+        theme.primary,
+    ));
+    lines.push(detail_line(
+        "Coordinates, verifies, corrects, and owns the final answer",
+        theme,
+    ));
+    lines.push(Line::raw(""));
     if let Some(worker) = &roster.subagent_default {
         let alternatives = roster.subagent_failover_roles().len().saturating_sub(1);
-        lines.push(Line::raw(format!(
-            "{} via {}; up to {} parallel; {} failover alternative(s)",
-            worker.model.model,
-            worker.launch.source_id,
-            state.config().subagents.max_parallel,
-            alternatives
-        )));
+        lines.push(role_line(
+            "BUILD",
+            format!(
+                "{}  ·  {}  ·  {} parallel",
+                worker.model.model,
+                worker.launch.source_id,
+                state.config().subagents.max_parallel
+            ),
+            theme.secondary,
+        ));
+        lines.push(detail_line(
+            format!("Implementation subagents  ·  {alternatives} failover route(s)",),
+            theme,
+        ));
     } else {
-        lines.push(Line::raw(
-            "disabled; the primary performs implementation work directly",
+        lines.push(role_line(
+            "BUILD",
+            "Disabled  ·  the primary implements directly",
+            theme.secondary,
         ));
     }
     lines.push(Line::raw(""));
-    lines.push(heading("Review supervisor", theme));
     if let Some(supervisor) = &roster.review_supervisor {
-        lines.push(Line::raw(format!(
-            "{} via {}; supervises intent-aware review",
-            supervisor.model.model, supervisor.launch.source_id
-        )));
+        lines.push(role_line(
+            "CHECK",
+            format!(
+                "{}  ·  {}",
+                supervisor.model.model, supervisor.launch.source_id
+            ),
+            theme.success,
+        ));
+        lines.push(detail_line(
+            if state.config().agent.discrete_review {
+                if roster.subagent_default.is_some() {
+                    "Automatic review every changed turn  ·  specialist reviewers available"
+                } else {
+                    "Automatic review every changed turn  ·  no specialist worker pool"
+                }
+            } else {
+                "Review supervisor resolved, but automatic review is disabled"
+            },
+            theme,
+        ));
     } else {
-        lines.push(Line::raw(
-            "no dedicated supervisor route; review uses the degraded primary-only path",
+        lines.push(role_line(
+            "CHECK",
+            "No dedicated review supervisor  ·  degraded primary-only review",
+            theme.warning,
+        ));
+        lines.push(detail_line(
+            if state.config().agent.discrete_review {
+                "Automatic review uses the degraded path"
+            } else {
+                "Automatic review is disabled"
+            },
+            theme,
         ));
     }
     lines.push(Line::raw(""));
-    lines.push(heading("Specialist reviewers", theme));
-    lines.push(Line::raw(if roster.subagent_default.is_some() {
-        "worker pool available for selective read-only specialists"
-    } else {
-        "no worker pool; review falls back without specialist fan-out"
-    }));
-    lines.push(Line::raw(""));
-    lines.push(heading("Automatic review", theme));
-    lines.push(Line::raw(if state.config().agent.discrete_review {
-        "enabled for every changed turn after write-capable workers drain"
-    } else {
-        "disabled"
-    }));
-    lines.push(Line::raw(
-        "Usage is reported separately for primary, subagent, and review seats.",
-    ));
+    lines.push(
+        Line::styled(
+            "Usage is reported separately for primary, subagent, and review roles.",
+            Style::default().fg(theme.muted),
+        )
+        .centered(),
+    );
     for warning in &roster.warnings {
-        lines.push(Line::raw(format!("Warning: {warning}")));
+        lines.push(Line::styled(
+            format!("Warning: {warning}"),
+            Style::default().fg(theme.warning),
+        ));
     }
     lines
 }
 
-fn footer(screen: Screen) -> &'static str {
+fn footer_line(
+    screen: Screen,
+    width: u16,
+    scrollable: bool,
+    theme: TerminalTheme,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut action = |key: &'static str, label: &'static str| {
+        if !spans.is_empty() {
+            spans.push(Span::styled("   ", Style::default()));
+        }
+        spans.push(Span::styled(
+            format!(" {key} "),
+            Style::default()
+                .fg(theme.selection_fg)
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {label}"),
+            Style::default().fg(theme.muted),
+        ));
+    };
     match screen {
-        Screen::Welcome => "Enter/N continue | Up/Down/PgUp/PgDn scroll | Esc exit without saving",
+        Screen::Welcome => {
+            action("Enter", "Set up Mjolnir");
+            action("Esc", "Quit");
+        }
         Screen::WhatsNew => {
-            "Enter keep current setup | C customize | S/Esc skip this onboarding | scroll keys"
+            action("Enter", "Continue");
+            action("C", "Review setup");
+            action("S", "Dismiss");
+        }
+        Screen::Connections if width < 72 => {
+            action("Enter", "Choose");
+            action("Esc", "Back");
+            if scrollable {
+                action("PgUp/PgDn", "Scroll");
+            }
         }
         Screen::Connections => {
-            "Up/Down select | Enter sign in/continue | C full settings | R retry | Esc back"
+            action("Enter", "Choose");
+            action("C", "Customize");
+            action("R", "Recheck");
+            action("Esc", "Back");
         }
-        Screen::ChoosePath => "Up/Down select | Enter choose | Esc back",
-        Screen::Customize => "",
-        Screen::Readiness => "Enter Start session | C customize | R retry | scroll keys | Esc back",
+        Screen::Readiness => {
+            action("Enter", "Start session");
+            action("C", "Customize");
+            action("Esc", "Back");
+        }
+        Screen::Customize => {}
     }
+    if scrollable && width >= 82 {
+        action("PgUp/PgDn", "Scroll");
+    }
+    Line::from(spans).centered()
 }
 
 #[cfg(test)]
@@ -816,9 +1311,7 @@ mod tests {
         assert_eq!(state.screen, Screen::Welcome);
         assert_eq!(state.handle_key(KeyCode::Enter), Action::None);
         assert_eq!(state.screen, Screen::Connections);
-        state.selected = crate::auth::AuthVendor::ALL.len();
-        assert_eq!(state.handle_key(KeyCode::Enter), Action::None);
-        assert_eq!(state.screen, Screen::ChoosePath);
+        state.selected = State::recommended_index();
         assert_eq!(state.handle_key(KeyCode::Enter), Action::UseRecommended);
         state.apply_recommended_setup();
         assert_eq!(
@@ -843,9 +1336,8 @@ mod tests {
     #[test]
     fn customize_returns_to_readiness_without_losing_edits() {
         let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
-        state.change_screen(Screen::ChoosePath);
-        state.selected = 1;
-        assert_eq!(state.handle_key(KeyCode::Enter), Action::None);
+        state.change_screen(Screen::Readiness);
+        assert_eq!(state.handle_key(KeyCode::Char('c')), Action::None);
         assert_eq!(state.screen, Screen::Customize);
         state.editor.config.agent.discrete_review = false;
         assert_eq!(state.handle_key(KeyCode::Enter), Action::Resolve);
@@ -871,8 +1363,31 @@ mod tests {
     fn upgrade_education_is_versioned_separately_from_provider_setup() {
         let mut state = State::new(Kind::Upgrade, Config::default(), Some(roster()), None);
         assert_eq!(state.screen, Screen::WhatsNew);
-        assert_eq!(state.handle_key(KeyCode::Enter), Action::None);
-        assert_eq!(state.screen, Screen::Readiness);
+        assert_eq!(state.handle_key(KeyCode::Enter), Action::Finish);
+        assert_eq!(state.screen, Screen::WhatsNew);
+    }
+
+    #[test]
+    fn fresh_connection_defaults_to_the_next_required_action() {
+        assert_eq!(State::connection_selection_for_openai(false), 0);
+        assert_eq!(
+            State::connection_selection_for_openai(true),
+            State::recommended_index()
+        );
+    }
+
+    #[test]
+    fn customize_cancel_restores_the_candidate_and_returns_to_its_origin() {
+        let mut state = State::new(Kind::Upgrade, Config::default(), Some(roster()), None);
+        let original = state.config().clone();
+        assert_eq!(state.handle_key(KeyCode::Char('c')), Action::None);
+        assert_eq!(state.screen, Screen::Customize);
+        state.editor.config.agent.acp_source = Some("claude-acp".to_string());
+        state.editor.config.agent.discrete_review = false;
+        assert_eq!(state.handle_key(KeyCode::Esc), Action::None);
+        assert_eq!(state.screen, Screen::WhatsNew);
+        assert_eq!(state.config(), &original);
+        assert_eq!(state.handle_key(KeyCode::Enter), Action::Finish);
     }
 
     #[test]
@@ -907,12 +1422,67 @@ mod tests {
             .draw(|frame| draw(frame, &mut state))
             .expect("draw");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("Codex owns"), "rendered:\n{rendered}");
+        assert!(rendered.contains("ONE REQUEST"), "rendered:\n{rendered}");
         assert_eq!(state.handle_key(KeyCode::PageDown), Action::None);
         terminal
             .draw(|frame| draw(frame, &mut state))
             .expect("redraw");
         assert!(state.scroll > 0);
+    }
+
+    #[test]
+    fn narrow_connection_keeps_the_selected_action_and_scroll_help_visible() {
+        let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
+        state.change_screen(Screen::Connections);
+        state.selected = State::recommended_index();
+        state.reveal_selection = true;
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &mut state))
+            .expect("draw");
+        let rendered = terminal.backend().to_string();
+        assert!(
+            rendered.contains("Use Codex defaults"),
+            "rendered:\n{rendered}"
+        );
+        assert!(rendered.contains("PgUp/PgDn"), "rendered:\n{rendered}");
+
+        assert_eq!(state.handle_key(KeyCode::Down), Action::None);
+        terminal
+            .draw(|frame| draw(frame, &mut state))
+            .expect("redraw");
+        let rendered = terminal.backend().to_string();
+        assert!(
+            rendered.contains("Customize every route"),
+            "rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn resize_reveals_the_selected_connection_action_again() {
+        let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
+        state.change_screen(Screen::Connections);
+        state.selected = State::recommended_index();
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut state))
+            .expect("wide draw");
+        assert!(!state.reveal_selection);
+
+        terminal.backend_mut().resize(40, 12);
+        state.terminal_resized();
+        terminal
+            .draw(|frame| draw(frame, &mut state))
+            .expect("narrow redraw");
+
+        let rendered = terminal.backend().to_string();
+        assert!(
+            rendered.contains("Use Codex defaults"),
+            "rendered:\n{rendered}"
+        );
     }
 
     #[test]
@@ -948,13 +1518,81 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         for expected in [
-            "Primary",
+            "PRIMARY",
             "Implementation subagents",
-            "Review supervisor",
-            "Specialist reviewers",
+            "CHECK",
+            "specialist reviewers",
             "every changed turn",
-            "primary, subagent, and review seats",
+            "primary, subagent, and review roles",
         ] {
+            assert!(text.contains(expected), "missing {expected:?}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn wide_layout_caps_and_centers_the_setup_panel() {
+        let panel = onboarding_panel_area(Rect::new(0, 0, 160, 40), 42);
+        assert_eq!(panel.width, PANEL_MAX_WIDTH);
+        assert_eq!(panel.height, PANEL_MAX_HEIGHT);
+        assert_eq!(panel.x, 28);
+        assert_eq!(panel.y, 5);
+    }
+
+    #[test]
+    fn standard_layout_keeps_each_primary_action_visible() {
+        for (kind, screen, expected) in [
+            (Kind::Fresh, Screen::Welcome, "Set up Mjolnir"),
+            (Kind::Fresh, Screen::Connections, "Use Codex defaults"),
+            (Kind::Fresh, Screen::Readiness, "Start session"),
+            (Kind::Upgrade, Screen::WhatsNew, "Continue"),
+        ] {
+            let mut state = State::new(kind, Config::default(), Some(roster()), None);
+            state.screen = screen;
+            let backend = TestBackend::new(100, 30);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| draw(frame, &mut state))
+                .expect("draw");
+            let rendered = terminal.backend().to_string();
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?} on {screen:?}:\n{rendered}"
+            );
+            assert_eq!(state.scroll, 0, "{screen:?} should fit without scrolling");
+        }
+    }
+
+    #[test]
+    fn long_readiness_warning_remains_reachable_at_narrow_width() {
+        let mut ready = roster();
+        ready.warnings.push(format!(
+            "{} warning-tail",
+            "route fallback has detailed context; ".repeat(8)
+        ));
+        let mut state = State::new(Kind::Fresh, Config::default(), Some(ready), None);
+        state.screen = Screen::Readiness;
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        state.handle_key(KeyCode::End);
+        terminal
+            .draw(|frame| draw(frame, &mut state))
+            .expect("draw");
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("warning-tail"), "rendered:\n{rendered}");
+        assert!(state.scroll > 0);
+    }
+
+    #[test]
+    fn upgrade_card_shows_the_current_routes() {
+        let state = State::new(Kind::Upgrade, Config::default(), Some(roster()), None);
+        let text = whats_new_lines(&state, state.config().theme.palette())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in ["YOUR CURRENT SETUP", "gpt-test", "worker-test", "codex-acp"] {
             assert!(text.contains(expected), "missing {expected:?}:\n{text}");
         }
     }
