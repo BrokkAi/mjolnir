@@ -1,11 +1,16 @@
 ---
-title: Overview
-description: What Mjolnir owns, how the primary agent and subagents fit together, and when to use it.
+title: Architecture and boundaries
+description: What Mjolnir owns around Codex, how subagents fit, and where provider boundaries remain.
 ---
 
-Mjolnir (`mj`) is a native terminal client for Agent Client Protocol (ACP)
-servers. It owns the interface and the coordination around agents while an ACP
-adapter owns the provider-specific model session.
+Mjolnir (`mj`) is a native, self-hosted interface and control plane for Codex.
+It owns the terminal, remote server, local session state, and coordination
+around the agent while the Codex ACP bridge owns the provider-specific model
+session.
+
+The same architecture can host other Agent Client Protocol (ACP) servers, but
+Codex is the recommended primary experience. Other agents are optional routes
+for specialists, review, comparison, or replacement.
 
 ## The boundary
 
@@ -45,10 +50,12 @@ independently from launchable routes; subagents can be turned off entirely.
 - Isolate a session in a linked Git worktree and resume it later.
 - Run the same setup headlessly or through Mjolnir's remote viewer.
 
-Mjolnir is not a model provider, a hosted agent service, or a guarantee that an
-agent will make a correct change. Provider cost, capability, and data handling
-still apply. Start with [Install and run](/install/), then use the checked
-[10-minute evaluation](/evaluate/) in a disposable repository.
+Mjolnir is not a model provider, a hosted model service, or a guarantee that an
+agent will make a correct change. Its remote-control plane is self-hosted;
+Codex requests still use OpenAI. Provider cost, capability, and data handling
+still apply. Start with [Start with Codex](/codex/) and [Install and
+run](/install/), then use the checked
+[10-minute Codex evaluation](/evaluate/) in a disposable repository.
 
 ## Interfaces
 
@@ -60,5 +67,5 @@ still apply. Start with [Install and run](/install/), then use the checked
 | Resume | `mj resume` | Returning to an ACP session with saved route provenance |
 | Remote viewer | `mj server` | Driving the same session from another browser or device |
 
-Continue with [Subagents](/subagents/) for delegation semantics or [ACP
-adapters and models](/adapters/) for discovery and selection.
+Continue with [Subagents](/subagents/) for delegation semantics or [Other
+agents and models](/adapters/) for advanced discovery and selection.

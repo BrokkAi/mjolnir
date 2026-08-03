@@ -82,6 +82,6 @@ current release, not an unversioned promise that fields will never grow.
 They require explicit IDs, accept an optional `+<effort>` suffix, and are never
 written back to the config file.
 
-For a controlled first run, use the [10-minute evaluation](/evaluate/). For
+For a controlled first run, use the [10-minute Codex evaluation](/evaluate/). For
 networked access to an interactive session, continue with [Remote
 control](/remote/).

@@ -55,8 +55,8 @@ const hammerArt = [...hammerMask]
     <p class="hero-kicker">
       <span aria-hidden="true"></span> Mjolnir by <a href="https://brokk.ai" rel="external">Brokk</a>
     </p>
-    <h1 id="_top">One terminal.<br /><em>A swarm</em> of subagents.</h1>
-    <p class="hero-tagline">Mjolnir gives one coding agent a workshop of background subagents, a shared terminal, and one consistent way to work—no matter which model is behind the hammer.</p>
+    <h1 id="_top">The power<br /><em>frontend</em> for Codex.</h1>
+    <p class="hero-tagline">Keep the workspace and control plane on your machine. Control Codex remotely, speak your prompts, delegate in parallel, and challenge changes before they land.</p>
     {
       actions.length > 0 && (
         <div class="hero-actions">
@@ -69,14 +69,14 @@ const hammerArt = [...hammerMask]
         </div>
       )
     }
-    <ul class="hero-facts" aria-label="How the work is split">
-      <li><span>01 / PRIMARY</span><strong>Directs the work</strong></li>
-      <li><span>02 / SUBAGENTS</span><strong>Forge it in parallel</strong></li>
-      <li><span>03 / REVIEW</span><strong>Vets it before it lands</strong></li>
+    <ul class="hero-facts" aria-label="What Mjolnir adds to Codex">
+      <li><span>01 / CONTROL</span><strong>Self-hosted + remote</strong></li>
+      <li><span>02 / INPUT</span><strong>Terminal + voice</strong></li>
+      <li><span>03 / REVIEW</span><strong>Adversarial by design</strong></li>
     </ul>
   </div>
 
-  <div class="storm-console mj-panel" aria-label="How a Mjolnir turn runs, and which agents can take each seat">
+  <div class="storm-console mj-panel" aria-label="How Codex and Mjolnir run a delegated, reviewed turn">
     <div class="console-bar">
       <span><i></i> SESSION</span>
     </div>
@@ -84,7 +84,7 @@ const hammerArt = [...hammerMask]
       <div
         class="turn-flow"
         role="img"
-        aria-label="Your prompt goes to the primary agent, which owns the turn and launches background subagents with standalone briefs; each subagent pushes its report back and the answer returns to you in the same terminal. Once the turn changes the workspace, specialist review lanes re-read the diff and an adversarial supervisor holds the completed turn until it is clean."
+        aria-label="Your prompt goes to Codex, which owns the turn and can launch background subagents with standalone briefs; each subagent pushes its report back and the answer returns through Mjolnir. Once delegated work changes the workspace, specialist review lanes can re-read the diff and an adversarial supervisor holds the completed turn until review finishes."
       >
         <div class="flow-node flow-node--you">
           <div><strong>YOU</strong><span>/ ONE TERMINAL</span></div>
@@ -96,7 +96,7 @@ const hammerArt = [...hammerMask]
         </div>
 
         <div class="flow-node flow-node--primary">
-          <div><strong>PRIMARY</strong><span>/ COORDINATES</span></div>
+          <div><strong>CODEX</strong><span>/ OWNS THE TURN</span></div>
           <small>plans the work · writes the briefs</small>
         </div>
 
@@ -123,23 +123,23 @@ const hammerArt = [...hammerMask]
     </div>
     <div class="seat-board">
       <div class="seat-head">
-        <span>SEATS / ANY ACP AGENT</span>
-        <small>MODEL-FIRST ROUTING</small>
+        <span>SEATS / CODEX FIRST</span>
+        <small>OTHER AGENTS OPTIONAL</small>
       </div>
       <ul class="seat-list">
         <li>
           <b>PRIMARY</b>
-          <span>owns the turn and launches the subagents</span>
-          <em class="seat-route" data-seat-rotator data-agents="Claude Code|Codex|OpenCode|Kimi|pi" aria-hidden="true">Codex</em>
+          <span>Codex owns the turn and launches the subagents</span>
+          <em class="seat-route" aria-hidden="true">Codex</em>
         </li>
         <li>
           <b>SUBAGENT</b>
           <span>runs one standalone brief in a fresh session</span>
-          <em class="seat-route" data-seat-rotator data-agents="Claude Code|Codex|OpenCode|Kimi|pi" aria-hidden="true">Claude Code</em>
+          <em class="seat-route" data-seat-rotator data-agents="Codex|Claude Code|Kimi|Anvil" aria-hidden="true">Codex</em>
         </li>
       </ul>
       <p class="seat-note">
-        Bring your favorite coding agent to each seat — one to direct the turn, a pool of them to do the work.
+        Start with Codex in every seat. Add other models as specialists when the work benefits from them.
       </p>
     </div>
   </div>

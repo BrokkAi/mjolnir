@@ -23,7 +23,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'Mjolnir',
-      description: 'A forge-grade terminal client for a coding agent and its subagents.',
+      description: 'The self-hosted power frontend for Codex, with remote control, voice, subagents, worktrees, and adversarial review.',
       head: [
         { tag: 'link', attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' } },
         { tag: 'link', attrs: { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: true } },
@@ -43,7 +43,7 @@ export default defineConfig({
           tag: 'meta',
           attrs: {
             property: 'og:image:alt',
-            content: 'Mjolnir: one terminal, a swarm of subagents, with an ASCII-art hammer.',
+            content: 'Mjolnir: the self-hosted power frontend for Codex, with an ASCII-art hammer.',
           },
         },
         { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
@@ -52,7 +52,7 @@ export default defineConfig({
           tag: 'meta',
           attrs: {
             name: 'twitter:image:alt',
-            content: 'Mjolnir: one terminal, a swarm of subagents, with an ASCII-art hammer.',
+            content: 'Mjolnir: the self-hosted power frontend for Codex, with an ASCII-art hammer.',
           },
         },
       ],
@@ -74,38 +74,40 @@ export default defineConfig({
       ],
       sidebar: [
         {
-          label: 'Start',
+          label: 'Start with Codex',
           items: [
-            { label: 'Overview', slug: 'overview' },
+            { label: 'Why Mjolnir for Codex', slug: 'codex' },
             { label: 'Install and run', slug: 'install' },
-            { label: '10-minute evaluation', slug: 'evaluate' },
-            { label: 'License and use cases', slug: 'license-use-cases' },
+            { label: '10-minute Codex evaluation', slug: 'evaluate' },
             { label: 'Data and trust boundaries', slug: 'data-boundaries' },
           ],
         },
         {
-          label: 'Agents',
+          label: 'Codex workflows',
           items: [
+            { label: 'Remote control', slug: 'remote' },
+            { label: 'Voice dictation', slug: 'voice' },
             { label: 'Subagents', slug: 'subagents' },
-            { label: 'ACP adapters and models', slug: 'adapters' },
-            { label: 'Delegation and review', slug: 'delegation-review' },
-          ],
-        },
-        {
-          label: 'Guides',
-          items: [
-            { label: 'Configuration', slug: 'configuration' },
+            { label: 'Delegation and adversarial review', slug: 'delegation-review' },
             { label: 'Permissions and workspace scope', slug: 'permissions' },
             { label: 'Sessions, worktrees, and resume', slug: 'sessions-worktrees' },
             { label: 'Headless automation', slug: 'headless' },
-            { label: 'Remote control', slug: 'remote' },
+          ],
+        },
+        {
+          label: 'Extend Mjolnir',
+          items: [
+            { label: 'Other agents and models', slug: 'adapters' },
+            { label: 'Configuration', slug: 'configuration' },
           ],
         },
         {
           label: 'Reference',
           items: [
             { label: 'CLI and keyboard', slug: 'cli-reference' },
+            { label: 'Architecture and boundaries', slug: 'overview' },
             { label: 'Storage and network activity', slug: 'storage-network' },
+            { label: 'License and use cases', slug: 'license-use-cases' },
             { label: 'Third-party notices', slug: 'third-party-notices' },
           ],
         },

@@ -1,43 +1,43 @@
 ---
-title: Mjolnir
-description: A forge-grade terminal client for a coding agent and its subagents.
+title: Mjolnir for Codex
+description: The self-hosted power frontend for Codex, with remote control, voice, subagents, worktrees, and adversarial review.
 template: splash
 hero:
-  title: One terminal. A swarm of subagents.
-  tagline: Mjolnir gives one coding agent a workshop of background subagents, a shared terminal, and one consistent way to work.
+  title: The power frontend for Codex.
+  tagline: Keep the workspace and control plane on your machine. Control Codex remotely, speak your prompts, delegate in parallel, and challenge changes before they land.
   actions:
+    - text: Start with Codex
+      link: codex/
+      icon: right-arrow
+      variant: primary
     - text: Install mj
       link: install/
       icon: right-arrow
-      variant: primary
-    - text: Overview
-      link: https://github.com/BrokkAi/mjolnir
-      icon: external
       variant: secondary
 ---
 
 <section class="home-section">
-  <p class="section-label">Primary and subagents</p>
-  <h2>One agent owns the outcome. Many do the work.</h2>
-  <p>Mjolnir turns a single coding session into a small, deliberate crew. The primary agent plans, delegates, and reviews; each subagent runs in a fresh session and pushes its report back into the conversation.</p>
+  <p class="section-label">Codex, with an operating environment</p>
+  <h2>More control around the agent you already use.</h2>
+  <p>Codex still plans, edits, runs tools, and answers. Mjolnir adds the native interface, self-hosted remote control, voice, background delegation, worktree isolation, durable sessions, and adversarial review around it.</p>
   <div class="role-grid">
     <div class="role-grid__inner">
       <article>
-        <small>01 / COORDINATE</small>
-        <h3>The primary directs</h3>
-        <p>Owns every user turn, writes the standalone briefs, reviews what comes back, and delivers the answer.</p>
-        <code>agent://primary</code>
+        <small>01 / RUN</small>
+        <h3>Codex owns the turn</h3>
+        <p>Your Codex account, models, tools, and reasoning stay at the center of the coding session.</p>
+        <code>agent://codex</code>
       </article>
       <article>
-        <small>02 / DELEGATE</small>
-        <h3>Subagents forge</h3>
-        <p>Background sessions, all write-capable, each reporting its result, activity log, and diff when it finishes.</p>
-        <code>tool://create_subagent</code>
+        <small>02 / CONTROL</small>
+        <h3>Mjolnir runs the workshop</h3>
+        <p>Terminal and browser access, voice, permissions, sessions, worktrees, and parallel agents stay under your control.</p>
+        <code>host://self</code>
       </article>
       <article>
         <small>03 / REVIEW</small>
-        <h3>Review challenges</h3>
-        <p>Once the delegated work lands, specialist lanes re-read the diff and an adversarial supervisor vets their findings before the turn completes.</p>
+        <h3>Adversaries challenge the diff</h3>
+        <p>A separate supervisor forms a risk map, calls focused specialist lanes when needed, and vets their findings.</p>
         <code>agent://review</code>
       </article>
     </div>
@@ -45,39 +45,40 @@ hero:
 </section>
 
 <section class="home-section">
-  <p class="section-label">A terminal, not a compromise</p>
-  <h2>Agent work that feels native to the command line.</h2>
-  <p>Inline rendering keeps the shell in view while Mjolnir handles streaming, permissions, tools, stable workflow progress, nested subagent detail, sessions, worktrees, and model-specific controls.</p>
+  <p class="section-label">Why Mjolnir</p>
+  <h2>Codex where you are, with stronger controls.</h2>
+  <p>The repository and Mjolnir server stay on your machine. Work from the terminal or a remote browser, dictate prompts locally on desktop, and keep every permission and nested agent attributable.</p>
   <div class="capability-grid">
     <div class="capability-grid__inner">
-      <a href="subagents/">
-        <span>01 / ORCHESTRATE</span><h3>Parallel subagents</h3><p>Launch background work, watch it live, and get each report pushed back into the turn.</p>
-      </a>
-      <a href="configuration/">
-        <span>02 / CONTROL</span><h3>Explicit permissions</h3><p>Keep agent choices readable and interactive without leaving the terminal.</p>
-      </a>
-      <a href="sessions-worktrees/">
-        <span>03 / RESUME</span><h3>Durable sessions</h3><p>Resume the original route and isolate work in linked Git worktrees.</p>
-      </a>
       <a href="remote/">
-        <span>04 / AUTOMATE</span><h3>Headless + remote</h3><p>Drive the same session from scripts, JSON streams, or a remote client.</p>
+        <span>01 / REMOTE</span><h3>Self-hosted control</h3><p>Drive the same live session from another browser or device without moving the checkout.</p>
+      </a>
+      <a href="voice/">
+        <span>02 / SPEAK</span><h3>Local voice input</h3><p>Dictate and edit prompts on macOS, Linux, and Windows before sending them to Codex.</p>
+      </a>
+      <a href="subagents/">
+        <span>03 / DELEGATE</span><h3>Parallel subagents</h3><p>Give Codex background workers and receive each report, activity log, and diff in the turn.</p>
+      </a>
+      <a href="delegation-review/">
+        <span>04 / CHALLENGE</span><h3>Adversarial review</h3><p>Hold delegated changes for an independent, findings-only review before completion.</p>
       </a>
     </div>
   </div>
 </section>
 
 <section class="home-section">
-  <p class="section-label">Short by design</p>
-  <h2>Install it. Open a repository. Type two letters.</h2>
-  <div class="command-strip" aria-label="Run Mjolnir"><span>❯</span><code>mj</code><small>AGENT READY</small></div>
+  <p class="section-label">Codex-first, not Codex-only</p>
+  <h2>Start with Codex. Add specialists when they earn a seat.</h2>
+  <p>Claude, Kimi, Anvil, and custom ACP servers remain available as alternative primaries, subagents, or reviewers. You do not need to configure any of them to get started.</p>
+  <div class="command-strip" aria-label="Run Mjolnir with Codex"><span>❯</span><code>mj</code><small>CODEX READY</small></div>
 </section>
 
 <section class="home-section">
   <div class="docs-callout">
     <div>
-      <p class="section-label">Documentation preview</p>
-      <h2>Start with the shape of the system.</h2>
-      <p>Install Mjolnir, run the checked evaluation, understand how subagents are launched and reported, and inspect the permission, data, and licensing boundaries before putting it to work.</p>
+      <p class="section-label">Ten minutes, disposable repository</p>
+      <h2>See the complete Codex workflow.</h2>
+      <p>Run a checked fixture through delegated implementation, pushed-back reports, adversarial review, session resume, and headless output before using Mjolnir on a private repository.</p>
     </div>
     <a href="evaluate/">Run the evaluation <span aria-hidden="true">→</span></a>
   </div>

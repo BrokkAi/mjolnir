@@ -197,4 +197,4 @@ headless invocation, `--subagent-model disabled` overrides the saved choice
 without changing the config file.
 
 Continue with [Delegation and review](/delegation-review/) for task shaping, or
-[ACP adapters and models](/adapters/) for how routes are selected.
+[Other agents and models](/adapters/) for how routes are selected.

@@ -1,9 +1,13 @@
 ---
-title: ACP adapters and models
-description: How Mjolnir discovers providers, probes ACP capabilities, and selects model routes.
+title: Other agents and models
+description: Add specialist models, alternative agents, Anvil, or custom ACP servers after the Codex path works.
 ---
 
-Mjolnir selects a model for the primary agent and a default model for
+Codex is Mjolnir's recommended primary experience. You can keep Codex in every
+seat or add another agent when a subtask, independent review, or provider
+fallback benefits from it.
+
+Under the hood, Mjolnir selects a model for the primary agent and a default model for
 subagents, then chooses a launchable Agent Client Protocol adapter that can
 provide each. An adapter must advertise ACP Streamable HTTP MCP support to enter
 the roster at all: that is how Mjolnir attaches the `mj-subagents` server the
@@ -11,7 +15,7 @@ primary agent calls `create_subagent` through. An adapter that does not is
 excluded with `ACP server does not advertise mcpCapabilities.http`, and with no
 qualifying adapter no model is launchable.
 
-## Built-in routes
+## Available routes
 
 | Route | Discovery | Launch notes |
 | --- | --- | --- |
@@ -41,7 +45,7 @@ session, `/models refresh` also clears Mjolnir's process-local probe results;
 run `/new` or `/clear` afterward to resolve models and reprobe every enabled
 adapter. The current session keeps its already-bound models.
 
-## Auto selection
+## Auto selection and Codex priority
 
 - The primary prefers the strongest launchable eligible row.
 - The review supervisor prefers the strongest distinct model after the primary,
@@ -56,7 +60,11 @@ adapter. The current session keeps its already-bound models.
   Auto or Ragnarok.
 
 Availability, credentials, cached capabilities, and the current ranking can
-change the result. Use `/agents` to record what actually launched.
+change the result. Auto chooses across launchable ranked models; adapter
+priority decides between adapters that provide the selected model. Therefore,
+adding another detected provider can change an Auto-resolved seat even though
+Codex is first in adapter priority. Use explicit model selections when a seat
+must stay on Codex, and use `/agents` to record what actually launched.
 
 ## Custom ACP servers
 

@@ -1,10 +1,10 @@
 ---
 title: Install and run
-description: Choose the release bundle, Cargo crates, or source build and connect a provider.
+description: Install Mjolnir, connect Codex, and launch the recommended first session.
 ---
 
-Mjolnir needs at least one supported provider account and a launchable ACP
-adapter. Provider use may incur cost. The first launch can also download an ACP
+The recommended setup needs an authenticated Codex CLI and a launchable Codex
+ACP bridge. Codex use may incur cost. The first launch can also download an ACP
 bridge, the managed Anvil runtime, registry metadata, model rankings, or voice
 assets. Review [Data and trust boundaries](/data-boundaries/) before using a
 private repository.
@@ -70,20 +70,36 @@ You only need Rust to build from source or contribute. See
 [CONTRIBUTING.md](https://github.com/BrokkAi/mjolnir/blob/master/CONTRIBUTING.md)
 for voice prerequisites and the full validation matrix.
 
-## Connect a provider
+## Connect Codex
 
-Run `mj`, then open `/mjconfig`:
+Install and authenticate the official Codex CLI if it is not already
+available:
 
-1. In **Accounts**, sign in or verify an existing provider credential.
-2. In **ACP Servers**, confirm at least one adapter is available.
-3. In **Agents**, keep the primary and subagent models on Auto or select explicit models.
-4. Start a new session after changing models or adapters.
+```bash
+npm install -g @openai/codex
+codex login
+```
 
-Existing Codex or Claude credentials can be detected without launching their
-ACP bridges during discovery. Launch still requires Node.js/npm, `npx`, and the
-corresponding PATH-visible vendor CLI. The official `codex` or `claude` CLI is
-also used when you choose Mjolnir's sign-in action for that vendor.
-Mjolnir can install Kimi and supported binary agents from the ACP registry.
+Run `mj`. First launch opens Mjolnir's configuration screen:
+
+1. In **Accounts**, verify that OpenAI / ChatGPT reports you are signed in.
+2. In **ACP Servers**, confirm that Codex is detected and enabled.
+3. In **Agents**, keep the primary model on Auto or select a Codex model.
+4. Keep discrete review enabled if you want delegated workspace changes
+   challenged before completion.
+5. Start a new session after changing models or adapters.
+
+Return to the same settings later with `/mjconfig`.
+
+Existing Codex credentials can be detected without launching the ACP bridge
+during discovery. Launch still requires Node.js/npm, `npx`, and the
+PATH-visible `codex` CLI. Mjolnir uses that CLI for its Codex sign-in action as
+well.
+
+Claude, Kimi, Anvil, and custom ACP servers are optional. Configure them after
+the Codex path works if you want alternative primary, subagent, or review
+routes. Mjolnir can install Kimi and supported binary agents from the ACP
+registry.
 
 Adapters must advertise ACP Streamable HTTP MCP support; Mjolnir uses that
 capability to expose its authenticated `mj-subagents` tools to the primary
@@ -95,7 +111,7 @@ agent.
 mj --version
 ```
 
-Then run the [10-minute evaluation](/evaluate/). A successful `mj --version`
+Then run the [10-minute Codex evaluation](/evaluate/). A successful `mj --version`
 only proves the binary starts; it does not prove that a provider route can
 launch or that delegation works end to end.
 

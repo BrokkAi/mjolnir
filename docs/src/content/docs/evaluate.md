@@ -1,13 +1,13 @@
 ---
-title: Evaluate Mjolnir in ten minutes
-description: Exercise the primary agent, subagents, review, resume, and headless output in a disposable fixture.
+title: Evaluate Codex in Mjolnir in ten minutes
+description: Exercise Codex, subagents, adversarial review, resume, and headless output in a disposable fixture.
 ---
 
 > Fixture and CLI surface reviewed against Mjolnir 1.0.2 on 2026-07-26.
 > Live provider output is model- and availability-dependent and is not run in docs CI.
 
-This evaluation uses a checked-in Python fixture in a disposable Git
-repository. It proves that a configured session can inspect a small project,
+This evaluation uses Codex with a checked-in Python fixture in a disposable Git
+repository. It proves that a configured Codex session can inspect a small project,
 delegate a bounded change to a background subagent, surface that subagent's live
 status and its pushed-back report, run an explicit review, preserve a resumable
 session, and emit headless stream records.
@@ -23,11 +23,12 @@ You need:
 - Mjolnir installed and `mj --version` working.
 - Python 3 for the fixture test.
 - Git.
-- At least one authenticated, launchable provider route. Provider use may cost money.
+- An authenticated, launchable Codex route. Codex use may cost money.
 
-Run `mj`, open `/mjconfig`, and confirm on the Agents tab that the primary and
-subagent models resolve to available models. Model or ACP-server changes apply to the next session, so exit and
-relaunch after changing them.
+Run `mj`, open `/mjconfig`, and confirm on the Agents tab that the primary
+resolves through Codex. Confirm the subagent and review seats as well if you
+want this run to remain Codex-only. Model or ACP-server changes apply to the
+next session, so exit and relaunch after changing them.
 
 ## Prepare the disposable fixture
 
@@ -138,9 +139,10 @@ subagent report has been delivered.
 
 ## Interpret the result
 
-A successful run proves the selected provider route can support the core
-delegation path on one small repository. Compare providers by repeating the same
-fixture and recording model IDs, elapsed time, token/cost telemetry, whether the
+A successful run proves the selected Codex route can support the core
+delegation path on one small repository. Compare models or advanced provider
+routes by repeating the same fixture and recording model IDs, elapsed time,
+token/cost telemetry, whether the
 delegation occurred, test outcome, review outcome, and any manual intervention.
 
 Before broader use, read [Permissions and workspace scope](/permissions/) and

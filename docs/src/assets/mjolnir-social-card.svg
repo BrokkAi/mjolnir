@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
   <title id="title">Mjolnir social card</title>
-  <desc id="description">Mjolnir, a native Rust terminal interface for coordinating a coding agent and its subagents, illustrated with a fixed-grid ASCII hammer.</desc>
+  <desc id="description">Mjolnir, the self-hosted power frontend for Codex, illustrated with a fixed-grid ASCII hammer.</desc>
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0b0910"/>
@@ -35,21 +35,21 @@
     <path d="M4 7H38" stroke="#d9c7ff" stroke-width="2" opacity="0.7"/>
     <text x="60" y="25" fill="#f5f1ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" font-weight="800" letter-spacing="4">MJOLNIR</text>
     <path d="M226 2V30" stroke="#514361"/>
-    <text x="246" y="23" fill="#8d819c" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="700" letter-spacing="3">TERMINAL AGENT</text>
+    <text x="246" y="23" fill="#8d819c" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="700" letter-spacing="3">CODEX FRONTEND</text>
   </g>
 
   <g transform="translate(58 206)">
     <text fill="#f6f2ff" font-family="Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif" font-size="72" font-weight="800" letter-spacing="1">
-      <tspan x="0" y="0">ONE TERMINAL.</tspan>
-      <tspan x="0" y="78">A SWARM OF</tspan>
-      <tspan x="0" y="156">SUBAGENTS.</tspan>
+      <tspan x="0" y="0">THE POWER</tspan>
+      <tspan x="0" y="78">FRONTEND FOR</tspan>
+      <tspan x="0" y="156">CODEX.</tspan>
     </text>
     <text x="2" y="208" fill="#b5aabd" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="20">
-      Native Rust TUI · Model-first agents · One shared terminal
+      Self-hosted control · Remote · Voice · Adversarial review
     </text>
   </g>
 
-  <text x="1142" y="74" text-anchor="end" fill="#8f839b" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" letter-spacing="2.2">RUST 2024  ·  ACP NATIVE  ·  PARALLEL SUBAGENTS</text>
+  <text x="1142" y="74" text-anchor="end" fill="#8f839b" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" letter-spacing="2.2">NATIVE RUST  ·  SELF-HOSTED CONTROL  ·  CODEX FIRST</text>
 
   <g>
     <ellipse cx="925" cy="330" rx="280" ry="270" fill="url(#hammerGlow)"/>

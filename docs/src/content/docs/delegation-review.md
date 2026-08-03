@@ -1,9 +1,9 @@
 ---
-title: Delegation and review
-description: Shape standalone subagent briefs and interpret Mjolnir's discrete review.
+title: Delegation and adversarial review
+description: Give Codex bounded subagent work and interpret Mjolnir's independent review pass.
 ---
 
-Delegation works best when the task has a clear seam, concrete inputs, and an
+Codex delegation works best when the task has a clear seam, concrete inputs, and an
 observable finish condition. A subagent runs in a brand-new session with no
 memory of the conversation, so the brief has to carry everything.
 
@@ -107,4 +107,4 @@ When comparing setups, record the exact primary and subagent models and
 adapters, how many subagents ran and whether they overlapped, permission
 decisions, elapsed time, token and cost telemetry, validation result, review
 findings, and whether the requested delegation actually occurred. The checked
-[10-minute evaluation](/evaluate/) provides a small common task.
+[10-minute Codex evaluation](/evaluate/) provides a small common task.

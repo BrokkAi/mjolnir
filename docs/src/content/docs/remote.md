@@ -1,10 +1,12 @@
 ---
 title: Remote control
-description: Expose the same session to a browser with explicit network and session boundaries.
+description: Control the Codex session on your machine from a browser with explicit network and session boundaries.
 ---
 
-`mj server` starts Mjolnir's remote-control server with the same resolved models
-and subagent configuration as the terminal client.
+`mj server` starts Mjolnir's self-hosted remote-control server with the same
+resolved Codex model and subagent configuration as the terminal client. The
+repository and agent processes stay on the host running Mjolnir; the browser is
+a control surface for that session.
 
 ## Default local server
 
