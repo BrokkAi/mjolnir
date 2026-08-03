@@ -1684,6 +1684,12 @@ where
         )
         .on_receive_request(
             async move |request: CreateElicitationRequest, responder, cx| {
+                tracing::debug!(
+                    event = "create_elicitation_request",
+                    message = %request.message,
+                    mode = ?request.mode,
+                    "received ACP elicitation request"
+                );
                 // Unlike permissions, do NOT gate on `is_active_session`:
                 // request-scoped elicitations (the `/setup` case) have no
                 // session and would be wrongly dropped. Render whatever

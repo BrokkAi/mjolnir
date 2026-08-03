@@ -17,7 +17,7 @@ use crate::deepseek_balance::DeepSeekBalanceStatus;
 use crate::openrouter_balance::OpenRouterBalanceStatus;
 use agent_client_protocol::schema::v1::{
     AvailableCommand, Diff, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
-    EnumOption, Plan, PlanEntry, SessionConfigKind, SessionConfigOption,
+    EnumOption, MultiSelectItems, Plan, PlanEntry, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOptions,
     SessionConfigValueId, SessionUpdate, StopReason, TerminalExitStatus, ToolCall, ToolCallContent,
     ToolCallStatus, ToolCallUpdate, ToolKind, Usage, UsageUpdate,
@@ -1073,17 +1073,67 @@ pub struct PendingPermission {
 #[derive(Debug)]
 pub struct PendingElicitation {
     pub prompt: ElicitationPrompt,
-    /// Cursor into the single-select option list. Ignored by URL/unsupported
-    /// views, which have no selectable options.
+    /// Cursor into the active single- or multi-select option list. Ignored by
+    /// URL, text, and unsupported views.
     pub selected: usize,
     /// Manual scroll position for content taller than the modal (e.g. a URL
     /// QR code). `None` auto-scrolls to keep the selected option visible.
     pub scroll_offset: Option<usize>,
-    /// Typed buffer for a [`ElicitationView::Text`] free-text field. Editing is
-    /// append/backspace at the end (the cursor renders after the last char);
-    /// empty for every other view.
+    /// Typed buffer for a free-text field, including the active text field in
+    /// a multi-property form. Editing is append/backspace at the end.
     pub input: String,
+    /// Current field and accumulated answers for a multi-property form.
+    pub form_field: usize,
+    pub form_content: BTreeMap<String, ElicitationContentValue>,
+    /// Selected option indices for the active multi-select field.
+    pub multi_selected: HashSet<usize>,
     pub subagent_id: Option<u64>,
+}
+
+impl PendingElicitation {
+    pub fn new(prompt: ElicitationPrompt, subagent_id: Option<u64>) -> Self {
+        Self {
+            prompt,
+            selected: 0,
+            scroll_offset: None,
+            input: String::new(),
+            form_field: 0,
+            form_content: BTreeMap::new(),
+            multi_selected: HashSet::new(),
+            subagent_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElicitationFormField {
+    pub property_name: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub required: bool,
+    pub kind: ElicitationFormFieldKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ElicitationFormFieldKind {
+    SingleSelect {
+        options: Vec<EnumOption>,
+    },
+    MultiSelect {
+        options: Vec<EnumOption>,
+        min_items: Option<u64>,
+        max_items: Option<u64>,
+    },
+    Text,
+    Number {
+        minimum: Option<f64>,
+        maximum: Option<f64>,
+    },
+    Integer {
+        minimum: Option<i64>,
+        maximum: Option<i64>,
+    },
+    Boolean,
 }
 
 /// How a pending elicitation should be rendered and resolved, derived once
@@ -1108,15 +1158,21 @@ pub enum ElicitationView {
         title: Option<String>,
         description: Option<String>,
     },
-    /// Any shape v1 cannot render (multi-field forms, number/boolean/
-    /// multi-select fields, an enum with no options). The modal shows an
-    /// informational message and resolves to `decline` on dismiss.
+    /// A form with multiple properties, or a single multi-select property.
+    /// Fields are presented in schema order and accumulated into one Accept.
+    Form {
+        title: Option<String>,
+        fields: Vec<ElicitationFormField>,
+    },
+    /// Any shape the UI cannot render (an enum with no options or a future
+    /// schema variant). The modal shows an informational message and resolves
+    /// to `decline` on dismiss.
     Unsupported,
 }
 
 /// Classify an elicitation prompt into the renderable/resolvable view. Never
-/// panics on an unexpected schema: anything outside the v1 single-select /
-/// URL subset becomes [`ElicitationView::Unsupported`].
+/// panics on an unexpected schema: unsupported primitive or future variants
+/// become [`ElicitationView::Unsupported`].
 pub fn classify_elicitation(prompt: &ElicitationPrompt) -> ElicitationView {
     match &prompt.mode {
         ElicitationMode::Url(url_mode) => ElicitationView::Url {
@@ -1124,9 +1180,115 @@ pub fn classify_elicitation(prompt: &ElicitationPrompt) -> ElicitationView {
         },
         ElicitationMode::Form(form) => {
             let schema = &form.requested_schema;
-            // v1 supports exactly one single-select property.
-            if schema.properties.len() != 1 {
+            if schema.properties.is_empty() {
                 return ElicitationView::Unsupported;
+            }
+            if schema.properties.len() > 1
+                || matches!(
+                    schema.properties.values().next(),
+                    Some(
+                        ElicitationPropertySchema::Array(_)
+                            | ElicitationPropertySchema::Number(_)
+                            | ElicitationPropertySchema::Integer(_)
+                            | ElicitationPropertySchema::Boolean(_)
+                    )
+                )
+            {
+                let required = schema.required.as_deref().unwrap_or_default();
+                let mut fields = Vec::with_capacity(schema.properties.len());
+                for (property_name, property) in &schema.properties {
+                    let field = match property {
+                        ElicitationPropertySchema::String(string_schema) => {
+                            let options = string_schema
+                                .one_of
+                                .clone()
+                                .filter(|options| !options.is_empty())
+                                .or_else(|| {
+                                    string_schema.enum_values.as_ref().and_then(|values| {
+                                        (!values.is_empty()).then(|| {
+                                            values
+                                                .iter()
+                                                .map(|value| {
+                                                    EnumOption::new(value.clone(), value.clone())
+                                                })
+                                                .collect()
+                                        })
+                                    })
+                                });
+                            ElicitationFormField {
+                                property_name: property_name.clone(),
+                                title: string_schema.title.clone(),
+                                description: string_schema.description.clone(),
+                                required: required.contains(property_name),
+                                kind: options.map_or(ElicitationFormFieldKind::Text, |options| {
+                                    ElicitationFormFieldKind::SingleSelect { options }
+                                }),
+                            }
+                        }
+                        ElicitationPropertySchema::Array(array_schema) => {
+                            let options = match &array_schema.items {
+                                MultiSelectItems::Titled(items) => items.options.clone(),
+                                MultiSelectItems::Untitled(items) => items
+                                    .values
+                                    .iter()
+                                    .map(|value| EnumOption::new(value.clone(), value.clone()))
+                                    .collect(),
+                                _ => return ElicitationView::Unsupported,
+                            };
+                            if options.is_empty() {
+                                return ElicitationView::Unsupported;
+                            }
+                            ElicitationFormField {
+                                property_name: property_name.clone(),
+                                title: array_schema.title.clone(),
+                                description: array_schema.description.clone(),
+                                required: required.contains(property_name),
+                                kind: ElicitationFormFieldKind::MultiSelect {
+                                    options,
+                                    min_items: array_schema.min_items,
+                                    max_items: array_schema.max_items,
+                                },
+                            }
+                        }
+                        ElicitationPropertySchema::Number(number_schema) => ElicitationFormField {
+                            property_name: property_name.clone(),
+                            title: number_schema.title.clone(),
+                            description: number_schema.description.clone(),
+                            required: required.contains(property_name),
+                            kind: ElicitationFormFieldKind::Number {
+                                minimum: number_schema.minimum,
+                                maximum: number_schema.maximum,
+                            },
+                        },
+                        ElicitationPropertySchema::Integer(integer_schema) => {
+                            ElicitationFormField {
+                                property_name: property_name.clone(),
+                                title: integer_schema.title.clone(),
+                                description: integer_schema.description.clone(),
+                                required: required.contains(property_name),
+                                kind: ElicitationFormFieldKind::Integer {
+                                    minimum: integer_schema.minimum,
+                                    maximum: integer_schema.maximum,
+                                },
+                            }
+                        }
+                        ElicitationPropertySchema::Boolean(boolean_schema) => {
+                            ElicitationFormField {
+                                property_name: property_name.clone(),
+                                title: boolean_schema.title.clone(),
+                                description: boolean_schema.description.clone(),
+                                required: required.contains(property_name),
+                                kind: ElicitationFormFieldKind::Boolean,
+                            }
+                        }
+                        _ => return ElicitationView::Unsupported,
+                    };
+                    fields.push(field);
+                }
+                return ElicitationView::Form {
+                    title: schema.title.clone(),
+                    fields,
+                };
             }
             let Some((property_name, property)) = schema.properties.iter().next() else {
                 return ElicitationView::Unsupported;
@@ -2278,8 +2440,7 @@ impl AppState {
         self.elicitation_queue.front()
     }
 
-    /// Mutable accessor for the front elicitation (used to move the
-    /// single-select cursor without removing it from the queue).
+    /// Mutable accessor for the front elicitation while editing its field.
     pub fn pending_elicitation_mut(&mut self) -> Option<&mut PendingElicitation> {
         self.elicitation_queue.front_mut()
     }
@@ -2300,6 +2461,24 @@ impl AppState {
             .map(|pending| classify_elicitation(&pending.prompt))
     }
 
+    pub fn elicitation_accepts_text_input(&self) -> bool {
+        match self.elicitation_view() {
+            Some(ElicitationView::Text { .. }) => true,
+            Some(ElicitationView::Form { fields, .. }) => self
+                .pending_elicitation()
+                .and_then(|pending| fields.get(pending.form_field))
+                .is_some_and(|field| {
+                    matches!(
+                        field.kind,
+                        ElicitationFormFieldKind::Text
+                            | ElicitationFormFieldKind::Number { .. }
+                            | ElicitationFormFieldKind::Integer { .. }
+                    )
+                }),
+            _ => false,
+        }
+    }
+
     /// Pop the front elicitation off the queue. The caller must answer the
     /// responder before dropping it (a drop maps to Cancel on the runtime side).
     fn take_pending_elicitation(&mut self) -> Option<PendingElicitation> {
@@ -2315,13 +2494,23 @@ impl AppState {
         }
     }
 
-    /// Move the single-select cursor by `delta`, wrapping within the option
-    /// list. No-op when the front view is not a single-select.
+    /// Move the active select cursor by `delta`, wrapping within its options.
     pub fn elicitation_select_move(&mut self, delta: i32) {
-        let Some(ElicitationView::SingleSelect { options, .. }) = self.elicitation_view() else {
-            return;
+        let len = match self.elicitation_view() {
+            Some(ElicitationView::SingleSelect { options, .. }) => options.len(),
+            Some(ElicitationView::Form { fields, .. }) => {
+                let field_index = self
+                    .pending_elicitation()
+                    .map_or(0, |pending| pending.form_field);
+                match fields.get(field_index).map(|field| &field.kind) {
+                    Some(ElicitationFormFieldKind::SingleSelect { options })
+                    | Some(ElicitationFormFieldKind::MultiSelect { options, .. }) => options.len(),
+                    Some(ElicitationFormFieldKind::Boolean) => 2,
+                    _ => return,
+                }
+            }
+            _ => return,
         };
-        let len = options.len();
         if len == 0 {
             return;
         }
@@ -2333,10 +2522,141 @@ impl AppState {
         }
     }
 
+    /// Toggle the option under the cursor for the active multi-select field.
+    pub fn elicitation_multi_toggle(&mut self) {
+        let Some(ElicitationView::Form { fields, .. }) = self.elicitation_view() else {
+            return;
+        };
+        let Some(pending) = self.elicitation_queue.front_mut() else {
+            return;
+        };
+        let Some(ElicitationFormFieldKind::MultiSelect {
+            options, max_items, ..
+        }) = fields.get(pending.form_field).map(|field| &field.kind)
+        else {
+            return;
+        };
+        if options.is_empty() {
+            return;
+        }
+        let selected = pending.selected.min(options.len() - 1);
+        if !pending.multi_selected.remove(&selected)
+            && max_items.is_none_or(|max| pending.multi_selected.len() < max as usize)
+        {
+            pending.multi_selected.insert(selected);
+        }
+        pending.scroll_offset = None;
+    }
+
     /// Resolve the front elicitation as an Accept (Enter). The content map is
-    /// built from the view: single-select sends the chosen value, URL sends
-    /// empty content, and an unsupported shape degrades to Decline.
+    /// built from the view. Multi-property forms advance one field at a time
+    /// and send their accumulated content after the final field.
     pub fn resolve_elicitation_accept(&mut self) {
+        if let Some(ElicitationView::Form { fields, .. }) = self.elicitation_view() {
+            let Some(pending) = self.elicitation_queue.front_mut() else {
+                return;
+            };
+            let Some(field) = fields.get(pending.form_field) else {
+                return;
+            };
+            let value = match &field.kind {
+                ElicitationFormFieldKind::SingleSelect { options } => {
+                    let Some(option) = options.get(pending.selected.min(options.len() - 1)) else {
+                        return;
+                    };
+                    Some(ElicitationContentValue::String(option.value.clone()))
+                }
+                ElicitationFormFieldKind::MultiSelect {
+                    options,
+                    min_items,
+                    max_items,
+                } => {
+                    let count = pending.multi_selected.len() as u64;
+                    if min_items.is_some_and(|min| count < min)
+                        || max_items.is_some_and(|max| count > max)
+                        || (field.required && count == 0)
+                    {
+                        return;
+                    }
+                    let values = options
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| pending.multi_selected.contains(index))
+                        .map(|(_, option)| option.value.clone())
+                        .collect::<Vec<_>>();
+                    (!values.is_empty()).then_some(ElicitationContentValue::StringArray(values))
+                }
+                ElicitationFormFieldKind::Text => {
+                    let value = pending.input.trim();
+                    if value.is_empty() {
+                        if field.required {
+                            return;
+                        }
+                        None
+                    } else {
+                        Some(ElicitationContentValue::String(value.to_string()))
+                    }
+                }
+                ElicitationFormFieldKind::Number { minimum, maximum } => {
+                    let value = pending.input.trim();
+                    if value.is_empty() && !field.required {
+                        None
+                    } else {
+                        let Ok(value) = value.parse::<f64>() else {
+                            return;
+                        };
+                        if !value.is_finite()
+                            || minimum.is_some_and(|minimum| value < minimum)
+                            || maximum.is_some_and(|maximum| value > maximum)
+                        {
+                            return;
+                        }
+                        Some(ElicitationContentValue::Number(value))
+                    }
+                }
+                ElicitationFormFieldKind::Integer { minimum, maximum } => {
+                    let value = pending.input.trim();
+                    if value.is_empty() && !field.required {
+                        None
+                    } else {
+                        let Ok(value) = value.parse::<i64>() else {
+                            return;
+                        };
+                        if minimum.is_some_and(|minimum| value < minimum)
+                            || maximum.is_some_and(|maximum| value > maximum)
+                        {
+                            return;
+                        }
+                        Some(ElicitationContentValue::Integer(value))
+                    }
+                }
+                ElicitationFormFieldKind::Boolean => {
+                    Some(ElicitationContentValue::Boolean(pending.selected == 1))
+                }
+            };
+            if let Some(value) = value {
+                pending
+                    .form_content
+                    .insert(field.property_name.clone(), value);
+            }
+            if pending.form_field + 1 < fields.len() {
+                pending.form_field += 1;
+                pending.selected = 0;
+                pending.input.clear();
+                pending.multi_selected.clear();
+                pending.scroll_offset = None;
+                return;
+            }
+            let pending = self
+                .take_pending_elicitation()
+                .expect("the form remained queued while resolving its final field");
+            let _ = pending
+                .prompt
+                .responder
+                .send(ElicitationOutcome::Accept(pending.form_content));
+            self.update_autocomplete();
+            return;
+        }
         let Some(pending) = self.take_pending_elicitation() else {
             return;
         };
@@ -2377,6 +2697,7 @@ impl AppState {
                     ElicitationOutcome::Accept(content)
                 }
             }
+            ElicitationView::Form { .. } => unreachable!("handled before removing the form"),
             ElicitationView::Unsupported => ElicitationOutcome::Decline,
         };
         let _ = pending.prompt.responder.send(outcome);
@@ -2830,13 +3151,8 @@ impl AppState {
                 // agent reads as a silent cancel. Render unconditionally (no
                 // session gating) -- `/setup` elicitations are request-scoped.
                 self.help_overlay = false;
-                self.elicitation_queue.push_back(PendingElicitation {
-                    prompt,
-                    selected: 0,
-                    scroll_offset: None,
-                    input: String::new(),
-                    subagent_id: None,
-                });
+                self.elicitation_queue
+                    .push_back(PendingElicitation::new(prompt, None));
                 self.update_autocomplete();
             }
             UiEvent::Subagent(event) => self.apply_subagent_event(event),
@@ -3282,13 +3598,8 @@ impl AppState {
             } => {
                 self.finalize_subagent_thinking(subagent_id);
                 self.help_overlay = false;
-                self.elicitation_queue.push_back(PendingElicitation {
-                    prompt,
-                    selected: 0,
-                    scroll_offset: None,
-                    input: String::new(),
-                    subagent_id: Some(subagent_id),
-                });
+                self.elicitation_queue
+                    .push_back(PendingElicitation::new(prompt, Some(subagent_id)));
                 self.update_autocomplete();
             }
             SubagentEvent::CancelPendingPermissions { subagent_id } => {
@@ -8150,14 +8461,21 @@ mod tests {
         let (responder, rx) = tokio::sync::oneshot::channel();
         let schema = ElicitationSchema::new()
             .property(
-                "model",
-                StringPropertySchema::new().one_of(vec![EnumOption::new("a", "A")]),
-                true,
+                "question_0",
+                StringPropertySchema::new()
+                    .title("Choose a model")
+                    .one_of(vec![
+                        EnumOption::new("fast", "Fast"),
+                        EnumOption::new("smart", "Smart"),
+                    ]),
+                false,
             )
             .property(
-                "region",
-                StringPropertySchema::new().one_of(vec![EnumOption::new("us", "US")]),
-                true,
+                "question_0_custom",
+                StringPropertySchema::new()
+                    .title("Other")
+                    .description("Type your own answer instead (optional)."),
+                false,
             );
         let mode = ElicitationMode::from(ElicitationFormMode::new(
             ElicitationSessionScope::new("setup-session".to_string()),
@@ -8281,20 +8599,130 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_multi_field_form_declines() {
+    fn claude_two_property_form_accepts_choice_and_skips_empty_other() {
         let mut s = AppState::new();
         let (prompt, rx) = two_property_elicitation_prompt();
         s.apply_event(UiEvent::ElicitationRequest(prompt));
         assert!(matches!(
             s.elicitation_view(),
-            Some(ElicitationView::Unsupported)
+            Some(ElicitationView::Form { .. })
         ));
-        // Dismissing the info modal resolves to Decline (the v1 fallback).
-        s.resolve_elicitation_dismiss();
+        s.elicitation_select_move(1);
+        s.resolve_elicitation_accept();
+        assert_eq!(s.pending_elicitation().expect("form").form_field, 1);
+        s.resolve_elicitation_accept();
+
+        match rx.blocking_recv() {
+            Ok(ElicitationOutcome::Accept(content)) => {
+                assert_eq!(
+                    content.get("question_0"),
+                    Some(&ElicitationContentValue::String("smart".to_string()))
+                );
+                assert!(!content.contains_key("question_0_custom"));
+            }
+            other => panic!("expected Accept, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_array_form_toggles_and_accepts_multiple_values() {
+        let mut s = AppState::new();
+        let (responder, rx) = tokio::sync::oneshot::channel();
+        let schema = ElicitationSchema::new().property(
+            "question_0",
+            agent_client_protocol::schema::v1::MultiSelectPropertySchema::titled(vec![
+                EnumOption::new("tests", "Tests"),
+                EnumOption::new("docs", "Docs"),
+                EnumOption::new("release", "Release"),
+            ]),
+            false,
+        );
+        s.apply_event(UiEvent::ElicitationRequest(ElicitationPrompt {
+            message: "Choose workstreams".to_string(),
+            mode: ElicitationMode::from(ElicitationFormMode::new(
+                ElicitationSessionScope::new("setup-session".to_string()),
+                schema,
+            )),
+            responder,
+        }));
         assert!(matches!(
-            rx.blocking_recv(),
-            Ok(ElicitationOutcome::Decline)
+            s.elicitation_view(),
+            Some(ElicitationView::Form { .. })
         ));
+        s.elicitation_multi_toggle();
+        s.elicitation_select_move(1);
+        s.elicitation_multi_toggle();
+        s.resolve_elicitation_accept();
+
+        match rx.blocking_recv() {
+            Ok(ElicitationOutcome::Accept(content)) => assert_eq!(
+                content.get("question_0"),
+                Some(&ElicitationContentValue::StringArray(vec![
+                    "tests".to_string(),
+                    "docs".to_string(),
+                ]))
+            ),
+            other => panic!("expected Accept, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn primitive_form_fields_return_typed_content() {
+        let mut s = AppState::new();
+        let (responder, rx) = tokio::sync::oneshot::channel();
+        let schema = ElicitationSchema::new()
+            .property(
+                "count",
+                agent_client_protocol::schema::v1::IntegerPropertySchema::new()
+                    .minimum(1)
+                    .maximum(5),
+                true,
+            )
+            .property(
+                "enabled",
+                agent_client_protocol::schema::v1::BooleanPropertySchema::new(),
+                true,
+            )
+            .property(
+                "ratio",
+                agent_client_protocol::schema::v1::NumberPropertySchema::new()
+                    .minimum(0.0)
+                    .maximum(1.0),
+                true,
+            );
+        s.apply_event(UiEvent::ElicitationRequest(ElicitationPrompt {
+            message: "Configure primitives".to_string(),
+            mode: ElicitationMode::from(ElicitationFormMode::new(
+                ElicitationSessionScope::new("setup-session".to_string()),
+                schema,
+            )),
+            responder,
+        }));
+
+        s.pending_elicitation_mut().expect("count").input = "3".to_string();
+        s.resolve_elicitation_accept();
+        s.elicitation_select_move(1);
+        s.resolve_elicitation_accept();
+        s.pending_elicitation_mut().expect("ratio").input = "0.5".to_string();
+        s.resolve_elicitation_accept();
+
+        match rx.blocking_recv() {
+            Ok(ElicitationOutcome::Accept(content)) => {
+                assert_eq!(
+                    content.get("count"),
+                    Some(&ElicitationContentValue::Integer(3))
+                );
+                assert_eq!(
+                    content.get("enabled"),
+                    Some(&ElicitationContentValue::Boolean(true))
+                );
+                assert_eq!(
+                    content.get("ratio"),
+                    Some(&ElicitationContentValue::Number(0.5))
+                );
+            }
+            other => panic!("expected Accept, got {other:?}"),
+        }
     }
 
     #[test]

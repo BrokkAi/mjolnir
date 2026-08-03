@@ -46,10 +46,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
     AppState, ArenaPane, ConfigValueChoice, ConnectionState, CurrentBranchPullRequest,
-    ElicitationView, Entry, PastedAttachment, PastedImageAttachment, PendingElicitation,
-    PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus,
-    RagnarokFighterUi, RagnarokUi, StatusKind, StatusMessage, SubagentStatus, ToolCallOutput,
-    UiExitReason, classify_elicitation, config_option_choices, config_option_current_value_label,
+    ElicitationFormFieldKind, ElicitationView, Entry, PastedAttachment, PastedImageAttachment,
+    PendingElicitation, PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt,
+    RagnarokDraftPrStatus, RagnarokFighterUi, RagnarokUi, StatusKind, StatusMessage,
+    SubagentStatus, ToolCallOutput, UiExitReason, classify_elicitation, config_option_choices,
+    config_option_current_value_label,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -2489,9 +2490,7 @@ fn handle_crossterm(
             // Route paste into an active free-text elicitation field -- users
             // paste API keys/tokens there. Strip control characters so a
             // trailing newline can't pre-submit or split the field.
-            if state.has_pending_elicitation()
-                && matches!(state.elicitation_view(), Some(ElicitationView::Text { .. }))
-            {
+            if state.elicitation_accepts_text_input() {
                 let cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
                 if let Some(pending) = state.pending_elicitation_mut() {
                     pending.input.push_str(&cleaned);
@@ -5271,11 +5270,9 @@ fn handle_permission_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> T
     TerminalRequest::None
 }
 
-/// Keyboard handler for the elicitation modal. Up/Down move the single-select
-/// cursor; PgUp/PgDn/Home/End scroll content taller than the modal (e.g. a URL
-/// QR); Enter accepts (single-select value, empty URL content, or `decline`
-/// for an unsupported shape); Esc dismisses (cancel for supported views,
-/// `decline` for the unsupported info modal).
+/// Keyboard handler for the elicitation modal. Up/Down move an option cursor,
+/// Space toggles multi-select choices, and Enter advances/submits the form.
+/// PgUp/PgDn/Home/End scroll content taller than the modal.
 fn handle_elicitation_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> TerminalRequest {
     let Some(view) = state.elicitation_view() else {
         return TerminalRequest::None;
@@ -5283,7 +5280,7 @@ fn handle_elicitation_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> 
     // A free-text field captures typed characters first -- including `j`/`k`,
     // which are option-navigation keys for single-select views. Editing is
     // append/backspace at the end of the buffer.
-    if matches!(view, ElicitationView::Text { .. }) {
+    if state.elicitation_accepts_text_input() {
         match code {
             KeyCode::Char(c) => {
                 if let Some(pending) = state.pending_elicitation_mut() {
@@ -5302,6 +5299,28 @@ fn handle_elicitation_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> 
             KeyCode::Esc => {
                 state.resolve_elicitation_dismiss();
                 return inline_repair_request(mode);
+            }
+            KeyCode::PageUp => {
+                if let Some(pending) = state.pending_elicitation_mut() {
+                    let current = pending.scroll_offset.unwrap_or(0);
+                    pending.scroll_offset = Some(current.saturating_sub(5));
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(pending) = state.pending_elicitation_mut() {
+                    let current = pending.scroll_offset.unwrap_or(0);
+                    pending.scroll_offset = Some(current.saturating_add(5));
+                }
+            }
+            KeyCode::Home => {
+                if let Some(pending) = state.pending_elicitation_mut() {
+                    pending.scroll_offset = Some(0);
+                }
+            }
+            KeyCode::End => {
+                if let Some(pending) = state.pending_elicitation_mut() {
+                    pending.scroll_offset = Some(usize::MAX);
+                }
             }
             _ => {}
         }
@@ -5334,6 +5353,18 @@ fn handle_elicitation_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> 
             if let ElicitationView::Url { url } = view {
                 return TerminalRequest::CopyText(url);
             }
+        }
+        KeyCode::Char(' ')
+            if matches!(
+                view,
+                ElicitationView::Form { ref fields, .. }
+                    if state
+                        .pending_elicitation()
+                        .and_then(|pending| fields.get(pending.form_field))
+                        .is_some_and(|field| matches!(field.kind, ElicitationFormFieldKind::MultiSelect { .. }))
+            ) =>
+        {
+            state.elicitation_multi_toggle();
         }
         // No-op for URL / unsupported views (they have no selectable options).
         KeyCode::Up | KeyCode::Char('k') => state.elicitation_select_move(-1),
@@ -10742,14 +10773,13 @@ fn selected_permission_content_row(pending: &PendingPermission, width: u16) -> u
 /// the windowing logic can auto-scroll to keep it visible.
 struct ElicitationContent {
     lines: Vec<Line<'static>>,
-    /// Row index of the selected single-select option. Points at the heading
+    /// Row index of the active option or input field. Points at the heading
     /// (0) for URL / unsupported views, which have no selection to follow.
     selected_row: usize,
 }
 
-/// Build the modal's content lines. Single-select renders the agent message
-/// plus a selectable option list; URL renders the link text and a QR code;
-/// unsupported renders an informational notice.
+/// Build the modal's content lines for single fields, sequential forms, URLs,
+/// and the unsupported-shape notice.
 fn elicitation_view_lines(
     pending: &PendingElicitation,
     queue_len: usize,
@@ -10888,6 +10918,159 @@ fn elicitation_view_lines(
                 Style::default().fg(theme.selection_fg).bg(theme.permission),
             )));
         }
+        ElicitationView::Form { title, fields } => {
+            if let Some(title) = title.filter(|title| !title.is_empty()) {
+                lines.push(Line::from(""));
+                lines.extend(
+                    wrap_text_to_width(&title, width).into_iter().map(|line| {
+                        Line::from(Span::styled(line, Style::default().fg(theme.muted)))
+                    }),
+                );
+            }
+            let field_index = pending.form_field.min(fields.len().saturating_sub(1));
+            let Some(field) = fields.get(field_index) else {
+                return ElicitationContent {
+                    lines,
+                    selected_row,
+                };
+            };
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("Field {} of {}", field_index + 1, fields.len()),
+                Style::default()
+                    .fg(theme.permission)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            if let Some(title) = field.title.as_deref().filter(|title| !title.is_empty()) {
+                lines.extend(
+                    wrap_text_to_width(title, width).into_iter().map(|line| {
+                        Line::from(Span::styled(line, Style::default().fg(theme.text)))
+                    }),
+                );
+            }
+            if let Some(description) = field
+                .description
+                .as_deref()
+                .filter(|description| !description.is_empty())
+            {
+                lines.extend(
+                    wrap_text_to_width(description, width)
+                        .into_iter()
+                        .map(|line| {
+                            Line::from(Span::styled(line, Style::default().fg(theme.muted)))
+                        }),
+                );
+            }
+            lines.push(Line::from(""));
+            match &field.kind {
+                ElicitationFormFieldKind::SingleSelect { options } => {
+                    let selected = pending.selected.min(options.len().saturating_sub(1));
+                    for (index, option) in options.iter().enumerate() {
+                        if index == selected {
+                            selected_row = lines.len();
+                        }
+                        let marker = if index == selected { "> " } else { "  " };
+                        let style = if index == selected {
+                            Style::default()
+                                .fg(theme.selection_fg)
+                                .bg(theme.permission)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme.text)
+                        };
+                        for line in wrap_prefixed_text_to_width(&option.title, width, marker, "  ")
+                        {
+                            lines.push(Line::from(Span::styled(
+                                if index == selected {
+                                    pad_text_to_width(line, width)
+                                } else {
+                                    line
+                                },
+                                style,
+                            )));
+                        }
+                    }
+                }
+                ElicitationFormFieldKind::MultiSelect { options, .. } => {
+                    let selected = pending.selected.min(options.len().saturating_sub(1));
+                    for (index, option) in options.iter().enumerate() {
+                        if index == selected {
+                            selected_row = lines.len();
+                        }
+                        let checked = if pending.multi_selected.contains(&index) {
+                            "[x] "
+                        } else {
+                            "[ ] "
+                        };
+                        let marker = if index == selected {
+                            format!("> {checked}")
+                        } else {
+                            format!("  {checked}")
+                        };
+                        let continuation = " ".repeat(marker.width());
+                        let style = if index == selected {
+                            Style::default()
+                                .fg(theme.selection_fg)
+                                .bg(theme.permission)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme.text)
+                        };
+                        for line in wrap_prefixed_text_to_width(
+                            &option.title,
+                            width,
+                            &marker,
+                            &continuation,
+                        ) {
+                            lines.push(Line::from(Span::styled(
+                                if index == selected {
+                                    pad_text_to_width(line, width)
+                                } else {
+                                    line
+                                },
+                                style,
+                            )));
+                        }
+                    }
+                }
+                ElicitationFormFieldKind::Text
+                | ElicitationFormFieldKind::Number { .. }
+                | ElicitationFormFieldKind::Integer { .. } => {
+                    selected_row = lines.len();
+                    let shown = pad_text_to_width(format!("{}\u{2588}", pending.input), width);
+                    lines.push(Line::from(Span::styled(
+                        shown,
+                        Style::default().fg(theme.selection_fg).bg(theme.permission),
+                    )));
+                }
+                ElicitationFormFieldKind::Boolean => {
+                    let selected = pending.selected.min(1);
+                    for (index, label) in ["No", "Yes"].into_iter().enumerate() {
+                        if index == selected {
+                            selected_row = lines.len();
+                        }
+                        let marker = if index == selected { "> " } else { "  " };
+                        let style = if index == selected {
+                            Style::default()
+                                .fg(theme.selection_fg)
+                                .bg(theme.permission)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme.text)
+                        };
+                        let line = format!("{marker}{label}");
+                        lines.push(Line::from(Span::styled(
+                            if index == selected {
+                                pad_text_to_width(line, width)
+                            } else {
+                                line
+                            },
+                            style,
+                        )));
+                    }
+                }
+            }
+        }
         ElicitationView::Unsupported => {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
@@ -10910,6 +11093,16 @@ fn elicitation_footer_text(view: &ElicitationView) -> &'static str {
             "c copy URL | Enter acknowledge | PgUp/PgDn scroll | Esc cancel"
         }
         ElicitationView::Text { .. } => "Type value | Backspace delete | Enter submit | Esc cancel",
+        ElicitationView::Form { fields, .. } => {
+            if fields
+                .iter()
+                .any(|field| matches!(field.kind, ElicitationFormFieldKind::MultiSelect { .. }))
+            {
+                "Up/Down choose | Space toggle | Enter next/submit | PgUp/PgDn scroll | Esc cancel"
+            } else {
+                "Up/Down choose | Enter next/submit | PgUp/PgDn scroll | Esc cancel"
+            }
+        }
         ElicitationView::Unsupported => "Enter / Esc to skip",
     }
 }
@@ -10947,6 +11140,39 @@ fn elicitation_content_width_hint(view: &ElicitationView, message: &str) -> usiz
                 .max(title_width)
                 .max(description_width)
                 .max(48)
+        }
+        ElicitationView::Form { title, fields } => {
+            let title_width = title.as_deref().map(|title| title.width()).unwrap_or(0);
+            let field_width = fields
+                .iter()
+                .map(|field| {
+                    let heading = field
+                        .title
+                        .as_deref()
+                        .map(|title| title.width())
+                        .unwrap_or(0);
+                    let description = field
+                        .description
+                        .as_deref()
+                        .map(|description| description.width())
+                        .unwrap_or(0);
+                    let options = match &field.kind {
+                        ElicitationFormFieldKind::SingleSelect { options }
+                        | ElicitationFormFieldKind::MultiSelect { options, .. } => options
+                            .iter()
+                            .map(|option| option.title.width() + 6)
+                            .max()
+                            .unwrap_or(0),
+                        ElicitationFormFieldKind::Text
+                        | ElicitationFormFieldKind::Number { .. }
+                        | ElicitationFormFieldKind::Integer { .. } => 48,
+                        ElicitationFormFieldKind::Boolean => 8,
+                    };
+                    heading.max(description).max(options)
+                })
+                .max()
+                .unwrap_or(0);
+            message_width.max(title_width).max(field_width)
         }
         ElicitationView::Unsupported => {
             message_width.max("This setup step isn't supported in this build.".width())
@@ -14288,6 +14514,37 @@ mod tests {
         }
     }
 
+    fn claude_form_elicitation_prompt() -> ElicitationPrompt {
+        let (responder, _rx) = tokio::sync::oneshot::channel();
+        let schema = ElicitationSchema::new()
+            .property(
+                "question_0",
+                StringPropertySchema::new()
+                    .title("Choose a model")
+                    .description("Select the model to use for this task.")
+                    .one_of(vec![
+                        EnumOption::new("fast", "Fast model"),
+                        EnumOption::new("smart", "Smart model"),
+                    ]),
+                false,
+            )
+            .property(
+                "question_0_custom",
+                StringPropertySchema::new()
+                    .title("Other")
+                    .description("Type your own answer instead (optional)."),
+                false,
+            );
+        ElicitationPrompt {
+            message: "Configure the task".to_string(),
+            mode: ElicitationMode::from(ElicitationFormMode::new(
+                ElicitationSessionScope::new("setup".to_string()),
+                schema,
+            )),
+            responder,
+        }
+    }
+
     fn url_elicitation_prompt() -> ElicitationPrompt {
         url_elicitation_prompt_with_url("https://example.com/oauth/authorize?client_id=abc")
     }
@@ -14307,13 +14564,7 @@ mod tests {
 
     #[test]
     fn elicitation_modal_renders_single_select_options() {
-        let pending = PendingElicitation {
-            prompt: single_select_elicitation_prompt(),
-            selected: 0,
-            scroll_offset: None,
-            input: String::new(),
-            subagent_id: None,
-        };
+        let pending = PendingElicitation::new(single_select_elicitation_prompt(), None);
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
@@ -14339,15 +14590,36 @@ mod tests {
     }
 
     #[test]
+    fn multi_field_elicitation_renders_each_field_in_sequence() {
+        let mut state = AppState::new();
+        state.apply_event(UiEvent::ElicitationRequest(claude_form_elicitation_prompt()));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        let render = |state: &mut AppState| {
+            let backend = TestBackend::new(80, 14);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| draw_inline_chat(frame, state))
+                .expect("draw");
+            buffer_lines(terminal.backend().buffer()).join("\n")
+        };
+
+        let first = render(&mut state);
+        assert!(first.contains("Field 1 of 2"), "rendered:\n{first}");
+        assert!(first.contains("Fast model"), "rendered:\n{first}");
+        assert!(first.contains("Smart model"), "rendered:\n{first}");
+
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        let second = render(&mut state);
+        assert!(second.contains("Field 2 of 2"), "rendered:\n{second}");
+        assert!(second.contains("Other"), "rendered:\n{second}");
+        assert!(second.contains('█'), "rendered:\n{second}");
+    }
+
+    #[test]
     fn elicitation_url_modal_renders_qr_without_panicking() {
         // Acceptance: URL + QR renders without panicking for an OAuth URL.
-        let pending = PendingElicitation {
-            prompt: url_elicitation_prompt(),
-            selected: 0,
-            scroll_offset: None,
-            input: String::new(),
-            subagent_id: None,
-        };
+        let pending = PendingElicitation::new(url_elicitation_prompt(), None);
         let backend = TestBackend::new(100, 60);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
@@ -14496,13 +14768,8 @@ mod tests {
     #[test]
     fn elicitation_modal_renders_text_input() {
         // The typed value and a cursor block render inside the modal.
-        let pending = PendingElicitation {
-            prompt: text_elicitation_prompt(),
-            selected: 0,
-            scroll_offset: None,
-            input: "sk-or-abc".to_string(),
-            subagent_id: None,
-        };
+        let mut pending = PendingElicitation::new(text_elicitation_prompt(), None);
+        pending.input = "sk-or-abc".to_string();
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
