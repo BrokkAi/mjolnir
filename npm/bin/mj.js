@@ -18,7 +18,7 @@ function resolveNativeBinary() {
   } catch (error) {
     throw new Error(
       `The native ${selected.alias} payload is missing. ` +
-        "Reinstall brokk-mjolnir with optional dependencies enabled.",
+        "Reinstall @brokkai/brokk-mjolnir with optional dependencies enabled.",
       { cause: error },
     );
   }

@@ -113,11 +113,11 @@ jobs:
         run: |
           version="${{ steps.version.outputs.value }}"
           install_root="$RUNNER_TEMP/brokk-mjolnir-npm-smoke"
-          root_package="$install_root/node_modules/brokk-mjolnir"
-          native_package="$install_root/node_modules/brokk-mjolnir-linux-x64"
+          root_package="$install_root/node_modules/@brokkai/brokk-mjolnir"
+          native_package="$install_root/node_modules/@brokkai/brokk-mjolnir-linux-x64"
           mkdir -p "$root_package" "$native_package"
-          tar -xzf "dist/npm/brokk-mjolnir-${version}.tgz" -C "$root_package" --strip-components=1
-          tar -xzf "dist/npm/brokk-mjolnir-${version}-linux-x64.tgz" -C "$native_package" --strip-components=1
+          tar -xzf "dist/npm/brokkai-brokk-mjolnir-${version}.tgz" -C "$root_package" --strip-components=1
+          tar -xzf "dist/npm/brokkai-brokk-mjolnir-${version}-linux-x64.tgz" -C "$native_package" --strip-components=1
           node "$root_package/bin/mj.js" --version | grep -Fx "mj $version"
           test -x "$native_package/vendor/x86_64-unknown-linux-gnu/mj"
           test -x "$native_package/vendor/x86_64-unknown-linux-gnu/anvil"
@@ -138,11 +138,11 @@ jobs:
           publish_variant() {
             local suffix="$1"
             local tag="$2"
-            if npm view "brokk-mjolnir@${version}-${suffix}" version >/dev/null 2>&1; then
-              echo "brokk-mjolnir@${version}-${suffix} is already published"
+            if npm view "@brokkai/brokk-mjolnir@${version}-${suffix}" version >/dev/null 2>&1; then
+              echo "@brokkai/brokk-mjolnir@${version}-${suffix} is already published"
               return
             fi
-            npm publish "dist/npm/brokk-mjolnir-${version}-${suffix}.tgz" --access public --tag "$tag"
+            npm publish "dist/npm/brokkai-brokk-mjolnir-${version}-${suffix}.tgz" --access public --tag "$tag"
           }
           publish_variant android-arm64 android-arm64
           publish_variant darwin-universal darwin-universal
@@ -155,9 +155,9 @@ jobs:
         shell: bash
         run: |
           version="${{ steps.version.outputs.value }}"
-          if npm view "brokk-mjolnir@${version}" version >/dev/null 2>&1; then
-            echo "brokk-mjolnir@${version} is already published"
+          if npm view "@brokkai/brokk-mjolnir@${version}" version >/dev/null 2>&1; then
+            echo "@brokkai/brokk-mjolnir@${version} is already published"
           else
-            npm publish "dist/npm/brokk-mjolnir-${version}.tgz" --access public --tag latest
+            npm publish "dist/npm/brokkai-brokk-mjolnir-${version}.tgz" --access public --tag latest
           fi
-          npm view brokk-mjolnir dist-tags --json
+          npm view @brokkai/brokk-mjolnir dist-tags --json
