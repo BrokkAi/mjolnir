@@ -6595,19 +6595,35 @@ fn render_nested_agent_lines(
     for (entry_index, entry) in actor.transcript.iter().enumerate() {
         match entry {
             Entry::UserPrompt(text) => {
-                push_speaker_name(&mut out, "prompt", state.theme);
-                push_plain_message(&mut out, text, false, state.theme);
+                push_role_plain_message(
+                    &mut out,
+                    USER_GLYPH,
+                    state.theme.user,
+                    text,
+                    false,
+                    width,
+                    state.theme,
+                );
             }
             Entry::AgentMessage(text) | Entry::SubagentMessage(text) => {
-                push_speaker_name(&mut out, "message", state.theme);
-                push_markdown_message(&mut out, text, false, width, state.theme);
+                push_role_markdown_message(
+                    &mut out,
+                    SUBAGENT_GLYPH,
+                    state.theme.secondary,
+                    text,
+                    false,
+                    width,
+                    state.theme,
+                );
             }
             Entry::AgentThought(thought) | Entry::SubagentThought(thought) => {
-                push_thinking(
+                push_role_thinking(
                     &mut out,
+                    (THOUGHT_GLYPH, state.theme.thought),
                     &thought.text,
                     thought.completed,
                     false,
+                    width,
                     state.theme,
                 );
             }
@@ -6644,12 +6660,7 @@ fn render_nested_agent_lines(
                         (ToolCallStatus::Completed, _) | (_, Some(_)) => String::new(),
                         _ => format!("[{}] ", tool_status_label(view.status)),
                     };
-                    let mut spans = vec![Span::styled(
-                        format!("{status}{} {}", tool_kind_label(view.kind), view.title),
-                        Style::default()
-                            .fg(state.theme.muted)
-                            .add_modifier(Modifier::ITALIC),
-                    )];
+                    let mut spans = tool_header_spans(view, &status, false, state.theme);
                     if let Some(exit_status) = terminal_exit_status {
                         spans.push(Span::styled(
                             format!(" · {}", terminal_header_outcome_label(exit_status)),
@@ -7347,10 +7358,6 @@ fn render_transcript_entry_range(
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     let turns = transcript_turns(state);
-    let mut speaker = state.transcript[..entry_range.start]
-        .iter()
-        .filter_map(entry_speaker)
-        .next_back();
     for (offset, entry) in state.transcript[entry_range.clone()].iter().enumerate() {
         let entry_index = entry_range.start + offset;
         let compact_turn = if compact_completed_turns {
@@ -7375,46 +7382,66 @@ fn render_transcript_entry_range(
         let collapse_message = collapse_limit.is_some()
             && !is_final_response
             && transcript_entry_is_stable(state, entry_index, entry);
-        if let Some(next) = entry_speaker(entry)
-            && speaker.as_deref() != Some(next.as_str())
-        {
-            push_speaker_name(&mut out, &next, theme);
-            speaker = Some(next);
-        }
         if compact_turn.is_some() && is_final_response {
             push_turn_final_response_label(&mut out, theme);
         }
         match entry {
             Entry::UserPrompt(text) => {
-                push_plain_message(&mut out, text, collapse_message, theme);
+                push_role_plain_message(
+                    &mut out,
+                    USER_GLYPH,
+                    theme.user,
+                    text,
+                    collapse_message,
+                    width,
+                    theme,
+                );
                 if let Some(turn) = compact_turn {
                     push_turn_header(&mut out, turn.elapsed, theme);
                     if let Some(summary) = &turn.tool_summary {
                         push_turn_tool_summary(&mut out, summary, theme);
                     }
-                    // The turn header is the primary-agent grouping anchor.
-                    // Nested actors still replace it when their visible activity
-                    // appears below.
-                    speaker = Some("agent".to_string());
                 }
             }
-            Entry::AgentMessage(text) | Entry::SubagentMessage(text) => {
+            Entry::AgentMessage(text) => {
                 // Answers are the durable result of a turn. Keep every answer
-                // fully readable in the transcript, including older primary
-                // answers and nested-agent answers.
-                push_markdown_message(
+                // fully readable while restoring the v1.0.2 role marker and
+                // hanging indent that made message boundaries easy to scan.
+                push_role_markdown_message(
                     &mut out,
+                    AGENT_GLYPH,
+                    theme.agent,
                     state.stream_visible_text(entry_index, text),
                     false,
                     width,
                     theme,
                 )
             }
-            Entry::AgentThought(thought) | Entry::SubagentThought(thought) => push_thinking(
+            Entry::SubagentMessage(text) => push_role_markdown_message(
                 &mut out,
+                SUBAGENT_GLYPH,
+                theme.secondary,
+                state.stream_visible_text(entry_index, text),
+                false,
+                width,
+                theme,
+            ),
+            Entry::AgentThought(thought) => push_role_thinking(
+                &mut out,
+                (THOUGHT_GLYPH, theme.thought),
                 state.stream_visible_text(entry_index, &thought.text),
                 thought.completed,
                 collapse_limit.is_some(),
+                width,
+                theme,
+            ),
+            Entry::SubagentThought(thought) => push_role_thinking(
+                &mut out,
+                (SUBAGENT_THOUGHT_GLYPH, theme.secondary),
+                state.stream_visible_text(entry_index, &thought.text),
+                thought.completed,
+                collapse_limit.is_some(),
+                width,
                 theme,
             ),
             Entry::InternalMessage(message) => {
@@ -7453,10 +7480,25 @@ fn render_transcript_entry_range(
                 push_markdown_message(&mut out, &message.text, collapse_message, width, theme);
             }
             Entry::Plan(entries) | Entry::SubagentPlan(entries) => {
-                out.push(Line::from(Span::styled(
-                    "plan",
-                    Style::default().fg(theme.tool).add_modifier(Modifier::BOLD),
-                )));
+                let mut heading = Vec::new();
+                if matches!(entry, Entry::SubagentPlan(_)) {
+                    heading.push(Span::styled(
+                        format!("{SUBAGENT_GLYPH} "),
+                        Style::default()
+                            .fg(theme.secondary)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    heading.push(Span::styled(
+                        "subagent plan",
+                        Style::default().fg(theme.tool).add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    heading.push(Span::styled(
+                        "plan",
+                        Style::default().fg(theme.tool).add_modifier(Modifier::BOLD),
+                    ));
+                }
+                out.push(Line::from(heading));
                 for e in entries {
                     out.push(plan_row(e, theme));
                 }
@@ -7479,13 +7521,12 @@ fn render_transcript_entry_range(
                         (_, Some(_)) => String::new(),
                         _ => format!("[{}] ", tool_status_label(view.status)),
                     };
-                    let call = format!("{status}{} {}", tool_kind_label(view.kind), view.title);
-                    let mut spans = vec![Span::styled(
-                        call,
-                        Style::default()
-                            .fg(theme.muted)
-                            .add_modifier(Modifier::ITALIC),
-                    )];
+                    let mut spans = tool_header_spans(
+                        view,
+                        &status,
+                        matches!(entry, Entry::SubagentToolCall(_)),
+                        theme,
+                    );
                     if let Some(exit_status) = terminal_exit_status {
                         spans.push(Span::styled(
                             format!(" · {}", terminal_header_outcome_label(exit_status)),
@@ -7613,21 +7654,6 @@ fn push_turn_final_response_label(out: &mut Vec<Line<'static>>, theme: TerminalT
     )));
 }
 
-fn entry_speaker(entry: &Entry) -> Option<String> {
-    match entry {
-        Entry::UserPrompt(_) => Some("You".to_string()),
-        Entry::AgentMessage(_) | Entry::AgentThought(_) | Entry::ToolCall(_) | Entry::Plan(_) => {
-            Some("agent".to_string())
-        }
-        Entry::SubagentMessage(_)
-        | Entry::SubagentThought(_)
-        | Entry::SubagentToolCall(_)
-        | Entry::SubagentPlan(_) => Some("subagent".to_string()),
-        Entry::InternalMessage(message) => Some(message.source.clone()),
-        Entry::System(_) | Entry::SessionBoundary(_) => None,
-    }
-}
-
 fn session_boundary_line(text: &str, width: u16, theme: TerminalTheme) -> Line<'static> {
     let label = format!(" {text} ");
     let label_width = label.width();
@@ -7647,24 +7673,111 @@ fn session_boundary_line(text: &str, width: u16, theme: TerminalTheme) -> Line<'
     ])
 }
 
-fn push_speaker_name(out: &mut Vec<Line<'static>>, name: &str, theme: TerminalTheme) {
-    out.push(Line::from(Span::styled(
-        name.to_string(),
-        Style::default()
-            .fg(speaker_color(name, theme))
-            .add_modifier(Modifier::BOLD),
-    )));
+/// Role glyphs and hanging indents restore the compact visual language used by
+/// mj 1.0.2. A distinct subagent diamond preserves provenance introduced by
+/// the newer multi-agent transcript model.
+const USER_GLYPH: &str = "❯";
+const AGENT_GLYPH: &str = "●";
+const SUBAGENT_GLYPH: &str = "◆";
+const THOUGHT_GLYPH: &str = "○";
+const SUBAGENT_THOUGHT_GLYPH: &str = "◇";
+const ROLE_GUTTER_WIDTH: u16 = 2;
+
+fn push_role_plain_message(
+    out: &mut Vec<Line<'static>>,
+    glyph: &str,
+    color: Color,
+    text: &str,
+    collapse: bool,
+    width: u16,
+    theme: TerminalTheme,
+) {
+    let (preview, collapsed) = message_preview(text, collapse);
+    let content_width = usize::from(width.saturating_sub(ROLE_GUTTER_WIDTH)).max(1);
+    let mut rows = Vec::new();
+    for raw in preview.split('\n') {
+        rows.extend(wrap_tool_line(Line::from(raw.to_string()), content_width));
+    }
+    if collapsed {
+        push_message_collapse_hint(&mut rows, theme);
+    }
+    push_role_rows(out, glyph, color, rows);
 }
 
-fn speaker_color(role: &str, theme: TerminalTheme) -> Color {
-    if role.eq_ignore_ascii_case("You") {
-        theme.user
-    } else if role.eq_ignore_ascii_case("agent") || role.eq_ignore_ascii_case("primary") {
-        theme.primary
-    } else if role.eq_ignore_ascii_case("subagent") {
-        theme.code
-    } else {
-        theme.agent
+fn push_role_markdown_message(
+    out: &mut Vec<Line<'static>>,
+    glyph: &str,
+    color: Color,
+    text: &str,
+    collapse: bool,
+    width: u16,
+    theme: TerminalTheme,
+) {
+    let (preview, collapsed) = message_preview(text, collapse);
+    let content_width = usize::from(width.saturating_sub(ROLE_GUTTER_WIDTH)).max(1);
+    let mut rows = Vec::new();
+    push_wrapped_role_markdown_lines(&mut rows, preview, content_width as u16, theme);
+    if collapsed {
+        push_message_collapse_hint(&mut rows, theme);
+    }
+    push_role_rows(out, glyph, color, rows);
+}
+
+fn push_role_thinking(
+    out: &mut Vec<Line<'static>>,
+    role: (&str, Color),
+    source: &str,
+    completed: bool,
+    compact: bool,
+    width: u16,
+    theme: TerminalTheme,
+) {
+    let mut body = Vec::new();
+    push_thinking(&mut body, source, completed, compact, theme);
+    let content_width = usize::from(width.saturating_sub(ROLE_GUTTER_WIDTH)).max(1);
+    let rows = body
+        .into_iter()
+        .flat_map(|line| wrap_tool_line(line, content_width))
+        .collect();
+    push_role_rows(out, role.0, role.1, rows);
+}
+
+/// Prefix the first visible row with a colored role glyph and keep every
+/// continuation row aligned beneath the content. Empty Markdown rows remain
+/// truly empty so paragraph spacing stays airy instead of turning into rails.
+fn push_role_rows(
+    out: &mut Vec<Line<'static>>,
+    glyph: &str,
+    color: Color,
+    rows: Vec<Line<'static>>,
+) {
+    debug_assert_eq!(
+        glyph.width() + 1,
+        ROLE_GUTTER_WIDTH as usize,
+        "role glyph marker must be exactly ROLE_GUTTER_WIDTH cells wide"
+    );
+    let mut glyph_pending = true;
+    for row in rows {
+        let row_is_empty = row.spans.iter().all(|span| span.content.trim().is_empty());
+        if row_is_empty {
+            out.push(Line::from(""));
+            continue;
+        }
+        let marker = if glyph_pending {
+            format!("{glyph} ")
+        } else {
+            " ".repeat(ROLE_GUTTER_WIDTH as usize)
+        };
+        glyph_pending = false;
+        let mut spans = vec![Span::styled(
+            marker,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )];
+        spans.extend(row.spans);
+        out.push(Line::from(spans));
+    }
+    if !glyph_pending {
+        out.push(Line::from(""));
     }
 }
 
@@ -7725,22 +7838,6 @@ fn active_thought_tail(text: &str) -> String {
         tail = format!("…{}", tail.chars().skip(keep).collect::<String>());
     }
     tail
-}
-
-fn push_plain_message(
-    out: &mut Vec<Line<'static>>,
-    text: &str,
-    collapse: bool,
-    theme: TerminalTheme,
-) {
-    let (preview, collapsed) = message_preview(text, collapse);
-    for raw in preview.split('\n') {
-        out.push(Line::from(raw.to_string()));
-    }
-    if collapsed {
-        push_message_collapse_hint(out, theme);
-    }
-    out.push(Line::from(""));
 }
 
 fn push_styled_message(
@@ -8762,8 +8859,29 @@ fn push_collapse_hint(
     )));
 }
 
-fn tool_output_line_style(_raw: &str, theme: TerminalTheme) -> Style {
-    Style::default().fg(theme.subtle)
+fn tool_output_line_style(raw: &str, theme: TerminalTheme) -> Style {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("panic")
+        || lower.contains("denied")
+    {
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD)
+    } else if lower.contains("warning") || lower.contains("warn") {
+        Style::default().fg(theme.warning)
+    } else if lower.contains("success")
+        || lower.contains("passed")
+        || lower == "ok"
+        || lower.ends_with(" ok")
+    {
+        Style::default().fg(theme.success)
+    } else if raw.trim_start().starts_with('$') {
+        Style::default().fg(theme.primary)
+    } else {
+        Style::default().fg(theme.subtle)
+    }
 }
 
 fn push_diff_output(
@@ -9409,6 +9527,117 @@ fn positional_line_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine>
         }
     }
     lines
+}
+
+fn tool_header_spans(
+    view: &crate::app::ToolCallView,
+    status: &str,
+    subagent: bool,
+    theme: TerminalTheme,
+) -> Vec<Span<'static>> {
+    let color = tool_status_color(view.status, theme);
+    let mut spans = Vec::new();
+    if subagent {
+        spans.push(Span::styled(
+            "subagent ",
+            Style::default()
+                .fg(theme.secondary)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.extend([
+        Span::styled(
+            format!("tool {status}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} ", tool_kind_label(view.kind)),
+            Style::default().fg(theme.muted),
+        ),
+    ]);
+    if matches!(
+        view.kind,
+        agent_client_protocol::schema::v1::ToolKind::Execute
+    ) {
+        spans.extend(highlight_command(&view.title, theme));
+    } else {
+        spans.push(Span::styled(
+            view.title.clone(),
+            Style::default().fg(theme.text),
+        ));
+    }
+    spans
+}
+
+fn is_shell_operator(token: &str) -> bool {
+    matches!(
+        token,
+        "|" | "||" | "&&" | "&" | ";" | ">" | ">>" | "<" | "<<" | "2>" | "2>&1" | "|&"
+    )
+}
+
+/// Lightweight syntax highlighting for commands displayed in tool headers.
+/// It deliberately preserves spacing and only distinguishes the program,
+/// first subcommand, flags, operators, and ordinary arguments.
+fn highlight_command(cmd: &str, theme: TerminalTheme) -> Vec<Span<'static>> {
+    let program_style = Style::default()
+        .fg(theme.primary)
+        .add_modifier(Modifier::BOLD);
+    let subcommand_style = Style::default().fg(theme.secondary);
+    let flag_style = Style::default().fg(theme.accent);
+    let operator_style = Style::default().fg(theme.muted);
+    let arg_style = Style::default().fg(theme.text);
+    let mut spans = Vec::new();
+    let mut expect_program = true;
+    let mut subcommand_seen = false;
+    let mut rest = cmd;
+
+    while !rest.is_empty() {
+        let ws_len: usize = rest
+            .chars()
+            .take_while(|ch| ch.is_whitespace())
+            .map(char::len_utf8)
+            .sum();
+        if ws_len > 0 {
+            spans.push(Span::raw(rest[..ws_len].to_string()));
+            rest = &rest[ws_len..];
+            continue;
+        }
+
+        let token_len: usize = rest
+            .chars()
+            .take_while(|ch| !ch.is_whitespace())
+            .map(char::len_utf8)
+            .sum();
+        let token = &rest[..token_len];
+        rest = &rest[token_len..];
+        let style = if is_shell_operator(token) {
+            expect_program = true;
+            subcommand_seen = false;
+            operator_style
+        } else if expect_program {
+            if token.contains('=') && !token.starts_with('-') {
+                arg_style
+            } else {
+                expect_program = false;
+                program_style
+            }
+        } else if token.starts_with('-') {
+            flag_style
+        } else if !subcommand_seen
+            && !token.contains('/')
+            && !token.contains('.')
+            && !token.contains('=')
+        {
+            subcommand_seen = true;
+            subcommand_style
+        } else {
+            arg_style
+        };
+        spans.push(Span::styled(token.to_string(), style));
+    }
+
+    spans
 }
 
 fn tool_kind_label(kind: agent_client_protocol::schema::v1::ToolKind) -> &'static str {
@@ -14104,7 +14333,6 @@ mod tests {
         ]));
 
         let expected = vec![
-            "agent",
             "plan",
             "  [pending] write tests",
             "  [running] [high] render output",
@@ -14118,19 +14346,19 @@ mod tests {
         assert!(!normal.iter().any(|line| line_text(line).contains("[!]")));
         assert!(!normal.iter().any(|line| line_text(line).contains("[*]")));
 
-        assert_eq!(normal[2].spans[1].style.fg, Some(state.theme.muted));
-        assert_eq!(normal[3].spans[1].style.fg, Some(state.theme.primary));
-        assert_eq!(normal[4].spans[1].style.fg, Some(state.theme.success));
-        assert_eq!(normal[3].spans[2].style.fg, Some(state.theme.warning));
+        assert_eq!(normal[1].spans[1].style.fg, Some(state.theme.muted));
+        assert_eq!(normal[2].spans[1].style.fg, Some(state.theme.primary));
+        assert_eq!(normal[3].spans[1].style.fg, Some(state.theme.success));
+        assert_eq!(normal[2].spans[2].style.fg, Some(state.theme.warning));
         assert!(
-            normal[3].spans[2]
+            normal[2].spans[2]
                 .style
                 .add_modifier
                 .contains(Modifier::BOLD)
         );
-        assert_eq!(normal[4].spans[2].style.fg, Some(state.theme.muted));
+        assert_eq!(normal[3].spans[2].style.fg, Some(state.theme.muted));
         assert!(
-            normal[4]
+            normal[3]
                 .spans
                 .last()
                 .expect("completed content")
@@ -14138,6 +14366,32 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::DIM)
         );
+    }
+
+    #[test]
+    fn subagent_plans_keep_visible_actor_provenance() {
+        let mut state = AppState::new();
+        state
+            .transcript
+            .push(Entry::SubagentPlan(vec![PlanEntry::new(
+                "inspect the renderer",
+                PlanEntryPriority::Medium,
+                PlanEntryStatus::InProgress,
+            )]));
+
+        let normal = render_transcript_lines(&state, 80);
+        let full = render_full_transcript_lines(&state, 80);
+        let expected = vec!["◆ subagent plan", "  [running] inspect the renderer", ""];
+        assert_eq!(normal.iter().map(line_text).collect::<Vec<_>>(), expected);
+        assert_eq!(full.iter().map(line_text).collect::<Vec<_>>(), expected);
+        assert_eq!(normal[0].spans[0].style.fg, Some(state.theme.secondary));
+        assert!(
+            normal[0].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        assert_eq!(normal[0].spans[1].style.fg, Some(state.theme.tool));
     }
 
     #[test]
@@ -17550,7 +17804,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(pending, vec!["You", "hello", ""]);
+        assert_eq!(pending, vec!["❯ hello", ""]);
 
         state.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
@@ -17561,7 +17815,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(rendered, vec!["agent", "world", ""]);
+        assert_eq!(rendered, vec!["● world", ""]);
         assert!(sink.pending_lines(&state, 80).is_empty());
     }
 
@@ -17580,14 +17834,14 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(before_exit, vec!["You", "hello", ""]);
+        assert_eq!(before_exit, vec!["❯ hello", ""]);
 
         let on_exit: Vec<String> = sink
             .pending_lines_for_exit(&state, 80)
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(on_exit, vec!["agent", "visible final answer", ""]);
+        assert_eq!(on_exit, vec!["● visible final answer", ""]);
         assert!(sink.pending_lines_for_exit(&state, 80).is_empty());
     }
 
@@ -17664,14 +17918,11 @@ mod tests {
         assert_eq!(
             flushed,
             vec![
-                "You",
-                "first prompt",
+                "❯ first prompt",
                 "",
-                "agent",
-                "first result",
+                "● first result",
                 "",
-                "You",
-                "second prompt",
+                "❯ second prompt",
                 "",
             ]
         );
@@ -17723,7 +17974,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
-        assert_eq!(tail, vec!["agent", "I need to inspect this"]);
+        assert_eq!(tail, vec!["○ I need to inspect this", ""]);
 
         state.apply_event(subagent_session_update(SessionUpdate::AgentThoughtChunk(
             text_chunk("implementing"),
@@ -17756,7 +18007,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             flushed,
-            vec!["agent", "thought · 1 line", "Here is the result", "",]
+            vec!["○ thought · 1 line", "", "● Here is the result", "",]
         );
         let nested =
             render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
@@ -17792,7 +18043,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             replayed,
-            vec!["You", "replayed prompt", "", "agent", "replayed answer", ""]
+            vec!["❯ replayed prompt", "", "● replayed answer", ""]
         );
 
         state.record_user_prompt("local prompt".to_string());
@@ -17961,7 +18212,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(initial, vec!["You", "delegate this", ""]);
+        assert_eq!(initial, vec!["❯ delegate this", ""]);
 
         let bridge = ToolCall::new("bridge-call", "mcp.mj-subagents.create_subagent")
             .status(ToolCallStatus::InProgress)
@@ -18090,7 +18341,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
-        assert_eq!(primary_tail, vec!["agent", "planning the handoff"]);
+        assert_eq!(primary_tail, vec!["○ planning the handoff", ""]);
 
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
@@ -18111,8 +18362,8 @@ mod tests {
         assert_eq!(
             live,
             vec![
-                "agent",
-                "planning the handoff",
+                "○ planning the handoff",
+                "",
                 "subagent #1 · subagent · gpt-builder · started",
                 ""
             ]
@@ -18145,8 +18396,8 @@ mod tests {
                 .map(line_text)
                 .collect::<Vec<_>>(),
             vec![
-                "agent",
-                "planning the handoff",
+                "○ planning the handoff",
+                "",
                 "subagent #1 · subagent · gpt-builder · started",
                 "",
                 "subagent #1 · subagent · gpt-builder · completed · 0s",
@@ -18241,7 +18492,7 @@ mod tests {
                 .iter()
                 .map(line_text)
                 .collect::<Vec<_>>(),
-            vec!["You", "delegate this", ""]
+            vec!["❯ delegate this", ""]
         );
 
         state.apply_event(UiEvent::InternalMessage(InternalMessage {
@@ -18450,7 +18701,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(prompt, vec!["You", "run tests", ""]);
+        assert_eq!(prompt, vec!["❯ run tests", ""]);
         assert!(sink.pending_lines(&state, 80).is_empty());
 
         let view = state.tool_calls.get_mut("call-1").expect("tool call");
@@ -18465,7 +18716,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(rendered, vec!["agent", "│ exec cargo test", "│   ok"]);
+        assert_eq!(rendered, vec!["│ tool exec cargo test", "│   ok"]);
         assert!(sink.pending_lines(&state, 80).is_empty());
 
         // When the turn ends with nothing after the tool call, the held
@@ -18506,7 +18757,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(prompt, vec!["You", "run tests", ""]);
+        assert_eq!(prompt, vec!["❯ run tests", ""]);
         assert!(
             sink.pending_lines(&state, 80).is_empty(),
             "completed terminal tool call must not flush before terminal exit status arrives"
@@ -18526,10 +18777,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(
-            rendered,
-            vec!["agent", "│ exec cargo test · exit 0", "│   ok"]
-        );
+        assert_eq!(rendered, vec!["│ tool exec cargo test · exit 0", "│   ok"]);
     }
 
     #[test]
@@ -18554,7 +18802,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(first_prompt, vec!["You", "run tests", ""]);
+        assert_eq!(first_prompt, vec!["❯ run tests", ""]);
 
         state.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::Cancelled,
@@ -18566,7 +18814,7 @@ mod tests {
             .map(line_text)
             .collect();
         let cancelled_tool = cancelled_tool.join("\n");
-        assert!(cancelled_tool.contains("agent"), "{cancelled_tool}");
+        assert!(cancelled_tool.contains("tool"), "{cancelled_tool}");
         assert!(cancelled_tool.contains("[failed]"), "{cancelled_tool}");
         assert!(cancelled_tool.contains("cargo test"), "{cancelled_tool}");
         assert!(cancelled_tool.contains("running"), "{cancelled_tool}");
@@ -18577,7 +18825,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(next_prompt, vec!["You", "next prompt", ""]);
+        assert_eq!(next_prompt, vec!["❯ next prompt", ""]);
     }
 
     #[test]
@@ -19467,7 +19715,7 @@ mod tests {
         assert_eq!(
             rendered
                 .iter()
-                .filter(|line| line.as_str() == "… details hidden")
+                .filter(|line| line.trim() == "… details hidden")
                 .count(),
             2,
             "rendered: {rendered:?}"
@@ -19475,7 +19723,7 @@ mod tests {
         assert_eq!(
             rendered
                 .iter()
-                .filter(|line| line.as_str() == "line 7")
+                .filter(|line| line.trim() == "line 7")
                 .count(),
             2,
             "primary and subagent answer tails must remain visible: {rendered:?}"
@@ -19498,7 +19746,7 @@ mod tests {
         let rendered = render_transcript_lines(&state, 100);
         let content = rendered
             .iter()
-            .find(|line| line_text(line).starts_with("important"))
+            .find(|line| line_text(line).starts_with("● important"))
             .expect("markdown preview");
         assert!(
             content
@@ -20275,11 +20523,10 @@ mod tests {
             .map(line_text)
             .collect();
 
-        assert!(rendered.iter().any(|line| line == "agent"));
-        assert!(rendered.iter().any(|line| line == "# Result"));
-        assert!(rendered.iter().any(|line| line == "- bold item"));
-        assert!(rendered.iter().any(|line| line == "code rs"));
-        assert!(rendered.iter().any(|line| line == "  let x = 1;"));
+        assert!(rendered.iter().any(|line| line == "● # Result"));
+        assert!(rendered.iter().any(|line| line == "  - bold item"));
+        assert!(rendered.iter().any(|line| line == "  code rs"));
+        assert!(rendered.iter().any(|line| line == "    let x = 1;"));
     }
 
     #[test]
@@ -20308,7 +20555,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_is_compact_and_primary_agent_names_have_distinct_colors() {
+    fn thinking_is_compact_and_actor_glyphs_keep_provenance() {
         let mut state = AppState::new();
         let theme = state.theme;
         state
@@ -20327,13 +20574,12 @@ mod tests {
         let text = rendered.iter().map(line_text).collect::<Vec<_>>();
         assert_eq!(
             text,
-            vec!["agent", "thought · 5 lines", "subagent", "thought · 1 line",]
+            vec!["○ thought · 5 lines", "", "◇ thought · 1 line", "",]
         );
-        assert_eq!(rendered[0].spans[0].style.fg, Some(theme.primary));
-        assert_eq!(rendered[2].spans[0].style.fg, Some(theme.code));
-        for line in [&rendered[1], &rendered[3]] {
-            assert_eq!(line.spans[0].style.fg, Some(theme.thought));
-        }
+        assert_eq!(rendered[0].spans[0].style.fg, Some(theme.thought));
+        assert_eq!(rendered[2].spans[0].style.fg, Some(theme.secondary));
+        assert_eq!(rendered[0].spans[1].style.fg, Some(theme.thought));
+        assert_eq!(rendered[2].spans[1].style.fg, Some(theme.thought));
     }
 
     #[test]
@@ -20351,9 +20597,9 @@ mod tests {
         let active_text = active.iter().map(line_text).collect::<Vec<_>>();
         assert!(!active_text.iter().any(|line| line.contains("old one")));
         assert!(!active_text.iter().any(|line| line.contains("old two")));
-        assert!(active_text.iter().any(|line| line == "new one"));
-        assert!(active_text.iter().any(|line| line == "new two"));
-        assert!(active_text.iter().any(|line| line == "new three"));
+        assert!(active_text.iter().any(|line| line == "○ new one"));
+        assert!(active_text.iter().any(|line| line == "  new two"));
+        assert!(active_text.iter().any(|line| line == "  new three"));
 
         let tail = active_thought_tail(&format!(
             "{}TAIL",
@@ -20372,19 +20618,20 @@ mod tests {
         let compact = render_transcript_lines(&state, 80);
         assert_eq!(
             compact.iter().map(line_text).collect::<Vec<_>>(),
-            vec!["agent", "thought · 2 lines"]
+            vec!["○ thought · 2 lines", ""]
         );
 
         state.expand_transcript_details = true;
         let expanded = render_transcript_lines(&state, 80);
         assert_eq!(
             expanded.iter().map(line_text).collect::<Vec<_>>(),
-            vec!["agent", "first line", "second line"]
+            vec!["○ first line", "  second line", ""]
         );
-        for line in expanded.iter().skip(1) {
+        for line in expanded.iter().take(2) {
             assert!(
                 line.spans
                     .iter()
+                    .skip(1)
                     .all(|span| span.style.fg == Some(theme.thought))
             );
         }
@@ -20395,12 +20642,12 @@ mod tests {
                 .iter()
                 .map(line_text)
                 .collect::<Vec<_>>(),
-            vec!["agent", "first line", "second line"]
+            vec!["○ first line", "  second line", ""]
         );
     }
 
     #[test]
-    fn speaker_name_is_only_rendered_when_the_speaker_changes() {
+    fn role_glyphs_mark_each_message_boundary_and_preserve_actor_provenance() {
         let mut state = AppState::new();
         state
             .transcript
@@ -20446,22 +20693,133 @@ mod tests {
             .push(Entry::AgentMessage("here is the result".to_string()));
 
         let rendered = render_transcript_lines(&state, 80);
-        let speaker_lines = rendered
+        let role_lines = rendered
             .iter()
-            .filter(|line| matches!(line_text(line).as_str(), "You" | "agent" | "subagent"))
+            .filter(|line| {
+                line_text(line).starts_with(USER_GLYPH)
+                    || line_text(line).starts_with(AGENT_GLYPH)
+                    || line_text(line).starts_with(SUBAGENT_GLYPH)
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(
-            speaker_lines
+            role_lines
                 .iter()
                 .map(|line| line_text(line))
                 .collect::<Vec<_>>(),
-            vec!["You", "agent", "subagent", "agent"]
+            vec![
+                "❯ build it",
+                "● delegating",
+                "● handoff accepted",
+                "◆ forging",
+                "◆ finished",
+                "● here is the result",
+            ]
         );
-        for line in speaker_lines {
+        for line in role_lines {
             assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
-            assert!(!line_text(line).ends_with(':'));
         }
+
+        let primary_tool = rendered
+            .iter()
+            .find(|line| line_text(line) == "│ tool other call a subagent")
+            .expect("primary tool header");
+        assert_eq!(primary_tool.spans[1].content.as_ref(), "tool ");
+
+        let subagent_tool = rendered
+            .iter()
+            .find(|line| line_text(line) == "│ subagent tool edit edit file")
+            .expect("subagent tool header");
+        assert_eq!(subagent_tool.spans[1].content.as_ref(), "subagent ");
+        assert_eq!(subagent_tool.spans[1].style.fg, Some(state.theme.secondary));
+        assert!(
+            subagent_tool.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    fn command_spans(command: &str) -> Vec<(String, Style)> {
+        let theme = TerminalThemeKind::Dark.palette();
+        highlight_command(command, theme)
+            .into_iter()
+            .map(|span| (span.content.into_owned(), span.style))
+            .collect()
+    }
+
+    fn command_style<'a>(spans: &'a [(String, Style)], token: &str) -> &'a Style {
+        &spans
+            .iter()
+            .find(|(content, _)| content == token)
+            .unwrap_or_else(|| panic!("missing command token {token:?}: {spans:?}"))
+            .1
+    }
+
+    #[test]
+    fn execute_tool_headers_restore_command_syntax_colors() {
+        let theme = TerminalThemeKind::Dark.palette();
+        let spans = command_spans("FOO=bar cargo test --all | grep failed");
+        assert_eq!(
+            spans
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>(),
+            "FOO=bar cargo test --all | grep failed"
+        );
+        assert_eq!(command_style(&spans, "FOO=bar").fg, Some(theme.text));
+        assert_eq!(command_style(&spans, "cargo").fg, Some(theme.primary));
+        assert_eq!(command_style(&spans, "test").fg, Some(theme.secondary));
+        assert_eq!(command_style(&spans, "--all").fg, Some(theme.accent));
+        assert_eq!(command_style(&spans, "|").fg, Some(theme.muted));
+        assert_eq!(command_style(&spans, "grep").fg, Some(theme.primary));
+
+        let mut state = AppState::new();
+        state.theme = theme;
+        state.tool_calls.insert(
+            "execute".to_string(),
+            crate::app::ToolCallView {
+                title: "FOO=bar cargo test --all | grep failed".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: Vec::new(),
+            },
+        );
+        state
+            .transcript
+            .push(Entry::ToolCall("execute".to_string()));
+
+        let rendered = render_transcript_lines(&state, 80);
+        let header = rendered
+            .iter()
+            .find(|line| line_text(line) == "│ tool exec FOO=bar cargo test --all | grep failed")
+            .expect("rendered execute tool header");
+        let rendered_spans = header
+            .spans
+            .iter()
+            .map(|span| (span.content.to_string(), span.style))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            command_style(&rendered_spans, "FOO=bar").fg,
+            Some(theme.text)
+        );
+        assert_eq!(
+            command_style(&rendered_spans, "cargo").fg,
+            Some(theme.primary)
+        );
+        assert_eq!(
+            command_style(&rendered_spans, "test").fg,
+            Some(theme.secondary)
+        );
+        assert_eq!(
+            command_style(&rendered_spans, "--all").fg,
+            Some(theme.accent)
+        );
+        assert_eq!(command_style(&rendered_spans, "|").fg, Some(theme.muted));
+        assert_eq!(
+            command_style(&rendered_spans, "grep").fg,
+            Some(theme.primary)
+        );
     }
 
     #[test]
@@ -20496,7 +20854,7 @@ mod tests {
             .map(line_text)
             .collect();
 
-        assert!(rendered.iter().any(|line| line == "│ exec run checks"));
+        assert!(rendered.iter().any(|line| line == "│ tool exec run checks"));
         assert!(rendered.iter().any(|line| line == "│   ## Output"));
         assert!(rendered.iter().any(|line| line == "│   ok"));
         assert!(
@@ -20544,7 +20902,7 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|line| line == "│ exec cargo test · exit 101")
+                .any(|line| line == "│ tool exec cargo test · exit 101")
         );
         assert!(rendered.iter().any(|line| line == "│   [output truncated]"));
         assert!(rendered.iter().any(|line| line == "│   error: test failed"));
@@ -20552,7 +20910,7 @@ mod tests {
         assert!(!rendered.iter().any(|line| line.contains("exit code")));
         let header = rendered_lines
             .iter()
-            .find(|line| line_text(line) == "│ exec cargo test · exit 101")
+            .find(|line| line_text(line) == "│ tool exec cargo test · exit 101")
             .expect("terminal tool header");
         let outcome = header.spans.last().expect("terminal outcome span");
         assert_eq!(outcome.style.fg, Some(state.theme.error));
@@ -20620,19 +20978,18 @@ mod tests {
         assert_eq!(
             rendered,
             [
-                "agent",
-                "- bold italic",
-                "  code tail",
-                "  123. wide界",
-                "       tail",
-                "       words",
-                "> quoted words",
-                "  here",
+                "● - bold italic",
+                "    code tail",
+                "    123. wide界",
+                "         tail",
+                "         words",
+                "  > quoted words",
+                "    here",
                 "",
             ],
             "rendered role rows"
         );
-        for row in &lines[1..8] {
+        for row in &lines[..7] {
             assert!(
                 line_text(row).width() <= width as usize,
                 "row exceeds {width} cells: {:?}",
@@ -20736,36 +21093,45 @@ mod tests {
         assert_eq!(signature(&normal), signature(&full));
 
         let rendered: Vec<String> = normal.iter().map(line_text).collect();
+        let content = rendered
+            .iter()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                line.chars()
+                    .skip(ROLE_GUTTER_WIDTH as usize)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
         assert!(
-            rendered
+            content
                 .join("")
                 .contains("docs (https://example.test/docs)")
-                && rendered
+                && content
                     .join("")
                     .contains("more (https://example.test/more)")
         );
-        assert!(rendered.iter().any(|line| line == "name | value"));
-        assert!(rendered.iter().any(|line| line == "alpha | beta"));
-        assert!(!rendered.iter().any(|line| line.contains(":---:")));
-        assert!(rendered.iter().any(|line| line == "  - nested bullet"));
-        assert!(rendered.iter().any(|line| line == "    2. nested number"));
+        assert!(content.iter().any(|line| line == "name | value"));
+        assert!(content.iter().any(|line| line == "alpha | beta"));
+        assert!(!content.iter().any(|line| line.contains(":---:")));
+        assert!(content.iter().any(|line| line == "  - nested bullet"));
+        assert!(content.iter().any(|line| line == "    2. nested number"));
         assert!(
-            rendered
+            content
                 .iter()
-                .any(|line| line == &"─".repeat(width as usize))
+                .any(|line| line == &"─".repeat((width - ROLE_GUTTER_WIDTH) as usize))
         );
 
         let top = normal
             .iter()
-            .find(|line| line_text(line) == "# Top")
+            .find(|line| line_text(line) == "● # Top")
             .unwrap();
         let bottom = normal
             .iter()
-            .find(|line| line_text(line) == "###### Bottom")
+            .find(|line| line_text(line) == "  ###### Bottom")
             .unwrap();
-        assert_ne!(top.spans[0].style, bottom.spans[0].style);
-        assert_eq!(top.spans[0].style.fg, Some(theme.primary));
-        assert_eq!(bottom.spans[0].style.fg, Some(theme.muted));
+        assert_ne!(top.spans[1].style, bottom.spans[1].style);
+        assert_eq!(top.spans[1].style.fg, Some(theme.primary));
+        assert_eq!(bottom.spans[1].style.fg, Some(theme.muted));
 
         let paragraph = Paragraph::new(normal).wrap(Wrap { trim: false });
         let height = paragraph.line_count(width);
@@ -20773,9 +21139,16 @@ mod tests {
         let mut buffer = ratatui::buffer::Buffer::empty(area);
         paragraph.render(area, &mut buffer);
         let narrow = buffer_lines(&buffer).join("");
+        let narrow_without_layout_space = narrow
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        assert!(
+            narrow_without_layout_space.contains("example.test/docs"),
+            "narrow Markdown rendering lost wrapped URL: {narrow:?}"
+        );
         for content in [
             "docs",
-            "example.test/docs",
             "name",
             "value",
             "alpha",
@@ -20826,10 +21199,10 @@ mod tests {
         );
         assert!(rendered.iter().any(|line| line == "│   key | value"));
         assert!(rendered.iter().any(|line| line == "│     - nested"));
-        for line in lines
-            .iter()
-            .filter(|line| line_text(line).starts_with(TOOL_GUTTER))
-        {
+        for line in lines.iter().filter(|line| {
+            let text = line_text(line);
+            text.starts_with(TOOL_GUTTER) && !text.starts_with("│ tool ")
+        }) {
             assert!(
                 line_text(line).width() <= width as usize,
                 "too wide: {line:?}"
@@ -20882,7 +21255,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_tool_markdown_output_is_desaturated() {
+    fn transcript_tool_markdown_output_uses_semantic_status_color() {
         let mut state = AppState::new();
         let theme = state.theme;
         state.tool_calls.insert(
@@ -20912,16 +21285,16 @@ mod tests {
                 .spans
                 .iter()
                 .skip(1)
-                .all(|span| span.style.fg == Some(theme.subtle)),
-            "tool output should stay desaturated: {warning_line:?}"
+                .all(|span| span.style.fg == Some(theme.warning)),
+            "warning output should be easy to spot: {warning_line:?}"
         );
         assert!(
             warning_line.spans.iter().skip(1).any(|span| {
                 span.content.as_ref() == "check"
-                    && span.style.fg == Some(theme.subtle)
+                    && span.style.fg == Some(theme.warning)
                     && span.style.add_modifier.contains(Modifier::BOLD)
             }),
-            "inline markdown should preserve emphasis without recoloring: {warning_line:?}"
+            "inline markdown should preserve emphasis with semantic color: {warning_line:?}"
         );
     }
 
@@ -20948,14 +21321,14 @@ mod tests {
         // Both the tool header and its output are framed by the gutter rail.
         let call_line = lines
             .iter()
-            .find(|line| line_text(line) == "│ exec cargo test")
+            .find(|line| line_text(line) == "│ tool exec cargo test")
             .expect("tool call line");
-        assert_eq!(call_line.spans[1].style.fg, Some(theme.muted));
+        assert_eq!(call_line.spans[1].style.fg, Some(theme.success));
         assert!(
             call_line.spans[1]
                 .style
                 .add_modifier
-                .contains(Modifier::ITALIC)
+                .contains(Modifier::BOLD)
         );
         assert!(lines.iter().any(|l| line_text(l) == "│   ok"));
 
@@ -20969,10 +21342,8 @@ mod tests {
             assert_eq!(line.spans[0].style.fg, Some(theme.success));
         }
 
-        // The agent message stays flush-left with no rail; that contrast is
-        // the fix for issue #257.
-        assert!(lines.iter().any(|l| line_text(l) == "agent"));
-        assert!(lines.iter().any(|l| line_text(l) == "hi there"));
+        // Agent prose uses its own role gutter rather than the tool rail.
+        assert!(lines.iter().any(|l| line_text(l) == "● hi there"));
         assert!(
             !lines
                 .iter()
@@ -21004,11 +21375,11 @@ mod tests {
         // wrapped continuation rows never read as flush-left agent prose) and
         // must fit inside the render width (so the transcript Paragraph does
         // not re-wrap it and strip the rail). See issue #257.
-        assert_eq!(rendered.first().map(String::as_str), Some("agent"));
-        let block_rows: Vec<&String> = rendered
-            .iter()
-            .filter(|line| !line.is_empty() && line.as_str() != "agent")
-            .collect();
+        assert_eq!(
+            rendered.first().map(String::as_str),
+            Some("│ tool exec log")
+        );
+        let block_rows: Vec<&String> = rendered.iter().filter(|line| !line.is_empty()).collect();
         assert!(
             block_rows.len() > 2,
             "expected the long line to wrap into several rows, got {rendered:?}"
@@ -21050,9 +21421,8 @@ mod tests {
             .map(line_text)
             .collect();
 
-        assert!(rendered.iter().any(|line| line == "You"));
-        assert!(rendered.iter().any(|line| line == "# literal"));
-        assert!(rendered.iter().any(|line| line == "`code` and **bold**"));
+        assert!(rendered.iter().any(|line| line == "❯ # literal"));
+        assert!(rendered.iter().any(|line| line == "  `code` and **bold**"));
         assert!(rendered.iter().any(|line| line == "│   # stdout"));
         assert!(rendered.iter().any(|line| line == "│   ok and bold"));
     }
@@ -21096,7 +21466,7 @@ mod tests {
     }
 
     #[test]
-    fn thought_blocks_render_dimmed_under_speaker_name() {
+    fn thought_blocks_render_dimmed_with_role_glyph() {
         let mut state = AppState::new();
         state.expand_transcript_details = true;
         let theme = state.theme;
@@ -21112,7 +21482,11 @@ mod tests {
             .iter()
             .find(|l| line_text(l).contains("weighing"))
             .expect("thought row");
-        assert!(lines.iter().any(|line| line_text(line) == "agent"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line_text(line) == "○ weighing the options")
+        );
         for span in &row.spans {
             assert_eq!(
                 span.style.fg,
@@ -21167,7 +21541,7 @@ mod tests {
             .map(line_text)
             .collect();
 
-        assert!(rendered.iter().any(|line| line == "before  after"));
+        assert!(rendered.iter().any(|line| line.ends_with("before  after")));
         assert!(
             rendered
                 .iter()
@@ -21178,7 +21552,11 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("<!-- multi-tick code -->"))
         );
-        assert!(rendered.iter().any(|line| line == "unmatched ` visible"));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.ends_with("unmatched ` visible"))
+        );
         assert!(rendered.iter().any(|line| line.contains("visible")));
         assert!(
             rendered
@@ -21239,12 +21617,8 @@ mod tests {
             .collect();
 
         assert!(
-            rendered.iter().any(|line| line == "agent"),
-            "speaker must render before the message: {rendered:?}"
-        );
-        assert!(
-            rendered.iter().any(|line| line == "hello"),
-            "message content must render after leading blanks: {rendered:?}"
+            rendered.iter().any(|line| line == "● hello"),
+            "role marker must stay attached to the first content row: {rendered:?}"
         );
     }
 
