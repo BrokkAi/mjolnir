@@ -1420,12 +1420,14 @@ async fn run_app(
     let termination = runtime_options.termination.clone();
     anvil::start_background_install();
     let config_path = config::default_config_path();
-    let first_startup = should_open_first_startup(
-        config::Config::path_has_current_version(&config_path),
+    let config_exists = config::Config::path_has_current_version(&config_path);
+    let mut cfg = Config::load(&config_path)?;
+    let onboarding_kind = onboarding_kind(
+        config_exists,
+        cfg.onboarding_version,
         resume_target.as_ref(),
         initial_agent.as_ref(),
     );
-    let mut cfg = Config::load(&config_path)?;
     if auth::detect(auth::AuthVendor::Kimi).available()
         && cfg.acp.policy("kimi") != config::AcpServerPolicy::Disabled
         && !cfg.acp.servers.iter().any(|server| server.id == "kimi")
@@ -1434,11 +1436,12 @@ async fn run_app(
     }
     let mut roster_updates = None;
     let mut pending_probe_servers = Vec::new();
-    let mut roster = if first_startup {
+    let mut roster = if let Some(kind) = onboarding_kind {
         // Onboarding wants a fully settled catalog to preview, so first
-        // startup keeps the blocking resolution.
+        // startup and versioned education keep the blocking resolution.
         let initial_resolution = resolve_roster_for_tui(&cfg, &cwd, false).await;
-        let Some((accepted_config, accepted_roster)) = run_first_startup(
+        let Some((accepted_config, accepted_roster)) = run_startup_onboarding(
+            kind,
             cfg,
             initial_resolution.ok(),
             &config_path,
@@ -1574,58 +1577,58 @@ async fn run_app(
     }
 }
 
-fn should_open_first_startup(
+fn onboarding_kind(
     config_exists: bool,
+    onboarding_version: u32,
     resume_target: Option<&ResumeTarget>,
     initial_agent: Option<&SelectedAgent>,
-) -> bool {
-    !config_exists && resume_target.is_none() && initial_agent.is_none()
+) -> Option<onboarding::Kind> {
+    if resume_target.is_some() || initial_agent.is_some() {
+        return None;
+    }
+    if !config_exists {
+        return Some(onboarding::Kind::Fresh);
+    }
+    (onboarding_version < config::ONBOARDING_CONTENT_VERSION).then_some(onboarding::Kind::Upgrade)
 }
 
-async fn run_first_startup(
-    mut candidate: Config,
-    mut preview: Option<roster::Roster>,
+async fn run_startup_onboarding(
+    kind: onboarding::Kind,
+    candidate: Config,
+    preview: Option<roster::Roster>,
     config_path: &Path,
     cwd: &Path,
     termination: CancellationToken,
 ) -> Result<Option<(Config, roster::Roster)>> {
-    let mut notice = None;
-    loop {
-        let outcome = run_onboarding_once(
-            candidate.clone(),
-            preview.clone(),
-            notice.take(),
-            termination.clone(),
-        )
-        .await?;
-        let onboarding::Outcome::Accept(next) = outcome else {
-            return Ok(None);
-        };
-        let next = *next;
-        match resolve_roster_for_tui(&next, cwd, true).await {
-            Ok(resolved) => {
-                next.save(config_path)
-                    .with_context(|| format!("save {}", config_path.display()))?;
-                return Ok(Some((next, resolved)));
-            }
-            Err(error) => {
-                candidate = next;
-                preview = None;
-                notice = Some(format!("Configuration is not launchable: {error:#}"));
-            }
-        }
-    }
+    let outcome = run_onboarding_once(kind, candidate, preview, None, cwd, termination).await?;
+    let onboarding::Outcome::Accept(next, resolved) = outcome else {
+        return Ok(None);
+    };
+    let next = *next;
+    next.save(config_path)
+        .with_context(|| format!("save {}", config_path.display()))?;
+    Ok(Some((next, *resolved)))
 }
 
 async fn run_onboarding_once(
+    kind: onboarding::Kind,
     config: Config,
     roster: Option<roster::Roster>,
     notice: Option<String>,
+    cwd: &Path,
     termination: CancellationToken,
 ) -> Result<onboarding::Outcome> {
     let mut terminal = FullscreenTerminal::fresh().context("setup onboarding terminal")?;
-    let outcome =
-        onboarding::run(terminal.terminal_mut(), config, roster, notice, termination).await;
+    let outcome = onboarding::run(
+        terminal.terminal_mut(),
+        kind,
+        config,
+        roster,
+        notice,
+        cwd,
+        termination,
+    )
+    .await;
     terminal.restore_once();
     settle_after_fullscreen_picker_restore().await;
     outcome
@@ -3278,7 +3281,7 @@ mod tests {
     }
 
     #[test]
-    fn first_startup_only_opens_for_a_fresh_unpinned_session() {
+    fn onboarding_opens_for_fresh_and_outdated_unpinned_sessions() {
         let agent = SelectedAgent {
             source_id: "roster:test".to_string(),
             program: PathBuf::from("test-acp"),
@@ -3290,10 +3293,20 @@ mod tests {
             title: None,
         };
 
-        assert!(should_open_first_startup(false, None, None));
-        assert!(!should_open_first_startup(true, None, None));
-        assert!(!should_open_first_startup(false, Some(&resume), None));
-        assert!(!should_open_first_startup(false, None, Some(&agent)));
+        assert_eq!(
+            onboarding_kind(false, 0, None, None),
+            Some(onboarding::Kind::Fresh)
+        );
+        assert_eq!(
+            onboarding_kind(true, 0, None, None),
+            Some(onboarding::Kind::Upgrade)
+        );
+        assert_eq!(
+            onboarding_kind(true, config::ONBOARDING_CONTENT_VERSION, None, None),
+            None
+        );
+        assert_eq!(onboarding_kind(false, 0, Some(&resume), None), None);
+        assert_eq!(onboarding_kind(false, 0, None, Some(&agent)), None);
     }
 
     #[test]

@@ -11296,14 +11296,30 @@ fn help_modal_lines(
         help_section_line("Agent seats", theme),
         help_binding_line_with_color(
             "agent",
-            "owns each turn and the final response",
+            "owns the request, plan, verification, corrections, and final answer",
             theme.primary,
             theme,
         ),
         help_binding_line_with_color(
             "subagents",
-            "run delegated work in the background and report back",
+            "fresh write-capable sessions for bounded parallel work; primary verifies reports",
             theme.code,
+            theme,
+        ),
+        help_binding_line_with_color(
+            "review",
+            "read-only intent analyst, primary-route supervisor, and selected specialists",
+            theme.warning,
+            theme,
+        ),
+        help_binding_line(
+            "automatic review",
+            "checks every changed turn after writers drain, even without delegation",
+            theme,
+        ),
+        help_binding_line(
+            "routing / usage",
+            "primary, subagent, and review seats are routed and accounted separately",
             theme,
         ),
         help_blank_line(),
@@ -15681,8 +15697,11 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("help"), "rendered:\n{rendered}");
-        assert!(rendered.contains("General"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Ctrl-C"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Agent seats"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("automatic review"),
+            "rendered:\n{rendered}"
+        );
     }
 
     #[test]
@@ -15761,7 +15780,7 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("help"), "rendered:\n{rendered}");
-        assert!(rendered.contains("General"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Agent seats"), "rendered:\n{rendered}");
         assert!(!rendered.contains("Model values"), "rendered:\n{rendered}");
     }
 
@@ -19709,8 +19728,11 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("help"), "rendered:\n{rendered}");
-        assert!(rendered.contains("General"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Ctrl-N"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Agent seats"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("automatic review"),
+            "rendered:\n{rendered}"
+        );
     }
 
     #[test]
@@ -22171,6 +22193,25 @@ mod tests {
 
         assert!(!help.contains("Ctrl-R"));
         assert!(!help.contains("dictation"));
+    }
+
+    #[test]
+    fn help_revisits_the_three_role_product_model() {
+        let help = help_modal_lines(UiMode::InlineChat, false, TerminalThemeKind::Dark.palette())
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for expected in [
+            "owns the request",
+            "fresh write-capable sessions",
+            "read-only intent analyst",
+            "every changed turn",
+            "accounted separately",
+        ] {
+            assert!(help.contains(expected), "missing {expected:?}:\n{help}");
+        }
     }
 
     #[test]

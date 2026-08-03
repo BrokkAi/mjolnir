@@ -13,6 +13,11 @@ The config schema is versioned. The current schema is `version = 3`; a
 `version = 2` file is migrated in place on load. Any other version starts from
 fresh defaults rather than guessing a field-by-field migration.
 
+The guided product explanation has its own `onboarding_version`, separate from
+the config schema. This lets a major workflow change explain what is new without
+forcing an existing user through provider setup or treating education as a
+storage migration.
+
 ## Minimal config
 
 ```toml

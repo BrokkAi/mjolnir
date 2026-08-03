@@ -87,9 +87,9 @@ Expected observations:
    primary responds to it.
 5. The returned change is limited to `weather.py` and `test_weather.py`.
 6. `python3 -m unittest -v` reports four passing tests.
-7. Because a subagent changed the workspace, a discrete review may run before
-   the turn is released; a stable `Review` workflow row shows its current phase
-   and reviewer progress.
+7. Because the completed turn changed the workspace, a discrete review may run
+   before the turn is released; delegation is not required. A stable `Review`
+   workflow row shows its current phase and reviewer progress.
 
 The exact wording and tool sequence can differ by model. If the primary ignores
 the explicit delegation, polls for a result, or the change is wrong, record the

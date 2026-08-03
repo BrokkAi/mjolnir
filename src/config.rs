@@ -15,6 +15,9 @@ use crate::theme::TerminalThemeKind;
 
 pub const DISABLED_MODEL: &str = "disabled";
 pub const CONFIG_VERSION: u32 = 3;
+/// Version of the product-model explanation accepted by the user. This is
+/// intentionally independent from the storage schema version.
+pub const ONBOARDING_CONTENT_VERSION: u32 = 1;
 pub const DEFAULT_ACP_PRIORITY: [&str; 4] = ["codex-acp", "claude-acp", "kimi", "anvil"];
 /// Schema version this build can migrate forward from.
 const MIGRATABLE_VERSION: u32 = 2;
@@ -34,6 +37,8 @@ pub struct ModelOverrides {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Config {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub onboarding_version: u32,
     #[serde(default, skip_serializing_if = "TerminalThemeKind::is_default")]
     pub theme: TerminalThemeKind,
     #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
@@ -72,6 +77,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
+            onboarding_version: 0,
             theme: TerminalThemeKind::default(),
             spinner: SpinnerStyle::default(),
             agent: AgentConfig::default(),
@@ -82,6 +88,10 @@ impl Default for Config {
             ragnarok: RagnarokConfig::default(),
         }
     }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// Permission preset applied to an ACP runtime. Never persisted: interactive
@@ -695,6 +705,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
     let old: ConfigV2 = toml::from_str(body).context("parse v2 config")?;
     Ok(Config {
         version: CONFIG_VERSION,
+        onboarding_version: 0,
         theme: old.theme,
         spinner: old.spinner,
         agent: AgentConfig {
@@ -982,6 +993,24 @@ mod tests {
     }
 
     #[test]
+    fn onboarding_content_version_roundtrips_independently() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let cfg = Config {
+            onboarding_version: ONBOARDING_CONTENT_VERSION,
+            ..Config::default()
+        };
+        cfg.save(&path).expect("save");
+
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(body.contains("onboarding_version = 1"), "body: {body:?}");
+        assert_eq!(
+            Config::load(&path).expect("load").onboarding_version,
+            ONBOARDING_CONTENT_VERSION
+        );
+    }
+
+    #[test]
     fn independent_acp_priorities_roundtrip() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
@@ -1018,7 +1047,8 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "version = 1\n").expect("old config");
         assert!(!Config::path_has_current_version(&path));
-        // A v2 file is migrated on load, so the user is already onboarded.
+        // A v2 file is migrated on load, while the separate content version
+        // still lets startup show the major-upgrade explanation.
         std::fs::write(&path, "version = 2\n").expect("v2 config");
         assert!(Config::path_has_current_version(&path));
         Config::default().save(&path).expect("current config");
