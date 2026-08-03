@@ -92,7 +92,7 @@ pub struct SubagentStatus {
     /// Full Markdown history after a completed actor is evicted from RAM.
     /// The path belongs to this primary session and is removed on session
     /// replacement or when the owning AppState is dropped.
-    archived_history: Option<PathBuf>,
+    archived_history: Vec<PathBuf>,
     open_message_index: Option<usize>,
     plan_index: Option<usize>,
     /// Latest distilled one-liner: the objective at spawn, then whatever the
@@ -121,7 +121,7 @@ impl SubagentStatus {
             lifecycle: Some(crate::workflow::WorkflowActorLifecycle::Running),
             session_id: None,
             transcript: Vec::new(),
-            archived_history: None,
+            archived_history: Vec::new(),
             open_message_index: None,
             plan_index: None,
             activity: "starting".to_string(),
@@ -151,13 +151,26 @@ impl SubagentStatus {
     }
 
     pub fn archived_history_markdown(&self) -> Option<String> {
-        let path = self.archived_history.as_ref()?;
-        Some(std::fs::read_to_string(path).unwrap_or_else(|error| {
-            format!(
-                "_Offloaded nested-agent history could not be read from `{}`: {error}_\n",
-                path.display()
-            )
-        }))
+        (!self.archived_history.is_empty()).then(|| {
+            let mut history = String::new();
+            for path in &self.archived_history {
+                history.push_str(&std::fs::read_to_string(path).unwrap_or_else(|error| {
+                    format!(
+                        "_Offloaded nested-agent history could not be read from `{}`: {error}_\n",
+                        path.display()
+                    )
+                }));
+                if !history.ends_with('\n') {
+                    history.push('\n');
+                }
+            }
+            history
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn archived_history_segments(&self) -> usize {
+        self.archived_history.len()
     }
 }
 
@@ -3538,7 +3551,7 @@ impl AppState {
                         lifecycle: Some(crate::workflow::WorkflowActorLifecycle::Running),
                         session_id: None,
                         transcript: Vec::new(),
-                        archived_history: None,
+                        archived_history: Vec::new(),
                         open_message_index: None,
                         plan_index: None,
                         activity: objective.clone(),
@@ -3796,9 +3809,6 @@ impl AppState {
         let Some(actor) = self.subagents.get(&subagent_id) else {
             return 0;
         };
-        if actor.archived_history.is_some() {
-            return 0;
-        }
         let prefix = Self::subagent_id_prefix(subagent_id);
         let transcript_and_tools = crate::ui::nested_actor_history_markdown(self, actor).len();
         let terminal_snapshots = self
@@ -3855,13 +3865,14 @@ impl AppState {
         let Some(actor) = self.subagents.get(&subagent_id) else {
             return Ok(());
         };
-        if actor.archived_history.is_some() || self.nested_actor_is_protected(subagent_id) {
+        if actor.transcript.is_empty() || self.nested_actor_is_protected(subagent_id) {
             return Ok(());
         }
         let markdown = crate::ui::nested_actor_history_markdown(self, actor);
+        let segment = actor.archived_history.len();
         let dir = self.nested_history_dir()?;
-        let path = dir.join(format!("actor-{subagent_id}.md"));
-        let partial_path = dir.join(format!("actor-{subagent_id}.partial"));
+        let path = dir.join(format!("actor-{subagent_id}-{segment}.md"));
+        let partial_path = dir.join(format!("actor-{subagent_id}-{segment}.partial"));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -3886,7 +3897,7 @@ impl AppState {
         if let Some(actor) = self.subagents.get_mut(&subagent_id) {
             actor.transcript.clear();
             actor.transcript.shrink_to_fit();
-            actor.archived_history = Some(path);
+            actor.archived_history.push(path);
             actor.open_message_index = None;
             actor.plan_index = None;
         }
@@ -3909,7 +3920,7 @@ impl AppState {
             .subagents
             .iter()
             .filter_map(|(id, actor)| {
-                (actor.finished.is_some() && actor.archived_history.is_none())
+                (actor.finished.is_some() && !actor.transcript.is_empty())
                     .then_some((*id, actor.finished.as_ref().map(|(_, at)| *at)))
             })
             .collect::<Vec<_>>();
@@ -5791,7 +5802,7 @@ mod tests {
         state.apply_event(finished_subagent(1, SubagentOutcome::Completed));
 
         let actor = state.nested_agent(1).expect("retained actor metadata");
-        let archive = actor.archived_history.clone().expect("offloaded history");
+        let archive = actor.archived_history[0].clone();
         assert!(actor.transcript.is_empty());
         assert!(!state.tool_calls.contains_key("subagent-1:large-tool"));
         assert!(
@@ -5830,7 +5841,7 @@ mod tests {
         state.apply_event(finished_subagent(1, SubagentOutcome::Completed));
 
         let actor = state.nested_agent(1).expect("selected actor");
-        assert!(actor.archived_history.is_none());
+        assert!(actor.archived_history.is_empty());
         assert!(!actor.transcript.is_empty());
     }
 
@@ -5846,7 +5857,7 @@ mod tests {
         state.enforce_nested_history_budget();
 
         let actor = state.nested_agent(1).expect("running actor");
-        assert!(actor.archived_history.is_none());
+        assert!(actor.archived_history.is_empty());
         assert!(!actor.transcript.is_empty());
     }
 
@@ -5904,19 +5915,13 @@ mod tests {
         ));
         state.apply_event(finished_subagent(1, SubagentOutcome::Completed));
         let dir = state.nested_history_dir().expect("history directory");
-        let partial = dir.join("actor-1.partial");
+        let partial = dir.join("actor-1-0.partial");
         std::fs::write(&partial, "stale partial").expect("seed stale partial");
 
         assert!(state.offload_nested_actor(1).is_err());
         assert!(!partial.exists());
         state.offload_nested_actor(1).expect("retry succeeds");
-        assert!(
-            state
-                .nested_agent(1)
-                .expect("actor")
-                .archived_history
-                .is_some()
-        );
+        assert!(state.nested_agent(1).expect("actor").archived_history.len() == 1);
     }
 
     #[test]
@@ -5936,14 +5941,15 @@ mod tests {
                 .nested_agent(1)
                 .expect("oldest actor")
                 .archived_history
-                .is_some()
+                .len()
+                == 1
         );
         assert!(
             state
                 .nested_agent(5)
                 .expect("newest actor")
                 .archived_history
-                .is_none()
+                .is_empty()
         );
         let resident = (1..=5)
             .map(|id| state.nested_actor_resident_bytes(id))

@@ -4876,9 +4876,8 @@ fn transcript_export_markdown_with_nested(state: &AppState, include_nested: bool
                 if !history.ends_with('\n') {
                     out.push('\n');
                 }
-            } else {
-                push_export_entries(&mut out, &actor.transcript, state);
             }
+            push_export_entries(&mut out, &actor.transcript, state);
         }
     }
 
@@ -6612,7 +6611,6 @@ fn render_nested_agent_lines(
     let mut out = Vec::new();
     if let Some(history) = actor.archived_history_markdown() {
         push_markdown_lines(&mut out, history, 0, width, state.theme);
-        return out;
     }
     for (entry_index, entry) in actor.transcript.iter().enumerate() {
         match entry {
@@ -17335,6 +17333,48 @@ mod tests {
                 .map(line_text)
                 .collect::<Vec<_>>();
         assert!(rendered.iter().any(|line| line.contains("OFFLOADED")));
+    }
+
+    #[test]
+    fn resumed_offloaded_actor_shows_archived_and_live_history() {
+        let mut state = AppState::new();
+        start_subagent(&mut state, 1, "worker", "first turn");
+        state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
+            text_chunk("ARCHIVED_TURN"),
+        )));
+        state.apply_event(subagent_finished(SubagentOutcome::Completed));
+        state.force_offload_nested_actor_for_test(1);
+
+        state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
+            subagent_id: 1,
+            resumed: true,
+            label: "worker".to_string(),
+            model: Some("gpt-y".to_string()),
+            agent: "codex-acp".to_string(),
+            objective: "second turn".to_string(),
+        }));
+        state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
+            text_chunk("RESUMED_TURN"),
+        )));
+
+        let full = transcript_export_markdown_with_nested(&state, true);
+        assert!(full.contains("ARCHIVED\\_TURN"));
+        assert!(full.contains("RESUMED\\_TURN"));
+        let rendered =
+            render_nested_agent_lines(&state, state.nested_agent(1).expect("resumed actor"), 100)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>();
+        assert!(rendered.iter().any(|line| line.contains("ARCHIVED")));
+        assert!(rendered.iter().any(|line| line.contains("RESUMED")));
+
+        state.apply_event(subagent_finished(SubagentOutcome::Completed));
+        state.force_offload_nested_actor_for_test(1);
+        let actor = state.nested_agent(1).expect("twice-offloaded actor");
+        assert_eq!(actor.archived_history_segments(), 2);
+        let history = actor.archived_history_markdown().expect("all segments");
+        assert!(history.contains("ARCHIVED\\_TURN"));
+        assert!(history.contains("RESUMED\\_TURN"));
     }
 
     #[test]
