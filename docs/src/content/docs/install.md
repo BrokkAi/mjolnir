@@ -22,8 +22,7 @@ private repository.
 ### Homebrew
 
 ```bash
-brew tap brokkai/tap
-brew install mjolnir
+brew install brokkai/tap/mjolnir
 mj --version
 ```
 
