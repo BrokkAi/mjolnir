@@ -7372,9 +7372,8 @@ fn render_transcript_entry_range(
         } else {
             None
         };
-        // Completed successful tools are represented by the turn summary.
-        // Do this before speaker grouping so a nested actor with only compacted
-        // tool activity cannot leave behind an empty attribution header.
+        // Completed successful tools are represented by the turn summary, so
+        // skip their entry-specific rendering entirely.
         if matches!(entry, Entry::ToolCall(_) | Entry::SubagentToolCall(_))
             && compact_turn.is_some()
             && tool_entry_is_successful(state, entry)
@@ -7542,7 +7541,7 @@ fn render_transcript_entry_range(
                     // temporary buffer, wrap each line to the width left of the
                     // gutter, then frame every resulting row with a colored left
                     // rail so the block reads as one unit, visually distinct from
-                    // the flush-left agent prose around it. Wrapping here — rather
+                    // the role-marked agent prose around it. Wrapping here — rather
                     // than letting the transcript Paragraph wrap — keeps the rail
                     // on continuation rows; a rail prepended to a single logical
                     // line would land only on the first wrapped row. The rail
@@ -8507,7 +8506,7 @@ fn find_underscore_emphasis_end(after: &str, marker: &str) -> Option<usize> {
 
 /// Left rail drawn before every line of a tool-call block, and its width in
 /// cells. The rail frames tool output as a distinct unit so it never blurs
-/// into the flush-left agent messages around it. See issue #257. The two must
+/// into the role-marked agent messages around it. See issue #257. The two must
 /// stay in sync; the `debug_assert` in `with_tool_gutter` guards against drift
 /// if the glyph ever changes (`str::width` is not usable in a `const`).
 const TOOL_GUTTER: &str = "│ ";
@@ -8866,27 +8865,59 @@ fn push_collapse_hint(
 
 fn tool_output_line_style(raw: &str, theme: TerminalTheme) -> Style {
     let lower = raw.to_ascii_lowercase();
-    if lower.contains("error")
-        || lower.contains("failed")
-        || lower.contains("panic")
-        || lower.contains("denied")
-    {
+    let trimmed = lower.trim_start();
+    let failed = word_is_nonzero_or_uncounted(&lower, "failed");
+    let error = trimmed == "error"
+        || trimmed.starts_with("error:")
+        || trimmed.starts_with("error[")
+        || trimmed.starts_with("fatal:")
+        || lower.contains("panicked at");
+    let success = contains_word(&lower, "success")
+        || contains_word(&lower, "successful")
+        || contains_word(&lower, "passed") && !failed
+        || lower == "ok"
+        || lower.ends_with(" ok")
+        || lower.contains("test result: ok");
+    if error || failed {
         Style::default()
             .fg(theme.error)
             .add_modifier(Modifier::BOLD)
-    } else if lower.contains("warning") || lower.contains("warn") {
+    } else if contains_word(&lower, "warning") || contains_word(&lower, "warn") {
         Style::default().fg(theme.warning)
-    } else if lower.contains("success")
-        || lower.contains("passed")
-        || lower == "ok"
-        || lower.ends_with(" ok")
-    {
+    } else if success {
         Style::default().fg(theme.success)
     } else if raw.trim_start().starts_with('$') {
         Style::default().fg(theme.primary)
     } else {
         Style::default().fg(theme.subtle)
     }
+}
+
+fn contains_word(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(start, _)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + word.len()..].chars().next();
+        !before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            && !after.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    })
+}
+
+fn word_is_nonzero_or_uncounted(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(start, _)| {
+        let before_char = text[..start].chars().next_back();
+        let after_char = text[start + word.len()..].chars().next();
+        if before_char.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            || after_char.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return false;
+        }
+        let before = text[..start].trim_end();
+        let count = before
+            .split_whitespace()
+            .next_back()
+            .and_then(|token| token.parse::<u64>().ok());
+        count != Some(0)
+    })
 }
 
 fn push_diff_output(
@@ -21269,7 +21300,10 @@ mod tests {
                 title: "log".to_string(),
                 kind: ToolKind::Execute,
                 status: ToolCallStatus::Completed,
-                body: vec![ToolCallOutput::Text("warning: **check**".to_string())],
+                body: vec![ToolCallOutput::Text(
+                    "warning: **check**\ntest result: ok. 1324 passed; 0 failed; 0 ignored\nerror: test failed"
+                        .to_string(),
+                )],
             },
         );
         state.transcript.push(Entry::ToolCall("call-1".to_string()));
@@ -21300,6 +21334,52 @@ mod tests {
                     && span.style.add_modifier.contains(Modifier::BOLD)
             }),
             "inline markdown should preserve emphasis with semantic color: {warning_line:?}"
+        );
+
+        let success_line = lines
+            .iter()
+            .find(|line| line_text(line) == "│   test result: ok. 1324 passed; 0 failed; 0 ignored")
+            .expect("successful test summary");
+        assert!(
+            success_line
+                .spans
+                .iter()
+                .skip(1)
+                .all(|span| span.style.fg == Some(theme.success)),
+            "zero failures must not override a successful summary: {success_line:?}"
+        );
+
+        let error_line = lines
+            .iter()
+            .find(|line| line_text(line) == "│   error: test failed")
+            .expect("failed test summary");
+        assert!(
+            error_line.spans.iter().skip(1).all(|span| {
+                span.style.fg == Some(theme.error)
+                    && span.style.add_modifier.contains(Modifier::BOLD)
+            }),
+            "real failures should remain prominent: {error_line:?}"
+        );
+    }
+
+    #[test]
+    fn tool_output_semantic_colors_ignore_incidental_failure_words() {
+        let theme = TerminalThemeKind::Dark.palette();
+        for line in [
+            "0 errors",
+            "Permission denied inside a deliberate check",
+            "src/error_handling.rs",
+            "src/panic_handler.rs",
+        ] {
+            assert_eq!(
+                tool_output_line_style(line, theme).fg,
+                Some(theme.subtle),
+                "incidental status word in {line:?}"
+            );
+        }
+        assert_eq!(
+            tool_output_line_style("1 passed; 1 failed", theme).fg,
+            Some(theme.error)
         );
     }
 
