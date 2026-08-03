@@ -448,7 +448,6 @@ fn draw(frame: &mut ratatui::Frame, state: &mut State) {
         .constraints([
             Constraint::Length(1),
             Constraint::Min(6),
-            Constraint::Length(if state.notice.is_some() { 3 } else { 0 }),
             Constraint::Length(1),
         ])
         .split(frame.area());
@@ -457,7 +456,20 @@ fn draw(frame: &mut ratatui::Frame, state: &mut State) {
             .style(Style::default().add_modifier(Modifier::REVERSED)),
         rows[0],
     );
-    let (title, lines) = screen_lines(state, theme);
+    let (title, mut lines) = screen_lines(state, theme);
+    if let Some(notice) = &state.notice {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "Setup status",
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            notice.clone(),
+            Style::default().fg(theme.warning),
+        )));
+    }
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(rows[1]);
     frame.render_widget(block.style(Style::default().fg(theme.primary)), rows[1]);
@@ -470,17 +482,9 @@ fn draw(frame: &mut ratatui::Frame, state: &mut State) {
         .min(u16::MAX as usize) as u16;
     state.scroll = state.scroll.min(max_scroll);
     frame.render_widget(paragraph.scroll((state.scroll, 0)), inner);
-    if let Some(notice) = &state.notice {
-        frame.render_widget(
-            Paragraph::new(notice.as_str())
-                .style(Style::default().fg(theme.warning))
-                .wrap(Wrap { trim: false }),
-            rows[2],
-        );
-    }
     frame.render_widget(
         Paragraph::new(footer(state.screen)).style(Style::default().fg(theme.muted)),
-        rows[3],
+        rows[2],
     );
 }
 
@@ -838,6 +842,30 @@ mod tests {
         terminal
             .draw(|frame| draw(frame, &mut state))
             .expect("redraw");
+        assert!(state.scroll > 0);
+    }
+
+    #[test]
+    fn long_setup_notice_remains_reachable_at_narrow_width() {
+        let mut state = State::new(Kind::Fresh, Config::default(), None, None);
+        state.screen = Screen::Connections;
+        state.notice = Some(format!(
+            "{} diagnostic-tail",
+            "provider validation failed with detailed context; ".repeat(8)
+        ));
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        state.handle_key(KeyCode::End);
+        terminal
+            .draw(|frame| draw(frame, &mut state))
+            .expect("draw");
+
+        let rendered = terminal.backend().to_string();
+        assert!(
+            rendered.contains("diagnostic-tail"),
+            "rendered:\n{rendered}"
+        );
         assert!(state.scroll > 0);
     }
 
