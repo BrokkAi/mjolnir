@@ -46,7 +46,7 @@ const child = spawn(binary, process.argv.slice(2), {
     ...process.env,
     // npm owns this installation. Product updates must arrive through
     // `npm update`, not by modifying files inside node_modules in place.
-    MJOLNIR_NO_UPDATE_CHECK: process.env.MJOLNIR_NO_UPDATE_CHECK ?? "1",
+    MJOLNIR_NO_UPDATE_CHECK: process.env.MJOLNIR_NO_UPDATE_CHECK ?? "true",
     [pathKey]: `${binaryDirectory}${path.delimiter}${process.env[pathKey] ?? ""}`,
   },
   stdio: "inherit",

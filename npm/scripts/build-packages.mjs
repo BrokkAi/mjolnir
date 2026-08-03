@@ -85,6 +85,7 @@ export function createPlatformStage({
 }
 
 export function createRootStage({
+  nativeVersion,
   repositoryRoot = DEFAULT_REPOSITORY_ROOT,
   stageDir,
   version,
@@ -102,7 +103,7 @@ export function createRootStage({
   const optionalDependencies = Object.fromEntries(
     Object.values(platformPackages()).map((selected) => [
       selected.alias,
-      `npm:${PACKAGE_NAME}@${version}-${selected.npmTag}`,
+      `npm:${PACKAGE_NAME}@${nativeVersion ?? version}-${selected.npmTag}`,
     ]),
   );
   const packageJson = {
@@ -129,7 +130,12 @@ function parseArgs(argv) {
   const values = { bundles: new Map() };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--version" || arg === "--output-dir" || arg === "--repository-root") {
+    if (
+      arg === "--version" ||
+      arg === "--native-version" ||
+      arg === "--output-dir" ||
+      arg === "--repository-root"
+    ) {
       values[arg.slice(2).replace("-", "_")] = argv[++index];
     } else if (arg === "--bundle") {
       const value = argv[++index];
@@ -143,7 +149,7 @@ function parseArgs(argv) {
     }
   }
   if (!values.version || !values.output_dir) {
-    throw new Error("Usage: build-packages.mjs --version <version> --output-dir <dir> [--repository-root <dir>] [--bundle <platform>=<dir> ...]");
+    throw new Error("Usage: build-packages.mjs --version <version> [--native-version <version>] --output-dir <dir> [--repository-root <dir>] [--bundle <platform>=<dir> ...]");
   }
   return values;
 }
@@ -167,7 +173,12 @@ function main() {
     }
 
     const rootStage = path.join(workDir, "root");
-    createRootStage({ repositoryRoot, stageDir: rootStage, version: args.version });
+    createRootStage({
+      nativeVersion: args.native_version,
+      repositoryRoot,
+      stageDir: rootStage,
+      version: args.version,
+    });
     pack(rootStage, outputDir, "root");
   } finally {
     fs.rmSync(workDir, { force: true, recursive: true });

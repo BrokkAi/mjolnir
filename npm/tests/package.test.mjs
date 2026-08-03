@@ -42,6 +42,24 @@ test("root package exposes mj and pins every optional native payload", () => {
   }
 });
 
+test("wrapper-only revisions can retain the released native payload version", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mjolnir-npm-wrapper-test-"));
+  try {
+    const packageJson = createRootStage({
+      nativeVersion: "1.4.0",
+      stageDir: root,
+      version: "1.4.0-npm.1",
+    });
+    assert.equal(packageJson.version, "1.4.0-npm.1");
+    assert.equal(
+      packageJson.optionalDependencies["@brokkai/mjolnir-linux-x64"],
+      "npm:@brokkai/mjolnir@1.4.0-linux-x64",
+    );
+  } finally {
+    fs.rmSync(root, { force: true, recursive: true });
+  }
+});
+
 test("platform package preserves the full sibling release bundle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mjolnir-npm-platform-test-"));
   const bundle = path.join(root, "bundle");
@@ -156,7 +174,7 @@ test(
         encoding: "utf8",
       });
       assert.equal(result.status, 23, result.stderr);
-      assert.equal(result.stdout, "hello|1\n");
+      assert.equal(result.stdout, "hello|true\n");
     } finally {
       fs.rmSync(root, { force: true, recursive: true });
     }
