@@ -29,8 +29,8 @@ target*/
 # Brokk
 .brokk/
 
-# Mjolnir linked worktrees
-.mjolnir/worktrees/
+# Mjolnir local state
+.mjolnir/
 
 # Claude worktrees
 .claude

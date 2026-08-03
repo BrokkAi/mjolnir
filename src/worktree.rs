@@ -15,7 +15,8 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::menu;
 
-const WORKTREE_IGNORE_ENTRY: &str = ".mjolnir/worktrees/";
+const WORKTREE_STORAGE_PATH: &str = ".mjolnir/worktrees/";
+const MJOLNIR_IGNORE_ENTRY: &str = ".mjolnir/";
 
 /// Adjectives for random worktree names (adjective-noun style, like
 /// Docker container names). Kept short so the header label stays
@@ -444,9 +445,9 @@ fn prompt_to_ignore_worktrees(
     writeln!(
         output,
         "Mjolnir stores linked worktrees under {}.",
-        WORKTREE_IGNORE_ENTRY
+        WORKTREE_STORAGE_PATH
     )?;
-    write!(output, "Add {WORKTREE_IGNORE_ENTRY} to .gitignore? [y/N] ")?;
+    write!(output, "Add {MJOLNIR_IGNORE_ENTRY} to .gitignore? [y/N] ")?;
     output.flush()?;
 
     let mut answer = String::new();
@@ -454,14 +455,14 @@ fn prompt_to_ignore_worktrees(
     if is_yes(answer.trim()) {
         append_gitignore_entry(checkout_root)?;
         if !git_check_ignores_worktrees(checkout_root)? {
-            bail!("added {WORKTREE_IGNORE_ENTRY} to .gitignore, but Git still does not ignore it");
+            bail!("added {MJOLNIR_IGNORE_ENTRY} to .gitignore, but Git still does not ignore it");
         }
-        writeln!(output, "Added {WORKTREE_IGNORE_ENTRY} to .gitignore.")?;
+        writeln!(output, "Added {MJOLNIR_IGNORE_ENTRY} to .gitignore.")?;
     } else {
         writeln!(
             output,
             "Leaving .gitignore unchanged; {} may appear as untracked content.",
-            WORKTREE_IGNORE_ENTRY
+            WORKTREE_STORAGE_PATH
         )?;
     }
     Ok(())
@@ -494,7 +495,7 @@ fn git_check_ignores_worktrees(project_root: &Path) -> Result<bool> {
         .arg("-C")
         .arg(project_root)
         .args(["check-ignore", "-q", "--no-index", "--"])
-        .arg(WORKTREE_IGNORE_ENTRY)
+        .arg(WORKTREE_STORAGE_PATH)
         .output()
         .with_context(|| format!("run git check-ignore in {}", project_root.display()))?;
     match output.status.code() {
@@ -523,8 +524,8 @@ fn append_gitignore_entry(checkout_root: &Path) -> Result<()> {
     if !next.is_empty() {
         next.push('\n');
     }
-    next.push_str("# Mjolnir linked worktrees\n");
-    next.push_str(WORKTREE_IGNORE_ENTRY);
+    next.push_str("# Mjolnir local state\n");
+    next.push_str(MJOLNIR_IGNORE_ENTRY);
     next.push('\n');
 
     std::fs::write(&path, next).with_context(|| format!("write {}", path.display()))
@@ -691,7 +692,26 @@ mod tests {
         let text = std::fs::read_to_string(&gitignore).expect("read gitignore");
 
         assert!(text.contains("target/\n"));
-        assert!(text.contains("# Mjolnir linked worktrees\n.mjolnir/worktrees/\n"));
+        assert!(text.contains("# Mjolnir local state\n.mjolnir/\n"));
+    }
+
+    #[test]
+    fn prompt_accepts_existing_parent_or_worktree_ignore() {
+        for entry in [".mjolnir/\n", ".mjolnir/worktrees/\n"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            init_git_repo(dir.path());
+            std::fs::write(dir.path().join(".gitignore"), entry).expect("write gitignore");
+            let mut input = Cursor::new(Vec::new());
+            let mut output = Vec::new();
+
+            prompt_to_ignore_worktrees(dir.path(), &mut input, &mut output).expect("prompt");
+
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(".gitignore")).expect("read gitignore"),
+                entry
+            );
+            assert!(output.is_empty());
+        }
     }
 
     #[test]
@@ -704,9 +724,9 @@ mod tests {
         prompt_to_ignore_worktrees(dir.path(), &mut input, &mut output).expect("prompt");
 
         let text = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
-        assert!(text.contains(".mjolnir/worktrees/"));
+        assert!(text.contains(".mjolnir/"));
         let output = String::from_utf8(output).expect("output utf8");
-        assert!(output.contains("Added .mjolnir/worktrees/ to .gitignore."));
+        assert!(output.contains("Added .mjolnir/ to .gitignore."));
     }
 
     #[test]
@@ -726,7 +746,7 @@ mod tests {
 
         assert!(git_check_ignores_worktrees(dir.path()).expect("check final ignore"));
         let text = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
-        assert!(text.ends_with("# Mjolnir linked worktrees\n.mjolnir/worktrees/\n"));
+        assert!(text.ends_with("# Mjolnir local state\n.mjolnir/\n"));
     }
 
     #[test]
@@ -748,7 +768,7 @@ mod tests {
         );
         let worktree_gitignore =
             std::fs::read_to_string(created.worktree_root.join(".gitignore")).expect("gitignore");
-        assert!(worktree_gitignore.contains(".mjolnir/worktrees/"));
+        assert!(worktree_gitignore.contains(".mjolnir/"));
         assert!(git_check_ignores_worktrees(&created.worktree_root).expect("check worktree"));
         assert!(!git_check_ignores_worktrees(dir.path()).expect("check parent"));
     }
