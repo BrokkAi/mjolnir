@@ -13,10 +13,11 @@ and operating environment around that session.
 | --- | --- |
 | Native terminal | Inline streaming, readable permissions, tool activity, session controls, and keyboard-driven configuration |
 | Remote control | Drive the session from another browser or device while the repository and Mjolnir server remain on your machine |
+| Isolated worktrees | Start Codex in a linked Git worktree so agent changes stay separate from your current checkout and easy to inspect |
 | Voice dictation | Add locally transcribed prompts with Ctrl-R on supported desktop platforms |
 | Parallel subagents | Let Codex launch focused background sessions and receive their reports without polling |
 | Adversarial review | Hold a delegated, workspace-changing turn while a separate supervisor challenges the diff and vets targeted specialist findings |
-| Durable work | Resume the original Codex route and isolate changes in linked Git worktrees |
+| Durable sessions | Resume the original Codex route with its transcript and routing intact |
 | Automation | Run the same setup headlessly with text, JSON, or newline-delimited stream output |
 
 Mjolnir, its transcript storage, remote server, and Mjolnir-hosted tools run on
@@ -39,12 +40,14 @@ Then [install Mjolnir](/install/), open a repository, and run:
 mj
 ```
 
-First launch opens Mjolnir's configuration screen. Confirm:
+First launch opens Mjolnir's onboarding. Choose **Use Codex (recommended)** to
+keep primary, subagent, and review model selection on Auto while constraining
+all three seats to the Codex adapter. Then confirm:
 
 1. **OpenAI / ChatGPT** reports that you are signed in.
 2. The **Codex** ACP server is detected and enabled.
 3. The primary model resolves to a Codex model. Keeping the model on **Auto**
-   lets Mjolnir choose among the currently launchable ranked models.
+   lets Mjolnir choose among currently launchable ranked Codex models.
 4. **Discrete review** is on if you want delegated workspace changes reviewed
    before the turn is released.
 

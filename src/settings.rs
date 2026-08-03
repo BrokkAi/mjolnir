@@ -267,7 +267,15 @@ impl SettingsEditor {
                 self.config.subagents.max_parallel =
                     (self.config.subagents.max_parallel as i32 + delta).rem_euclid(17) as usize;
             }
-            SettingsTab::AcpPriority => return SettingsAction::None,
+            SettingsTab::AcpPriority => {
+                let seat = match self.selected {
+                    0 => PrioritySeat::Primary,
+                    1 => PrioritySeat::Review,
+                    2 => PrioritySeat::Subagents,
+                    _ => return SettingsAction::None,
+                };
+                self.cycle_source(seat, delta);
+            }
             SettingsTab::AcpServers => {
                 let Some(index) = self.selected.checked_sub(SERVER_ROW_OFFSET) else {
                     return SettingsAction::None;
@@ -463,6 +471,38 @@ impl SettingsEditor {
         }
     }
 
+    fn source(&self, seat: PrioritySeat) -> &Option<String> {
+        match seat {
+            PrioritySeat::Primary => &self.config.agent.acp_source,
+            PrioritySeat::Review => &self.config.review.acp_source,
+            PrioritySeat::Subagents => &self.config.subagents.acp_source,
+        }
+    }
+
+    fn source_mut(&mut self, seat: PrioritySeat) -> &mut Option<String> {
+        match seat {
+            PrioritySeat::Primary => &mut self.config.agent.acp_source,
+            PrioritySeat::Review => &mut self.config.review.acp_source,
+            PrioritySeat::Subagents => &mut self.config.subagents.acp_source,
+        }
+    }
+
+    fn cycle_source(&mut self, seat: PrioritySeat, delta: i32) {
+        let choices = std::iter::once(None)
+            .chain(self.effective_priority(seat).into_iter().map(Some))
+            .collect::<Vec<_>>();
+        let current = choices
+            .iter()
+            .position(|choice| choice == self.source(seat))
+            .unwrap_or(0);
+        let next = (current as i32 + delta).rem_euclid(choices.len() as i32) as usize;
+        *self.source_mut(seat) = choices[next].clone();
+        self.notice = Some(
+            "Source constraint updated; start a new session or restart Mjolnir to apply it."
+                .to_string(),
+        );
+    }
+
     fn priority_mut(&mut self, seat: PrioritySeat) -> &mut Vec<String> {
         match seat {
             PrioritySeat::Primary => &mut self.config.agent.acp_priority,
@@ -554,6 +594,19 @@ impl SettingsEditor {
             })
             .collect::<Vec<_>>()
             .join(" → ")
+    }
+
+    fn source_summary(&self, seat: PrioritySeat) -> String {
+        self.source(seat).as_ref().map_or_else(
+            || "any enabled source".to_string(),
+            |id| {
+                self.inventory
+                    .servers
+                    .iter()
+                    .find(|server| server.id == *id)
+                    .map_or_else(|| id.clone(), |server| format!("{} only", server.label))
+            },
+        )
     }
 
     fn staged_model_detail(&self, model: &str) -> String {
@@ -1264,14 +1317,15 @@ fn draw_acp_priority(
 
     let lines = vec![
         Line::styled(
-            "Choose which enabled ACP source supplies a model when several match.",
+            "Left/Right constrains a seat to one source; Enter edits fallback priority.",
             Style::default().fg(theme.muted),
         ),
         Line::raw(""),
         selected_line(
             editor.selected == 0,
             format!(
-                "Primary   [Enter] {}",
+                "Primary   < {} >  [Enter] {}",
+                editor.source_summary(PrioritySeat::Primary),
                 editor.priority_summary(PrioritySeat::Primary)
             ),
             theme,
@@ -1279,7 +1333,8 @@ fn draw_acp_priority(
         selected_line(
             editor.selected == 1,
             format!(
-                "Review   [Enter] {}",
+                "Review    < {} >  [Enter] {}",
+                editor.source_summary(PrioritySeat::Review),
                 editor.priority_summary(PrioritySeat::Review)
             ),
             theme,
@@ -1287,14 +1342,15 @@ fn draw_acp_priority(
         selected_line(
             editor.selected == 2,
             format!(
-                "Subagents [Enter] {}",
+                "Subagents < {} >  [Enter] {}",
+                editor.source_summary(PrioritySeat::Subagents),
                 editor.priority_summary(PrioritySeat::Subagents)
             ),
             theme,
         ),
         Line::raw(""),
         Line::styled(
-            "ACP Servers controls eligibility; this tab controls preference order.",
+            "ACP Servers controls eligibility; source constraints preserve Auto within one route.",
             Style::default().fg(theme.muted),
         ),
     ];
@@ -1829,6 +1885,26 @@ mod tests {
     }
 
     #[test]
+    fn acp_source_constraints_cycle_independently() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::AcpPriority;
+
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.agent.acp_source.as_deref(), Some("codex-acp"));
+        assert_eq!(editor.config.review.acp_source, None);
+        assert_eq!(editor.config.subagents.acp_source, None);
+
+        editor.selected = 2;
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(
+            editor.config.subagents.acp_source.as_deref(),
+            Some("codex-acp")
+        );
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert_eq!(editor.config.subagents.acp_source, None);
+    }
+
+    #[test]
     fn acp_priority_tab_exposes_both_seat_editors() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::AcpPriority;
@@ -1842,11 +1918,11 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("ACP Priority"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("Primary   [Enter]"),
+            rendered.contains("Primary   < any enabled source >"),
             "rendered:\n{rendered}"
         );
         assert!(
-            rendered.contains("Subagents [Enter]"),
+            rendered.contains("Subagents < any enabled source >"),
             "rendered:\n{rendered}"
         );
     }

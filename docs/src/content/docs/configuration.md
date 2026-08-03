@@ -13,10 +13,11 @@ The config schema is versioned. The current schema is `version = 3`; a
 `version = 2` file is migrated in place on load. Any other version starts from
 fresh defaults rather than guessing a field-by-field migration.
 
-The guided product explanation has its own `onboarding_version`, separate from
-the config schema. This lets a major workflow change explain what is new without
-forcing an existing user through provider setup or treating education as a
-storage migration.
+The guided product explanation has one monotonic `onboarding_version`, separate
+from the config schema. Mjolnir compares it only with the latest onboarding:
+someone several versions behind sees the current flow once, never a replay of
+every missed flow. Finishing or explicitly skipping records the latest version;
+canceling fresh setup leaves onboarding incomplete.
 
 ## Minimal config
 
@@ -25,13 +26,16 @@ version = 3
 
 [agent]
 model = "auto"
+acp_source = "codex-acp"
 discrete_review = true
 
 [review]
 model = "auto"
+acp_source = "codex-acp"
 
 [subagents]
 model = "auto"
+acp_source = "codex-acp"
 max_parallel = 6
 auto_failover = true
 ```
@@ -45,13 +49,16 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | Key | Meaning |
 | --- | --- |
 | `agent.model` | Primary model, or `auto` |
+| `agent.acp_source` | Optional exact ACP source constraint; keeps `auto` selection inside that adapter |
 | `agent.acp_priority` | ACP source preference when several enabled adapters offer the primary model |
 | `agent.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `agent.discrete_review` | Run the end-of-turn discrete review |
 | `review.model` | Review supervisor model, or `auto` |
+| `review.acp_source` | Optional exact ACP source constraint for the review seat |
 | `review.acp_priority` | ACP source preference for the review supervisor model |
 | `review.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `subagents.model` | Default subagent model, `auto`, or `disabled` |
+| `subagents.acp_source` | Optional exact ACP source constraint for default workers and their failover pool |
 | `subagents.acp_priority` | Independent ACP source preference for the default worker model |
 | `subagents.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `subagents.max_parallel` | Concurrent subagents, default 6, maximum 16 |
@@ -62,10 +69,15 @@ Explicit model IDs can come from `/models`; availability is checked when the
 next session starts. A `max_parallel` above 16 is a configuration error, not a
 silently clamped value.
 
+The recommended onboarding sets each seat's `acp_source` to `codex-acp`. This
+retains automatic model selection without letting another installed adapter
+take that seat. In `/mjconfig`, use Left/Right on the ACP Priority tab to change
+or clear a seat's source constraint.
+
 ACP priority lists default to `codex-acp`, `claude-acp`, `kimi`, then `anvil`,
-preserving the automatic behavior of earlier configurations. Reorder or reset
-them independently from the ACP Priority tab, or configure stable source IDs
-directly:
+preserving the automatic behavior of earlier configurations. When a source is
+not constrained, reorder or reset fallback preference independently from the
+ACP Priority tab, or configure stable source IDs directly:
 
 ```toml
 [agent]

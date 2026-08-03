@@ -1601,13 +1601,22 @@ async fn run_startup_onboarding(
     termination: CancellationToken,
 ) -> Result<Option<(Config, roster::Roster)>> {
     let outcome = run_onboarding_once(kind, candidate, preview, None, cwd, termination).await?;
-    let onboarding::Outcome::Accept(next, resolved) = outcome else {
-        return Ok(None);
-    };
-    let next = *next;
-    next.save(config_path)
-        .with_context(|| format!("save {}", config_path.display()))?;
-    Ok(Some((next, *resolved)))
+    match outcome {
+        onboarding::Outcome::Accept(next, resolved) => {
+            let next = *next;
+            next.save(config_path)
+                .with_context(|| format!("save {}", config_path.display()))?;
+            Ok(Some((next, *resolved)))
+        }
+        onboarding::Outcome::Skip(next) => {
+            let next = *next;
+            next.save(config_path)
+                .with_context(|| format!("save {}", config_path.display()))?;
+            let resolved = resolve_roster_for_tui(&next, cwd, false).await?;
+            Ok(Some((next, resolved)))
+        }
+        onboarding::Outcome::Cancel => Ok(None),
+    }
 }
 
 async fn run_onboarding_once(
@@ -3272,6 +3281,7 @@ mod tests {
             warnings: Vec::new(),
             inventory: roster::AcpInventory::default(),
             subagent_acp_priority: Vec::new(),
+            subagent_acp_source: None,
         };
 
         assert_eq!(

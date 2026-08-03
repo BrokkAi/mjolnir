@@ -62,9 +62,10 @@ adapter. The current session keeps its already-bound models.
 Availability, credentials, cached capabilities, and the current ranking can
 change the result. Auto chooses across launchable ranked models; adapter
 priority decides between adapters that provide the selected model. Therefore,
-adding another detected provider can change an Auto-resolved seat even though
-Codex is first in adapter priority. Use explicit model selections when a seat
-must stay on Codex, and use `/agents` to record what actually launched.
+adding another detected provider can change an unconstrained Auto-resolved seat
+even though Codex is first in adapter priority. Set the seat's ACP source to
+Codex in `/mjconfig` to retain Auto model selection within Codex, and use
+`/agents` to record what actually launched.
 
 ## Custom ACP servers
 

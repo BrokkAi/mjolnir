@@ -35,14 +35,16 @@ and remote workflow stay consistent across those routes.
 
 - **Self-hosted remote control:** keep the workspace and control plane on your
   machine and drive the session from another browser or device.
+- **Isolated worktrees:** start Codex in a linked Git worktree so agent changes
+  stay separate from your current checkout and remain easy to inspect.
 - **Cross-platform desktop voice:** dictate prompts locally on macOS, Linux,
   and Windows with Ctrl-R.
 - **Parallel subagents:** let Codex launch focused background sessions and
   receive their reports without polling.
 - **Adversarial review:** challenge workspace changes with a separate review
   supervisor and targeted specialist lanes before a delegated turn completes.
-- **Operational control:** readable permissions, isolated worktrees, resumable
-  sessions, headless JSON output, and Codex quota visibility.
+- **Operational control:** readable permissions, resumable sessions, headless
+  JSON output, and Codex quota visibility.
 
 Mjolnir itself, its remote-control server, transcripts, and workspace tools run
 on infrastructure you control. Codex model requests still use OpenAI under the

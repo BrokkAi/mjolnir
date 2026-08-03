@@ -30,6 +30,7 @@ pub enum Kind {
 #[derive(Debug)]
 pub enum Outcome {
     Accept(Box<Config>, Box<Roster>),
+    Skip(Box<Config>),
     Cancel,
 }
 
@@ -49,6 +50,8 @@ enum Action {
     Cancel,
     Resolve,
     Authenticate(crate::auth::AuthVendor),
+    UseRecommended,
+    Skip,
     Finish,
 }
 
@@ -120,6 +123,26 @@ impl State {
 
     fn config(&self) -> &Config {
         &self.editor.config
+    }
+
+    fn apply_recommended_setup(&mut self) {
+        self.editor.config.agent.model = "auto".to_string();
+        self.editor.config.agent.acp_source = Some("codex-acp".to_string());
+        self.editor.config.agent.discrete_review = true;
+        self.editor.config.review.model = "auto".to_string();
+        self.editor.config.review.acp_source = Some("codex-acp".to_string());
+        self.editor.config.subagents.model = "auto".to_string();
+        self.editor.config.subagents.acp_source = Some("codex-acp".to_string());
+        self.editor.config.subagents.auto_failover = true;
+        self.editor
+            .config
+            .set_acp_server_policy("codex-acp", crate::config::AcpServerPolicy::Enabled);
+    }
+
+    fn visited_config(&self) -> Config {
+        let mut config = self.editor.config.clone();
+        config.onboarding_version = ONBOARDING_CONTENT_VERSION;
+        config
     }
 
     fn change_screen(&mut self, screen: Screen) {
@@ -197,6 +220,7 @@ impl State {
                     self.change_screen(Screen::ChoosePath);
                     Action::None
                 }
+                KeyCode::Char('s' | 'S') | KeyCode::Esc => Action::Skip,
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.scroll(-1);
                     Action::None
@@ -205,7 +229,6 @@ impl State {
                     self.scroll(1);
                     Action::None
                 }
-                KeyCode::Esc => Action::Cancel,
                 _ => Action::None,
             },
             Screen::Connections => match code {
@@ -248,7 +271,7 @@ impl State {
                     self.move_selected(1, 2);
                     Action::None
                 }
-                KeyCode::Enter if self.selected == 0 => Action::Resolve,
+                KeyCode::Enter if self.selected == 0 => Action::UseRecommended,
                 KeyCode::Enter => {
                     self.change_screen(Screen::Customize);
                     Action::None
@@ -392,15 +415,20 @@ pub async fn run(
                         state.editor.cancel_background();
                         return Ok(Outcome::Cancel);
                     }
+                    Action::Skip => {
+                        state.editor.cancel_background();
+                        return Ok(Outcome::Skip(Box::new(state.visited_config())));
+                    }
                     Action::Finish => {
                         let Some(roster) = state.roster.take() else {
                             state.resolution_failed("readiness was not resolved");
                             terminal.draw(|frame| draw(frame, &mut state))?;
                             continue;
                         };
-                        let mut config = state.editor.config.clone();
-                        config.onboarding_version = ONBOARDING_CONTENT_VERSION;
-                        return Ok(Outcome::Accept(Box::new(config), Box::new(roster)));
+                        return Ok(Outcome::Accept(
+                            Box::new(state.visited_config()),
+                            Box::new(roster),
+                        ));
                     }
                     Action::Authenticate(vendor) => {
                         let notice = if crate::auth::executable(vendor).is_none() {
@@ -421,7 +449,10 @@ pub async fn run(
                             state.notice = Some(notice);
                         }
                     }
-                    Action::Resolve => {
+                    action @ (Action::Resolve | Action::UseRecommended) => {
+                        if action == Action::UseRecommended {
+                            state.apply_recommended_setup();
+                        }
                         state.notice = Some("Checking provider routes and role readiness…".to_string());
                         terminal.draw(|frame| draw(frame, &mut state))?;
                         match crate::roster::resolve_waiting_for_installs(&state.editor.config, cwd).await {
@@ -514,7 +545,7 @@ fn screen_lines(state: &State, theme: TerminalTheme) -> (&'static str, Vec<Line<
     match state.screen {
         Screen::Welcome => (" How Mjolnir works ", welcome_lines(theme)),
         Screen::WhatsNew => (" What changed ", whats_new_lines(theme)),
-        Screen::Connections => (" Connect a provider ", connection_lines(state, theme)),
+        Screen::Connections => (" Connect Codex ", connection_lines(state, theme)),
         Screen::ChoosePath => (" Choose your setup ", choose_path_lines(state, theme)),
         Screen::Readiness => (" Ready to start ", readiness_lines(state, theme)),
         Screen::Customize => unreachable!("custom settings draw separately"),
@@ -523,9 +554,9 @@ fn screen_lines(state: &State, theme: TerminalTheme) -> (&'static str, Vec<Line<
 
 fn welcome_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
     vec![
-        heading("1. The primary owns your request", theme),
+        heading("1. Codex owns your request", theme),
         Line::raw(
-            "The primary keeps the conversation, overall plan, verification, corrections, and final answer. It decides what to do directly and what bounded work to delegate, then integrates the evidence that comes back.",
+            "Codex keeps the conversation, overall plan, verification, corrections, and final answer. It decides what to do directly and what bounded work to delegate, then integrates the evidence that comes back.",
         ),
         Line::raw(""),
         heading("2. Implementation subagents do bounded work", theme),
@@ -538,28 +569,28 @@ fn welcome_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
             "When automatic review is enabled, any completed turn that changed the workspace is reviewable after writers drain—even when the primary made every edit. A visible intent analyst reconstructs the contract; a supervisor on the primary route selects useful read-only specialists, vets their reports, and returns one verdict. Surviving findings go to the primary for correction, and changed corrections receive a focused delta review.",
         ),
         Line::raw(""),
-        heading("Routing and usage", theme),
+        heading("Codex first, other agents optional", theme),
         Line::raw(
-            "Primary, subagent, and review work are accounted as separate seats. Delegation can preserve scarce primary context and quota by moving bounded work to cheaper or available workers; parallel work and independent review can also increase total work performed. Multiple providers expand capacity, choice, failover, cost options, and possible diversity, but do not guarantee that every role uses a different provider.",
+            "The recommended setup keeps primary, subagent, and review work on Codex. Add other providers later for capacity, cost options, failover, or specialist diversity without changing Mjolnir's terminal, worktree, remote-control, voice, and review workflow.",
         ),
     ]
 }
 
 fn whats_new_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
     vec![
-        heading("Mjolnir now uses three explicit roles", theme),
+        heading("Mjolnir is now Codex-first", theme),
         Line::raw(
-            "The former Council model is now a primary agent, a pool of write-capable implementation subagents, and a separate read-only automatic review team.",
+            "New users start with Codex as the primary, implementation-subagent, and review route. Other agents remain available as optional specialists or alternative routes.",
         ),
         Line::raw(""),
-        heading("Review is turn-based, not delegation-based", theme),
+        heading("The power features stay up front", theme),
         Line::raw(
-            "Every changed turn can be reviewed when review is enabled. The primary model supervises selective specialist sessions, verifies findings, corrects surviving problems, and receives a focused re-review when corrections change the workspace.",
+            "Self-hosted remote control, isolated worktrees, local desktop voice, parallel subagents, and adversarial review remain part of the default Codex experience.",
         ),
         Line::raw(""),
         heading("Your existing providers and settings stay in place", theme),
         Line::raw(
-            "This explanation has its own content version, separate from the config schema. Continue to review the resolved routes, or press C to customize them.",
+            "Continue to keep your saved routes unchanged, press C to customize them, or press S to skip this onboarding. Skipping records this onboarding version so it will not return.",
         ),
     ]
 }
@@ -567,7 +598,7 @@ fn whats_new_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
 fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::raw(
-            "One working connection is enough to start. Additional connections are optional and add model choice, workload capacity, quota failover, cost options, and possible provider diversity.",
+            "Codex is the recommended connection. Additional providers are optional and can add specialist models, capacity, failover, or cost choices later.",
         ),
         Line::raw(""),
         heading("Account actions", theme),
@@ -587,7 +618,7 @@ fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     lines.push(selected_line(
         state.selected == crate::auth::AuthVendor::ALL.len(),
         "Continue",
-        "choose recommended setup or open full settings",
+        "choose Codex or open full settings",
         theme,
     ));
     lines.push(Line::raw(""));
@@ -619,13 +650,13 @@ fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
 fn choose_path_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     vec![
         Line::raw(
-            "You can start from Mjolnir's automatic routing and current review/failover defaults, or inspect every model and connection setting.",
+            "Start with automatic model selection constrained to Codex for every seat, or inspect every model and connection setting.",
         ),
         Line::raw(""),
         selected_line(
             state.selected == 0,
-            "Use recommended setup",
-            "automatic primary and worker routing; review and failover enabled",
+            "Use Codex (recommended)",
+            "automatic Codex models for primary, subagents, and review",
             theme,
         ),
         selected_line(
@@ -644,7 +675,14 @@ fn readiness_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
         )];
     };
     let mut lines = vec![
-        heading("Primary", theme),
+        heading(
+            if roster.primary.launch.source_id == "codex-acp" {
+                "Codex Primary"
+            } else {
+                "Primary"
+            },
+            theme,
+        ),
         Line::raw(format!(
             "{} via {} — owns coordination, verification, correction, and the final answer",
             roster.primary.model.model, roster.primary.launch.source_id
@@ -705,7 +743,7 @@ fn footer(screen: Screen) -> &'static str {
     match screen {
         Screen::Welcome => "Enter/N continue | Up/Down/PgUp/PgDn scroll | Esc exit without saving",
         Screen::WhatsNew => {
-            "Enter review readiness | C customize | scroll keys | Esc skip without saving"
+            "Enter keep current setup | C customize | S/Esc skip this onboarding | scroll keys"
         }
         Screen::Connections => {
             "Up/Down select | Enter sign in/continue | C full settings | R retry | Esc back"
@@ -768,11 +806,12 @@ mod tests {
             warnings: Vec::new(),
             inventory: AcpInventory::default(),
             subagent_acp_priority: Vec::new(),
+            subagent_acp_source: None,
         }
     }
 
     #[test]
-    fn fresh_recommended_path_explains_roles_before_resolution() {
+    fn fresh_recommended_path_constrains_every_seat_to_codex() {
         let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
         assert_eq!(state.screen, Screen::Welcome);
         assert_eq!(state.handle_key(KeyCode::Enter), Action::None);
@@ -780,7 +819,22 @@ mod tests {
         state.selected = crate::auth::AuthVendor::ALL.len();
         assert_eq!(state.handle_key(KeyCode::Enter), Action::None);
         assert_eq!(state.screen, Screen::ChoosePath);
-        assert_eq!(state.handle_key(KeyCode::Enter), Action::Resolve);
+        assert_eq!(state.handle_key(KeyCode::Enter), Action::UseRecommended);
+        state.apply_recommended_setup();
+        assert_eq!(
+            state.config().agent.acp_source.as_deref(),
+            Some("codex-acp")
+        );
+        assert_eq!(
+            state.config().review.acp_source.as_deref(),
+            Some("codex-acp")
+        );
+        assert_eq!(
+            state.config().subagents.acp_source.as_deref(),
+            Some("codex-acp")
+        );
+        assert!(state.config().agent.discrete_review);
+        assert!(state.config().subagents.auto_failover);
         state.resolution_succeeded(roster());
         assert_eq!(state.screen, Screen::Readiness);
         assert_eq!(state.handle_key(KeyCode::Enter), Action::Finish);
@@ -822,6 +876,22 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_skip_records_latest_onboarding_without_changing_routes() {
+        let mut config = Config {
+            onboarding_version: 1,
+            ..Config::default()
+        };
+        config.agent.acp_source = Some("claude-acp".to_string());
+        let mut state = State::new(Kind::Upgrade, config, Some(roster()), None);
+
+        assert_eq!(state.handle_key(KeyCode::Esc), Action::Skip);
+        let visited = state.visited_config();
+
+        assert_eq!(visited.onboarding_version, ONBOARDING_CONTENT_VERSION);
+        assert_eq!(visited.agent.acp_source.as_deref(), Some("claude-acp"));
+    }
+
+    #[test]
     fn cancel_does_not_mutate_or_accept_the_config() {
         let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
         assert_eq!(state.handle_key(KeyCode::Esc), Action::Cancel);
@@ -837,7 +907,7 @@ mod tests {
             .draw(|frame| draw(frame, &mut state))
             .expect("draw");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("primary owns"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Codex owns"), "rendered:\n{rendered}");
         assert_eq!(state.handle_key(KeyCode::PageDown), Action::None);
         terminal
             .draw(|frame| draw(frame, &mut state))

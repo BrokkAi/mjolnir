@@ -17,7 +17,7 @@ pub const DISABLED_MODEL: &str = "disabled";
 pub const CONFIG_VERSION: u32 = 3;
 /// Version of the product-model explanation accepted by the user. This is
 /// intentionally independent from the storage schema version.
-pub const ONBOARDING_CONTENT_VERSION: u32 = 1;
+pub const ONBOARDING_CONTENT_VERSION: u32 = 2;
 pub const DEFAULT_ACP_PRIORITY: [&str; 4] = ["codex-acp", "claude-acp", "kimi", "anvil"];
 /// Schema version this build can migrate forward from.
 const MIGRATABLE_VERSION: u32 = 2;
@@ -165,6 +165,10 @@ impl Default for ModelsConfig {
 pub struct AgentConfig {
     #[serde(default = "default_auto")]
     pub model: String,
+    /// Restrict this seat to one ACP source while retaining automatic model
+    /// selection within that source. `None` allows every enabled source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_source: Option<String>,
     /// Preferred ACP sources when more than one enabled adapter offers the
     /// selected model. Unlisted sources follow in discovery order.
     #[serde(
@@ -191,6 +195,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             model: default_auto(),
+            acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: None,
             discrete_review: true,
@@ -209,6 +214,10 @@ impl AgentConfig {
 pub struct ReviewConfig {
     #[serde(default = "default_auto")]
     pub model: String,
+    /// Restrict this seat to one ACP source while retaining automatic model
+    /// selection within that source. `None` allows every enabled source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_source: Option<String>,
     /// Preferred ACP sources when more than one enabled adapter offers the
     /// selected review supervisor model. Unlisted sources follow in discovery
     /// order.
@@ -229,6 +238,7 @@ impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
             model: default_auto(),
+            acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: None,
         }
@@ -245,6 +255,10 @@ impl ReviewConfig {
 pub struct SubagentsConfig {
     #[serde(default = "default_auto")]
     pub model: String,
+    /// Restrict this seat and its automatic failover pool to one ACP source.
+    /// `None` allows every enabled source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_source: Option<String>,
     /// Preferred ACP sources when more than one enabled adapter offers the
     /// selected worker model. Unlisted sources follow in discovery order.
     #[serde(
@@ -276,6 +290,7 @@ impl Default for SubagentsConfig {
     fn default() -> Self {
         Self {
             model: default_auto(),
+            acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: None,
             max_parallel: default_max_parallel(),
@@ -431,14 +446,17 @@ impl Config {
     pub fn apply_model_overrides(&mut self, overrides: &ModelOverrides) {
         if let Some(model) = &overrides.primary {
             self.agent.model.clone_from(model);
+            self.agent.acp_source = None;
             self.agent.reasoning_effort = overrides.primary_effort.clone();
         }
         if let Some(model) = &overrides.review {
             self.review.model.clone_from(model);
+            self.review.acp_source = None;
             self.review.reasoning_effort = overrides.review_effort.clone();
         }
         if let Some(model) = &overrides.subagent {
             self.subagents.model.clone_from(model);
+            self.subagents.acp_source = None;
             self.subagents.reasoning_effort = overrides.subagent_effort.clone();
         }
     }
@@ -548,6 +566,16 @@ impl Config {
                     "{seat}.acp_priority contains duplicate source id '{source_id}'"
                 );
             }
+        }
+        for (seat, source) in [
+            ("agent", self.agent.acp_source.as_deref()),
+            ("review", self.review.acp_source.as_deref()),
+            ("subagents", self.subagents.acp_source.as_deref()),
+        ] {
+            anyhow::ensure!(
+                source.is_none_or(|source| !source.trim().is_empty()),
+                "{seat}.acp_source cannot be empty"
+            );
         }
         anyhow::ensure!(
             self.subagents.max_parallel <= 16,
@@ -710,6 +738,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
         spinner: old.spinner,
         agent: AgentConfig {
             model: old.thor.model,
+            acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: old.thor.reasoning_effort,
             discrete_review: old.thor.discrete_review,
@@ -717,11 +746,13 @@ fn migrate_v2(body: &str) -> Result<Config> {
         },
         review: ReviewConfig {
             model: old.loki.model,
+            acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: old.loki.reasoning_effort,
         },
         subagents: SubagentsConfig {
             model: old.eitri.model,
+            acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: old.eitri.reasoning_effort,
             max_parallel: old.eitri.max_parallel_explores,
@@ -1003,7 +1034,12 @@ mod tests {
         cfg.save(&path).expect("save");
 
         let body = std::fs::read_to_string(&path).expect("read");
-        assert!(body.contains("onboarding_version = 1"), "body: {body:?}");
+        assert!(
+            body.contains(&format!(
+                "onboarding_version = {ONBOARDING_CONTENT_VERSION}"
+            )),
+            "body: {body:?}"
+        );
         assert_eq!(
             Config::load(&path).expect("load").onboarding_version,
             ONBOARDING_CONTENT_VERSION
@@ -1015,6 +1051,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut cfg = Config::default();
+        cfg.agent.acp_source = Some("codex-acp".into());
+        cfg.review.acp_source = Some("claude-acp".into());
+        cfg.subagents.acp_source = Some("anvil".into());
         cfg.agent.acp_priority = vec!["claude-acp".into(), "anvil".into()];
         cfg.review.acp_priority = vec!["kimi".into(), "codex-acp".into()];
         cfg.subagents.acp_priority = vec!["anvil".into(), "codex-acp".into()];
@@ -1022,6 +1061,9 @@ mod tests {
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
 
+        assert_eq!(loaded.agent.acp_source, cfg.agent.acp_source);
+        assert_eq!(loaded.review.acp_source, cfg.review.acp_source);
+        assert_eq!(loaded.subagents.acp_source, cfg.subagents.acp_source);
         assert_eq!(loaded.agent.acp_priority, cfg.agent.acp_priority);
         assert_eq!(loaded.review.acp_priority, cfg.review.acp_priority);
         assert_eq!(loaded.subagents.acp_priority, cfg.subagents.acp_priority);
@@ -1247,6 +1289,7 @@ origin = "custom"
             theme: TerminalThemeKind::Light,
             agent: AgentConfig {
                 model: "gpt-5-6-sol".to_string(),
+                acp_source: None,
                 acp_priority: default_acp_priority(),
                 reasoning_effort: None,
                 discrete_review: false,
@@ -1282,7 +1325,10 @@ origin = "custom"
 
     #[test]
     fn model_overrides_do_not_mutate_the_source_config() {
-        let saved = Config::default();
+        let mut saved = Config::default();
+        saved.agent.acp_source = Some("codex-acp".to_string());
+        saved.review.acp_source = Some("codex-acp".to_string());
+        saved.subagents.acp_source = Some("codex-acp".to_string());
         let mut invocation = saved.clone();
         invocation.apply_model_overrides(&ModelOverrides {
             primary: Some("gpt-test".to_string()),
@@ -1293,12 +1339,15 @@ origin = "custom"
             subagent_effort: Some("medium".to_string()),
         });
 
-        assert_eq!(saved.model_names(), ModelsConfig::default());
+        assert_eq!(saved.agent.acp_source.as_deref(), Some("codex-acp"));
         assert_eq!(invocation.agent.model, "gpt-test");
+        assert_eq!(invocation.agent.acp_source, None);
         assert_eq!(invocation.agent.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(invocation.review.model, "claude-review");
+        assert_eq!(invocation.review.acp_source, None);
         assert_eq!(invocation.review.reasoning_effort.as_deref(), Some("xhigh"));
         assert_eq!(invocation.subagents.model, "qwen-test");
+        assert_eq!(invocation.subagents.acp_source, None);
         assert_eq!(
             invocation.subagents.reasoning_effort.as_deref(),
             Some("medium")

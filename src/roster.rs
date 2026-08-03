@@ -124,6 +124,7 @@ pub struct Roster {
     pub warnings: Vec<String>,
     pub inventory: AcpInventory,
     pub(crate) subagent_acp_priority: Vec<String>,
+    pub(crate) subagent_acp_source: Option<String>,
 }
 
 impl Roster {
@@ -134,7 +135,8 @@ impl Roster {
         let Some(initial) = self.subagent_default.clone() else {
             return Vec::new();
         };
-        failover_roles(initial, &self.available, false, &self.subagent_acp_priority)
+        let available = source_candidates(&self.available, self.subagent_acp_source.as_deref());
+        failover_roles(initial, &available, false, &self.subagent_acp_priority)
     }
 
     /// Rebind the auto-selected review supervisor after resume provenance pins
@@ -149,8 +151,9 @@ impl Roster {
         if config.review.model != "auto" {
             return;
         }
+        let available = source_candidates(&self.available, config.review.acp_source.as_deref());
         self.review_supervisor =
-            choose_review_auto(&self.primary, &self.available, &config.review.acp_priority);
+            choose_review_auto(&self.primary, &available, &config.review.acp_priority);
         if let Some(review_supervisor) = self.review_supervisor.as_mut() {
             review_supervisor.reasoning_effort = config.review.reasoning_effort.clone();
         }
@@ -164,6 +167,14 @@ fn provider_key(model: &str) -> &str {
     } else {
         provider
     }
+}
+
+fn source_candidates(available: &[ResolvedAgent], source: Option<&str>) -> Vec<ResolvedAgent> {
+    available
+        .iter()
+        .filter(|candidate| source.is_none_or(|source| candidate.launch.source_id == source))
+        .cloned()
+        .collect()
 }
 
 fn failover_roles(
@@ -1405,9 +1416,15 @@ fn assemble_roster(
     ) {
         bail!("the primary agent cannot be disabled");
     }
+    let primary_available = source_candidates(&available, config.agent.acp_source.as_deref());
+    if primary_available.is_empty()
+        && let Some(source) = &config.agent.acp_source
+    {
+        bail!("Agent ACP source '{source}' has no launchable models");
+    }
     let primary = if config.agent.model == "auto" {
         choose_primary_auto(
-            &available,
+            &primary_available,
             &availability.subscriptions,
             &config.agent.acp_priority,
         )
@@ -1417,23 +1434,25 @@ fn assemble_roster(
             "Agent",
             &config.agent.model,
             rows,
-            &available,
+            &primary_available,
             &config.agent.acp_priority,
         )?
     };
+    let review_available = source_candidates(&available, config.review.acp_source.as_deref());
     let mut review_supervisor = resolve_review_supervisor(
         &config.review.model,
         primary,
         rows,
-        &available,
+        &review_available,
         &config.review.acp_priority,
         config.agent.discrete_review,
     )?;
     let occupied = vec![primary.model.model.as_str()];
+    let subagent_available = source_candidates(&available, config.subagents.acp_source.as_deref());
     let mut subagent_default = resolve_subagent_default(
         &config.subagents.model,
         rows,
-        &available,
+        &subagent_available,
         &occupied,
         &config.subagents.acp_priority,
     )?;
@@ -1492,6 +1511,7 @@ fn assemble_roster(
         warnings,
         inventory,
         subagent_acp_priority: config.subagents.acp_priority.clone(),
+        subagent_acp_source: config.subagents.acp_source.clone(),
     })
 }
 
@@ -1769,6 +1789,26 @@ mod tests {
     }
 
     #[test]
+    fn source_constraint_keeps_auto_selection_within_codex() {
+        let available = vec![
+            role("claude-fable-5", 0.70),
+            role("gpt-5-6-sol", 0.68),
+            role("gpt-5-5", 0.65),
+        ];
+        let codex = source_candidates(&available, Some("codex-acp"));
+
+        let chosen =
+            choose_primary_auto(&codex, &plans("max20", "plus"), &[]).expect("Codex model");
+
+        assert_eq!(chosen.model.model, "gpt-5-6-sol");
+        assert!(
+            codex
+                .iter()
+                .all(|candidate| candidate.launch.source_id == "codex-acp")
+        );
+    }
+
+    #[test]
     fn auto_primary_moves_to_the_larger_subscription() {
         let available = vec![
             role("claude-fable-5", 0.70),
@@ -1891,6 +1931,7 @@ mod tests {
     fn auto_review_rebinds_after_primary_is_pinned() {
         let mut config = Config::default();
         config.review.reasoning_effort = Some("high".to_string());
+        config.review.acp_source = Some("codex-acp".to_string());
         let gpt = role("gpt-5-6-sol", 0.70);
         let claude = role("claude-fable-5", 0.64);
         let gemini = role("gemini-3-1-pro-preview", 0.60);
@@ -1903,6 +1944,7 @@ mod tests {
             warnings: Vec::new(),
             inventory: AcpInventory::default(),
             subagent_acp_priority: Vec::new(),
+            subagent_acp_source: None,
         };
 
         roster.primary = claude;
@@ -1929,6 +1971,7 @@ mod tests {
             warnings: Vec::new(),
             inventory: AcpInventory::default(),
             subagent_acp_priority: Vec::new(),
+            subagent_acp_source: None,
         };
 
         roster.primary = claude;
@@ -1941,6 +1984,31 @@ mod tests {
                 .model
                 .model,
             "claude-fable-5"
+        );
+    }
+
+    #[test]
+    fn subagent_source_constraint_applies_to_failover_pool() {
+        let primary = role("gpt-5-6-sol", 0.70);
+        let worker = role("gpt-5-5", 0.65);
+        let claude = role("claude-fable-5", 0.64);
+        let roster = Roster {
+            primary: primary.clone(),
+            review_supervisor: None,
+            subagent_default: Some(worker.clone()),
+            available: vec![primary, worker, claude],
+            choices: Vec::new(),
+            warnings: Vec::new(),
+            inventory: AcpInventory::default(),
+            subagent_acp_priority: Vec::new(),
+            subagent_acp_source: Some("codex-acp".to_string()),
+        };
+
+        assert!(
+            roster
+                .subagent_failover_roles()
+                .iter()
+                .all(|candidate| candidate.launch.source_id == "codex-acp")
         );
     }
 
