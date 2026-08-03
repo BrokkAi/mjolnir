@@ -34,3 +34,37 @@ pub(crate) fn truncate_text_to_width(line: String, width: u16) -> String {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_text_to_width;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn text_that_fits_is_preserved() {
+        let line = "界abc".to_string();
+
+        assert_eq!(truncate_text_to_width(line.clone(), 5), line);
+    }
+
+    #[test]
+    fn truncation_reserves_room_for_ellipsis() {
+        assert_eq!(truncate_text_to_width("abcdef".to_string(), 5), "ab...");
+        assert_eq!(truncate_text_to_width("界abcd".to_string(), 5), "界...");
+    }
+
+    #[test]
+    fn narrow_widths_truncate_without_ellipsis() {
+        assert_eq!(truncate_text_to_width("abcdef".to_string(), 3), "abc");
+        assert_eq!(truncate_text_to_width("界abc".to_string(), 1), "");
+        assert_eq!(truncate_text_to_width("abcdef".to_string(), 0), "");
+    }
+
+    #[test]
+    fn truncation_preserves_zero_width_characters() {
+        let truncated = truncate_text_to_width("e\u{301}xyzz".to_string(), 4);
+
+        assert_eq!(truncated, "e\u{301}...");
+        assert_eq!(truncated.width(), 4);
+    }
+}
