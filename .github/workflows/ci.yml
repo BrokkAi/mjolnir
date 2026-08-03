@@ -49,6 +49,20 @@ jobs:
         grep -Fx licenses/anvil-v0.24.0/SOURCE.md /tmp/mjolnir-package-files.txt
         grep -Fx LICENSE /tmp/voice-worker-package-files.txt
 
+  npm-packaging:
+    name: npm packaging
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Node
+      uses: actions/setup-node@v6
+      with:
+        node-version: 24
+
+    - name: Run npm packaging tests
+      run: node --test packaging/npm/test/*.test.mjs
+
   mjolnir:
     strategy:
       fail-fast: false

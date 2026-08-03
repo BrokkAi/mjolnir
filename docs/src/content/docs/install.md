@@ -13,10 +13,43 @@ private repository.
 
 | Method | Platforms | Installs |
 | --- | --- | --- |
+| npm / npx | macOS universal; Linux x86-64/ARM64 (glibc); Windows x86-64; Android ARM64 | Native `mj` and bundled Anvil; desktop also `mj-voice-worker`; not Bifrost |
 | Release installer | macOS/Linux on x86-64 or ARM64; Android ARM64 | `mj`, Bifrost, and on desktop `mj-voice-worker` |
 | crates.io | Platforms supported by the Rust crates | `mj` and whichever crates you name; it does not install Bifrost |
 | Release archive | Linux, macOS, Windows, Android release targets | The binaries and legal files packaged for that target |
 | Build from source | Rust-supported development hosts | The workspace members you build |
+
+### npm and npx
+
+The npm package ships the native release bundle for your platform — no Rust
+toolchain and no first-run product download:
+
+```bash
+npm install -g @brokkai/mjolnir
+mj --version
+```
+
+Run one-shot without a global install, optionally pinned to an exact
+release:
+
+```bash
+npx -y @brokkai/mjolnir
+npx -y @brokkai/mjolnir@1.4.0
+```
+
+Upgrade and uninstall through npm:
+
+```bash
+npm update -g @brokkai/mjolnir
+npm uninstall -g @brokkai/mjolnir
+```
+
+Desktop installs place `anvil` and the `mj-voice-worker` voice sidecar next
+to `mj`, so voice support works out of the box; Android includes `mj` and
+`anvil` only. The npm path does not install Bifrost — use the release
+installer if you want it. Linux builds are glibc-only; musl systems should
+use another method. Because npm owns the installation, Mjolnir's in-place
+self-updater is disabled under this method.
 
 ### Release installer
 
@@ -119,7 +152,9 @@ launch or that delegation works end to end.
 
 Interactive startup checks GitHub for a newer Mjolnir release unless
 `MJOLNIR_NO_UPDATE_CHECK=1` or `--no-update-check` is set. The in-app updater
-requires the matching checksum asset.
+requires the matching checksum asset. npm installations set
+`MJOLNIR_NO_UPDATE_CHECK` automatically and are upgraded with
+`npm update -g @brokkai/mjolnir` instead.
 
 To uninstall a release-installer deployment, remove `mj`, `bifrost`, and
 `mj-voice-worker` from the selected install directory. Review [Storage and
