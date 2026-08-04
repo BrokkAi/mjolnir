@@ -778,6 +778,7 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
     match entry {
         Entry::UserPrompt(_)
         | Entry::System(_)
+        | Entry::FeatureHint(_)
         | Entry::SessionBoundary(_)
         | Entry::Plan(_)
         | Entry::SubagentPlan(_)
@@ -855,6 +856,7 @@ pub struct UiRunOptions<'a> {
     pub mode: UiMode,
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
+    pub feature_hints_enabled: bool,
     pub active_agent_launch: Option<ragnarok::Launch>,
     pub session_boundary: Option<String>,
     /// The ACP session cwd; `/ragnarok` battles are rooted here.
@@ -888,6 +890,7 @@ struct UiInitialState {
     config_path: Option<PathBuf>,
     theme_kind: TerminalThemeKind,
     spinner_style: SpinnerStyle,
+    feature_hints_enabled: bool,
     session_boundary: Option<String>,
     session_cwd: PathBuf,
     model_choices: Vec<crate::roster::ModelChoice>,
@@ -949,6 +952,7 @@ pub async fn run(
             config_path: options.persistence.config_path.map(Path::to_path_buf),
             theme_kind: options.theme_kind,
             spinner_style: options.spinner_style,
+            feature_hints_enabled: options.feature_hints_enabled,
             session_boundary: options.session_boundary,
             session_cwd: options.session_cwd,
             model_choices: options.model_choices,
@@ -1171,6 +1175,7 @@ async fn ui_loop(
     state.transcript_export_dir = initial.transcript_export_dir;
     state.set_theme(initial.theme_kind);
     state.set_spinner_style(initial.spinner_style);
+    state.feature_hints_enabled = initial.feature_hints_enabled;
     state.config_path = initial.config_path;
     if let Some(boundary) = initial.session_boundary {
         state.push_session_boundary(boundary);
@@ -1396,7 +1401,20 @@ async fn ui_loop(
                             && state.session_id.is_none()
                             && matches!(&ev, UiEvent::Fatal(_));
                         let flushed_prose = stream_reveal.flush_for_event(&mut state, &ev);
+                        let completed_turn = matches!(
+                            &ev,
+                            UiEvent::PromptDone { stop_reason, .. }
+                                if *stop_reason != StopReason::Cancelled
+                        );
                         state.apply_event(ev);
+                        if completed_turn {
+                            state.maybe_record_feature_hint(crate::app::FeatureHintCapabilities {
+                                subagents: state.active_models.subagent
+                                    != crate::config::DISABLED_MODEL,
+                                ragnarok: state.ragnarok_models.len() >= 2,
+                                voice: voice_input_supported(),
+                            });
+                        }
                         let visibility_changed = stream_reveal.observe(&mut state);
                         finalize_startup_prompt(&mut state);
                         if failed_side_start {
@@ -4651,6 +4669,7 @@ fn persist_mjconfig_selection(
     let theme = config.theme;
     let style = config.spinner;
     let review_changed = state.review_enabled != config.agent.discrete_review;
+    let feature_hints_enabled = config.feature_hints;
     let live_session_updates = live_primary_session_config_updates(state, &config);
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
@@ -4659,6 +4678,7 @@ fn persist_mjconfig_selection(
                 state.acp_inventory =
                     crate::roster::rediscover_inventory(&config, &state.acp_inventory);
                 state.review_enabled = config.agent.discrete_review;
+                state.feature_hints_enabled = feature_hints_enabled;
                 if review_changed {
                     let _ = cmd_tx.send(UiCommand::SetReviewPolicy {
                         enabled: config.agent.discrete_review,
@@ -4879,6 +4899,8 @@ fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
                 push_export_text(out, &heading, &message.text);
             }
             Entry::System(text) => push_export_text(out, "System", text),
+            // Feature hints are ephemeral UI guidance, not session content.
+            Entry::FeatureHint(_) => {}
             Entry::SessionBoundary(text) => push_export_text(out, "Session", text),
             Entry::Plan(entries) | Entry::SubagentPlan(entries) => {
                 let heading = if matches!(entry, Entry::SubagentPlan(_)) {
@@ -6768,6 +6790,15 @@ fn render_nested_agent_lines(
             Entry::System(text) => {
                 push_styled_message(&mut out, text, state.theme.accent, false, state.theme);
             }
+            Entry::FeatureHint(text) => {
+                push_styled_message(
+                    &mut out,
+                    &format!("Mjolnir tip · {text}"),
+                    state.theme.muted,
+                    false,
+                    state.theme,
+                );
+            }
             Entry::SessionBoundary(text) => {
                 out.push(Line::from(""));
                 out.push(session_boundary_line(text, width, state.theme));
@@ -7708,6 +7739,15 @@ fn render_transcript_entry_range(
             Entry::System(text) => {
                 push_styled_message(&mut out, text, theme.accent, collapse_message, theme);
             }
+            Entry::FeatureHint(text) => {
+                push_styled_message(
+                    &mut out,
+                    &format!("Mjolnir tip · {text}"),
+                    theme.muted,
+                    false,
+                    theme,
+                );
+            }
             Entry::SessionBoundary(text) => {
                 if !text.starts_with("subagent ·") {
                     out.push(Line::from(""));
@@ -8055,7 +8095,7 @@ fn message_preview(text: &str, collapse: bool) -> (String, bool) {
 
 fn push_message_collapse_hint(out: &mut Vec<Line<'static>>, theme: TerminalTheme) {
     out.push(Line::from(Span::styled(
-        "… details hidden",
+        "… details hidden · Ctrl-T full transcript",
         Style::default()
             .fg(theme.muted)
             .add_modifier(Modifier::ITALIC),
@@ -8950,7 +8990,7 @@ fn push_tool_collapse_hint(
         ToolOutputHidden::Details => {
             let prefix = " ".repeat(indent);
             out.push(Line::from(Span::styled(
-                format!("{prefix}… details hidden"),
+                format!("{prefix}… details hidden · Ctrl-T full transcript · Alt-T latest tool"),
                 Style::default()
                     .fg(theme.muted)
                     .add_modifier(Modifier::ITALIC),
@@ -8979,7 +9019,9 @@ fn push_collapse_hint(
 ) {
     let prefix = " ".repeat(indent);
     out.push(Line::from(Span::styled(
-        format!("{prefix}... {hidden} earlier lines hidden"),
+        format!(
+            "{prefix}... {hidden} earlier lines hidden · Ctrl-T full transcript · Alt-T latest tool"
+        ),
         Style::default()
             .fg(theme.muted)
             .add_modifier(Modifier::ITALIC),
@@ -14359,8 +14401,8 @@ mod tests {
             after
                 .iter()
                 .filter(|line| line.contains("hidden"))
-                .all(|line| !line.contains("Ctrl-T")),
-            "collapsed inline rows must not promise a Ctrl-T expansion: {after:?}"
+                .all(|line| line.contains("Alt-T")),
+            "collapsed reader rows must name the Alt-T control: {after:?}"
         );
     }
 
@@ -19962,7 +20004,7 @@ mod tests {
         assert_eq!(
             rendered
                 .iter()
-                .filter(|line| line.trim() == "… details hidden")
+                .filter(|line| line.trim().starts_with("… details hidden · Ctrl-T"))
                 .count(),
             2,
             "rendered: {rendered:?}"
@@ -20129,7 +20171,10 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|line| line == &format!("│   ... {hidden} earlier lines hidden")),
+                .any(|line| line
+                    == &format!(
+                        "│   ... {hidden} earlier lines hidden · Ctrl-T full transcript · Alt-T latest tool"
+                    )),
             "missing collapse hint, got: {rendered:?}"
         );
 
@@ -25164,5 +25209,27 @@ mod tests {
         assert!(!preview.contains('\n'));
         assert!(!preview.contains('\r'));
         assert!(preview.starts_with("line one"));
+    }
+
+    #[test]
+    fn feature_hint_is_distinct_wraps_narrowly_and_is_not_exported() {
+        let mut state = AppState::new();
+        state.transcript.push(Entry::FeatureHint(
+            "Open /mjconfig to choose agents and session options.".to_string(),
+        ));
+
+        let rendered = render_transcript_lines(&state, 24);
+        let text = rendered
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Mjolnir tip"));
+        assert!(text.contains("/mjconfig"));
+        assert!(rendered.len() > 1, "narrow hint should wrap: {text:?}");
+
+        let mut exported = String::new();
+        push_export_entries(&mut exported, &state.transcript, &state);
+        assert!(exported.is_empty(), "ephemeral hint leaked into export");
     }
 }

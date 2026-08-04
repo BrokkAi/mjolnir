@@ -2517,6 +2517,9 @@ async fn run_session(
                 mode,
                 theme_kind,
                 spinner_style,
+                feature_hints_enabled: config::Config::load(&config_path)
+                    .map(|config| config.feature_hints)
+                    .unwrap_or(true),
                 active_agent_launch: Some(ragnarok::Launch {
                     program: agent.program.clone(),
                     args: agent.args.clone(),

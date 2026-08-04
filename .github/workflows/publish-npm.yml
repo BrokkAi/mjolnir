@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing Mjolnir release tag to package, for example v1.5.1
+        description: Existing Mjolnir release tag to package, for example v1.5.2
         required: true
         type: string
       publish:
@@ -85,7 +85,7 @@ jobs:
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/anvil
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj-voice-worker
-          npm-smoke/node_modules/@brokkai/mjolnir/bin/mj.js --version
+          npm-smoke/node_modules/.bin/mj --version
 
       - uses: actions/upload-artifact@v7
         with:

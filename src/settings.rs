@@ -249,7 +249,7 @@ impl SettingsEditor {
             SettingsTab::AcpPriority => 3,
             SettingsTab::AcpServers => self.inventory.servers.len() + SERVER_ROW_OFFSET,
             SettingsTab::AcpSessions => self.session_option_rows().len(),
-            SettingsTab::Appearance => 2,
+            SettingsTab::Appearance => 3,
         }
     }
 
@@ -354,6 +354,9 @@ impl SettingsEditor {
                 let next =
                     (current as i32 + delta).rem_euclid(SpinnerStyle::ALL.len() as i32) as usize;
                 self.config.spinner = SpinnerStyle::ALL[next];
+            }
+            SettingsTab::Appearance if self.selected == 2 => {
+                self.config.feature_hints = !self.config.feature_hints;
             }
             _ => return SettingsAction::None,
         }
@@ -1647,6 +1650,18 @@ fn draw_appearance(
             ),
             theme,
         ),
+        selected_line(
+            editor.selected == 2,
+            format!(
+                "Feature tips < {} >",
+                if editor.config.feature_hints {
+                    "on"
+                } else {
+                    "off"
+                }
+            ),
+            theme,
+        ),
     ];
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -1988,5 +2003,17 @@ mod tests {
         editor.selected = ADD_SERVER_INDEX;
         assert_eq!(editor.handle_key(KeyCode::Enter), SettingsAction::None);
         assert!(matches!(editor.acp_view, AcpView::Catalog { .. }));
+    }
+
+    #[test]
+    fn appearance_tab_toggles_feature_hints() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Appearance;
+        editor.selected = 2;
+
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert!(!editor.config.feature_hints);
+        assert_eq!(editor.handle_key(KeyCode::Char(' ')), SettingsAction::None);
+        assert!(!editor.config.feature_hints);
     }
 }

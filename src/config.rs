@@ -43,6 +43,9 @@ pub struct Config {
     pub theme: TerminalThemeKind,
     #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
     pub spinner: SpinnerStyle,
+    /// Show occasional capability-aware tips between completed turns.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub feature_hints: bool,
     /// The primary agent's model and review behavior.
     #[serde(default, skip_serializing_if = "AgentConfig::is_default")]
     pub agent: AgentConfig,
@@ -80,6 +83,7 @@ impl Default for Config {
             onboarding_version: 0,
             theme: TerminalThemeKind::default(),
             spinner: SpinnerStyle::default(),
+            feature_hints: true,
             agent: AgentConfig::default(),
             review: ReviewConfig::default(),
             subagents: SubagentsConfig::default(),
@@ -92,6 +96,10 @@ impl Default for Config {
 
 fn is_zero(value: &u32) -> bool {
     *value == 0
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// Permission preset applied to an ACP runtime. Never persisted: interactive
@@ -736,6 +744,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
         onboarding_version: 0,
         theme: old.theme,
         spinner: old.spinner,
+        feature_hints: true,
         agent: AgentConfig {
             model: old.thor.model,
             acp_source: None,
@@ -1732,5 +1741,23 @@ mode = "ask"
 
         let loaded = Config::load(&path).expect("load saved");
         assert_eq!(loaded.spinner, SpinnerStyle::Bars);
+    }
+
+    #[test]
+    fn feature_hints_default_on_and_disabled_roundtrips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        Config::default().save(&path).expect("save default");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(!body.contains("feature_hints"));
+
+        let config = Config {
+            feature_hints: false,
+            ..Config::default()
+        };
+        config.save(&path).expect("save disabled");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(body.contains("feature_hints = false"));
+        assert!(!Config::load(&path).expect("load disabled").feature_hints);
     }
 }

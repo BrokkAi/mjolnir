@@ -414,10 +414,82 @@ pub enum Entry {
     InternalMessage(InternalMessage),
     /// System-level note (errors, warnings, mode changes).
     System(String),
+    /// Local Mjolnir feature-discovery hint. Never sent to the agent.
+    FeatureHint(String),
     /// Visual separator inserted at local session boundaries so a freshly
     /// started session is not confused with the previous transcript.
     SessionBoundary(String),
 }
+
+const FEATURE_HINT_INTERVAL_TURNS: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeatureHintCapabilities {
+    pub subagents: bool,
+    pub ragnarok: bool,
+    pub voice: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeatureHintRequirement {
+    Always,
+    Subagents,
+    Ragnarok,
+    Voice,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FeatureHint {
+    text: &'static str,
+    requirement: FeatureHintRequirement,
+}
+
+const FEATURE_HINTS: &[FeatureHint] = &[
+    FeatureHint {
+        text: "Open /mjconfig to choose agents, subagents, models, ACP routes, and session options.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Use /new for another workspace, /clear for a fresh thread, /load to resume, and /export to save this transcript.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Press Ctrl+J for a new line, Up/Down for prompt history, F10 for help, and Ctrl+Y to copy the latest reply.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Scroll the transcript normally; Ctrl+T expands details and Ctrl+G opens the latest workspace diff.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Mjolnir can queue another prompt while an agent is working; Ctrl+C cancels the active turn first.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Review permission requests before allowing tools, or change session permission behavior in /mjconfig.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Launch and monitor specialist subagents from the agent; F8 opens the nested-agent viewer.",
+        requirement: FeatureHintRequirement::Subagents,
+    },
+    FeatureHint {
+        text: "Use /ragnarok <task> to compare independent implementations and adopt the strongest result.",
+        requirement: FeatureHintRequirement::Ragnarok,
+    },
+    FeatureHint {
+        text: "Press Ctrl+R to dictate a prompt when voice input is available.",
+        requirement: FeatureHintRequirement::Voice,
+    },
+    FeatureHint {
+        text: "Run mj --remote to monitor sessions from the web viewer on another device.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "For adapter diagnostics, use --debug-file and --agent-stderr when starting mj.",
+        requirement: FeatureHintRequirement::Always,
+    },
+];
 
 /// One displayed value for a select-style session config option.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -900,6 +972,10 @@ pub struct AppState {
     pub side_exit_requested: bool,
     pub side_main_notice: Option<String>,
     pub transcript: Vec<Entry>,
+    /// Whether periodic local feature-discovery hints are enabled.
+    pub feature_hints_enabled: bool,
+    completed_turns_since_hint: usize,
+    feature_hint_cursor: usize,
     /// Actor-owned streaming message blocks.  Unlike thoughts, a message can
     /// remain open while another actor reports coordination activity after it.
     /// Keeping that ownership separate from transcript position prevents a
@@ -1546,6 +1622,9 @@ impl AppState {
             side_exit_requested: false,
             side_main_notice: None,
             transcript: Vec::new(),
+            feature_hints_enabled: true,
+            completed_turns_since_hint: 0,
+            feature_hint_cursor: 0,
             agent_open_message_index: None,
             tool_calls: HashMap::new(),
             tool_detail_overrides: HashMap::new(),
@@ -1637,6 +1716,7 @@ impl AppState {
         side.theme_kind = self.theme_kind;
         side.theme = self.theme;
         side.spinner_style = self.spinner_style;
+        side.feature_hints_enabled = self.feature_hints_enabled;
         side.project_label = self.project_label.clone();
         side.worktree_label = self.worktree_label.clone();
         side.additional_roots = self.additional_roots;
@@ -2292,6 +2372,7 @@ impl AppState {
             | Entry::SubagentPlan(_)
             | Entry::InternalMessage(_)
             | Entry::System(_)
+            | Entry::FeatureHint(_)
             | Entry::SessionBoundary(_) => None,
         })
     }
@@ -2425,6 +2506,38 @@ impl AppState {
             return;
         }
         self.push_system_message(transcript_text);
+    }
+
+    /// Record the next eligible local feature hint after a quiet run of turns.
+    /// The hint is transcript-only UI state and never becomes ACP history.
+    pub fn maybe_record_feature_hint(&mut self, capabilities: FeatureHintCapabilities) -> bool {
+        if !self.feature_hints_enabled || self.is_side {
+            return false;
+        }
+        self.completed_turns_since_hint += 1;
+        if self.completed_turns_since_hint < FEATURE_HINT_INTERVAL_TURNS {
+            return false;
+        }
+
+        for offset in 0..FEATURE_HINTS.len() {
+            let index = (self.feature_hint_cursor + offset) % FEATURE_HINTS.len();
+            let hint = FEATURE_HINTS[index];
+            let eligible = match hint.requirement {
+                FeatureHintRequirement::Always => true,
+                FeatureHintRequirement::Subagents => capabilities.subagents,
+                FeatureHintRequirement::Ragnarok => capabilities.ragnarok,
+                FeatureHintRequirement::Voice => capabilities.voice,
+            };
+            if eligible {
+                self.transcript
+                    .push(Entry::FeatureHint(hint.text.to_string()));
+                self.feature_hint_cursor = (index + 1) % FEATURE_HINTS.len();
+                self.completed_turns_since_hint = 0;
+                self.bump_transcript_revision();
+                return true;
+            }
+        }
+        false
     }
 
     /// Mark the runtime as closed and switch the UI into read-only mode.
@@ -10218,5 +10331,78 @@ mod tests {
         assert_eq!(arena.feed_scroll_for_rows(2), 2);
         arena.scroll_feed(-99);
         assert_eq!(arena.feed_scroll_for_rows(2), 0);
+    }
+
+    fn feature_capabilities() -> FeatureHintCapabilities {
+        FeatureHintCapabilities {
+            subagents: true,
+            ragnarok: true,
+            voice: true,
+        }
+    }
+
+    #[test]
+    fn feature_hints_are_infrequent_and_rotate() {
+        let mut state = AppState::new();
+        for _ in 0..FEATURE_HINT_INTERVAL_TURNS - 1 {
+            assert!(!state.maybe_record_feature_hint(feature_capabilities()));
+        }
+        assert!(state.maybe_record_feature_hint(feature_capabilities()));
+        let first = match state.transcript.last() {
+            Some(Entry::FeatureHint(text)) => text.clone(),
+            other => panic!("expected feature hint, got {other:?}"),
+        };
+
+        for _ in 0..FEATURE_HINT_INTERVAL_TURNS - 1 {
+            assert!(!state.maybe_record_feature_hint(feature_capabilities()));
+        }
+        assert!(state.maybe_record_feature_hint(feature_capabilities()));
+        let second = match state.transcript.last() {
+            Some(Entry::FeatureHint(text)) => text,
+            other => panic!("expected feature hint, got {other:?}"),
+        };
+        assert_ne!(&first, second);
+    }
+
+    #[test]
+    fn feature_hints_skip_unsupported_capabilities() {
+        let mut state = AppState::new();
+        state.feature_hint_cursor = FEATURE_HINTS
+            .iter()
+            .position(|hint| hint.requirement == FeatureHintRequirement::Subagents)
+            .expect("subagent hint");
+        state.completed_turns_since_hint = FEATURE_HINT_INTERVAL_TURNS - 1;
+
+        assert!(state.maybe_record_feature_hint(FeatureHintCapabilities {
+            subagents: false,
+            ragnarok: false,
+            voice: false,
+        }));
+        let Some(Entry::FeatureHint(text)) = state.transcript.last() else {
+            panic!("expected feature hint");
+        };
+        assert!(!text.contains("subagent"));
+        assert!(!text.contains("ragnarok"));
+        assert!(!text.contains("Ctrl+R"));
+    }
+
+    #[test]
+    fn feature_hints_can_be_disabled_and_never_enter_prompt_history() {
+        let mut state = AppState::new();
+        state.feature_hints_enabled = false;
+        for _ in 0..FEATURE_HINT_INTERVAL_TURNS * 2 {
+            assert!(!state.maybe_record_feature_hint(feature_capabilities()));
+        }
+        assert!(state.transcript.is_empty());
+
+        state.feature_hints_enabled = true;
+        for _ in 0..FEATURE_HINT_INTERVAL_TURNS {
+            state.maybe_record_feature_hint(feature_capabilities());
+        }
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::FeatureHint(_))
+        ));
+        assert!(state.prompt_history().is_empty());
     }
 }

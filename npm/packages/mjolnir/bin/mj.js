@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createRequire } from "node:module";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -95,6 +96,12 @@ function main() {
   launch(resolveBundle(), process.argv.slice(2));
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+export function isMainModule(argvPath = process.argv[1], resolveRealPath = realpathSync) {
+  return Boolean(
+    argvPath && resolveRealPath(path.resolve(argvPath)) === fileURLToPath(import.meta.url),
+  );
+}
+
+if (isMainModule()) {
   main();
 }

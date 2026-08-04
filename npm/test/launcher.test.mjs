@@ -3,11 +3,24 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import {
+  isMainModule,
   nativeBinaryPath,
   launch,
   platformPackageName,
   resolveBundle,
 } from "../packages/mjolnir/bin/mj.js";
+
+test("recognizes npm's symlinked bin entrypoint", () => {
+  let resolved;
+  assert.equal(
+    isMainModule("/tmp/node_modules/.bin/mj", (entrypoint) => {
+      resolved = entrypoint;
+      return new URL("../packages/mjolnir/bin/mj.js", import.meta.url).pathname;
+    }),
+    true,
+  );
+  assert.equal(resolved, "/tmp/node_modules/.bin/mj");
+});
 
 test("selects each published native package", () => {
   assert.equal(platformPackageName("darwin", "arm64"), "@brokkai/mjolnir-darwin-universal");

@@ -153,7 +153,10 @@ configuration remains unchanged.
 
 ## Appearance and session controls
 
-Theme and spinner preferences are persistent. Agent-owned ACP session defaults
+Theme, spinner, and feature-tip preferences are persistent. Feature tips are
+enabled by default and appear occasionally between completed turns; disable
+them under **Appearance** in `/mjconfig` or set `feature_hints = false` in the
+top level of the config file. Agent-owned ACP session defaults
 are listed per configured server on the **ACP Sessions** tab in `/mjconfig`.
 Model and thought-level selection remain in Mjolnir's **Agents** configuration.
 Saved ACP session defaults take effect when that server starts a new session.
