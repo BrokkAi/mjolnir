@@ -2733,6 +2733,7 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
         config_path.clone(),
         resolved.choices.clone(),
         Some(models_config_from_roster(&resolved)),
+        resolved.inventory.clone(),
     ));
     let session_manager = Arc::new(ServerSessionManager::new_roster(
         resolved,
@@ -3805,6 +3806,10 @@ struct MjConfigRuntime {
     config_path: PathBuf,
     choices: Mutex<Vec<roster::ModelChoice>>,
     active_models: Mutex<Option<config::ModelsConfig>>,
+    /// Probed ACP inventory from the last roster resolution. Carries the
+    /// agent-advertised session options; rebuilding inventory from config
+    /// alone would lose them (`discover_inventory` starts them empty).
+    inventory: Mutex<roster::AcpInventory>,
     login: Mutex<Option<MjLoginJob>>,
     install: Mutex<Option<MjInstallJob>>,
     registry: tokio::sync::Mutex<Option<crate::registry::Registry>>,
@@ -3815,11 +3820,13 @@ impl MjConfigRuntime {
         config_path: PathBuf,
         choices: Vec<roster::ModelChoice>,
         active_models: Option<config::ModelsConfig>,
+        inventory: roster::AcpInventory,
     ) -> Self {
         Self {
             config_path,
             choices: Mutex::new(choices),
             active_models: Mutex::new(active_models),
+            inventory: Mutex::new(inventory),
             login: Mutex::new(None),
             install: Mutex::new(None),
             registry: tokio::sync::Mutex::new(None),
@@ -3832,6 +3839,7 @@ impl MjConfigRuntime {
         *self.choices.lock().expect("mjconfig choices lock") = roster.choices.clone();
         *self.active_models.lock().expect("mjconfig models lock") =
             Some(models_config_from_roster(roster));
+        *self.inventory.lock().expect("mjconfig inventory lock") = roster.inventory.clone();
     }
 }
 
@@ -4068,7 +4076,14 @@ fn mjconfig_editor(state: &ServerState, config: config::Config) -> crate::settin
         .lock()
         .expect("mjconfig choices lock")
         .clone();
-    let mut editor = crate::settings::SettingsEditor::new(config, choices, None);
+    let inventory = state
+        .mjconfig
+        .inventory
+        .lock()
+        .expect("mjconfig inventory lock")
+        .clone();
+    let mut editor =
+        crate::settings::SettingsEditor::new(config, choices, None).with_inventory(inventory);
     let active_models = state
         .mjconfig
         .active_models
@@ -7423,7 +7438,12 @@ mod tests {
             "config-{}.toml",
             COUNTER.fetch_add(1, Ordering::SeqCst)
         ));
-        Arc::new(MjConfigRuntime::new(config_path, Vec::new(), None))
+        Arc::new(MjConfigRuntime::new(
+            config_path,
+            Vec::new(),
+            None,
+            roster::AcpInventory::default(),
+        ))
     }
 
     fn mjconfig_request(
@@ -7549,6 +7569,44 @@ mod tests {
         assert!(snapshot["acp_sessions"].is_array());
         assert!(snapshot["login"].is_null());
         assert!(snapshot["install"].is_null());
+    }
+
+    #[tokio::test]
+    async fn mjconfig_snapshot_reports_probed_session_options() {
+        use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
+        let runtime = test_mjconfig_runtime();
+        let mut inventory = roster::discover_inventory(&config::Config::default());
+        let server = inventory.servers.first_mut().expect("visible ACP server");
+        let server_id = server.id.clone();
+        server.session_config = vec![SessionConfigOption::select(
+            "service_tier",
+            "Service tier",
+            "default",
+            vec![
+                SessionConfigSelectOption::new("default", "Default"),
+                SessionConfigSelectOption::new("flex", "Flex"),
+            ],
+        )];
+        *runtime.inventory.lock().expect("inventory lock") = inventory;
+
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+        let response = app
+            .oneshot(mjconfig_request("GET", Some(token), None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = json_body(response).await;
+        let groups = snapshot["acp_sessions"].as_array().expect("groups");
+        let group = groups
+            .iter()
+            .find(|group| group["server_id"] == server_id.as_str())
+            .expect("server group present");
+        let option = &group["options"][0];
+        assert_eq!(option["key"], "config:service_tier");
+        assert_eq!(option["name"], "Service tier");
+        assert_eq!(option["value"], "default");
+        assert_eq!(option["choices"].as_array().expect("choices").len(), 2);
     }
 
     #[tokio::test]
