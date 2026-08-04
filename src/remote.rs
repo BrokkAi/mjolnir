@@ -970,14 +970,70 @@ struct ServerAgentSession {
     task: JoinHandle<()>,
 }
 
-#[derive(Debug)]
-struct ServerSessionManager {
+/// The agent binding new server-owned sessions launch with, plus the hash of
+/// the config file it was resolved from so a `/mjconfig` save (or any other
+/// config edit) triggers a re-resolve before the next session starts.
+#[derive(Debug, Clone)]
+struct ServerSessionLaunch {
     agent: SelectedAgent,
     roster: Option<roster::Roster>,
+    config_hash: Option<u64>,
+}
+
+#[derive(Debug)]
+struct ServerSessionManager {
+    launch: RwLock<ServerSessionLaunch>,
+    /// Directory the startup roster was resolved against; config-change
+    /// re-resolves reuse it. `None` disables re-resolving (tests).
+    resolve_cwd: Option<PathBuf>,
     additional_directories: Vec<PathBuf>,
     snapshot_exclusions: Vec<PathBuf>,
     fs_max_text_bytes: u64,
     sessions: Mutex<Vec<ServerAgentSession>>,
+}
+
+fn selected_agent_for_roster(roster: &roster::Roster) -> SelectedAgent {
+    let primary = &roster.primary;
+    SelectedAgent {
+        source_id: format!("roster:{}", primary.model.model),
+        program: primary.launch.command.clone(),
+        args: primary.launch.args.clone(),
+        env: primary.launch.env.clone(),
+    }
+}
+
+/// Display-only seat bindings for the `/mjconfig` Agents panel, mirroring what
+/// the roster bound for each seat.
+fn models_config_from_roster(roster: &roster::Roster) -> config::ModelsConfig {
+    config::ModelsConfig {
+        primary: roster.primary.model.model.clone(),
+        review: roster.review_supervisor.as_ref().map_or_else(
+            || config::DISABLED_MODEL.to_string(),
+            |agent| agent.model.model.clone(),
+        ),
+        subagent: roster.subagent_default.as_ref().map_or_else(
+            || config::DISABLED_MODEL.to_string(),
+            |agent| agent.model.model.clone(),
+        ),
+        primary_source: Some(roster.primary.launch.source_id.clone()),
+        review_source: roster
+            .review_supervisor
+            .as_ref()
+            .map(|agent| agent.launch.source_id.clone()),
+        subagent_source: roster
+            .subagent_default
+            .as_ref()
+            .map(|agent| agent.launch.source_id.clone()),
+    }
+}
+
+/// Content hash of the saved config file; `None` when it cannot be read.
+fn config_file_hash(config_path: &Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let contents = std::fs::read(config_path).ok()?;
+    let mut hasher = std::hash::DefaultHasher::new();
+    contents.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 impl ServerSessionManager {
@@ -988,8 +1044,12 @@ impl ServerSessionManager {
         fs_max_text_bytes: u64,
     ) -> Self {
         Self {
-            agent,
-            roster: None,
+            launch: RwLock::new(ServerSessionLaunch {
+                agent,
+                roster: None,
+                config_hash: None,
+            }),
+            resolve_cwd: None,
             additional_directories,
             snapshot_exclusions: Vec::new(),
             fs_max_text_bytes,
@@ -999,19 +1059,19 @@ impl ServerSessionManager {
 
     fn new_roster(
         roster: roster::Roster,
+        config_hash: Option<u64>,
+        resolve_cwd: PathBuf,
         additional_directories: Vec<PathBuf>,
         snapshot_exclusions: Vec<PathBuf>,
         fs_max_text_bytes: u64,
     ) -> Self {
-        let primary = &roster.primary;
         Self {
-            agent: SelectedAgent {
-                source_id: format!("roster:{}", primary.model.model),
-                program: primary.launch.command.clone(),
-                args: primary.launch.args.clone(),
-                env: primary.launch.env.clone(),
-            },
-            roster: Some(roster),
+            launch: RwLock::new(ServerSessionLaunch {
+                agent: selected_agent_for_roster(&roster),
+                roster: Some(roster),
+                config_hash,
+            }),
+            resolve_cwd: Some(resolve_cwd),
             additional_directories,
             snapshot_exclusions,
             fs_max_text_bytes,
@@ -1019,10 +1079,40 @@ impl ServerSessionManager {
         }
     }
 
+    /// Re-resolve the roster when the saved config changed since the last
+    /// resolution, so a new session launches what `/mjconfig` (or any other
+    /// config edit) saved instead of the binding frozen at server startup.
+    /// Returns the fresh roster when a re-resolve happened.
+    async fn refresh_for_config(&self, config_path: &Path) -> Option<roster::Roster> {
+        let resolve_cwd = self.resolve_cwd.clone()?;
+        let hash = config_file_hash(config_path);
+        {
+            let launch = self.launch.read().expect("server launch lock");
+            if launch.config_hash == hash {
+                return None;
+            }
+        }
+        let config = config::Config::load(config_path).ok()?;
+        match roster::resolve(&config, &resolve_cwd).await {
+            Ok(roster) => {
+                let mut launch = self.launch.write().expect("server launch lock");
+                launch.agent = selected_agent_for_roster(&roster);
+                launch.roster = Some(roster.clone());
+                launch.config_hash = hash;
+                Some(roster)
+            }
+            Err(error) => {
+                warn!("config changed but roster re-resolve failed: {error:#}");
+                None
+            }
+        }
+    }
+
     fn start_session(&self, cwd: PathBuf) {
+        let launch = self.launch.read().expect("server launch lock").clone();
         let session = start_server_agent_session(
-            self.agent.clone(),
-            self.roster.clone(),
+            launch.agent,
+            launch.roster,
             cwd,
             self.additional_directories.clone(),
             self.snapshot_exclusions.clone(),
@@ -2639,33 +2729,15 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
     };
     let workspace_roots =
         crate::paths::WorkspaceRoots::new(&cwd, &additional_directories)?.active_roots();
-    let active_models = config::ModelsConfig {
-        primary: resolved.primary.model.model.clone(),
-        review: resolved.review_supervisor.as_ref().map_or_else(
-            || config::DISABLED_MODEL.to_string(),
-            |agent| agent.model.model.clone(),
-        ),
-        subagent: resolved.subagent_default.as_ref().map_or_else(
-            || config::DISABLED_MODEL.to_string(),
-            |agent| agent.model.model.clone(),
-        ),
-        primary_source: Some(resolved.primary.launch.source_id.clone()),
-        review_source: resolved
-            .review_supervisor
-            .as_ref()
-            .map(|agent| agent.launch.source_id.clone()),
-        subagent_source: resolved
-            .subagent_default
-            .as_ref()
-            .map(|agent| agent.launch.source_id.clone()),
-    };
     let mjconfig = Arc::new(MjConfigRuntime::new(
         config_path.clone(),
         resolved.choices.clone(),
-        Some(active_models),
+        Some(models_config_from_roster(&resolved)),
     ));
     let session_manager = Arc::new(ServerSessionManager::new_roster(
         resolved,
+        config_file_hash(&config_path),
+        cwd.clone(),
         additional_directories,
         snapshot_exclusions,
         fs_max_text_bytes,
@@ -3731,8 +3803,8 @@ fn spawn_tailscale_cert_renewer(ts: TailscaleTls, resolver: Arc<SniCertResolver>
 #[derive(Debug)]
 struct MjConfigRuntime {
     config_path: PathBuf,
-    choices: Vec<roster::ModelChoice>,
-    active_models: Option<config::ModelsConfig>,
+    choices: Mutex<Vec<roster::ModelChoice>>,
+    active_models: Mutex<Option<config::ModelsConfig>>,
     login: Mutex<Option<MjLoginJob>>,
     install: Mutex<Option<MjInstallJob>>,
     registry: tokio::sync::Mutex<Option<crate::registry::Registry>>,
@@ -3746,12 +3818,20 @@ impl MjConfigRuntime {
     ) -> Self {
         Self {
             config_path,
-            choices,
-            active_models,
+            choices: Mutex::new(choices),
+            active_models: Mutex::new(active_models),
             login: Mutex::new(None),
             install: Mutex::new(None),
             registry: tokio::sync::Mutex::new(None),
         }
+    }
+
+    /// Sync the editor's model choices and active seat details after a
+    /// config-change re-resolve, so the panel reports the new bindings.
+    fn update_from_roster(&self, roster: &roster::Roster) {
+        *self.choices.lock().expect("mjconfig choices lock") = roster.choices.clone();
+        *self.active_models.lock().expect("mjconfig models lock") =
+            Some(models_config_from_roster(roster));
     }
 }
 
@@ -3982,9 +4062,20 @@ fn mjconfig_load(state: &ServerState) -> config::Config {
 }
 
 fn mjconfig_editor(state: &ServerState, config: config::Config) -> crate::settings::SettingsEditor {
-    let mut editor =
-        crate::settings::SettingsEditor::new(config, state.mjconfig.choices.clone(), None);
-    if let Some(models) = state.mjconfig.active_models.clone() {
+    let choices = state
+        .mjconfig
+        .choices
+        .lock()
+        .expect("mjconfig choices lock")
+        .clone();
+    let mut editor = crate::settings::SettingsEditor::new(config, choices, None);
+    let active_models = state
+        .mjconfig
+        .active_models
+        .lock()
+        .expect("mjconfig models lock")
+        .clone();
+    if let Some(models) = active_models {
         editor = editor.with_active_models(models);
     }
     editor
@@ -5404,6 +5495,15 @@ async fn create_server_owned_session(
     })
     .await
     .map_err(internal_error)??;
+    // A /mjconfig save (or any config edit) since the last resolve re-binds
+    // the seats now, so this session launches the saved selection.
+    if let Some(roster) = state
+        .session_manager
+        .refresh_for_config(&state.mjconfig.config_path)
+        .await
+    {
+        state.mjconfig.update_from_roster(&roster);
+    }
     state.session_manager.start_session(cwd.clone());
     Ok((
         StatusCode::ACCEPTED,
@@ -7370,6 +7470,31 @@ mod tests {
             session_manager: test_session_manager(),
             mjconfig,
         })
+    }
+
+    #[test]
+    fn config_file_hash_tracks_content_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        assert_eq!(config_file_hash(&path), None);
+        std::fs::write(&path, "theme = \"dark\"\n").expect("write config");
+        let first = config_file_hash(&path).expect("hash");
+        std::fs::write(&path, "theme = \"light\"\n").expect("write config");
+        let second = config_file_hash(&path).expect("hash");
+        assert_ne!(first, second);
+        std::fs::write(&path, "theme = \"dark\"\n").expect("write config");
+        assert_eq!(config_file_hash(&path), Some(first));
+    }
+
+    #[tokio::test]
+    async fn refresh_for_config_is_disabled_without_resolve_cwd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "theme = \"dark\"\n").expect("write config");
+        // Managers without a startup roster (tests, degraded startup) never
+        // re-resolve; they keep launching their fixed agent.
+        let manager = test_session_manager();
+        assert!(manager.refresh_for_config(&path).await.is_none());
     }
 
     #[tokio::test]
