@@ -4961,6 +4961,15 @@ fn persist_mjconfig_selection(
     let review_changed = state.review_enabled != config.agent.discrete_review;
     let feature_hints_enabled = config.feature_hints;
     let live_session_updates = live_primary_session_config_updates(state, &config);
+    // A policy edit in this save may have disabled the only route of a pinned
+    // seat model; flip such seats to auto and tell the user, instead of
+    // letting the next /new or restart fail to resolve.
+    let refreshed_inventory = crate::roster::rediscover_inventory(&config, &state.acp_inventory);
+    let reroute_notices = crate::settings::reset_unroutable_models(
+        &mut config,
+        &refreshed_inventory,
+        &state.model_choices,
+    );
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
             Ok(()) => {
@@ -4977,9 +4986,20 @@ fn persist_mjconfig_selection(
                 for (target, value) in live_session_updates {
                     let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { target, value });
                 }
+                let mut message = format!(
+                    "config saved — theme {theme}, spinner {style}; compatible session options update the active primary, while model and ACP routing changes apply on /new or /clear"
+                );
+                for notice in &reroute_notices {
+                    message.push_str("; ");
+                    message.push_str(notice);
+                }
                 state.record_status_message(
-                    StatusKind::Info,
-                    format!("config saved — theme {theme}, spinner {style}; compatible session options update the active primary, while model and ACP routing changes apply on /new or /clear"),
+                    if reroute_notices.is_empty() {
+                        StatusKind::Info
+                    } else {
+                        StatusKind::Warning
+                    },
+                    message,
                 );
             }
             Err(e) => state.record_status_message(

@@ -4103,8 +4103,16 @@
             }
           }
           mjcfg.edits = {};
+          const notice = mjcfg.snapshot?.notice;
           closeMjConfig();
-          setQueueStatus("Configuration saved. Model, permission, and routing changes apply to new sessions.");
+          // Surface save-time adjustments (e.g. a seat flipped to auto because
+          // its model lost every enabled ACP route) where the user will see them.
+          setQueueStatus(
+            notice && notice !== "Saved"
+              ? notice
+              : "Configuration saved. Model, permission, and routing changes apply to new sessions.",
+            Boolean(notice && notice !== "Saved"),
+          );
         } catch (error) {
           mjSetStatus(`Couldn't save: ${error.message}`, true);
         } finally {

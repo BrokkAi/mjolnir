@@ -4615,12 +4615,31 @@ async fn mjconfig_apply(
 ) -> std::result::Result<Json<MjConfigSnapshot>, (StatusCode, String)> {
     let mut config = mjconfig_load(&state);
     mjconfig_apply_edits(&mut config, request)?;
+    // Same guard as the TUI's save: a policy edit that strands a pinned seat
+    // model flips that seat to auto, with a notice instead of a later failure.
+    let cached = state
+        .mjconfig
+        .inventory
+        .lock()
+        .expect("mjconfig inventory lock")
+        .clone();
+    let choices = state
+        .mjconfig
+        .choices
+        .lock()
+        .expect("mjconfig choices lock")
+        .clone();
+    let refreshed_inventory = roster::rediscover_inventory(&config, &cached);
+    let reroute_notices =
+        crate::settings::reset_unroutable_models(&mut config, &refreshed_inventory, &choices);
     config::save_user_config_preserving_session_routes(&state.mjconfig.config_path, &mut config)
         .map_err(|error| internal_error(format!("save config: {error:#}")))?;
-    Ok(Json(mjconfig_snapshot_response(
-        &state,
-        Some("Saved".to_string()),
-    )))
+    let notice = if reroute_notices.is_empty() {
+        "Saved".to_string()
+    } else {
+        format!("Saved. {}", reroute_notices.join("; "))
+    };
+    Ok(Json(mjconfig_snapshot_response(&state, Some(notice))))
 }
 
 async fn mjconfig_registry(
@@ -7768,6 +7787,45 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let saved = config::Config::load(&config_path).expect("reload saved config");
         assert_eq!(saved.review.acp_source, None);
+    }
+
+    #[tokio::test]
+    async fn mjconfig_apply_flips_stranded_models_to_auto_with_notice() {
+        let runtime = test_mjconfig_runtime();
+        *runtime.choices.lock().expect("choices lock") = vec![roster::ModelChoice {
+            model: "model-a".to_string(),
+            pass_at_1: 0.5,
+            mean_cost_usd: 1.0,
+            available: true,
+            disabled_reason: None,
+            adapter: Some("codex-acp".to_string()),
+            ranked: true,
+        }];
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+
+        // Pin the primary to the codex-routed model, then disable codex in the
+        // same save: the seat flips back to auto and the notice says why.
+        let response = app
+            .oneshot(mjconfig_request(
+                "POST",
+                Some(token),
+                Some(serde_json::json!({
+                    "primary_model": "model-a",
+                    "server_policies": { "codex-acp": "disabled" }
+                })),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = json_body(response).await;
+        assert_eq!(snapshot["agents"]["roles"][0]["model"], "auto");
+        let notice = snapshot["notice"].as_str().expect("notice");
+        assert!(notice.contains("Agent model model-a"), "{notice}");
+        assert!(
+            notice.contains("switched to automatic selection"),
+            "{notice}"
+        );
     }
 
     #[tokio::test]

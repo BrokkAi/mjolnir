@@ -1343,6 +1343,52 @@ pub fn draw_settings_panel(
     );
 }
 
+/// After a save disables an ACP server, a pinned seat model can lose its only
+/// known route. Rather than letting the next session (or server restart) fail
+/// to resolve, flip that seat back to automatic selection and explain why.
+/// The inventory must already reflect the edited config's policies. Returns
+/// one human-readable notice per changed seat.
+pub fn reset_unroutable_models(
+    config: &mut Config,
+    inventory: &AcpInventory,
+    choices: &[ModelChoice],
+) -> Vec<String> {
+    let source_enabled = |source: &str| {
+        inventory
+            .servers
+            .iter()
+            .any(|server| server.id == source && server.policy != AcpServerPolicy::Disabled)
+    };
+    let mut notices = Vec::new();
+    let seats: [(&str, &mut String); 3] = [
+        ("Agent", &mut config.agent.model),
+        ("Review", &mut config.review.model),
+        ("Subagents", &mut config.subagents.model),
+    ];
+    for (label, slot) in seats {
+        let model = slot.clone();
+        if model == "auto" || model == crate::config::DISABLED_MODEL {
+            continue;
+        }
+        // Only models with a known route can be judged: an unknown adapter
+        // (not signed in yet, not probed) keeps the saved pin untouched.
+        let Some(route) = choices
+            .iter()
+            .find(|choice| choice.model == model)
+            .and_then(|choice| choice.adapter.as_deref())
+        else {
+            continue;
+        };
+        if !source_enabled(route) {
+            "auto".clone_into(slot);
+            notices.push(format!(
+                "{label} model {model} is not provided by any enabled ACP server; switched to automatic selection"
+            ));
+        }
+    }
+    notices
+}
+
 pub(crate) fn session_option_choices(option: &SessionConfigOption) -> Vec<(String, String)> {
     let SessionConfigKind::Select(select) = &option.kind else {
         return Vec::new();
@@ -2047,6 +2093,46 @@ fn on_off(enabled: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_unroutable_models_flips_seats_whose_route_is_disabled() {
+        let mut config = Config::default();
+        config.agent.model = "model-a".to_string();
+        config.review.model = "model-b".to_string();
+        config.subagents.model = crate::config::DISABLED_MODEL.to_string();
+        config.set_acp_server_policy("codex-acp", AcpServerPolicy::Disabled);
+        let inventory = crate::roster::discover_inventory(&config);
+        let choices = vec![
+            ModelChoice {
+                model: "model-a".to_string(),
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("codex-acp".to_string()),
+                ranked: true,
+            },
+            ModelChoice {
+                model: "model-b".to_string(),
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("claude-acp".to_string()),
+                ranked: true,
+            },
+        ];
+
+        let notices = reset_unroutable_models(&mut config, &inventory, &choices);
+
+        // model-a lost its only route; model-b's adapter is still enabled and
+        // the disabled subagent sentinel is never touched.
+        assert_eq!(config.agent.model, "auto");
+        assert_eq!(config.review.model, "model-b");
+        assert_eq!(config.subagents.model, crate::config::DISABLED_MODEL);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("Agent model model-a"), "{}", notices[0]);
+    }
     use agent_client_protocol::schema::v1::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     };
