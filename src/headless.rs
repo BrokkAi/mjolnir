@@ -313,6 +313,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             model_id: primary.model.model.clone(),
             model_value: primary.model_value.clone(),
             adapter_source_id: primary.launch.source_id.clone(),
+            require_native_read_only: false,
             permission: primary_permission,
             session_tag: None,
             reasoning_effort: primary.reasoning_effort.clone(),

@@ -207,6 +207,7 @@ impl Config {
                 model_id: role.model.model,
                 model_value: role.model_value,
                 adapter_source_id: role.launch.source_id,
+                require_native_read_only: false,
                 permission: None,
                 session_tag: None,
                 reasoning_effort,
@@ -367,12 +368,17 @@ impl Config {
             .role_config
             .as_ref()
             .and_then(|config| config.session_tag.clone());
+        let require_native_read_only = self
+            .role_config
+            .as_ref()
+            .is_some_and(|config| config.require_native_read_only);
         let reasoning_effort = role.reasoning_effort.clone();
         self.role_config = Some(acp::RuntimeRoleConfig {
             label: LABEL.to_string(),
             model_id: role.model.model,
             model_value: role.model_value,
             adapter_source_id: role.launch.source_id,
+            require_native_read_only,
             permission: None,
             session_tag,
             reasoning_effort,
@@ -3716,6 +3722,7 @@ mod tests {
                 model_id: "gpt-y".to_string(),
                 model_value: "gpt-y-value".to_string(),
                 adapter_source_id: "codex-acp".to_string(),
+                require_native_read_only: false,
                 permission: None,
                 session_tag: None,
                 reasoning_effort: None,

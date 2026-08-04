@@ -2172,6 +2172,7 @@ async fn run_session(
             model_id: roster.primary.model.model.clone(),
             model_value: roster.primary.model_value.clone(),
             adapter_source_id: roster.primary.launch.source_id.clone(),
+            require_native_read_only: false,
             permission: primary_permission,
             session_tag: Some(session_tag.clone()),
             reasoning_effort: roster.primary.reasoning_effort.clone(),

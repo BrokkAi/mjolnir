@@ -916,6 +916,7 @@ fn configure_review_pool(
 ) -> SubagentConfig {
     if let Some(role) = config.role_config.as_mut() {
         role.session_tag = fanout.session_tag.clone();
+        role.require_native_read_only = true;
     }
     config
         .with_reports(reports)

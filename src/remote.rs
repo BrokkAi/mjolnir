@@ -2851,6 +2851,7 @@ fn start_server_agent_session(
         model_id: resolved.primary.model.model.clone(),
         model_value: resolved.primary.model_value.clone(),
         adapter_source_id: resolved.primary.launch.source_id.clone(),
+        require_native_read_only: false,
         permission: None,
         session_tag: None,
         reasoning_effort: resolved.primary.reasoning_effort.clone(),
