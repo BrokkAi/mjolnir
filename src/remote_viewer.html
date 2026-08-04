@@ -2136,9 +2136,28 @@
 
       .config-option {
         display: inline-flex;
+        flex-wrap: wrap;
         align-items: center;
-        gap: 7px;
+        column-gap: 7px;
+        row-gap: 2px;
         min-width: 0;
+      }
+
+      /* Visible description/category line under the control, so the detail
+         is not hover-only (touch users have no tooltip). */
+      .config-option-desc {
+        flex-basis: 100%;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font: 400 9.5px/1.4 var(--font-mono);
+        letter-spacing: 0.04em;
+        color: var(--dim);
+
+        &:empty {
+          display: none;
+        }
       }
 
       .config-option-name {
@@ -2685,6 +2704,7 @@
       <div class="config-option">
         <span class="config-option-name"></span>
         <span class="config-option-status"></span>
+        <span class="config-option-desc"></span>
       </div>
     </template>
 
@@ -5633,21 +5653,15 @@
           for (const option of options) {
             const key = configChangeKey(session.session_id, option);
             const row = cloneTemplate(configOptionTpl);
-            const nameEl = row.querySelector(".config-option-name");
-            nameEl.textContent = option.name || option.config_id || "";
-            // The agent's option description (and semantic category) arrive
-            // with every snapshot; surface them instead of dropping them.
-            const detail = [option.category, option.description].filter(Boolean).join(" — ");
-            if (detail) {
-              row.title = detail;
-              nameEl.setAttribute("aria-label", `${nameEl.textContent}: ${detail}`);
-            }
+            row.querySelector(".config-option-name").textContent =
+              option.name || option.config_id || "";
             const statusEl = row.querySelector(".config-option-status");
+            const descEl = row.querySelector(".config-option-desc");
             const combo = createCombobox(option, key, (value) => {
               void submitConfigChange(session.session_id, option, value);
             });
             row.insertBefore(combo.element, statusEl);
-            const entry = { combo, statusEl };
+            const entry = { combo, statusEl, descEl };
             configCombos.set(key, entry);
             applyConfigComboState(entry, key, option);
             sessionConfigEl.appendChild(row);
@@ -5673,6 +5687,12 @@
         const applying = sentConfigChanges.has(key);
         entry.combo.update(option);
         entry.statusEl.textContent = applying ? "applying…" : "";
+        // The agent's option description (and semantic category) arrive with
+        // every snapshot; render them as visible row text so touch users see
+        // them too, not just hover/screen-reader users.
+        entry.descEl.textContent = [option.category, option.description]
+          .filter(Boolean)
+          .join(" — ");
       }
 
       async function submitConfigChange(sessionId, option, value) {
