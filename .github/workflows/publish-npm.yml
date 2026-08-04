@@ -140,12 +140,12 @@ jobs:
           for index in "${!packages[@]}"; do
             package="${packages[$index]}@$version"
             if ! npm view "$package" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
-              npm publish "npm-tarballs/${tarballs[$index]}" --access public --provenance
+              npm publish "./npm-tarballs/${tarballs[$index]}" --access public --provenance
             fi
             npm view "$package" version --registry=https://registry.npmjs.org | grep -Fx "$version"
           done
           root=@brokkai/mjolnir
           if ! npm view "$root@$version" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
-            npm publish "npm-tarballs/brokkai-mjolnir-$version.tgz" --access public --provenance
+            npm publish "./npm-tarballs/brokkai-mjolnir-$version.tgz" --access public --provenance
           fi
           npm view "$root@$version" version --registry=https://registry.npmjs.org | grep -Fx "$version"
