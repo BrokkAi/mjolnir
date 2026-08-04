@@ -7749,7 +7749,11 @@ mod tests {
             .iter()
             .find(|server| server.id == "custom:my-agent")
             .expect("custom server saved");
-        assert_eq!(custom.command, PathBuf::from("npx"));
+        // Windows resolves the launcher to npx.cmd on load.
+        assert_eq!(
+            custom.command.file_stem().and_then(|stem| stem.to_str()),
+            Some("npx")
+        );
         assert_eq!(custom.args, vec!["-y", "my-agent", "--acp"]);
 
         // Clearing the source constraint round-trips back to "any".
