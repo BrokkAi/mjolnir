@@ -5,6 +5,7 @@
 //! a ratatui chat UI.
 
 mod acp;
+mod agent_instructions;
 mod agent_usage;
 mod anvil;
 mod app;
@@ -206,6 +207,8 @@ struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
+    /// Install repository guidance for coding agents.
+    Agents(AgentsArgs),
     /// Inspect or refresh model discovery state.
     Models(ModelsArgs),
     /// Resume an existing ACP session.
@@ -218,6 +221,25 @@ enum Commands {
     Resume(ResumeArgs),
     /// Start the local remote-control server.
     Server(ServerArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct AgentsArgs {
+    #[command(subcommand)]
+    command: AgentsCommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum AgentsCommand {
+    /// Add Bifrost code-intelligence guidance to AGENTS.md.
+    Install(AgentsInstallArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct AgentsInstallArgs {
+    /// Apply the displayed diff without an interactive confirmation.
+    #[arg(short = 'y', long)]
+    yes: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -453,6 +475,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
         return false;
     }
     match &cli.command {
+        Some(Commands::Agents(_)) => false,
         Some(Commands::Models(_)) => false,
         Some(Commands::Resume(args)) => !args.list,
         Some(Commands::Server(_)) => false,
@@ -492,6 +515,9 @@ async fn main() -> Result<()> {
 
     if let Some(command) = cli.command {
         return match command {
+            Commands::Agents(args) => match args.command {
+                AgentsCommand::Install(args) => agent_instructions::install(&cwd, args.yes),
+            },
             Commands::Models(args) => match args.command {
                 ModelsCommand::Refresh => {
                     roster::invalidate_model_cache()?;
@@ -3848,6 +3874,23 @@ mod tests {
         ));
 
         let error = Cli::try_parse_from(["mj", "models"]).expect_err("refresh is required");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+    }
+
+    #[test]
+    fn parse_agents_install_subcommand() {
+        let cli = Cli::try_parse_from(["mj", "agents", "install", "--yes"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Agents(AgentsArgs {
+                command: AgentsCommand::Install(AgentsInstallArgs { yes: true })
+            }))
+        ));
+
+        let error = Cli::try_parse_from(["mj", "agents"]).expect_err("install is required");
         assert_eq!(
             error.kind(),
             clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
