@@ -495,11 +495,13 @@ impl TerminalText {
 
     fn insert_lines(&mut self, count: usize) {
         self.ensure_row(self.cursor_row);
-        for _ in 0..count.min(self.max_rows) {
-            self.lines.insert(self.cursor_row, Vec::new());
-            if self.lines.len() > self.max_rows
-                && let Some(line) = self.lines.pop_back()
-            {
+        let count = count.min(self.max_rows);
+        let mut tail = self.lines.split_off(self.cursor_row);
+        self.lines
+            .extend(std::iter::repeat_with(Vec::new).take(count));
+        self.lines.append(&mut tail);
+        while self.lines.len() > self.max_rows {
+            if let Some(line) = self.lines.pop_back() {
                 self.cells = self.cells.saturating_sub(line.len());
             }
         }
@@ -507,14 +509,13 @@ impl TerminalText {
 
     fn delete_lines(&mut self, count: usize) {
         self.ensure_row(self.cursor_row);
-        for _ in 0..count.min(self.lines.len()) {
-            if self.cursor_row < self.lines.len() {
-                if let Some(line) = self.lines.remove(self.cursor_row) {
-                    self.cells = self.cells.saturating_sub(line.len());
-                }
-                self.lines.push_back(Vec::new());
-            }
+        let end = self.cursor_row.saturating_add(count).min(self.lines.len());
+        let removed = end.saturating_sub(self.cursor_row);
+        for line in self.lines.drain(self.cursor_row..end) {
+            self.cells = self.cells.saturating_sub(line.len());
         }
+        self.lines
+            .extend(std::iter::repeat_with(Vec::new).take(removed));
     }
 
     fn scroll_up(&mut self, count: usize) {
@@ -720,6 +721,7 @@ mod tests {
             "start",
             "\x1b[18446744073709551615@",
             "X",
+            "\x1b[18446744073709551615L",
             "\x1b[18446744073709551615M",
             "end"
         )
