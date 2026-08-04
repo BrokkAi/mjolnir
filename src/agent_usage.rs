@@ -185,25 +185,6 @@ impl Snapshot {
             self.baselines.insert(lane, next);
         }
     }
-
-    /// Every seat's totals combined — what the header shows when it has room
-    /// for one number only.
-    pub fn total(&self) -> RoleUsage {
-        let mut total = self.primary.clone();
-        for other in [&self.subagents, &self.review] {
-            total.prompts += other.prompts;
-            total.total_tokens += other.total_tokens;
-            total.input_tokens += other.input_tokens;
-            total.output_tokens += other.output_tokens;
-            total.thought_tokens += other.thought_tokens;
-            total.context_used += other.context_used;
-            total.context_size += other.context_size;
-            for (currency, amount) in &other.costs {
-                *total.costs.entry(currency.clone()).or_default() += amount;
-            }
-        }
-        total
-    }
 }
 
 #[cfg(test)]
@@ -230,8 +211,6 @@ mod tests {
         assert_eq!(snapshot.primary.total_tokens, 10);
         assert_eq!(snapshot.subagents.total_tokens, 20);
         assert_eq!(snapshot.review.total_tokens, 30);
-        assert_eq!(snapshot.total().total_tokens, 60);
-        assert_eq!(snapshot.total().prompts, 3);
     }
 
     #[test]

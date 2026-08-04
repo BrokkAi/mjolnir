@@ -877,9 +877,9 @@ impl TranscriptScrollState {
 /// terminate or run the picker again.
 ///
 /// Prompt history is loaded from `history_path` (if set) and persisted
-/// on exit. `initial_agent_label` pre-populates the agent section of
-/// the header so we show the configured agent name immediately instead
-/// of waiting for the agent to report its own name during handshake.
+/// on exit. `initial_agent_label` pre-populates the status line so we show
+/// the configured agent name immediately instead of waiting for the agent to
+/// report its own name during handshake.
 #[derive(Clone, Copy, Default)]
 pub struct UiPersistencePaths<'a> {
     pub history_path: Option<&'a Path>,
@@ -904,6 +904,7 @@ pub struct UiRunOptions<'a> {
     pub review_enabled: bool,
     pub ragnarok_models: Vec<crate::roster::ResolvedAgent>,
     pub primary_acp_name: String,
+    pub primary_reasoning_effort: Option<String>,
     pub termination: CancellationToken,
 }
 
@@ -934,6 +935,7 @@ struct UiInitialState {
     review_enabled: bool,
     ragnarok_models: Vec<crate::roster::ResolvedAgent>,
     primary_acp_name: String,
+    primary_reasoning_effort: Option<String>,
 }
 
 /// Internal result of [`ui_loop`]. `run` unpacks it into the public
@@ -994,6 +996,7 @@ pub async fn run(
             review_enabled: options.review_enabled,
             ragnarok_models: options.ragnarok_models,
             primary_acp_name: options.primary_acp_name,
+            primary_reasoning_effort: options.primary_reasoning_effort,
         },
         options.mode,
         options.termination,
@@ -1202,6 +1205,7 @@ async fn ui_loop(
     state.review_enabled = initial.review_enabled;
     state.ragnarok_models = initial.ragnarok_models;
     state.set_primary_acp_name(initial.primary_acp_name);
+    state.primary_reasoning_effort = initial.primary_reasoning_effort;
     state.transcript_export_dir = initial.transcript_export_dir;
     state.set_theme(initial.theme_kind);
     state.set_spinner_style(initial.spinner_style);
@@ -2472,7 +2476,6 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
         usize::from(INLINE_CHAT_HEIGHT)
             + usize::from(queued_prompt_row_count(state))
             + usize::from(workflow_progress_row_count(state))
-            + usize::from(current_branch_pr_row_count(state))
             + usage_quota_row_count(state, width)
     };
 
@@ -5897,18 +5900,16 @@ fn draw(
 
     let queued_row = queued_prompt_row_count(state);
     let workflow_rows = workflow_progress_row_count(state);
-    let current_pr_rows = current_branch_pr_row_count(state);
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(1),
             Constraint::Length(workflow_rows),
-            Constraint::Length(current_pr_rows),
             Constraint::Length(queued_row),
             Constraint::Length(input_height),
             Constraint::Length(usage_quota_rows),
+            Constraint::Length(1),
         ])
         .split(f.area());
 
@@ -5923,10 +5924,10 @@ fn draw(
     }
     draw_header(f, chunks[1], state);
     draw_workflow_progress_rows(f, chunks[2], state);
-    draw_current_branch_pr_row(f, chunks[3], state);
-    draw_queued_prompt_row(f, chunks[4], state);
-    draw_input(f, chunks[5], state, mode);
-    draw_usage_quota_row(f, chunks[6], state);
+    draw_queued_prompt_row(f, chunks[3], state);
+    draw_input(f, chunks[4], state, mode);
+    draw_usage_quota_row(f, chunks[5], state);
+    draw_status_line(f, chunks[6], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -6020,10 +6021,10 @@ fn inline_transcript_tail_height(state: &AppState, area: Rect) -> u16 {
     }
     let reserved_rows = 1u16
         .saturating_add(workflow_progress_row_count(state))
-        .saturating_add(current_branch_pr_row_count(state))
         .saturating_add(queued_prompt_row_count(state))
         .saturating_add(MIN_INPUT_HEIGHT)
-        .saturating_add(usage_quota_row_count(state, area.width) as u16);
+        .saturating_add(usage_quota_row_count(state, area.width) as u16)
+        .saturating_add(1);
     area.height
         .saturating_sub(reserved_rows)
         .min(INLINE_TRANSCRIPT_TAIL_MAX_ROWS as u16)
@@ -6036,10 +6037,10 @@ fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 7] {
             Constraint::Length(inline_transcript_tail_height(state, area)),
             Constraint::Length(1),
             Constraint::Length(workflow_progress_row_count(state)),
-            Constraint::Length(current_branch_pr_row_count(state)),
             Constraint::Length(queued_prompt_row_count(state)),
             Constraint::Min(MIN_INPUT_HEIGHT),
             Constraint::Length(usage_quota_row_count(state, area.width) as u16),
+            Constraint::Length(1),
         ])
         .split(area);
     std::array::from_fn(|index| chunks[index])
@@ -6118,10 +6119,10 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     draw_inline_transcript_tail(f, chunks[0], state);
     draw_header(f, chunks[1], state);
     draw_workflow_progress_rows(f, chunks[2], state);
-    draw_current_branch_pr_row(f, chunks[3], state);
-    draw_queued_prompt_row(f, chunks[4], state);
-    draw_input(f, chunks[5], state, UiMode::InlineChat);
-    draw_usage_quota_row(f, chunks[6], state);
+    draw_queued_prompt_row(f, chunks[3], state);
+    draw_input(f, chunks[4], state, UiMode::InlineChat);
+    draw_usage_quota_row(f, chunks[5], state);
+    draw_status_line(f, chunks[6], state);
 
     if state.autocomplete.visible
         && !state.has_pending_permission()
@@ -7098,73 +7099,15 @@ fn inline_config_view_line_count(state: &AppState, width: u16) -> usize {
 }
 
 fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let inner = area;
-
     let width = area.width as usize;
-    let mut spans = vec![
-        Span::styled(
-            mjolnir_version_label(),
-            Style::default().fg(state.theme.accent),
-        ),
-        Span::raw("   "),
-    ];
-    let agent_label = state
-        .subagent_label
-        .as_deref()
-        .or(Some(state.agent_label.as_str()))
-        .map(str::trim)
-        .filter(|label| !label.is_empty());
-    if let Some(agent_label) = agent_label {
-        spans.push(Span::styled(
-            agent_label.to_string(),
-            Style::default().fg(state.theme.primary),
-        ));
-        spans.push(Span::raw("   "));
-    }
-    if let Some(notice) = state.side_main_notice.as_deref() {
-        spans.push(Span::styled(
-            notice.to_string(),
-            Style::default().fg(state.theme.warning),
-        ));
-        spans.push(Span::raw("   "));
-    }
-    let project_label = state.project_label.trim();
-    if !project_label.is_empty() {
-        let max_width = match width {
-            0..=89 => 18,
-            90..=139 => 28,
-            140..=179 => 40,
-            _ => 56,
-        };
-        spans.push(Span::styled(
-            compact_middle_display(project_label, max_width),
-            Style::default().fg(state.theme.secondary),
-        ));
-        spans.push(Span::raw("   "));
-    }
-    if state.additional_roots > 0 {
-        let label = if state.additional_roots == 1 {
-            "+1 root".to_string()
-        } else {
-            format!("+{} roots", state.additional_roots)
-        };
-        spans.push(Span::styled(
-            label,
-            Style::default().fg(state.theme.warning),
-        ));
-        spans.push(Span::raw("   "));
-    }
-    spans.push(Span::styled(
-        header_token_usage_label(state, width),
-        Style::default().fg(state.theme.tool),
-    ));
+    let mut spans = vec![Span::styled(
+        mjolnir_version_label(),
+        Style::default().fg(state.theme.accent),
+    )];
     if let Some(title) = state.session_title.as_deref() {
         let title = title.trim();
         if !title.is_empty() {
-            // The session title is appended LAST and consumes whatever width
-            // remains after the preceding spans (version/project/token
-            // usage) plus a 3-cell separator. This relies on every other
-            // width-consuming span having already been pushed above.
+            // The title owns every cell after the version label.
             let separator_width = 3;
             let used: usize = spans.iter().map(|span| span.content.width()).sum();
             let max_width = width.saturating_sub(used).saturating_sub(separator_width);
@@ -7180,7 +7123,160 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         }
     }
     let p = Paragraph::new(Line::from(spans));
-    f.render_widget(p, inner);
+    f.render_widget(p, area);
+}
+
+fn draw_status_line(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    f.render_widget(
+        Paragraph::new(status_line(state, usize::from(area.width))),
+        area,
+    );
+}
+
+fn status_line(state: &AppState, width: usize) -> Line<'static> {
+    if width == 0 {
+        return Line::default();
+    }
+
+    let model_name = state.active_models.primary.trim();
+    let model_name = if !model_name.is_empty() && model_name != "auto" {
+        model_name
+    } else {
+        state.agent_label.trim()
+    };
+    let source = state
+        .active_models
+        .primary_source
+        .as_deref()
+        .filter(|source| !source.is_empty())
+        .unwrap_or(state.agent_source_id.as_str());
+    let model_with_source = if source.is_empty() {
+        model_name.to_string()
+    } else {
+        format!("{model_name} via {source}")
+    };
+    let effort = state
+        .primary_reasoning_effort
+        .as_deref()
+        .unwrap_or("default");
+    let project = state.project_label.trim();
+    let primary = compact_status_count(state.agent_usage.primary.total_tokens);
+    let review = compact_status_count(state.agent_usage.review.total_tokens);
+    let primary_field = format!("primary: {primary}");
+    let review_field = format!("review: {review}");
+    let mut full_fields = vec![
+        (model_with_source.clone(), state.theme.primary),
+        (format!("effort: {effort}"), state.theme.warning),
+        (project.to_string(), state.theme.secondary),
+        (primary_field.clone(), state.theme.success),
+        (review_field.clone(), state.theme.error),
+    ];
+    if let Some(pull_request) = state.current_branch_pull_request.as_ref() {
+        full_fields.push((
+            format!("PR #{}", pull_request.number),
+            status_pr_color(state),
+        ));
+    }
+    if status_fields_width(&full_fields) <= width {
+        return status_line_from_fields(full_fields, state.theme.muted);
+    }
+
+    // Preserve every requested field at common terminal widths by dropping
+    // the adapter suffix and assigning the remaining space to the path.
+    let mut medium_fields = vec![
+        (model_name.to_string(), state.theme.primary),
+        (format!("effort: {effort}"), state.theme.warning),
+        (String::new(), state.theme.secondary),
+        (primary_field.clone(), state.theme.success),
+        (review_field.clone(), state.theme.error),
+    ];
+    if let Some(pull_request) = state.current_branch_pull_request.as_ref() {
+        medium_fields.push((
+            format!("PR #{}", pull_request.number),
+            status_pr_color(state),
+        ));
+    }
+    let path_width = width.saturating_sub(status_fields_width(&medium_fields));
+    if path_width >= 9 {
+        medium_fields[2].0 = compact_middle_display(project, path_width);
+        if status_fields_width(&medium_fields) <= width {
+            return status_line_from_fields(medium_fields, state.theme.muted);
+        }
+    }
+
+    let mut narrow_fields = vec![
+        (model_name.to_string(), state.theme.primary),
+        (effort.to_string(), state.theme.warning),
+        (
+            project.rsplit('/').next().unwrap_or(project).to_string(),
+            state.theme.secondary,
+        ),
+        (format!("p: {primary}"), state.theme.success),
+        (format!("r: {review}"), state.theme.error),
+    ];
+    if let Some(pull_request) = state.current_branch_pull_request.as_ref() {
+        narrow_fields.push((
+            format!("PR #{}", pull_request.number),
+            status_pr_color(state),
+        ));
+    }
+    if status_fields_width(&narrow_fields) <= width {
+        return status_line_from_fields(narrow_fields, state.theme.muted);
+    }
+
+    // On very narrow terminals, make the pull request visible rather than
+    // letting it disappear at the truncated right edge.
+    if let Some(pull_request) = state.current_branch_pull_request.as_ref() {
+        let pr = format!("PR #{}", pull_request.number);
+        let separator_width = 3;
+        if width >= pr.width().saturating_add(separator_width).saturating_add(1) {
+            let model_width = width - pr.width() - separator_width;
+            return status_line_from_fields(
+                vec![
+                    (
+                        compact_middle_display(model_name, model_width),
+                        state.theme.primary,
+                    ),
+                    (pr, status_pr_color(state)),
+                ],
+                state.theme.muted,
+            );
+        }
+        return status_line_from_fields(
+            vec![(compact_middle_display(&pr, width), status_pr_color(state))],
+            state.theme.muted,
+        );
+    }
+
+    status_line_from_fields(
+        vec![(
+            compact_middle_display(model_name, width),
+            state.theme.primary,
+        )],
+        state.theme.muted,
+    )
+}
+
+fn status_fields_width(fields: &[(String, Color)]) -> usize {
+    fields.iter().map(|(text, _)| text.width()).sum::<usize>() + fields.len().saturating_sub(1) * 3
+}
+
+fn status_line_from_fields(fields: Vec<(String, Color)>, separator_color: Color) -> Line<'static> {
+    let mut spans = Vec::with_capacity(fields.len() * 2);
+    for (index, (text, color)) in fields.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(separator_color)));
+        }
+        spans.push(Span::styled(text, Style::default().fg(color)));
+    }
+    Line::from(spans)
+}
+
+fn status_pr_color(state: &AppState) -> Color {
+    match state.theme.kind {
+        TerminalThemeKind::AnsiLight => Color::Cyan,
+        _ => state.theme.accent,
+    }
 }
 
 fn compact_middle_display(text: &str, max_width: usize) -> String {
@@ -7250,49 +7346,6 @@ pub(crate) fn format_duration(duration: Duration) -> String {
     }
 }
 
-fn token_usage_label(state: &AppState) -> String {
-    let usage = state.displayed_token_usage();
-    let mut parts = Vec::new();
-
-    if let Some(input) = usage.input_tokens {
-        parts.push(format!("in: {}", compact_count(input)));
-    }
-    if let Some(output) = usage.output_tokens {
-        parts.push(format!("out: {}", compact_count(output)));
-    }
-    if let Some(used) = usage.context_used {
-        parts.push(format!("ctx: {}", compact_count(used)));
-    }
-    // The Claude rate-limit status is surfaced in the transcript (see
-    // `apply_usage_update`), not the header, so it is intentionally omitted
-    // here.
-
-    if !parts.is_empty() {
-        return parts.join(" · ");
-    }
-
-    "in: - · out: - · ctx: -".to_string()
-}
-
-fn header_token_usage_label(state: &AppState, _width: usize) -> String {
-    let usage = &state.agent_usage;
-    if usage.total().prompts > 0 {
-        let mut label = format!(
-            "primary {} · subagents {}",
-            compact_count(usage.primary.total_tokens),
-            compact_count(usage.subagents.total_tokens),
-        );
-        if usage.review.total_tokens > 0 {
-            label.push_str(&format!(
-                " · review {}",
-                compact_count(usage.review.total_tokens)
-            ));
-        }
-        return label;
-    }
-    token_usage_label(state)
-}
-
 fn seat_usage_label(usage: &crate::agent_usage::RoleUsage) -> String {
     let mut label = format!("{} tokens", usage.total_tokens);
     for (currency, amount) in &usage.costs {
@@ -7344,6 +7397,15 @@ fn compact_count(value: u64) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn compact_status_count(value: u64) -> String {
+    let value = compact_count(value);
+    value
+        .strip_suffix(".0k")
+        .map(|whole| format!("{whole}k"))
+        .or_else(|| value.strip_suffix(".0m").map(|whole| format!("{whole}m")))
+        .unwrap_or(value)
 }
 
 fn draw_transcript(
@@ -10275,34 +10337,6 @@ fn workflow_progress_row_count(state: &AppState) -> u16 {
     let visible = count.min(WORKFLOW_PROGRESS_VISIBLE_ROWS);
     let overflow = usize::from(count > WORKFLOW_PROGRESS_VISIBLE_ROWS);
     (visible + overflow).min(u16::MAX as usize) as u16
-}
-
-fn current_branch_pr_row_count(state: &AppState) -> u16 {
-    u16::from(state.current_branch_pull_request.is_some())
-}
-
-fn draw_current_branch_pr_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let Some(pull_request) = state.current_branch_pull_request.as_ref() else {
-        return;
-    };
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    let width = usize::from(area.width);
-    let label = fit_width(
-        format!(" PR #{} · {}", pull_request.number, pull_request.url),
-        width,
-    );
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            label,
-            Style::default()
-                .fg(state.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ))),
-        area,
-    );
 }
 
 /// One stable line per visible delegation or review workflow, shared by inline
@@ -14181,7 +14215,7 @@ mod tests {
         PlanEntryStatus, SessionConfigOption, SessionConfigOptionCategory,
         SessionConfigSelectOption, SessionConfigValueId, SessionUpdate, StopReason,
         StringPropertySchema, TerminalExitStatus, TextContent, ToolCall, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
+        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::{Backend, TestBackend};
@@ -14631,72 +14665,6 @@ mod tests {
     }
 
     #[test]
-    fn token_usage_label_prefers_in_out_and_ctx_format() {
-        let mut state = AppState::new();
-        state.token_usage.input_tokens = Some(1233);
-        state.token_usage.output_tokens = Some(1282);
-        state.token_usage.context_used = Some(944);
-        state.token_usage.context_size = Some(128_000);
-        state.token_usage.total_tokens = Some(2515);
-
-        assert_eq!(token_usage_label(&state), "in: 1233 · out: 1282 · ctx: 944");
-        assert_eq!(
-            header_token_usage_label(&state, 80),
-            "in: 1233 · out: 1282 · ctx: 944"
-        );
-    }
-
-    #[test]
-    fn header_token_usage_label_reports_seat_totals_once_a_seat_has_billed() {
-        let mut state = AppState::new();
-        state.token_usage.input_tokens = Some(10);
-        state.token_usage.output_tokens = Some(20);
-        state.token_usage.context_used = Some(30);
-
-        // No seat usage yet: the header falls back to the plain token label.
-        assert_eq!(
-            header_token_usage_label(&state, 80),
-            "in: 10 · out: 20 · ctx: 30"
-        );
-
-        state.agent_usage.observe(crate::agent_usage::Record {
-            seat: crate::agent_usage::Seat::Primary,
-            model: Some("gpt-primary".to_string()),
-            usage: Some(agent_client_protocol::schema::v1::Usage::new(
-                1200, 900, 300,
-            )),
-            update: None,
-            session_id: Some("p1".to_string()),
-        });
-        state.agent_usage.observe(crate::agent_usage::Record {
-            seat: crate::agent_usage::Seat::Subagent,
-            model: Some("gpt-worker".to_string()),
-            usage: Some(agent_client_protocol::schema::v1::Usage::new(
-                3400, 3000, 400,
-            )),
-            update: None,
-            session_id: Some("s1".to_string()),
-        });
-        assert_eq!(
-            header_token_usage_label(&state, 80),
-            "primary 1200 · subagents 3400"
-        );
-
-        // Review overhead only appears once it is nonzero.
-        state.agent_usage.observe(crate::agent_usage::Record {
-            seat: crate::agent_usage::Seat::Review,
-            model: Some("gpt-worker".to_string()),
-            usage: Some(agent_client_protocol::schema::v1::Usage::new(500, 400, 100)),
-            update: None,
-            session_id: Some("r1".to_string()),
-        });
-        assert_eq!(
-            header_token_usage_label(&state, 80),
-            "primary 1200 · subagents 3400 · review 500"
-        );
-    }
-
-    #[test]
     fn slash_agents_panel_breaks_usage_down_per_model() {
         let mut state = AppState::new();
         state.active_models = crate::config::ModelsConfig {
@@ -14735,102 +14703,122 @@ mod tests {
     }
 
     #[test]
-    fn token_usage_label_omits_rate_limit_from_header() {
-        // The Claude rate-limit status belongs in the transcript, not the
-        // header, so the header label must not surface it even when present.
+    fn status_line_shows_requested_fields_in_distinct_colors() {
         let mut state = AppState::new();
-        state.token_usage.input_tokens = Some(1233);
-        state.token_usage.output_tokens = Some(1282);
-        state.token_usage.context_used = Some(944);
-        state.token_usage.rate_limit = Some("Current session: 85% used".to_string());
+        state.active_models.primary = "gpt-5-6-terra".to_string();
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.primary_reasoning_effort = Some("high".to_string());
+        state.project_label = "~/code/mjolnir/.mjolnir/worktrees/slim-hawk".to_string();
+        state.agent_usage.primary.total_tokens = 68_000;
+        state.agent_usage.review.total_tokens = 311_000;
+        state.current_branch_pull_request = Some(CurrentBranchPullRequest {
+            number: 487,
+            url: "https://github.com/BrokkAi/mjolnir/pull/487".to_string(),
+        });
 
-        let label = token_usage_label(&state);
-        assert_eq!(label, "in: 1233 · out: 1282 · ctx: 944");
-        assert!(!label.contains("rl:"), "label: {label}");
-        assert!(!label.contains("85%"), "label: {label}");
-    }
-
-    #[test]
-    fn token_usage_label_never_falls_back_to_tok_or_think() {
-        let mut state = AppState::new();
-        state.token_usage.total_tokens = Some(411_400);
-        state.token_usage.input_tokens = Some(261_300);
-        state.token_usage.output_tokens = Some(3905);
-        state.token_usage.thought_tokens = Some(327);
-        state.token_usage.context_used = Some(944);
-
-        let label = token_usage_label(&state);
-        assert_eq!(label, "in: 261.3k · out: 3905 · ctx: 944");
-        assert!(!label.contains("tok:"), "label: {label}");
-        assert!(!label.contains("think:"), "label: {label}");
-    }
-
-    #[test]
-    fn token_usage_label_uses_dash_format_when_usage_is_missing() {
-        let state = AppState::new();
-        assert_eq!(token_usage_label(&state), "in: - · out: - · ctx: -");
-    }
-
-    #[test]
-    fn header_switches_to_fresh_subagent_usage_and_restores_primary_afterward() {
-        let mut state = AppState::new();
-        state.token_usage.context_used = Some(42_000);
-        state.token_usage.context_size = Some(128_000);
-        assert_eq!(token_usage_label(&state), "ctx: 42.0k");
-
-        state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
-            subagent_id: 1,
-            resumed: false,
-            model: None,
-            agent: "codex-acp".to_string(),
-            objective: String::new(),
-            label: "subagent".to_string(),
-        }));
+        let line = status_line(&state, 200);
         assert_eq!(
-            token_usage_label(&state),
-            "ctx: 42.0k",
-            "a subagent that has reported no usage yet must not blank the header"
+            line_text(&line),
+            "gpt-5-6-terra via codex-acp · effort: high · ~/code/mjolnir/.mjolnir/worktrees/slim-hawk · primary: 68k · review: 311k · PR #487"
         );
-
-        state.apply_event(subagent_session_update(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(900, 128_000),
-        )));
-        assert_eq!(token_usage_label(&state), "ctx: 900");
-
-        state.apply_event(subagent_finished(SubagentOutcome::Completed));
-        assert_eq!(token_usage_label(&state), "ctx: 42.0k");
+        assert!(!line_text(&line).contains("github.com"));
+        let colors: Vec<_> = line
+            .spans
+            .iter()
+            .filter_map(|span| span.style.fg)
+            .filter(|color| *color != state.theme.muted)
+            .collect();
+        assert_eq!(
+            colors,
+            vec![
+                state.theme.primary,
+                state.theme.warning,
+                state.theme.secondary,
+                state.theme.success,
+                state.theme.error,
+                status_pr_color(&state),
+            ]
+        );
+        for theme in [
+            TerminalThemeKind::Light,
+            TerminalThemeKind::Dark,
+            TerminalThemeKind::AnsiLight,
+            TerminalThemeKind::AnsiDark,
+        ] {
+            state.set_theme(theme);
+            let colors: Vec<_> = status_line(&state, 200)
+                .spans
+                .iter()
+                .filter_map(|span| span.style.fg)
+                .filter(|color| *color != state.theme.muted)
+                .collect();
+            for (index, color) in colors.iter().enumerate() {
+                assert!(
+                    !colors[..index].contains(color),
+                    "duplicate status-line color {color:?} in {theme:?}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn header_surfaces_full_directory_path() {
+    fn narrow_status_line_keeps_the_pr_number_visible() {
         let mut state = AppState::new();
-        state.agent_label = "anvil".to_string();
-        state.project_label = "~/code/project-a".to_string();
-        let backend = TestBackend::new(140, 1);
+        state.active_models.primary = "gpt-5-6-terra".to_string();
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.primary_reasoning_effort = Some("high".to_string());
+        state.project_label = "~/code/mjolnir/.mjolnir/worktrees/slim-hawk".to_string();
+        state.agent_usage.primary.total_tokens = 68_000;
+        state.agent_usage.review.total_tokens = 311_000;
+        state.current_branch_pull_request = Some(CurrentBranchPullRequest {
+            number: 487,
+            url: "https://github.com/BrokkAi/mjolnir/pull/487".to_string(),
+        });
+
+        for width in [80, 100, 120] {
+            let line = status_line(&state, width);
+            let rendered = line_text(&line);
+            assert!(rendered.contains("PR #487"), "width {width}: {rendered}");
+            assert!(rendered.width() <= width, "width {width}: {rendered}");
+            assert!(
+                !rendered.contains("github.com"),
+                "width {width}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_line_renders_below_the_chat_surface() {
+        let mut state = AppState::new();
+        state.active_models.primary = "gpt-status-line".to_string();
+        state.project_label = "~/code/mjolnir".to_string();
+        let mut transcript_scroll = TranscriptScrollState::default();
+        let backend = TestBackend::new(160, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &mut transcript_scroll,
+                    UiMode::FullscreenTui,
+                )
+            })
             .expect("draw");
 
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        let lines = buffer_lines(terminal.backend().buffer());
         assert!(
-            rendered.contains(&mjolnir_version_label()),
-            "rendered:\n{rendered}"
+            lines
+                .last()
+                .is_some_and(|line| line.contains("gpt-status-line")),
+            "status line must be the terminal's last row:\n{}",
+            lines.join("\n")
         );
-        assert!(rendered.contains("anvil"), "rendered:\n{rendered}");
-        assert!(
-            rendered.contains("~/code/project-a"),
-            "rendered:\n{rendered}"
-        );
-        assert!(!rendered.contains("agent "), "rendered:\n{rendered}");
-        assert!(!rendered.contains("project "), "rendered:\n{rendered}");
-        assert!(!rendered.contains("cwd"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("worktree"), "rendered:\n{rendered}");
     }
 
     #[test]
-    fn header_shows_project_path_worktree_and_session_title_without_session_id() {
+    fn header_shows_only_version_and_session_title() {
         let mut state = AppState::new();
         state.agent_label = "uvx".to_string();
         state.project_label = "~/code/mjolnir/.mjolnir/worktrees/bold-willow".to_string();
@@ -14846,16 +14834,8 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("mjolnir v"), "rendered:\n{rendered}");
-        assert!(rendered.contains("uvx"), "rendered:\n{rendered}");
-        assert!(
-            rendered.contains("~/code/mjolnir/.mjolnir/worktrees/bold-willow"),
-            "rendered:\n{rendered}"
-        );
-        assert_eq!(
-            rendered.matches("bold-willow").count(),
-            1,
-            "worktree name should only appear as part of the project path:\n{rendered}"
-        );
+        assert!(!rendered.contains("uvx"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("bold-willow"), "rendered:\n{rendered}");
         assert!(!rendered.contains("worktree "), "rendered:\n{rendered}");
         assert!(!rendered.contains("agent "), "rendered:\n{rendered}");
         assert!(!rendered.contains("project "), "rendered:\n{rendered}");
@@ -14869,7 +14849,7 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_additional_workspace_root_count() {
+    fn header_omits_additional_workspace_root_count() {
         let mut state = AppState::new();
         state.agent_label = "codex-acp".to_string();
         state.project_label = "~/code/mjolnir".to_string();
@@ -14882,7 +14862,7 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("+2 roots"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("+2 roots"), "rendered:\n{rendered}");
     }
 
     #[test]
@@ -15484,25 +15464,6 @@ mod tests {
             },
         ));
         assert!(state.current_branch_pull_request.is_none());
-    }
-
-    #[test]
-    fn current_branch_pr_row_is_compact_at_narrow_widths() {
-        let mut state = AppState::new();
-        state.current_branch_pull_request = Some(CurrentBranchPullRequest {
-            number: 487,
-            url: "https://github.com/BrokkAi/mjolnir/pull/487".to_string(),
-        });
-        let backend = TestBackend::new(24, 1);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-
-        terminal
-            .draw(|frame| draw_current_branch_pr_row(frame, frame.area(), &state))
-            .expect("draw PR row");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("PR #487"));
-        assert_eq!(current_branch_pr_row_count(&state), 1);
     }
 
     #[test]
@@ -18695,15 +18656,6 @@ mod tests {
             "streamed transcript rows must not resize the inline viewport"
         );
 
-        let backend = TestBackend::new(120, 1);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| draw_header(frame, frame.area(), &state))
-            .expect("draw active header");
-        let active = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(active.contains("subagent · gpt-builder"), "{active}");
-        assert!(!active.contains("gpt-primary"), "{active}");
-
         state.apply_event(subagent_finished(SubagentOutcome::Completed));
         assert_eq!(
             inline_transcript_tail_lines(&state, 80)
@@ -18726,11 +18678,6 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
         assert!(nested.contains("working now"), "{nested}");
-        terminal
-            .draw(|frame| draw_header(frame, frame.area(), &state))
-            .expect("draw restored header");
-        let restored = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(restored.contains("gpt-primary"), "{restored}");
     }
 
     #[test]
@@ -18744,7 +18691,7 @@ mod tests {
         let baseline = desired_inline_height(&state, terminal_size);
         let area = Rect::new(0, 0, terminal_size.width, baseline);
         let baseline_tail_height = inline_transcript_tail_height(&state, area);
-        let baseline_input_area = inline_chat_layout(&state, area)[5];
+        let baseline_input_area = inline_chat_layout(&state, area)[4];
         let mut terminal =
             Terminal::new(TestBackend::new(terminal_size.width, baseline)).expect("terminal");
         terminal
@@ -18786,7 +18733,7 @@ mod tests {
             streamed_header_row, baseline_header_row,
             "streaming must not move the header inside the fixed viewport"
         );
-        let streamed_input_area = inline_chat_layout(&state, area)[5];
+        let streamed_input_area = inline_chat_layout(&state, area)[4];
         assert_eq!(
             streamed_input_area, baseline_input_area,
             "the input panel rendered by the inline layout must not move or resize"

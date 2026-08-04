@@ -2548,6 +2548,7 @@ async fn run_session(
                 review_enabled: agent_config.discrete_review,
                 ragnarok_models: roster.available.clone(),
                 primary_acp_name: roster.primary.launch.kind.display_name().to_string(),
+                primary_reasoning_effort: roster.primary.reasoning_effort.clone(),
                 termination: termination.clone(),
             },
         )

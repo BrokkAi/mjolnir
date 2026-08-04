@@ -728,17 +728,6 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
-    /// True once this seat has reported any token or context figure.
-    fn has_counts(&self) -> bool {
-        self.total_tokens.is_some()
-            || self.input_tokens.is_some()
-            || self.output_tokens.is_some()
-            || self.thought_tokens.is_some()
-            || self.context_used.is_some()
-            || self.context_size.is_some()
-            || self.cost.is_some()
-    }
-
     fn apply_prompt_usage(&mut self, usage: Usage) {
         self.total_tokens = Some(usage.total_tokens);
         self.input_tokens = Some(usage.input_tokens);
@@ -880,6 +869,9 @@ pub struct AppState {
     /// which is a *display* string; this is the stable id the model-score
     /// resolver keys on. Empty until the launch site fills it in.
     pub agent_source_id: String,
+    /// Reasoning effort resolved for the active primary session. `None`
+    /// means the ACP adapter selected its own default.
+    pub primary_reasoning_effort: Option<String>,
     /// Launch command for the active session agent. Ragnarok uses this for
     /// the primary agent so the router follows the user's current agent instead of the
     /// competitor pool.
@@ -1075,8 +1067,8 @@ pub struct AppState {
     pub help_scroll: u16,
     /// True while mouse capture is disabled so the terminal can select text.
     pub text_selection_mode: bool,
-    /// Project shown in the header so users can tell which checkout this
-    /// session belongs to without leaking nested worktree paths.
+    /// Project shown in the bottom status line so users can tell which
+    /// checkout this session belongs to without leaking nested worktree paths.
     pub project_label: String,
     /// Short linked-worktree name shown separately from the project when
     /// the session runs under `.mjolnir/worktrees/`.
@@ -1530,6 +1522,7 @@ impl AppState {
             agent_label: String::new(),
             primary_acp_name: "ACP server".to_string(),
             agent_source_id: String::new(),
+            primary_reasoning_effort: None,
             active_agent_launch: None,
             session_id: None,
             session_title: None,
@@ -1651,6 +1644,7 @@ impl AppState {
         side.agent_label = format!("Side · {}", self.agent_label);
         side.primary_acp_name = self.primary_acp_name.clone();
         side.agent_source_id = self.agent_source_id.clone();
+        side.primary_reasoning_effort = self.primary_reasoning_effort.clone();
         side.active_agent_launch = self.active_agent_launch.clone();
         side.current_branch_pull_request = self.current_branch_pull_request.clone();
         side.current_branch_pull_request_branch = self.current_branch_pull_request_branch.clone();
@@ -2367,17 +2361,6 @@ impl AppState {
 
     pub fn connection_state_elapsed(&self) -> Duration {
         self.connection_state_started_at.elapsed()
-    }
-
-    pub fn displayed_token_usage(&self) -> &TokenUsage {
-        // A subagent that has not reported usage yet -- and a discrete-review
-        // lane, which has no nested session in this UI at all -- must not blank
-        // out the primary's numbers.
-        if self.subagent_active && self.subagent_token_usage.has_counts() {
-            &self.subagent_token_usage
-        } else {
-            &self.token_usage
-        }
     }
 
     pub fn connection_state(&self) -> ConnectionState {
