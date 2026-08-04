@@ -48,8 +48,8 @@ use crate::app::{
     PRIMARY_EFFORT_OPTIONS, PastedAttachment, PastedImageAttachment, PendingElicitation,
     PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus,
     RagnarokFighterUi, RagnarokUi, StatusKind, StatusMessage, SubagentStatus, ToolCallOutput,
-    UiExitReason, classify_elicitation, config_option_choices, config_option_current_value_label,
-    primary_effort_value,
+    TranscriptSearch, UiExitReason, classify_elicitation, config_option_choices,
+    config_option_current_value_label, primary_effort_value,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -519,8 +519,10 @@ struct TranscriptScrollState {
 struct TranscriptCache {
     revision: u64,
     width: u16,
+    search_query: Option<String>,
     lines: Vec<Line<'static>>,
     line_count: usize,
+    entry_row_starts: Vec<Option<usize>>,
 }
 
 #[derive(Debug, Default)]
@@ -662,6 +664,264 @@ fn stable_transcript_entry_count(state: &AppState) -> usize {
         }
     }
     stable
+}
+
+fn append_search_text(target: &mut String, text: &str) {
+    if !target.is_empty() {
+        target.push('\n');
+    }
+    target.push_str(text);
+}
+
+/// Plain logical text for one canonical transcript entry. This intentionally
+/// searches source entries rather than rendered rows: terminal wrapping and
+/// markdown styling must not determine whether a hit exists.
+fn transcript_entry_search_text(state: &AppState, entry: &Entry) -> String {
+    match entry {
+        Entry::UserPrompt(text)
+        | Entry::AgentMessage(text)
+        | Entry::SubagentMessage(text)
+        | Entry::System(text)
+        | Entry::FeatureHint(text)
+        | Entry::SessionBoundary(text) => text.clone(),
+        Entry::AgentThought(thought) | Entry::SubagentThought(thought) => thought.text.clone(),
+        Entry::InternalMessage(message) => {
+            let mut text = String::new();
+            append_search_text(&mut text, &message.source);
+            append_search_text(&mut text, &message.target);
+            append_search_text(&mut text, &message.text);
+            text
+        }
+        Entry::Plan(entries) | Entry::SubagentPlan(entries) => entries
+            .iter()
+            .map(|entry| entry.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
+            let mut text = id.clone();
+            let Some(view) = state.tool_calls.get(id) else {
+                return text;
+            };
+            append_search_text(&mut text, &view.title);
+            for output in &view.body {
+                match output {
+                    ToolCallOutput::Text(output) | ToolCallOutput::Note(output) => {
+                        append_search_text(&mut text, output);
+                    }
+                    ToolCallOutput::Diff {
+                        path,
+                        old_text,
+                        new_text,
+                    } => {
+                        append_search_text(&mut text, path);
+                        if let Some(old_text) = old_text {
+                            append_search_text(&mut text, old_text);
+                        }
+                        append_search_text(&mut text, new_text);
+                    }
+                    ToolCallOutput::Terminal {
+                        terminal_id,
+                        output,
+                        ..
+                    } => {
+                        append_search_text(&mut text, terminal_id);
+                        append_search_text(&mut text, output);
+                    }
+                }
+            }
+            text
+        }
+    }
+}
+
+fn compute_transcript_search_matches(state: &AppState, query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    state
+        .transcript
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let text = transcript_entry_search_text(state, entry);
+            (!line_search_match_ranges(&text, query).is_empty()).then_some(index)
+        })
+        .collect()
+}
+
+fn transcript_search_matches(state: &AppState) -> &[usize] {
+    state
+        .transcript_search
+        .as_ref()
+        .map(|search| search.matches.as_slice())
+        .unwrap_or_default()
+}
+
+fn ensure_transcript_search_matches(state: &mut AppState) {
+    let revision = state.transcript_revision();
+    let Some(search) = state.transcript_search.as_ref() else {
+        return;
+    };
+    if search.matches_revision == Some(revision) {
+        return;
+    }
+    let query = search.query.clone();
+    let selected_entry = search.matches.get(search.selected).copied();
+    let matches = compute_transcript_search_matches(state, &query);
+    if let Some(search) = state.transcript_search.as_mut() {
+        search.matches = matches;
+        search.matches_revision = Some(revision);
+        if search.matches.is_empty() {
+            search.selected = 0;
+            search.jump_pending = false;
+        } else if let Some(selected_entry) = selected_entry
+            && let Some(position) = search
+                .matches
+                .iter()
+                .position(|entry| *entry == selected_entry)
+        {
+            search.selected = position;
+        } else {
+            search.selected = search.selected.min(search.matches.len() - 1);
+        }
+    }
+}
+
+fn selected_transcript_search_entry(state: &AppState) -> Option<usize> {
+    let search = state.transcript_search.as_ref()?;
+    let matches = &search.matches;
+    if matches.is_empty() {
+        return None;
+    }
+    matches.get(search.selected % matches.len()).copied()
+}
+
+fn open_transcript_search(state: &mut AppState) {
+    state.autocomplete_dismiss();
+    let search = state
+        .transcript_search
+        .get_or_insert_with(TranscriptSearch::default);
+    search.editing = true;
+    search.jump_pending = false;
+}
+
+fn refresh_transcript_search_after_edit(state: &mut AppState) {
+    let query = state
+        .transcript_search
+        .as_ref()
+        .map(|search| search.query.clone())
+        .unwrap_or_default();
+    let matches = compute_transcript_search_matches(state, &query);
+    let revision = state.transcript_revision();
+    let match_count = matches.len();
+    let Some(search) = state.transcript_search.as_mut() else {
+        return;
+    };
+    search.matches = matches;
+    search.matches_revision = Some(revision);
+    if match_count == 0 {
+        search.selected = 0;
+        search.jump_pending = false;
+    } else {
+        search.selected = search.selected.min(match_count - 1);
+        search.jump_pending = true;
+    }
+}
+
+fn move_transcript_search(state: &mut AppState, next: bool) {
+    ensure_transcript_search_matches(state);
+    let match_count = transcript_search_matches(state).len();
+    let Some(search) = state.transcript_search.as_mut() else {
+        return;
+    };
+    if match_count == 0 {
+        search.selected = 0;
+        search.jump_pending = false;
+        return;
+    }
+    search.selected = if next {
+        (search.selected + 1) % match_count
+    } else {
+        (search.selected + match_count - 1) % match_count
+    };
+    search.jump_pending = true;
+}
+
+/// Handle keys while a search exists. Returns whether the key belongs to the
+/// search mode; unrelated keys may continue to the surrounding UI.
+fn handle_active_transcript_search_key(
+    state: &mut AppState,
+    modifiers: KeyModifiers,
+    code: KeyCode,
+) -> bool {
+    ensure_transcript_search_matches(state);
+    let Some(search) = state.transcript_search.as_ref() else {
+        return false;
+    };
+    if search.editing {
+        match (modifiers, code) {
+            (_, KeyCode::Esc) => state.transcript_search = None,
+            (_, KeyCode::Enter) => {
+                let match_count = transcript_search_matches(state).len();
+                if let Some(search) = state.transcript_search.as_mut() {
+                    search.editing = false;
+                    search.jump_pending = match_count > 0;
+                }
+            }
+            (_, KeyCode::Backspace) => {
+                if let Some(search) = state.transcript_search.as_mut() {
+                    search.query.pop();
+                    search.selected = 0;
+                }
+                refresh_transcript_search_after_edit(state);
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('u' | 'U')) => {
+                if let Some(search) = state.transcript_search.as_mut() {
+                    search.query.clear();
+                    search.selected = 0;
+                }
+                refresh_transcript_search_after_edit(state);
+            }
+            (modifiers, KeyCode::Char(ch))
+                if !modifiers.intersects(
+                    KeyModifiers::CONTROL
+                        | KeyModifiers::ALT
+                        | KeyModifiers::SUPER
+                        | KeyModifiers::HYPER
+                        | KeyModifiers::META,
+                ) =>
+            {
+                if let Some(search) = state.transcript_search.as_mut() {
+                    search.query.push(ch);
+                    search.selected = 0;
+                }
+                refresh_transcript_search_after_edit(state);
+            }
+            _ => {}
+        }
+        return true;
+    }
+
+    match (modifiers, code) {
+        (_, KeyCode::Esc) => {
+            state.transcript_search = None;
+            true
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('f' | 'F'))
+        | (KeyModifiers::NONE, KeyCode::Char('/')) => {
+            open_transcript_search(state);
+            true
+        }
+        (KeyModifiers::NONE, KeyCode::Char('n')) => {
+            move_transcript_search(state, true);
+            true
+        }
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char('N')) => {
+            move_transcript_search(state, false);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// A derived prompt-bounded view of the source transcript. It deliberately
@@ -2471,6 +2731,31 @@ fn handle_crossterm(
     let key = match ev {
         CtEvent::Key(k) => k,
         CtEvent::Paste(text) => {
+            if state
+                .transcript_search
+                .as_ref()
+                .is_some_and(|search| search.editing)
+                && !state.has_pending_permission()
+                && !state.has_pending_elicitation()
+                && !state.help_overlay
+                && state.mjconfig_menu.is_none()
+                && state.agent_picker.is_none()
+                && state.review_picker.is_none()
+                && state.config_picker.is_none()
+                && state.ragnarok.is_none()
+                && !state.review_issue_viewer
+                && !state.nested_agent_viewer
+                && !state.workspace_diff_viewer
+                && (state.transcript_viewer || mode == UiMode::FullscreenTui)
+            {
+                let cleaned: String = text.chars().filter(|ch| !ch.is_control()).collect();
+                if let Some(search) = state.transcript_search.as_mut() {
+                    search.query.push_str(&cleaned);
+                    search.selected = 0;
+                }
+                refresh_transcript_search_after_edit(state);
+                return TerminalRequest::None;
+            }
             // Route paste into an active free-text elicitation field -- users
             // paste API keys/tokens there. Strip control characters so a
             // trailing newline can't pre-submit or split the field.
@@ -2669,6 +2954,11 @@ fn handle_crossterm(
     }
 
     if state.runtime_closed {
+        if mode == UiMode::FullscreenTui
+            && handle_active_transcript_search_key(state, key.modifiers, key.code)
+        {
+            return TerminalRequest::None;
+        }
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c'))
             | (KeyModifiers::CONTROL, KeyCode::Char('d'))
@@ -2759,6 +3049,20 @@ fn handle_crossterm(
 
     if state.config_picker.is_some() {
         return handle_config_picker_key(state, cmd_tx, key.modifiers, key.code, mode);
+    }
+
+    if mode == UiMode::FullscreenTui {
+        if handle_active_transcript_search_key(state, key.modifiers, key.code) {
+            return TerminalRequest::None;
+        }
+        if key.modifiers == KeyModifiers::CONTROL
+            && matches!(key.code, KeyCode::Char('f' | 'F'))
+            && state.input.is_empty()
+            && attachment_count(state) == 0
+        {
+            open_transcript_search(state);
+            return TerminalRequest::None;
+        }
     }
 
     if matches!(key.code, KeyCode::BackTab) {
@@ -4034,6 +4338,16 @@ fn handle_transcript_viewer_key(
     code: KeyCode,
     mode: UiMode,
 ) -> TerminalRequest {
+    if handle_active_transcript_search_key(state, modifiers, code) {
+        return TerminalRequest::None;
+    }
+    if (modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Char('f' | 'F')))
+        || (modifiers == KeyModifiers::NONE && matches!(code, KeyCode::Char('/')))
+    {
+        open_transcript_search(state);
+        return TerminalRequest::None;
+    }
+
     let closes_reader = matches!(code, KeyCode::Esc)
         || (modifiers == KeyModifiers::NONE && matches!(code, KeyCode::Char('q')))
         || (modifiers.contains(KeyModifiers::CONTROL)
@@ -5812,6 +6126,7 @@ fn draw(
     transcript_scroll: &mut TranscriptScrollState,
     mode: UiMode,
 ) {
+    ensure_transcript_search_matches(state);
     if mode == UiMode::InlineChat {
         draw_inline_chat(f, state);
         return;
@@ -5999,6 +6314,7 @@ fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 7] {
 }
 
 fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
+    ensure_transcript_search_matches(state);
     if let Some(pending) = state.pending_permission() {
         draw_inline_permission_view(
             f,
@@ -6396,6 +6712,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
 /// expanded. `scroll_offset` is the index of the top visible line and is
 /// clamped here so End / PageDown can never scroll past the final screen.
 fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
+    ensure_transcript_search_matches(state);
     f.render_widget(Clear, area);
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -6404,18 +6721,49 @@ fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" transcript — full history · Alt-T toggles latest tool ")
+        .title(" transcript — full history · / or Ctrl-F searches ")
         .style(Style::default().fg(state.theme.agent));
     let inner = block.inner(layout[0]);
     f.render_widget(block, layout[0]);
 
     if inner.width > 0 && inner.height > 0 {
-        let lines = render_full_transcript_lines(state, inner.width);
-        let total = Paragraph::new(lines.clone())
-            .wrap(Wrap { trim: false })
-            .line_count(inner.width);
+        let search_query = state
+            .transcript_search
+            .as_ref()
+            .filter(|search| !search.query.is_empty())
+            .map(|search| search.query.clone());
+        let (lines, total, entry_row_starts) = if let Some(query) = search_query.as_deref() {
+            let rendered = render_search_transcript_lines(state, inner.width, query);
+            (
+                rendered.lines,
+                rendered.line_count,
+                rendered.entry_row_starts,
+            )
+        } else {
+            let lines = render_full_transcript_lines(state, inner.width);
+            let total = Paragraph::new(lines.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width);
+            (lines, total, Vec::new())
+        };
         let max_offset = total.saturating_sub(usize::from(inner.height));
         state.scroll_offset = state.scroll_offset.min(max_offset);
+        if state
+            .transcript_search
+            .as_ref()
+            .is_some_and(|search| search.jump_pending)
+        {
+            if let Some(entry_index) = selected_transcript_search_entry(state)
+                && let Some(Some(target_row)) = entry_row_starts.get(entry_index)
+            {
+                state.scroll_offset = target_row
+                    .saturating_sub(usize::from(inner.height) / 3)
+                    .min(max_offset);
+            }
+            if let Some(search) = state.transcript_search.as_mut() {
+                search.jump_pending = false;
+            }
+        }
         let top = state.scroll_offset.min(u16::MAX as usize) as u16;
         f.render_widget(
             Paragraph::new(lines)
@@ -6425,11 +6773,26 @@ fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut
         );
     }
 
+    let footer = if let Some(search) = state.transcript_search.as_ref() {
+        let matches = transcript_search_matches(state);
+        if search.editing {
+            format!("Search: {}▌ · Enter apply · Esc cancel", search.query)
+        } else if matches.is_empty() {
+            format!("Search: {} · no matches · / edit · Esc clear", search.query)
+        } else {
+            format!(
+                "Search: {} · {}/{} · n/N next/previous · / edit · Esc clear",
+                search.query,
+                search.selected.min(matches.len() - 1) + 1,
+                matches.len()
+            )
+        }
+    } else {
+        "Alt-T latest tool · / search · Up/Down PgUp/PgDn · Home/End · Esc or Ctrl-T close"
+            .to_string()
+    };
     f.render_widget(
-        Paragraph::new(
-            "Alt-T latest tool · Up/Down PgUp/PgDn scroll · Home/End top/bottom · Esc or Ctrl-T to close",
-        )
-            .style(Style::default().fg(state.theme.muted)),
+        Paragraph::new(footer).style(Style::default().fg(state.theme.muted)),
         layout[1],
     );
 }
@@ -7383,23 +7746,43 @@ fn draw_transcript(
     // Avoid rebuilding the lines and re-running `Paragraph::line_count`
     // (both O(text) with unicode segmentation) when neither the
     // transcript nor the terminal width has changed since the last
-    // frame. Caching is keyed by `(revision, width)`; any mutation to
-    // `transcript` / `tool_calls` bumps the revision.
+    // frame. Caching is keyed by transcript revision, width, and active search
+    // query; any mutation to `transcript` / `tool_calls` bumps the revision.
     let revision = state.transcript_revision();
+    let search_query = state
+        .transcript_search
+        .as_ref()
+        .filter(|search| !search.query.is_empty())
+        .map(|search| search.query.clone());
     let cache_hit = matches!(
         transcript_scroll.cache.as_ref(),
-        Some(c) if c.revision == revision && c.width == inner.width
+        Some(c)
+            if c.revision == revision
+                && c.width == inner.width
+                && c.search_query == search_query
     );
     if !cache_hit {
-        let lines = render_transcript_lines(state, inner.width);
-        let line_count = Paragraph::new(lines.clone())
-            .wrap(Wrap { trim: false })
-            .line_count(inner.width);
+        let (lines, line_count, entry_row_starts) = if let Some(query) = search_query.as_deref() {
+            let rendered = render_search_transcript_lines(state, inner.width, query);
+            (
+                rendered.lines,
+                rendered.line_count,
+                rendered.entry_row_starts,
+            )
+        } else {
+            let lines = render_transcript_lines(state, inner.width);
+            let line_count = Paragraph::new(lines.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width);
+            (lines, line_count, Vec::new())
+        };
         transcript_scroll.cache = Some(TranscriptCache {
             revision,
             width: inner.width,
+            search_query: search_query.clone(),
             lines,
             line_count,
+            entry_row_starts,
         });
     }
     let cache = transcript_scroll
@@ -7411,8 +7794,27 @@ fn draw_transcript(
     // `Vec<Line>`. This still avoids the dominant cost (word-wrap +
     // unicode tables) which only runs inside `render_widget`.
     let lines = cache.lines.clone();
+    let entry_row_starts = cache.entry_row_starts.clone();
 
     transcript_scroll.reconcile(&mut state.scroll_offset, total, inner.height);
+    if state
+        .transcript_search
+        .as_ref()
+        .is_some_and(|search| search.jump_pending)
+    {
+        if let Some(entry_index) = selected_transcript_search_entry(state)
+            && let Some(Some(target_row)) = entry_row_starts.get(entry_index)
+        {
+            let max_top = total.saturating_sub(usize::from(inner.height));
+            let desired_top = target_row
+                .saturating_sub(usize::from(inner.height) / 3)
+                .min(max_top);
+            state.scroll_offset = max_top.saturating_sub(desired_top);
+        }
+        if let Some(search) = state.transcript_search.as_mut() {
+            search.jump_pending = false;
+        }
+    }
     let top = total
         .saturating_sub(inner.height as usize)
         .saturating_sub(state.scroll_offset)
@@ -7429,6 +7831,27 @@ fn draw_transcript(
 /// state for compacted transcript details is appended so Ctrl-T's effect is visible.
 fn transcript_block_title(state: &AppState) -> String {
     let mut title = String::from(" transcript ");
+    if let Some(search) = state.transcript_search.as_ref() {
+        let matches = transcript_search_matches(state);
+        if search.editing {
+            title.push_str(&format!(
+                "[search: {}▌ | Enter apply · Esc cancel] ",
+                search.query
+            ));
+        } else if matches.is_empty() {
+            title.push_str(&format!(
+                "[search: {} | no matches · Esc clear] ",
+                search.query
+            ));
+        } else {
+            title.push_str(&format!(
+                "[search: {} | {}/{} · n/N next/previous · Esc clear] ",
+                search.query,
+                search.selected.min(matches.len() - 1) + 1,
+                matches.len()
+            ));
+        }
+    }
     if state.scroll_offset > 0 {
         title.push_str(&format!(
             "[scrolled +{} | End to follow] ",
@@ -7465,6 +7888,156 @@ fn render_full_transcript_lines(state: &AppState, width: u16) -> Vec<Line<'stati
     )
 }
 
+struct SearchTranscriptRender {
+    lines: Vec<Line<'static>>,
+    line_count: usize,
+    entry_row_starts: Vec<Option<usize>>,
+}
+
+fn line_search_match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let folded_query = query
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if folded_query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut folded_text = String::new();
+    let mut source_ranges = Vec::new();
+    for (source_start, ch) in text.char_indices() {
+        let source_end = source_start + ch.len_utf8();
+        let folded = ch.to_lowercase().collect::<String>();
+        for _ in 0..folded.len() {
+            source_ranges.push((source_start, source_end));
+        }
+        folded_text.push_str(&folded);
+    }
+
+    let mut ranges = folded_text
+        .match_indices(&folded_query)
+        .filter_map(|(start, matched)| {
+            let end = start + matched.len();
+            let (source_start, _) = *source_ranges.get(start)?;
+            let (_, source_end) = *source_ranges.get(end.checked_sub(1)?)?;
+            Some(source_start..source_end)
+        })
+        .collect::<Vec<_>>();
+    ranges.dedup();
+    ranges
+}
+
+fn highlight_search_matches(
+    line: Line<'static>,
+    query: &str,
+    theme: TerminalTheme,
+) -> Line<'static> {
+    let text = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    let ranges = line_search_match_ranges(&text, query);
+    if ranges.is_empty() {
+        return line;
+    }
+
+    let line_style = line.style;
+    let line_alignment = line.alignment;
+    let mut highlighted = Vec::new();
+    let mut span_start = 0;
+    for span in line.spans {
+        let content = span.content.into_owned();
+        let span_end = span_start + content.len();
+        let mut boundaries = vec![0, content.len()];
+        for range in &ranges {
+            if range.start > span_start && range.start < span_end {
+                boundaries.push(range.start - span_start);
+            }
+            if range.end > span_start && range.end < span_end {
+                boundaries.push(range.end - span_start);
+            }
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        for pair in boundaries.windows(2) {
+            let start = pair[0];
+            let end = pair[1];
+            if start == end {
+                continue;
+            }
+            let absolute_start = span_start + start;
+            let matched = ranges
+                .iter()
+                .any(|range| range.start <= absolute_start && absolute_start < range.end);
+            let style = if matched {
+                span.style
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                span.style
+            };
+            highlighted.push(Span::styled(content[start..end].to_string(), style));
+        }
+        span_start = span_end;
+    }
+    let mut line = Line::from(highlighted).style(line_style);
+    line.alignment = line_alignment;
+    line
+}
+
+/// Render every logical entry independently so each hit has a stable wrapped
+/// row target. Search mode deliberately shows full details: a match must not
+/// disappear inside normal transcript compaction.
+fn render_search_transcript_lines(
+    state: &AppState,
+    width: u16,
+    query: &str,
+) -> SearchTranscriptRender {
+    let matches = transcript_search_matches(state)
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let turns = transcript_turns(state);
+    let mut lines = Vec::new();
+    let mut line_count = 0;
+    let mut entry_row_starts = vec![None; state.transcript.len()];
+    for (entry_index, entry_row_start) in entry_row_starts.iter_mut().enumerate() {
+        let mut entry_lines = render_transcript_entry_range_with_turns(
+            state,
+            width,
+            entry_index..entry_index + 1,
+            None,
+            state.theme,
+            false,
+            &turns,
+        );
+        if entry_lines.is_empty() {
+            continue;
+        }
+        if matches.contains(&entry_index) {
+            entry_lines = entry_lines
+                .into_iter()
+                .map(|line| highlight_search_matches(line, query, state.theme))
+                .collect();
+        }
+        *entry_row_start = Some(line_count);
+        line_count += Paragraph::new(entry_lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width);
+        lines.extend(entry_lines);
+    }
+    SearchTranscriptRender {
+        lines,
+        line_count,
+        entry_row_starts,
+    }
+}
+
 /// Detail budget for the transcript: `None` when expanded, otherwise the
 /// collapsed default for stable long prose and tool output.
 fn transcript_collapse_limit(state: &AppState) -> Option<usize> {
@@ -7483,8 +8056,28 @@ fn render_transcript_entry_range(
     theme: TerminalTheme,
     compact_completed_turns: bool,
 ) -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = Vec::new();
     let turns = transcript_turns(state);
+    render_transcript_entry_range_with_turns(
+        state,
+        width,
+        entry_range,
+        collapse_limit,
+        theme,
+        compact_completed_turns,
+        &turns,
+    )
+}
+
+fn render_transcript_entry_range_with_turns(
+    state: &AppState,
+    width: u16,
+    entry_range: Range<usize>,
+    collapse_limit: Option<usize>,
+    theme: TerminalTheme,
+    compact_completed_turns: bool,
+    turns: &[TranscriptTurn],
+) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
     for (offset, entry) in state.transcript[entry_range.clone()].iter().enumerate() {
         let entry_index = entry_range.start + offset;
         let compact_turn = if compact_completed_turns {
@@ -11935,6 +12528,7 @@ fn help_modal_lines(
                 "",
                 theme,
             ),
+            help_binding_line("Ctrl-F", "search transcript; n/N moves between hits", theme),
             help_binding_line("Alt-T", "expand/collapse latest visible tool output", theme),
             help_blank_line(),
         ]);
@@ -11943,7 +12537,7 @@ fn help_modal_lines(
             help_section_line("Read transcript", theme),
             help_binding_line(
                 "Ctrl-T",
-                "open full transcript reader (Up/Down/PgUp/PgDn, Esc closes)",
+                "open full transcript reader (/ or Ctrl-F searches; n/N moves hits)",
                 theme,
             ),
             help_blank_line(),
@@ -19840,6 +20434,245 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_transcript_search_edits_and_cycles_logical_entry_matches() {
+        let mut state = AppState::new();
+        state
+            .transcript
+            .push(Entry::UserPrompt("first NEEDLE".to_string()));
+        state
+            .transcript
+            .push(Entry::AgentMessage("unrelated".to_string()));
+        state
+            .transcript
+            .push(Entry::System("second needle".to_string()));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        );
+        for ch in "needle".chars() {
+            handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char(ch)));
+        }
+        assert_eq!(transcript_search_matches(&state), vec![0, 2]);
+        assert_eq!(state.input, "");
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        let search = state
+            .transcript_search
+            .as_ref()
+            .expect("search remains active");
+        assert!(!search.editing);
+        assert_eq!(search.selected, 0);
+        assert!(search.jump_pending);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('n')));
+        assert_eq!(state.transcript_search.as_ref().unwrap().selected, 1);
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('N')));
+        assert_eq!(state.transcript_search.as_ref().unwrap().selected, 0);
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+        assert!(state.transcript_search.is_none());
+    }
+
+    #[test]
+    fn inline_reader_slash_search_clears_before_reader_closes() {
+        let mut state = AppState::new();
+        state
+            .transcript
+            .push(Entry::AgentMessage("find this answer".to_string()));
+        state.open_transcript_viewer();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('/')));
+        assert!(state.transcript_search.as_ref().unwrap().editing);
+        for ch in "answer".chars() {
+            handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char(ch)));
+        }
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        assert!(state.transcript_viewer);
+        assert_eq!(transcript_search_matches(&state), vec![0]);
+
+        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+        assert!(state.transcript_viewer, "first Esc clears search only");
+        assert!(state.transcript_search.is_none());
+
+        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+        assert!(!state.transcript_viewer);
+        assert!(terminal_request_forces_inline_repair(&request));
+    }
+
+    #[test]
+    fn transcript_search_includes_tool_output_and_maps_wrapped_entry_rows() {
+        let mut state = AppState::new();
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "run a command".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Failed,
+                body: vec![ToolCallOutput::Terminal {
+                    terminal_id: "term-1".to_string(),
+                    output: format!("{}SPLITNEEDLE", "x".repeat(40)),
+                    truncated: false,
+                    exit_status: None,
+                }],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+        state.transcript_search = Some(TranscriptSearch {
+            query: "splitneedle".to_string(),
+            editing: false,
+            selected: 0,
+            jump_pending: true,
+            ..TranscriptSearch::default()
+        });
+
+        ensure_transcript_search_matches(&mut state);
+        assert_eq!(transcript_search_matches(&state), vec![0]);
+        let rendered = render_search_transcript_lines(&state, 12, "splitneedle");
+        assert!(rendered.line_count > 1, "tool output should wrap");
+        assert_eq!(rendered.entry_row_starts, vec![Some(0)]);
+    }
+
+    #[test]
+    fn transcript_search_highlights_visible_matches() {
+        let mut state = AppState::new();
+        state
+            .transcript
+            .push(Entry::AgentMessage("before Needle after".to_string()));
+        state.transcript_search = Some(TranscriptSearch {
+            query: "needle".to_string(),
+            editing: false,
+            selected: 0,
+            jump_pending: false,
+            ..TranscriptSearch::default()
+        });
+
+        ensure_transcript_search_matches(&mut state);
+        let rendered = render_search_transcript_lines(&state, 80, "needle");
+        let hit = rendered
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.eq_ignore_ascii_case("needle"))
+            .expect("highlighted match span");
+        assert_eq!(hit.style.bg, Some(state.theme.selection_bg));
+        assert_eq!(hit.style.fg, Some(state.theme.selection_fg));
+    }
+
+    #[test]
+    fn transcript_search_refreshes_when_the_transcript_revision_changes() {
+        let mut state = AppState::new();
+        state
+            .transcript
+            .push(Entry::AgentMessage("first needle".to_string()));
+        state.transcript_search = Some(TranscriptSearch {
+            query: "needle".to_string(),
+            editing: false,
+            ..TranscriptSearch::default()
+        });
+        ensure_transcript_search_matches(&mut state);
+        assert_eq!(transcript_search_matches(&state), vec![0]);
+
+        state.record_status_message(StatusKind::Info, "another needle");
+        ensure_transcript_search_matches(&mut state);
+        assert_eq!(transcript_search_matches(&state), vec![0, 1]);
+    }
+
+    #[test]
+    fn fullscreen_search_jump_scrolls_the_selected_entry_into_view() {
+        let mut state = AppState::new();
+        for index in 0..20 {
+            let text = if index == 2 {
+                "selected target entry".to_string()
+            } else {
+                format!("ordinary transcript entry {index}")
+            };
+            state.transcript.push(Entry::AgentMessage(text));
+        }
+        state.transcript_search = Some(TranscriptSearch {
+            query: "target".to_string(),
+            editing: false,
+            jump_pending: true,
+            ..TranscriptSearch::default()
+        });
+        let backend = TestBackend::new(70, 16);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut scroll = TranscriptScrollState::default();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+
+        assert!(
+            state.scroll_offset > 0,
+            "selected early hit scrolls above tail"
+        );
+        assert!(!state.transcript_search.as_ref().unwrap().jump_pending);
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("selected target entry"),
+            "rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn transcript_search_unicode_matching_and_highlighting_agree() {
+        let ranges = line_search_match_ranges("vorher Äpfel danach", "äPFEL");
+        assert_eq!(&"vorher Äpfel danach"[ranges[0].clone()], "Äpfel");
+
+        let theme = TerminalThemeKind::Dark.palette();
+        let highlighted = highlight_search_matches(
+            Line::from("vorher Äpfel danach".to_string()),
+            "äPFEL",
+            theme,
+        );
+        let hit = highlighted
+            .spans
+            .iter()
+            .find(|span| span.content == "Äpfel")
+            .expect("unicode match highlighted");
+        assert_eq!(hit.style.bg, Some(theme.selection_bg));
+    }
+
+    #[test]
+    fn closed_runtime_esc_clears_search_before_quitting() {
+        let mut state = AppState::new();
+        state.runtime_closed = true;
+        state.transcript_search = Some(TranscriptSearch {
+            query: "needle".to_string(),
+            editing: false,
+            ..TranscriptSearch::default()
+        });
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
+
+        assert!(state.transcript_search.is_none());
+        assert_eq!(state.exit_reason, None);
+    }
+
+    #[test]
+    fn paste_does_not_edit_a_search_hidden_by_help() {
+        let mut state = AppState::new();
+        state.help_overlay = true;
+        state.transcript_search = Some(TranscriptSearch {
+            editing: true,
+            ..TranscriptSearch::default()
+        });
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            CtEvent::Paste("hidden text".to_string()),
+        );
+
+        assert_eq!(state.transcript_search.as_ref().unwrap().query, "");
+    }
+
+    #[test]
     fn transcript_reader_scrolls_with_mouse_wheel() {
         let mut state = AppState::new();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
@@ -23062,7 +23895,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_ctrl_b_and_ctrl_f_move_one_character() {
+    fn prompt_ctrl_b_and_ctrl_f_keep_character_navigation_for_a_draft() {
         let mut state = AppState::new();
         state.input = "abc".to_string();
         state.input_cursor = 1;
@@ -23081,6 +23914,26 @@ mod tests {
             key_with_modifiers(KeyCode::Char('f'), KeyModifiers::CONTROL),
         );
         assert_eq!(state.input_cursor, 1);
+        assert!(state.transcript_search.is_none());
+    }
+
+    #[test]
+    fn prompt_ctrl_f_opens_transcript_search_when_the_draft_is_empty() {
+        let mut state = AppState::new();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        );
+
+        assert!(
+            state
+                .transcript_search
+                .as_ref()
+                .is_some_and(|search| search.editing)
+        );
     }
 
     #[test]

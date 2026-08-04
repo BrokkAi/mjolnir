@@ -410,6 +410,19 @@ pub enum Entry {
     SessionBoundary(String),
 }
 
+/// Ephemeral search state shared by the fullscreen transcript and the inline
+/// full-history reader. Matches are derived from the canonical transcript so
+/// streaming updates cannot leave a stale list behind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TranscriptSearch {
+    pub query: String,
+    pub editing: bool,
+    pub selected: usize,
+    pub jump_pending: bool,
+    pub(crate) matches: Vec<usize>,
+    pub(crate) matches_revision: Option<u64>,
+}
+
 const FEATURE_HINT_INTERVAL_TURNS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1052,6 +1065,7 @@ pub struct AppState {
     /// messages and tool outputs fully expanded. Inline scrollback is immutable once
     /// flushed, so this reader is how users re-read earlier output in full.
     pub transcript_viewer: bool,
+    pub transcript_search: Option<TranscriptSearch>,
     /// On-demand roster and transcript reader for nested implementation and
     /// review actors. It is available in inline and fullscreen modes.
     pub nested_agent_viewer: bool,
@@ -1640,6 +1654,7 @@ impl AppState {
             scroll_offset: 0,
             expand_transcript_details: false,
             transcript_viewer: false,
+            transcript_search: None,
             nested_agent_viewer: false,
             nested_agent_selected: None,
             nested_agent_scroll_offset: 0,
@@ -2219,6 +2234,7 @@ impl AppState {
     /// Close the inline full-transcript reader and reset its scroll position.
     pub fn close_transcript_viewer(&mut self) {
         self.transcript_viewer = false;
+        self.transcript_search = None;
         self.scroll_offset = 0;
     }
 
