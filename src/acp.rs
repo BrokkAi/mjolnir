@@ -128,22 +128,7 @@ enum NativeReadOnlyPolicy {
     Anvil,
 }
 
-const CLAUDE_READ_ONLY_TOOLS: &[&str] = &[
-    "Read",
-    "Glob",
-    "Grep",
-    "WebFetch",
-    "WebSearch",
-    "TaskOutput",
-    "TaskGet",
-    "TaskList",
-    "CronList",
-    "ListMcpResources",
-    "ReadMcpResource",
-    "ReadMcpResourceDir",
-    "ReportFindings",
-    "Monitor",
-];
+const CLAUDE_READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebFetch", "WebSearch"];
 
 const CLAUDE_MUTATING_TOOLS: &[&str] = &[
     "Agent",
@@ -892,6 +877,11 @@ pub async fn run(
     ui_rx: mpsc::UnboundedReceiver<UiCommand>,
 ) -> Result<()> {
     let fatal_emitted = Arc::new(AtomicBool::new(false));
+    if let Err(error) = native_read_only_policy(cfg.role_config.as_ref()) {
+        let text = error.to_string();
+        emit_fatal(&ui_tx, &fatal_emitted, text.clone());
+        return Err(anyhow::anyhow!(text));
+    }
     if let Some(role) = cfg.role_config.as_ref()
         && let Some(session_tag) = role.session_tag.as_deref()
     {
@@ -10347,6 +10337,50 @@ mod tests {
             .await
             .expect("run task did not finish");
         assert!(result.expect("run task panicked").is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_rejects_unsupported_native_read_only_before_spawn() {
+        let cfg = AcpRuntimeConfig {
+            command: PathBuf::from("definitely-not-a-real-mjolnir-command"),
+            args: Vec::new(),
+            cwd: std::env::temp_dir(),
+            additional_directories: Vec::new(),
+            mcp_servers: Vec::new(),
+            resume_session: None,
+            session_restore_mode: SessionRestoreMode::Continue,
+            env: HashMap::new(),
+            agent_stderr: None,
+            fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
+            access_mode: RuntimeAccessMode::ReadOnly,
+            agent_source_id: Some("custom:unsafe".to_string()),
+            config_path: None,
+            saved_session_config: HashMap::new(),
+            role_config: Some(RuntimeRoleConfig {
+                label: "reviewer".to_string(),
+                model_id: "custom-model".to_string(),
+                model_value: "custom-model".to_string(),
+                adapter_source_id: "custom:unsafe".to_string(),
+                require_native_read_only: true,
+                permission: None,
+                session_tag: None,
+                reasoning_effort: None,
+            }),
+            subagents: None,
+            side_prompt_policy: false,
+            termination: None,
+        };
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        let result = run(cfg, ui_tx, cmd_rx).await.expect_err("must fail closed");
+        let event = ui_rx.recv().await.expect("fatal event");
+        let UiEvent::Fatal(message) = event else {
+            panic!("unexpected event: {event:?}");
+        };
+        assert!(message.contains("native read-only enforcement is unavailable"));
+        assert!(!message.contains("agent command not found"));
+        assert!(result.to_string().contains("review lane disabled"));
     }
 
     /// End-to-end check that a bad `--agent-stderr` path emits the right
