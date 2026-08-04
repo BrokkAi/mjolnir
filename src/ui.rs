@@ -666,70 +666,70 @@ fn stable_transcript_entry_count(state: &AppState) -> usize {
     stable
 }
 
-fn append_search_text(target: &mut String, text: &str) {
-    if !target.is_empty() {
-        target.push('\n');
+fn search_text_contains(text: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return false;
     }
-    target.push_str(text);
+    if query.is_ascii() {
+        return text
+            .as_bytes()
+            .windows(query.len())
+            .any(|window| window.eq_ignore_ascii_case(query.as_bytes()));
+    }
+    text.to_lowercase().contains(&query.to_lowercase())
 }
 
-/// Plain logical text for one canonical transcript entry. This intentionally
-/// searches source entries rather than rendered rows: terminal wrapping and
-/// markdown styling must not determine whether a hit exists.
-fn transcript_entry_search_text(state: &AppState, entry: &Entry) -> String {
+/// Match one canonical entry without rendering or concatenating large tool
+/// outputs. Wrapping and markdown styling therefore cannot split a hit.
+fn transcript_entry_matches(state: &AppState, entry: &Entry, query: &str) -> bool {
     match entry {
         Entry::UserPrompt(text)
         | Entry::AgentMessage(text)
         | Entry::SubagentMessage(text)
         | Entry::System(text)
         | Entry::FeatureHint(text)
-        | Entry::SessionBoundary(text) => text.clone(),
-        Entry::AgentThought(thought) | Entry::SubagentThought(thought) => thought.text.clone(),
-        Entry::InternalMessage(message) => {
-            let mut text = String::new();
-            append_search_text(&mut text, &message.source);
-            append_search_text(&mut text, &message.target);
-            append_search_text(&mut text, &message.text);
-            text
+        | Entry::SessionBoundary(text) => search_text_contains(text, query),
+        Entry::AgentThought(thought) | Entry::SubagentThought(thought) => {
+            search_text_contains(&thought.text, query)
         }
+        Entry::InternalMessage(message) => [&message.source, &message.target, &message.text]
+            .into_iter()
+            .any(|text| search_text_contains(text, query)),
         Entry::Plan(entries) | Entry::SubagentPlan(entries) => entries
             .iter()
-            .map(|entry| entry.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
+            .any(|entry| search_text_contains(&entry.content, query)),
         Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
-            let mut text = id.clone();
+            if search_text_contains(id, query) {
+                return true;
+            }
             let Some(view) = state.tool_calls.get(id) else {
-                return text;
+                return false;
             };
-            append_search_text(&mut text, &view.title);
-            for output in &view.body {
-                match output {
+            search_text_contains(&view.title, query)
+                || view.body.iter().any(|output| match output {
                     ToolCallOutput::Text(output) | ToolCallOutput::Note(output) => {
-                        append_search_text(&mut text, output);
+                        search_text_contains(output, query)
                     }
                     ToolCallOutput::Diff {
                         path,
                         old_text,
                         new_text,
                     } => {
-                        append_search_text(&mut text, path);
-                        if let Some(old_text) = old_text {
-                            append_search_text(&mut text, old_text);
-                        }
-                        append_search_text(&mut text, new_text);
+                        search_text_contains(path, query)
+                            || old_text
+                                .as_deref()
+                                .is_some_and(|text| search_text_contains(text, query))
+                            || search_text_contains(new_text, query)
                     }
                     ToolCallOutput::Terminal {
                         terminal_id,
                         output,
                         ..
                     } => {
-                        append_search_text(&mut text, terminal_id);
-                        append_search_text(&mut text, output);
+                        search_text_contains(terminal_id, query)
+                            || search_text_contains(output, query)
                     }
-                }
-            }
-            text
+                })
         }
     }
 }
@@ -742,10 +742,7 @@ fn compute_transcript_search_matches(state: &AppState, query: &str) -> Vec<usize
         .transcript
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| {
-            let text = transcript_entry_search_text(state, entry);
-            (!line_search_match_ranges(&text, query).is_empty()).then_some(index)
-        })
+        .filter_map(|(index, entry)| transcript_entry_matches(state, entry, query).then_some(index))
         .collect()
 }
 
@@ -7897,6 +7894,18 @@ struct SearchTranscriptRender {
 fn line_search_match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
     if query.is_empty() {
         return Vec::new();
+    }
+    if query.is_ascii() {
+        return text
+            .as_bytes()
+            .windows(query.len())
+            .enumerate()
+            .filter_map(|(start, window)| {
+                window
+                    .eq_ignore_ascii_case(query.as_bytes())
+                    .then_some(start..start + query.len())
+            })
+            .collect();
     }
     let folded_query = query
         .chars()
