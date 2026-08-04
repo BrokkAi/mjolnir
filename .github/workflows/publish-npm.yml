@@ -91,7 +91,7 @@ jobs:
   publish:
     name: Publish npm packages
     needs: package
-    if: (github.event_name == 'release' && vars.NPM_PUBLISH_ENABLED == 'true') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    if: github.event_name == 'release' || inputs.publish
     runs-on: ubuntu-latest
     environment: npm-publish
     env:
