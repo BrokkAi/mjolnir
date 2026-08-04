@@ -1082,28 +1082,37 @@ impl ServerSessionManager {
     /// Re-resolve the roster when the saved config changed since the last
     /// resolution, so a new session launches what `/mjconfig` (or any other
     /// config edit) saved instead of the binding frozen at server startup.
-    /// Returns the fresh roster when a re-resolve happened.
-    async fn refresh_for_config(&self, config_path: &Path) -> Option<roster::Roster> {
-        let resolve_cwd = self.resolve_cwd.clone()?;
+    /// Returns the fresh roster when a re-resolve happened, and an error when
+    /// the saved config cannot bind a roster at all — callers must refuse to
+    /// start the session rather than silently launching the stale binding.
+    async fn refresh_for_config(
+        &self,
+        config_path: &Path,
+    ) -> std::result::Result<Option<roster::Roster>, String> {
+        let Some(resolve_cwd) = self.resolve_cwd.clone() else {
+            return Ok(None);
+        };
         let hash = config_file_hash(config_path);
         {
             let launch = self.launch.read().expect("server launch lock");
             if launch.config_hash == hash {
-                return None;
+                return Ok(None);
             }
         }
-        let config = config::Config::load(config_path).ok()?;
+        let Ok(config) = config::Config::load(config_path) else {
+            return Ok(None);
+        };
         match roster::resolve(&config, &resolve_cwd).await {
             Ok(roster) => {
                 let mut launch = self.launch.write().expect("server launch lock");
                 launch.agent = selected_agent_for_roster(&roster);
                 launch.roster = Some(roster.clone());
                 launch.config_hash = hash;
-                Some(roster)
+                Ok(Some(roster))
             }
             Err(error) => {
                 warn!("config changed but roster re-resolve failed: {error:#}");
-                None
+                Err(format!("{error:#}"))
             }
         }
     }
@@ -3887,7 +3896,11 @@ struct MjInstallJob {
 struct MjConfigSnapshot {
     agents: MjAgentsPanel,
     acp_servers: MjServersPanel,
-    acp_sessions: Vec<MjSessionOptionsGroup>,
+    /// Session options for the primary seat's bound ACP source, mirroring the
+    /// TUI's role-scoped Agents panel rows. `None` when no source has options.
+    primary_options: Option<MjSessionOptionsGroup>,
+    /// Session options for the subagent seat, mirroring the Subagents panel.
+    subagent_options: Option<MjSessionOptionsGroup>,
     acp_priority: MjPriorityPanel,
     appearance: MjAppearancePanel,
     login: Option<MjLoginStatus>,
@@ -4039,9 +4052,13 @@ struct MjConfigApplyRequest {
     feature_hints: Option<bool>,
     /// Server id → `auto` | `enabled` | `disabled`.
     server_policies: Option<BTreeMap<String, String>>,
-    /// Server id → option key → value; mirrors the TUI by also clearing the
-    /// per-model route overrides for each changed key.
-    session_defaults: Option<BTreeMap<String, BTreeMap<String, String>>>,
+    /// Server id → option key → value written to the primary seat's
+    /// role-scoped defaults (`agent.session_defaults`), like the TUI's
+    /// Agents panel.
+    primary_session_defaults: Option<BTreeMap<String, BTreeMap<String, String>>>,
+    /// Server id → option key → value for the subagent seat
+    /// (`subagents.session_defaults`).
+    subagent_session_defaults: Option<BTreeMap<String, BTreeMap<String, String>>>,
     /// Seat (`primary` | `review` | `subagents`) → source/order edit.
     priority: Option<BTreeMap<String, MjSeatPriorityEdit>>,
     add_custom_server: Option<MjCustomServerRequest>,
@@ -4090,12 +4107,16 @@ fn mjconfig_editor(state: &ServerState, config: config::Config) -> crate::settin
         .lock()
         .expect("mjconfig choices lock")
         .clone();
-    let inventory = state
+    // Rediscover on top of the cached probe inventory: policy and detection
+    // re-derive from the *current* config (a just-saved policy shows
+    // immediately) while probe-only fields like session options survive.
+    let cached = state
         .mjconfig
         .inventory
         .lock()
         .expect("mjconfig inventory lock")
         .clone();
+    let inventory = roster::rediscover_inventory(&config, &cached);
     let mut editor =
         crate::settings::SettingsEditor::new(config, choices, None).with_inventory(inventory);
     let active_models = state
@@ -4357,40 +4378,31 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         })
         .collect();
 
-    let acp_sessions = inventory
-        .servers
-        .iter()
-        .filter_map(|server| {
-            let options: Vec<MjSessionOptionEntry> = server
-                .session_config
-                .iter()
-                .filter(|option| matches!(option.kind, SessionConfigKind::Select(_)))
-                .map(|option| {
-                    let key = acp::session_config_option_key(&option.id);
-                    let value = config
-                        .session_config
-                        .get(&server.id)
-                        .and_then(|saved| saved.defaults.get(&key))
-                        .cloned()
-                        .unwrap_or_else(|| crate::settings::session_option_current_value(option));
-                    MjSessionOptionEntry {
-                        key,
-                        name: option.name.clone(),
-                        value,
-                        choices: crate::settings::session_option_choices(option)
-                            .into_iter()
-                            .map(|(value, label)| MjSessionOptionChoice { value, label })
-                            .collect(),
-                    }
-                })
-                .collect();
-            (!options.is_empty()).then(|| MjSessionOptionsGroup {
-                server_id: server.id.clone(),
-                server_label: server.label.clone(),
-                options,
+    let seat_options = |seat: crate::settings::SessionDefaultsSeat| {
+        let rows = editor.session_option_rows(seat);
+        let (server_index, _) = *rows.first()?;
+        let server = inventory.servers.get(server_index)?;
+        let options = rows
+            .iter()
+            .filter_map(|(_, option_index)| server.session_config.get(*option_index))
+            .map(|option| MjSessionOptionEntry {
+                key: acp::session_config_option_key(&option.id),
+                name: option.name.clone(),
+                value: editor.saved_session_value(seat, &server.id, option),
+                choices: crate::settings::session_option_choices(option)
+                    .into_iter()
+                    .map(|(value, label)| MjSessionOptionChoice { value, label })
+                    .collect(),
             })
+            .collect::<Vec<_>>();
+        (!options.is_empty()).then(|| MjSessionOptionsGroup {
+            server_id: server.id.clone(),
+            server_label: server.label.clone(),
+            options,
         })
-        .collect();
+    };
+    let primary_options = seat_options(crate::settings::SessionDefaultsSeat::Primary);
+    let subagent_options = seat_options(crate::settings::SessionDefaultsSeat::Subagents);
 
     let seats = MJ_SEATS
         .into_iter()
@@ -4439,7 +4451,8 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
             auto_failover: config.subagents.auto_failover,
         },
         acp_servers: MjServersPanel { accounts, servers },
-        acp_sessions,
+        primary_options,
+        subagent_options,
         acp_priority: MjPriorityPanel {
             seats,
             default_priority: config::DEFAULT_ACP_PRIORITY
@@ -4507,20 +4520,32 @@ fn mjconfig_apply_edits(
             }
         }
     }
-    if let Some(defaults) = request.session_defaults {
+    let reasoning_effort_key = format!("config:{}", acp::REASONING_EFFORT_CONFIG_ID);
+    for (defaults, seat_is_primary) in [
+        (request.primary_session_defaults, true),
+        (request.subagent_session_defaults, false),
+    ] {
+        let Some(defaults) = defaults else { continue };
         for (server_id, options) in defaults {
             for (option_key, value) in options {
-                config
-                    .session_config
-                    .entry(server_id.clone())
-                    .or_default()
-                    .defaults
-                    .insert(option_key.clone(), value);
-                if let Some(saved) = config.session_config.get_mut(&server_id) {
-                    for route in saved.models.values_mut() {
-                        route.remove(&option_key);
+                // Mirror the TUI's Agents/Subagents panels: a thought-level
+                // option also updates the seat's reasoning-effort default.
+                if option_key == reasoning_effort_key {
+                    if seat_is_primary {
+                        config.agent.reasoning_effort = Some(value.clone());
+                    } else {
+                        config.subagents.reasoning_effort = Some(value.clone());
                     }
                 }
+                let scoped = if seat_is_primary {
+                    &mut config.agent.session_defaults
+                } else {
+                    &mut config.subagents.session_defaults
+                };
+                scoped
+                    .entry(server_id.clone())
+                    .or_default()
+                    .insert(option_key, value);
             }
         }
     }
@@ -5532,13 +5557,22 @@ async fn create_server_owned_session(
     .await
     .map_err(internal_error)??;
     // A /mjconfig save (or any config edit) since the last resolve re-binds
-    // the seats now, so this session launches the saved selection.
-    if let Some(roster) = state
+    // the seats now, so this session launches the saved selection. A config
+    // that cannot bind a roster fails the request instead of silently
+    // launching the previous binding.
+    match state
         .session_manager
         .refresh_for_config(&state.mjconfig.config_path)
         .await
     {
-        state.mjconfig.update_from_roster(&roster);
+        Ok(Some(roster)) => state.mjconfig.update_from_roster(&roster),
+        Ok(None) => {}
+        Err(error) => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("saved configuration cannot start a session: {error}"),
+            ));
+        }
     }
     state.session_manager.start_session(cwd.clone());
     Ok((
@@ -7535,7 +7569,7 @@ mod tests {
         // Managers without a startup roster (tests, degraded startup) never
         // re-resolve; they keep launching their fixed agent.
         let manager = test_session_manager();
-        assert!(manager.refresh_for_config(&path).await.is_none());
+        assert!(matches!(manager.refresh_for_config(&path).await, Ok(None)));
     }
 
     #[tokio::test]
@@ -7587,7 +7621,14 @@ mod tests {
             assert!(!spinner["frames"].as_array().expect("frames").is_empty());
         }
 
-        assert!(snapshot["acp_sessions"].is_array());
+        assert!(
+            snapshot.get("primary_options").is_some(),
+            "primary_options key present"
+        );
+        assert!(
+            snapshot.get("subagent_options").is_some(),
+            "subagent_options key present"
+        );
         assert!(snapshot["login"].is_null());
         assert!(snapshot["install"].is_null());
     }
@@ -7618,16 +7659,17 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
         let snapshot = json_body(response).await;
-        let groups = snapshot["acp_sessions"].as_array().expect("groups");
-        let group = groups
-            .iter()
-            .find(|group| group["server_id"] == server_id.as_str())
-            .expect("server group present");
-        let option = &group["options"][0];
-        assert_eq!(option["key"], "config:service_tier");
-        assert_eq!(option["name"], "Service tier");
-        assert_eq!(option["value"], "default");
-        assert_eq!(option["choices"].as_array().expect("choices").len(), 2);
+        // With the default "auto" models, both seats fall back to the first
+        // priority source advertising options — the server we seeded.
+        for seat in ["primary_options", "subagent_options"] {
+            let group = &snapshot[seat];
+            assert_eq!(group["server_id"], server_id.as_str(), "{seat} server");
+            let option = &group["options"][0];
+            assert_eq!(option["key"], "config:service_tier");
+            assert_eq!(option["name"], "Service tier");
+            assert_eq!(option["value"], "default");
+            assert_eq!(option["choices"].as_array().expect("choices").len(), 2);
+        }
     }
 
     #[tokio::test]
@@ -7649,8 +7691,11 @@ mod tests {
                     "theme": "ansi-dark",
                     "spinner": "wave",
                     "feature_hints": false,
-                    "session_defaults": {
+                    "primary_session_defaults": {
                         "codex-acp": { "config:collaboration_mode": "yolo" }
+                    },
+                    "subagent_session_defaults": {
+                        "codex-acp": { "config:reasoning_effort": "low" }
                     },
                     "priority": {
                         "review": { "source": "codex-acp", "order": ["codex-acp", "anvil"] }
@@ -7678,12 +7723,24 @@ mod tests {
         assert!(!saved.feature_hints);
         assert_eq!(
             saved
-                .session_config
+                .agent
+                .session_defaults
                 .get("codex-acp")
-                .and_then(|entry| entry.defaults.get("config:collaboration_mode"))
+                .and_then(|entry| entry.get("config:collaboration_mode"))
                 .map(String::as_str),
             Some("yolo")
         );
+        assert_eq!(
+            saved
+                .subagents
+                .session_defaults
+                .get("codex-acp")
+                .and_then(|entry| entry.get("config:reasoning_effort"))
+                .map(String::as_str),
+            Some("low")
+        );
+        // A thought-level default also updates the seat's reasoning effort.
+        assert_eq!(saved.subagents.reasoning_effort.as_deref(), Some("low"));
         assert_eq!(saved.review.acp_source.as_deref(), Some("codex-acp"));
         assert_eq!(saved.review.acp_priority, vec!["codex-acp", "anvil"]);
         let custom = saved

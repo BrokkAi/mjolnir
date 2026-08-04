@@ -3265,8 +3265,8 @@
 
       const MJ_TABS = [
         ["agents", "Agents"],
+        ["subagents", "Subagents"],
         ["servers", "ACP Servers"],
-        ["sessions", "ACP Sessions"],
         ["priority", "ACP Priority"],
         ["appearance", "Appearance"],
       ];
@@ -3455,11 +3455,11 @@
           case "agents":
             renderMjAgents();
             break;
+          case "subagents":
+            renderMjSubagents();
+            break;
           case "servers":
             renderMjServers();
-            break;
-          case "sessions":
-            renderMjSessions();
             break;
           case "priority":
             renderMjPriority();
@@ -3538,33 +3538,69 @@
         return button;
       }
 
-      function renderMjAgents() {
-        const panel = mjcfg.snapshot.agents;
-        mjconfigBodyEl.appendChild(
-          mjNote("The running session keeps its models until a new session reloads the saved selection."),
+      function mjRoleModelRow(role, field) {
+        const value = mjEditedValue(field, role.model);
+        const row = mjRow(role.label);
+        row.appendChild(
+          mjCombo(
+            role.choices.map((choice) => ({
+              value: choice.model,
+              label: choice.model,
+              description: choice.detail,
+            })),
+            value,
+            (next) => {
+              mjcfg.edits[field] = next;
+              renderMjConfig();
+            },
+          ),
         );
-        for (const role of panel.roles) {
-          const field = `${role.role}_model`;
-          const value = mjEditedValue(field, role.model);
-          const row = mjRow(role.label);
+        row.appendChild(mjDetail(role.description));
+        row.appendChild(mjDetail(`saved: ${role.saved_detail} · active: ${role.active_detail}`));
+        return row;
+      }
+
+      // Session options for one seat's bound ACP source, staged into the
+      // seat-scoped defaults edit map (agent/subagents.session_defaults).
+      function mjSeatOptionRows(group, editsField) {
+        const rows = [];
+        if (!group) {
+          return rows;
+        }
+        rows.push(mjSectionTitle(`${group.server_label} session options`));
+        const staged = mjcfg.edits[editsField] || {};
+        const stagedGroup = staged[group.server_id] || {};
+        for (const option of group.options) {
+          const value = Object.hasOwn(stagedGroup, option.key) ? stagedGroup[option.key] : option.value;
+          const row = mjRow(option.name);
           row.appendChild(
             mjCombo(
-              role.choices.map((choice) => ({
-                value: choice.model,
-                label: choice.model,
-                description: choice.detail,
-              })),
+              option.choices.map((choice) => ({ value: choice.value, label: choice.label })),
               value,
               (next) => {
-                mjcfg.edits[field] = next;
+                mjcfg.edits[editsField] = {
+                  ...staged,
+                  [group.server_id]: { ...stagedGroup, [option.key]: next },
+                };
                 renderMjConfig();
               },
             ),
           );
-          row.appendChild(mjDetail(role.description));
-          row.appendChild(mjDetail(`saved: ${role.saved_detail} · active: ${role.active_detail}`));
+          rows.push(row);
+        }
+        return rows;
+      }
+
+      function renderMjAgents() {
+        const panel = mjcfg.snapshot.agents;
+        mjconfigBodyEl.appendChild(
+          mjNote("The running session keeps its models until a new session reloads the saved selection. Option defaults apply to new sessions; the selected session updates on save where it exposes the same option."),
+        );
+        mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[0], "primary_model"));
+        for (const row of mjSeatOptionRows(mjcfg.snapshot.primary_options, "primary_session_defaults")) {
           mjconfigBodyEl.appendChild(row);
         }
+        mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[1], "review_model"));
         const reviewRow = mjRow("Discrete review");
         reviewRow.appendChild(
           mjToggle(mjEditedValue("discrete_review", panel.discrete_review), (next) => {
@@ -3573,6 +3609,17 @@
           }),
         );
         mjconfigBodyEl.appendChild(reviewRow);
+      }
+
+      function renderMjSubagents() {
+        const panel = mjcfg.snapshot.agents;
+        mjconfigBodyEl.appendChild(
+          mjNote("Subagent defaults apply to newly delegated create_subagent sessions."),
+        );
+        mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[2], "subagents_model"));
+        for (const row of mjSeatOptionRows(mjcfg.snapshot.subagent_options, "subagent_session_defaults")) {
+          mjconfigBodyEl.appendChild(row);
+        }
 
         const parallelRow = mjRow("Parallel subagents");
         const stepper = document.createElement("span");
@@ -3896,65 +3943,6 @@
         nameInput.focus();
       }
 
-      function renderMjSessions() {
-        const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
-        const liveOptions = session ? sessionConfigOptions(session) : [];
-        if (session && (liveOptions.length || session.native_mode)) {
-          mjconfigBodyEl.appendChild(mjSectionTitle("Selected session · applies immediately"));
-          if (session.native_mode?.label) {
-            mjconfigBodyEl.appendChild(mjNote(`Native session mode: ${session.native_mode.label}`));
-          }
-          for (const option of liveOptions) {
-            const key = configChangeKey(session.session_id, option);
-            const row = mjRow(option.name || option.config_id || "");
-            const combo = createCombobox(option, key, (value) => {
-              // submitConfigChange stages the optimistic value synchronously,
-              // so an immediate re-render shows it while the change queues.
-              void submitConfigChange(session.session_id, option, value);
-              renderMjConfig();
-            });
-            row.appendChild(combo.element);
-            const description = [option.category, option.description].filter(Boolean).join(" — ");
-            if (description) {
-              row.appendChild(mjDetail(description));
-            }
-            mjconfigBodyEl.appendChild(row);
-          }
-        }
-
-        const groups = mjcfg.snapshot.acp_sessions;
-        mjconfigBodyEl.appendChild(mjSectionTitle("Defaults for new sessions"));
-        if (!groups.length) {
-          mjconfigBodyEl.appendChild(
-            mjNote("No selectable session options were reported by configured ACP servers."),
-          );
-          return;
-        }
-        const staged = mjcfg.edits.session_defaults || {};
-        for (const group of groups) {
-          mjconfigBodyEl.appendChild(mjSectionTitle(group.server_label));
-          for (const option of group.options) {
-            const stagedGroup = staged[group.server_id] || {};
-            const value = Object.hasOwn(stagedGroup, option.key) ? stagedGroup[option.key] : option.value;
-            const row = mjRow(option.name);
-            row.appendChild(
-              mjCombo(
-                option.choices.map((choice) => ({ value: choice.value, label: choice.label })),
-                value,
-                (next) => {
-                  mjcfg.edits.session_defaults = {
-                    ...staged,
-                    [group.server_id]: { ...stagedGroup, [option.key]: next },
-                  };
-                  renderMjConfig();
-                },
-              ),
-            );
-            mjconfigBodyEl.appendChild(row);
-          }
-        }
-      }
-
       function renderMjPriority() {
         const panel = mjcfg.snapshot.acp_priority;
         mjconfigBodyEl.appendChild(
@@ -4127,12 +4115,12 @@
             return;
           }
           mjcfg.snapshot = await response.json();
-          // Parity with the TUI: saved session-option defaults also update the
-          // selected live session where it exposes the same option.
+          // Parity with the TUI: saved primary session-option defaults also
+          // update the selected live session where it exposes the same option.
           const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
-          if (session && edits.session_defaults) {
+          if (session && edits.primary_session_defaults) {
             const liveOptions = sessionConfigOptions(session);
-            for (const options of Object.values(edits.session_defaults)) {
+            for (const options of Object.values(edits.primary_session_defaults)) {
               for (const [key, value] of Object.entries(options)) {
                 const live = liveOptions.find(
                   (option) => option.config_id && `config:${option.config_id}` === key,
@@ -7058,7 +7046,7 @@
         open.textContent = "session config";
         open.setAttribute("aria-label", "Open the configuration editor");
         open.addEventListener("click", () => {
-          void openMjConfig("sessions");
+          void openMjConfig("agents");
         });
         sessionConfigEl.appendChild(open);
       }

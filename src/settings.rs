@@ -107,7 +107,7 @@ pub(crate) enum PrioritySeat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionDefaultsSeat {
+pub(crate) enum SessionDefaultsSeat {
     Primary,
     Subagents,
 }
@@ -471,7 +471,7 @@ impl SettingsEditor {
         }
     }
 
-    fn selected_session_source(&self, seat: SessionDefaultsSeat) -> Option<String> {
+    pub(crate) fn selected_session_source(&self, seat: SessionDefaultsSeat) -> Option<String> {
         let (model, configured_source, priority, active_model, active_source) = match seat {
             SessionDefaultsSeat::Primary => (
                 self.config.agent.model.as_str(),
@@ -560,7 +560,7 @@ impl SettingsEditor {
             .cloned()
     }
 
-    fn session_option_rows(&self, seat: SessionDefaultsSeat) -> Vec<(usize, usize)> {
+    pub(crate) fn session_option_rows(&self, seat: SessionDefaultsSeat) -> Vec<(usize, usize)> {
         let Some(source) = self.selected_session_source(seat) else {
             return Vec::new();
         };
@@ -608,7 +608,7 @@ impl SettingsEditor {
         }
     }
 
-    fn saved_session_value(
+    pub(crate) fn saved_session_value(
         &self,
         seat: SessionDefaultsSeat,
         server_id: &str,
