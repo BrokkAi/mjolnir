@@ -90,7 +90,7 @@ fn detection_for_state(state: InstallState) -> Detection {
             } else if let Some(total) = total_bytes {
                 format!(
                     "downloading {}%",
-                    downloaded_bytes.saturating_mul(100) / total.max(1)
+                    (downloaded_bytes.saturating_mul(100) / total.max(1)).min(100)
                 )
             } else if downloaded_bytes > 0 {
                 format!("downloading {downloaded_bytes} bytes")
@@ -283,10 +283,10 @@ fn parse_checksum(body: &str) -> Result<String> {
 }
 
 fn release_target() -> Option<BinaryTarget> {
-    release_target_for(std::env::consts::OS, std::env::consts::ARCH, cfg!(windows))
+    release_target_for(std::env::consts::OS, std::env::consts::ARCH)
 }
 
-fn release_target_for(os: &str, arch: &str, windows: bool) -> Option<BinaryTarget> {
+fn release_target_for(os: &str, arch: &str) -> Option<BinaryTarget> {
     let target = match (os, arch) {
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
         ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
@@ -296,7 +296,11 @@ fn release_target_for(os: &str, arch: &str, windows: bool) -> Option<BinaryTarge
         _ => return None,
     };
     let archive_name = format!("brokk-anvil-v{VERSION}-{target}.zip");
-    let executable = if windows { "anvil.exe" } else { "anvil" };
+    let executable = if os == "windows" {
+        "anvil.exe"
+    } else {
+        "anvil"
+    };
     Some(BinaryTarget {
         archive: format!(
             "https://github.com/BrokkAi/anvil/releases/download/v{VERSION}/{archive_name}"
@@ -382,7 +386,8 @@ mod tests {
             (None, 0, false, "downloading"),
             (None, 42, false, "downloading 42 bytes"),
             (Some(200), 50, false, "downloading 25%"),
-            (Some(0), 50, false, "downloading 5000%"),
+            (Some(0), 50, false, "downloading 100%"),
+            (Some(200), 500, false, "downloading 100%"),
             (Some(200), 50, true, "extracting"),
         ];
 
@@ -508,7 +513,7 @@ mod tests {
         ];
 
         for (os, arch, release_name) in supported {
-            let target = release_target_for(os, arch, os == "windows").expect("target");
+            let target = release_target_for(os, arch).expect("target");
             assert!(target.archive.contains(release_name));
             assert!(target.cmd.contains(release_name));
             assert_eq!(target.cmd.ends_with("anvil.exe"), os == "windows");
@@ -517,8 +522,8 @@ mod tests {
             assert!(target.env.is_empty());
         }
 
-        assert!(release_target_for("linux", "riscv64", false).is_none());
-        assert!(release_target_for("windows", "aarch64", true).is_none());
+        assert!(release_target_for("linux", "riscv64").is_none());
+        assert!(release_target_for("windows", "aarch64").is_none());
     }
 
     #[test]
