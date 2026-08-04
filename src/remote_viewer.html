@@ -7,7 +7,11 @@
     <script>
       (() => {
         try {
-          if (localStorage.getItem("mjolnir-remote-theme") === "light") {
+          const stored = localStorage.getItem("mjolnir-remote-theme");
+          const light =
+            stored === "light"
+            || (stored !== "dark" && matchMedia("(prefers-color-scheme: light)").matches);
+          if (light) {
             document.documentElement.dataset.theme = "light";
           }
         } catch {
@@ -147,7 +151,7 @@
         --shape-chip: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
 
         --keyboard-inset: 0px;
-        --theme-toggle-reserve: 78px;
+        --theme-toggle-reserve: 0px;
         accent-color: var(--red);
         scrollbar-color: var(--scrollbar-thumb) transparent;
       }
@@ -266,7 +270,6 @@
       .permission-option,
       .jump-to-latest,
       .icon-button,
-      .theme-toggle,
       .stop-turn,
       .queue-item-delete {
         position: relative;
@@ -357,16 +360,6 @@
         padding: 0 9px;
         font-size: 9px;
         letter-spacing: 0.08em;
-      }
-
-      .theme-toggle {
-        position: fixed;
-        top: calc(10px + env(safe-area-inset-top));
-        right: calc(12px + env(safe-area-inset-right));
-        z-index: 120;
-        min-width: 66px;
-        height: 34px;
-        padding: 0 13px;
       }
 
       /* ---- viewer settings ---- */
@@ -2884,8 +2877,6 @@
     </style>
   </head>
   <body>
-    <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch to light mode" aria-pressed="false">Light</button>
-
     <section id="auth-screen" class="auth-screen">
       <div class="auth-card">
         <div class="auth-kicker">Remote console</div>
@@ -3080,7 +3071,6 @@
       const viewerToken = queryParams.get("token") || "";
 
       const $ = (id) => document.getElementById(id);
-      const themeToggleEl = $("theme-toggle");
       const authScreenEl = $("auth-screen");
       const appEl = $("app");
       const authFormEl = $("auth-form");
@@ -3194,34 +3184,48 @@
         return reducedMotion.matches ? "auto" : "smooth";
       }
 
-      function currentTheme() {
-        return document.documentElement.dataset.theme === "light" ? "light" : "dark";
+      const systemLightQuery = matchMedia("(prefers-color-scheme: light)");
+
+      function themePreference() {
+        try {
+          const stored = localStorage.getItem(THEME_STORAGE_KEY);
+          if (stored === "light" || stored === "dark") {
+            return stored;
+          }
+        } catch {
+          // Fall through to system when storage is blocked.
+        }
+        return "system";
       }
 
-      function applyTheme(theme) {
-        const light = theme === "light";
+      function applyThemePreference(preference) {
+        const light =
+          preference === "light" || (preference === "system" && systemLightQuery.matches);
         if (light) {
           document.documentElement.dataset.theme = "light";
         } else {
           document.documentElement.removeAttribute("data-theme");
         }
-        themeToggleEl.textContent = light ? "Dark" : "Light";
-        themeToggleEl.setAttribute("aria-label", `Switch to ${light ? "dark" : "light"} mode`);
-        themeToggleEl.setAttribute("aria-pressed", light ? "true" : "false");
         document.querySelector('meta[name="theme-color"]')?.setAttribute(
           "content",
           THEME_COLORS[light ? "light" : "dark"],
         );
       }
 
-      function setTheme(theme) {
-        applyTheme(theme);
+      function setThemePreference(preference) {
         try {
-          localStorage.setItem(THEME_STORAGE_KEY, theme);
+          localStorage.setItem(THEME_STORAGE_KEY, preference);
         } catch {
           // The current page can still switch themes when storage is blocked.
         }
+        applyThemePreference(preference);
       }
+
+      systemLightQuery.addEventListener("change", () => {
+        if (themePreference() === "system") {
+          applyThemePreference("system");
+        }
+      });
 
       function loadViewerSettings() {
         try {
@@ -4038,58 +4042,25 @@
       }
 
       function renderMjAppearance() {
-        const panel = mjcfg.snapshot.appearance;
         mjconfigBodyEl.appendChild(
-          mjNote("Theme and spinner style the terminal UI. The web viewer's own theme lives in ⚙ viewer settings."),
+          mjNote("Web viewer theme. Terminal appearance (theme, spinner, feature tips) lives in the TUI's /mjconfig."),
         );
         const themeRow = mjRow("Theme");
-        themeRow.appendChild(
-          mjCombo(
-            panel.themes.map((theme) => ({ value: theme, label: theme })),
-            mjEditedValue("theme", panel.theme),
-            (next) => {
-              mjcfg.edits.theme = next;
-              renderMjConfig();
-            },
-          ),
-        );
-        mjconfigBodyEl.appendChild(themeRow);
-
-        const spinnerRow = mjRow("Spinner");
-        const spinnerValue = mjEditedValue("spinner", panel.spinner);
-        spinnerRow.appendChild(
-          mjCombo(
-            panel.spinners.map((spinner) => ({ value: spinner.name, label: spinner.name })),
-            spinnerValue,
-            (next) => {
-              mjcfg.edits.spinner = next;
-              renderMjConfig();
-            },
-          ),
-        );
-        const preview = document.createElement("span");
-        preview.className = "mjconfig-spinner-preview";
-        spinnerRow.appendChild(preview);
-        mjconfigBodyEl.appendChild(spinnerRow);
-        const frames = panel.spinners.find((spinner) => spinner.name === spinnerValue)?.frames || [];
-        if (frames.length) {
-          let frame = 0;
-          preview.textContent = frames[0];
-          mjcfg.spinnerTimer = setInterval(() => {
-            frame = (frame + 1) % frames.length;
-            preview.textContent = frames[frame];
-          }, 250);
-        }
-
-        const hintsRow = mjRow("Feature tips");
-        hintsRow.appendChild(
-          mjToggle(mjEditedValue("feature_hints", panel.feature_hints), (next) => {
-            mjcfg.edits.feature_hints = next;
+        const current = themePreference();
+        for (const preference of ["light", "dark", "system"]) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "mjconfig-toggle";
+          button.classList.toggle("is-on", current === preference);
+          button.setAttribute("aria-pressed", current === preference ? "true" : "false");
+          button.textContent = preference;
+          button.addEventListener("click", () => {
+            setThemePreference(preference);
             renderMjConfig();
-          }),
-        );
-        hintsRow.appendChild(mjDetail("occasional feature-discovery hints in the terminal transcript"));
-        mjconfigBodyEl.appendChild(hintsRow);
+          });
+          themeRow.appendChild(button);
+        }
+        mjconfigBodyEl.appendChild(themeRow);
       }
 
       async function saveMjConfig() {
@@ -7429,9 +7400,6 @@
 
       /* ---- wiring ---- */
 
-      themeToggleEl.addEventListener("click", () => {
-        setTheme(currentTheme() === "light" ? "dark" : "light");
-      });
       settingsButtonEl.addEventListener("click", openViewerSettings);
       mjconfigCloseEl.addEventListener("click", closeMjConfig);
       mjconfigCancelEl.addEventListener("click", closeMjConfig);
@@ -7552,7 +7520,7 @@
         }
       });
 
-      applyTheme(currentTheme());
+      applyThemePreference(themePreference());
       loadViewerSettings();
       syncComposerHeight();
       syncKeyboardInset();
