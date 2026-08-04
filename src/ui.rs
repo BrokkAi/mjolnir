@@ -12,7 +12,6 @@ use std::ops::Range;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -38,7 +37,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
-use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -111,54 +109,18 @@ struct CurrentBranchPrProbe {
     pull_request: Option<CurrentBranchPullRequest>,
 }
 
-#[derive(Deserialize)]
-struct GhPullRequestView {
-    number: u64,
-    url: String,
-    state: String,
-}
-
 async fn probe_current_branch_pull_request(cwd: PathBuf) -> CurrentBranchPrProbe {
-    let branch = tokio::process::Command::new("git")
-        .current_dir(&cwd)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(["branch", "--show-current"])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|branch| branch.trim().to_string())
-        .filter(|branch| !branch.is_empty());
-
-    let gh_output = tokio::process::Command::new("gh")
-        .current_dir(&cwd)
-        .env("GH_PROMPT_DISABLED", "1")
-        .args(["pr", "view", "--json", "number,url,state"])
-        .stdin(Stdio::null())
-        .output()
-        .await;
-    let (gh_succeeded, pull_request) = match gh_output {
-        Ok(output) if output.status.success() => {
-            let pull_request = String::from_utf8(output.stdout)
-                .ok()
-                .and_then(|output| serde_json::from_str::<GhPullRequestView>(&output).ok())
-                .filter(|pull_request| pull_request.state.eq_ignore_ascii_case("open"))
-                .map(|pull_request| CurrentBranchPullRequest {
-                    number: pull_request.number,
-                    url: pull_request.url,
-                });
-            (true, pull_request)
-        }
-        _ => (false, None),
-    };
-
+    let probe = crate::pull_request::probe_current_branch(&cwd).await;
     CurrentBranchPrProbe {
         cwd,
-        branch,
-        gh_succeeded,
-        pull_request,
+        branch: probe.branch,
+        gh_succeeded: probe.gh_succeeded,
+        pull_request: probe.pull_request.map(|pull_request| {
+            CurrentBranchPullRequest {
+                number: pull_request.number,
+                url: pull_request.url,
+            }
+        }),
     }
 }
 

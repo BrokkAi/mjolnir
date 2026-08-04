@@ -80,6 +80,10 @@ const QUEUED_PROMPT_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const PERMISSION_DECISION_TTL: Duration = Duration::from_secs(60 * 60);
 /// How many finished subagent rows the live status list keeps.
 const REMOTE_FINISHED_SUBAGENT_ROWS: usize = 4;
+/// Cadence of the tracker's current-branch pull-request probe. Slower than
+/// the TUI's 5s status-line poll on purpose: remote viewers tolerate a stale
+/// badge, and each probe spawns `git` + `gh` subprocesses.
+const PR_PROBE_INTERVAL: Duration = Duration::from_secs(30);
 const NATIVE_MCP_APPROVAL_PROPERTY: &str = "persist";
 const NATIVE_MCP_APPROVAL_CHOICES: [(&str, &str, &str); 3] = [
     ("once", "Allow once", "allow_once"),
@@ -179,6 +183,64 @@ pub struct SessionRecord {
     /// Live per-subagent status rows, mirroring the TUI's subagent status area.
     #[serde(default)]
     pub subagents: Vec<SubagentStatusRecord>,
+    /// Status-line data mirroring the TUI's bottom status row and usage
+    /// displays: model, adapter, effort, per-seat token totals, quota lines
+    /// and the current branch's open pull request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<SessionStatusRecord>,
+}
+
+/// The TUI status line projected for the remote viewer. Everything here is
+/// display state: token totals come from the same per-seat accounting the TUI
+/// renders, quota lines reuse each provider's compact label verbatim, and the
+/// pull request mirrors the `PR #N` badge.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionStatusRecord {
+    /// Primary model name, e.g. `gpt-5.2-codex`.
+    pub model: String,
+    /// ACP adapter serving the primary model, e.g. `codex-acp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub primary_tokens: u64,
+    #[serde(default)]
+    pub review_tokens: u64,
+    #[serde(default)]
+    pub subagent_tokens: u64,
+    /// Primary context window occupancy, when the agent reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_size: Option<u64>,
+    /// Formatted session cost across every seat, e.g. `0.1234 USD`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<String>,
+    /// Preformatted provider quota lines (Codex/Claude subscription windows),
+    /// exactly as the TUI usage row shows them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quotas: Vec<String>,
+    /// Open pull request on the session's current branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<PullRequestRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PullRequestRecord {
+    pub number: u64,
+    pub url: String,
+}
+
+/// Session-immutable status-line identity handed to the tracker at
+/// construction, alongside the model already carried by `agent`.
+#[derive(Debug, Clone, Default)]
+pub struct TrackerStatusSeed {
+    pub model_source: Option<String>,
+    pub reasoning_effort: Option<String>,
+    /// Working directory to probe for the current branch's open pull
+    /// request. `None` disables the probe.
+    pub cwd: Option<PathBuf>,
 }
 
 /// One background subagent as the viewer sees it: keyed by `subagent_id`,
@@ -582,11 +644,13 @@ enum RemoteQueuedPromptAction {
     RejectUnsupportedFork,
     RunReview(crate::event::ReviewTarget),
     RejectInvalidReview,
+    CompactPrimary,
 }
 
 fn remote_queued_prompt_action(
     text: String,
     session_fork_supported: bool,
+    compact_command_supported: bool,
 ) -> RemoteQueuedPromptAction {
     let trimmed = text.trim();
     if let Some(rest) = trimmed.strip_prefix("/review")
@@ -602,6 +666,12 @@ fn remote_queued_prompt_action(
             RemoteQueuedPromptAction::RejectInvalidReview,
             RemoteQueuedPromptAction::RunReview,
         );
+    }
+    // Headless trackers have no coordinator to run the compact command, so
+    // there `/compact` stays literal prompt text for agents that implement
+    // the slash command natively.
+    if trimmed == "/compact" && compact_command_supported {
+        return RemoteQueuedPromptAction::CompactPrimary;
     }
     if trimmed != "/fork" {
         return RemoteQueuedPromptAction::SendPrompt(text);
@@ -740,6 +810,8 @@ pub struct RemoteSessionTracker {
     publish_signal: Arc<tokio::sync::Notify>,
     queue_poller: Arc<Mutex<Option<JoinHandle<()>>>>,
     connector: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Periodic `git`/`gh` probe keeping the status PR badge current.
+    pr_probe: Arc<Mutex<Option<JoinHandle<()>>>>,
     next_mcp_elicitation_id: Arc<AtomicU64>,
     /// False when no UI event channel exists (headless): remote permission
     /// decisions could never be applied, so pending permissions must not
@@ -759,6 +831,20 @@ struct TrackerState {
     project: String,
     worktree: Option<String>,
     agent: String,
+    /// ACP adapter serving the primary model, for the `model via source`
+    /// status-line field.
+    model_source: Option<String>,
+    reasoning_effort: Option<String>,
+    /// Per-seat token/cost accounting, folded from the same `AgentUsage`
+    /// records the TUI status line reads.
+    agent_usage: crate::agent_usage::Snapshot,
+    /// Latest provider quota lines, keyed so a newer scrape replaces the
+    /// older one for the same provider.
+    codex_quota: Option<String>,
+    claude_quota: Option<String>,
+    /// Open pull request on the session's current branch, maintained by the
+    /// tracker's own branch probe.
+    pull_request: Option<PullRequestRecord>,
     agent_message_open: bool,
     prompt_in_flight: bool,
     prompt_turn_started_at: Option<String>,
@@ -923,6 +1009,12 @@ impl TrackerState {
             project,
             worktree: None,
             agent,
+            model_source: None,
+            reasoning_effort: None,
+            agent_usage: crate::agent_usage::Snapshot::default(),
+            codex_quota: None,
+            claude_quota: None,
+            pull_request: None,
             agent_message_open: false,
             prompt_in_flight: false,
             prompt_turn_started_at: None,
@@ -963,6 +1055,9 @@ impl TrackerState {
         self.session_config.clear();
         self.native_mode = None;
         self.available_commands = available_command_records(&[], self.session_fork_supported);
+        // A new session starts its token accounting from zero; adapter
+        // identity, provider quotas and the branch PR are session-independent.
+        self.agent_usage = crate::agent_usage::Snapshot::default();
     }
 
     fn observe_event(&mut self, event: &UiEvent) {
@@ -1042,8 +1137,16 @@ impl TrackerState {
                 self.prompt_turn_started_at = None;
                 self.touch();
             }
-            UiEvent::ClaudeUsage(_) | UiEvent::CodexUsage(_) => {}
+            UiEvent::ClaudeUsage(status) => {
+                self.claude_quota = Some(status.compact_label());
+                self.touch();
+            }
+            UiEvent::CodexUsage(status) => {
+                self.codex_quota = Some(status.compact_label());
+                self.touch();
+            }
             UiEvent::AgentUsage(record) => {
+                self.agent_usage.observe(record.clone());
                 let actor = match record.seat {
                     crate::agent_usage::Seat::Primary => "primary",
                     crate::agent_usage::Seat::Subagent => "subagent",
@@ -1533,7 +1636,68 @@ impl TrackerState {
             native_mode: self.native_mode.clone(),
             available_commands: self.available_commands.clone(),
             subagents: self.subagents.values().cloned().collect(),
+            status: Some(self.status_record()),
         })
+    }
+
+    fn status_record(&self) -> SessionStatusRecord {
+        let usage = &self.agent_usage;
+        let mut costs: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+        for role in [&usage.primary, &usage.review, &usage.subagents] {
+            for (currency, amount) in &role.costs {
+                *costs.entry(currency.clone()).or_default() += amount;
+            }
+        }
+        let cost = (!costs.is_empty()).then(|| {
+            costs
+                .iter()
+                .map(|(currency, amount)| format!("{amount:.4} {currency}"))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        });
+        let has_context = usage.primary.context_size > 0;
+        SessionStatusRecord {
+            model: self.agent.clone(),
+            model_source: self.model_source.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            primary_tokens: usage.primary.total_tokens,
+            review_tokens: usage.review.total_tokens,
+            subagent_tokens: usage.subagents.total_tokens,
+            context_used: has_context.then_some(usage.primary.context_used),
+            context_size: has_context.then_some(usage.primary.context_size),
+            cost,
+            quotas: [self.codex_quota.clone(), self.claude_quota.clone()]
+                .into_iter()
+                .flatten()
+                .collect(),
+            pull_request: self.pull_request.clone(),
+        }
+    }
+
+    /// Apply one branch-PR probe result. Mirrors the TUI: a branch change
+    /// clears the badge immediately, while a failed `gh` lookup keeps the
+    /// previous answer for the same branch. Returns true when the visible
+    /// pull request changed.
+    fn observe_pull_request_probe(
+        &mut self,
+        previous_branch: &Option<String>,
+        probe: &crate::pull_request::BranchProbe,
+    ) -> bool {
+        let previous = self.pull_request.clone();
+        if *previous_branch != probe.branch {
+            self.pull_request = None;
+        }
+        if probe.gh_succeeded {
+            self.pull_request = probe.pull_request.as_ref().map(|pr| PullRequestRecord {
+                number: pr.number,
+                url: pr.url.clone(),
+            });
+        }
+        let changed = previous != self.pull_request;
+        if changed {
+            self.touch();
+        }
+        changed
     }
 
     fn touch(&mut self) {
@@ -1602,6 +1766,7 @@ impl RemoteSessionTracker {
         project: String,
         worktree: Option<String>,
         agent: String,
+        status: TrackerStatusSeed,
         command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
         ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
     ) -> Self {
@@ -1609,6 +1774,8 @@ impl RemoteSessionTracker {
         let connection = build_connection(&dir);
         let mut state = TrackerState::new(project, agent);
         state.worktree = worktree;
+        state.model_source = status.model_source;
+        state.reasoning_effort = status.reasoning_effort;
         let tracker = Self {
             remote_dir: Arc::new(dir),
             connection: Arc::new(Mutex::new(connection)),
@@ -1617,13 +1784,49 @@ impl RemoteSessionTracker {
             publish_signal: Arc::new(tokio::sync::Notify::new()),
             queue_poller: Arc::new(Mutex::new(None)),
             connector: Arc::new(Mutex::new(None)),
+            pr_probe: Arc::new(Mutex::new(None)),
             next_mcp_elicitation_id: Arc::new(AtomicU64::new(1)),
             publish_permissions: ui_event_tx.is_some(),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
         tracker.ensure_queue_poller(command_tx.clone(), ui_event_tx.clone());
         tracker.ensure_connector(command_tx, ui_event_tx);
+        if let Some(cwd) = status.cwd {
+            tracker.ensure_pr_probe(cwd);
+        }
         tracker
+    }
+
+    /// Keep the status PR badge current the same way the TUI does, but at a
+    /// gentler cadence: the tracker serves remote viewers, not an interactive
+    /// status line, so a half-minute of staleness is fine and keeps the extra
+    /// `gh` subprocess load negligible.
+    fn ensure_pr_probe(&self, cwd: PathBuf) {
+        let Ok(mut slot) = self.pr_probe.lock() else {
+            return;
+        };
+        if slot.is_some() {
+            return;
+        }
+        let tracker = self.clone();
+        *slot = Some(tokio::spawn(async move {
+            let mut previous_branch: Option<String> = None;
+            loop {
+                if tracker.shutting_down.load(Ordering::Relaxed) {
+                    break;
+                }
+                let probe = crate::pull_request::probe_current_branch(&cwd).await;
+                let changed = match tracker.state.lock() {
+                    Ok(mut state) => state.observe_pull_request_probe(&previous_branch, &probe),
+                    Err(_) => break,
+                };
+                previous_branch = probe.branch;
+                if changed {
+                    tracker.request_flush();
+                }
+                tokio::time::sleep(PR_PROBE_INTERVAL).await;
+            }
+        }));
     }
 
     /// Tracker with no HTTP client and no pollers, so tests can exercise
@@ -1641,6 +1844,7 @@ impl RemoteSessionTracker {
             publish_signal: Arc::new(tokio::sync::Notify::new()),
             queue_poller: Arc::new(Mutex::new(None)),
             connector: Arc::new(Mutex::new(None)),
+            pr_probe: Arc::new(Mutex::new(None)),
             next_mcp_elicitation_id: Arc::new(AtomicU64::new(1)),
             publish_permissions: true,
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -1854,6 +2058,11 @@ impl RemoteSessionTracker {
             .ok()
             .and_then(|mut slot| slot.take());
         if let Some(handle) = queue_poller {
+            handle.abort();
+            let _ = handle.await;
+        }
+        let pr_probe = self.pr_probe.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(handle) = pr_probe {
             handle.abort();
             let _ = handle.await;
         }
@@ -2216,7 +2425,8 @@ impl RemoteSessionTracker {
                             .lock()
                             .map(|guard| guard.session_fork_supported)
                             .unwrap_or(false);
-                        match remote_queued_prompt_action(prompt.text, can_fork) {
+                        let can_compact = ui_event_tx.is_some();
+                        match remote_queued_prompt_action(prompt.text, can_fork, can_compact) {
                             RemoteQueuedPromptAction::ForkSession => {
                                 if command_tx.send(UiCommand::ForkSession).is_err() {
                                     break;
@@ -2234,6 +2444,20 @@ impl RemoteSessionTracker {
                             }
                             RemoteQueuedPromptAction::RunReview(target) => {
                                 if command_tx.send(UiCommand::RunReview { target }).is_err() {
+                                    break;
+                                }
+                            }
+                            RemoteQueuedPromptAction::CompactPrimary => {
+                                // Compacting is not a prompt turn: the command
+                                // loop runs it to completion before touching
+                                // the next command, and its outcome arrives as
+                                // an Info/Warning event, never PromptDone. The
+                                // slot must free up now or the queue starves.
+                                let sent = command_tx.send(UiCommand::CompactPrimary).is_ok();
+                                if let Ok(mut guard) = state.lock() {
+                                    guard.release_remote_prompt_slot();
+                                }
+                                if !sent {
                                     break;
                                 }
                             }
@@ -2525,13 +2749,30 @@ fn start_server_agent_session(
     let agent_source_id = agent.source_id.clone();
     let config_path = config::default_config_path();
     let app_config = config::Config::load(&config_path).unwrap_or_default();
-    let agent_label = agent_display_label(&agent);
     let project_label = crate::paths::project_label_from_cwd(&cwd);
     let worktree_label = crate::paths::worktree_name_from_cwd(&cwd);
+    // With a roster the session has a real primary model; align the published
+    // identity with what a TUI session publishes (model + adapter source)
+    // instead of the adapter display label alone.
+    let (model_label, model_source) = match roster.as_ref() {
+        Some(resolved) => (
+            resolved.primary.model.model.clone(),
+            Some(resolved.primary.launch.source_id.clone()),
+        ),
+        None => (agent_display_label(&agent), None),
+    };
+    let reasoning_effort = roster
+        .as_ref()
+        .and_then(|resolved| resolved.primary.reasoning_effort.clone());
     let tracker = RemoteSessionTracker::new(
         project_label,
         worktree_label,
-        agent_label,
+        model_label,
+        TrackerStatusSeed {
+            model_source,
+            reasoning_effort,
+            cwd: Some(cwd.clone()),
+        },
         Some(server_cmd_tx.clone()),
         Some(remote_event_tx),
     );
@@ -3911,7 +4152,7 @@ async fn queue_prompt(
             "prompt text must not be empty".to_string(),
         ));
     }
-    let review = match remote_queued_prompt_action(request.text.clone(), false) {
+    let review = match remote_queued_prompt_action(request.text.clone(), false, false) {
         RemoteQueuedPromptAction::RunReview(_) => true,
         RemoteQueuedPromptAction::RejectInvalidReview => {
             return Err((
@@ -4481,6 +4722,7 @@ fn init_db(db_path: &Path) -> Result<()> {
     ensure_sessions_column(&conn, "prompt_in_flight", "integer not null default 0")?;
     ensure_sessions_column(&conn, "worktree", "text")?;
     ensure_sessions_column(&conn, "subagents_json", "text not null default '[]'")?;
+    ensure_sessions_column(&conn, "status_json", "text")?;
     Ok(())
 }
 
@@ -4526,6 +4768,12 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
         .context("serialize remote-control available commands")?;
     let subagents_json = serde_json::to_string(&session.subagents)
         .context("serialize remote-control subagent status")?;
+    let status_json = session
+        .status
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("serialize remote-control session status")?;
     let last_prompt_at = session_last_prompt_at(session);
     let prompt_in_flight = if session.prompt_in_flight { 1_i64 } else { 0 };
     // The conflict arm refuses to move `last_update` backwards: every state
@@ -4549,8 +4797,9 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             prompt_in_flight,
             worktree,
             subagents_json,
+            status_json,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -4571,6 +4820,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             prompt_in_flight = excluded.prompt_in_flight,
             worktree = excluded.worktree,
             subagents_json = excluded.subagents_json,
+            status_json = excluded.status_json,
             connected = 1
         where excluded.last_update >= sessions.last_update",
         params![
@@ -4589,6 +4839,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             prompt_in_flight,
             session.worktree,
             subagents_json,
+            status_json,
         ],
     )
     .context("upsert remote-control session")?;
@@ -4766,7 +5017,8 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                     where queued_prompts.session_id = sessions.session_id
                 ) as queued_prompt_count,
                 worktree,
-                subagents_json
+                subagents_json,
+                status_json
             from sessions
             order by session_id asc",
         )
@@ -4807,7 +5059,8 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                     where queued_prompts.session_id = sessions.session_id
                 ) as queued_prompt_count,
                 worktree,
-                subagents_json
+                subagents_json,
+                status_json
             from sessions
             where connected = 1 and last_update >= ?1
             order by session_id asc",
@@ -4833,6 +5086,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let prompt_in_flight: i64 = row.get(12)?;
     let queued_prompt_count: i64 = row.get(13)?;
     let subagents_json: String = row.get(15)?;
+    let status_json: Option<String> = row.get(16)?;
     let transcript: Vec<TranscriptEntry> =
         serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
@@ -4861,6 +5115,9 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         native_mode: None,
         available_commands,
         subagents,
+        status: status_json
+            .as_deref()
+            .and_then(|status| serde_json::from_str(status).ok()),
     })
 }
 
@@ -6178,6 +6435,97 @@ mod tests {
         assert!(!snapshot.transcript[1].timestamp.is_empty());
     }
 
+    #[test]
+    fn tracker_status_record_mirrors_usage_quota_and_pull_request_state() {
+        let mut state = TrackerState::new("proj".to_string(), "gpt-5.6".to_string());
+        state.model_source = Some("codex-acp".to_string());
+        state.reasoning_effort = Some("high".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        state.observe_event(&UiEvent::AgentUsage(crate::agent_usage::Record {
+            seat: crate::agent_usage::Seat::Primary,
+            model: Some("gpt-5.6".to_string()),
+            usage: Some(agent_client_protocol::schema::v1::Usage::new(100, 90, 10)),
+            update: None,
+            session_id: Some("sess-1".to_string()),
+        }));
+        state.observe_event(&UiEvent::AgentUsage(crate::agent_usage::Record {
+            seat: crate::agent_usage::Seat::Review,
+            model: Some("gpt-5.6".to_string()),
+            usage: Some(agent_client_protocol::schema::v1::Usage::new(40, 30, 10)),
+            update: None,
+            session_id: Some("review-1".to_string()),
+        }));
+        state.observe_event(&UiEvent::CodexUsage(
+            crate::codex_usage::CodexUsageStatus::Unavailable("not signed in".to_string()),
+        ));
+        state.observe_pull_request_probe(
+            &None,
+            &crate::pull_request::BranchProbe {
+                branch: Some("feature".to_string()),
+                gh_succeeded: true,
+                pull_request: Some(crate::pull_request::PullRequest {
+                    number: 7,
+                    url: "https://example.invalid/pr/7".to_string(),
+                }),
+            },
+        );
+
+        let status = state.snapshot().expect("snapshot").status.expect("status");
+        assert_eq!(status.model, "gpt-5.6");
+        assert_eq!(status.model_source.as_deref(), Some("codex-acp"));
+        assert_eq!(status.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(status.primary_tokens, 100);
+        assert_eq!(status.review_tokens, 40);
+        assert_eq!(status.subagent_tokens, 0);
+        assert_eq!(
+            status.quotas,
+            vec!["Codex usage unavailable: not signed in".to_string()]
+        );
+        assert_eq!(
+            status.pull_request,
+            Some(PullRequestRecord {
+                number: 7,
+                url: "https://example.invalid/pr/7".to_string(),
+            })
+        );
+
+        // A failed gh probe on the same branch keeps the badge; a branch
+        // change without gh data clears it.
+        state.observe_pull_request_probe(
+            &Some("feature".to_string()),
+            &crate::pull_request::BranchProbe {
+                branch: Some("feature".to_string()),
+                gh_succeeded: false,
+                pull_request: None,
+            },
+        );
+        assert!(state.pull_request.is_some());
+        state.observe_pull_request_probe(
+            &Some("feature".to_string()),
+            &crate::pull_request::BranchProbe {
+                branch: Some("main".to_string()),
+                gh_succeeded: false,
+                pull_request: None,
+            },
+        );
+        assert!(state.pull_request.is_none());
+
+        // A fresh session restarts token accounting but keeps identity,
+        // quotas and the branch state.
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-2".to_string(),
+            resumed: false,
+        });
+        let status = state.snapshot().expect("snapshot").status.expect("status");
+        assert_eq!(status.primary_tokens, 0);
+        assert_eq!(status.model, "gpt-5.6");
+        assert_eq!(status.quotas.len(), 1);
+    }
+
     fn started_subagent(subagent_id: u64, label: &str, objective: &str) -> UiEvent {
         UiEvent::Subagent(SubagentEvent::Started {
             subagent_id,
@@ -7040,6 +7388,22 @@ mod tests {
                 finished_at: None,
                 outcome: None,
             }],
+            status: Some(SessionStatusRecord {
+                model: "gpt-5.6".to_string(),
+                model_source: Some("codex-acp".to_string()),
+                reasoning_effort: Some("high".to_string()),
+                primary_tokens: 1200,
+                review_tokens: 300,
+                subagent_tokens: 40,
+                context_used: Some(9000),
+                context_size: Some(272_000),
+                cost: Some("0.1234 USD".to_string()),
+                quotas: vec!["Codex usage: 5h 81% left".to_string()],
+                pull_request: Some(PullRequestRecord {
+                    number: 42,
+                    url: "https://example.invalid/pr/42".to_string(),
+                }),
+            }),
         };
 
         upsert_session_record(&db_path, &session).expect("insert");
@@ -7094,6 +7458,7 @@ mod tests {
         assert_eq!(sessions[0].available_commands, session.available_commands);
         assert_eq!(sessions[0].worktree.as_deref(), Some("bold-fox"));
         assert_eq!(sessions[0].subagents, session.subagents);
+        assert_eq!(sessions[0].status, session.status);
     }
 
     #[test]
@@ -7246,6 +7611,7 @@ mod tests {
             available_commands: Vec::new(),
             subagents: Vec::new(),
             native_mode: None,
+            status: None,
         };
         let disconnected = SessionRecord {
             session_id: "sess-disconnected".to_string(),
@@ -7521,32 +7887,54 @@ mod tests {
     #[test]
     fn remote_queued_prompt_action_routes_fork_commands() {
         assert_eq!(
-            remote_queued_prompt_action("/fork".to_string(), true),
+            remote_queued_prompt_action("/fork".to_string(), true, true),
             RemoteQueuedPromptAction::ForkSession
         );
         assert_eq!(
-            remote_queued_prompt_action(" /fork ".to_string(), false),
+            remote_queued_prompt_action(" /fork ".to_string(), false, true),
             RemoteQueuedPromptAction::RejectUnsupportedFork
         );
         assert_eq!(
-            remote_queued_prompt_action("/fork later".to_string(), true),
+            remote_queued_prompt_action("/fork later".to_string(), true, true),
             RemoteQueuedPromptAction::SendPrompt("/fork later".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("hello".to_string(), true),
+            remote_queued_prompt_action("hello".to_string(), true, true),
             RemoteQueuedPromptAction::SendPrompt("hello".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("/review recent".to_string(), true),
+            remote_queued_prompt_action("/review recent".to_string(), true, true),
             RemoteQueuedPromptAction::RunReview(crate::event::ReviewTarget::Recent)
         );
         assert_eq!(
-            remote_queued_prompt_action("/review head".to_string(), true),
+            remote_queued_prompt_action("/review head".to_string(), true, true),
             RemoteQueuedPromptAction::RunReview(crate::event::ReviewTarget::Head)
         );
         assert_eq!(
-            remote_queued_prompt_action("/review".to_string(), true),
+            remote_queued_prompt_action("/review".to_string(), true, true),
             RemoteQueuedPromptAction::RejectInvalidReview
+        );
+    }
+
+    #[test]
+    fn remote_queued_prompt_action_routes_compact_when_a_coordinator_exists() {
+        assert_eq!(
+            remote_queued_prompt_action("/compact".to_string(), true, true),
+            RemoteQueuedPromptAction::CompactPrimary
+        );
+        assert_eq!(
+            remote_queued_prompt_action(" /compact ".to_string(), false, true),
+            RemoteQueuedPromptAction::CompactPrimary
+        );
+        // Headless: no coordinator, keep the literal slash prompt for agents
+        // that implement /compact natively.
+        assert_eq!(
+            remote_queued_prompt_action("/compact".to_string(), true, false),
+            RemoteQueuedPromptAction::SendPrompt("/compact".to_string())
+        );
+        assert_eq!(
+            remote_queued_prompt_action("/compact now".to_string(), true, true),
+            RemoteQueuedPromptAction::SendPrompt("/compact now".to_string())
         );
     }
 
@@ -7758,6 +8146,7 @@ mod tests {
             available_commands: Vec::new(),
             subagents: Vec::new(),
             native_mode: None,
+            status: None,
         }
     }
 
@@ -8395,6 +8784,7 @@ mod tests {
             available_commands: Vec::new(),
             subagents: Vec::new(),
             native_mode: None,
+            status: None,
         };
 
         upsert_session_record(&db_path, &session).expect("insert");
@@ -9438,6 +9828,7 @@ mod tests {
             available_commands: Vec::new(),
             subagents: Vec::new(),
             native_mode: None,
+            status: None,
         };
 
         // Without the bearer token the write is rejected.

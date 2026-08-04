@@ -1239,6 +1239,76 @@
         animation: attention-fade 1.4s ease-in-out infinite;
       }
 
+      /* The TUI status line, mirrored: model via adapter, reasoning effort,
+         per-seat token totals, cost, context occupancy, provider quota
+         windows and the current branch's open pull request. Field hues match
+         the TUI status row (model=primary, effort=amber, primary=green,
+         review=red, PR=accent). */
+      .status-line {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 5px 18px 6px;
+        padding-right: calc(18px + env(safe-area-inset-right));
+        border-bottom: 1px solid var(--line);
+        background: var(--surface-chrome);
+      }
+
+      .status-fields {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        column-gap: 7px;
+        row-gap: 1px;
+        font: 500 10px/1.5 var(--font-mono);
+        letter-spacing: 0.04em;
+      }
+
+      .status-field {
+        color: var(--muted);
+        white-space: nowrap;
+
+        &[data-role="model"] {
+          color: var(--primary);
+        }
+
+        &[data-role="effort"] {
+          color: var(--thought);
+        }
+
+        &[data-role="primary"] {
+          color: var(--agent);
+        }
+
+        &[data-role="review"] {
+          color: var(--red-hot);
+        }
+
+        &[data-role="pr"] {
+          color: var(--user);
+          text-decoration: none;
+
+          &:hover,
+          &:focus-visible {
+            text-decoration: underline;
+          }
+        }
+      }
+
+      .status-sep {
+        color: var(--dim);
+      }
+
+      .status-quotas {
+        display: flex;
+        flex-wrap: wrap;
+        column-gap: 14px;
+        row-gap: 1px;
+        color: var(--dim);
+        font: 400 10px/1.5 var(--font-mono);
+        letter-spacing: 0.04em;
+      }
+
       @keyframes attention-fade {
         50% {
           opacity: 0.55;
@@ -1887,6 +1957,15 @@
         font-weight: 700;
       }
 
+      .subagent-model {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--dim);
+      }
+
       .subagent-activity {
         flex: 1 1 auto;
         min-width: 0;
@@ -2470,6 +2549,10 @@
           <span id="working-badge" class="working-badge" hidden>working</span>
           <button id="settings-button" class="icon-button" type="button" aria-label="Open viewer settings">⚙</button>
         </header>
+        <div id="status-line" class="status-line" hidden>
+          <div id="status-fields" class="status-fields"></div>
+          <div id="status-quotas" class="status-quotas" hidden></div>
+        </div>
         <div class="transcript-wrap">
           <div id="transcript" role="log" aria-label="Session transcript"></div>
           <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
@@ -2639,6 +2722,9 @@
       const transcriptEl = $("transcript");
       const transcriptTitleEl = $("transcript-title");
       const transcriptMetaEl = $("transcript-meta");
+      const statusLineEl = $("status-line");
+      const statusFieldsEl = $("status-fields");
+      const statusQuotasEl = $("status-quotas");
       const workingBadgeEl = $("working-badge");
       const approvalBadgeEl = $("approval-badge");
       const connectionBadgeEl = $("connection-badge");
@@ -3329,7 +3415,9 @@
         card.agent.textContent = session.agent || "-";
         const queued = session.queued_prompt_count ?? 0;
         card.counts.textContent = `${session.total_messages ?? 0} messages${queued ? ` · ${queued} queued` : ""}`;
-        setTimestamp(card.updated, session.last_prompt_at || session.start_time || "");
+        // Prefer prompt recency, but fall back to the heartbeat timestamp so
+        // a connected-yet-quiet session doesn't read as stale.
+        setTimestamp(card.updated, session.last_prompt_at || session.last_update || session.start_time || "");
         const needsApproval = sessionPendingPermissions(session).length > 0;
         card.root.classList.toggle("needs-approval", needsApproval);
         card.approval.hidden = !needsApproval;
@@ -5155,9 +5243,6 @@
           const label = document.createElement("span");
           label.className = "subagent-label";
           label.textContent = `#${row.subagent_id} ${row.label || "subagent"}`;
-          if (row.model) {
-            label.title = row.model;
-          }
 
           const activity = document.createElement("span");
           activity.className = "subagent-activity";
@@ -5167,7 +5252,14 @@
           elapsed.className = "subagent-elapsed";
           elapsed.textContent = subagentElapsed(row);
 
-          el.append(glyph, label, activity, elapsed);
+          el.append(glyph, label);
+          if (row.model) {
+            const model = document.createElement("span");
+            model.className = "subagent-model";
+            model.textContent = row.model;
+            el.append(model);
+          }
+          el.append(activity, elapsed);
           subagentsEl.appendChild(el);
         }
       }
@@ -5541,8 +5633,15 @@
           for (const option of options) {
             const key = configChangeKey(session.session_id, option);
             const row = cloneTemplate(configOptionTpl);
-            row.querySelector(".config-option-name").textContent =
-              option.name || option.config_id || "";
+            const nameEl = row.querySelector(".config-option-name");
+            nameEl.textContent = option.name || option.config_id || "";
+            // The agent's option description (and semantic category) arrive
+            // with every snapshot; surface them instead of dropping them.
+            const detail = [option.category, option.description].filter(Boolean).join(" — ");
+            if (detail) {
+              row.title = detail;
+              nameEl.setAttribute("aria-label", `${nameEl.textContent}: ${detail}`);
+            }
             const statusEl = row.querySelector(".config-option-status");
             const combo = createCombobox(option, key, (value) => {
               void submitConfigChange(session.session_id, option, value);
@@ -5608,9 +5707,99 @@
         }
       }
 
+      // Token totals compact exactly like the TUI status line: 9876 stays
+      // literal, 10.5k above ten thousand, 1.2m above a million, with the
+      // pointless ".0" stripped.
+      function compactTokenCount(value) {
+        const count = Number(value) || 0;
+        let compact;
+        if (count >= 1_000_000) {
+          compact = `${(count / 1_000_000).toFixed(1)}m`;
+        } else if (count >= 10_000) {
+          compact = `${(count / 1_000).toFixed(1)}k`;
+        } else {
+          return String(count);
+        }
+        return compact.replace(/\.0(k|m)$/, "$1");
+      }
+
+      function statusField(text, role) {
+        const el = document.createElement("span");
+        el.className = "status-field";
+        if (role) {
+          el.dataset.role = role;
+        }
+        el.textContent = text;
+        return el;
+      }
+
+      function renderStatusLine(session) {
+        const status = session?.status;
+        if (!status || !status.model) {
+          statusLineEl.hidden = true;
+          statusFieldsEl.replaceChildren();
+          statusQuotasEl.replaceChildren();
+          statusQuotasEl.hidden = true;
+          return;
+        }
+        const fields = [];
+        fields.push(statusField(
+          status.model_source ? `${status.model} via ${status.model_source}` : status.model,
+          "model",
+        ));
+        fields.push(statusField(`effort: ${status.reasoning_effort || "default"}`, "effort"));
+        fields.push(statusField(`primary: ${compactTokenCount(status.primary_tokens)}`, "primary"));
+        fields.push(statusField(`review: ${compactTokenCount(status.review_tokens)}`, "review"));
+        if (status.subagent_tokens) {
+          fields.push(statusField(`subagents: ${compactTokenCount(status.subagent_tokens)}`, "subagents"));
+        }
+        if (status.cost) {
+          fields.push(statusField(status.cost, "cost"));
+        }
+        if (status.context_used != null && status.context_size) {
+          const percent = Math.min(100, Math.round((status.context_used / status.context_size) * 100));
+          fields.push(statusField(`context: ${percent}%`, "context"));
+        }
+        if (status.pull_request?.number) {
+          const pr = document.createElement("a");
+          pr.className = "status-field";
+          pr.dataset.role = "pr";
+          pr.textContent = `PR #${status.pull_request.number}`;
+          if (status.pull_request.url) {
+            pr.href = status.pull_request.url;
+            pr.target = "_blank";
+            pr.rel = "noreferrer noopener";
+          }
+          fields.push(pr);
+        }
+        const joined = [];
+        fields.forEach((field, index) => {
+          if (index > 0) {
+            const sep = document.createElement("span");
+            sep.className = "status-sep";
+            sep.setAttribute("aria-hidden", "true");
+            sep.textContent = "·";
+            joined.push(sep);
+          }
+          joined.push(field);
+        });
+        statusFieldsEl.replaceChildren(...joined);
+        const quotas = Array.isArray(status.quotas) ? status.quotas : [];
+        statusQuotasEl.replaceChildren(
+          ...quotas.map((quota) => {
+            const el = document.createElement("span");
+            el.textContent = quota;
+            return el;
+          }),
+        );
+        statusQuotasEl.hidden = !quotas.length;
+        statusLineEl.hidden = false;
+      }
+
       function renderChat() {
         const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
         renderTranscript(session);
+        renderStatusLine(session);
         renderConfig(session);
         renderSubagents(session);
         renderPermissions(session);

@@ -33,6 +33,15 @@ the right nested request while several run at once. MCP approvals for
 `mcp__mj_subagents__create_subagent` and `mcp__mj_subagents__subagent_cancel`
 are recognized as Mjolnir's own tools rather than third-party ones.
 
+## Status line in the viewer
+
+Under the chat header the browser mirrors the terminal status line: primary
+model and its ACP adapter, reasoning effort, per-seat token totals
+(primary/review/subagents), session cost and context occupancy when the agent
+reports them, provider subscription quota windows (Codex/Claude), and a link to
+the current branch's open pull request. The pull-request badge comes from a
+`git`/`gh` probe on the session host and refreshes about twice a minute.
+
 ## Tailscale
 
 ```bash

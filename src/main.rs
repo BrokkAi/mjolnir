@@ -33,6 +33,7 @@ mod palette;
 mod paths;
 mod probe;
 mod probe_cache;
+mod pull_request;
 mod qr;
 mod quota;
 mod ragnarok;
@@ -2207,6 +2208,11 @@ async fn run_session(
         tracker_project_label,
         tracker_worktree_label,
         roster.primary.model.model.clone(),
+        remote::TrackerStatusSeed {
+            model_source: Some(roster.primary.launch.source_id.clone()),
+            reasoning_effort: roster.primary.reasoning_effort.clone(),
+            cwd: Some(cwd.clone()),
+        },
         Some(cmd_tx.clone()),
         Some(ui_event_tx.clone()),
     );

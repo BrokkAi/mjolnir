@@ -346,6 +346,11 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         project_label,
         worktree_label,
         agent_label,
+        remote::TrackerStatusSeed {
+            model_source: Some(primary.launch.source_id.clone()),
+            reasoning_effort: primary.reasoning_effort.clone(),
+            cwd: Some(cfg.cwd.clone()),
+        },
         Some(cmd_tx.clone()),
         None,
     );
