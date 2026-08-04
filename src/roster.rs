@@ -413,6 +413,14 @@ fn adapter_kind(model: &str) -> AdapterKind {
     }
 }
 
+/// The built-in ACP source that natively serves a model, by provider. Lets
+/// settings judge a pinned model's route even when the model-choice catalog
+/// has no entry for it (e.g. the catalog was resolved while that vendor was
+/// disabled).
+pub(crate) fn native_source_id(model: &str) -> String {
+    launch_for(adapter_kind(model)).source_id
+}
+
 fn adapter_accepts_model(kind: AdapterKind, model: &str) -> bool {
     match kind {
         AdapterKind::Codex => deepswe::model_provider(model) == "openai",

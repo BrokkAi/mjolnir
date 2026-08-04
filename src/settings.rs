@@ -1367,19 +1367,25 @@ pub fn reset_unroutable_models(
     ];
     for (label, slot) in seats {
         let model = slot.clone();
-        if model == "auto" || model == crate::config::DISABLED_MODEL {
+        if model == "auto"
+            || model == crate::config::DISABLED_MODEL
+            // Custom-selector models have no native built-in adapter; only
+            // their catalog entry (when present) can judge them.
+            || (model.starts_with("custom/")
+                && !choices.iter().any(|choice| choice.model == model))
+        {
             continue;
         }
-        // Only models with a known route can be judged: an unknown adapter
-        // (not signed in yet, not probed) keeps the saved pin untouched.
-        let Some(route) = choices
+        // Judge the route from the model catalog when it knows the model,
+        // falling back to the provider's native adapter — the catalog may
+        // have been resolved while that vendor was disabled and lack the
+        // entry entirely. Custom-server models resolve to their own id.
+        let route = choices
             .iter()
             .find(|choice| choice.model == model)
-            .and_then(|choice| choice.adapter.as_deref())
-        else {
-            continue;
-        };
-        if !source_enabled(route) {
+            .and_then(|choice| choice.adapter.clone())
+            .unwrap_or_else(|| crate::roster::native_source_id(&model));
+        if !source_enabled(&route) {
             "auto".clone_into(slot);
             notices.push(format!(
                 "{label} model {model} is not provided by any enabled ACP server; switched to automatic selection"
@@ -2132,6 +2138,25 @@ mod tests {
         assert_eq!(config.subagents.model, crate::config::DISABLED_MODEL);
         assert_eq!(notices.len(), 1);
         assert!(notices[0].contains("Agent model model-a"), "{}", notices[0]);
+    }
+
+    #[test]
+    fn reset_unroutable_models_uses_native_adapter_when_catalog_lacks_the_model() {
+        let mut config = Config::default();
+        config.agent.model = "claude-opus-5".to_string();
+        config.set_acp_server_policy("claude-acp", AcpServerPolicy::Disabled);
+        let inventory = crate::roster::discover_inventory(&config);
+
+        // No catalog entry at all: the provider's native adapter decides.
+        let notices = reset_unroutable_models(&mut config, &inventory, &[]);
+
+        assert_eq!(config.agent.model, "auto");
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("Agent model claude-opus-5"),
+            "{}",
+            notices[0]
+        );
     }
     use agent_client_protocol::schema::v1::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
