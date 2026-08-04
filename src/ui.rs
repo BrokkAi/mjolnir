@@ -45,12 +45,13 @@ use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    AppState, ArenaPane, ConfigValueChoice, ConnectionState, CurrentBranchPullRequest,
-    ElicitationFormFieldKind, ElicitationView, Entry, PastedAttachment, PastedImageAttachment,
-    PendingElicitation, PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt,
-    RagnarokDraftPrStatus, RagnarokFighterUi, RagnarokUi, StatusKind, StatusMessage,
-    SubagentStatus, ToolCallOutput, UiExitReason, classify_elicitation, config_option_choices,
-    config_option_current_value_label,
+    AgentPickerStep, AppState, ArenaPane, ConfigValueChoice, ConnectionState,
+    CurrentBranchPullRequest, ElicitationFormFieldKind, ElicitationView, Entry,
+    PRIMARY_EFFORT_OPTIONS, PastedAttachment, PastedImageAttachment, PendingElicitation,
+    PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus,
+    RagnarokFighterUi, RagnarokUi, StatusKind, StatusMessage, SubagentStatus, ToolCallOutput,
+    UiExitReason, classify_elicitation, config_option_choices, config_option_current_value_label,
+    primary_effort_value,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -2779,9 +2780,7 @@ fn handle_crossterm(
 
     if matches!(key.code, KeyCode::BackTab) {
         if !state.open_agent_picker() {
-            state.status_line = Some(StatusMessage::info(
-                "no other ACP agent is currently available",
-            ));
+            state.status_line = Some(StatusMessage::info("no ACP agent is currently available"));
         }
         return TerminalRequest::None;
     }
@@ -5431,6 +5430,9 @@ fn handle_agent_picker_key(
     code: KeyCode,
     mode: UiMode,
 ) -> TerminalRequest {
+    let Some(step) = state.agent_picker.as_ref().map(|picker| picker.step) else {
+        return TerminalRequest::None;
+    };
     let action = match code {
         KeyCode::BackTab => PickerKeyAction::Move(-1),
         KeyCode::Tab => PickerKeyAction::Move(1),
@@ -5438,38 +5440,48 @@ fn handle_agent_picker_key(
     };
     match action {
         PickerKeyAction::Cancel => {
-            if let Some(picker) = state.agent_picker.as_mut()
-                && picker.confirming
-            {
-                picker.confirming = false;
-            } else {
+            if !state.agent_picker_back() {
                 state.agent_picker = None;
             }
             inline_repair_request(mode)
         }
         PickerKeyAction::Accept => {
-            let confirming = state
-                .agent_picker
-                .as_ref()
-                .is_some_and(|picker| picker.confirming);
-            if confirming {
-                if let Some(role) = state.agent_picker_confirm() {
-                    persist_primary_picker_selection(state, role);
+            match step {
+                AgentPickerStep::ConfirmSave => {
+                    if let Some((role, effort)) = state.agent_picker_selection()
+                        && persist_primary_picker_selection(state, role, effort)
+                        && let Some(picker) = state.agent_picker.as_mut()
+                    {
+                        picker.step = AgentPickerStep::StartNewSession;
+                    }
                 }
-            } else if !state.agent_picker_request_confirmation() {
-                state.status_line = Some(StatusMessage::info(
-                    "the primary agent is already using that ACP agent",
-                ));
+                AgentPickerStep::StartNewSession => {
+                    let start_new_session = state
+                        .agent_picker
+                        .as_ref()
+                        .is_some_and(|picker| picker.start_new_session);
+                    state.agent_picker = None;
+                    if start_new_session {
+                        state.exit_reason = Some(UiExitReason::NewSession);
+                    } else {
+                        state.record_status_message(
+                            StatusKind::Info,
+                            "model and effort saved; start /new or /clear when ready",
+                        );
+                    }
+                }
+                AgentPickerStep::Model | AgentPickerStep::Effort => {
+                    state.agent_picker_advance();
+                }
             }
             inline_repair_request(mode)
         }
         PickerKeyAction::Move(delta) => {
-            if !state
-                .agent_picker
-                .as_ref()
-                .is_some_and(|picker| picker.confirming)
-            {
-                state.agent_picker_move(delta);
+            match step {
+                AgentPickerStep::Model => state.agent_picker_move(delta),
+                AgentPickerStep::Effort => state.agent_picker_move_effort(delta),
+                AgentPickerStep::StartNewSession => state.agent_picker_toggle_start_new_session(),
+                AgentPickerStep::ConfirmSave => {}
             }
             TerminalRequest::None
         }
@@ -5477,10 +5489,14 @@ fn handle_agent_picker_key(
     }
 }
 
-fn persist_primary_picker_selection(state: &mut AppState, role: crate::roster::ResolvedAgent) {
+fn persist_primary_picker_selection(
+    state: &mut AppState,
+    role: crate::roster::ResolvedAgent,
+    effort: Option<String>,
+) -> bool {
     let Some(path) = state.config_path.as_deref() else {
         state.record_status_message(StatusKind::Warning, "config path is unavailable");
-        return;
+        return false;
     };
     let mut config = match config::Config::load(path) {
         Ok(config) => config,
@@ -5489,22 +5505,27 @@ fn persist_primary_picker_selection(state: &mut AppState, role: crate::roster::R
                 StatusKind::Warning,
                 format!("could not load config: {error:#}"),
             );
-            return;
+            return false;
         }
     };
     config.agent.model.clone_from(&role.model.model);
+    config.agent.reasoning_effort = effort;
     match config.save(path) {
         Ok(()) => {
             state.configured_models = config.model_names();
             state.record_status_message(
                 StatusKind::Info,
-                format!("{} saved; use /new or /clear to apply", role.model.model),
+                format!("{} and reasoning effort saved", role.model.model),
             );
+            true
         }
-        Err(error) => state.record_status_message(
-            StatusKind::Warning,
-            format!("model selection was not saved: {error:#}"),
-        ),
+        Err(error) => {
+            state.record_status_message(
+                StatusKind::Warning,
+                format!("model and effort were not saved: {error:#}"),
+            );
+            false
+        }
     }
 }
 
@@ -6173,6 +6194,19 @@ fn agent_picker_items(state: &AppState, width: u16, visible: usize) -> Vec<ListI
     let Some(picker) = state.agent_picker.as_ref() else {
         return Vec::new();
     };
+    if picker.step == AgentPickerStep::Effort {
+        let range = centered_visible_range(
+            PRIMARY_EFFORT_OPTIONS.len(),
+            picker.effort_selected,
+            visible,
+        );
+        return range
+            .map(|index| {
+                let label = primary_effort_label(index);
+                truncate_line(label, width, index == picker.effort_selected, state.theme)
+            })
+            .collect();
+    }
     let range = centered_visible_range(picker.role_indices.len(), picker.selected, visible);
     picker.role_indices[range.clone()]
         .iter()
@@ -6192,6 +6226,26 @@ fn agent_picker_items(state: &AppState, width: u16, visible: usize) -> Vec<ListI
         .collect()
 }
 
+fn primary_effort_label(index: usize) -> String {
+    match primary_effort_value(index) {
+        Some(effort) => format!("{effort} reasoning effort"),
+        None => "adapter default reasoning effort".to_string(),
+    }
+}
+
+fn agent_picker_selection_summary(state: &AppState) -> String {
+    let Some(picker) = state.agent_picker.as_ref() else {
+        return String::new();
+    };
+    let model = picker
+        .role_indices
+        .get(picker.selected)
+        .and_then(|&index| state.ragnarok_models.get(index))
+        .map(|role| role.model.model.as_str())
+        .unwrap_or("primary model");
+    format!("{model} · {}", primary_effort_label(picker.effort_selected))
+}
+
 fn draw_inline_agent_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     f.render_widget(Clear, area);
     let content = inline_content_rect(area);
@@ -6208,38 +6262,68 @@ fn draw_inline_agent_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState
         ])
         .split(content);
     f.render_widget(
-        Paragraph::new("Select primary model").style(
+        Paragraph::new("Configure primary model").style(
             Style::default()
                 .fg(state.theme.primary)
                 .add_modifier(Modifier::BOLD),
         ),
         layout[0],
     );
-    let confirming = state
+    let step = state
         .agent_picker
         .as_ref()
-        .is_some_and(|picker| picker.confirming);
-    let detail = if confirming {
-        "Save this model for /new or /clear?"
-    } else {
-        "Choose a model for the primary agent"
+        .map(|picker| picker.step)
+        .unwrap_or(AgentPickerStep::Model);
+    let detail = match step {
+        AgentPickerStep::Model => "Choose a model for the primary agent",
+        AgentPickerStep::Effort => "Choose its reasoning effort",
+        AgentPickerStep::ConfirmSave => "Save this model and effort?",
+        AgentPickerStep::StartNewSession => "Saved. Start a new session now to apply the change?",
     };
     f.render_widget(
         Paragraph::new(detail).style(Style::default().fg(state.theme.muted)),
         layout[1],
     );
-    f.render_widget(
-        List::new(agent_picker_items(
-            state,
-            layout[2].width,
-            usize::from(layout[2].height),
-        )),
-        layout[2],
-    );
-    let footer = if confirming {
-        "Enter confirm | Esc back"
+    if step == AgentPickerStep::ConfirmSave {
+        f.render_widget(
+            Paragraph::new(agent_picker_selection_summary(state)),
+            layout[2],
+        );
+    } else if step == AgentPickerStep::StartNewSession {
+        let start_new_session = state
+            .agent_picker
+            .as_ref()
+            .is_some_and(|picker| picker.start_new_session);
+        let start = if start_new_session {
+            "› start new session"
+        } else {
+            "  start new session"
+        };
+        let keep = if start_new_session {
+            "  keep current session"
+        } else {
+            "› keep current session"
+        };
+        f.render_widget(
+            Paragraph::new(vec![Line::from(start), Line::from(keep)]),
+            layout[2],
+        );
     } else {
-        "Up/Down choose | Enter continue | Esc cancel"
+        f.render_widget(
+            List::new(agent_picker_items(
+                state,
+                layout[2].width,
+                usize::from(layout[2].height),
+            )),
+            layout[2],
+        );
+    }
+    let footer = match step {
+        AgentPickerStep::Model | AgentPickerStep::Effort => {
+            "Up/Down or Tab/Shift-Tab choose | Enter continue | Esc back"
+        }
+        AgentPickerStep::ConfirmSave => "Enter save | Esc back",
+        AgentPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
     };
     f.render_widget(
         Paragraph::new(footer).style(Style::default().fg(state.theme.muted)),
@@ -10130,11 +10214,11 @@ fn idle_prompt_title(
     let label = prompt_title_label(state);
     if voice_input_supported {
         format!(
-            " {label} (Enter send | {PROMPT_NEWLINE_HINT} newline | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " {label} (Enter send | {PROMPT_NEWLINE_HINT} newline | Shift-Tab model/effort | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     } else {
         format!(
-            " {label} (Enter send | {PROMPT_NEWLINE_HINT} newline | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " {label} (Enter send | {PROMPT_NEWLINE_HINT} newline | Shift-Tab model/effort | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     }
 }
@@ -11895,7 +11979,11 @@ fn general_help_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<
         help_section_line("General", theme),
         help_binding_line("Ctrl-N", "new session", theme),
         help_binding_line("Ctrl-O", "load session", theme),
-        help_binding_line("Shift-Tab", "choose the primary ACP agent", theme),
+        help_binding_line(
+            "Shift-Tab",
+            "choose the primary model and reasoning effort",
+            theme,
+        ),
         help_binding_line("Enter", "send prompt / accept selected item", theme),
         help_binding_line(PROMPT_NEWLINE_HINT, "insert a newline in the prompt", theme),
         help_binding_line("Left/Right", "move the prompt cursor", theme),
@@ -12122,7 +12210,13 @@ fn draw_agent_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState)
     let Some(picker) = state.agent_picker.as_ref() else {
         return;
     };
-    let rows = (picker.role_indices.len() as u16).min(8);
+    let item_count = match picker.step {
+        AgentPickerStep::Model => picker.role_indices.len(),
+        AgentPickerStep::Effort => PRIMARY_EFFORT_OPTIONS.len(),
+        AgentPickerStep::ConfirmSave => 1,
+        AgentPickerStep::StartNewSession => 2,
+    };
+    let rows = (item_count as u16).min(8);
     let height = (rows + 5).min(area.height.saturating_sub(2));
     let width = area.width.saturating_sub(8).min(72);
     if height < 6 || width < 20 {
@@ -12132,7 +12226,7 @@ fn draw_agent_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState)
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Select primary model ")
+        .title(" Configure primary model and effort ")
         .style(Style::default().fg(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -12144,31 +12238,60 @@ fn draw_agent_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState)
             Constraint::Length(1),
         ])
         .split(inner);
-    let confirming = picker.confirming;
-    let header = if confirming {
-        vec![
-            Line::from("Save this model for /new or /clear?"),
-            Line::from("Enter confirm | Esc back"),
-        ]
-    } else {
-        vec![
+    let header = match picker.step {
+        AgentPickerStep::Model => vec![
             Line::from("Choose a model for the primary agent."),
-            Line::from("Enter continue | Esc cancel"),
-        ]
+            Line::from("Enter continues to reasoning effort."),
+        ],
+        AgentPickerStep::Effort => vec![
+            Line::from("Choose the primary agent's reasoning effort."),
+            Line::from("Enter continues to save."),
+        ],
+        AgentPickerStep::ConfirmSave => vec![
+            Line::from("Save this model and reasoning effort?"),
+            Line::from(agent_picker_selection_summary(state)),
+        ],
+        AgentPickerStep::StartNewSession => vec![
+            Line::from("Saved. Start a new session now to apply the change?"),
+            Line::from("Choose an action below."),
+        ],
     };
     f.render_widget(Paragraph::new(header), layout[0]);
-    f.render_widget(
-        List::new(agent_picker_items(
-            state,
-            layout[1].width,
-            usize::from(layout[1].height),
-        )),
-        layout[1],
-    );
-    let footer = if confirming {
-        "Selection locked pending confirmation"
-    } else {
-        "Up/Down or Tab/Shift-Tab to choose"
+    match picker.step {
+        AgentPickerStep::ConfirmSave => {
+            f.render_widget(Paragraph::new("Press Enter to save."), layout[1]);
+        }
+        AgentPickerStep::StartNewSession => {
+            let start = if picker.start_new_session {
+                "› start new session"
+            } else {
+                "  start new session"
+            };
+            let keep = if picker.start_new_session {
+                "  keep current session"
+            } else {
+                "› keep current session"
+            };
+            f.render_widget(
+                Paragraph::new(vec![Line::from(start), Line::from(keep)]),
+                layout[1],
+            );
+        }
+        AgentPickerStep::Model | AgentPickerStep::Effort => {
+            f.render_widget(
+                List::new(agent_picker_items(
+                    state,
+                    layout[1].width,
+                    usize::from(layout[1].height),
+                )),
+                layout[1],
+            );
+        }
+    }
+    let footer = match picker.step {
+        AgentPickerStep::Model | AgentPickerStep::Effort => "Up/Down or Tab/Shift-Tab to choose",
+        AgentPickerStep::ConfirmSave => "Enter save | Esc back",
+        AgentPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
     };
     f.render_widget(
         Paragraph::new(footer).style(Style::default().fg(state.theme.muted)),
@@ -16626,7 +16749,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_saves_the_primary_model_for_the_next_clear_or_new_boundary() {
+    fn shift_tab_saves_primary_model_and_effort_then_offers_a_new_session() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("config.toml");
         config::Config::default()
@@ -16676,26 +16799,65 @@ mod tests {
             state
                 .agent_picker
                 .as_ref()
-                .is_some_and(|picker| picker.confirming)
+                .is_some_and(|picker| picker.step == AgentPickerStep::Effort)
         );
         assert_eq!(state.exit_reason, None);
 
+        for _ in 0..5 {
+            handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        }
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        assert!(
+            state
+                .agent_picker
+                .as_ref()
+                .is_some_and(|picker| picker.step == AgentPickerStep::ConfirmSave)
+        );
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
-        assert!(state.agent_picker.is_none());
-        assert_eq!(state.exit_reason, None);
-        assert_eq!(
-            config::Config::load(&config_path)
-                .expect("load config")
-                .agent
-                .model,
-            "claude-acp"
+        assert!(
+            state
+                .agent_picker
+                .as_ref()
+                .is_some_and(|picker| picker.step == AgentPickerStep::StartNewSession)
         );
+        let saved = config::Config::load(&config_path).expect("load config");
+        assert_eq!(saved.agent.model, "claude-acp");
+        assert_eq!(saved.agent.reasoning_effort.as_deref(), Some("high"));
         assert!(
             state
                 .status_line
                 .as_ref()
-                .is_some_and(|status| status.text.contains("use /new or /clear to apply"))
+                .is_some_and(|status| status.text.contains("reasoning effort saved"))
+        );
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        assert!(state.agent_picker.is_none());
+        assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
+    }
+
+    #[test]
+    fn declining_new_session_offer_keeps_current_session() {
+        let mut state = AppState::new();
+        state.agent_picker = Some(crate::app::AgentPicker {
+            selected: 0,
+            role_indices: Vec::new(),
+            effort_selected: 0,
+            step: AgentPickerStep::StartNewSession,
+            start_new_session: true,
+        });
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(state.agent_picker.is_none());
+        assert_eq!(state.exit_reason, None);
+        assert!(
+            state
+                .status_line
+                .as_ref()
+                .is_some_and(|status| { status.text.contains("start /new or /clear when ready") })
         );
     }
 
@@ -16735,7 +16897,7 @@ mod tests {
     }
 
     #[test]
-    fn selecting_current_agent_closes_selector_without_restart() {
+    fn selecting_current_agent_advances_to_effort() {
         let mut state = AppState::new();
         state.agent_source_id = "codex-acp".to_string();
         state.active_models.primary = "codex-acp".to_string();
@@ -16765,8 +16927,48 @@ mod tests {
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::BackTab));
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
-        assert!(state.agent_picker.is_none());
+        assert!(
+            state
+                .agent_picker
+                .as_ref()
+                .is_some_and(|picker| picker.step == AgentPickerStep::Effort)
+        );
         assert_eq!(state.exit_reason, None);
+    }
+
+    #[test]
+    fn shift_tab_opens_effort_picker_with_only_one_primary_model() {
+        let mut state = AppState::new();
+        state.active_models.primary = "codex-acp".to_string();
+        state.ragnarok_models = vec![crate::roster::ResolvedAgent {
+            model: crate::deepswe::Row {
+                model: "codex-acp".to_string(),
+                reasoning_effort: None,
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+            },
+            model_value: "codex-acp".to_string(),
+            launch: crate::roster::AdapterLaunch {
+                kind: crate::roster::AdapterKind::Codex,
+                source_id: "codex-acp".to_string(),
+                command: PathBuf::from("codex-acp"),
+                args: Vec::new(),
+                env: Default::default(),
+            },
+            ranked: true,
+            reasoning_effort: None,
+        }];
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::BackTab));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(
+            state
+                .agent_picker
+                .as_ref()
+                .is_some_and(|picker| picker.step == AgentPickerStep::Effort)
+        );
     }
 
     #[test]
@@ -19212,7 +19414,9 @@ mod tests {
         state.agent_picker = Some(crate::app::AgentPicker {
             selected: 0,
             role_indices: Vec::new(),
-            confirming: false,
+            effort_selected: 0,
+            step: AgentPickerStep::Model,
+            start_new_session: true,
         });
         handle_crossterm(&mut state, &cmd_tx, ctrl_g());
         assert!(!state.workspace_diff_viewer);
@@ -20106,6 +20310,10 @@ mod tests {
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
         assert!(
+            rendered.contains("Shift-Tab model/effort"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
             rendered.contains("F12 select text"),
             "rendered:\n{rendered}"
         );
@@ -20172,6 +20380,10 @@ mod tests {
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
         assert!(rendered.contains("F10 help"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("Shift-Tab model/effort"),
+            "rendered:\n{rendered}"
+        );
         assert!(!rendered.contains("F12"), "rendered:\n{rendered}");
         assert!(!rendered.contains("prompt"), "rendered:\n{rendered}");
         assert!(!rendered.contains("ready"), "rendered:\n{rendered}");

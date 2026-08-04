@@ -1435,13 +1435,53 @@ impl InputPasteBurst {
     }
 }
 
+/// Steps in the deferred primary model and effort picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPickerStep {
+    Model,
+    Effort,
+    ConfirmSave,
+    StartNewSession,
+}
+
+/// Persisted primary-agent effort choices. `None` retains the ACP adapter's
+/// own default rather than forcing a reasoning level.
+pub const PRIMARY_EFFORT_OPTIONS: &[Option<&str>] = &[
+    None,
+    Some("off"),
+    Some("minimal"),
+    Some("low"),
+    Some("medium"),
+    Some("high"),
+    Some("xhigh"),
+    Some("max"),
+];
+
+pub fn primary_effort_value(index: usize) -> Option<&'static str> {
+    PRIMARY_EFFORT_OPTIONS.get(index).copied().flatten()
+}
+
+fn primary_effort_index(effort: Option<String>) -> usize {
+    effort
+        .as_deref()
+        .and_then(|effort| {
+            PRIMARY_EFFORT_OPTIONS.iter().position(|candidate| {
+                candidate.is_some_and(|candidate| candidate.eq_ignore_ascii_case(effort))
+            })
+        })
+        .unwrap_or(0)
+}
+
 /// Deferred primary-agent model picker overlay state.
 #[derive(Debug, Clone)]
 pub struct AgentPicker {
     pub selected: usize,
     /// Indices into `ragnarok_models`, deduplicated by configured model ID.
     pub role_indices: Vec<usize>,
-    pub confirming: bool,
+    pub effort_selected: usize,
+    pub step: AgentPickerStep,
+    /// Whether the post-save new-session offer selects its affirmative action.
+    pub start_new_session: bool,
 }
 
 /// Config option picker overlay state.
@@ -1695,7 +1735,7 @@ impl AppState {
             .enumerate()
             .filter_map(|(index, role)| seen.insert(role.model.model.as_str()).then_some(index))
             .collect::<Vec<_>>();
-        if role_indices.len() < 2 {
+        if role_indices.is_empty() {
             return false;
         }
         let selected = role_indices
@@ -1707,7 +1747,14 @@ impl AppState {
         self.agent_picker = Some(AgentPicker {
             selected,
             role_indices,
-            confirming: false,
+            effort_selected: primary_effort_index(
+                self.config_path
+                    .as_deref()
+                    .and_then(|path| crate::config::Config::load(path).ok())
+                    .and_then(|config| config.agent.reasoning_effort),
+            ),
+            step: AgentPickerStep::Model,
+            start_new_session: true,
         });
         true
     }
@@ -1716,35 +1763,58 @@ impl AppState {
         let Some(picker) = self.agent_picker.as_mut() else {
             return;
         };
-        picker.confirming = false;
         move_wrapped(&mut picker.selected, delta, picker.role_indices.len());
     }
 
-    pub fn agent_picker_request_confirmation(&mut self) -> bool {
+    pub fn agent_picker_move_effort(&mut self, delta: i32) {
+        let Some(picker) = self.agent_picker.as_mut() else {
+            return;
+        };
+        move_wrapped(
+            &mut picker.effort_selected,
+            delta,
+            PRIMARY_EFFORT_OPTIONS.len(),
+        );
+    }
+
+    pub fn agent_picker_toggle_start_new_session(&mut self) {
+        if let Some(picker) = self.agent_picker.as_mut() {
+            picker.start_new_session = !picker.start_new_session;
+        }
+    }
+
+    pub fn agent_picker_advance(&mut self) -> bool {
         let Some(picker) = self.agent_picker.as_mut() else {
             return false;
         };
-        let Some(&role_index) = picker.role_indices.get(picker.selected) else {
-            return false;
+        picker.step = match picker.step {
+            AgentPickerStep::Model => AgentPickerStep::Effort,
+            AgentPickerStep::Effort => AgentPickerStep::ConfirmSave,
+            AgentPickerStep::ConfirmSave | AgentPickerStep::StartNewSession => return false,
         };
-        let Some(role) = self.ragnarok_models.get(role_index) else {
-            return false;
-        };
-        if role.model.model == self.active_models.primary {
-            self.agent_picker = None;
-            return false;
-        }
-        picker.confirming = true;
         true
     }
 
-    pub fn agent_picker_confirm(&mut self) -> Option<crate::roster::ResolvedAgent> {
-        let picker = self.agent_picker.take()?;
-        if !picker.confirming {
-            return None;
-        }
+    pub fn agent_picker_selection(&self) -> Option<(crate::roster::ResolvedAgent, Option<String>)> {
+        let picker = self.agent_picker.as_ref()?;
         let role_index = picker.role_indices.get(picker.selected).copied()?;
-        self.ragnarok_models.get(role_index).cloned()
+        Some((
+            self.ragnarok_models.get(role_index).cloned()?,
+            primary_effort_value(picker.effort_selected).map(str::to_string),
+        ))
+    }
+
+    pub fn agent_picker_back(&mut self) -> bool {
+        let Some(picker) = self.agent_picker.as_mut() else {
+            return false;
+        };
+        picker.step = match picker.step {
+            AgentPickerStep::Model => return false,
+            AgentPickerStep::Effort => AgentPickerStep::Model,
+            AgentPickerStep::ConfirmSave => AgentPickerStep::Effort,
+            AgentPickerStep::StartNewSession => return false,
+        };
+        true
     }
 
     /// Open `/mjconfig`, seeded from the same persisted config startup edits.

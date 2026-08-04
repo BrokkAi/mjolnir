@@ -176,9 +176,9 @@ pub struct AgentConfig {
         skip_serializing_if = "is_default_acp_priority"
     )]
     pub acp_priority: Vec<String>,
-    /// Per-invocation reasoning-effort override for the primary agent's ACP
-    /// session (e.g. from `--model MODEL+high`). Not meaningful outside a
-    /// single `--print` invocation; never written to the on-disk default.
+    /// Reasoning-effort override for the primary agent's ACP session. It may
+    /// be supplied for one `--print` invocation or saved from the interactive
+    /// primary model picker for future sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(default = "default_true")]
