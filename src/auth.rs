@@ -1,6 +1,9 @@
 //! Vendor-owned account discovery and login command selection.
 
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -90,14 +93,27 @@ pub fn install_hint(vendor: AuthVendor) -> &'static str {
 }
 
 fn detect_openai() -> CredentialSource {
-    for name in ["CODEX_API_KEY", "OPENAI_API_KEY"] {
-        if nonempty_env(name) {
-            return CredentialSource::Environment(name);
-        }
-    }
     let root = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".codex")));
+    detect_openai_with(
+        nonempty_env("CODEX_API_KEY"),
+        nonempty_env("OPENAI_API_KEY"),
+        root,
+    )
+}
+
+fn detect_openai_with(
+    has_codex_api_key: bool,
+    has_openai_api_key: bool,
+    root: Option<PathBuf>,
+) -> CredentialSource {
+    if has_codex_api_key {
+        return CredentialSource::Environment("CODEX_API_KEY");
+    }
+    if has_openai_api_key {
+        return CredentialSource::Environment("OPENAI_API_KEY");
+    }
     detect_file(
         root.map(|root| root.join("auth.json")),
         &[
@@ -109,12 +125,16 @@ fn detect_openai() -> CredentialSource {
 }
 
 fn detect_kimi() -> CredentialSource {
-    if nonempty_env("KIMI_API_KEY") {
-        return CredentialSource::Environment("KIMI_API_KEY");
-    }
     let root = std::env::var_os("KIMI_CODE_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".kimi-code")));
+    detect_kimi_with(nonempty_env("KIMI_API_KEY"), root)
+}
+
+fn detect_kimi_with(has_api_key: bool, root: Option<PathBuf>) -> CredentialSource {
+    if has_api_key {
+        return CredentialSource::Environment("KIMI_API_KEY");
+    }
     detect_file(
         root.map(|root| root.join("credentials").join("kimi-code.json")),
         &["/access_token", "/refresh_token"],
@@ -152,21 +172,43 @@ fn credential_file_has_any(path: &Path, pointers: &[&str]) -> bool {
 }
 
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
+    find_in_path(name, std::env::var_os("PATH").as_deref())
+}
+
+fn find_in_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    let path = path?;
     for directory in std::env::split_paths(&path) {
         let candidate = directory.join(name);
-        if candidate.is_file() {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
         #[cfg(windows)]
         for extension in ["exe", "cmd", "bat"] {
             let candidate = directory.join(format!("{name}.{extension}"));
-            if candidate.is_file() {
+            if is_executable_file(&candidate) {
                 return Some(candidate);
             }
         }
     }
     None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
@@ -255,6 +297,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vendors_report_labels_capabilities_and_install_hints() {
+        assert_eq!(AuthVendor::ALL, [AuthVendor::OpenAi, AuthVendor::Kimi]);
+        assert_eq!(AuthVendor::OpenAi.label(), "OpenAI / ChatGPT");
+        assert_eq!(AuthVendor::OpenAi.enables(), "Codex, Anvil");
+        assert_eq!(
+            install_hint(AuthVendor::OpenAi),
+            "npm install -g @openai/codex"
+        );
+        assert_eq!(AuthVendor::Kimi.label(), "Kimi");
+        assert_eq!(AuthVendor::Kimi.enables(), "Kimi Code, Anvil");
+        assert_eq!(
+            install_hint(AuthVendor::Kimi),
+            "install Kimi Code from the ACP registry"
+        );
+    }
+
+    #[test]
+    fn credential_source_reports_availability_and_status() {
+        let environment = CredentialSource::Environment("TEST_API_KEY");
+        assert!(environment.available());
+        assert_eq!(environment.status(), "signed in via TEST_API_KEY");
+
+        let file = CredentialSource::File(PathBuf::from("credentials.json"));
+        assert!(file.available());
+        assert_eq!(file.status(), "signed in");
+
+        assert!(!CredentialSource::Missing.available());
+        assert_eq!(CredentialSource::Missing.status(), "sign in");
+    }
+
+    #[test]
     fn login_outcome_distinguishes_success_from_cancellation() {
         let signed_in = LoginOutcome::SignedIn("connected".to_string());
         assert!(signed_in.succeeded());
@@ -273,5 +346,117 @@ mod tests {
         assert!(credential_file_has_any(&path, &["/tokens/access_token"]));
         std::fs::write(&path, r#"{"tokens":{"access_token":"  "}}"#).unwrap();
         assert!(!credential_file_has_any(&path, &["/tokens/access_token"]));
+    }
+
+    #[test]
+    fn credential_files_reject_missing_malformed_and_non_string_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        assert!(!credential_file_has_any(&path, &["/access_token"]));
+
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(!credential_file_has_any(&path, &["/access_token"]));
+
+        std::fs::write(&path, r#"{"access_token":42,"refresh_token":"token"}"#).unwrap();
+        assert!(!credential_file_has_any(&path, &["/access_token"]));
+        assert!(credential_file_has_any(
+            &path,
+            &["/access_token", "/refresh_token"]
+        ));
+    }
+
+    #[test]
+    fn openai_detection_prefers_environment_then_falls_back_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let path = root.join("auth.json");
+        std::fs::write(&path, r#"{"tokens":{"refresh_token":"refresh"}}"#).unwrap();
+
+        assert_eq!(
+            detect_openai_with(true, true, Some(root.clone())),
+            CredentialSource::Environment("CODEX_API_KEY")
+        );
+        assert_eq!(
+            detect_openai_with(false, true, Some(root.clone())),
+            CredentialSource::Environment("OPENAI_API_KEY")
+        );
+        assert_eq!(
+            detect_openai_with(false, false, Some(root)),
+            CredentialSource::File(path)
+        );
+        assert_eq!(
+            detect_openai_with(false, false, None),
+            CredentialSource::Missing
+        );
+    }
+
+    #[test]
+    fn kimi_detection_prefers_environment_then_falls_back_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let credentials = root.join("credentials");
+        std::fs::create_dir(&credentials).unwrap();
+        let path = credentials.join("kimi-code.json");
+        std::fs::write(&path, r#"{"access_token":"access"}"#).unwrap();
+
+        assert_eq!(
+            detect_kimi_with(true, Some(root.clone())),
+            CredentialSource::Environment("KIMI_API_KEY")
+        );
+        assert_eq!(
+            detect_kimi_with(false, Some(root)),
+            CredentialSource::File(path)
+        );
+        assert_eq!(detect_kimi_with(false, None), CredentialSource::Missing);
+    }
+
+    #[test]
+    fn path_lookup_skips_non_files_and_uses_first_matching_file() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::create_dir(first.path().join("helper")).unwrap();
+        let executable = second.path().join("helper");
+        std::fs::write(&executable, b"placeholder").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+        assert_eq!(find_in_path("helper", Some(&path)), Some(executable));
+        assert_eq!(find_in_path("missing", Some(&path)), None);
+        assert_eq!(find_in_path("helper", None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_lookup_skips_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::write(first.path().join("helper"), b"not executable").unwrap();
+        let executable = second.path().join("helper");
+        std::fs::write(&executable, b"executable").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+        assert_eq!(find_in_path("helper", Some(&path)), Some(executable));
+    }
+
+    #[test]
+    fn public_detection_and_executable_lookup_cover_each_vendor() {
+        for vendor in AuthVendor::ALL {
+            let source = detect(vendor);
+            assert_eq!(
+                source.available(),
+                !matches!(source, CredentialSource::Missing)
+            );
+
+            if let Some(path) = executable(vendor) {
+                assert!(path.is_file());
+            }
+        }
     }
 }
