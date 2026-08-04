@@ -123,6 +123,23 @@ jobs:
         run: |
           set -euo pipefail
           version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          wait_for_version() {
+            local package="$1"
+            local published_version
+            for attempt in {1..12}; do
+              if published_version="$(npm view "$package" version --registry=https://registry.npmjs.org 2>/dev/null)" &&
+                [[ "$published_version" == "$version" ]]; then
+                printf '%s\n' "$published_version"
+                return 0
+              fi
+              if [[ "$attempt" -lt 12 ]]; then
+                echo "waiting for $package to become available (attempt $attempt/12)" >&2
+                sleep 5
+              fi
+            done
+            echo "$package did not become available after 12 attempts" >&2
+            return 1
+          }
           packages=(
             @brokkai/mjolnir-darwin-universal
             @brokkai/mjolnir-linux-x64-gnu
@@ -142,10 +159,10 @@ jobs:
             if ! npm view "$package" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
               npm publish "./npm-tarballs/${tarballs[$index]}" --access public --provenance
             fi
-            npm view "$package" version --registry=https://registry.npmjs.org | grep -Fx "$version"
+            wait_for_version "$package"
           done
           root=@brokkai/mjolnir
           if ! npm view "$root@$version" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
             npm publish "./npm-tarballs/brokkai-mjolnir-$version.tgz" --access public --provenance
           fi
-          npm view "$root@$version" version --registry=https://registry.npmjs.org | grep -Fx "$version"
+          wait_for_version "$root@$version"
