@@ -1717,6 +1717,36 @@
         gap: 8px;
       }
 
+      .elicitation-form {
+        display: grid;
+        gap: 12px;
+        width: 100%;
+      }
+
+      .elicitation-field {
+        display: grid;
+        gap: 5px;
+      }
+
+      .elicitation-field > input,
+      .elicitation-field > select {
+        width: 100%;
+        padding: 9px 10px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--text);
+        background: var(--surface);
+      }
+
+      .elicitation-description {
+        color: var(--muted);
+        font-size: 0.86rem;
+      }
+
+      .elicitation-url {
+        overflow-wrap: anywhere;
+      }
+
       .permission-option {
         /* Option labels must never truncate (AGENTS.md UI safety): let long
            labels wrap and grow the key instead of clipping at a fixed height. */
@@ -5304,14 +5334,16 @@
         }
         for (const request of pending) {
           const card = cloneTemplate(permissionTpl);
-          const isMcpToolApproval = (request.request_id || "").startsWith("mcp-elicitation:");
-          card.querySelector(".permission-label").textContent = isMcpToolApproval
-            ? "MCP tool approval needed"
+          card.querySelector(".permission-label").textContent = request.elicitation
+            ? "Input needed"
             : "Permission needed";
           card.querySelector(".permission-title").textContent = request.title || request.request_id;
           setTimestamp(card.querySelector(".permission-time"), request.requested_at || "");
           const optionsEl = card.querySelector(".permission-options");
           const sent = sentDecisions.has(decisionKey(session.session_id, request.request_id));
+          if (request.elicitation) {
+            renderElicitationControls(optionsEl, session, request, sent);
+          }
           for (const option of request.options || []) {
             const button = document.createElement("button");
             button.type = "button";
@@ -5329,6 +5361,135 @@
             : "";
           permissionsEl.appendChild(card);
         }
+      }
+
+      function elicitationAccept(content) {
+        return `elicitation:accept:${JSON.stringify(content)}`;
+      }
+
+      function appendElicitationButton(container, label, kind, disabled, onClick) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "permission-option";
+        button.dataset.kind = kind;
+        button.textContent = label;
+        button.disabled = disabled;
+        button.addEventListener("click", onClick);
+        container.appendChild(button);
+      }
+
+      function renderElicitationControls(container, session, request, sent) {
+        const elicitation = request.elicitation;
+        const submit = (optionId) => {
+          void submitPermissionDecision(session.session_id, request.request_id, optionId);
+        };
+        if (elicitation.title) {
+          const title = document.createElement("strong");
+          title.textContent = elicitation.title;
+          container.appendChild(title);
+        }
+        if (elicitation.description) {
+          const description = document.createElement("div");
+          description.className = "elicitation-description";
+          description.textContent = elicitation.description;
+          container.appendChild(description);
+        }
+        if (elicitation.mode === "select") {
+          for (const option of elicitation.options || []) {
+            appendElicitationButton(container, option.label || option.value, "allow_once", sent, () => {
+              submit(elicitationAccept({ [elicitation.property_name]: option.value }));
+            });
+          }
+        } else if (elicitation.mode === "url") {
+          const link = document.createElement("a");
+          link.className = "elicitation-url";
+          link.href = elicitation.url;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.textContent = elicitation.url;
+          container.appendChild(link);
+          appendElicitationButton(container, "Continue", "allow_once", sent, () => {
+            submit(elicitationAccept({}));
+          });
+        } else {
+          const form = document.createElement("form");
+          form.className = "elicitation-form";
+          const fields = elicitation.mode === "text"
+            ? [{
+                property_name: elicitation.property_name,
+                label: elicitation.title || elicitation.property_name,
+                description: elicitation.description,
+                required: true,
+                kind: "text",
+              }]
+            : (elicitation.fields || []);
+          const controls = [];
+          for (const field of fields) {
+            const wrapper = document.createElement("label");
+            wrapper.className = "elicitation-field";
+            const label = document.createElement("span");
+            label.textContent = `${field.label || field.property_name}${field.required ? " *" : ""}`;
+            wrapper.appendChild(label);
+            let control;
+            if (field.kind === "select" || field.kind === "multi_select") {
+              control = document.createElement("select");
+              control.multiple = field.kind === "multi_select";
+              if (!field.required && !control.multiple) {
+                control.appendChild(new Option("", ""));
+              }
+              for (const option of field.options || []) {
+                control.appendChild(new Option(option.label || option.value, option.value));
+              }
+            } else {
+              control = document.createElement("input");
+              control.type = field.kind === "boolean"
+                ? "checkbox"
+                : (field.kind === "number" || field.kind === "integer" ? "number" : "text");
+              if (field.kind === "integer") control.step = "1";
+              if (field.minimum !== undefined && field.minimum !== null) control.min = field.minimum;
+              if (field.maximum !== undefined && field.maximum !== null) control.max = field.maximum;
+            }
+            control.disabled = sent;
+            control.required = Boolean(field.required);
+            wrapper.appendChild(control);
+            if (field.description) {
+              const description = document.createElement("span");
+              description.className = "elicitation-description";
+              description.textContent = field.description;
+              wrapper.appendChild(description);
+            }
+            form.appendChild(wrapper);
+            controls.push([field, control]);
+          }
+          const submitButton = document.createElement("button");
+          submitButton.type = "submit";
+          submitButton.className = "permission-option";
+          submitButton.dataset.kind = "allow_once";
+          submitButton.textContent = "Submit";
+          submitButton.disabled = sent;
+          form.appendChild(submitButton);
+          form.addEventListener("submit", (event) => {
+            event.preventDefault();
+            const content = {};
+            for (const [field, control] of controls) {
+              if (field.kind === "multi_select") {
+                const values = [...control.selectedOptions].map((option) => option.value);
+                if (values.length || field.required) content[field.property_name] = values;
+              } else if (field.kind === "boolean") {
+                content[field.property_name] = control.checked;
+              } else if (control.value !== "" || field.required) {
+                content[field.property_name] = field.kind === "number"
+                  ? Number(control.value)
+                  : (field.kind === "integer" ? Number.parseInt(control.value, 10) : control.value);
+              }
+            }
+            submit(elicitationAccept(content));
+          });
+          container.appendChild(form);
+        }
+        appendElicitationButton(container, "Cancel", "reject_once", sent, () => {
+          submit("elicitation:cancel");
+        });
       }
 
       async function submitPermissionDecision(sessionId, requestId, optionId) {

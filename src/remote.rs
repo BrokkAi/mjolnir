@@ -11,10 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::v1::{
     AvailableCommand, AvailableCommandInput, ContentBlock, Diff, ElicitationContentValue,
-    ElicitationMode, ElicitationPropertySchema, PermissionOptionKind, SessionConfigId,
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate, ToolCallContent,
-    ToolCallStatus, ToolCallUpdateFields, ToolKind,
+    PermissionOptionKind, SessionConfigId, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate,
+    ToolCallContent, ToolCallStatus, ToolCallUpdateFields, ToolKind,
 };
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
@@ -84,7 +83,9 @@ const REMOTE_FINISHED_SUBAGENT_ROWS: usize = 4;
 /// the TUI's 5s status-line poll on purpose: remote viewers tolerate a stale
 /// badge, and each probe spawns `git` + `gh` subprocesses.
 const PR_PROBE_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(test)]
 const NATIVE_MCP_APPROVAL_PROPERTY: &str = "persist";
+#[cfg(test)]
 const NATIVE_MCP_APPROVAL_CHOICES: [(&str, &str, &str); 3] = [
     ("once", "Allow once", "allow_once"),
     ("session", "Allow for session", "allow_session"),
@@ -562,7 +563,51 @@ pub struct PendingPermissionRecord {
     pub request_id: String,
     pub title: String,
     pub options: Vec<PermissionOptionRecord>,
+    /// Browser-renderable elicitation data. Absent for ordinary permissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elicitation: Option<RemoteElicitationRecord>,
     pub requested_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteElicitationRecord {
+    /// `select`, `text`, `form`, or `url`.
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub property_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<RemoteElicitationOptionRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<RemoteElicitationFieldRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteElicitationOptionRecord {
+    pub value: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteElicitationFieldRecord {
+    pub property_name: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub required: bool,
+    /// `select`, `multi_select`, `text`, `number`, `integer`, or `boolean`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<RemoteElicitationOptionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1891,6 +1936,7 @@ impl RemoteSessionTracker {
                     kind: permission_option_kind_id(option.kind).to_string(),
                 })
                 .collect(),
+            elicitation: None,
             requested_at: now_rfc3339(),
         };
         if let Ok(mut state) = self.state.lock() {
@@ -1924,37 +1970,29 @@ impl RemoteSessionTracker {
         }
     }
 
-    /// Only Codex's native MCP approval form for the two injected
-    /// servers is safe to expose remotely. All other elicitations are handled
-    /// locally or explicitly declined by the server session loop.
-    fn track_mcp_tool_approval(
+    /// Publish every elicitation shape the shared classifier can render.
+    /// Unknown future schema shapes remain private and are declined by the
+    /// server-session loop.
+    fn track_elicitation_prompt(
         &self,
         prompt: ElicitationPrompt,
+        owner_prefix: Option<&str>,
     ) -> Option<(String, ElicitationPrompt)> {
-        if !is_native_injected_mcp_approval(&prompt) {
+        let Some(elicitation) = remote_elicitation_record(&prompt) else {
+            let _ = prompt.responder.send(ElicitationOutcome::Decline);
             return None;
-        }
+        };
 
-        let request_id = format!(
-            "mcp-elicitation:{}",
-            self.next_mcp_elicitation_id.fetch_add(1, Ordering::Relaxed)
+        let sequence = self.next_mcp_elicitation_id.fetch_add(1, Ordering::Relaxed);
+        let request_id = owner_prefix.map_or_else(
+            || format!("elicitation:{sequence}"),
+            |prefix| format!("elicitation:{prefix}:{sequence}"),
         );
         let record = PendingPermissionRecord {
             request_id: request_id.clone(),
             title: prompt.message.clone(),
-            options: NATIVE_MCP_APPROVAL_CHOICES
-                .into_iter()
-                .map(|(option_id, label, kind)| PermissionOptionRecord {
-                    option_id: option_id.to_string(),
-                    label: label.to_string(),
-                    kind: kind.to_string(),
-                })
-                .chain(std::iter::once(PermissionOptionRecord {
-                    option_id: "decline".to_string(),
-                    label: "Decline".to_string(),
-                    kind: "reject_once".to_string(),
-                }))
-                .collect(),
+            options: Vec::new(),
+            elicitation: Some(elicitation),
             requested_at: now_rfc3339(),
         };
         if let Ok(mut state) = self.state.lock() {
@@ -3078,27 +3116,32 @@ fn handle_server_agent_event(
             }
             crate::event::SubagentEvent::SessionUpdate { .. }
             | crate::event::SubagentEvent::TerminalOutput { .. } => {}
-            crate::event::SubagentEvent::ElicitationRequest { prompt, .. } => {
-                let _ = prompt
-                    .responder
-                    .send(crate::event::ElicitationOutcome::Decline);
+            crate::event::SubagentEvent::ElicitationRequest {
+                subagent_id,
+                prompt,
+            } => {
+                let owner_prefix = format!("subagent-{subagent_id}");
+                if let Some((request_id, prompt)) =
+                    tracker.track_elicitation_prompt(prompt, Some(&owner_prefix))
+                {
+                    pending_permissions
+                        .insert(request_id, RemotePendingApproval::Elicitation(prompt));
+                }
             }
             crate::event::SubagentEvent::CancelPendingPermissions { subagent_id } => {
                 let prefix = format!("subagent-{subagent_id}:");
-                pending_permissions.retain(|id, _| !id.starts_with(&prefix));
+                let elicitation_prefix = format!("elicitation:{prefix}");
+                pending_permissions.retain(|id, _| {
+                    !id.starts_with(&prefix) && !id.starts_with(&elicitation_prefix)
+                });
             }
             crate::event::SubagentEvent::Status { .. } => {}
         }
         return;
     }
     if let UiEvent::ElicitationRequest(prompt) = event {
-        if is_native_injected_mcp_approval(&prompt) {
-            let Some((request_id, prompt)) = tracker.track_mcp_tool_approval(prompt) else {
-                return;
-            };
+        if let Some((request_id, prompt)) = tracker.track_elicitation_prompt(prompt, None) {
             pending_permissions.insert(request_id, RemotePendingApproval::Elicitation(prompt));
-        } else {
-            let _ = prompt.responder.send(ElicitationOutcome::Decline);
         }
         return;
     }
@@ -3127,97 +3170,199 @@ enum RemotePendingApproval {
     Elicitation(ElicitationPrompt),
 }
 
-/// Keep the recognition deliberately narrow: only Codex's native approval
-/// form for the two injected MCP servers may cross the remote boundary.
-fn is_native_injected_mcp_approval(prompt: &ElicitationPrompt) -> bool {
-    let ElicitationMode::Form(form) = &prompt.mode else {
-        return false;
+fn remote_elicitation_record(prompt: &ElicitationPrompt) -> Option<RemoteElicitationRecord> {
+    use crate::app::{ElicitationFormFieldKind, ElicitationView};
+
+    let option_records = |options: Vec<agent_client_protocol::schema::v1::EnumOption>| {
+        options
+            .into_iter()
+            .map(|option| RemoteElicitationOptionRecord {
+                label: if option.title.is_empty() {
+                    option.value.clone()
+                } else {
+                    option.title
+                },
+                value: option.value,
+            })
+            .collect()
     };
-    let schema = &form.requested_schema;
-    let Some(ElicitationPropertySchema::String(approval)) =
-        schema.properties.get(NATIVE_MCP_APPROVAL_PROPERTY)
-    else {
-        return false;
+    match crate::app::classify_elicitation(prompt) {
+        ElicitationView::SingleSelect {
+            property_name,
+            title,
+            options,
+        } => Some(RemoteElicitationRecord {
+            mode: "select".to_string(),
+            property_name: Some(property_name),
+            title,
+            description: None,
+            url: None,
+            options: option_records(options),
+            fields: Vec::new(),
+        }),
+        ElicitationView::Text {
+            property_name,
+            title,
+            description,
+        } => Some(RemoteElicitationRecord {
+            mode: "text".to_string(),
+            property_name: Some(property_name),
+            title,
+            description,
+            url: None,
+            options: Vec::new(),
+            fields: Vec::new(),
+        }),
+        ElicitationView::Url { url } => {
+            let parsed = url::Url::parse(&url).ok()?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return None;
+            }
+            Some(RemoteElicitationRecord {
+                mode: "url".to_string(),
+                property_name: None,
+                title: None,
+                description: None,
+                url: Some(url),
+                options: Vec::new(),
+                fields: Vec::new(),
+            })
+        }
+        ElicitationView::Form { title, fields } => Some(RemoteElicitationRecord {
+            mode: "form".to_string(),
+            property_name: None,
+            title,
+            description: None,
+            url: None,
+            options: Vec::new(),
+            fields: fields
+                .into_iter()
+                .map(|field| {
+                    let (kind, options, minimum, maximum) = match field.kind {
+                        ElicitationFormFieldKind::SingleSelect { options } => {
+                            ("select", option_records(options), None, None)
+                        }
+                        ElicitationFormFieldKind::MultiSelect { options, .. } => {
+                            ("multi_select", option_records(options), None, None)
+                        }
+                        ElicitationFormFieldKind::Text => ("text", Vec::new(), None, None),
+                        ElicitationFormFieldKind::Number { minimum, maximum } => (
+                            "number",
+                            Vec::new(),
+                            minimum.map(|value| value.to_string()),
+                            maximum.map(|value| value.to_string()),
+                        ),
+                        ElicitationFormFieldKind::Integer { minimum, maximum } => (
+                            "integer",
+                            Vec::new(),
+                            minimum.map(|value| value.to_string()),
+                            maximum.map(|value| value.to_string()),
+                        ),
+                        ElicitationFormFieldKind::Boolean => ("boolean", Vec::new(), None, None),
+                    };
+                    RemoteElicitationFieldRecord {
+                        property_name: field.property_name.clone(),
+                        label: field.title.unwrap_or(field.property_name),
+                        description: field.description,
+                        required: field.required,
+                        kind: kind.to_string(),
+                        options,
+                        minimum,
+                        maximum,
+                    }
+                })
+                .collect(),
+        }),
+        ElicitationView::Unsupported => None,
+    }
+}
+
+const REMOTE_ELICITATION_ACCEPT_PREFIX: &str = "elicitation:accept:";
+const REMOTE_ELICITATION_CANCEL: &str = "elicitation:cancel";
+
+fn remote_elicitation_outcome(
+    prompt: &ElicitationPrompt,
+    option_id: &str,
+) -> Option<ElicitationOutcome> {
+    use crate::app::{ElicitationFormFieldKind, ElicitationView};
+
+    if option_id == REMOTE_ELICITATION_CANCEL {
+        return Some(ElicitationOutcome::Cancel);
+    }
+    let encoded = option_id.strip_prefix(REMOTE_ELICITATION_ACCEPT_PREFIX)?;
+    let content: BTreeMap<String, ElicitationContentValue> = serde_json::from_str(encoded).ok()?;
+    let valid = match crate::app::classify_elicitation(prompt) {
+        ElicitationView::SingleSelect {
+            property_name,
+            options,
+            ..
+        } => content.len() == 1
+            && content.get(&property_name).is_some_and(|value| {
+                let ElicitationContentValue::String(value) = value else {
+                    return false;
+                };
+                options.iter().any(|option| option.value == *value)
+            }),
+        ElicitationView::Text { property_name, .. } => content.len() == 1
+            && content.get(&property_name).is_some_and(|value| {
+                matches!(value, ElicitationContentValue::String(value) if !value.trim().is_empty())
+            }),
+        ElicitationView::Url { .. } => content.is_empty(),
+        ElicitationView::Form { fields, .. } => {
+            content.keys().all(|name| fields.iter().any(|field| field.property_name == *name))
+                && fields.iter().all(|field| {
+                    let value = content.get(&field.property_name);
+                    if value.is_none() {
+                        return !field.required;
+                    }
+                    match (&field.kind, value.expect("checked above")) {
+                        (
+                            ElicitationFormFieldKind::SingleSelect { options },
+                            ElicitationContentValue::String(value),
+                        ) => options.iter().any(|option| option.value == *value),
+                        (
+                            ElicitationFormFieldKind::MultiSelect {
+                                options,
+                                min_items,
+                                max_items,
+                            },
+                            ElicitationContentValue::StringArray(values),
+                        ) => {
+                            min_items.is_none_or(|minimum| values.len() as u64 >= minimum)
+                                && max_items.is_none_or(|maximum| values.len() as u64 <= maximum)
+                                && values.iter().all(|value| {
+                                    options.iter().any(|option| option.value == *value)
+                                })
+                        }
+                        (
+                            ElicitationFormFieldKind::Text,
+                            ElicitationContentValue::String(value),
+                        ) => !field.required || !value.trim().is_empty(),
+                        (
+                            ElicitationFormFieldKind::Number { minimum, maximum },
+                            ElicitationContentValue::Number(value),
+                        ) => {
+                            minimum.is_none_or(|minimum| *value >= minimum)
+                                && maximum.is_none_or(|maximum| *value <= maximum)
+                        }
+                        (
+                            ElicitationFormFieldKind::Integer { minimum, maximum },
+                            ElicitationContentValue::Integer(value),
+                        ) => {
+                            minimum.is_none_or(|minimum| *value >= minimum)
+                                && maximum.is_none_or(|maximum| *value <= maximum)
+                        }
+                        (
+                            ElicitationFormFieldKind::Boolean,
+                            ElicitationContentValue::Boolean(_),
+                        ) => true,
+                        _ => false,
+                    }
+                })
+        }
+        ElicitationView::Unsupported => false,
     };
-    let matches_native_schema = schema.properties.len() == 1
-        && schema.required.as_ref().is_some_and(|required| {
-            required.len() == 1 && required[0] == NATIVE_MCP_APPROVAL_PROPERTY
-        })
-        && approval.enum_values.is_none()
-        && approval.one_of.as_ref().is_some_and(|options| {
-            options.len() == NATIVE_MCP_APPROVAL_CHOICES.len()
-                && options
-                    .iter()
-                    .zip(NATIVE_MCP_APPROVAL_CHOICES)
-                    .all(|(option, (value, _, _))| option.value == value)
-        });
-    if !matches_native_schema {
-        return false;
-    }
-    message_has_exact_native_mcp_tool_identity(&prompt.message)
-}
-
-/// Match only the fully qualified identities of tools injected by Mjolnir.
-/// Server names or arbitrary tool names mentioned in prose are insufficient.
-fn message_has_exact_native_mcp_tool_identity(message: &str) -> bool {
-    ["mj-subagents"].into_iter().any(|server| {
-        known_native_mcp_tools(server).iter().any(|tool| {
-            let dotted_identity = format!("mcp.{server}.{tool}");
-            message_has_exact_mcp_identity(message, &dotted_identity)
-                || match server {
-                    "mj-subagents" => message_has_exact_mcp_identity(
-                        message,
-                        &format!("mcp__mj_subagents__{tool}"),
-                    ),
-                    _ => false,
-                }
-        })
-    })
-}
-
-fn message_has_exact_mcp_identity(message: &str, identity: &str) -> bool {
-    message.match_indices(identity).any(|(start, _)| {
-        let end = start + identity.len();
-        has_identifier_boundary_before(message, start)
-            && !message[end..]
-                .chars()
-                .next()
-                .is_some_and(is_mcp_server_identifier_char)
-    })
-}
-
-fn known_native_mcp_tools(server: &str) -> &'static [&'static str] {
-    match server {
-        "mj-subagents" => &["create_subagent", "subagent_cancel"],
-        _ => &[],
-    }
-}
-
-fn has_identifier_boundary_before(message: &str, start: usize) -> bool {
-    !message[..start]
-        .chars()
-        .next_back()
-        .is_some_and(is_mcp_server_identifier_char)
-}
-
-fn is_mcp_server_identifier_char(character: char) -> bool {
-    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-}
-
-fn native_mcp_approval_outcome(option_id: &str) -> Option<ElicitationOutcome> {
-    if NATIVE_MCP_APPROVAL_CHOICES
-        .iter()
-        .any(|(value, _, _)| *value == option_id)
-    {
-        Some(ElicitationOutcome::Accept(BTreeMap::from([(
-            NATIVE_MCP_APPROVAL_PROPERTY.to_string(),
-            ElicitationContentValue::String(option_id.to_string()),
-        )])))
-    } else if option_id == "decline" {
-        Some(ElicitationOutcome::Decline)
-    } else {
-        None
-    }
+    valid.then_some(ElicitationOutcome::Accept(content))
 }
 
 fn namespace_remote_id(prefix: Option<&str>, id: &str) -> String {
@@ -3264,8 +3409,8 @@ fn handle_server_remote_event(
                         .options
                         .iter()
                         .any(|option| option.option_id.to_string() == option_id),
-                    RemotePendingApproval::Elicitation(_) => {
-                        native_mcp_approval_outcome(&option_id).is_some()
+                    RemotePendingApproval::Elicitation(prompt) => {
+                        remote_elicitation_outcome(prompt, &option_id).is_some()
                     }
                 });
         if !valid_option {
@@ -3281,7 +3426,7 @@ fn handle_server_remote_event(
                     .send(PermissionDecision::Selected(option_id));
             }
             RemotePendingApproval::Elicitation(prompt) => {
-                if let Some(outcome) = native_mcp_approval_outcome(&option_id) {
+                if let Some(outcome) = remote_elicitation_outcome(&prompt, &option_id) {
                     let _ = prompt.responder.send(outcome);
                 }
             }
@@ -5919,11 +6064,11 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
         AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, ContentBlock,
-        ContentChunk, Diff, ElicitationFormMode, ElicitationSchema, ElicitationSessionScope,
-        EnumOption, PermissionOption, SessionConfigSelect, SessionConfigSelectOption, StopReason,
-        StringPropertySchema, Terminal, TerminalExitStatus, TerminalId, TextContent, ToolCall,
-        ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
-        UnstructuredCommandInput,
+        ContentChunk, Diff, ElicitationFormMode, ElicitationId, ElicitationSchema,
+        ElicitationSessionScope, ElicitationUrlMode, EnumOption, PermissionOption,
+        SessionConfigSelect, SessionConfigSelectOption, StopReason, StringPropertySchema, Terminal,
+        TerminalExitStatus, TerminalId, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput,
     };
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
@@ -6076,8 +6221,97 @@ mod tests {
         )
     }
 
+    #[test]
+    fn remote_elicitation_projects_text_form_and_url_modes() {
+        let (text, _) = mcp_approval_prompt(
+            "Enter token",
+            ElicitationSchema::new().property(
+                "token",
+                StringPropertySchema::new().description("API token"),
+                true,
+            ),
+        );
+        let text_record = remote_elicitation_record(&text).expect("text is supported");
+        assert_eq!(text_record.mode, "text");
+        assert_eq!(text_record.property_name.as_deref(), Some("token"));
+
+        let (form, _) = mcp_approval_prompt(
+            "Configure",
+            ElicitationSchema::new()
+                .property(
+                    "model",
+                    StringPropertySchema::new().one_of(vec![
+                        EnumOption::new("fast", "Fast"),
+                        EnumOption::new("smart", "Smart"),
+                    ]),
+                    true,
+                )
+                .property("note", StringPropertySchema::new(), false),
+        );
+        let form_record = remote_elicitation_record(&form).expect("form is supported");
+        assert_eq!(form_record.mode, "form");
+        assert_eq!(form_record.fields.len(), 2);
+
+        let (responder, _rx) = tokio::sync::oneshot::channel();
+        let url = ElicitationPrompt {
+            message: "Sign in".to_string(),
+            mode: ElicitationUrlMode::new(
+                ElicitationSessionScope::new("session"),
+                ElicitationId::new("login"),
+                "https://example.com/login",
+            )
+            .into(),
+            responder,
+        };
+        let url_record = remote_elicitation_record(&url).expect("URL is supported");
+        assert_eq!(url_record.mode, "url");
+        assert_eq!(url_record.url.as_deref(), Some("https://example.com/login"));
+
+        let (responder, _rx) = tokio::sync::oneshot::channel();
+        let unsafe_url = ElicitationPrompt {
+            message: "Open".to_string(),
+            mode: ElicitationUrlMode::new(
+                ElicitationSessionScope::new("session"),
+                ElicitationId::new("unsafe"),
+                "javascript:alert(1)",
+            )
+            .into(),
+            responder,
+        };
+        assert!(remote_elicitation_record(&unsafe_url).is_none());
+    }
+
+    #[test]
+    fn remote_elicitation_rejects_values_outside_the_original_schema() {
+        let (prompt, _) = mcp_approval_prompt("Choose", native_mcp_approval_schema());
+        let valid = format!(
+            "{REMOTE_ELICITATION_ACCEPT_PREFIX}{}",
+            serde_json::json!({ "persist": "once" })
+        );
+        assert!(matches!(
+            remote_elicitation_outcome(&prompt, &valid),
+            Some(ElicitationOutcome::Accept(_))
+        ));
+
+        let invalid = format!(
+            "{REMOTE_ELICITATION_ACCEPT_PREFIX}{}",
+            serde_json::json!({ "persist": "forever" })
+        );
+        assert!(remote_elicitation_outcome(&prompt, &invalid).is_none());
+        assert!(remote_elicitation_outcome(&prompt, REMOTE_ELICITATION_CANCEL).is_some());
+    }
+
+    #[test]
+    fn embedded_viewer_contains_elicitation_controls() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("renderElicitationControls"));
+        assert!(viewer.contains("elicitation:accept:"));
+        assert!(viewer.contains("elicitation:cancel"));
+        assert!(viewer.contains("multi_select"));
+    }
+
     #[tokio::test]
-    async fn top_level_subagent_mcp_approvals_track_cards_and_forward_persist_choices() {
+    async fn select_elicitations_track_cards_and_forward_valid_choices() {
         for (tool, choice) in [
             ("create_subagent", "once"),
             ("create_subagent", "session"),
@@ -6106,17 +6340,26 @@ mod tests {
                 .snapshot()
                 .expect("snapshot");
             assert_eq!(snapshot.pending_permissions.len(), 1, "{tool} card");
-            assert_eq!(
-                snapshot.pending_permissions[0].options.len(),
-                4,
-                "{tool} choices"
-            );
+            let elicitation = snapshot.pending_permissions[0]
+                .elicitation
+                .as_ref()
+                .expect("elicitation payload");
+            assert_eq!(elicitation.mode, "select");
+            assert_eq!(elicitation.options.len(), 3, "{tool} choices");
             let request_id = snapshot.pending_permissions[0].request_id.clone();
+            let option_id = format!(
+                "{REMOTE_ELICITATION_ACCEPT_PREFIX}{}",
+                serde_json::to_string(&BTreeMap::from([(
+                    NATIVE_MCP_APPROVAL_PROPERTY.to_string(),
+                    ElicitationContentValue::String(choice.to_string()),
+                )]))
+                .expect("serialize response")
+            );
 
             handle_server_remote_event(
                 UiEvent::RemotePermissionDecision {
                     request_id,
-                    option_id: choice.to_string(),
+                    option_id,
                 },
                 &mut pending,
             );
@@ -6146,7 +6389,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn top_level_subagent_mcp_approval_decline_forwards_and_cleans_up() {
+    async fn elicitation_cancel_forwards_and_cleans_up() {
         let tracker =
             RemoteSessionTracker::new_disconnected("project".to_string(), "primary".to_string());
         tracker.observe_event(&UiEvent::SessionStarted {
@@ -6172,12 +6415,12 @@ mod tests {
         handle_server_remote_event(
             UiEvent::RemotePermissionDecision {
                 request_id,
-                option_id: "decline".to_string(),
+                option_id: REMOTE_ELICITATION_CANCEL.to_string(),
             },
             &mut pending,
         );
         assert!(pending.is_empty());
-        assert!(matches!(rx.await, Ok(ElicitationOutcome::Decline)));
+        assert!(matches!(rx.await, Ok(ElicitationOutcome::Cancel)));
         assert!(
             tracker
                 .state
@@ -6190,103 +6433,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn native_mcp_approval_accepts_exact_known_tool_identities() {
-        for message in [
-            "MCP approval for mcp.mj-subagents.create_subagent",
-            "MCP approval for mcp.mj-subagents.subagent_cancel",
-            "MCP approval for mcp__mj_subagents__create_subagent",
-            "MCP approval for mcp__mj_subagents__subagent_cancel",
-        ] {
-            let (prompt, _) = mcp_approval_prompt(message, native_mcp_approval_schema());
-            assert!(is_native_injected_mcp_approval(&prompt), "{message}");
-        }
-    }
-
-    #[test]
-    fn native_mcp_approval_rejects_wrong_values_extra_fields_and_non_server_tokens() {
-        let extra_field = native_mcp_approval_schema().string("extra", false);
-        let (prompt, _) = mcp_approval_prompt(
-            "MCP approval for mcp__mj_subagents__create_subagent",
-            extra_field,
-        );
-        assert!(!is_native_injected_mcp_approval(&prompt));
-
-        let mut wrong_values = native_mcp_approval_schema();
-        let ElicitationPropertySchema::String(approval) = wrong_values
-            .properties
-            .get_mut(NATIVE_MCP_APPROVAL_PROPERTY)
-            .expect("persist property")
-        else {
-            panic!("persist property is a string schema");
-        };
-        approval.one_of.as_mut().expect("persist choices")[1].value = "forever".to_string();
-        let (prompt, _) = mcp_approval_prompt(
-            "MCP approval for mcp__mj_subagents__create_subagent",
-            wrong_values,
-        );
-        assert!(!is_native_injected_mcp_approval(&prompt));
-
-        let mut optional_persist = native_mcp_approval_schema();
-        optional_persist.required = Some(Vec::new());
-        let (prompt, _) = mcp_approval_prompt(
-            "MCP approval for mcp__mj_subagents__create_subagent",
-            optional_persist,
-        );
-        assert!(!is_native_injected_mcp_approval(&prompt));
-
-        for message in [
-            "MCP approval for xmcp__mj_subagents__create_subagent",
-            "MCP approval for mcp__mj-subagents__create_subagent",
-            "MCP approval for mcp__mj_subagents__create-subagent",
-            "MCP approval for mcp__mj__subagents__create_subagent",
-            "MCP approval for mcp__mj_subagents_extra__create_subagent",
-            "MCP approval for mcp__mj-subagents-extra__create_subagent",
-            "MCP approval for mcp__mj-subagents___create_subagent",
-            "MCP approval for mj-subagents.extra",
-            "MCP approval for mj-subagents-extra",
-            "MCP approval for mcp.mj-subagents-extra.create_subagent",
-            "MCP approval for mcp.mj-subagents.extra",
-            "MCP approval for mcp.mj-subagents.a_future_top_level_subagent_operation",
-            "MCP approval for mcp.mj-subagents.create_subagent.extra",
-            "MCP approval for mcp.mj-subagents.create_subagent_extra",
-            "MCP approval for mcp__mj-subagents__a_future_top_level_subagent_operation",
-            "MCP approval for mcp__mj-subagents__create_subagent_extra",
-            "MCP approval for mcp__mj-subagents__create_subagent__extra",
-            "MCP approval for mcp__mj_subagents__a_future_top_level_subagent_operation",
-            "MCP approval for mcp__mj_subagents__create_subagent_extra",
-            "MCP approval for mcp__mj_subagents__create_subagent__extra",
-            "MCP approval for mj-subagents",
-            "MCP approval mentions mcp__mj_subagents__create_subagent_extra",
-            "MCP approval for mcp__MJ-subagents__create_subagent",
-        ] {
-            let (prompt, _) = mcp_approval_prompt(message, native_mcp_approval_schema());
-            assert!(!is_native_injected_mcp_approval(&prompt), "{message}");
-        }
-    }
-
-    #[test]
-    fn native_mcp_approval_allows_option_labels_and_metadata() {
-        let mut altered_label = native_mcp_approval_schema();
-        let ElicitationPropertySchema::String(approval) = altered_label
-            .properties
-            .get_mut(NATIVE_MCP_APPROVAL_PROPERTY)
-            .expect("persist property")
-        else {
-            panic!("persist property is a string schema");
-        };
-        approval.one_of.as_mut().expect("persist choices")[0].title = "Allow this time".to_string();
-        approval.meta = Some(serde_json::Map::new());
-        approval.one_of.as_mut().expect("persist choices")[0].meta = Some(serde_json::Map::new());
-        let (prompt, _) = mcp_approval_prompt(
-            "MCP approval for mcp__mj_subagents__create_subagent",
-            altered_label,
-        );
-        assert!(is_native_injected_mcp_approval(&prompt));
-    }
-
-    #[test]
-    fn nested_subagent_elicitation_is_declined_without_a_remote_card() {
+    #[tokio::test]
+    async fn nested_subagent_elicitation_is_published_for_the_remote_viewer() {
         let tracker =
             RemoteSessionTracker::new_disconnected("project".to_string(), "primary".to_string());
         tracker.observe_event(&UiEvent::SessionStarted {
@@ -6308,18 +6456,24 @@ mod tests {
             &mut pending,
         );
 
-        assert!(pending.is_empty());
+        assert_eq!(pending.len(), 1);
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(snapshot.pending_permissions.len(), 1);
+        assert!(snapshot.pending_permissions[0].elicitation.is_some());
         assert!(
-            tracker
-                .state
-                .lock()
-                .expect("state")
-                .snapshot()
-                .expect("snapshot")
-                .pending_permissions
-                .is_empty()
+            snapshot.pending_permissions[0]
+                .request_id
+                .starts_with("elicitation:subagent-1:")
         );
-        assert!(matches!(rx.try_recv(), Ok(ElicitationOutcome::Decline)));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -7663,6 +7817,7 @@ mod tests {
                 request_id: "call-1".to_string(),
                 title: "run command".to_string(),
                 options: Vec::new(),
+                elicitation: None,
                 requested_at: "2026-06-10T09:59:30Z".to_string(),
             }],
             ..session_named("sess-approval", "2026-06-10T09:59:00Z")
@@ -8659,6 +8814,7 @@ mod tests {
                 request_id: "call-1".to_string(),
                 title: "run something".to_string(),
                 options: Vec::new(),
+                elicitation: None,
                 requested_at: "2026-06-10T10:00:01Z".to_string(),
             }],
             ..session_named("sess-1", "2026-06-10T10:00:01Z")
@@ -8764,6 +8920,7 @@ mod tests {
                 label: "Allow".to_string(),
                 kind: "allow_once".to_string(),
             }],
+            elicitation: None,
             requested_at: "2026-06-10T10:00:00Z".to_string(),
         };
         let session = SessionRecord {
