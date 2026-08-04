@@ -2902,6 +2902,7 @@ fn start_server_agent_session(
             &config_path,
             &resolved.primary.launch.source_id,
             &resolved.primary.model.model,
+            config::SessionConfigSeat::Primary,
         )
     });
     let project_label = crate::paths::project_label_from_cwd(&cwd);
@@ -4277,7 +4278,14 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     let config = &editor.config;
     let inventory = editor.inventory();
 
-    let roles = crate::settings::ROLE_DESCRIPTIONS
+    // Mirrors the TUI's seat labels; settings.rs no longer exports them
+    // since #590 split its Agents/Subagents panels.
+    const ROLE_DESCRIPTIONS: [(&str, &str); 3] = [
+        ("Agent", "primary model; plans, implements, and answers"),
+        ("Review", "supervisor model for discrete review"),
+        ("Subagents", "default model for create_subagent delegations"),
+    ];
+    let roles = ROLE_DESCRIPTIONS
         .iter()
         .enumerate()
         .map(|(index, (label, description))| {
