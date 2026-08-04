@@ -320,6 +320,21 @@ input.on("line", (line) => {
       update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: primaryReviewResult() } });
       send({ id: promptRequestId, result: { stopReason: "end_turn" } });
       promptRequestId = null;
+    } else if (mode === "terminal-output") {
+      update({ sessionUpdate: "tool_call", toolCallId: "hostile-terminal", title: "terminal normalization fixture", kind: "execute", status: "in_progress", content: [{ type: "terminal", terminalId: "hostile-terminal" }] });
+      update({ sessionUpdate: "tool_call_update", toolCallId: "hostile-terminal", _meta: {
+        terminal_output_delta: { terminal_id: "hostile-terminal", data: "ansi \u001b[3" },
+      } });
+      update({ sessionUpdate: "tool_call_update", toolCallId: "hostile-terminal", _meta: {
+        terminal_output_delta: { terminal_id: "hostile-terminal", data: "1mred\u001b[0m\nprogress 10%\rprogress 100%\nold value\rnew\u001b[K\n\u001b]0;HOSTILE_OSC" },
+      } });
+      update({ sessionUpdate: "tool_call_update", toolCallId: "hostile-terminal", status: "completed", _meta: {
+        terminal_output_delta: { terminal_id: "hostile-terminal", data: " TITLE\u001b\\\u001bPHOSTILE_DCS\u001b\\\u001b[4;2Hplaced\u001b[?25l\u001b[?25h\u001b[5;1HSAFE_TERMINAL_TAIL" },
+        terminal_exit: { terminal_id: "hostile-terminal", exit_code: 0, signal: null },
+      } });
+      update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "TERMINAL_E2E_DONE" } });
+      send({ id: promptRequestId, result: { stopReason: "end_turn" } });
+      promptRequestId = null;
     } else if (mode === "no-change") {
       finishPrimary("PRIMARY NO CHANGE");
     } else {

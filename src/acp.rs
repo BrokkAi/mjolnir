@@ -3614,6 +3614,7 @@ struct TerminalOutputBuffer {
     output: String,
     truncated: bool,
     limit: usize,
+    terminal: crate::terminal_output::TerminalText,
 }
 
 impl TerminalOutputBuffer {
@@ -3622,18 +3623,29 @@ impl TerminalOutputBuffer {
             output: String::new(),
             truncated: false,
             limit,
+            terminal: crate::terminal_output::TerminalText::new(limit),
         }
     }
 
     fn append(&mut self, bytes: &[u8]) {
-        self.output.push_str(&String::from_utf8_lossy(bytes));
-        self.truncate_to_limit();
+        self.terminal.push(bytes);
+        self.refresh_output();
     }
 
     fn replace(&mut self, text: &str) {
-        self.output.clear();
-        self.output.push_str(text);
-        self.truncated = false;
+        self.terminal.reset();
+        self.terminal.push(text.as_bytes());
+        self.refresh_output();
+    }
+
+    fn finish(&mut self) {
+        self.terminal.finish();
+        self.refresh_output();
+    }
+
+    fn refresh_output(&mut self) {
+        self.output = self.terminal.render();
+        self.truncated = self.terminal.truncated();
         self.truncate_to_limit();
     }
 
@@ -3712,6 +3724,7 @@ impl TerminalMetadataBridge {
                 .terminals
                 .entry((session_id.clone(), terminal_id.clone()))
                 .or_default();
+            state.output.finish();
             state.exit_status = Some(exit_status);
             touched.insert(terminal_id);
         }
@@ -4160,7 +4173,8 @@ async fn wait_terminal_child(
     }
     let _ = exit_tx.send(Some(status.clone()));
     let snapshot = {
-        let output = output.lock().await;
+        let mut output = output.lock().await;
+        output.finish();
         TerminalOutputSnapshot {
             terminal_id,
             output: output.output.clone(),
@@ -5445,6 +5459,8 @@ mod tests {
         atomic::{AtomicBool as StdAtomicBool, AtomicUsize, Ordering},
     };
     use std::time::Duration;
+    #[cfg(windows)]
+    use tokio::io::AsyncWriteExt as _;
     use tokio::io::split;
 
     #[test]
@@ -6282,6 +6298,27 @@ mod tests {
     }
 
     #[test]
+    fn terminal_output_buffer_normalizes_split_controls_and_utf8() {
+        let mut buffer = TerminalOutputBuffer::new(1024);
+        buffer.append(b"safe \x1b[3");
+        buffer.append(b"1mred\x1b[0m ");
+        buffer.append(&[0xc3]);
+        buffer.append(&[0xa9]);
+        buffer.append(b"\x1b]0;hostile");
+        buffer.append(b" title\x1b\\ tail");
+        buffer.finish();
+
+        assert_eq!(buffer.output, "safe red é tail");
+        assert!(!buffer.output.contains('\u{1b}'));
+        assert!(
+            buffer
+                .output
+                .chars()
+                .all(|ch| ch == '\n' || !ch.is_control())
+        );
+    }
+
+    #[test]
     fn terminal_metadata_bridge_merges_deltas_and_exit_status() {
         fn update(meta: serde_json::Value) -> SessionUpdate {
             SessionUpdate::ToolCallUpdate(
@@ -6314,6 +6351,48 @@ mod tests {
         let status = completed[0].exit_status.as_ref().expect("exit status");
         assert_eq!(status.exit_code, Some(7));
         assert_eq!(status.signal, None);
+    }
+
+    #[test]
+    fn terminal_metadata_bridge_normalizes_controls_split_across_deltas() {
+        fn update(meta: serde_json::Value) -> SessionUpdate {
+            SessionUpdate::ToolCallUpdate(
+                ToolCallUpdate::new("tool-1", ToolCallUpdateFields::new())
+                    .meta(meta.as_object().expect("metadata object").clone()),
+            )
+        }
+
+        let session_id = SessionId::new("session-1");
+        let mut bridge = TerminalMetadataBridge::default();
+        let first = bridge.observe(
+            &session_id,
+            &update(serde_json::json!({
+                "terminal_output_delta": {"terminal_id": "tool-1", "data": "safe \u{001b}[3"}
+            })),
+        );
+        assert_eq!(first[0].output, "safe");
+
+        let second = bridge.observe(
+            &session_id,
+            &update(serde_json::json!({
+                "terminal_output_delta": {
+                    "terminal_id": "tool-1",
+                    "data": "1mred\u{001b}]0;hostile title"
+                }
+            })),
+        );
+        assert_eq!(second[0].output, "safe red");
+
+        let completed = bridge.observe(
+            &session_id,
+            &update(serde_json::json!({
+                "terminal_output_delta": {"terminal_id": "tool-1", "data": "\u{001b}\\ tail"},
+                "terminal_exit": {"terminal_id": "tool-1", "exit_code": 0}
+            })),
+        );
+        assert_eq!(completed[0].output, "safe red tail");
+        assert!(!completed[0].output.contains('\u{1b}'));
+        assert!(completed[0].exit_status.is_some());
     }
 
     #[test]
@@ -6407,6 +6486,42 @@ mod tests {
             )),
             "expected at least one terminal output UI event"
         );
+    }
+
+    #[tokio::test]
+    async fn local_terminal_stream_normalizes_hostile_control_bytes() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        let output = Arc::new(Mutex::new(TerminalOutputBuffer::new(1024)));
+        let reader_output = output.clone();
+        let reader_task = tokio::spawn(read_terminal_stream(
+            reader,
+            "term-1".to_string(),
+            reader_output,
+            ui_tx,
+            None,
+        ));
+
+        writer
+            .write_all(b"progress 10%\rprogress 90%\x1b[31m red\x1b[0m")
+            .await
+            .expect("write terminal data");
+        writer
+            .write_all(b"\x1b]0;hostile title\x07\ncomplete")
+            .await
+            .expect("write terminal data");
+        writer.shutdown().await.expect("shutdown terminal data");
+        reader_task.await.expect("join terminal reader");
+
+        let mut output = output.lock().await;
+        output.finish();
+        assert_eq!(output.output, "progress 90% red\ncomplete");
+        assert!(!output.output.contains('\u{1b}'));
+        let snapshots = std::iter::from_fn(|| ui_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(snapshots.iter().all(|event| match event {
+            UiEvent::TerminalOutput(snapshot) => !snapshot.output.contains('\u{1b}'),
+            _ => true,
+        }));
     }
 
     #[tokio::test]

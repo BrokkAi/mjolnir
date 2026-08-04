@@ -124,6 +124,15 @@ if {$mode eq "parallel"} {
         -re {PRIMARY.*NO.*CHANGE} { after 500; send_ctrl_c }
         timeout { exit 35 }
     }
+} elseif {$mode eq "terminal-output"} {
+    expect {
+        -re {SAFE_TERMINAL_TAIL} {}
+        timeout { exit 45 }
+    }
+    expect {
+        -re {TERMINAL_E2E_DONE} { after 500; send_ctrl_c }
+        timeout { exit 46 }
+    }
 } elseif {$mode eq "details"} {
     expect {
         -re {details hidden} {}

@@ -51,10 +51,10 @@ run_case() {
   printf '{"OPENAI_API_KEY":"e2e-test-key"}\n' >"$root/home/.codex/auth.json"
   cp "$repo/src/deepswe_snapshot.json" "$root/home/.cache/mj/deepswe-v1.1.json"
   cp "$repo/src/deepswe_snapshot.json" "$root/home/Library/Caches/mj/deepswe-v1.1.json"
-  # The version line is load-bearing: a config without a current version is
-  # treated as "not onboarded yet" and mj opens first-startup settings instead
-  # of a session, so the pinned subagent model would never apply either.
-  config="version = 3\n\n[agent]\nreasoning_effort = \"high\"\n\n[subagents]\nmodel = \"gpt-5-6-luna\"\nreasoning_effort = \"high\"\n"
+  # Both version markers are load-bearing: stale schema starts fresh, while
+  # stale onboarding content opens the product-update card instead of a
+  # session, so the pinned fixture routes would never run.
+  config="version = 3\nonboarding_version = 2\n\n[agent]\nreasoning_effort = \"high\"\n\n[subagents]\nmodel = \"gpt-5-6-luna\"\nreasoning_effort = \"high\"\n"
   printf '%b' "$config" >"$root/home/.config/mj/config.toml"
   printf '%b' "$config" >"$root/home/Library/Application Support/mj/config.toml"
 
@@ -131,6 +131,17 @@ run_case() {
     grep -a 'Agents · primary' "$root/transcript.log" >/dev/null
     test ! -e "$root/primary-result.json"
     grep -a "PRIMARY.*NO.*CHANGE" "$root/transcript.log" >/dev/null
+  elif [ "$mode" = terminal-output ]; then
+    grep -a 'Agents · primary' "$root/transcript.log" >/dev/null
+    grep -a 'ansi red' "$root/transcript.log" >/dev/null
+    grep -a 'progress 100%' "$root/transcript.log" >/dev/null
+    grep -a 'placed' "$root/transcript.log" >/dev/null
+    grep -a 'SAFE_TERMINAL_TAIL' "$root/transcript.log" >/dev/null
+    grep -a 'TERMINAL_E2E_DONE' "$root/transcript.log" >/dev/null
+    if grep -a 'HOSTILE_OSC\|HOSTILE_DCS' "$root/transcript.log" >/dev/null; then
+      echo "terminal control payload leaked into the transcript" >&2
+      exit 1
+    fi
   elif [ "$mode" = parallel ]; then
     grep -a 'Agents · primary' "$root/transcript.log" >/dev/null
     test "$(grep -ac '^session-directive:' "$root/primary.log")" -eq 1
@@ -263,11 +274,12 @@ case ${MJ_E2E_CASE:-both} in
   failed) run_case failed ;;
   unsupported) run_case unsupported ;;
   no-change) run_case no-change ;;
+  terminal-output) run_case terminal-output ;;
   review) run_case review ;;
   details) run_case details ;;
   parallel) run_case parallel ;;
-  both) run_case complete; run_case cancel; run_case unsupported ;;
-  subagents) run_case complete; run_case no-change; run_case inline-stream; run_case cancel; run_case failed; run_case unsupported; run_case review; run_case details; run_case parallel ;;
-  *) echo "MJ_E2E_CASE must be complete, no-change, inline-stream, cancel, failed, unsupported, review, details, parallel, both, or subagents" >&2; exit 2 ;;
+  both) run_case complete; run_case terminal-output; run_case cancel; run_case unsupported ;;
+  subagents) run_case complete; run_case no-change; run_case terminal-output; run_case inline-stream; run_case cancel; run_case failed; run_case unsupported; run_case review; run_case details; run_case parallel ;;
+  *) echo "MJ_E2E_CASE must be complete, no-change, terminal-output, inline-stream, cancel, failed, unsupported, review, details, parallel, both, or subagents" >&2; exit 2 ;;
 esac
 echo "deterministic subagent PTY E2E passed"

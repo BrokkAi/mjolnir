@@ -8722,6 +8722,7 @@ fn push_tool_markdown_lines_limited(
 enum ToolOutputHidden {
     Lines(usize),
     Details,
+    EarlierTerminalOutput,
 }
 
 fn tool_output_preview(
@@ -8773,6 +8774,36 @@ fn tool_output_preview(
         ToolOutputHidden::Lines(total_lines.saturating_sub(line_limit))
     };
     (preview, Some(hidden))
+}
+
+fn terminal_output_preview(
+    text: &str,
+    collapse_limit: Option<usize>,
+) -> (String, Option<ToolOutputHidden>) {
+    let Some(line_limit) = collapse_limit else {
+        return (text.to_string(), None);
+    };
+    let lines = text.split('\n').collect::<Vec<_>>();
+    let first_visible = lines.len().saturating_sub(line_limit);
+    let tail = lines[first_visible..].join("\n");
+    let tail_chars = tail.chars().count();
+    if first_visible == 0 && tail_chars <= TOOL_OUTPUT_COLLAPSED_CHARS {
+        return (tail, None);
+    }
+    if tail_chars <= TOOL_OUTPUT_COLLAPSED_CHARS {
+        return (tail, Some(ToolOutputHidden::Lines(first_visible)));
+    }
+
+    let mut preview = tail
+        .chars()
+        .rev()
+        .take(TOOL_OUTPUT_COLLAPSED_CHARS)
+        .collect::<Vec<_>>();
+    preview.reverse();
+    (
+        preview.into_iter().collect(),
+        Some(ToolOutputHidden::EarlierTerminalOutput),
+    )
 }
 
 fn push_markdown_lines_limited_inner(
@@ -9542,17 +9573,17 @@ fn push_tool_text_lines(
     collapse_limit: Option<usize>,
     theme: TerminalTheme,
 ) {
-    let (preview, hidden) = tool_output_preview(&text, collapse_limit);
+    let (preview, hidden) = terminal_output_preview(&text, collapse_limit);
     let prefix = " ".repeat(indent);
+    if let Some(hidden) = hidden {
+        push_tool_collapse_hint(out, indent, hidden, theme);
+    }
     for raw in preview.split('\n') {
         let line = format!("{prefix}{raw}");
         out.push(Line::from(Span::styled(
             line,
             tool_output_line_style(raw, theme),
         )));
-    }
-    if let Some(hidden) = hidden {
-        push_tool_collapse_hint(out, indent, hidden, theme);
     }
 }
 
@@ -9568,6 +9599,17 @@ fn push_tool_collapse_hint(
             let prefix = " ".repeat(indent);
             out.push(Line::from(Span::styled(
                 format!("{prefix}… details hidden · Ctrl-T full transcript · Alt-T latest tool"),
+                Style::default()
+                    .fg(theme.muted)
+                    .add_modifier(Modifier::ITALIC),
+            )));
+        }
+        ToolOutputHidden::EarlierTerminalOutput => {
+            let prefix = " ".repeat(indent);
+            out.push(Line::from(Span::styled(
+                format!(
+                    "{prefix}… earlier terminal output hidden · Ctrl-T full transcript · Alt-T latest tool"
+                ),
                 Style::default()
                     .fg(theme.muted)
                     .add_modifier(Modifier::ITALIC),
@@ -21008,16 +21050,16 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>();
         assert!(
-            !collapsed
+            collapsed
                 .iter()
                 .any(|line| line.contains("ONE_LINE_SUFFIX"))
         );
-        assert!(collapsed.iter().any(|line| line.contains("details hidden")));
         assert!(
-            !collapsed
+            collapsed
                 .iter()
-                .any(|line| line.contains("terminal output"))
+                .any(|line| line.contains("earlier terminal output hidden"))
         );
+        assert!(!collapsed.iter().any(|line| line.contains("term-1")));
 
         state.expand_transcript_details = true;
         let expanded_lines = render_transcript_lines(&state, 80);
@@ -21036,8 +21078,46 @@ mod tests {
             !expanded
                 .iter()
                 .map(|line| line_text(line))
-                .any(|line| line.contains("details hidden"))
+                .any(|line| line.contains("terminal output hidden"))
         );
+    }
+
+    #[test]
+    fn terminal_output_preview_keeps_the_latest_lines_and_characters() {
+        let lines = (1..=20)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (line_preview, hidden) =
+            terminal_output_preview(&lines, Some(TOOL_OUTPUT_COLLAPSED_LINES));
+        assert!(!line_preview.contains("line 1\n"));
+        assert!(line_preview.ends_with("line 20"));
+        assert_eq!(
+            hidden,
+            Some(ToolOutputHidden::Lines(20 - TOOL_OUTPUT_COLLAPSED_LINES))
+        );
+
+        let one_line = format!("{}LATEST_SUFFIX", "x".repeat(900));
+        let (char_preview, hidden) =
+            terminal_output_preview(&one_line, Some(TOOL_OUTPUT_COLLAPSED_LINES));
+        assert_eq!(char_preview.chars().count(), TOOL_OUTPUT_COLLAPSED_CHARS);
+        assert!(char_preview.ends_with("LATEST_SUFFIX"));
+        assert_eq!(hidden, Some(ToolOutputHidden::EarlierTerminalOutput));
+
+        let mut repaint_stream = String::new();
+        for step in 0..1_000 {
+            repaint_stream.push_str(&format!("progress {step}\r"));
+        }
+        repaint_stream.push_str("complete FINAL_REPAINT");
+        assert!(repaint_stream.chars().count() > TOOL_OUTPUT_COLLAPSED_CHARS);
+        let mut terminal = crate::terminal_output::TerminalText::new(4096);
+        terminal.push(repaint_stream.as_bytes());
+        terminal.finish();
+        let normalized = terminal.render();
+        let (preview, hidden) =
+            terminal_output_preview(&normalized, Some(TOOL_OUTPUT_COLLAPSED_LINES));
+        assert_eq!(preview, "complete FINAL_REPAINT");
+        assert_eq!(hidden, None);
     }
 
     #[test]
@@ -22006,6 +22086,75 @@ mod tests {
             !rendered.iter().any(|line| line.contains("call_q403")),
             "terminal ids should not leak into user-facing transcript rows: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn transcript_terminal_views_and_export_use_normalized_text() {
+        let mut hostile = (1..=20)
+            .map(|line| format!("\x1b[31mline {line}\x1b[0m"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        hostile.push_str(concat!(
+            "\nprogress 10%\rprogress 100%",
+            "\x1b]0;hostile title\x07",
+            "\x1b[19;2Hplaced\x1b[2K\x1b[?25l\x1b[?25h",
+            "\x1b[22;1Hsafe tail"
+        ));
+        let mut terminal = crate::terminal_output::TerminalText::new(4096);
+        terminal.push(hostile.as_bytes());
+        terminal.finish();
+
+        let mut state = AppState::new();
+        state.tool_calls.insert(
+            "call-1".to_string(),
+            crate::app::ToolCallView {
+                title: "hostile terminal".to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Terminal {
+                    terminal_id: "term-1".to_string(),
+                    output: terminal.render(),
+                    truncated: terminal.truncated(),
+                    exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+                }],
+            },
+        );
+        state.transcript.push(Entry::ToolCall("call-1".to_string()));
+
+        let collapsed = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(collapsed.iter().any(|line| line.contains("line 20")));
+        assert!(collapsed.iter().any(|line| line.contains("progress 100%")));
+        assert!(
+            collapsed
+                .iter()
+                .flat_map(|line| line.chars())
+                .all(|ch| ch == '\n' || !ch.is_control())
+        );
+
+        state.expand_transcript_details = true;
+        let expanded = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(expanded.iter().any(|line| line.contains("line 1")));
+        assert!(!expanded.iter().any(|line| line.contains("hostile title")));
+        assert!(
+            expanded
+                .iter()
+                .flat_map(|line| line.chars())
+                .all(|ch| ch == '\n' || !ch.is_control())
+        );
+
+        let export = transcript_export_markdown(&state);
+        assert!(export.contains("safe tail"));
+        assert!(!export.contains("hostile title"));
+        assert!(!export.contains('\u{1b}'));
+        for fragment in ["[19;2H", "[2K", "[?25l", "[?25h", "[31m"] {
+            assert!(!export.contains(fragment), "fragment leaked: {fragment}");
+        }
     }
 
     #[test]

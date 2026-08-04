@@ -52,6 +52,7 @@ mod subagent;
 mod subscription;
 mod tailscale;
 mod term;
+mod terminal_output;
 mod termination;
 mod text;
 mod theme;
