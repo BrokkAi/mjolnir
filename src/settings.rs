@@ -100,7 +100,7 @@ struct InstallingServer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PrioritySeat {
+pub(crate) enum PrioritySeat {
     Primary,
     Review,
     Subagents,
@@ -179,6 +179,13 @@ impl SettingsEditor {
     pub fn with_active_session_config(mut self, options: Vec<SessionConfigOption>) -> Self {
         self.active_session_config = options;
         self
+    }
+
+    /// Discovered ACP inventory backing the editor's server and session rows.
+    /// The remote-control server projects it into the web `/mjconfig` panel so
+    /// both UIs describe the same servers with the same status strings.
+    pub(crate) fn inventory(&self) -> &AcpInventory {
+        &self.inventory
     }
 
     pub fn handle_key(&mut self, code: KeyCode) -> SettingsAction {
@@ -703,7 +710,7 @@ impl SettingsEditor {
         }
     }
 
-    fn model_choices(&self, role: usize) -> Vec<String> {
+    pub(crate) fn model_choices(&self, role: usize) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut choices = vec!["auto".to_string()];
         seen.insert("auto".to_string());
@@ -727,7 +734,7 @@ impl SettingsEditor {
         }
     }
 
-    fn source(&self, seat: PrioritySeat) -> &Option<String> {
+    pub(crate) fn source(&self, seat: PrioritySeat) -> &Option<String> {
         match seat {
             PrioritySeat::Primary => &self.config.agent.acp_source,
             PrioritySeat::Review => &self.config.review.acp_source,
@@ -767,7 +774,7 @@ impl SettingsEditor {
         }
     }
 
-    fn effective_priority(&self, seat: PrioritySeat) -> Vec<String> {
+    pub(crate) fn effective_priority(&self, seat: PrioritySeat) -> Vec<String> {
         let mut priority = self.priority(seat).clone();
         for server in &self.inventory.servers {
             if !priority.contains(&server.id) {
@@ -865,7 +872,7 @@ impl SettingsEditor {
         )
     }
 
-    fn staged_model_detail(&self, model: &str) -> String {
+    pub(crate) fn staged_model_detail(&self, model: &str) -> String {
         if model == "auto" {
             return "automatic selection".to_string();
         }
@@ -895,7 +902,7 @@ impl SettingsEditor {
         }
     }
 
-    fn active_model_detail(&self, role: usize) -> String {
+    pub(crate) fn active_model_detail(&self, role: usize) -> String {
         let Some(models) = self.active_models.as_ref() else {
             return "not running".to_string();
         };
@@ -1336,7 +1343,7 @@ pub fn draw_settings_panel(
     );
 }
 
-fn session_option_choices(option: &SessionConfigOption) -> Vec<(String, String)> {
+pub(crate) fn session_option_choices(option: &SessionConfigOption) -> Vec<(String, String)> {
     let SessionConfigKind::Select(select) = &option.kind else {
         return Vec::new();
     };
@@ -1354,7 +1361,7 @@ fn session_option_choices(option: &SessionConfigOption) -> Vec<(String, String)>
     }
 }
 
-fn session_option_current_value(option: &SessionConfigOption) -> String {
+pub(crate) fn session_option_current_value(option: &SessionConfigOption) -> String {
     match &option.kind {
         SessionConfigKind::Select(select) => select.current_value.to_string(),
         _ => String::new(),

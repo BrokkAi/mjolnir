@@ -29,6 +29,18 @@ impl AuthVendor {
             Self::Kimi => "Kimi Code, Anvil",
         }
     }
+
+    /// Stable wire identifier used by the remote-control API.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Kimi => "kimi",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|vendor| vendor.id() == id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +221,31 @@ fn is_executable_file(path: &Path) -> bool {
     {
         true
     }
+}
+
+/// Login invocation for contexts without an interactive terminal (the remote
+/// viewer's sign-in runs the command server-side and streams its output to the
+/// browser). OpenAI always uses the device-auth flow there: `codex login`
+/// without it wants to open a local browser, which a headless server can't.
+pub async fn headless_login_invocation(vendor: AuthVendor) -> Result<(PathBuf, Vec<String>)> {
+    let command = match vendor {
+        AuthVendor::Kimi => match executable(vendor) {
+            Some(command) => command,
+            None => crate::kimi::wait_until_ready().await?,
+        },
+        _ => executable(vendor).with_context(|| {
+            format!(
+                "{} CLI is not installed; run `{}`",
+                vendor.label(),
+                install_hint(vendor)
+            )
+        })?,
+    };
+    let args = match vendor {
+        AuthVendor::OpenAi => vec!["login".to_string(), "--device-auth".to_string()],
+        AuthVendor::Kimi => vec!["login".to_string()],
+    };
+    Ok((command, args))
 }
 
 pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {

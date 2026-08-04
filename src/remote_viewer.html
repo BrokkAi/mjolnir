@@ -2365,6 +2365,334 @@
         font: 400 11px/1.4 var(--font-mono);
       }
 
+      /* ---- /mjconfig configuration editor modal ---- */
+
+      .mjconfig-panel {
+        width: min(880px, 100%);
+        max-height: min(860px, 100%);
+        /* Make the panel the containing block for the fixed-position combo
+           sheet, so it stays inside the panel's clip-path (which also bounds
+           hit-testing) instead of escaping to the blurred backdrop. */
+        transform: translateZ(0);
+      }
+
+      .mjconfig-open-button {
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 0;
+        background: transparent;
+        padding: 5px 2px;
+        color: var(--text-control);
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        cursor: pointer;
+
+        &:hover {
+          color: var(--button-hover-text);
+        }
+      }
+
+      .mjconfig-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 10px;
+      }
+
+      .mjconfig-tab {
+        border: 0;
+        background: transparent;
+        padding: 6px 8px;
+        color: var(--dim);
+        font: 700 11px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        cursor: pointer;
+
+        &.is-active {
+          color: var(--red-hot);
+          box-shadow: inset 0 -2px 0 var(--red);
+        }
+
+        &:hover {
+          color: var(--button-hover-text);
+        }
+      }
+
+      .mjconfig-body {
+        flex: 1;
+        min-height: 240px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding-right: 4px;
+      }
+
+      .mjconfig-note {
+        color: var(--dim);
+        font: 400 11px/1.5 var(--font-mono);
+      }
+
+      .mjconfig-section-title {
+        color: var(--dim);
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        padding-top: 4px;
+      }
+
+      .mjconfig-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 12px;
+      }
+
+      .mjconfig-row-label {
+        flex: none;
+        min-width: 150px;
+        color: var(--text-control);
+        font: 700 11px/1.4 var(--font-mono);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .mjconfig-row-detail {
+        flex-basis: 100%;
+        color: var(--dim);
+        font: 400 10.5px/1.5 var(--font-mono);
+        word-break: break-word;
+      }
+
+      .mjconfig-toggle {
+        border: 1px solid var(--line-control);
+        background: transparent;
+        padding: 5px 12px;
+        color: var(--text-control);
+        font: 700 11px/1 var(--font-mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        cursor: pointer;
+
+        &.is-on {
+          color: var(--red-hot);
+          border-color: rgb(235 63 51 / 0.6);
+        }
+      }
+
+      .mjconfig-stepper {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+
+        & button {
+          border: 1px solid var(--line-control);
+          background: transparent;
+          width: 26px;
+          height: 26px;
+          color: var(--text-control);
+          font: 700 13px/1 var(--font-mono);
+          cursor: pointer;
+        }
+
+        & span {
+          min-width: 26px;
+          text-align: center;
+          color: var(--text-control);
+          font: 700 12px/1 var(--font-mono);
+        }
+      }
+
+      .mjconfig-priority-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .mjconfig-priority-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 6px;
+        border-left: 2px solid var(--line-control);
+        color: var(--text-control);
+        font: 400 12px/1.4 var(--font-mono);
+
+        & .mjconfig-priority-id {
+          color: var(--dim);
+          font-size: 10.5px;
+        }
+
+        & button {
+          border: 1px solid var(--line-control);
+          background: transparent;
+          width: 24px;
+          height: 24px;
+          color: var(--text-control);
+          font: 700 12px/1 var(--font-mono);
+          cursor: pointer;
+
+          &:disabled {
+            opacity: 0.35;
+            cursor: default;
+          }
+        }
+      }
+
+      .mjconfig-move-group {
+        margin-left: auto;
+        display: inline-flex;
+        gap: 4px;
+      }
+
+      .mjconfig-spinner-preview {
+        color: var(--red-hot);
+        font: 700 13px/1 var(--font-mono);
+        white-space: pre;
+      }
+
+      .mjconfig-login-output {
+        margin: 0;
+        max-height: 180px;
+        overflow-y: auto;
+        padding: 8px 10px;
+        border: 1px solid var(--line-control);
+        background: var(--bg);
+        color: var(--text-control);
+        font: 400 11px/1.5 var(--font-mono);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .mjconfig-login-link {
+        color: var(--red-hot);
+        font: 700 12px/1.4 var(--font-mono);
+        word-break: break-all;
+      }
+
+      .mjconfig-catalog-filter {
+        width: 100%;
+        border: 1px solid var(--line-control);
+        background: var(--bg);
+        color: var(--text);
+        caret-color: var(--red);
+        padding: 7px 9px;
+        font: 400 12px/1.4 var(--font-mono);
+
+        &:focus-visible {
+          outline: none;
+          border-color: rgb(235 63 51 / 0.6);
+        }
+      }
+
+      .mjconfig-catalog-item {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 4px 10px;
+        padding: 6px 8px;
+        border-left: 2px solid transparent;
+        cursor: pointer;
+
+        &:hover {
+          background: rgb(235 63 51 / 0.08);
+          border-left-color: var(--red);
+        }
+
+        & .mjconfig-catalog-name {
+          color: var(--text-control);
+          font: 700 12px/1.4 var(--font-mono);
+        }
+
+        & .mjconfig-catalog-kind {
+          color: var(--dim);
+          font: 400 10.5px/1.4 var(--font-mono);
+          text-transform: uppercase;
+        }
+
+        & .mjconfig-catalog-desc {
+          flex-basis: 100%;
+          color: var(--dim);
+          font: 400 10.5px/1.5 var(--font-mono);
+        }
+      }
+
+      .mjconfig-text-input {
+        border: 1px solid var(--line-control);
+        background: var(--bg);
+        color: var(--text);
+        caret-color: var(--red);
+        padding: 7px 9px;
+        font: 400 12px/1.4 var(--font-mono);
+        flex: 1;
+        min-width: 160px;
+
+        &:focus-visible {
+          outline: none;
+          border-color: rgb(235 63 51 / 0.6);
+        }
+      }
+
+      .mjconfig-foot {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+
+        & .queue-meta {
+          flex: 1;
+          color: var(--dim);
+          font: 400 10px/1.4 var(--font-mono);
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+
+          &.is-error {
+            color: var(--red-hot);
+          }
+        }
+
+        & button {
+          height: 30px;
+          padding: 0 16px;
+        }
+      }
+
+      .mjconfig-notice {
+        color: var(--red-hot);
+        font: 400 11px/1.5 var(--font-mono);
+
+        &:empty {
+          display: none;
+        }
+      }
+
+      /* Dropdowns inside the scrollable modal body would be clipped by its
+         overflow, so they open as a sheet pinned inside the panel instead.
+         The panel's clip-path makes it the containing block for fixed
+         descendants, so these offsets are panel-relative by design. */
+      #mjconfig-modal .config-combo-popup {
+        position: fixed;
+        left: 18px;
+        right: 18px;
+        bottom: 18px;
+        min-width: 0;
+        max-width: none;
+        max-height: 62%;
+        z-index: 40;
+      }
+
+      #mjconfig-modal .config-combo-list {
+        flex: 1;
+        max-height: none;
+        overflow-y: auto;
+      }
+
       #queue-status {
         margin-left: auto;
         flex: none;
@@ -2646,6 +2974,23 @@
       </div>
     </section>
 
+    <section id="mjconfig-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="mjconfig-title" hidden>
+      <div class="new-session-panel mjconfig-panel">
+        <header class="new-session-head">
+          <h2 id="mjconfig-title">Configuration</h2>
+          <button id="mjconfig-close" class="new-session-close" type="button" aria-label="Close configuration">×</button>
+        </header>
+        <div id="mjconfig-tabs" class="mjconfig-tabs" role="tablist" aria-label="Configuration panels"></div>
+        <div id="mjconfig-notice" class="mjconfig-notice" role="status"></div>
+        <div id="mjconfig-body" class="mjconfig-body"></div>
+        <footer class="mjconfig-foot">
+          <span id="mjconfig-status" class="queue-meta"></span>
+          <button id="mjconfig-cancel" type="button">Cancel</button>
+          <button id="mjconfig-save" class="primary" type="button">Save</button>
+        </footer>
+      </div>
+    </section>
+
     <section id="new-session-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="new-session-title" hidden>
       <div class="new-session-panel">
         <header class="new-session-head">
@@ -2730,14 +3075,6 @@
       </section>
     </template>
 
-    <template id="tpl-config-option">
-      <div class="config-option">
-        <span class="config-option-name"></span>
-        <span class="config-option-status"></span>
-        <span class="config-option-desc"></span>
-      </div>
-    </template>
-
     <script type="module">
       const queryParams = new URLSearchParams(window.location.search);
       const viewerToken = queryParams.get("token") || "";
@@ -2793,7 +3130,6 @@
       const entryTpl = $("tpl-entry");
       const queueTpl = $("tpl-queue-item");
       const permissionTpl = $("tpl-permission");
-      const configOptionTpl = $("tpl-config-option");
 
       const POLL_MS = 2000;
       const WORKING_WINDOW_MS = 6000;
@@ -2849,7 +3185,6 @@
       // Persistent combobox controllers keyed by "<session_id><target>", kept
       // across polls so an open/searched dropdown is never torn down by a
       // background snapshot refresh.
-      const configCombos = new Map();
       // Keyed render state: the transcript DOM is patched in place instead of
       // rebuilt on every poll, so text selection and scroll momentum survive.
       let renderedSessionId = null;
@@ -2917,6 +3252,908 @@
         settingsModalEl.hidden = true;
       }
 
+      // ---- /mjconfig configuration editor ----
+
+      const mjconfigModalEl = $("mjconfig-modal");
+      const mjconfigTabsEl = $("mjconfig-tabs");
+      const mjconfigNoticeEl = $("mjconfig-notice");
+      const mjconfigBodyEl = $("mjconfig-body");
+      const mjconfigStatusEl = $("mjconfig-status");
+      const mjconfigCloseEl = $("mjconfig-close");
+      const mjconfigCancelEl = $("mjconfig-cancel");
+      const mjconfigSaveEl = $("mjconfig-save");
+
+      const MJ_TABS = [
+        ["agents", "Agents"],
+        ["servers", "ACP Servers"],
+        ["sessions", "ACP Sessions"],
+        ["priority", "ACP Priority"],
+        ["appearance", "Appearance"],
+      ];
+
+      const mjcfg = {
+        snapshot: null,
+        edits: {},
+        tab: "agents",
+        serversView: "list", // list | catalog | custom
+        catalogFilter: "",
+        registry: null,
+        registryError: null,
+        pollTimer: null,
+        spinnerTimer: null,
+        comboSeq: 0,
+        saving: false,
+      };
+
+      function mjEditedValue(field, fallback) {
+        return Object.hasOwn(mjcfg.edits, field) ? mjcfg.edits[field] : fallback;
+      }
+
+      function mjSetStatus(message, isError = false) {
+        mjconfigStatusEl.textContent = message || "";
+        mjconfigStatusEl.classList.toggle("is-error", isError);
+      }
+
+      function mjDirty() {
+        return Object.keys(mjcfg.edits).length > 0;
+      }
+
+      async function openMjConfig(tab = "agents") {
+        mjcfg.edits = {};
+        mjcfg.tab = tab;
+        mjcfg.serversView = "list";
+        mjcfg.catalogFilter = "";
+        mjconfigModalEl.hidden = false;
+        mjconfigNoticeEl.textContent = "";
+        mjSetStatus("Loading…");
+        mjconfigBodyEl.replaceChildren();
+        renderMjTabs();
+        try {
+          const response = await apiFetch("/api/mjconfig");
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          mjcfg.snapshot = await response.json();
+          mjSetStatus("");
+          renderMjConfig();
+          mjSchedulePoll();
+        } catch (error) {
+          if (error.message === "HTTP 401") {
+            closeMjConfig();
+            return;
+          }
+          mjSetStatus(`Couldn't load configuration: ${error.message}`, true);
+        }
+      }
+
+      function closeMjConfig() {
+        mjconfigModalEl.hidden = true;
+        mjcfg.edits = {};
+        mjcfg.snapshot = null;
+        if (mjcfg.pollTimer) {
+          clearTimeout(mjcfg.pollTimer);
+          mjcfg.pollTimer = null;
+        }
+        if (mjcfg.spinnerTimer) {
+          clearInterval(mjcfg.spinnerTimer);
+          mjcfg.spinnerTimer = null;
+        }
+      }
+
+      /// Poll while a background job (sign-in, install) runs so its output and
+      /// progress stream into the panel. Structural re-render only happens on
+      /// job completion, so open dropdowns and focused inputs stay alive.
+      function mjSchedulePoll() {
+        if (mjcfg.pollTimer) {
+          clearTimeout(mjcfg.pollTimer);
+          mjcfg.pollTimer = null;
+        }
+        const snapshot = mjcfg.snapshot;
+        const jobRunning =
+          snapshot && ((snapshot.login && snapshot.login.running) || (snapshot.install && snapshot.install.running));
+        if (!jobRunning || mjconfigModalEl.hidden) {
+          return;
+        }
+        mjcfg.pollTimer = setTimeout(async () => {
+          mjcfg.pollTimer = null;
+          if (mjconfigModalEl.hidden) {
+            return;
+          }
+          try {
+            const response = await apiFetch("/api/mjconfig");
+            if (response.ok) {
+              const previous = mjcfg.snapshot;
+              mjcfg.snapshot = await response.json();
+              const wasRunning =
+                (previous.login && previous.login.running) || (previous.install && previous.install.running);
+              const stillRunning =
+                (mjcfg.snapshot.login && mjcfg.snapshot.login.running)
+                || (mjcfg.snapshot.install && mjcfg.snapshot.install.running);
+              if (wasRunning && !stillRunning) {
+                renderMjConfig();
+              } else {
+                mjPatchJobUi();
+              }
+            }
+          } catch {
+            // Poll failures are transient; the next tick retries.
+          }
+          mjSchedulePoll();
+        }, 2000);
+      }
+
+      function mjPatchJobUi() {
+        const login = mjcfg.snapshot?.login;
+        const outputEl = mjconfigBodyEl.querySelector("[data-mj-login-output]");
+        if (outputEl && login) {
+          outputEl.textContent = login.output || "waiting for the login helper…";
+          const linkEl = mjconfigBodyEl.querySelector("[data-mj-login-link]");
+          const url = mjExtractUrl(login.output || "");
+          if (linkEl) {
+            if (url) {
+              linkEl.href = url;
+              linkEl.textContent = url;
+              linkEl.hidden = false;
+            } else {
+              linkEl.hidden = true;
+            }
+          }
+        }
+        const install = mjcfg.snapshot?.install;
+        const installEl = mjconfigBodyEl.querySelector("[data-mj-install-status]");
+        if (installEl && install) {
+          installEl.textContent = mjInstallLabel(install);
+        }
+      }
+
+      function mjExtractUrl(text) {
+        const match = text.match(/https?:\/\/\S+/);
+        return match ? match[0].replace(/[).,]$/, "") : null;
+      }
+
+      function mjInstallLabel(install) {
+        if (install.extracting) {
+          return `Installing ${install.agent_name}: extracting…`;
+        }
+        if (install.total_bytes) {
+          const percent = Math.floor((install.downloaded_bytes * 100) / Math.max(1, install.total_bytes));
+          return `Installing ${install.agent_name}: downloading ${percent}%`;
+        }
+        return `Installing ${install.agent_name}: downloading ${install.downloaded_bytes} bytes`;
+      }
+
+      function renderMjTabs() {
+        mjconfigTabsEl.replaceChildren();
+        for (const [id, label] of MJ_TABS) {
+          const tab = document.createElement("button");
+          tab.type = "button";
+          tab.className = "mjconfig-tab";
+          tab.setAttribute("role", "tab");
+          tab.classList.toggle("is-active", mjcfg.tab === id);
+          tab.setAttribute("aria-selected", mjcfg.tab === id ? "true" : "false");
+          tab.textContent = label;
+          tab.addEventListener("click", () => {
+            mjcfg.tab = id;
+            renderMjConfig();
+          });
+          mjconfigTabsEl.appendChild(tab);
+        }
+      }
+
+      function renderMjConfig() {
+        renderMjTabs();
+        mjconfigNoticeEl.textContent = mjcfg.snapshot?.notice || "";
+        mjconfigBodyEl.replaceChildren();
+        if (mjcfg.spinnerTimer) {
+          clearInterval(mjcfg.spinnerTimer);
+          mjcfg.spinnerTimer = null;
+        }
+        if (!mjcfg.snapshot) {
+          return;
+        }
+        switch (mjcfg.tab) {
+          case "agents":
+            renderMjAgents();
+            break;
+          case "servers":
+            renderMjServers();
+            break;
+          case "sessions":
+            renderMjSessions();
+            break;
+          case "priority":
+            renderMjPriority();
+            break;
+          case "appearance":
+            renderMjAppearance();
+            break;
+        }
+        mjSetStatus(mjDirty() ? "Unsaved changes" : "");
+      }
+
+      function mjNote(text) {
+        const note = document.createElement("div");
+        note.className = "mjconfig-note";
+        note.textContent = text;
+        return note;
+      }
+
+      function mjSectionTitle(text) {
+        const title = document.createElement("div");
+        title.className = "mjconfig-section-title";
+        title.textContent = text;
+        return title;
+      }
+
+      function mjRow(label) {
+        const row = document.createElement("div");
+        row.className = "mjconfig-row";
+        if (label) {
+          const labelEl = document.createElement("span");
+          labelEl.className = "mjconfig-row-label";
+          labelEl.textContent = label;
+          row.appendChild(labelEl);
+        }
+        return row;
+      }
+
+      function mjDetail(text) {
+        const detail = document.createElement("span");
+        detail.className = "mjconfig-row-detail";
+        detail.textContent = text;
+        return detail;
+      }
+
+      function mjCombo(choices, currentValue, onSelect) {
+        mjcfg.comboSeq += 1;
+        const combo = createCombobox(
+          { choices, current_value: currentValue },
+          `mjcfg${mjcfg.comboSeq}`,
+          onSelect,
+        );
+        return combo.element;
+      }
+
+      function mjToggle(value, onToggle) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "mjconfig-toggle";
+        button.classList.toggle("is-on", value);
+        button.textContent = value ? "on" : "off";
+        button.setAttribute("aria-pressed", value ? "true" : "false");
+        button.addEventListener("click", () => onToggle(!value));
+        return button;
+      }
+
+      function mjButton(label, onClick, primary = false) {
+        const button = document.createElement("button");
+        button.type = "button";
+        if (primary) {
+          button.className = "primary";
+        } else {
+          button.className = "mjconfig-toggle";
+        }
+        button.textContent = label;
+        button.addEventListener("click", onClick);
+        return button;
+      }
+
+      function renderMjAgents() {
+        const panel = mjcfg.snapshot.agents;
+        mjconfigBodyEl.appendChild(
+          mjNote("The running session keeps its models until a new session reloads the saved selection."),
+        );
+        for (const role of panel.roles) {
+          const field = `${role.role}_model`;
+          const value = mjEditedValue(field, role.model);
+          const row = mjRow(role.label);
+          row.appendChild(
+            mjCombo(
+              role.choices.map((choice) => ({
+                value: choice.model,
+                label: choice.model,
+                description: choice.detail,
+              })),
+              value,
+              (next) => {
+                mjcfg.edits[field] = next;
+                renderMjConfig();
+              },
+            ),
+          );
+          row.appendChild(mjDetail(role.description));
+          row.appendChild(mjDetail(`saved: ${role.saved_detail} · active: ${role.active_detail}`));
+          mjconfigBodyEl.appendChild(row);
+        }
+        const reviewRow = mjRow("Discrete review");
+        reviewRow.appendChild(
+          mjToggle(mjEditedValue("discrete_review", panel.discrete_review), (next) => {
+            mjcfg.edits.discrete_review = next;
+            renderMjConfig();
+          }),
+        );
+        mjconfigBodyEl.appendChild(reviewRow);
+
+        const parallelRow = mjRow("Parallel subagents");
+        const stepper = document.createElement("span");
+        stepper.className = "mjconfig-stepper";
+        const current = mjEditedValue("max_parallel", panel.max_parallel);
+        const minus = document.createElement("button");
+        minus.type = "button";
+        minus.textContent = "−";
+        minus.disabled = current <= 0;
+        minus.addEventListener("click", () => {
+          mjcfg.edits.max_parallel = Math.max(0, current - 1);
+          renderMjConfig();
+        });
+        const count = document.createElement("span");
+        count.textContent = String(current);
+        const plus = document.createElement("button");
+        plus.type = "button";
+        plus.textContent = "+";
+        plus.disabled = current >= panel.max_parallel_limit;
+        plus.addEventListener("click", () => {
+          mjcfg.edits.max_parallel = Math.min(panel.max_parallel_limit, current + 1);
+          renderMjConfig();
+        });
+        stepper.append(minus, count, plus);
+        parallelRow.appendChild(stepper);
+        mjconfigBodyEl.appendChild(parallelRow);
+
+        const failoverRow = mjRow("Automatic quota failover");
+        failoverRow.appendChild(
+          mjToggle(mjEditedValue("auto_failover", panel.auto_failover), (next) => {
+            mjcfg.edits.auto_failover = next;
+            renderMjConfig();
+          }),
+        );
+        failoverRow.appendChild(mjDetail("quota changes reload with a new session"));
+        mjconfigBodyEl.appendChild(failoverRow);
+      }
+
+      function renderMjServers() {
+        if (mjcfg.serversView === "catalog") {
+          renderMjCatalog();
+          return;
+        }
+        if (mjcfg.serversView === "custom") {
+          renderMjCustomServer();
+          return;
+        }
+        const panel = mjcfg.snapshot.acp_servers;
+        mjconfigBodyEl.appendChild(mjSectionTitle("Accounts"));
+        const login = mjcfg.snapshot.login;
+        for (const account of panel.accounts) {
+          const row = mjRow(account.label);
+          row.appendChild(mjDetail(`${account.status} · enables ${account.enables}`));
+          const loginActive = login && login.vendor === account.vendor;
+          if (loginActive && login.running) {
+            row.appendChild(
+              mjButton("Cancel sign-in", async () => {
+                await mjJobRequest("/api/mjconfig/login", "DELETE");
+              }),
+            );
+          } else {
+            row.appendChild(
+              mjButton(account.signed_in ? "Sign in again" : "Sign in", async () => {
+                await mjJobRequest("/api/mjconfig/login", "POST", { vendor: account.vendor });
+              }),
+            );
+          }
+          mjconfigBodyEl.appendChild(row);
+          if (loginActive) {
+            if (login.message) {
+              mjconfigBodyEl.appendChild(mjNote(login.message));
+            }
+            if (login.running || login.output) {
+              const link = document.createElement("a");
+              link.className = "mjconfig-login-link";
+              link.target = "_blank";
+              link.rel = "noreferrer";
+              link.dataset.mjLoginLink = "true";
+              link.hidden = true;
+              mjconfigBodyEl.appendChild(link);
+              const output = document.createElement("pre");
+              output.className = "mjconfig-login-output";
+              output.dataset.mjLoginOutput = "true";
+              mjconfigBodyEl.appendChild(output);
+              mjPatchJobUi();
+            }
+          }
+        }
+
+        const addRow = mjRow("");
+        addRow.appendChild(
+          mjButton("+ Add server", () => {
+            mjcfg.serversView = "catalog";
+            mjLoadRegistry();
+            renderMjConfig();
+          }),
+        );
+        mjconfigBodyEl.appendChild(addRow);
+
+        const install = mjcfg.snapshot.install;
+        if (install) {
+          const installRow = mjRow("");
+          const status = document.createElement("span");
+          status.className = "mjconfig-row-detail";
+          status.dataset.mjInstallStatus = "true";
+          status.textContent = mjInstallLabel(install);
+          installRow.appendChild(status);
+          if (install.running) {
+            installRow.appendChild(
+              mjButton("Cancel install", async () => {
+                await mjJobRequest("/api/mjconfig/install", "DELETE");
+              }),
+            );
+          }
+          mjconfigBodyEl.appendChild(installRow);
+        }
+
+        mjconfigBodyEl.appendChild(mjSectionTitle("Servers"));
+        const staged = mjcfg.edits.server_policies || {};
+        for (const server of panel.servers) {
+          const row = mjRow(server.label);
+          const value = Object.hasOwn(staged, server.id) ? staged[server.id] : server.policy;
+          row.appendChild(
+            mjCombo(
+              server.allowed_policies.map((policy) => ({ value: policy, label: policy })),
+              value,
+              (next) => {
+                mjcfg.edits.server_policies = { ...staged, [server.id]: next };
+                renderMjConfig();
+              },
+            ),
+          );
+          row.appendChild(mjDetail(server.status));
+          row.appendChild(mjDetail(server.detail));
+          mjconfigBodyEl.appendChild(row);
+        }
+      }
+
+      async function mjJobRequest(path, method, body) {
+        try {
+          const response = await apiFetch(path, {
+            method,
+            headers: body ? { "Content-Type": "application/json" } : undefined,
+            body: body ? JSON.stringify(body) : undefined,
+          });
+          if (!response.ok) {
+            const text = await response.text();
+            mjSetStatus(text || `HTTP ${response.status}`, true);
+            return;
+          }
+          mjcfg.snapshot = await response.json();
+          renderMjConfig();
+          mjSchedulePoll();
+        } catch (error) {
+          mjSetStatus(`Request failed: ${error.message}`, true);
+        }
+      }
+
+      async function mjLoadRegistry() {
+        mjcfg.registry = null;
+        mjcfg.registryError = null;
+        try {
+          const response = await apiFetch("/api/mjconfig/registry");
+          if (!response.ok) {
+            throw new Error((await response.text()) || `HTTP ${response.status}`);
+          }
+          mjcfg.registry = await response.json();
+        } catch (error) {
+          mjcfg.registryError = error.message;
+        }
+        if (mjcfg.serversView === "catalog" && !mjconfigModalEl.hidden) {
+          renderMjConfig();
+        }
+      }
+
+      function renderMjCatalog() {
+        const backRow = mjRow("");
+        backRow.appendChild(
+          mjButton("← Back", () => {
+            mjcfg.serversView = "list";
+            renderMjConfig();
+          }),
+        );
+        backRow.appendChild(
+          mjButton("Custom command…", () => {
+            mjcfg.serversView = "custom";
+            renderMjConfig();
+          }),
+        );
+        mjconfigBodyEl.appendChild(backRow);
+        mjconfigBodyEl.appendChild(mjSectionTitle("ACP registry"));
+
+        const filter = document.createElement("input");
+        filter.type = "text";
+        filter.className = "mjconfig-catalog-filter";
+        filter.placeholder = "Filter agents…";
+        filter.value = mjcfg.catalogFilter;
+        filter.addEventListener("input", () => {
+          mjcfg.catalogFilter = filter.value;
+          renderMjCatalogList();
+        });
+        mjconfigBodyEl.appendChild(filter);
+
+        const list = document.createElement("div");
+        list.dataset.mjCatalogList = "true";
+        mjconfigBodyEl.appendChild(list);
+        renderMjCatalogList();
+        filter.focus();
+      }
+
+      function renderMjCatalogList() {
+        const list = mjconfigBodyEl.querySelector("[data-mj-catalog-list]");
+        if (!list) {
+          return;
+        }
+        list.replaceChildren();
+        if (mjcfg.registryError) {
+          list.appendChild(mjNote(`Registry unavailable: ${mjcfg.registryError}`));
+          return;
+        }
+        if (!mjcfg.registry) {
+          list.appendChild(mjNote("Loading registry…"));
+          return;
+        }
+        const filter = mjcfg.catalogFilter.trim().toLowerCase();
+        const agents = mjcfg.registry.filter(
+          (agent) =>
+            !filter
+            || agent.name.toLowerCase().includes(filter)
+            || agent.id.toLowerCase().includes(filter),
+        );
+        if (!agents.length) {
+          list.appendChild(mjNote("No matching agents."));
+          return;
+        }
+        for (const agent of agents) {
+          const item = document.createElement("div");
+          item.className = "mjconfig-catalog-item";
+          item.setAttribute("role", "button");
+          item.tabIndex = 0;
+          const name = document.createElement("span");
+          name.className = "mjconfig-catalog-name";
+          name.textContent = agent.name;
+          const kind = document.createElement("span");
+          kind.className = "mjconfig-catalog-kind";
+          kind.textContent = `${agent.kind}${agent.version ? ` · v${agent.version}` : ""}`;
+          const desc = document.createElement("span");
+          desc.className = "mjconfig-catalog-desc";
+          desc.textContent = agent.description || "";
+          item.append(name, kind, desc);
+          const install = async () => {
+            mjcfg.serversView = "list";
+            await mjJobRequest("/api/mjconfig/install", "POST", { id: agent.id });
+          };
+          item.addEventListener("click", install);
+          item.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              void install();
+            }
+          });
+          list.appendChild(item);
+        }
+      }
+
+      function renderMjCustomServer() {
+        const backRow = mjRow("");
+        backRow.appendChild(
+          mjButton("← Back", () => {
+            mjcfg.serversView = "catalog";
+            renderMjConfig();
+          }),
+        );
+        mjconfigBodyEl.appendChild(backRow);
+        mjconfigBodyEl.appendChild(mjSectionTitle("Add a custom ACP server command"));
+
+        const nameRow = mjRow("Name");
+        const nameInput = document.createElement("input");
+        nameInput.type = "text";
+        nameInput.className = "mjconfig-text-input";
+        nameInput.placeholder = "my-agent";
+        nameRow.appendChild(nameInput);
+        mjconfigBodyEl.appendChild(nameRow);
+
+        const commandRow = mjRow("Command");
+        const commandInput = document.createElement("input");
+        commandInput.type = "text";
+        commandInput.className = "mjconfig-text-input";
+        commandInput.placeholder = "npx -y my-acp-agent";
+        commandRow.appendChild(commandInput);
+        mjconfigBodyEl.appendChild(commandRow);
+
+        const addRow = mjRow("");
+        addRow.appendChild(
+          mjButton(
+            "Add server",
+            async () => {
+              try {
+                const response = await apiFetch("/api/mjconfig", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    add_custom_server: { name: nameInput.value, command: commandInput.value },
+                  }),
+                });
+                if (!response.ok) {
+                  mjSetStatus((await response.text()) || `HTTP ${response.status}`, true);
+                  return;
+                }
+                mjcfg.snapshot = await response.json();
+                mjcfg.serversView = "list";
+                renderMjConfig();
+              } catch (error) {
+                mjSetStatus(`Request failed: ${error.message}`, true);
+              }
+            },
+            true,
+          ),
+        );
+        mjconfigBodyEl.appendChild(addRow);
+        nameInput.focus();
+      }
+
+      function renderMjSessions() {
+        const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
+        const liveOptions = session ? sessionConfigOptions(session) : [];
+        if (session && (liveOptions.length || session.native_mode)) {
+          mjconfigBodyEl.appendChild(mjSectionTitle("Selected session · applies immediately"));
+          if (session.native_mode?.label) {
+            mjconfigBodyEl.appendChild(mjNote(`Native session mode: ${session.native_mode.label}`));
+          }
+          for (const option of liveOptions) {
+            const key = configChangeKey(session.session_id, option);
+            const row = mjRow(option.name || option.config_id || "");
+            const combo = createCombobox(option, key, (value) => {
+              // submitConfigChange stages the optimistic value synchronously,
+              // so an immediate re-render shows it while the change queues.
+              void submitConfigChange(session.session_id, option, value);
+              renderMjConfig();
+            });
+            row.appendChild(combo.element);
+            const description = [option.category, option.description].filter(Boolean).join(" — ");
+            if (description) {
+              row.appendChild(mjDetail(description));
+            }
+            mjconfigBodyEl.appendChild(row);
+          }
+        }
+
+        const groups = mjcfg.snapshot.acp_sessions;
+        mjconfigBodyEl.appendChild(mjSectionTitle("Defaults for new sessions"));
+        if (!groups.length) {
+          mjconfigBodyEl.appendChild(
+            mjNote("No selectable session options were reported by configured ACP servers."),
+          );
+          return;
+        }
+        const staged = mjcfg.edits.session_defaults || {};
+        for (const group of groups) {
+          mjconfigBodyEl.appendChild(mjSectionTitle(group.server_label));
+          for (const option of group.options) {
+            const stagedGroup = staged[group.server_id] || {};
+            const value = Object.hasOwn(stagedGroup, option.key) ? stagedGroup[option.key] : option.value;
+            const row = mjRow(option.name);
+            row.appendChild(
+              mjCombo(
+                option.choices.map((choice) => ({ value: choice.value, label: choice.label })),
+                value,
+                (next) => {
+                  mjcfg.edits.session_defaults = {
+                    ...staged,
+                    [group.server_id]: { ...stagedGroup, [option.key]: next },
+                  };
+                  renderMjConfig();
+                },
+              ),
+            );
+            mjconfigBodyEl.appendChild(row);
+          }
+        }
+      }
+
+      function renderMjPriority() {
+        const panel = mjcfg.snapshot.acp_priority;
+        mjconfigBodyEl.appendChild(
+          mjNote("Source constrains a seat to one ACP route; the ordered list breaks ties when several routes offer the model. Changes apply to new sessions."),
+        );
+        const staged = mjcfg.edits.priority || {};
+        for (const seat of panel.seats) {
+          const stagedSeat = staged[seat.seat] || {};
+          mjconfigBodyEl.appendChild(mjSectionTitle(seat.label));
+          const sourceRow = mjRow("Source");
+          const sourceValue = Object.hasOwn(stagedSeat, "source")
+            ? stagedSeat.source
+            : seat.source || "";
+          const sourceChoices = [
+            { value: "", label: "any enabled source" },
+            ...seat.priority.map((server) => ({
+              value: server.id,
+              label: `${server.label} only`,
+            })),
+          ];
+          sourceRow.appendChild(
+            mjCombo(sourceChoices, sourceValue, (next) => {
+              mjcfg.edits.priority = {
+                ...staged,
+                [seat.seat]: { ...stagedSeat, source: next },
+              };
+              renderMjConfig();
+            }),
+          );
+          mjconfigBodyEl.appendChild(sourceRow);
+
+          const order = stagedSeat.order || seat.priority.map((server) => server.id);
+          const labelById = new Map(seat.priority.map((server) => [server.id, server.label]));
+          const list = document.createElement("ol");
+          list.className = "mjconfig-priority-list";
+          order.forEach((id, index) => {
+            const item = document.createElement("li");
+            item.className = "mjconfig-priority-item";
+            const rank = document.createElement("span");
+            rank.textContent = `${index + 1}.`;
+            const label = document.createElement("span");
+            label.textContent = labelById.get(id) || id;
+            const idEl = document.createElement("span");
+            idEl.className = "mjconfig-priority-id";
+            idEl.textContent = `(${id})`;
+            const moves = document.createElement("span");
+            moves.className = "mjconfig-move-group";
+            const move = (delta) => {
+              const next = order.slice();
+              const target = index + delta;
+              [next[index], next[target]] = [next[target], next[index]];
+              mjcfg.edits.priority = {
+                ...staged,
+                [seat.seat]: { ...stagedSeat, order: next },
+              };
+              renderMjConfig();
+            };
+            const up = document.createElement("button");
+            up.type = "button";
+            up.textContent = "↑";
+            up.setAttribute("aria-label", `Move ${labelById.get(id) || id} up`);
+            up.disabled = index === 0;
+            up.addEventListener("click", () => move(-1));
+            const down = document.createElement("button");
+            down.type = "button";
+            down.textContent = "↓";
+            down.setAttribute("aria-label", `Move ${labelById.get(id) || id} down`);
+            down.disabled = index === order.length - 1;
+            down.addEventListener("click", () => move(1));
+            moves.append(up, down);
+            item.append(rank, label, idEl, moves);
+            list.appendChild(item);
+          });
+          mjconfigBodyEl.appendChild(list);
+
+          const resetRow = mjRow("");
+          resetRow.appendChild(
+            mjButton("Reset default order", () => {
+              const known = new Set(seat.priority.map((server) => server.id));
+              const next = [
+                ...panel.default_priority.filter((id) => known.has(id)),
+                ...seat.priority.map((server) => server.id).filter((id) => !panel.default_priority.includes(id)),
+              ];
+              mjcfg.edits.priority = {
+                ...staged,
+                [seat.seat]: { ...stagedSeat, order: next },
+              };
+              renderMjConfig();
+            }),
+          );
+          mjconfigBodyEl.appendChild(resetRow);
+        }
+      }
+
+      function renderMjAppearance() {
+        const panel = mjcfg.snapshot.appearance;
+        mjconfigBodyEl.appendChild(
+          mjNote("Theme and spinner style the terminal UI. The web viewer's own theme lives in ⚙ viewer settings."),
+        );
+        const themeRow = mjRow("Theme");
+        themeRow.appendChild(
+          mjCombo(
+            panel.themes.map((theme) => ({ value: theme, label: theme })),
+            mjEditedValue("theme", panel.theme),
+            (next) => {
+              mjcfg.edits.theme = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        mjconfigBodyEl.appendChild(themeRow);
+
+        const spinnerRow = mjRow("Spinner");
+        const spinnerValue = mjEditedValue("spinner", panel.spinner);
+        spinnerRow.appendChild(
+          mjCombo(
+            panel.spinners.map((spinner) => ({ value: spinner.name, label: spinner.name })),
+            spinnerValue,
+            (next) => {
+              mjcfg.edits.spinner = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const preview = document.createElement("span");
+        preview.className = "mjconfig-spinner-preview";
+        spinnerRow.appendChild(preview);
+        mjconfigBodyEl.appendChild(spinnerRow);
+        const frames = panel.spinners.find((spinner) => spinner.name === spinnerValue)?.frames || [];
+        if (frames.length) {
+          let frame = 0;
+          preview.textContent = frames[0];
+          mjcfg.spinnerTimer = setInterval(() => {
+            frame = (frame + 1) % frames.length;
+            preview.textContent = frames[frame];
+          }, 250);
+        }
+
+        const hintsRow = mjRow("Feature tips");
+        hintsRow.appendChild(
+          mjToggle(mjEditedValue("feature_hints", panel.feature_hints), (next) => {
+            mjcfg.edits.feature_hints = next;
+            renderMjConfig();
+          }),
+        );
+        hintsRow.appendChild(mjDetail("occasional feature-discovery hints in the terminal transcript"));
+        mjconfigBodyEl.appendChild(hintsRow);
+      }
+
+      async function saveMjConfig() {
+        if (mjcfg.saving) {
+          return;
+        }
+        if (!mjDirty()) {
+          closeMjConfig();
+          return;
+        }
+        mjcfg.saving = true;
+        mjconfigSaveEl.disabled = true;
+        mjSetStatus("Saving…");
+        try {
+          const edits = mjcfg.edits;
+          const response = await apiFetch("/api/mjconfig", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(edits),
+          });
+          if (!response.ok) {
+            mjSetStatus((await response.text()) || `HTTP ${response.status}`, true);
+            return;
+          }
+          mjcfg.snapshot = await response.json();
+          // Parity with the TUI: saved session-option defaults also update the
+          // selected live session where it exposes the same option.
+          const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
+          if (session && edits.session_defaults) {
+            const liveOptions = sessionConfigOptions(session);
+            for (const options of Object.values(edits.session_defaults)) {
+              for (const [key, value] of Object.entries(options)) {
+                const live = liveOptions.find(
+                  (option) => option.config_id && `config:${option.config_id}` === key,
+                );
+                if (live && live.current_value !== value) {
+                  void submitConfigChange(session.session_id, live, value);
+                }
+              }
+            }
+          }
+          mjcfg.edits = {};
+          closeMjConfig();
+          setQueueStatus("Configuration saved. Model, permission, and routing changes apply to new sessions.");
+        } catch (error) {
+          mjSetStatus(`Couldn't save: ${error.message}`, true);
+        } finally {
+          mjcfg.saving = false;
+          mjconfigSaveEl.disabled = false;
+        }
+      }
+
       function syncKeyboardInset() {
         const viewport = window.visualViewport;
         const inset = viewport
@@ -2961,6 +4198,7 @@
         filesystemLoading = false;
         creatingSession = false;
         settingsModalEl.hidden = true;
+        closeMjConfig();
         pendingSessionLaunch = null;
         if (launchSessionCard) {
           launchSessionCard.root.remove();
@@ -2972,7 +4210,6 @@
         activityBySessionId.clear();
         sentDecisions.clear();
         sentConfigChanges.clear();
-        configCombos.clear();
         renderedSessionId = null;
         renderedEntries = [];
         if (refreshTimer) {
@@ -5187,16 +6424,7 @@
         if (trimmed === "/new") {
           openNewSessionPicker();
         } else if (trimmed === "/mjconfig") {
-          if (!session) {
-            return false;
-          }
-          const target = sessionConfigEl.querySelector("button, input, select");
-          if (target) {
-            target.focus();
-            sessionConfigEl.scrollIntoView({ block: "nearest" });
-          } else {
-            setQueueStatus("No session config controls are available.", true);
-          }
+          void openMjConfig();
         } else if (trimmed === "/export") {
           if (!session) {
             return false;
@@ -5796,6 +7024,9 @@
         return root;
       }
 
+      // The strip under the composer stays compact: the native-mode readout
+      // plus one button into the full /mjconfig editor. The session option
+      // combos themselves live in the editor's ACP Sessions tab.
       function renderConfig(session) {
         const options = sessionConfigOptions(session);
         // Forget sent changes the session has applied (current_value caught
@@ -5818,65 +7049,18 @@
             }
           }
         }
-        const desiredKeys = session
-          ? options.map((option) => configChangeKey(session.session_id, option))
-          : [];
-        const currentKeys = [...configCombos.keys()];
-        const sameStructure =
-          !!session
-          && sessionConfigEl.querySelector("[data-native-mode]")
-          && currentKeys.length === desiredKeys.length
-          && currentKeys.every((key, index) => key === desiredKeys[index]);
-
-        if (!sameStructure) {
-          sessionConfigEl.replaceChildren();
-          configCombos.clear();
-          if (!session) return;
-          const nativeMode = createNativeModeStatus(session);
-          sessionConfigEl.appendChild(nativeMode);
-          for (const option of options) {
-            const key = configChangeKey(session.session_id, option);
-            const row = cloneTemplate(configOptionTpl);
-            row.querySelector(".config-option-name").textContent =
-              option.name || option.config_id || "";
-            const statusEl = row.querySelector(".config-option-status");
-            const descEl = row.querySelector(".config-option-desc");
-            const combo = createCombobox(option, key, (value) => {
-              void submitConfigChange(session.session_id, option, value);
-            });
-            row.insertBefore(combo.element, statusEl);
-            const entry = { combo, statusEl, descEl };
-            configCombos.set(key, entry);
-            applyConfigComboState(entry, key, option);
-            sessionConfigEl.appendChild(row);
-          }
-          return;
-        }
-
-        const nativeModeValue = sessionConfigEl.querySelector(".config-native-mode-value");
-        if (nativeModeValue) {
-          nativeModeValue.textContent = session.native_mode?.label || "unavailable";
-        }
-
-        // Same option set as last render: patch the existing combos in place so
-        // an open dropdown or in-flight selection survives the poll refresh.
-        for (const option of options) {
-          const key = configChangeKey(session.session_id, option);
-          const entry = configCombos.get(key);
-          if (entry) applyConfigComboState(entry, key, option);
-        }
-      }
-
-      function applyConfigComboState(entry, key, option) {
-        const applying = sentConfigChanges.has(key);
-        entry.combo.update(option);
-        entry.statusEl.textContent = applying ? "applying…" : "";
-        // The agent's option description (and semantic category) arrive with
-        // every snapshot; render them as visible row text so touch users see
-        // them too, not just hover/screen-reader users.
-        entry.descEl.textContent = [option.category, option.description]
-          .filter(Boolean)
-          .join(" — ");
+        sessionConfigEl.replaceChildren();
+        if (!session) return;
+        sessionConfigEl.appendChild(createNativeModeStatus(session));
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "mjconfig-open-button";
+        open.textContent = "session config";
+        open.setAttribute("aria-label", "Open the configuration editor");
+        open.addEventListener("click", () => {
+          void openMjConfig("sessions");
+        });
+        sessionConfigEl.appendChild(open);
       }
 
       async function submitConfigChange(sessionId, option, value) {
@@ -6261,6 +7445,16 @@
         setTheme(currentTheme() === "light" ? "dark" : "light");
       });
       settingsButtonEl.addEventListener("click", openViewerSettings);
+      mjconfigCloseEl.addEventListener("click", closeMjConfig);
+      mjconfigCancelEl.addEventListener("click", closeMjConfig);
+      mjconfigSaveEl.addEventListener("click", () => {
+        void saveMjConfig();
+      });
+      mjconfigModalEl.addEventListener("click", (event) => {
+        if (event.target === mjconfigModalEl) {
+          closeMjConfig();
+        }
+      });
       settingsCloseEl.addEventListener("click", closeViewerSettings);
       settingsModalEl.addEventListener("click", (event) => {
         if (event.target === settingsModalEl) {
@@ -6284,7 +7478,10 @@
         if (event.key !== "Escape") {
           return;
         }
-        if (!settingsModalEl.hidden) {
+        if (!mjconfigModalEl.hidden) {
+          event.preventDefault();
+          closeMjConfig();
+        } else if (!settingsModalEl.hidden) {
           event.preventDefault();
           closeViewerSettings();
         } else if (!newSessionModalEl.hidden) {
