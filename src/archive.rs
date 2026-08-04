@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
+
+const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
+
 pub async fn download_and_extract(url: &str, dest: &Path) -> Result<()> {
     let response = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
@@ -19,17 +22,41 @@ pub async fn download_and_extract(url: &str, dest: &Path) -> Result<()> {
     let status = response.status();
     anyhow::ensure!(status.is_success(), "GET {url}: HTTP {status}");
     let total_bytes = response.content_length();
-    let mut bytes = Vec::with_capacity(total_bytes.unwrap_or(0) as usize);
+    let mut bytes = download_buffer(total_bytes, url, MAX_ARCHIVE_BYTES)?;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.with_context(|| format!("read chunk from {url}"))?;
-        bytes.extend_from_slice(&chunk);
+        append_download_chunk(&mut bytes, &chunk, url, MAX_ARCHIVE_BYTES)?;
     }
     let kind = ArchiveKind::from_url(url);
     let dest = dest.to_path_buf();
     tokio::task::spawn_blocking(move || extract(&bytes, kind, &dest))
         .await
         .context("join archive extraction")??;
+    Ok(())
+}
+
+fn download_buffer(total_bytes: Option<u64>, url: &str, max_bytes: usize) -> Result<Vec<u8>> {
+    if let Some(total_bytes) = total_bytes {
+        anyhow::ensure!(
+            total_bytes <= max_bytes as u64,
+            "archive from {url} is too large ({total_bytes} bytes; max {max_bytes})"
+        );
+    }
+    Ok(Vec::with_capacity(total_bytes.unwrap_or(0) as usize))
+}
+
+fn append_download_chunk(
+    bytes: &mut Vec<u8>,
+    chunk: &[u8],
+    url: &str,
+    max_bytes: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        bytes.len().saturating_add(chunk.len()) <= max_bytes,
+        "archive from {url} exceeds maximum size of {max_bytes} bytes"
+    );
+    bytes.extend_from_slice(chunk);
     Ok(())
 }
 
@@ -284,5 +311,22 @@ mod tests {
 
         assert!(error.to_string().contains("HTTP 404 Not Found"));
         assert!(!destination.path().join("nested/tool").exists());
+    }
+
+    #[test]
+    fn download_size_limit_rejects_declared_and_streamed_overflow() {
+        let declared = download_buffer(Some(5), "https://example.test/archive.zip", 4)
+            .expect_err("declared size limit");
+        assert!(declared.to_string().contains("5 bytes; max 4"));
+
+        let mut bytes = download_buffer(Some(3), "https://example.test/archive.zip", 4)
+            .expect("within declared limit");
+        append_download_chunk(&mut bytes, b"123", "https://example.test/archive.zip", 4)
+            .expect("first chunk");
+        let streamed =
+            append_download_chunk(&mut bytes, b"45", "https://example.test/archive.zip", 4)
+                .expect_err("streamed size limit");
+        assert!(streamed.to_string().contains("maximum size of 4 bytes"));
+        assert_eq!(bytes, b"123");
     }
 }
