@@ -74,12 +74,15 @@ pub fn install(root: &Path, yes: bool) -> Result<()> {
 
 fn confirm_install() -> Result<bool> {
     let stdin = io::stdin();
-    if !stdin.is_terminal() {
-        bail!("confirmation requires a terminal; rerun with --yes to apply the displayed diff");
+    let mut stdout = io::stdout();
+    if !stdin.is_terminal() || !stdout.is_terminal() {
+        bail!(
+            "confirmation requires terminal input and output; rerun with --yes to apply the displayed diff"
+        );
     }
 
-    print!("Apply this change? [y/N] ");
-    io::stdout().flush().context("flush confirmation prompt")?;
+    write!(stdout, "Apply this change? [y/N] ").context("write confirmation prompt")?;
+    stdout.flush().context("flush confirmation prompt")?;
 
     let mut answer = String::new();
     stdin
@@ -100,13 +103,7 @@ struct InstallPlan {
 impl InstallPlan {
     fn load(root: &Path) -> Result<Self> {
         let path = root.join(AGENTS_FILE);
-        let previous = match fs::read_to_string(&path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-            Err(error) => {
-                return Err(error).with_context(|| format!("read {}", path.display()));
-            }
-        };
+        let previous = read_agents_file(&path)?;
         let proposed = merge_guidance(&previous)?;
         Ok(Self {
             path,
@@ -116,8 +113,22 @@ impl InstallPlan {
     }
 
     fn write(&self) -> Result<()> {
+        if read_agents_file(&self.path)? != self.previous {
+            bail!(
+                "{} changed after the preview; no changes were written",
+                self.path.display()
+            );
+        }
         fs::write(&self.path, &self.proposed)
             .with_context(|| format!("write {}", self.path.display()))
+    }
+}
+
+fn read_agents_file(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(contents),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
     }
 }
 
@@ -248,6 +259,23 @@ mod tests {
     fn install_plan_is_idempotent() {
         let installed = merge_guidance("").expect("first merge");
         assert_eq!(merge_guidance(&installed).expect("second merge"), installed);
+    }
+
+    #[test]
+    fn install_plan_refuses_to_overwrite_changes_made_after_preview() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(AGENTS_FILE);
+        fs::write(&path, "original\n").expect("seed file");
+        let plan = InstallPlan::load(dir.path()).expect("plan");
+
+        fs::write(&path, "edited while confirming\n").expect("concurrent edit");
+        let error = plan.write().expect_err("refuse stale plan");
+
+        assert!(error.to_string().contains("changed after the preview"));
+        assert_eq!(
+            fs::read_to_string(path).expect("read preserved edit"),
+            "edited while confirming\n"
+        );
     }
 
     #[test]
