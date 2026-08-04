@@ -1,14 +1,9 @@
 {
   "name": "mjolnir-npm-packaging",
   "private": true,
-  "version": "1.5.2",
   "type": "module",
-  "workspaces": [
-    "packages/*"
-  ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "sync-versions": "node scripts/package-release.mjs --sync-versions",
     "package-release": "node scripts/package-release.mjs"
   }
 }

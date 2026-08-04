@@ -10,6 +10,8 @@ const execFile = promisify(execFileCallback);
 const npmRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = path.resolve(npmRoot, "..");
 
+export const ROOT_PACKAGE = "@brokkai/mjolnir";
+
 export const PLATFORMS = [
   {
     packageName: "@brokkai/mjolnir-darwin-universal",
@@ -17,6 +19,9 @@ export const PLATFORMS = [
     extension: ".tar.gz",
     binary: "mj",
     desktop: true,
+    description: "Native universal macOS bundle for @brokkai/mjolnir",
+    os: ["darwin"],
+    cpu: ["x64", "arm64"],
   },
   {
     packageName: "@brokkai/mjolnir-linux-x64-gnu",
@@ -24,6 +29,10 @@ export const PLATFORMS = [
     extension: ".tar.gz",
     binary: "mj",
     desktop: true,
+    description: "Native Linux x64 glibc bundle for @brokkai/mjolnir",
+    os: ["linux"],
+    cpu: ["x64"],
+    libc: ["glibc"],
   },
   {
     packageName: "@brokkai/mjolnir-linux-arm64-gnu",
@@ -31,6 +40,10 @@ export const PLATFORMS = [
     extension: ".tar.gz",
     binary: "mj",
     desktop: true,
+    description: "Native Linux ARM64 glibc bundle for @brokkai/mjolnir",
+    os: ["linux"],
+    cpu: ["arm64"],
+    libc: ["glibc"],
   },
   {
     packageName: "@brokkai/mjolnir-android-arm64",
@@ -38,6 +51,9 @@ export const PLATFORMS = [
     extension: ".tar.gz",
     binary: "mj",
     desktop: false,
+    description: "Native Android ARM64 bundle for @brokkai/mjolnir",
+    os: ["android"],
+    cpu: ["arm64"],
   },
   {
     packageName: "@brokkai/mjolnir-win32-x64",
@@ -45,8 +61,17 @@ export const PLATFORMS = [
     extension: ".zip",
     binary: "mj.exe",
     desktop: true,
+    description: "Native Windows x64 bundle for @brokkai/mjolnir",
+    os: ["win32"],
+    cpu: ["x64"],
   },
 ];
+
+export function versionFromTag(tag) {
+  const match = /^v(\d+\.\d+\.\d+)$/.exec(tag);
+  if (!match) throw new Error(`release tag must look like vX.Y.Z, got: ${tag}`);
+  return match[1];
+}
 
 export async function cargoVersion() {
   const manifest = await readFile(path.join(repositoryRoot, "Cargo.toml"), "utf8");
@@ -55,48 +80,58 @@ export async function cargoVersion() {
   return version;
 }
 
-async function readJson(filename) {
-  return JSON.parse(await readFile(filename, "utf8"));
+function baseManifest(version) {
+  return {
+    version,
+    license: "GPL-3.0-only",
+    repository: "https://github.com/BrokkAi/mjolnir",
+    homepage: "https://mjolnir.brokk.ai/",
+    bugs: "https://github.com/BrokkAi/mjolnir/issues",
+    publishConfig: { access: "public" },
+  };
 }
 
-async function writeJson(filename, value) {
-  await writeFile(filename, `${JSON.stringify(value, null, 2)}\n`);
+export function platformManifest(platform, version) {
+  return {
+    name: platform.packageName,
+    ...baseManifest(version),
+    description: platform.description,
+    os: platform.os,
+    cpu: platform.cpu,
+    ...(platform.libc ? { libc: platform.libc } : {}),
+    files: ["bin/", "README.md", "LICENSE", "licenses/", "anvil-licenses/"],
+  };
 }
 
-export async function syncVersions(version) {
-  const releaseVersion = version ?? (await cargoVersion());
-  const rootManifestPath = path.join(npmRoot, "package.json");
-  const rootManifest = await readJson(rootManifestPath);
-  rootManifest.version = releaseVersion;
-  await writeJson(rootManifestPath, rootManifest);
-
-  for (const platform of PLATFORMS) {
-    const manifestPath = path.join(npmRoot, "packages", packageDirectory(platform), "package.json");
-    const manifest = await readJson(manifestPath);
-    manifest.version = releaseVersion;
-    await writeJson(manifestPath, manifest);
-  }
-
-  const wrapperManifestPath = path.join(npmRoot, "packages", "mjolnir", "package.json");
-  const wrapperManifest = await readJson(wrapperManifestPath);
-  wrapperManifest.version = releaseVersion;
-  wrapperManifest.optionalDependencies = Object.fromEntries(
-    PLATFORMS.map((platform) => [platform.packageName, releaseVersion]),
-  );
-  await writeJson(wrapperManifestPath, wrapperManifest);
+export function rootManifest(version) {
+  return {
+    name: ROOT_PACKAGE,
+    ...baseManifest(version),
+    description: "Mjolnir terminal client for Agent Client Protocol servers",
+    type: "module",
+    bin: { mj: "bin/mj.js" },
+    files: ["bin/", "README.md", "LICENSE"],
+    optionalDependencies: Object.fromEntries(
+      PLATFORMS.map((platform) => [platform.packageName, version]),
+    ),
+    engines: { node: ">=18" },
+  };
 }
 
-function packageDirectory(platform) {
-  return platform.packageName.split("/").at(-1);
+function packageDirectory(packageName) {
+  return packageName.replace("@", "").replace("/", "-");
 }
 
 function archiveName(version, platform) {
   return `brokk-mjolnir-v${version}-${platform.target}${platform.extension}`;
 }
 
+async function writeManifest(directory, manifest) {
+  await writeFile(path.join(directory, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 async function sha256(filename) {
-  const contents = await readFile(filename);
-  return createHash("sha256").update(contents).digest("hex");
+  return createHash("sha256").update(await readFile(filename)).digest("hex");
 }
 
 async function verifyChecksum(filename) {
@@ -132,70 +167,82 @@ async function ensureBinary(filename, requireExecutableBit) {
   }
 }
 
-async function copyReleaseBundle(platform, source) {
-  const destination = path.join(npmRoot, "packages", packageDirectory(platform));
-  const bundleFiles = ["bin", "README.md", "LICENSE", "licenses", "anvil-licenses"];
-  await Promise.all(bundleFiles.map((file) => rm(path.join(destination, file), { recursive: true, force: true })));
-  await cp(path.join(source, "README.md"), path.join(destination, "README.md"));
-  await cp(path.join(source, "LICENSE"), path.join(destination, "LICENSE"));
-  await cp(path.join(source, "licenses"), path.join(destination, "licenses"), { recursive: true });
-  await cp(path.join(source, "anvil-licenses"), path.join(destination, "anvil-licenses"), { recursive: true });
+async function stagePlatform(platform, version, source, stagingRoot) {
+  const destination = path.join(stagingRoot, packageDirectory(platform.packageName));
   await mkdir(path.join(destination, "bin"), { recursive: true });
-  await cp(path.join(source, platform.binary), path.join(destination, "bin", platform.binary), {
-    recursive: true,
-    force: true,
-  });
-  await cp(
-    path.join(source, platform.binary === "mj.exe" ? "anvil.exe" : "anvil"),
-    path.join(destination, "bin", platform.binary === "mj.exe" ? "anvil.exe" : "anvil"),
-  );
+  for (const entry of ["README.md", "LICENSE", "licenses", "anvil-licenses"]) {
+    await cp(path.join(source, entry), path.join(destination, entry), { recursive: true });
+  }
+  await cp(path.join(source, platform.binary), path.join(destination, "bin", platform.binary));
+  const anvil = platform.binary === "mj.exe" ? "anvil.exe" : "anvil";
+  await cp(path.join(source, anvil), path.join(destination, "bin", anvil));
   if (platform.desktop) {
     const worker = platform.binary === "mj.exe" ? "mj-voice-worker.exe" : "mj-voice-worker";
     await cp(path.join(source, worker), path.join(destination, "bin", worker));
     await ensureBinary(path.join(destination, "bin", worker), platform.binary !== "mj.exe");
   }
   await ensureBinary(path.join(destination, "bin", platform.binary), platform.binary !== "mj.exe");
-  await ensureBinary(
-    path.join(destination, "bin", platform.binary === "mj.exe" ? "anvil.exe" : "anvil"),
-    platform.binary !== "mj.exe",
-  );
+  await ensureBinary(path.join(destination, "bin", anvil), platform.binary !== "mj.exe");
+  await writeManifest(destination, platformManifest(platform, version));
+  return destination;
 }
 
-export async function packageRelease({ releaseTag, assetsDirectory }) {
-  const version = await cargoVersion();
-  if (releaseTag !== `v${version}`) {
-    throw new Error(`release tag ${releaseTag} does not match Cargo.toml version v${version}`);
+async function stageRoot(version, stagingRoot) {
+  const destination = path.join(stagingRoot, packageDirectory(ROOT_PACKAGE));
+  await mkdir(path.join(destination, "bin"), { recursive: true });
+  await cp(path.join(npmRoot, "launcher", "mj.js"), path.join(destination, "bin", "mj.js"));
+  await cp(path.join(npmRoot, "launcher", "README.md"), path.join(destination, "README.md"));
+  await cp(path.join(repositoryRoot, "LICENSE"), path.join(destination, "LICENSE"));
+  await writeManifest(destination, rootManifest(version));
+  return destination;
+}
+
+async function pack(directory, outputDirectory) {
+  const { stdout } = await execFile("npm", ["pack", directory, "--pack-destination", outputDirectory, "--silent"]);
+  return path.join(outputDirectory, stdout.trim().split("\n").at(-1));
+}
+
+export async function packageRelease({ releaseTag, assetsDirectory, outputDirectory }) {
+  const version = versionFromTag(releaseTag);
+  const manifestVersion = await cargoVersion();
+  if (version !== manifestVersion) {
+    throw new Error(`release tag ${releaseTag} does not match Cargo.toml version v${manifestVersion}`);
   }
-  await syncVersions(version);
+  const output = path.resolve(outputDirectory ?? path.join(npmRoot, "dist"));
+  await rm(output, { recursive: true, force: true });
+  await mkdir(output, { recursive: true });
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "mjolnir-npm-"));
   try {
     for (const platform of PLATFORMS) {
       const archive = path.join(assetsDirectory, archiveName(version, platform));
       await verifyChecksum(archive);
-      const extractDirectory = path.join(temporaryRoot, packageDirectory(platform));
+      const extractDirectory = path.join(temporaryRoot, `extract-${packageDirectory(platform.packageName)}`);
       await mkdir(extractDirectory, { recursive: true });
       const bundle = await extractArchive(archive, extractDirectory);
-      await copyReleaseBundle(platform, bundle);
+      await pack(await stagePlatform(platform, version, bundle, temporaryRoot), output);
     }
+    await pack(await stageRoot(version, temporaryRoot), output);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
+  return output;
 }
 
 function usage() {
-  return "Usage: node scripts/package-release.mjs --sync-versions | --release-tag vX.Y.Z --assets DIRECTORY";
+  return "Usage: node scripts/package-release.mjs --release-tag vX.Y.Z --assets DIRECTORY [--out DIRECTORY]";
 }
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.includes("--sync-versions")) {
-    await syncVersions();
-    return;
-  }
   const releaseTag = args[args.indexOf("--release-tag") + 1];
   const assetsDirectory = args[args.indexOf("--assets") + 1];
+  const outputArgument = args.includes("--out") ? args[args.indexOf("--out") + 1] : undefined;
   if (!releaseTag || !assetsDirectory) throw new Error(usage());
-  await packageRelease({ releaseTag, assetsDirectory: path.resolve(assetsDirectory) });
+  await packageRelease({
+    releaseTag,
+    assetsDirectory: path.resolve(assetsDirectory),
+    outputDirectory: outputArgument ? path.resolve(outputArgument) : undefined,
+  });
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

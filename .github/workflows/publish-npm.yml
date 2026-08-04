@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing Mjolnir release tag to package, for example v1.5.2
+        description: Existing Mjolnir release tag to package, in the form vX.Y.Z
         required: true
         type: string
       publish:
@@ -57,18 +57,13 @@ jobs:
         working-directory: npm
         run: npm test
 
-      - name: Verify release checksums and assemble native packages
+      - name: Verify release checksums and build npm tarballs
         working-directory: npm
         run: npm run package-release -- --release-tag "$RELEASE_TAG" --assets ../release-assets
 
       - name: Inspect npm tarballs
         run: |
-          mkdir npm-tarballs
-          for package in npm/packages/*; do
-            (cd "$package" && npm pack --dry-run)
-            (cd "$package" && npm pack --pack-destination "$GITHUB_WORKSPACE/npm-tarballs")
-          done
-          for tarball in npm-tarballs/*.tgz; do
+          for tarball in npm/dist/*.tgz; do
             if tar -tzf "$tarball" | grep -E '(^|/)([.]npmrc|[.]git|id_rsa|credentials)($|/)'; then
               echo "unexpected sensitive path in $tarball" >&2
               exit 1
@@ -80,8 +75,8 @@ jobs:
           version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
           mkdir npm-smoke
           npm install --prefix npm-smoke --ignore-scripts \
-            "npm-tarballs/brokkai-mjolnir-$version.tgz" \
-            "npm-tarballs/brokkai-mjolnir-linux-x64-gnu-$version.tgz"
+            "npm/dist/brokkai-mjolnir-$version.tgz" \
+            "npm/dist/brokkai-mjolnir-linux-x64-gnu-$version.tgz"
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/anvil
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj-voice-worker
@@ -90,7 +85,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: npm-tarballs-${{ env.RELEASE_TAG }}
-          path: npm-tarballs/*.tgz
+          path: npm/dist/*.tgz
           if-no-files-found: error
 
   publish:

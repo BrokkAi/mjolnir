@@ -8,14 +8,14 @@ import {
   launch,
   platformPackageName,
   resolveBundle,
-} from "../packages/mjolnir/bin/mj.js";
+} from "../launcher/mj.js";
 
 test("recognizes npm's symlinked bin entrypoint", () => {
   let resolved;
   assert.equal(
     isMainModule("/tmp/node_modules/.bin/mj", (entrypoint) => {
       resolved = entrypoint;
-      return new URL("../packages/mjolnir/bin/mj.js", import.meta.url).pathname;
+      return new URL("../launcher/mj.js", import.meta.url).pathname;
     }),
     true,
   );

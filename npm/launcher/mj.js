@@ -67,7 +67,6 @@ export function launch(
       MJOLNIR_NO_UPDATE_CHECK: "1",
     },
   });
-
   const signalHandlers = new Map();
   for (const signal of Object.keys(SIGNAL_EXIT_CODES)) {
     const handler = () => child.kill(signal);

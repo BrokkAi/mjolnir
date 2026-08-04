@@ -33,7 +33,6 @@ Or run it once without installing globally:
 
 ```bash
 npx -y @brokkai/mjolnir --version
-npx -y @brokkai/mjolnir@1.5.2 --version
 ```
 
 The package contains the native Mjolnir release bundle for your platform. It
