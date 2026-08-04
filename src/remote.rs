@@ -2888,9 +2888,22 @@ fn start_server_agent_session(
     let (runtime_cmd_tx, runtime_cmd_rx) = mpsc::unbounded_channel();
     let (server_cmd_tx, mut server_cmd_rx) = mpsc::unbounded_channel();
     let (remote_event_tx, mut remote_event_rx) = mpsc::unbounded_channel();
-    let agent_source_id = agent.source_id.clone();
+    // The adapter source id ("codex-acp", ...) — not the synthetic
+    // `roster:{model}` launch id — so saved session options load from and
+    // accepted live values persist to the same buckets the TUI uses.
+    let agent_source_id = roster.as_ref().map_or_else(
+        || agent.source_id.clone(),
+        |resolved| resolved.primary.launch.source_id.clone(),
+    );
     let config_path = config::default_config_path();
     let app_config = config::Config::load(&config_path).unwrap_or_default();
+    let saved_session_config = roster.as_ref().map_or_else(HashMap::new, |resolved| {
+        config::load_saved_session_config(
+            &config_path,
+            &resolved.primary.launch.source_id,
+            &resolved.primary.model.model,
+        )
+    });
     let project_label = crate::paths::project_label_from_cwd(&cwd);
     let worktree_label = crate::paths::worktree_name_from_cwd(&cwd);
     // With a roster the session has a real primary model; align the published
@@ -3005,7 +3018,7 @@ fn start_server_agent_session(
         access_mode: crate::acp::RuntimeAccessMode::Full,
         agent_source_id: Some(agent_source_id),
         config_path: Some(config_path),
-        saved_session_config: HashMap::new(),
+        saved_session_config,
         role_config,
         subagents,
         side_prompt_policy: false,
