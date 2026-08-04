@@ -287,9 +287,8 @@ pub struct SubagentsConfig {
         skip_serializing_if = "is_default_acp_priority"
     )]
     pub acp_priority: Vec<String>,
-    /// Per-invocation reasoning-effort override for subagent ACP sessions
-    /// (e.g. from `--subagent-model MODEL+high`). Not meaningful outside a
-    /// single `--print` invocation; never written to the on-disk default.
+    /// Reasoning-effort default for delegated ACP sessions. A one-shot
+    /// `--subagent-model MODEL+high` override replaces it only for that run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     /// Adapter-owned session defaults selected for future delegated sessions.
