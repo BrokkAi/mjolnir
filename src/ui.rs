@@ -6228,8 +6228,8 @@ fn agent_picker_items(state: &AppState, width: u16, visible: usize) -> Vec<ListI
 
 fn primary_effort_label(index: usize) -> String {
     match primary_effort_value(index) {
-        Some(effort) => format!("{effort} reasoning effort"),
-        None => "adapter default reasoning effort".to_string(),
+        Some(effort) => effort.to_string(),
+        None => "adapter default".to_string(),
     }
 }
 
@@ -16934,6 +16934,27 @@ mod tests {
                 .is_some_and(|picker| picker.step == AgentPickerStep::Effort)
         );
         assert_eq!(state.exit_reason, None);
+    }
+
+    #[test]
+    fn primary_effort_picker_uses_concise_option_labels() {
+        let labels = (0..PRIMARY_EFFORT_OPTIONS.len())
+            .map(primary_effort_label)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            [
+                "adapter default",
+                "off",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+            ]
+        );
     }
 
     #[test]
