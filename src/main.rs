@@ -2166,6 +2166,7 @@ async fn run_session(
             &config::default_config_path(),
             &roster.primary.launch.source_id,
             &roster.primary.model.model,
+            config::SessionConfigSeat::Primary,
         ),
         role_config: Some(acp::RuntimeRoleConfig {
             label: "primary".to_string(),

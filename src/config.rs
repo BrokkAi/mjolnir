@@ -22,6 +22,15 @@ pub const DEFAULT_ACP_PRIORITY: [&str; 4] = ["codex-acp", "claude-acp", "kimi", 
 /// Schema version this build can migrate forward from.
 const MIGRATABLE_VERSION: u32 = 2;
 
+/// Saved ACP session defaults are scoped to the seat that will consume them.
+/// Live accepted values remain in the top-level `session_config` cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionConfigSeat {
+    Primary,
+    Subagent,
+    Review,
+}
+
 /// Per-invocation model overrides (`--model` / `--review-model` /
 /// `--subagent-model`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -189,6 +198,9 @@ pub struct AgentConfig {
     /// primary model picker for future sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Adapter-owned session defaults selected for future primary sessions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_defaults: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default = "default_true")]
     pub discrete_review: bool,
     /// How many corrective re-review passes one user turn may dispatch after
@@ -206,6 +218,7 @@ impl Default for AgentConfig {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: None,
+            session_defaults: BTreeMap::new(),
             discrete_review: true,
             max_correction_rounds: default_max_correction_rounds(),
         }
@@ -279,6 +292,9 @@ pub struct SubagentsConfig {
     /// single `--print` invocation; never written to the on-disk default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Adapter-owned session defaults selected for future delegated sessions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_defaults: BTreeMap<String, BTreeMap<String, String>>,
     /// Concurrency cap for the shared subagent pool.
     #[serde(default = "default_max_parallel")]
     pub max_parallel: usize,
@@ -301,6 +317,7 @@ impl Default for SubagentsConfig {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: None,
+            session_defaults: BTreeMap::new(),
             max_parallel: default_max_parallel(),
             auto_failover: true,
             debrief: true,
@@ -750,6 +767,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: old.thor.reasoning_effort,
+            session_defaults: BTreeMap::new(),
             discrete_review: old.thor.discrete_review,
             max_correction_rounds: old.thor.max_correction_rounds,
         },
@@ -764,6 +782,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: old.eitri.reasoning_effort,
+            session_defaults: BTreeMap::new(),
             max_parallel: old.eitri.max_parallel_explores,
             auto_failover: old.council.auto_failover,
             debrief: old.eitri.debrief,
@@ -788,15 +807,24 @@ pub fn load_saved_session_config(
     path: &Path,
     source_id: &str,
     model_id: &str,
+    seat: SessionConfigSeat,
 ) -> HashMap<String, String> {
     match Config::load(path) {
         Ok(config) => {
-            let Some(saved) = config.session_config.get(source_id) else {
-                return HashMap::new();
+            let mut values = HashMap::new();
+            if let Some(saved) = config.session_config.get(source_id) {
+                values.extend(saved.defaults.clone());
+                if let Some(route) = saved.models.get(model_id) {
+                    values.extend(route.clone());
+                }
+            }
+            let scoped = match seat {
+                SessionConfigSeat::Primary => config.agent.session_defaults.get(source_id),
+                SessionConfigSeat::Subagent => config.subagents.session_defaults.get(source_id),
+                SessionConfigSeat::Review => None,
             };
-            let mut values: HashMap<_, _> = saved.defaults.clone().into_iter().collect();
-            if let Some(route) = saved.models.get(model_id) {
-                values.extend(route.clone());
+            if let Some(scoped) = scoped {
+                values.extend(scoped.clone());
             }
             values
         }
@@ -1301,6 +1329,7 @@ origin = "custom"
                 acp_source: None,
                 acp_priority: default_acp_priority(),
                 reasoning_effort: None,
+                session_defaults: BTreeMap::new(),
                 discrete_review: false,
                 max_correction_rounds: default_max_correction_rounds(),
             },
@@ -1431,12 +1460,44 @@ origin = "custom"
         cfg.save(&path).expect("save");
 
         assert_eq!(
-            load_saved_session_config(&path, "codex-acp", "model-a")["config:service_tier"],
+            load_saved_session_config(&path, "codex-acp", "model-a", SessionConfigSeat::Primary,)["config:service_tier"],
             "priority"
         );
         assert_eq!(
-            load_saved_session_config(&path, "codex-acp", "model-b")["config:service_tier"],
+            load_saved_session_config(&path, "codex-acp", "model-b", SessionConfigSeat::Primary,)["config:service_tier"],
             "default"
+        );
+    }
+
+    #[test]
+    fn saved_session_config_keeps_primary_and_subagent_defaults_separate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.agent
+            .session_defaults
+            .entry("codex-acp".to_string())
+            .or_default()
+            .insert("config:mode".to_string(), "primary".to_string());
+        cfg.subagents
+            .session_defaults
+            .entry("codex-acp".to_string())
+            .or_default()
+            .insert("config:mode".to_string(), "subagent".to_string());
+        cfg.save(&path).expect("save");
+
+        assert_eq!(
+            load_saved_session_config(&path, "codex-acp", "model-a", SessionConfigSeat::Primary,)["config:mode"],
+            "primary"
+        );
+        assert_eq!(
+            load_saved_session_config(&path, "codex-acp", "model-a", SessionConfigSeat::Subagent,)
+                ["config:mode"],
+            "subagent"
+        );
+        assert!(
+            load_saved_session_config(&path, "codex-acp", "model-a", SessionConfigSeat::Review,)
+                .is_empty()
         );
     }
 

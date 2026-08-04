@@ -12,13 +12,8 @@ expect {
     -re {Agents.*primary} {}
     timeout { exit 29 }
 }
-expect {
-    -re {F1 Mode} {
-        after 300
-        send -- "$env(MJ_E2E_LIVE_PROMPT)\r"
-    }
-    timeout { exit 34 }
-}
+after 300
+send -- "$env(MJ_E2E_LIVE_PROMPT)\r"
 
 expect {
     -re {permission request} { send -- "\r"; exp_continue }

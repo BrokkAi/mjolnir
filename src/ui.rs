@@ -4979,7 +4979,7 @@ fn persist_mjconfig_selection(
                 }
                 state.record_status_message(
                     StatusKind::Info,
-                    format!("config saved — theme {theme}, spinner {style}; session options update the active primary, while model, permission, and ACP routing changes apply on /new or /clear"),
+                    format!("config saved — theme {theme}, spinner {style}; compatible session options update the active primary, while model and ACP routing changes apply on /new or /clear"),
                 );
             }
             Err(e) => state.record_status_message(
@@ -5002,11 +5002,7 @@ fn live_primary_session_config_updates(
     let Some(source_id) = state.active_models.primary_source.as_deref() else {
         return Vec::new();
     };
-    let Some(defaults) = config
-        .session_config
-        .get(source_id)
-        .map(|saved| &saved.defaults)
-    else {
+    let Some(defaults) = config.agent.session_defaults.get(source_id) else {
         return Vec::new();
     };
 
@@ -11498,33 +11494,6 @@ fn usage_quota_source_label(state: &AppState, source: &str) -> Option<String> {
     }
 }
 
-#[cfg(test)]
-fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-
-    let options = state.selectable_config_options();
-    if options.is_empty() {
-        return;
-    }
-
-    let mut chips = Vec::with_capacity(options.len());
-    for (_, option, shortcut) in options {
-        let current = config_option_current_value_label(option);
-        let chip = match shortcut {
-            Some(shortcut) => format!("[F{shortcut} {}: {current}]", option.name),
-            None => format!("[{}: {current}]", option.name),
-        };
-        chips.push(chip);
-    }
-
-    let text = chips.join(" ");
-
-    let paragraph = Paragraph::new(text).style(Style::default().fg(state.theme.primary));
-    f.render_widget(paragraph, area);
-}
-
 fn draw_permission_modal(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -12580,8 +12549,8 @@ fn help_modal_lines(
         help_blank_line(),
         help_section_line("Config", theme),
         help_binding_line(
-            "/mjconfig → ACP Sessions",
-            "edit per-server session defaults",
+            "/mjconfig → Agents/Subagents",
+            "edit role-scoped session defaults",
             theme,
         ),
         help_blank_line(),
@@ -17767,6 +17736,7 @@ mod tests {
 
         // ACP Servers tab: toggle Codex off.
         state.mjconfig_menu_key(KeyCode::Tab);
+        state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu.as_mut().expect("menu").editor.selected =
             crate::settings::SERVER_ROW_OFFSET;
         handle_mjconfig_menu_key(
@@ -17780,7 +17750,6 @@ mod tests {
         // Appearance tab: preview theme and spinner live.
         state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Right);
         let previewed_theme = state.theme_kind;
         state.mjconfig_menu_key(KeyCode::Down);
@@ -17789,7 +17758,7 @@ mod tests {
 
         // Agents tab: toggle discrete review and apply it to the running session.
         state.mjconfig_menu_key(KeyCode::Tab);
-        for _ in 0..3 {
+        for _ in 0..2 {
             state.mjconfig_menu_key(KeyCode::Down);
         }
         state.mjconfig_menu_key(KeyCode::Char(' '));
@@ -17856,10 +17825,10 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut config = config::Config::default();
         config
-            .session_config
+            .agent
+            .session_defaults
             .entry("codex-acp".to_string())
             .or_default()
-            .defaults
             .insert("config:service_tier".to_string(), "priority".to_string());
         let mut state = AppState::new();
         state.config_path = Some(path);
@@ -17976,11 +17945,13 @@ mod tests {
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("mj config"), "rendered:\n{rendered}");
         assert!(rendered.contains("Agents"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Subagents"), "rendered:\n{rendered}");
         assert!(rendered.contains("ACP Priority"), "rendered:\n{rendered}");
         assert!(rendered.contains("ACP Servers"), "rendered:\n{rendered}");
         assert!(rendered.contains("Appearance"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("primary model; plans, implements, and answers"),
+            rendered.contains("Saved primary defaults")
+                || rendered.contains("No primary ACP route is resolved"),
             "rendered:\n{rendered}"
         );
     }
@@ -23153,7 +23124,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_quota_row_renders_between_input_and_config_shortcuts() {
+    fn usage_quota_row_renders_claude_usage() {
         let mut state = AppState::new();
         state.set_claude_usage(ClaudeUsageStatus::Available(ClaudeUsageReport {
             five_hour: Some(crate::claude_usage::ClaudeUsageWindow {
@@ -23165,29 +23136,14 @@ mod tests {
                 reset_context: None,
             }),
         }));
-        state.session_config_options = vec![SessionConfigOption::select(
-            "model",
-            "Model",
-            "model-1",
-            vec![SessionConfigSelectOption::new("model-1", "Model 1")],
-        )];
-
-        let backend = TestBackend::new(100, 2);
+        let backend = TestBackend::new(100, 1);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|frame| {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(1), Constraint::Length(1)])
-                    .split(frame.area());
-                draw_usage_quota_row(frame, chunks[0], &state);
-                draw_config_shortcuts_row(frame, chunks[1], &state);
-            })
+            .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
             .expect("draw");
 
         let lines = buffer_lines(terminal.backend().buffer());
         assert!(lines[0].contains("Claude usage: 5H 88% left · week 63% left"));
-        assert!(lines[1].contains("[F1 Model: Model 1]"));
     }
 
     #[test]

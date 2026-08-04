@@ -51,6 +51,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `agent.acp_source` | Optional exact ACP source constraint; keeps `auto` selection inside that adapter |
 | `agent.acp_priority` | ACP source preference when several enabled adapters offer the primary model |
 | `agent.reasoning_effort` | Optional per-seat ACP reasoning effort |
+| `agent.session_defaults` | Per-ACP saved session-option defaults for new primary sessions |
 | `agent.discrete_review` | Run the end-of-turn discrete review |
 | `review.model` | Review supervisor model, or `auto` |
 | `review.acp_source` | Optional exact ACP source constraint for the review seat |
@@ -60,6 +61,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `subagents.acp_source` | Optional exact ACP source constraint for default workers and their failover pool |
 | `subagents.acp_priority` | Independent ACP source preference for the default worker model |
 | `subagents.reasoning_effort` | Optional per-seat ACP reasoning effort |
+| `subagents.session_defaults` | Per-ACP saved session-option defaults for newly created subagents |
 | `subagents.max_parallel` | Concurrent subagents, default 6, maximum 16 |
 | `subagents.auto_failover` | Move the default pool to the next roster route when the current ACP source's quota runs low; the model may stay the same |
 | `subagents.progress_wake_minutes` | Minutes a primary parked on running subagents may go without a report before it is woken with their progress alone; default 20, `0` disables. Config file only |
@@ -155,10 +157,26 @@ configuration remains unchanged.
 Theme, spinner, and feature-tip preferences are persistent. Feature tips are
 enabled by default and appear occasionally between completed turns; disable
 them under **Appearance** in `/mjconfig` or set `feature_hints = false` in the
-top level of the config file. Agent-owned ACP session defaults
-are listed per configured server on the **ACP Sessions** tab in `/mjconfig`.
-Model and thought-level selection remain in Mjolnir's **Agents** configuration.
-Saved ACP session defaults take effect when that server starts a new session.
+top level of the config file.
+
+The **Agents** and **Subagents** tabs list the selectable session options
+advertised by each role's selected ACP source. Primary defaults and delegated
+subagent defaults are stored separately. Compatible primary changes are also
+sent to the running primary session when `/mjconfig` is saved; the UI reports
+the active value separately from the saved default. Subagent changes apply only
+to subagents started later, never to ones that are already running. A saved
+value that a newly selected adapter no longer advertises stays intact and is
+shown as unavailable until you select a compatible value.
+
+The same role-scoped defaults can be written directly in TOML:
+
+```toml
+[agent.session_defaults."codex-acp"]
+"config:service_tier" = "priority"
+
+[subagents.session_defaults."codex-acp"]
+"config:service_tier" = "default"
+```
 
 Platform config locations come from the operating system rather than a literal
 cross-platform `~/.config` contract. See [Storage and network

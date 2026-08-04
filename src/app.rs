@@ -1907,6 +1907,7 @@ impl AppState {
         self.mjconfig_menu = Some(MjConfigMenu {
             editor: SettingsEditor::new(config, self.model_choices.clone(), None)
                 .with_active_models(self.active_models.clone())
+                .with_active_session_config(self.session_config_options.clone())
                 .with_inventory(self.acp_inventory.clone()),
             orig_theme: self.theme_kind,
             orig_spinner: self.spinner_style,
@@ -4668,21 +4669,6 @@ impl AppState {
             self.current_mode = Some(value.to_string());
         }
     }
-
-    /// Return select-style config options in agent order, together with
-    /// their original index and optional `Ctrl-1..9` shortcut.
-    #[cfg(test)]
-    pub fn selectable_config_options(&self) -> Vec<(usize, &SessionConfigOption, Option<char>)> {
-        self.session_config_options
-            .iter()
-            .enumerate()
-            .filter(|(_, option)| matches!(&option.kind, SessionConfigKind::Select(_)))
-            .enumerate()
-            .map(|(select_index, (option_index, option))| {
-                (option_index, option, config_shortcut_char(select_index))
-            })
-            .collect()
-    }
 }
 
 fn move_wrapped(selected: &mut usize, delta: i32, len: usize) {
@@ -4847,11 +4833,6 @@ pub fn config_option_choices(option: &SessionConfigOption) -> Option<Vec<ConfigV
 /// level). Used to decide which picker rows get a strength score.
 pub fn is_model_config_option(option: &SessionConfigOption) -> bool {
     matches!(option.category, Some(SessionConfigOptionCategory::Model))
-}
-
-#[cfg(test)]
-fn config_shortcut_char(select_index: usize) -> Option<char> {
-    (select_index < 9).then_some((b'1' + select_index as u8) as char)
 }
 
 fn config_select_current_value_label(select: &SessionConfigSelect) -> String {
@@ -7585,45 +7566,6 @@ mod tests {
     }
 
     #[test]
-    fn config_shortcuts_assign_in_select_order_and_cap_at_nine() {
-        let mut s = AppState::new();
-        s.session_config_options = (0..10)
-            .map(|idx| {
-                SessionConfigOption::select(
-                    format!("model-{idx}"),
-                    format!("Model {idx}"),
-                    format!("model-{idx}-a"),
-                    vec![
-                        SessionConfigSelectOption::new(format!("model-{idx}-a"), "A"),
-                        SessionConfigSelectOption::new(format!("model-{idx}-b"), "B"),
-                    ],
-                )
-            })
-            .collect();
-
-        let shortcuts = s.selectable_config_options();
-        assert_eq!(shortcuts.len(), 10);
-        assert_eq!(
-            shortcuts
-                .iter()
-                .map(|(option_index, _, shortcut)| (*option_index, *shortcut))
-                .collect::<Vec<_>>(),
-            vec![
-                (0, Some('1')),
-                (1, Some('2')),
-                (2, Some('3')),
-                (3, Some('4')),
-                (4, Some('5')),
-                (5, Some('6')),
-                (6, Some('7')),
-                (7, Some('8')),
-                (8, Some('9')),
-                (9, None),
-            ]
-        );
-    }
-
-    #[test]
     fn open_config_value_picker_preselects_current_value_and_submits() {
         let mut s = AppState::new();
         s.session_config_options = vec![SessionConfigOption::select(
@@ -7652,7 +7594,7 @@ mod tests {
     }
 
     #[test]
-    fn config_option_update_reassigns_shortcuts_and_clamps_picker_selection() {
+    fn config_option_update_clamps_picker_selection() {
         let mut s = AppState::new();
         let initial = vec![
             SessionConfigOption::select(
@@ -7692,10 +7634,6 @@ mod tests {
             ConfigOptionUpdate::new(updated),
         )));
 
-        let shortcuts = s.selectable_config_options();
-        assert_eq!(shortcuts.len(), 1);
-        assert_eq!(shortcuts[0].0, 0);
-        assert_eq!(shortcuts[0].2, Some('1'));
         assert_eq!(s.config_picker.as_ref().expect("picker").selected_value, 0);
     }
 

@@ -1041,6 +1041,11 @@ fn spawn_subagent_runtime(
                 &crate::config::default_config_path(),
                 &role.adapter_source_id,
                 &role.model_id,
+                match config.usage_seat {
+                    Seat::Primary => crate::config::SessionConfigSeat::Primary,
+                    Seat::Subagent => crate::config::SessionConfigSeat::Subagent,
+                    Seat::Review => crate::config::SessionConfigSeat::Review,
+                },
             )
         })
         .unwrap_or_default();
