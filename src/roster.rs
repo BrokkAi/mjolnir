@@ -1489,7 +1489,7 @@ fn assemble_roster(
         warnings.push(
             "subagent delegation is disabled: no launchable subagent model is available. \
              Install and authenticate a supported ACP adapter (for Codex: install `@openai/codex` \
-             and run `codex login`), then restart or retry with /models."
+             and run `codex login`), then restart and review the route in /mjconfig."
                 .to_string(),
         );
     }

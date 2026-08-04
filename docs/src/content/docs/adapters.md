@@ -32,18 +32,16 @@ authentication.
 ## Probing and caching
 
 Native routes with fresh capability cache entries can bind immediately. Other
-routes are probed in the background and appear in `/models` or the ACP Servers
-tab when their catalog is ready. A wedged probe does not block an otherwise
-launchable session.
+routes are probed in the background and appear on the Agents or ACP Servers
+tabs in `/mjconfig` when their catalog is ready. A wedged probe does not block
+an otherwise launchable session.
 
 Probe results and the live DeepSWE ranking are cached for 24 hours. A bundled
 snapshot is available when the ranking endpoint cannot be refreshed. Read
 [Storage and network activity](/storage-network/) for paths and endpoints.
 
-`mj models refresh` clears the persisted ACP capability cache. In an active
-session, `/models refresh` also clears Mjolnir's process-local probe results;
-run `/new` or `/clear` afterward to resolve models and reprobe every enabled
-adapter. The current session keeps its already-bound models.
+`mj models refresh` clears the persisted ACP capability cache. Run it before
+starting Mjolnir again to resolve models and reprobe every enabled adapter.
 
 ## Auto selection and Codex priority
 

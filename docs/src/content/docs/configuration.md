@@ -3,11 +3,10 @@ title: Configuration
 description: Configure the primary agent, subagents, ACP servers, review, and appearance.
 ---
 
-Open `/mjconfig` to edit settings from the TUI. `/models` opens the same editor
-on the Agents tab. Model and ACP-server changes apply to the next session.
-Use `/models refresh` when credentials or adapter capabilities changed and you
-need the next `/new` or `/clear` to probe every enabled adapter again. The
-equivalent non-interactive command is `mj models refresh`.
+Open `/mjconfig` to edit settings from the TUI. Model and ACP-server changes
+apply to the next session. The former `/models` command has been removed; use
+the Agents tab in `/mjconfig` instead. When credentials or adapter capabilities
+change, run `mj models refresh` before starting Mjolnir again.
 
 The config schema is versioned. The current schema is `version = 3`; a
 `version = 2` file is migrated in place on load. Any other version starts from
@@ -65,9 +64,9 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `subagents.auto_failover` | Move the default pool to the next roster route when the current ACP source's quota runs low; the model may stay the same |
 | `subagents.progress_wake_minutes` | Minutes a primary parked on running subagents may go without a report before it is woken with their progress alone; default 20, `0` disables. Config file only |
 
-Explicit model IDs can come from `/models`; availability is checked when the
-next session starts. A `max_parallel` above 16 is a configuration error, not a
-silently clamped value.
+Explicit model IDs can be selected in `/mjconfig`; availability is checked
+when the next session starts. A `max_parallel` above 16 is a configuration
+error, not a silently clamped value.
 
 The recommended onboarding sets each seat's `acp_source` to `codex-acp`. This
 retains automatic model selection without letting another installed adapter

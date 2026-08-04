@@ -113,9 +113,8 @@ mj
 First launch opens Mjolnir's configuration screen. Confirm the Codex account
 and route, keep the primary model on Auto, and start the session. Return later
 with `/mjconfig`. Model and adapter changes apply to the next session. If Codex
-credentials or capabilities change under a running Mjolnir process, use
-`/models refresh` before `/new` or `/clear`; the standalone equivalent is `mj
-models refresh`.
+credentials or capabilities change, run `mj models refresh` before starting
+Mjolnir again.
 
 ## Try it
 

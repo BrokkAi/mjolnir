@@ -221,7 +221,6 @@ const BUILTIN_FORK_COMMAND: &str = "fork";
 const BUILTIN_SIDE_COMMAND: &str = "side";
 const BUILTIN_EXPORT_COMMAND: &str = "export";
 const BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
-const BUILTIN_MODELS_COMMAND: &str = "models";
 const BUILTIN_AGENTS_COMMAND: &str = "agents";
 const BUILTIN_SUBAGENTS_COMMAND: &str = "subagents";
 const BUILTIN_REVIEW_COMMAND: &str = "review";
@@ -278,13 +277,6 @@ fn builtin_mjconfig_command() -> AvailableCommand {
     )
 }
 
-fn builtin_models_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_MODELS_COMMAND,
-        "open model settings; add refresh to clear cached discovery",
-    )
-}
-
 fn builtin_agents_command() -> AvailableCommand {
     AvailableCommand::new(
         BUILTIN_AGENTS_COMMAND,
@@ -327,7 +319,6 @@ fn install_builtin_commands(
             && command.name != BUILTIN_SIDE_COMMAND
             && command.name != BUILTIN_EXPORT_COMMAND
             && command.name != BUILTIN_MJCONFIG_COMMAND
-            && command.name != BUILTIN_MODELS_COMMAND
             && command.name != BUILTIN_AGENTS_COMMAND
             && command.name != BUILTIN_SUBAGENTS_COMMAND
             && command.name != BUILTIN_REVIEW_COMMAND
@@ -344,7 +335,6 @@ fn install_builtin_commands(
     commands.insert(0, builtin_review_command());
     commands.insert(0, builtin_subagents_command());
     commands.insert(0, builtin_agents_command());
-    commands.insert(0, builtin_models_command());
     commands.insert(0, builtin_export_command());
     commands.insert(0, builtin_load_command());
     commands.insert(0, builtin_compact_command());
@@ -362,7 +352,6 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
             BUILTIN_FORK_COMMAND,
             BUILTIN_SIDE_COMMAND,
             BUILTIN_MJCONFIG_COMMAND,
-            BUILTIN_MODELS_COMMAND,
             BUILTIN_AGENTS_COMMAND,
             BUILTIN_SUBAGENTS_COMMAND,
             BUILTIN_REVIEW_COMMAND,
@@ -9487,7 +9476,6 @@ mod tests {
                 "compact",
                 "load",
                 "export",
-                "models",
                 "agents",
                 "subagents",
                 "review",
@@ -9526,7 +9514,6 @@ mod tests {
                 "compact",
                 "load",
                 "export",
-                "models",
                 "agents",
                 "subagents",
                 "review",
@@ -9572,7 +9559,6 @@ mod tests {
                 "compact",
                 "load",
                 "export",
-                "models",
                 "agents",
                 "subagents",
                 "review",
@@ -9601,14 +9587,10 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[5].description,
-            "open model settings; add refresh to clear cached discovery"
-        );
-        assert_eq!(
-            s.available_commands[6].description,
             "show active model selections and usage"
         );
         assert_eq!(
-            s.available_commands[11].description,
+            s.available_commands[10].description,
             "fork the current session (unstable ACP extension)"
         );
     }
@@ -9636,7 +9618,6 @@ mod tests {
                 "compact",
                 "load",
                 "export",
-                "models",
                 "agents",
                 "subagents",
                 "review",
