@@ -1,6 +1,6 @@
 {
   "name": "@brokkai/mjolnir-darwin-universal",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Native universal macOS bundle for @brokkai/mjolnir",
   "license": "GPL-3.0-only",
   "repository": "https://github.com/BrokkAi/mjolnir",

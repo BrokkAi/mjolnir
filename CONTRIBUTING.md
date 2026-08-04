@@ -196,8 +196,9 @@ Reviewers will pay particular attention to:
 ## Releases
 
 Releases are maintainer-driven. The root and voice-worker `Cargo.toml` files
-must carry the same version, with `Cargo.lock` and `SCRIPT_VERSION` in
-`install.sh` updated for the release.
+must carry the same version, with matching workspace entries in `Cargo.lock`.
+`install.sh`'s `SCRIPT_VERSION` is an independent installer logging revision
+and is not automatically synchronized to product releases.
 
 A `vX.Y.Z` tag triggers the GitHub release and crates.io workflows. The publish
 workflow refuses to publish when the tag differs from either crate version. The
@@ -230,7 +231,7 @@ to keep release events in package-and-smoke-test mode.
 
 Before tagging, maintainers should confirm that:
 
-1. Both crate manifests, `Cargo.lock`, and `install.sh` match the intended tag.
+1. Both crate manifests and their `Cargo.lock` workspace entries match the intended tag.
 2. The pinned Anvil runtime version, release workflow, README, and bundled legal
    directory agree when that dependency changed.
 3. Formatting, Clippy, release builds, tests, and relevant cross-platform or

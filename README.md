@@ -70,7 +70,7 @@ npm install -g @brokkai/mjolnir
 mj --version
 
 npx -y @brokkai/mjolnir --version
-npx -y @brokkai/mjolnir@1.5.0 --version
+npx -y @brokkai/mjolnir@1.5.1 --version
 ```
 
 The npm package includes the native `mj` bundle for your platform—plus bundled

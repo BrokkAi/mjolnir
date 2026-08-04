@@ -1,6 +1,6 @@
 {
   "name": "@brokkai/mjolnir",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Mjolnir terminal client for Agent Client Protocol servers",
   "license": "GPL-3.0-only",
   "repository": "https://github.com/BrokkAi/mjolnir",
@@ -16,11 +16,11 @@
     "LICENSE"
   ],
   "optionalDependencies": {
-    "@brokkai/mjolnir-darwin-universal": "1.5.0",
-    "@brokkai/mjolnir-linux-x64-gnu": "1.5.0",
-    "@brokkai/mjolnir-linux-arm64-gnu": "1.5.0",
-    "@brokkai/mjolnir-android-arm64": "1.5.0",
-    "@brokkai/mjolnir-win32-x64": "1.5.0"
+    "@brokkai/mjolnir-darwin-universal": "1.5.1",
+    "@brokkai/mjolnir-linux-x64-gnu": "1.5.1",
+    "@brokkai/mjolnir-linux-arm64-gnu": "1.5.1",
+    "@brokkai/mjolnir-android-arm64": "1.5.1",
+    "@brokkai/mjolnir-win32-x64": "1.5.1"
   },
   "publishConfig": {
     "access": "public"
