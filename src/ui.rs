@@ -2951,8 +2951,15 @@ fn handle_crossterm(
     }
 
     if state.runtime_closed {
+        let search_was_active = state.transcript_search.is_some();
         if mode == UiMode::FullscreenTui
             && handle_active_transcript_search_key(state, key.modifiers, key.code)
+        {
+            return TerminalRequest::None;
+        }
+        if mode == UiMode::FullscreenTui
+            && search_was_active
+            && is_plain_character_input(key.modifiers, key.code)
         {
             return TerminalRequest::None;
         }
@@ -3049,7 +3056,11 @@ fn handle_crossterm(
     }
 
     if mode == UiMode::FullscreenTui {
+        let search_was_active = state.transcript_search.is_some();
         if handle_active_transcript_search_key(state, key.modifiers, key.code) {
+            return TerminalRequest::None;
+        }
+        if search_was_active && is_plain_character_input(key.modifiers, key.code) {
             return TerminalRequest::None;
         }
         if key.modifiers == KeyModifiers::CONTROL
@@ -20476,6 +20487,11 @@ mod tests {
         assert_eq!(search.selected, 0);
         assert!(search.jump_pending);
 
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('h')));
+        assert!(
+            state.input.is_empty(),
+            "search navigation must not start a partial prompt"
+        );
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('n')));
         assert_eq!(state.transcript_search.as_ref().unwrap().selected, 1);
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('N')));
