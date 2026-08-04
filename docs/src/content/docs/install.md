@@ -13,11 +13,44 @@ private repository.
 
 | Method | Platforms | Installs |
 | --- | --- | --- |
+| npm / npx | macOS universal; Linux x86-64 or ARM64 glibc; Windows x86-64; Android ARM64 | `mj`, bundled Anvil, and on desktop `mj-voice-worker`; no first-run Mjolnir download |
 | Homebrew | macOS on Apple Silicon or Intel; Linux on x86-64 or ARM64 glibc | `mj` on `PATH`, with `mj-voice-worker` and a bundled Anvil in the formula's `libexec`; not Bifrost |
 | Release installer | macOS/Linux on x86-64 or ARM64; Android ARM64 | `mj`, Bifrost, and on desktop `mj-voice-worker` |
 | crates.io | Platforms supported by the Rust crates | `mj` and whichever crates you name; it does not install Bifrost |
 | Release archive | Linux, macOS, Windows, Android release targets | The binaries and legal files packaged for that target |
 | Build from source | Rust-supported development hosts | The workspace members you build |
+
+### npm and npx
+
+Install Mjolnir permanently with npm:
+
+```bash
+npm install -g @brokkai/mjolnir
+mj --version
+```
+
+Or run it once without installing globally:
+
+```bash
+npx -y @brokkai/mjolnir --version
+npx -y @brokkai/mjolnir@1.5.0 --version
+```
+
+The package contains the native Mjolnir release bundle for your platform. It
+does not download a product binary on first run. On macOS, Linux, and Windows,
+the bundle keeps `anvil` and `mj-voice-worker` beside `mj`; Android omits voice
+support. Linux npm packages require glibc.
+
+Upgrade or remove a global install with:
+
+```bash
+npm update -g @brokkai/mjolnir
+npm uninstall -g @brokkai/mjolnir
+```
+
+The npm route requires Node.js 18 or later. Use Homebrew, the release installer,
+Cargo, or a release archive if you do not want Node.js. npm does not install
+Bifrost; the release installer does.
 
 ### Homebrew
 

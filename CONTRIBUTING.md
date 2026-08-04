@@ -213,6 +213,21 @@ prevents mentions from being parsed, suppresses automatic link embeds, and
 leaves a failed Discord delivery as a warning so it cannot invalidate an
 already-published release.
 
+### npm publishing
+
+`publish-npm.yml` packages an existing GitHub Release into
+`@brokkai/mjolnir` and its five platform packages. It verifies the release
+checksums, then publishes every platform package before the root wrapper.
+
+Bootstrap a never-published release manually: run the workflow with its tag and
+leave `publish` off to inspect its tarball artifact and Linux smoke test; then
+run it again with `publish` on from an npm account that can publish in the
+`brokkai` organization. Configure npm Trusted Publishing for every package to
+trust `BrokkAi/mjolnir` and this workflow. After that, set the repository
+variable `NPM_PUBLISH_ENABLED` to `true`; future published GitHub Releases run
+the same verified pipeline automatically. Leave the variable unset or `false`
+to keep release events in package-and-smoke-test mode.
+
 Before tagging, maintainers should confirm that:
 
 1. Both crate manifests, `Cargo.lock`, and `install.sh` match the intended tag.

@@ -1,0 +1,23 @@
+{
+  "name": "@brokkai/mjolnir-android-arm64",
+  "version": "1.5.0",
+  "description": "Native Android ARM64 bundle for @brokkai/mjolnir",
+  "license": "GPL-3.0-only",
+  "repository": "https://github.com/BrokkAi/mjolnir",
+  "os": [
+    "android"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE",
+    "licenses/",
+    "anvil-licenses/"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

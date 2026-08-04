@@ -1,0 +1,31 @@
+{
+  "name": "@brokkai/mjolnir",
+  "version": "1.5.0",
+  "description": "Mjolnir terminal client for Agent Client Protocol servers",
+  "license": "GPL-3.0-only",
+  "repository": "https://github.com/BrokkAi/mjolnir",
+  "homepage": "https://mjolnir.brokk.ai/",
+  "bugs": "https://github.com/BrokkAi/mjolnir/issues",
+  "type": "module",
+  "bin": {
+    "mj": "bin/mj.js"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "optionalDependencies": {
+    "@brokkai/mjolnir-darwin-universal": "1.5.0",
+    "@brokkai/mjolnir-linux-x64-gnu": "1.5.0",
+    "@brokkai/mjolnir-linux-arm64-gnu": "1.5.0",
+    "@brokkai/mjolnir-android-arm64": "1.5.0",
+    "@brokkai/mjolnir-win32-x64": "1.5.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

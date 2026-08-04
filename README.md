@@ -62,6 +62,22 @@ before connecting a private repository.
 
 ## Install and run
 
+With Node.js 18 or later, npm is the simplest persistent install and npx runs
+Mjolnir once without changing your global packages:
+
+```bash
+npm install -g @brokkai/mjolnir
+mj --version
+
+npx -y @brokkai/mjolnir --version
+npx -y @brokkai/mjolnir@1.5.0 --version
+```
+
+The npm package includes the native `mj` bundle for your platform—plus bundled
+Anvil and, on desktop, `mj-voice-worker`—so it does not download Mjolnir on
+first run. Upgrade with `npm update -g @brokkai/mjolnir` and remove it with
+`npm uninstall -g @brokkai/mjolnir`.
+
 On macOS (Apple Silicon and Intel) and Linux (x86-64 or ARM64 glibc), install
 from the Homebrew tap:
 

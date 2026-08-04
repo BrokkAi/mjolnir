@@ -1,0 +1,23 @@
+{
+  "name": "@brokkai/mjolnir-win32-x64",
+  "version": "1.5.0",
+  "description": "Native Windows x64 bundle for @brokkai/mjolnir",
+  "license": "GPL-3.0-only",
+  "repository": "https://github.com/BrokkAi/mjolnir",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE",
+    "licenses/",
+    "anvil-licenses/"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
