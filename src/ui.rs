@@ -115,12 +115,12 @@ async fn probe_current_branch_pull_request(cwd: PathBuf) -> CurrentBranchPrProbe
         cwd,
         branch: probe.branch,
         gh_succeeded: probe.gh_succeeded,
-        pull_request: probe.pull_request.map(|pull_request| {
-            CurrentBranchPullRequest {
+        pull_request: probe
+            .pull_request
+            .map(|pull_request| CurrentBranchPullRequest {
                 number: pull_request.number,
                 url: pull_request.url,
-            }
-        }),
+            }),
     }
 }
 
