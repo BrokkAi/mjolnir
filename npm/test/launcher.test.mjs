@@ -53,3 +53,20 @@ test("launches the native bundle with its siblings on PATH and updates disabled"
   assert.equal(invocation.options.env.MJOLNIR_NO_UPDATE_CHECK, "1");
   assert.ok(invocation.options.env.PATH.startsWith(`/tmp/bundle/bin${process.platform === "win32" ? ";" : ":"}`));
 });
+
+test("returns the conventional exit status when the native process is signalled", () => {
+  const child = new EventEmitter();
+  child.kill = () => true;
+  let exitCode;
+  launch(
+    "/tmp/bundle",
+    [],
+    "linux",
+    () => child,
+    (code) => {
+      exitCode = code;
+    },
+  );
+  child.emit("exit", null, "SIGINT");
+  assert.equal(exitCode, 130);
+});

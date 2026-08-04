@@ -42,7 +42,19 @@ export function nativeBinaryPath(bundleRoot, platform = process.platform) {
   return path.join(bundleRoot, "bin", platform === "win32" ? "mj.exe" : "mj");
 }
 
-export function launch(bundleRoot, args, platform = process.platform, spawnProcess = spawn) {
+const SIGNAL_EXIT_CODES = {
+  SIGHUP: 129,
+  SIGINT: 130,
+  SIGTERM: 143,
+};
+
+export function launch(
+  bundleRoot,
+  args,
+  platform = process.platform,
+  spawnProcess = spawn,
+  exitProcess = process.exit,
+) {
   const bundleBin = path.join(bundleRoot, "bin");
   const child = spawnProcess(nativeBinaryPath(bundleRoot, platform), args, {
     stdio: "inherit",
@@ -55,16 +67,24 @@ export function launch(bundleRoot, args, platform = process.platform, spawnProce
     },
   });
 
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-    process.on(signal, () => child.kill(signal));
+  const signalHandlers = new Map();
+  for (const signal of Object.keys(SIGNAL_EXIT_CODES)) {
+    const handler = () => child.kill(signal);
+    signalHandlers.set(signal, handler);
+    process.on(signal, handler);
   }
+  const removeSignalHandlers = () => {
+    for (const [signal, handler] of signalHandlers) process.off(signal, handler);
+  };
   child.on("error", (error) => {
+    removeSignalHandlers();
     console.error(`mj: could not start native bundle: ${error.message}`);
     process.exitCode = 1;
   });
   child.on("exit", (code, signal) => {
+    removeSignalHandlers();
     if (signal) {
-      process.kill(process.pid, signal);
+      exitProcess(SIGNAL_EXIT_CODES[signal] ?? 1);
       return;
     }
     process.exitCode = code ?? 1;
