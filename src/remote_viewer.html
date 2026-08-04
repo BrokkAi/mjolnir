@@ -5383,12 +5383,12 @@
         const submit = (optionId) => {
           void submitPermissionDecision(session.session_id, request.request_id, optionId);
         };
-        if (elicitation.title) {
+        if (elicitation.title && elicitation.mode !== "text") {
           const title = document.createElement("strong");
           title.textContent = elicitation.title;
           container.appendChild(title);
         }
-        if (elicitation.description) {
+        if (elicitation.description && elicitation.mode !== "text") {
           const description = document.createElement("div");
           description.className = "elicitation-description";
           description.textContent = elicitation.description;
@@ -5451,6 +5451,22 @@
             }
             control.disabled = sent;
             control.required = Boolean(field.required);
+            if (field.kind === "multi_select") {
+              const validateSelectionCount = () => {
+                const count = control.selectedOptions.length;
+                const belowMinimum = field.min_items != null
+                  && (count > 0 || field.required)
+                  && count < field.min_items;
+                const aboveMaximum = field.max_items != null && count > field.max_items;
+                control.setCustomValidity(
+                  belowMinimum
+                    ? `Select at least ${field.min_items} option(s).`
+                    : (aboveMaximum ? `Select at most ${field.max_items} option(s).` : "")
+                );
+              };
+              control.addEventListener("change", validateSelectionCount);
+              validateSelectionCount();
+            }
             wrapper.appendChild(control);
             if (field.description) {
               const description = document.createElement("span");
@@ -5470,6 +5486,10 @@
           form.appendChild(submitButton);
           form.addEventListener("submit", (event) => {
             event.preventDefault();
+            for (const [field, control] of controls) {
+              if (field.kind === "text") control.value = control.value.trim();
+            }
+            if (!form.reportValidity()) return;
             const content = {};
             for (const [field, control] of controls) {
               if (field.kind === "multi_select") {
@@ -5489,6 +5509,9 @@
         }
         appendElicitationButton(container, "Cancel", "reject_once", sent, () => {
           submit("elicitation:cancel");
+        });
+        appendElicitationButton(container, "Decline", "reject_always", sent, () => {
+          submit("elicitation:decline");
         });
       }
 

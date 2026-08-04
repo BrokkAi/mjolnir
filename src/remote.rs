@@ -608,6 +608,10 @@ pub struct RemoteElicitationFieldRecord {
     pub minimum: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maximum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_items: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -857,7 +861,7 @@ pub struct RemoteSessionTracker {
     connector: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Periodic `git`/`gh` probe keeping the status PR badge current.
     pr_probe: Arc<Mutex<Option<JoinHandle<()>>>>,
-    next_mcp_elicitation_id: Arc<AtomicU64>,
+    next_elicitation_id: Arc<AtomicU64>,
     /// False when no UI event channel exists (headless): remote permission
     /// decisions could never be applied, so pending permissions must not
     /// be advertised to viewers at all.
@@ -1830,7 +1834,7 @@ impl RemoteSessionTracker {
             queue_poller: Arc::new(Mutex::new(None)),
             connector: Arc::new(Mutex::new(None)),
             pr_probe: Arc::new(Mutex::new(None)),
-            next_mcp_elicitation_id: Arc::new(AtomicU64::new(1)),
+            next_elicitation_id: Arc::new(AtomicU64::new(1)),
             publish_permissions: ui_event_tx.is_some(),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
@@ -1890,7 +1894,7 @@ impl RemoteSessionTracker {
             queue_poller: Arc::new(Mutex::new(None)),
             connector: Arc::new(Mutex::new(None)),
             pr_probe: Arc::new(Mutex::new(None)),
-            next_mcp_elicitation_id: Arc::new(AtomicU64::new(1)),
+            next_elicitation_id: Arc::new(AtomicU64::new(1)),
             publish_permissions: true,
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
@@ -1983,7 +1987,7 @@ impl RemoteSessionTracker {
             return None;
         };
 
-        let sequence = self.next_mcp_elicitation_id.fetch_add(1, Ordering::Relaxed);
+        let sequence = self.next_elicitation_id.fetch_add(1, Ordering::Relaxed);
         let request_id = owner_prefix.map_or_else(
             || format!("elicitation:{sequence}"),
             |prefix| format!("elicitation:{prefix}:{sequence}"),
@@ -3238,27 +3242,44 @@ fn remote_elicitation_record(prompt: &ElicitationPrompt) -> Option<RemoteElicita
             fields: fields
                 .into_iter()
                 .map(|field| {
-                    let (kind, options, minimum, maximum) = match field.kind {
+                    let (kind, options, minimum, maximum, min_items, max_items) = match field.kind {
                         ElicitationFormFieldKind::SingleSelect { options } => {
-                            ("select", option_records(options), None, None)
+                            ("select", option_records(options), None, None, None, None)
                         }
-                        ElicitationFormFieldKind::MultiSelect { options, .. } => {
-                            ("multi_select", option_records(options), None, None)
+                        ElicitationFormFieldKind::MultiSelect {
+                            options,
+                            min_items,
+                            max_items,
+                        } => (
+                            "multi_select",
+                            option_records(options),
+                            None,
+                            None,
+                            min_items,
+                            max_items,
+                        ),
+                        ElicitationFormFieldKind::Text => {
+                            ("text", Vec::new(), None, None, None, None)
                         }
-                        ElicitationFormFieldKind::Text => ("text", Vec::new(), None, None),
                         ElicitationFormFieldKind::Number { minimum, maximum } => (
                             "number",
                             Vec::new(),
                             minimum.map(|value| value.to_string()),
                             maximum.map(|value| value.to_string()),
+                            None,
+                            None,
                         ),
                         ElicitationFormFieldKind::Integer { minimum, maximum } => (
                             "integer",
                             Vec::new(),
                             minimum.map(|value| value.to_string()),
                             maximum.map(|value| value.to_string()),
+                            None,
+                            None,
                         ),
-                        ElicitationFormFieldKind::Boolean => ("boolean", Vec::new(), None, None),
+                        ElicitationFormFieldKind::Boolean => {
+                            ("boolean", Vec::new(), None, None, None, None)
+                        }
                     };
                     RemoteElicitationFieldRecord {
                         property_name: field.property_name.clone(),
@@ -3269,6 +3290,8 @@ fn remote_elicitation_record(prompt: &ElicitationPrompt) -> Option<RemoteElicita
                         options,
                         minimum,
                         maximum,
+                        min_items,
+                        max_items,
                     }
                 })
                 .collect(),
@@ -3279,6 +3302,7 @@ fn remote_elicitation_record(prompt: &ElicitationPrompt) -> Option<RemoteElicita
 
 const REMOTE_ELICITATION_ACCEPT_PREFIX: &str = "elicitation:accept:";
 const REMOTE_ELICITATION_CANCEL: &str = "elicitation:cancel";
+const REMOTE_ELICITATION_DECLINE: &str = "elicitation:decline";
 
 fn remote_elicitation_outcome(
     prompt: &ElicitationPrompt,
@@ -3288,6 +3312,9 @@ fn remote_elicitation_outcome(
 
     if option_id == REMOTE_ELICITATION_CANCEL {
         return Some(ElicitationOutcome::Cancel);
+    }
+    if option_id == REMOTE_ELICITATION_DECLINE {
+        return Some(ElicitationOutcome::Decline);
     }
     let encoded = option_id.strip_prefix(REMOTE_ELICITATION_ACCEPT_PREFIX)?;
     let content: BTreeMap<String, ElicitationContentValue> = serde_json::from_str(encoded).ok()?;
@@ -3344,6 +3371,14 @@ fn remote_elicitation_outcome(
                         ) => {
                             minimum.is_none_or(|minimum| *value >= minimum)
                                 && maximum.is_none_or(|maximum| *value <= maximum)
+                        }
+                        (
+                            ElicitationFormFieldKind::Number { minimum, maximum },
+                            ElicitationContentValue::Integer(value),
+                        ) => {
+                            let value = *value as f64;
+                            minimum.is_none_or(|minimum| value >= minimum)
+                                && maximum.is_none_or(|maximum| value <= maximum)
                         }
                         (
                             ElicitationFormFieldKind::Integer { minimum, maximum },
@@ -6065,10 +6100,11 @@ mod tests {
     use agent_client_protocol::schema::v1::{
         AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, ContentBlock,
         ContentChunk, Diff, ElicitationFormMode, ElicitationId, ElicitationSchema,
-        ElicitationSessionScope, ElicitationUrlMode, EnumOption, PermissionOption,
-        SessionConfigSelect, SessionConfigSelectOption, StopReason, StringPropertySchema, Terminal,
-        TerminalExitStatus, TerminalId, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput,
+        ElicitationSessionScope, ElicitationUrlMode, EnumOption, NumberPropertySchema,
+        PermissionOption, SessionConfigSelect, SessionConfigSelectOption, StopReason,
+        StringPropertySchema, Terminal, TerminalExitStatus, TerminalId, TextContent, ToolCall,
+        ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+        UnstructuredCommandInput,
     };
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
@@ -6299,6 +6335,31 @@ mod tests {
         );
         assert!(remote_elicitation_outcome(&prompt, &invalid).is_none());
         assert!(remote_elicitation_outcome(&prompt, REMOTE_ELICITATION_CANCEL).is_some());
+        assert!(matches!(
+            remote_elicitation_outcome(&prompt, REMOTE_ELICITATION_DECLINE),
+            Some(ElicitationOutcome::Decline)
+        ));
+    }
+
+    #[test]
+    fn remote_number_elicitation_accepts_whole_number_json() {
+        let (prompt, _) = mcp_approval_prompt(
+            "Set threshold",
+            ElicitationSchema::new()
+                .property(
+                    "threshold",
+                    NumberPropertySchema::new().minimum(1.0).maximum(10.0),
+                    true,
+                )
+                .property("note", StringPropertySchema::new(), false),
+        );
+        let whole_number = format!(
+            "{REMOTE_ELICITATION_ACCEPT_PREFIX}{}",
+            serde_json::json!({ "threshold": 5 })
+        );
+
+        let outcome = remote_elicitation_outcome(&prompt, &whole_number);
+        assert!(matches!(outcome, Some(ElicitationOutcome::Accept(_))));
     }
 
     #[test]
@@ -6307,7 +6368,10 @@ mod tests {
         assert!(viewer.contains("renderElicitationControls"));
         assert!(viewer.contains("elicitation:accept:"));
         assert!(viewer.contains("elicitation:cancel"));
+        assert!(viewer.contains("elicitation:decline"));
         assert!(viewer.contains("multi_select"));
+        assert!(viewer.contains("field.min_items"));
+        assert!(viewer.contains("control.value.trim()"));
     }
 
     #[tokio::test]
