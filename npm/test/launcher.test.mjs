@@ -63,7 +63,7 @@ test("launches the native bundle with its siblings on PATH and updates disabled"
   assert.equal(invocation.binary, "/tmp/bundle/bin/mj");
   assert.deepEqual(invocation.args, ["--version"]);
   assert.equal(invocation.options.stdio, "inherit");
-  assert.equal(invocation.options.env.MJOLNIR_NO_UPDATE_CHECK, "1");
+  assert.equal(invocation.options.env.MJOLNIR_NO_UPDATE_CHECK, "true");
   assert.ok(invocation.options.env.PATH.startsWith(`/tmp/bundle/bin${process.platform === "win32" ? ";" : ":"}`));
 });
 

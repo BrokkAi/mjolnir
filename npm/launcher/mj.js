@@ -64,7 +64,7 @@ export function launch(
       PATH: `${bundleBin}${path.delimiter}${process.env.PATH ?? ""}`,
       // npm owns upgrades. Replacing files under node_modules would corrupt its
       // package database and can leave sibling binaries at different versions.
-      MJOLNIR_NO_UPDATE_CHECK: "1",
+      MJOLNIR_NO_UPDATE_CHECK: "true",
     },
   });
   const signalHandlers = new Map();
