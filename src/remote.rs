@@ -4617,21 +4617,13 @@ async fn mjconfig_apply(
     mjconfig_apply_edits(&mut config, request)?;
     // Same guard as the TUI's save: a policy edit that strands a pinned seat
     // model flips that seat to auto, with a notice instead of a later failure.
-    let cached = state
-        .mjconfig
-        .inventory
-        .lock()
-        .expect("mjconfig inventory lock")
-        .clone();
     let choices = state
         .mjconfig
         .choices
         .lock()
         .expect("mjconfig choices lock")
         .clone();
-    let refreshed_inventory = roster::rediscover_inventory(&config, &cached);
-    let reroute_notices =
-        crate::settings::reset_unroutable_models(&mut config, &refreshed_inventory, &choices);
+    let reroute_notices = crate::settings::reset_unroutable_models(&mut config, &choices);
     config::save_user_config_preserving_session_routes(&state.mjconfig.config_path, &mut config)
         .map_err(|error| internal_error(format!("save config: {error:#}")))?;
     let notice = if reroute_notices.is_empty() {

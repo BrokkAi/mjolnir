@@ -1348,25 +1348,35 @@ pub fn draw_settings_panel(
 /// to resolve, flip that seat back to automatic selection and explain why.
 /// The inventory must already reflect the edited config's policies. Returns
 /// one human-readable notice per changed seat.
-pub fn reset_unroutable_models(
-    config: &mut Config,
-    inventory: &AcpInventory,
-    choices: &[ModelChoice],
-) -> Vec<String> {
-    let source_enabled = |source: &str| {
-        inventory
+pub fn reset_unroutable_models(config: &mut Config, choices: &[ModelChoice]) -> Vec<String> {
+    // Only an explicit `disabled` policy strands a route. Absence from the
+    // discovered inventory is not proof: an undetected server (not signed in,
+    // not probed yet) may still serve the model once it comes back.
+    let source_disabled = |config: &Config, source: &str| {
+        config
+            .acp
             .servers
             .iter()
-            .any(|server| server.id == source && server.policy != AcpServerPolicy::Disabled)
+            .find(|server| server.id == source)
+            .map_or_else(|| config.acp.policy(source), |server| server.policy)
+            == AcpServerPolicy::Disabled
     };
     let mut notices = Vec::new();
-    let seats: [(&str, &mut String); 3] = [
-        ("Agent", &mut config.agent.model),
-        ("Review", &mut config.review.model),
-        ("Subagents", &mut config.subagents.model),
-    ];
-    for (label, slot) in seats {
-        let model = slot.clone();
+    enum Seat {
+        Agent,
+        Review,
+        Subagents,
+    }
+    for (label, seat) in [
+        ("Agent", Seat::Agent),
+        ("Review", Seat::Review),
+        ("Subagents", Seat::Subagents),
+    ] {
+        let model = match seat {
+            Seat::Agent => config.agent.model.clone(),
+            Seat::Review => config.review.model.clone(),
+            Seat::Subagents => config.subagents.model.clone(),
+        };
         if model == "auto"
             || model == crate::config::DISABLED_MODEL
             // Custom-selector models have no native built-in adapter; only
@@ -1385,7 +1395,12 @@ pub fn reset_unroutable_models(
             .find(|choice| choice.model == model)
             .and_then(|choice| choice.adapter.clone())
             .unwrap_or_else(|| crate::roster::native_source_id(&model));
-        if !source_enabled(&route) {
+        if source_disabled(config, &route) {
+            let slot = match seat {
+                Seat::Agent => &mut config.agent.model,
+                Seat::Review => &mut config.review.model,
+                Seat::Subagents => &mut config.subagents.model,
+            };
             "auto".clone_into(slot);
             notices.push(format!(
                 "{label} model {model} is not provided by any enabled ACP server; switched to automatic selection"
@@ -2107,7 +2122,6 @@ mod tests {
         config.review.model = "model-b".to_string();
         config.subagents.model = crate::config::DISABLED_MODEL.to_string();
         config.set_acp_server_policy("codex-acp", AcpServerPolicy::Disabled);
-        let inventory = crate::roster::discover_inventory(&config);
         let choices = vec![
             ModelChoice {
                 model: "model-a".to_string(),
@@ -2129,7 +2143,7 @@ mod tests {
             },
         ];
 
-        let notices = reset_unroutable_models(&mut config, &inventory, &choices);
+        let notices = reset_unroutable_models(&mut config, &choices);
 
         // model-a lost its only route; model-b's adapter is still enabled and
         // the disabled subagent sentinel is never touched.
@@ -2145,10 +2159,9 @@ mod tests {
         let mut config = Config::default();
         config.agent.model = "claude-opus-5".to_string();
         config.set_acp_server_policy("claude-acp", AcpServerPolicy::Disabled);
-        let inventory = crate::roster::discover_inventory(&config);
 
         // No catalog entry at all: the provider's native adapter decides.
-        let notices = reset_unroutable_models(&mut config, &inventory, &[]);
+        let notices = reset_unroutable_models(&mut config, &[]);
 
         assert_eq!(config.agent.model, "auto");
         assert_eq!(notices.len(), 1);

@@ -4964,12 +4964,8 @@ fn persist_mjconfig_selection(
     // A policy edit in this save may have disabled the only route of a pinned
     // seat model; flip such seats to auto and tell the user, instead of
     // letting the next /new or restart fail to resolve.
-    let refreshed_inventory = crate::roster::rediscover_inventory(&config, &state.acp_inventory);
-    let reroute_notices = crate::settings::reset_unroutable_models(
-        &mut config,
-        &refreshed_inventory,
-        &state.model_choices,
-    );
+    let reroute_notices =
+        crate::settings::reset_unroutable_models(&mut config, &state.model_choices);
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
             Ok(()) => {
