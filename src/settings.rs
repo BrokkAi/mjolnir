@@ -2044,6 +2044,23 @@ mod tests {
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     };
 
+    fn ensure_two_inventory_servers(editor: &mut SettingsEditor) {
+        if editor.inventory.servers.len() >= 2 {
+            return;
+        }
+        let mut second = editor
+            .inventory
+            .servers
+            .first()
+            .expect("at least one built-in ACP server")
+            .clone();
+        second.id = "test-second-adapter".to_string();
+        second.label = "Test second adapter".to_string();
+        second.launch.source_id.clone_from(&second.id);
+        second.session_config.clear();
+        editor.inventory.servers.push(second);
+    }
+
     #[test]
     fn agent_panel_saves_primary_option_without_overwriting_live_route_cache() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
@@ -2163,7 +2180,8 @@ mod tests {
     #[test]
     fn primary_and_subagent_panels_use_their_selected_adapters_options() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        assert!(editor.inventory.servers.len() >= 2);
+        editor.inventory.servers.truncate(1);
+        ensure_two_inventory_servers(&mut editor);
         let primary_index = 0;
         let subagent_index = 1;
         let primary_id = editor.inventory.servers[primary_index].id.clone();
@@ -2197,7 +2215,8 @@ mod tests {
     #[test]
     fn active_source_wins_for_the_current_explicit_model() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        assert!(editor.inventory.servers.len() >= 2);
+        editor.inventory.servers.truncate(1);
+        ensure_two_inventory_servers(&mut editor);
         let active_source = editor.inventory.servers[1].id.clone();
         editor.inventory.servers[0].session_config = vec![SessionConfigOption::select(
             "first",
