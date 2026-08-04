@@ -98,6 +98,7 @@ jobs:
     needs: package
     if: (github.event_name == 'release' && vars.NPM_PUBLISH_ENABLED == 'true') || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-latest
+    environment: npm-publish
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
     steps:
