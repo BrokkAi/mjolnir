@@ -670,15 +670,59 @@ impl InlineResizeReflow {
 }
 
 fn stable_transcript_entry_count(state: &AppState) -> usize {
-    let mut stable = 0;
-    for (idx, entry) in state.transcript.iter().enumerate() {
-        if transcript_entry_is_stable(state, idx, entry) {
+    // Force-committed entries are already in scrollback; the natural
+    // stability scan resumes after them so one never-settling entry cannot
+    // pin the boundary once the overflow valve has moved past it.
+    let committed = state.committed_transcript_entries();
+    let mut stable = committed;
+    for idx in committed..state.transcript.len() {
+        if transcript_entry_is_stable(state, idx, &state.transcript[idx]) {
             stable = idx + 1;
         } else {
             break;
         }
     }
     stable
+}
+
+/// #615 fix B: the commit boundary normally waits for entries to settle, but
+/// an entry that never settles (a terminal that never exits, a tool call that
+/// never resolves) would pin it forever while the tail viewport silently
+/// scrolls everything after it out of existence. Once the uncommitted region
+/// no longer fits the tail, commit the pinned entry frozen as-is — a far
+/// smaller loss than discarding every row that follows. The trailing entry is
+/// never forced: it may still be streaming, and committing it early would
+/// truncate it in scrollback permanently.
+fn force_commit_overflowing_tail(state: &mut AppState, width: u16) -> bool {
+    if width == 0 {
+        return false;
+    }
+    let mut changed = false;
+    loop {
+        let stable = stable_transcript_entry_count(state);
+        if stable + 1 >= state.transcript.len() {
+            break;
+        }
+        let lines = render_transcript_entry_range(
+            state,
+            width,
+            stable..state.transcript.len(),
+            transcript_collapse_limit(state),
+            state.theme,
+            false,
+        );
+        let rows = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .line_count(width);
+        if rows <= INLINE_TRANSCRIPT_TAIL_MAX_ROWS {
+            break;
+        }
+        if !state.force_commit_transcript_entries(stable + 1) {
+            break;
+        }
+        changed = true;
+    }
+    changed
 }
 
 fn search_text_contains(text: &str, query: &str) -> bool {
@@ -1047,6 +1091,11 @@ fn turn_tool_summary(state: &AppState, start: usize, end: usize) -> Option<TurnT
 }
 
 fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bool {
+    // Scrollback already holds these rows and cannot retract them, so they
+    // are immutable by fiat even if their backing state would still change.
+    if idx < state.committed_transcript_entries() {
+        return true;
+    }
     match entry {
         Entry::UserPrompt(_)
         | Entry::System(_)
@@ -1067,8 +1116,11 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
         // primary stream. Legacy/replayed entries that still reach the main
         // transcript are therefore immutable.
         Entry::SubagentMessage(_) => true,
+        // A tool call with no backing view renders nothing that could change,
+        // so it must not hold the boundary (`is_none_or`, not `is_some_and`:
+        // a missing record can never settle any other way).
         Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
-            state.tool_calls.get(id).is_some_and(|view| {
+            state.tool_calls.get(id).is_none_or(|view| {
                 matches!(
                     view.status,
                     ToolCallStatus::Completed | ToolCallStatus::Failed
@@ -1935,7 +1987,7 @@ async fn ui_loop(
             && state.ragnarok.is_none()
             && !inline_resize_reflow.is_pending()
         {
-            flush_transcript_to_scrollback(terminal, &mut transcript_sink, &state)?;
+            flush_transcript_to_scrollback(terminal, &mut transcript_sink, &mut state)?;
         }
 
         if let Some(reason) = state.exit_reason {
@@ -1944,7 +1996,11 @@ async fn ui_loop(
             }
             cancel_dictation_for_exit(&mut state, &mut dictation_cancel_tx);
             if mode == UiMode::InlineChat {
-                flush_transcript_to_scrollback_for_exit(terminal, &mut transcript_sink, &state)?;
+                flush_transcript_to_scrollback_for_exit(
+                    terminal,
+                    &mut transcript_sink,
+                    &mut state,
+                )?;
                 sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
             }
             let _ = draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
@@ -2021,7 +2077,7 @@ async fn ui_loop(
         }
     }
     if mode == UiMode::InlineChat {
-        flush_transcript_to_scrollback_for_exit(terminal, &mut transcript_sink, &state)?;
+        flush_transcript_to_scrollback_for_exit(terminal, &mut transcript_sink, &mut state)?;
     }
     cancel_dictation_for_exit(&mut state, &mut dictation_cancel_tx);
     if mode == UiMode::FullscreenTui {
@@ -2292,7 +2348,7 @@ fn needs_live_redraw(state: &AppState) -> bool {
 fn flush_transcript_to_scrollback(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     sink: &mut TranscriptSink,
-    state: &AppState,
+    state: &mut AppState,
 ) -> Result<()> {
     flush_transcript_lines_to_scrollback(terminal, sink, state, false)
 }
@@ -2300,7 +2356,7 @@ fn flush_transcript_to_scrollback(
 fn flush_transcript_to_scrollback_for_exit(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     sink: &mut TranscriptSink,
-    state: &AppState,
+    state: &mut AppState,
 ) -> Result<()> {
     flush_transcript_lines_to_scrollback(terminal, sink, state, true)
 }
@@ -2308,7 +2364,7 @@ fn flush_transcript_to_scrollback_for_exit(
 fn flush_transcript_lines_to_scrollback(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     sink: &mut TranscriptSink,
-    state: &AppState,
+    state: &mut AppState,
     exiting: bool,
 ) -> Result<()> {
     let width = match terminal.size() {
@@ -2322,6 +2378,7 @@ fn flush_transcript_lines_to_scrollback(
     if width == 0 {
         return Ok(());
     }
+    force_commit_overflowing_tail(state, width);
     let lines = if exiting {
         sink.pending_lines_for_exit(state, width)
     } else {
@@ -8743,14 +8800,37 @@ fn render_transcript_entry_range_with_turns(
                         Some(false) => Some(TOOL_OUTPUT_COLLAPSED_LINES),
                         None => collapse_limit,
                     };
-                    push_tool_outputs(
-                        &mut block,
-                        &view.body,
-                        view.status,
-                        content_width,
-                        tool_collapse_limit,
-                        theme,
-                    );
+                    // #615 fix A: this terminal was still running when its
+                    // entry crossed the irrevocable scrollback boundary. A
+                    // half-painted live window would freeze there forever, so
+                    // commit a reference line instead; the live output stays
+                    // readable via /terminals.
+                    let committed_while_running = entry_index
+                        < state.committed_transcript_entries()
+                        && view.body.iter().any(|output| {
+                            matches!(
+                                output,
+                                ToolCallOutput::Terminal {
+                                    exit_status: None,
+                                    ..
+                                }
+                            )
+                        });
+                    if committed_while_running {
+                        block.push(Line::from(Span::styled(
+                            "  running · /terminals to view",
+                            Style::default().ink(theme.muted),
+                        )));
+                    } else {
+                        push_tool_outputs(
+                            &mut block,
+                            &view.body,
+                            view.status,
+                            content_width,
+                            tool_collapse_limit,
+                            theme,
+                        );
+                    }
                     for line in block {
                         for row in wrap_tool_line(line, content_width as usize) {
                             out.push(with_tool_gutter(row, color));
@@ -19749,6 +19829,172 @@ mod tests {
         assert!(reflowed.contains("replayed answer"), "{reflowed}");
         assert!(reflowed.contains("write"), "{reflowed}");
         assert!(reflowed.contains("src/lib.rs"), "{reflowed}");
+    }
+
+    /// A running terminal registered against a tool-call entry: exactly the
+    /// never-settling shape from #615 (dev server, or an exit status the UI
+    /// never received).
+    fn insert_running_terminal_tool_call(state: &mut AppState, id: &str, title: &str) {
+        state.tool_calls.insert(
+            id.to_string(),
+            crate::app::ToolCallView {
+                title: title.to_string(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::InProgress,
+                body: vec![ToolCallOutput::Terminal {
+                    terminal_id: format!("{id}-terminal"),
+                    output: "compiling...\n".to_string(),
+                    truncated: false,
+                    exit_status: None,
+                }],
+            },
+        );
+        state.transcript.push(Entry::ToolCall(id.to_string()));
+    }
+
+    #[test]
+    fn overflow_valve_commits_pinned_running_terminal_and_frees_the_boundary() {
+        let mut state = AppState::new();
+        let mut sink = TranscriptSink::default();
+
+        state.record_user_prompt("start the build".to_string());
+        insert_running_terminal_tool_call(&mut state, "stuck-build", "cargo build --watch");
+
+        // The conversation moves on while the terminal never reports an exit.
+        for turn in 0..4 {
+            state.record_user_prompt(format!("follow-up {turn}"));
+            state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                text_chunk(&format!("answer {turn}")),
+            )));
+            state.apply_event(UiEvent::PromptDone {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            });
+        }
+
+        // Without the valve the boundary pins at the running terminal.
+        assert_eq!(stable_transcript_entry_count(&state), 1);
+        let held = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!held.contains("answer 3"), "{held}");
+
+        assert!(force_commit_overflowing_tail(&mut state, 80));
+        assert_eq!(
+            stable_transcript_entry_count(&state),
+            state.transcript.len()
+        );
+
+        let flushed = sink
+            .pending_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The pinned entry commits as a stable reference to /terminals, not a
+        // frozen half-painted live window, and everything behind it flows.
+        assert!(flushed.contains("cargo build --watch"), "{flushed}");
+        assert!(
+            flushed.contains("running · /terminals to view"),
+            "{flushed}"
+        );
+        assert!(!flushed.contains("compiling..."), "{flushed}");
+        assert!(flushed.contains("answer 0"), "{flushed}");
+        assert!(flushed.contains("answer 3"), "{flushed}");
+    }
+
+    #[test]
+    fn overflow_valve_never_commits_the_trailing_entry_that_may_still_grow() {
+        let mut state = AppState::new();
+
+        state.record_user_prompt("think about it".to_string());
+        let long_thought = (0..20)
+            .map(|n| format!("thought line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk(&long_thought),
+        )));
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::AgentThought(thought)) if !thought.completed
+        ));
+
+        // An open thought is the trailing entry and may still grow;
+        // committing it now would truncate it in scrollback forever.
+        assert!(!force_commit_overflowing_tail(&mut state, 80));
+        assert_eq!(state.committed_transcript_entries(), 0);
+
+        // With a pinned terminal and finished turns stacked behind it, the
+        // valve advances past the terminal but still leaves the growing
+        // trailing thought alone.
+        let mut state = AppState::new();
+        state.record_user_prompt("start then think".to_string());
+        insert_running_terminal_tool_call(&mut state, "stuck-server", "npm run dev");
+        for turn in 0..4 {
+            state.record_user_prompt(format!("follow-up {turn}"));
+            state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                text_chunk(&format!("answer {turn}")),
+            )));
+            state.apply_event(UiEvent::PromptDone {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            });
+        }
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk(&long_thought),
+        )));
+
+        assert!(force_commit_overflowing_tail(&mut state, 80));
+        assert_eq!(state.committed_transcript_entries(), 2);
+        // Everything settled behind the valve is flushable; only the open
+        // trailing thought stays live.
+        assert_eq!(
+            stable_transcript_entry_count(&state),
+            state.transcript.len() - 1
+        );
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::AgentThought(thought)) if !thought.completed
+        ));
+    }
+
+    #[test]
+    fn tool_call_without_backing_view_does_not_pin_the_boundary() {
+        let mut state = AppState::new();
+        state.record_user_prompt("phantom tool".to_string());
+        state.transcript.push(Entry::ToolCall("ghost".to_string()));
+        state.record_user_prompt("next prompt".to_string());
+
+        // A record-less tool call renders nothing that could still change, so
+        // it must not hold everything after it out of scrollback.
+        assert_eq!(stable_transcript_entry_count(&state), 3);
+    }
+
+    #[test]
+    fn committed_entries_render_complete_text_not_their_pacing_prefix() {
+        let mut state = AppState::new();
+        state.record_user_prompt("stream".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("first line\nsecond line"),
+        )));
+        let entry_index = state.transcript.len() - 1;
+        state.set_stream_visible_bytes(entry_index, "first line\n".len());
+        assert_eq!(
+            state.stream_visible_text(entry_index, "first line\nsecond line"),
+            "first line\n"
+        );
+
+        assert!(state.force_commit_transcript_entries(entry_index + 1));
+        // Scrollback rows are final: a committed entry must flush whole, never
+        // frozen at whatever the reveal pacing happened to show.
+        assert_eq!(
+            state.stream_visible_text(entry_index, "first line\nsecond line"),
+            "first line\nsecond line"
+        );
     }
 
     #[test]

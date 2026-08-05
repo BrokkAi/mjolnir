@@ -1045,6 +1045,11 @@ pub struct AppState {
     /// transcript always retains the complete source; this only lets the
     /// terminal renderer hold back incomplete or not-yet-paced source.
     stream_visible_bytes: HashMap<usize, usize>,
+    /// Entries below this index have been irrevocably written to terminal
+    /// scrollback even though their backing state may still change (#615's
+    /// overflow valve). Monotonic: scrollback cannot be retracted, so the
+    /// stability predicate must keep reporting them stable forever.
+    committed_transcript_entries: usize,
     pub input: String,
     /// Cursor position in `input`, counted in Unicode scalar values from
     /// the start of the buffer.
@@ -1670,6 +1675,7 @@ impl AppState {
             terminal_registry: Vec::new(),
             transcript_revision: 0,
             stream_visible_bytes: HashMap::new(),
+            committed_transcript_entries: 0,
             input: String::new(),
             input_cursor: 0,
             input_scroll_offset: 0,
@@ -2152,10 +2158,36 @@ impl AppState {
     }
 
     pub(crate) fn stream_visible_text<'a>(&self, entry_index: usize, text: &'a str) -> &'a str {
+        // A committed entry's scrollback rows are final: render the complete
+        // text, never a pacing prefix that would be truncated forever (#615).
+        if entry_index < self.committed_transcript_entries {
+            return text;
+        }
         self.stream_visible_bytes
             .get(&entry_index)
             .and_then(|bytes| text.get(..*bytes))
             .unwrap_or(text)
+    }
+
+    /// Entries below this boundary were force-committed to scrollback while
+    /// their backing state could still change. Clamped so a stale value can
+    /// never report more entries than the transcript holds.
+    pub(crate) fn committed_transcript_entries(&self) -> usize {
+        self.committed_transcript_entries.min(self.transcript.len())
+    }
+
+    /// Raise the committed boundary (monotonic; clamped to the transcript
+    /// length). Drops live-render prefixes for the newly committed entries so
+    /// they flush with their complete text in the same frame.
+    pub(crate) fn force_commit_transcript_entries(&mut self, count: usize) -> bool {
+        let count = count.min(self.transcript.len());
+        if count <= self.committed_transcript_entries {
+            return false;
+        }
+        self.committed_transcript_entries = count;
+        self.stream_visible_bytes.retain(|&idx, _| idx >= count);
+        self.bump_transcript_revision();
+        true
     }
 
     fn transcript_entry_text(&self, entry_index: usize) -> Option<&str> {
