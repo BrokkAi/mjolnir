@@ -173,6 +173,31 @@ mod tests {
         (dir, binary)
     }
 
+    /// Executing a just-written script races with every concurrent test that
+    /// forks: a child forked while the script's write descriptor was open
+    /// still holds it until its own exec, and executing the script in that
+    /// window fails with `ETXTBSY`. The window closes on its own, so retry
+    /// exactly that error and let every other outcome through.
+    #[cfg(unix)]
+    fn retry_text_file_busy<T>(mut run: impl FnMut() -> Result<T>) -> Result<T> {
+        const ETXTBSY: i32 = 26; // Same value on Linux and macOS.
+        for _ in 0..50 {
+            let result = run();
+            let text_file_busy = result.as_ref().is_err_and(|error| {
+                error.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io_error| io_error.raw_os_error() == Some(ETXTBSY))
+                })
+            });
+            if !text_file_busy {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        run()
+    }
+
     fn status(backend_state: &str, cert_domains: Option<Vec<&str>>) -> Status {
         Status {
             backend_state: backend_state.to_string(),
@@ -253,7 +278,8 @@ exit 9
 "#,
         );
 
-        let tailscale = Tailscale::discover_with_binary(binary.clone()).expect("discover");
+        let tailscale = retry_text_file_busy(|| Tailscale::discover_with_binary(binary.clone()))
+            .expect("discover");
         assert_eq!(tailscale.binary, binary);
         assert_eq!(tailscale.cert_domain, "node.tail1234.ts.net");
     }
@@ -268,7 +294,8 @@ exit 4
 "#,
         );
 
-        let error = Tailscale::discover_with_binary(binary).expect_err("status failure");
+        let error = retry_text_file_busy(|| Tailscale::discover_with_binary(binary.clone()))
+            .expect_err("status failure");
         let message = error.to_string();
         assert!(message.contains("tailscale status"), "{message}");
         assert!(message.contains("daemon unavailable"), "{message}");
@@ -283,7 +310,8 @@ printf '%s' 'not json'
 "#,
         );
 
-        let error = Tailscale::discover_with_binary(binary).expect_err("malformed status");
+        let error = retry_text_file_busy(|| Tailscale::discover_with_binary(binary.clone()))
+            .expect_err("malformed status");
         assert!(
             error
                 .to_string()
@@ -313,8 +341,7 @@ printf '%s' 'private key' > "$5"
             cert_domain: "node.tail1234.ts.net".to_string(),
         };
 
-        tailscale
-            .mint_cert(&cert_path, &key_path)
+        retry_text_file_busy(|| tailscale.mint_cert(&cert_path, &key_path))
             .expect("mint certificate");
         assert_eq!(std::fs::read_to_string(cert_path).unwrap(), "certificate");
         assert_eq!(std::fs::read_to_string(key_path).unwrap(), "private key");
@@ -335,12 +362,13 @@ exit 5
             cert_domain: "node.tail1234.ts.net".to_string(),
         };
 
-        let error = tailscale
-            .mint_cert(
+        let error = retry_text_file_busy(|| {
+            tailscale.mint_cert(
                 &output.path().join("node.crt"),
                 &output.path().join("node.key"),
             )
-            .expect_err("certificate failure");
+        })
+        .expect_err("certificate failure");
         let message = error.to_string();
         assert!(message.contains("node.tail1234.ts.net"), "{message}");
         assert!(
