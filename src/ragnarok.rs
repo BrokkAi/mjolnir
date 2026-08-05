@@ -3824,6 +3824,273 @@ mod tests {
         pool
     }
 
+    #[test]
+    fn timeout_messages_and_phase_banners_are_stable() {
+        assert_eq!(
+            SessionStartTimeout.to_string(),
+            "timed out waiting for session"
+        );
+        assert_eq!(PromptTimeout.to_string(), "ran out of time");
+        assert_eq!(Phase::Mustering.banner(), "MUSTERING THE CHAMPIONS");
+        assert_eq!(Phase::Routing.banner(), "THOR WEIGHS THE TASK");
+        assert_eq!(Phase::Approval.banner(), "THE MUSTER AWAITS YOUR COMMAND");
+        assert_eq!(Phase::Combat.banner(), "COMBAT");
+        assert_eq!(Phase::Review.banner(), "ADVERSARIAL REVIEW");
+        assert_eq!(Phase::Judgment.banner(), "THOR SITS IN JUDGMENT");
+        assert_eq!(Phase::Verdict.banner(), "VERDICT");
+    }
+
+    #[test]
+    fn event_helpers_deliver_logs_and_report_a_closed_arena() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        feed(&tx, Some(7), "hammer falls").expect("open arena");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(RagnarokEvent::Log {
+                fighter: Some(7),
+                text
+            }) if text == "hammer falls"
+        ));
+
+        drop(rx);
+        let error = emit(&tx, RagnarokEvent::Phase(Phase::Combat)).expect_err("closed arena");
+        assert!(error.to_string().contains("arena was abandoned"));
+    }
+
+    #[tokio::test]
+    async fn battle_watchers_observe_signals_and_closed_abort_senders() {
+        let (abort_tx, abort_rx) = watch::channel(false);
+        let abort_waiter = tokio::spawn(wait_abort(abort_rx));
+        abort_tx.send(true).expect("abort receiver");
+        tokio::time::timeout(Duration::from_secs(1), abort_waiter)
+            .await
+            .expect("abort signal observed")
+            .expect("abort waiter");
+
+        let (closed_tx, closed_rx) = watch::channel(false);
+        drop(closed_tx);
+        tokio::time::timeout(Duration::from_secs(1), wait_abort(closed_rx))
+            .await
+            .expect("closed sender observed");
+
+        let (proceed_tx, proceed_rx) = watch::channel(false);
+        let proceed_waiter = tokio::spawn(wait_proceed(proceed_rx));
+        proceed_tx.send(true).expect("proceed receiver");
+        tokio::time::timeout(Duration::from_secs(1), proceed_waiter)
+            .await
+            .expect("proceed signal observed")
+            .expect("proceed waiter");
+
+        let (_already_tx, already_rx) = watch::channel(true);
+        tokio::time::timeout(Duration::from_secs(1), wait_proceed(already_rx))
+            .await
+            .expect("existing proceed signal observed");
+    }
+
+    #[tokio::test]
+    async fn run_battle_surfaces_setup_failure_and_always_finishes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (_abort_tx, abort_rx) = watch::channel(false);
+        let (_proceed_tx, proceed_rx) = watch::channel(false);
+        let cfg = BattleConfig {
+            task: "repair the bridge".to_string(),
+            cwd: temp.path().to_path_buf(),
+            available_models: Vec::new(),
+            thor_host: None,
+        };
+
+        run_battle(cfg, tx, abort_rx, proceed_rx).await;
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(matches!(
+            events.first(),
+            Some(RagnarokEvent::Phase(Phase::Mustering))
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RagnarokEvent::Failed(_)))
+        );
+        assert!(matches!(events.last(), Some(RagnarokEvent::Done)));
+    }
+
+    #[test]
+    fn thor_host_and_runtime_config_preserve_launch_context() {
+        let fighter = candidate("codex-acp", "gpt-test", 5_000, "gpt-test");
+        let host = ThorHost::from_candidate(&fighter);
+        assert_eq!(host.tag(), "gpt-test [codex-acp]");
+        let mut current = host.clone();
+        current.model_name = Some("   ".to_string());
+        assert_eq!(current.tag(), "codex-acp [current model]");
+
+        let cwd = PathBuf::from("/tmp/ragnarok-camp");
+        let extra = vec![PathBuf::from("/tmp/shared")];
+        let saved = HashMap::from([("mode".to_string(), "fast".to_string())]);
+        let runtime = runtime_config(
+            &fighter.launch,
+            &cwd,
+            &extra,
+            acp::RuntimeAccessMode::ReadOnly,
+            saved.clone(),
+            None,
+            Vec::new(),
+            Some("session-7".to_string()),
+            Some(CancellationToken::new()),
+        );
+        assert_eq!(runtime.command, fighter.launch.program);
+        assert_eq!(runtime.args, fighter.launch.args);
+        assert_eq!(runtime.cwd, cwd);
+        assert_eq!(runtime.additional_directories, extra);
+        assert_eq!(runtime.env, fighter.launch.env);
+        assert_eq!(runtime.saved_session_config, saved);
+        assert_eq!(runtime.resume_session.as_deref(), Some("session-7"));
+        assert_eq!(runtime.access_mode, acp::RuntimeAccessMode::ReadOnly);
+        assert_eq!(
+            runtime.session_restore_mode,
+            acp::SessionRestoreMode::Continue
+        );
+        assert!(runtime.termination.is_some());
+    }
+
+    #[test]
+    fn prompt_builders_include_the_battle_contract_and_roster() {
+        let cards = vec![
+            candidate("codex-acp", "gpt-a", 6_000, "a").card,
+            candidate("claude-acp", "claude-b", 5_000, "b").card,
+        ];
+        assert!(route_prompt("fix it").contains("THE TASK:\nfix it"));
+        let assignment = assign_prompt(&[0, 1], &cards);
+        assert!(assignment.contains("\"id\":0"));
+        assert!(assignment.contains("gpt-a"));
+        assert!(judge_prompt("DOSSIER").contains("DOSSIER"));
+        assert!(fight_prompt("fix it").contains("Do NOT create git commits"));
+        assert!(fight_prompt("fix it").contains("THE TASK:\nfix it"));
+        assert!(
+            mercy_prompt(
+                "gpt-a",
+                Duration::from_secs(600),
+                Duration::from_secs(120),
+                "edit × 4"
+            )
+            .contains("5.0x")
+        );
+        assert_eq!(catalog_provider("unknown-family-model"), "unknown");
+        assert!(turn_succeeded(StopReason::EndTurn));
+        assert!(turn_succeeded(StopReason::MaxTokens));
+        assert!(turn_succeeded(StopReason::MaxTurnRequests));
+        assert!(!turn_succeeded(StopReason::Cancelled));
+        assert!(prompt_rejected_transiently(
+            "config update already in flight"
+        ));
+        assert!(prompt_rejected_transiently("prompt already in flight"));
+        assert!(!prompt_rejected_transiently("adapter disconnected"));
+    }
+
+    #[test]
+    fn judgment_dossier_includes_artifacts_summaries_and_missing_reviews() {
+        let cards = vec![
+            candidate("codex-acp", "gpt-a", 6_000, "a").card,
+            candidate("claude-acp", "claude-b", 5_000, "b").card,
+        ];
+        let report = FighterReport {
+            id: 0,
+            worktree: None,
+            artifact: Some(CapturedArtifact {
+                diffstat: "src/lib.rs | 2 +".to_string(),
+                diff: "+fixed".to_string(),
+                truncated: false,
+            }),
+            final_text: "implemented the repair".to_string(),
+            slain_reason: None,
+        };
+        let empty_report = FighterReport {
+            id: 1,
+            worktree: None,
+            artifact: None,
+            final_text: "no artifact".to_string(),
+            slain_reason: None,
+        };
+        let reports = HashMap::from([(0, &report), (1, &empty_report)]);
+        let reviews = vec![ReviewReport {
+            assignment: Assignment {
+                reviewer: 1,
+                defender: 0,
+            },
+            text: "the fix is sound".to_string(),
+            delivered: false,
+        }];
+
+        let dossier = judgment_dossier("repair bridge", &cards, &[0, 1], &reports, &reviews);
+
+        assert!(dossier.contains("THE TASK:\nrepair bridge"));
+        assert!(dossier.contains("src/lib.rs | 2 +"));
+        assert!(dossier.contains("+fixed"));
+        assert!(dossier.contains("implemented the repair"));
+        assert!(dossier.contains("NOT DELIVERED"));
+        assert!(dossier.contains("the fix is sound"));
+        assert!(dossier.contains("DIFF: (none captured)"));
+    }
+
+    #[test]
+    fn forward_turn_event_maps_transcript_tools_and_notes_to_arena_events() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut cry_roll = 0;
+        let mut chunks = 0;
+        for event in [
+            TurnEvent::Message("hello".to_string()),
+            TurnEvent::Thought("considering".to_string()),
+            TurnEvent::Thought("deciding".to_string()),
+            TurnEvent::Tool {
+                title: "edit source".to_string(),
+                kind: Some(ToolKind::Edit),
+                status: Some(ToolCallStatus::InProgress),
+                started: true,
+            },
+            TurnEvent::Tool {
+                title: "test failed".to_string(),
+                kind: Some(ToolKind::Execute),
+                status: Some(ToolCallStatus::Failed),
+                started: false,
+            },
+            TurnEvent::Note("runtime recovered".to_string()),
+        ] {
+            forward_turn_event(
+                &tx,
+                3,
+                "gpt-a",
+                event,
+                TextLane::Message,
+                &mut cry_roll,
+                &mut chunks,
+            );
+        }
+
+        let mut actions = Vec::new();
+        let mut text_lanes = Vec::new();
+        let mut log_count = 0;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                RagnarokEvent::FighterAction { action, .. } => actions.push(action),
+                RagnarokEvent::FighterText { lane, .. } => text_lanes.push(lane),
+                RagnarokEvent::Log { .. } => log_count += 1,
+                _ => {}
+            }
+        }
+        assert!(actions.contains(&ActionKind::Chant));
+        assert!(actions.contains(&ActionKind::Ponder));
+        assert!(actions.contains(&ActionKind::Forge));
+        assert!(actions.contains(&ActionKind::Wound));
+        assert!(actions.contains(&ActionKind::Guard));
+        assert!(text_lanes.contains(&TextLane::Message));
+        assert!(text_lanes.contains(&TextLane::Thought));
+        assert!(text_lanes.contains(&TextLane::Tool));
+        assert_eq!(log_count, 3);
+    }
+
     fn init_git_repo_with_commit(path: &Path) {
         let status = std::process::Command::new("git")
             .arg("init")
