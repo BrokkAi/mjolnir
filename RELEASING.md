@@ -17,15 +17,28 @@ version bump must regenerate it. CI diffs the checked-in report against a fresh
 
 ## What a tag triggers
 
-A `vX.Y.Z` tag triggers the GitHub release and docs workflows. The release
-workflow builds Linux x86-64 and ARM64, Android ARM64, Windows x86-64, and a
+A `vX.Y.Z` tag triggers the GitHub release and docs workflows.
+
+The release workflow opens with a coverage gate and builds nothing until it
+passes. CI's branch and pull request triggers do not match tags, so this is the
+only check that re-runs against the tagged tree. Collecting coverage runs the
+whole workspace test suite, which means a failing test and a coverage
+regression both stop the release; tagging a commit whose coverage run was red
+on master fails here rather than shipping.
+
+The gate covers Linux tests and the coverage baseline only. Formatting, Clippy,
+the macOS and Windows test runs, the Android target check, and the
+dependency-license checks stay pull request checks, so a tag still relies on the
+tagged commit having passed CI on master.
+
+The builds cover Linux x86-64 and ARM64, Android ARM64, Windows x86-64, and a
 universal macOS archive. Desktop archives contain `mj` and the voice worker;
 Android omits the voice worker. Every archive includes the applicable licenses
 and notices and is published with a SHA-256 sidecar.
 
 Neither registry publish runs off the tag push. Both wait for the release
-workflow to succeed, so a build that fails on any target stops the release
-before anything reaches crates.io or npm.
+workflow to succeed, so the coverage gate and a build failure on any target
+each stop the release before anything reaches crates.io or npm.
 
 ## Discord announcement
 

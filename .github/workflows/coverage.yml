@@ -4,6 +4,9 @@ on:
   push:
     branches: [ 'master', 'ci/**' ]
   pull_request: {}
+  # Tag builds reach this through release.yml rather than a tag trigger, so the
+  # release can depend on the result instead of racing it.
+  workflow_call: {}
 
 permissions:
   contents: read
