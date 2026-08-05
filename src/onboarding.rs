@@ -1430,6 +1430,46 @@ mod tests {
     }
 
     #[test]
+    fn setup_notice_opens_connection_recovery_with_warning_focus() {
+        let state = State::new(
+            Kind::Fresh,
+            Config::default(),
+            Some(roster()),
+            Some("provider route needs repair".to_string()),
+        );
+
+        assert_eq!(state.screen, Screen::Connections);
+        assert_eq!(state.selected, State::default_connection_selection());
+        assert!(state.reveal_selection);
+        assert_eq!(state.notice_tone, NoticeTone::Warning);
+    }
+
+    #[test]
+    fn visited_config_accepts_candidate_edits_and_marks_onboarding_complete() {
+        let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
+        state.editor.config.agent.acp_source = Some("claude-acp".to_string());
+
+        let visited = state.visited_config();
+
+        assert_eq!(visited.onboarding_version, ONBOARDING_CONTENT_VERSION);
+        assert_eq!(visited.agent.acp_source.as_deref(), Some("claude-acp"));
+    }
+
+    #[test]
+    fn page_navigation_saturates_at_both_scroll_boundaries() {
+        let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
+
+        assert_eq!(state.handle_key(KeyCode::PageUp), Action::None);
+        assert_eq!(state.scroll, 0);
+        assert_eq!(state.handle_key(KeyCode::End), Action::None);
+        assert_eq!(state.scroll, u16::MAX);
+        assert_eq!(state.handle_key(KeyCode::PageDown), Action::None);
+        assert_eq!(state.scroll, u16::MAX);
+        assert_eq!(state.handle_key(KeyCode::Home), Action::None);
+        assert_eq!(state.scroll, 0);
+    }
+
+    #[test]
     fn customize_cancel_restores_the_candidate_and_returns_to_its_origin() {
         let mut state = State::new(Kind::Upgrade, Config::default(), Some(roster()), None);
         let original = state.config().clone();

@@ -157,6 +157,32 @@ impl<W: Write> Backend for TrackedBackend<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn centered_rect_centers_and_clamps_to_offset_area() {
+        let area = Rect::new(10, 20, 80, 40);
+        assert_eq!(centered_rect(area, 20, 10), Rect::new(40, 35, 20, 10));
+        assert_eq!(centered_rect(area, 100, 50), area);
+        assert_eq!(
+            centered_rect(Rect::new(3, 4, 0, 0), 10, 10),
+            Rect::new(3, 4, 0, 0)
+        );
+    }
 
     #[test]
     fn seeded_cursor_position_is_returned_without_terminal_query() {
@@ -184,5 +210,71 @@ mod tests {
         backend.draw(content.into_iter()).expect("draw");
         let pos = backend.get_cursor_position().expect("tracked position");
         assert_eq!(pos, Position { x: 7, y: 9 });
+    }
+
+    #[test]
+    fn empty_draw_keeps_the_previous_cursor_position() {
+        let initial = Position { x: 4, y: 6 };
+        let mut backend = TrackedBackend::with_cursor_position(Vec::new(), initial);
+        backend
+            .draw(std::iter::empty::<(u16, u16, &Cell)>())
+            .expect("empty draw");
+        assert_eq!(backend.get_cursor_position().unwrap(), initial);
+    }
+
+    #[test]
+    fn append_lines_advances_known_cursor_and_zero_is_a_noop() {
+        let mut backend = TrackedBackend::with_cursor_position(Vec::new(), Position { x: 3, y: 7 });
+
+        backend.append_lines(0).expect("append zero lines");
+        assert_eq!(
+            backend.get_cursor_position().unwrap(),
+            Position { x: 3, y: 7 }
+        );
+
+        backend.append_lines(5).expect("append lines");
+        assert_eq!(backend.get_cursor_position().unwrap().x, 3);
+        assert!(backend.get_cursor_position().unwrap().y >= 7);
+    }
+
+    #[test]
+    fn append_lines_saturates_and_clamps_to_terminal_height() {
+        let mut backend = TrackedBackend::with_cursor_position(
+            Vec::new(),
+            Position {
+                x: 2,
+                y: u16::MAX - 1,
+            },
+        );
+        let expected_y = Backend::size(&backend)
+            .map(|size| size.height.saturating_sub(1))
+            .unwrap_or(u16::MAX);
+
+        backend.append_lines(10).expect("append lines");
+
+        assert_eq!(backend.get_cursor_position().unwrap().x, 2);
+        assert_eq!(backend.get_cursor_position().unwrap().y, expected_y);
+    }
+
+    #[test]
+    fn write_and_backend_commands_reach_the_inner_writer() {
+        let writer = SharedWriter::default();
+        let mut backend = TrackedBackend::with_cursor_position(writer.clone(), Position::ORIGIN);
+        Write::write_all(&mut backend, b"literal").expect("write");
+        Write::flush(&mut backend).expect("writer flush");
+        backend.hide_cursor().expect("hide cursor");
+        backend.show_cursor().expect("show cursor");
+        backend.clear().expect("clear screen");
+        backend
+            .clear_region(ClearType::AfterCursor)
+            .expect("clear region");
+        Backend::flush(&mut backend).expect("backend flush");
+
+        let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        assert!(output.starts_with("literal"));
+        assert!(output.contains("\x1b[?25l"));
+        assert!(output.contains("\x1b[?25h"));
+        assert!(output.contains("\x1b[2J"));
+        assert!(output.contains("\x1b[J"));
     }
 }
