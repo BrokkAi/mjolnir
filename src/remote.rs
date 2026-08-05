@@ -1342,13 +1342,13 @@ impl TrackerState {
                     self.nested_roles.insert(*id, role.clone());
                 }
             }
-            UiEvent::Info(message) => {
-                if message.starts_with("compact: primary") {
-                    self.record_system_notice(message.clone());
-                }
-            }
-            UiEvent::Warning(message) => {
-                self.record_system_notice(message.clone());
+            // `Info` and `Warning` are the TUI's status channel, and both land
+            // in its transcript through one `record_status_message` path. The
+            // mirror keeps that pairing deliberately: a viewer that shows
+            // warnings but hides orchestrator progress is the more surprising
+            // of the two behaviours.
+            UiEvent::Info(message) | UiEvent::Warning(message) => {
+                self.record_status_notice(message.clone());
             }
             UiEvent::InternalMessage(message) => {
                 self.push_actor_transcript_entry(
@@ -1668,6 +1668,21 @@ impl TrackerState {
     fn record_system_notice(&mut self, text: impl Into<String>) {
         self.push_transcript_entry("system", text.into());
         self.touch();
+    }
+
+    /// Record a status-channel message (`Info` / `Warning`), collapsing an
+    /// immediate repeat the way `AppState::record_status_message` does. Status
+    /// lines are re-emitted on every retry and every turn boundary, so without
+    /// this the mirror accumulates runs of identical entries the terminal
+    /// never shows.
+    fn record_status_notice(&mut self, text: String) {
+        let repeated = self.transcript.last().is_some_and(|entry| {
+            entry.kind == "system" && entry.actor.is_none() && entry.text == text
+        });
+        if repeated {
+            return;
+        }
+        self.record_system_notice(text);
     }
 
     fn push_system_notice(&mut self, text: impl Into<String>) {
@@ -8698,6 +8713,83 @@ mod tests {
         });
         let session: SessionRecord = serde_json::from_value(legacy).expect("legacy record");
         assert!(session.subagents.is_empty());
+    }
+
+    #[test]
+    fn tracker_records_info_as_system_transcript_entries() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        state.observe_event(&UiEvent::Info(
+            "reviewing the selected changes…".to_string(),
+        ));
+        state.observe_event(&UiEvent::Info("session loaded".to_string()));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        let texts: Vec<&str> = snapshot
+            .transcript
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect();
+        assert_eq!(texts, ["reviewing the selected changes…", "session loaded"]);
+        assert!(
+            snapshot
+                .transcript
+                .iter()
+                .all(|entry| entry.kind == "system" && entry.actor.is_none())
+        );
+    }
+
+    /// The TUI and the remote mirror fold the same event stream by hand. This
+    /// pins the two status kinds to the same treatment so a future edit cannot
+    /// quietly drop one of them again (#617).
+    #[test]
+    fn tracker_mirrors_info_and_warning_identically() {
+        let record_one = |event: UiEvent| {
+            let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+            state.observe_event(&UiEvent::SessionStarted {
+                session_id: "sess-1".to_string(),
+                resumed: false,
+            });
+            state.observe_event(&event);
+            state.snapshot().expect("snapshot").transcript
+        };
+
+        let message = "next turn".to_string();
+        let from_info = record_one(UiEvent::Info(message.clone()));
+        let from_warning = record_one(UiEvent::Warning(message.clone()));
+
+        assert_eq!(from_info.len(), 1);
+        assert_eq!(from_info[0].kind, from_warning[0].kind);
+        assert_eq!(from_info[0].text, from_warning[0].text);
+        assert_eq!(from_info[0].actor, from_warning[0].actor);
+    }
+
+    #[test]
+    fn tracker_collapses_repeated_status_notices() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        state.observe_event(&UiEvent::Info("mid-turn".to_string()));
+        state.observe_event(&UiEvent::Info("mid-turn".to_string()));
+        state.observe_event(&UiEvent::Warning("mid-turn".to_string()));
+        state.observe_event(&UiEvent::Info("next turn".to_string()));
+        state.observe_event(&UiEvent::Info("mid-turn".to_string()));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        let texts: Vec<&str> = snapshot
+            .transcript
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect();
+        // Only immediate repeats collapse; the message may recur later.
+        assert_eq!(texts, ["mid-turn", "next turn", "mid-turn"]);
     }
 
     #[test]
