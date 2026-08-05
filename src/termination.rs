@@ -141,6 +141,8 @@ const fn exit_code(_signal: i32) -> i32 {
 mod tests {
     use super::*;
 
+    static INTERRUPT_SUPPRESSION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn first_then_repeated_signal_transitions_to_force() {
         let signals_seen = AtomicU8::new(0);
@@ -150,12 +152,33 @@ mod tests {
 
     #[test]
     fn interrupt_suppression_is_scoped() {
+        let _lock = INTERRUPT_SUPPRESSION_TEST_LOCK.lock().unwrap();
         assert_eq!(SUPPRESSED_INTERRUPTS.load(Ordering::Acquire), 0);
         {
             let _guard = suppress_interrupts();
             assert_eq!(SUPPRESSED_INTERRUPTS.load(Ordering::Acquire), 1);
         }
         assert_eq!(SUPPRESSED_INTERRUPTS.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn suppressed_interrupt_does_not_advance_shutdown() {
+        let _lock = INTERRUPT_SUPPRESSION_TEST_LOCK.lock().unwrap();
+        let coordinator = Coordinator {
+            token: CancellationToken::new(),
+            signals_seen: Arc::new(AtomicU8::new(0)),
+        };
+
+        let guard = suppress_interrupts();
+        coordinator.received_signal(libc::SIGINT);
+        assert!(!coordinator.token().is_cancelled());
+        assert_eq!(coordinator.signals_seen.load(Ordering::Acquire), 0);
+
+        drop(guard);
+        coordinator.received_signal(libc::SIGINT);
+        assert!(coordinator.token().is_cancelled());
+        assert_eq!(coordinator.signals_seen.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]
