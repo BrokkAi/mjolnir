@@ -9,8 +9,7 @@ run them for personal, research, internal, or commercial work. The obligations
 change mainly when you give someone else a copy or create a combined work.
 
 This page is practical orientation, not legal advice. The license text controls.
-Third-party components and the bundled Anvil runtime have their own notices and
-legal files.
+Third-party components have their own notices and legal files.
 
 ## Start with what you do
 
@@ -62,12 +61,10 @@ Release archives include:
 - the GPL license;
 - [`licenses/SOURCE.md`](https://github.com/BrokkAi/mjolnir/blob/master/licenses/SOURCE.md);
 - the generated Rust dependency report;
-- supplemental notices for native libraries and embedded fonts; and
-- the legal bundle matching the Anvil binary shipped by that release.
+- supplemental notices for native libraries and embedded fonts.
 
-The exact bundled Anvil version is release-specific. Use the legal directory in
-the archive you received rather than assuming the repository's newest managed
-runtime is the one in an older package.
+Use the legal directory in the archive you received rather than assuming the
+repository's newest notices are the ones in an older package.
 
 ## Distribution checklist
 

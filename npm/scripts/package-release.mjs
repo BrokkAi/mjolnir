@@ -99,7 +99,7 @@ export function platformManifest(platform, version) {
     os: platform.os,
     cpu: platform.cpu,
     ...(platform.libc ? { libc: platform.libc } : {}),
-    files: ["bin/", "README.md", "LICENSE", "licenses/", "anvil-licenses/"],
+    files: ["bin/", "README.md", "LICENSE", "licenses/"],
   };
 }
 
@@ -170,19 +170,16 @@ async function ensureBinary(filename, requireExecutableBit) {
 async function stagePlatform(platform, version, source, stagingRoot) {
   const destination = path.join(stagingRoot, packageDirectory(platform.packageName));
   await mkdir(path.join(destination, "bin"), { recursive: true });
-  for (const entry of ["README.md", "LICENSE", "licenses", "anvil-licenses"]) {
+  for (const entry of ["README.md", "LICENSE", "licenses"]) {
     await cp(path.join(source, entry), path.join(destination, entry), { recursive: true });
   }
   await cp(path.join(source, platform.binary), path.join(destination, "bin", platform.binary));
-  const anvil = platform.binary === "mj.exe" ? "anvil.exe" : "anvil";
-  await cp(path.join(source, anvil), path.join(destination, "bin", anvil));
   if (platform.desktop) {
     const worker = platform.binary === "mj.exe" ? "mj-voice-worker.exe" : "mj-voice-worker";
     await cp(path.join(source, worker), path.join(destination, "bin", worker));
     await ensureBinary(path.join(destination, "bin", worker), platform.binary !== "mj.exe");
   }
   await ensureBinary(path.join(destination, "bin", platform.binary), platform.binary !== "mj.exe");
-  await ensureBinary(path.join(destination, "bin", anvil), platform.binary !== "mj.exe");
   await writeManifest(destination, platformManifest(platform, version));
   return destination;
 }

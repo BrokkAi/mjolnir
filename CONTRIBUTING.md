@@ -133,13 +133,13 @@ portable code.
 
 Commit `Cargo.lock` when dependency resolution changes. Mjolnir uses a reviewed,
 deny-by-default dependency-license policy and ships generated notices for the
-Rust workspace, native voice dependencies, embedded fonts, and the pinned Anvil
-binary. Do not broaden an allowed license or add an exception without explaining
+Rust workspace, native voice dependencies, and embedded fonts. Do not broaden
+an allowed license or add an exception without explaining
 and reviewing the obligation it introduces.
 
-After changing dependencies, license policy, bundled assets, the voice worker,
-or pinned Anvil material, use Node.js 24 and the tool versions pinned by CI to
-refresh and validate the reports:
+After changing dependencies, license policy, bundled assets, or the voice
+worker, use Node.js 24 and the tool versions pinned by CI to refresh and
+validate the reports:
 
 ```bash
 cargo install --locked cargo-about --version 0.9.1 --features cli
@@ -155,9 +155,7 @@ node scripts/generate-supplemental-third-party-notices.mjs
 Review the generated diff rather than assuming regeneration is sufficient. CI
 recreates both notice reports, inventories bundled native material, checks the
 crate package contents, and fails when committed output is stale. Keep
-`voice-worker/LICENSE` synchronized with the root license. A pinned Anvil update
-must also update its runtime and release references together with the matching
-`licenses/anvil-vX.Y.Z/` bundle.
+`voice-worker/LICENSE` synchronized with the root license.
 
 ## Pull Requests
 
@@ -203,9 +201,9 @@ and is not automatically synchronized to product releases.
 A `vX.Y.Z` tag triggers the GitHub release and crates.io workflows. The publish
 workflow refuses to publish when the tag differs from either crate version. The
 release workflow builds Linux x86-64 and ARM64, Android ARM64, Windows x86-64,
-and a universal macOS archive. Desktop archives contain `mj`, the voice worker,
-and pinned Anvil; Android omits the voice worker. Every archive includes the
-applicable licenses and notices and is published with a SHA-256 sidecar.
+and a universal macOS archive. Desktop archives contain `mj` and the voice
+worker; Android omits the voice worker. Every archive includes the applicable
+licenses and notices and is published with a SHA-256 sidecar.
 
 To announce a published GitHub Release in Discord, set the
 `DISCORD_RELEASE_WEBHOOK_URL` repository Actions secret to the target channel's
@@ -232,12 +230,10 @@ to keep release events in package-and-smoke-test mode.
 Before tagging, maintainers should confirm that:
 
 1. Both crate manifests and their `Cargo.lock` workspace entries match the intended tag.
-2. The pinned Anvil runtime version, release workflow, README, and bundled legal
-   directory agree when that dependency changed.
-3. Formatting, Clippy, release builds, tests, and relevant cross-platform or
+2. Formatting, Clippy, release builds, tests, and relevant cross-platform or
    packaging checks pass.
-4. Dependency-license policy and generated notice reports are current.
-5. User-facing installation, configuration, and release documentation reflects
+3. Dependency-license policy and generated notice reports are current.
+4. User-facing installation, configuration, and release documentation reflects
    the shipped behavior.
-6. The release commit is merged and the tagged commit is the exact commit meant
+5. The release commit is merged and the tagged commit is the exact commit meant
    to be published.

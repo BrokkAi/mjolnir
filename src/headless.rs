@@ -354,6 +354,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         },
         Some(cmd_tx.clone()),
         None,
+        false,
     );
     let orchestrated = crate::orchestrator::spawn(
         event_rx,
@@ -423,7 +424,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         }
 
         match event {
-            UiEvent::Side(_) | UiEvent::SideStartFailed { .. } => {}
+            UiEvent::Side(_)
+            | UiEvent::SideStartFailed { .. }
+            | UiEvent::RemoteSideStartRequested { .. }
+            | UiEvent::RemoteSideExitRequested => {}
             UiEvent::Connected {
                 agent_name,
                 agent_version,
@@ -2138,6 +2142,7 @@ mod tests {
                         "https://example.com/login",
                     )
                     .into(),
+                    remote_id: None,
                     responder: elicitation_tx,
                 },
             },
@@ -2340,6 +2345,7 @@ mod tests {
                 "https://example.com/auth",
             )
             .into(),
+            remote_id: None,
             responder,
         });
         assert!(matches!(

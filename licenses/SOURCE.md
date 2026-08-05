@@ -17,7 +17,3 @@ contains the GNU GPL version 3 text. `THIRD_PARTY_LICENSES.html` covers the
 locked Rust graph. `SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt` and the other files in
 this directory cover native libraries, embedded fonts, and standalone notices
 not fully represented by Cargo metadata.
-
-Official archives also contain an `anvil-licenses` directory generated from the
-locked graph of the pinned Anvil release. Its `SOURCE.md` identifies the source
-for that separately built and aggregated binary.

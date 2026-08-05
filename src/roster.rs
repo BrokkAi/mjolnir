@@ -22,7 +22,6 @@ pub enum AdapterKind {
     Codex,
     Claude,
     Kimi,
-    Anvil,
     Custom,
 }
 
@@ -32,7 +31,6 @@ impl AdapterKind {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
             Self::Kimi => "Kimi Code",
-            Self::Anvil => "Anvil",
             Self::Custom => "Custom",
         }
     }
@@ -42,7 +40,6 @@ impl AdapterKind {
             "codex-acp" => Some(Self::Codex),
             "claude-acp" => Some(Self::Claude),
             "kimi" => Some(Self::Kimi),
-            "anvil" => Some(Self::Anvil),
             _ => None,
         }
     }
@@ -78,13 +75,11 @@ pub fn configure_permissions(
         (AdapterKind::Claude, PermissionPreset::Auto) => ("mode", "auto", Some("default")),
         (AdapterKind::Claude, PermissionPreset::Yolo) => ("mode", "bypassPermissions", None),
         (AdapterKind::Kimi, _) => return None,
-        (AdapterKind::Anvil | AdapterKind::Custom, PermissionPreset::Manual) => {
-            ("permission_mode", "default", None)
-        }
-        (AdapterKind::Anvil | AdapterKind::Custom, PermissionPreset::Auto) => {
+        (AdapterKind::Custom, PermissionPreset::Manual) => ("permission_mode", "default", None),
+        (AdapterKind::Custom, PermissionPreset::Auto) => {
             ("permission_mode", "auto", Some("default"))
         }
-        (AdapterKind::Anvil | AdapterKind::Custom, PermissionPreset::Yolo) => {
+        (AdapterKind::Custom, PermissionPreset::Yolo) => {
             ("permission_mode", "bypassPermissions", None)
         }
     };
@@ -271,7 +266,6 @@ pub struct Availability {
     pub claude_status: ClaudeAuthStatus,
     pub kimi_credentials: bool,
     pub kimi: Option<PathBuf>,
-    pub anvil: Option<PathBuf>,
     /// Subscription tier behind each vendor-native account, which decides
     /// which provider `auto` routes the primary seat through.
     pub subscriptions: Subscriptions,
@@ -284,20 +278,18 @@ impl Availability {
             claude_status: claude_auth_status(),
             kimi_credentials: kimi_credentials_available(),
             kimi: crate::kimi::detect().path,
-            anvil: crate::anvil::detect().path,
             subscriptions: Subscriptions::detect(),
         }
     }
 
     pub fn missing_reason(&self, model: &str) -> Option<&'static str> {
-        match adapter_kind(model) {
+        match adapter_kind(model)? {
             AdapterKind::Codex if !self.codex_credentials => Some("Codex credentials not found"),
             AdapterKind::Claude if !self.claude_status.logged_in() => {
                 Some(self.claude_status.unavailable_reason())
             }
             AdapterKind::Kimi if !self.kimi_credentials => Some("Kimi credentials not found"),
             AdapterKind::Kimi if self.kimi.is_none() => Some("Kimi Code is not installed"),
-            AdapterKind::Anvil if self.anvil.is_none() => Some("managed Anvil is not ready"),
             _ => None,
         }
     }
@@ -404,21 +396,52 @@ fn claude_auth_status_logged_in(output: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-fn adapter_kind(model: &str) -> AdapterKind {
+/// The built-in adapter whose vendor serves this model. `None` for providers
+/// no built-in adapter speaks; such models only reach the roster through a
+/// configured custom ACP server, never through the ranked catalog.
+fn adapter_kind(model: &str) -> Option<AdapterKind> {
     match deepswe::model_provider(model) {
-        "openai" => AdapterKind::Codex,
-        "anthropic" => AdapterKind::Claude,
-        "moonshotai" => AdapterKind::Kimi,
-        _ => AdapterKind::Anvil,
+        "openai" => Some(AdapterKind::Codex),
+        "anthropic" => Some(AdapterKind::Claude),
+        "moonshotai" => Some(AdapterKind::Kimi),
+        _ => None,
     }
+}
+
+/// Drop leaderboard rows whose provider no built-in adapter serves. Ranking
+/// them would only ever produce unlaunchable choices.
+fn natively_served(rows: Vec<Row>) -> Vec<Row> {
+    rows.into_iter()
+        .filter(|row| adapter_kind(&row.model).is_some())
+        .collect()
 }
 
 /// The built-in ACP source that natively serves a model, by provider. Lets
 /// settings judge a pinned model's route even when the model-choice catalog
 /// has no entry for it (e.g. the catalog was resolved while that vendor was
-/// disabled).
-pub(crate) fn native_source_id(model: &str) -> String {
-    launch_for(adapter_kind(model)).source_id
+/// disabled). `None` when no built-in adapter serves the model's provider.
+pub(crate) fn native_source_id(model: &str) -> Option<String> {
+    Some(launch_for(adapter_kind(model)?).source_id)
+}
+
+/// Whether any built-in adapter serves this model's provider. Lets config
+/// load drop seat pins that no longer have a route.
+pub(crate) fn model_has_builtin_adapter(model: &str) -> bool {
+    adapter_kind(model).is_some()
+}
+
+/// A config that discovery is guaranteed to surface at least one built-in
+/// server for.
+///
+/// `inventory_server_is_visible` hides an undetected built-in left on `Auto`,
+/// so a test that just needs a server row would otherwise depend on whichever
+/// credentials the host running it happens to have — passing on a developer
+/// machine and failing in CI. An explicit policy is visible either way.
+#[cfg(test)]
+pub(crate) fn config_with_a_visible_builtin() -> Config {
+    let mut config = Config::default();
+    config.set_acp_server_policy("codex-acp", AcpServerPolicy::Enabled);
+    config
 }
 
 fn adapter_accepts_model(kind: AdapterKind, model: &str) -> bool {
@@ -426,7 +449,7 @@ fn adapter_accepts_model(kind: AdapterKind, model: &str) -> bool {
         AdapterKind::Codex => deepswe::model_provider(model) == "openai",
         AdapterKind::Claude => deepswe::model_provider(model) == "anthropic",
         AdapterKind::Kimi => deepswe::model_provider(model) == "moonshotai",
-        AdapterKind::Anvil | AdapterKind::Custom => true,
+        AdapterKind::Custom => true,
     }
 }
 
@@ -462,20 +485,12 @@ fn launch_for(kind: AdapterKind) -> AdapterLaunch {
                 env: detection.env,
             }
         }
-        AdapterKind::Anvil => AdapterLaunch {
-            kind,
-            source_id: "anvil".to_string(),
-            command: PathBuf::from("anvil"),
-            args: Vec::new(),
-            env: HashMap::new(),
-        },
         AdapterKind::Custom => unreachable!("custom launches come from configuration"),
     }
 }
 
 pub fn discover_inventory(config: &Config) -> AcpInventory {
     let availability = Availability::detect();
-    let anvil = crate::anvil::detect();
     let kimi = crate::kimi::detect();
     let detections = [
         (
@@ -497,11 +512,6 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
                 .then(|| kimi.evidence.clone()),
             kimi.evidence.clone(),
         ),
-        (
-            AdapterKind::Anvil,
-            availability.anvil.as_ref().map(|_| anvil.evidence.clone()),
-            anvil.evidence.clone(),
-        ),
     ];
     let mut servers = detections
         .into_iter()
@@ -520,8 +530,7 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
                 launch,
                 model_count: 0,
                 error: None,
-                installing: (kind == AdapterKind::Anvil && anvil.installing)
-                    || (kind == AdapterKind::Kimi && kimi.installing),
+                installing: kind == AdapterKind::Kimi && kimi.installing,
                 origin: None,
                 session_config: Vec::new(),
                 subscription: availability
@@ -565,14 +574,6 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
             subscription: None,
         }
     }));
-    if let Some(server) = servers.iter_mut().find(|server| server.id == "anvil") {
-        server.error = anvil.error;
-        if let Some(path) = availability.anvil {
-            server.launch.command = path;
-        } else if let Some(path) = crate::anvil::managed_path() {
-            server.launch.command = path;
-        }
-    }
     if let Some(server) = servers.iter_mut().find(|server| server.id == "kimi") {
         server.error = kimi.error;
         if let Some(path) = availability.kimi {
@@ -595,9 +596,7 @@ pub fn rediscover_inventory(config: &Config, previous: &AcpInventory) -> AcpInve
         {
             server.model_count = previous.model_count;
             server.session_config.clone_from(&previous.session_config);
-            if server.id != "anvil" {
-                server.error.clone_from(&previous.error);
-            }
+            server.error.clone_from(&previous.error);
         }
     }
     refreshed
@@ -608,7 +607,6 @@ fn inventory_server_is_visible(server: &AcpServerInfo) -> bool {
         || server.installing
         || server.error.is_some()
         || server.origin.is_some()
-        || server.id == "anvil"
         || server.policy != AcpServerPolicy::Auto
 }
 
@@ -979,8 +977,8 @@ fn preferred_route<'a>(
 /// less than being able to finish: the marginally better model on an entry
 /// plan runs the account dry, while the larger plan carries the whole day.
 /// Only the vendor-native adapters count - an Anthropic model routed through
-/// Anvil bills somewhere else entirely, so it never stands in for the Claude
-/// subscription.
+/// a custom ACP server bills somewhere else entirely, so it never stands in
+/// for the Claude subscription.
 fn choose_primary_auto<'a>(
     available: &'a [ResolvedAgent],
     subscriptions: &Subscriptions,
@@ -1107,48 +1105,42 @@ fn unavailable_reason(
             None => format!("{} did not advertise this model", server.label),
         });
     }
-    let native = adapter_kind(&row.model);
-    let native_source = launch_for(native).source_id;
-    let native_detected = match native {
-        AdapterKind::Codex => {
-            availability.codex_credentials
-                || config.acp.policy("codex-acp") == AcpServerPolicy::Enabled
+    match adapter_kind(&row.model) {
+        None => reasons.push("no built-in ACP adapter serves this model's provider".to_string()),
+        Some(native) => {
+            let native_source = launch_for(native).source_id;
+            let native_detected = match native {
+                AdapterKind::Codex => {
+                    availability.codex_credentials
+                        || config.acp.policy("codex-acp") == AcpServerPolicy::Enabled
+                }
+                AdapterKind::Claude => {
+                    availability.claude_status.logged_in()
+                        || config.acp.policy("claude-acp") == AcpServerPolicy::Enabled
+                }
+                AdapterKind::Kimi => {
+                    (availability.kimi_credentials && availability.kimi.is_some())
+                        || config.acp.policy("kimi") == AcpServerPolicy::Enabled
+                }
+                AdapterKind::Custom => false,
+            };
+            let native_enabled = match native {
+                AdapterKind::Codex => config.acp.policy("codex-acp") != AcpServerPolicy::Disabled,
+                AdapterKind::Claude => config.acp.policy("claude-acp") != AcpServerPolicy::Disabled,
+                AdapterKind::Kimi => config.acp.policy("kimi") != AcpServerPolicy::Disabled,
+                AdapterKind::Custom => true,
+            };
+            if !native_enabled {
+                reasons.push(format!("{native_source} is disabled in config"));
+            } else if native_detected {
+                reasons.push(adapter_errors.get(&native_source).map_or_else(
+                    || format!("{native_source} did not advertise this model"),
+                    |reason| format!("{native_source}: {reason}"),
+                ));
+            } else if let Some(reason) = availability.missing_reason(&row.model) {
+                reasons.push(reason.to_string());
+            }
         }
-        AdapterKind::Claude => {
-            availability.claude_status.logged_in()
-                || config.acp.policy("claude-acp") == AcpServerPolicy::Enabled
-        }
-        AdapterKind::Kimi => {
-            (availability.kimi_credentials && availability.kimi.is_some())
-                || config.acp.policy("kimi") == AcpServerPolicy::Enabled
-        }
-        AdapterKind::Anvil => {
-            availability.anvil.is_some() || config.acp.policy("anvil") == AcpServerPolicy::Enabled
-        }
-        AdapterKind::Custom => false,
-    };
-    let native_enabled = match native {
-        AdapterKind::Codex => config.acp.policy("codex-acp") != AcpServerPolicy::Disabled,
-        AdapterKind::Claude => config.acp.policy("claude-acp") != AcpServerPolicy::Disabled,
-        AdapterKind::Kimi => config.acp.policy("kimi") != AcpServerPolicy::Disabled,
-        AdapterKind::Anvil => config.acp.policy("anvil") != AcpServerPolicy::Disabled,
-        AdapterKind::Custom => true,
-    };
-    if !native_enabled {
-        reasons.push(format!("{native_source} is disabled in config"));
-    } else if native_detected {
-        reasons.push(adapter_errors.get(&native_source).map_or_else(
-            || format!("{native_source} did not advertise this model"),
-            |reason| format!("{native_source}: {reason}"),
-        ));
-    } else if let Some(reason) = availability.missing_reason(&row.model) {
-        reasons.push(reason.to_string());
-    }
-    if native != AdapterKind::Anvil && config.acp.policy("anvil") != AcpServerPolicy::Disabled {
-        reasons.push(adapter_errors.get("anvil").map_or_else(
-            || "anvil did not advertise this model".to_string(),
-            |reason| format!("anvil: {reason}"),
-        ));
     }
     reasons.sort();
     reasons.dedup();
@@ -1160,13 +1152,6 @@ pub async fn resolve(config: &Config, cwd: &Path) -> Result<Roster> {
 }
 
 pub async fn resolve_waiting_for_installs(config: &Config, cwd: &Path) -> Result<Roster> {
-    if config.acp.policy("anvil") != AcpServerPolicy::Disabled
-        && crate::anvil::detect().path.is_none()
-    {
-        crate::anvil::wait_until_ready()
-            .await
-            .context("install managed Anvil")?;
-    }
     if config.acp.policy("kimi") != AcpServerPolicy::Disabled
         && kimi_credentials_available()
         && crate::kimi::detect().path.is_none()
@@ -1204,13 +1189,9 @@ pub async fn resolve_streaming(config: &Config, cwd: &Path) -> Result<StreamingR
         deepswe::DEFAULT_URL,
     )
     .await;
-    let rows = deepswe::eligible_high(&leaderboard.rows);
+    let rows = natively_served(deepswe::eligible_high(&leaderboard.rows));
     let availability = Availability::detect();
     let inventory = discover_inventory(config);
-    let anvil_installing = inventory
-        .servers
-        .iter()
-        .any(|server| server.id == "anvil" && server.selected && server.installing);
 
     let mut results: Vec<(usize, AdapterLaunch, ProbeResult)> = Vec::new();
     let mut pending: Vec<(usize, AdapterLaunch)> = Vec::new();
@@ -1272,11 +1253,6 @@ pub async fn resolve_streaming(config: &Config, cwd: &Path) -> Result<StreamingR
             .map(|(priority, launch)| {
                 let cwd = cwd.clone();
                 async move {
-                    // A managed Anvil install already running in the
-                    // background becomes probe-able once it lands.
-                    if launch.kind == AdapterKind::Anvil && anvil_installing {
-                        let _ = crate::anvil::wait_until_ready().await;
-                    }
                     let result = probe_launch(&launch, &cwd).await;
                     (priority, launch, result)
                 }
@@ -1341,7 +1317,7 @@ async fn resolve_inner(config: &Config, cwd: &Path) -> Result<Roster> {
         deepswe::DEFAULT_URL,
     )
     .await;
-    let rows = deepswe::eligible_high(&leaderboard.rows);
+    let rows = natively_served(deepswe::eligible_high(&leaderboard.rows));
     let availability = Availability::detect();
     let inventory = discover_inventory(config);
     let discovery = discover_available(&rows, &inventory, cwd).await;
@@ -1580,7 +1556,7 @@ mod tests {
 
     #[test]
     fn rediscovery_preserves_probe_only_inventory_fields() {
-        let config = Config::default();
+        let config = config_with_a_visible_builtin();
         let mut previous = discover_inventory(&config);
         let server = previous.servers.first_mut().expect("visible ACP server");
         let server_id = server.id.clone();
@@ -1681,14 +1657,12 @@ mod tests {
             .expect("Claude preset");
         assert_eq!(claude.value, "default");
 
-        let anvil = configure_permissions(AdapterKind::Anvil, PermissionPreset::Yolo, &mut env)
-            .expect("Anvil preset");
-        assert_eq!(anvil.config_id, "permission_mode");
-        assert_eq!(anvil.value, "bypassPermissions");
+        let kimi = configure_permissions(AdapterKind::Kimi, PermissionPreset::Yolo, &mut env);
+        assert_eq!(kimi, None);
     }
 
     #[test]
-    fn custom_explicit_yolo_permission_uses_anvil_config_option() {
+    fn custom_explicit_yolo_permission_uses_the_generic_config_option() {
         let mut env = HashMap::new();
         let custom = configure_permissions(AdapterKind::Custom, PermissionPreset::Yolo, &mut env)
             .expect("Custom preset");
@@ -1749,7 +1723,7 @@ mod tests {
                 mean_cost_usd,
             },
             model_value: model.to_string(),
-            launch: launch_for(adapter_kind(model)),
+            launch: launch_for(adapter_kind(model).expect("model has a built-in adapter")),
             ranked: true,
             reasoning_effort: None,
         }
@@ -1851,28 +1825,29 @@ mod tests {
 
     #[test]
     fn auto_primary_ignores_third_party_routes_for_a_favored_vendor() {
-        // An Anthropic model served through Anvil bills Anvil, not the Claude
-        // subscription, so it cannot satisfy a Claude preference.
-        let mut anvil_claude = role("claude-fable-5", 0.70);
-        anvil_claude.launch = launch_for(AdapterKind::Anvil);
-        let available = vec![anvil_claude, role("gpt-5-6-sol", 0.68)];
+        // An Anthropic model served through a custom ACP server bills that
+        // server, not the Claude subscription, so it cannot satisfy a Claude
+        // preference.
+        let mut bridged_claude = role("claude-fable-5", 0.70);
+        bridged_claude.launch = custom_launch("bridge");
+        let available = vec![bridged_claude, role("gpt-5-6-sol", 0.68)];
 
         let chosen =
             choose_primary_auto(&available, &plans("max20", "plus"), &[]).expect("ranked fallback");
-        assert_eq!(chosen.launch.kind, AdapterKind::Anvil);
+        assert_eq!(chosen.launch.kind, AdapterKind::Custom);
         assert_eq!(chosen.model.model, "claude-fable-5");
     }
 
     #[test]
     fn auto_primary_keeps_the_favored_vendor_route_over_custom_priority() {
-        let mut anvil_gpt = role("gpt-5-6-sol", 0.68);
-        anvil_gpt.launch = launch_for(AdapterKind::Anvil);
+        let mut bridged_gpt = role("gpt-5-6-sol", 0.68);
+        bridged_gpt.launch = custom_launch("bridge");
         let available = vec![
             role("claude-fable-5", 0.70),
-            anvil_gpt,
+            bridged_gpt,
             role("gpt-5-6-sol", 0.68),
         ];
-        let priority = vec!["anvil".to_string(), "codex-acp".to_string()];
+        let priority = vec!["custom:bridge".to_string(), "codex-acp".to_string()];
 
         let chosen = choose_primary_auto(&available, &plans("pro", "pro"), &priority)
             .expect("favored native route");
@@ -1887,7 +1862,7 @@ mod tests {
             role("gpt-5-6-sol", 0.70),
             role("gpt-5-5", 0.65),
             role("claude-fable-5", 0.64),
-            role("gemini-3-1-pro-preview", 0.60),
+            role("kimi-k2-7-code", 0.60),
         ];
 
         assert_eq!(
@@ -1942,12 +1917,12 @@ mod tests {
         config.review.acp_source = Some("codex-acp".to_string());
         let gpt = role("gpt-5-6-sol", 0.70);
         let claude = role("claude-fable-5", 0.64);
-        let gemini = role("gemini-3-1-pro-preview", 0.60);
+        let kimi = role("kimi-k2-7-code", 0.60);
         let mut roster = Roster {
             primary: gpt.clone(),
             review_supervisor: Some(claude.clone()),
             subagent_default: None,
-            available: vec![gpt, claude.clone(), gemini.clone()],
+            available: vec![gpt, claude.clone(), kimi],
             choices: Vec::new(),
             warnings: Vec::new(),
             inventory: AcpInventory::default(),
@@ -1969,12 +1944,12 @@ mod tests {
         config.review.model = "claude-fable-5".to_string();
         let gpt = role("gpt-5-6-sol", 0.70);
         let claude = role("claude-fable-5", 0.64);
-        let gemini = role("gemini-3-1-pro-preview", 0.60);
+        let kimi = role("kimi-k2-7-code", 0.60);
         let mut roster = Roster {
             primary: gpt.clone(),
             review_supervisor: Some(claude.clone()),
             subagent_default: None,
-            available: vec![gpt, claude.clone(), gemini],
+            available: vec![gpt, claude.clone(), kimi],
             choices: Vec::new(),
             warnings: Vec::new(),
             inventory: AcpInventory::default(),
@@ -2022,10 +1997,42 @@ mod tests {
 
     #[test]
     fn provider_routes_are_model_first() {
-        assert_eq!(adapter_kind("gpt-5-6-sol"), AdapterKind::Codex);
-        assert_eq!(adapter_kind("claude-sonnet-5"), AdapterKind::Claude);
-        assert_eq!(adapter_kind("gemini-3-5-flash"), AdapterKind::Anvil);
-        assert_eq!(adapter_kind("glm-5-2"), AdapterKind::Anvil);
+        assert_eq!(adapter_kind("gpt-5-6-sol"), Some(AdapterKind::Codex));
+        assert_eq!(adapter_kind("claude-sonnet-5"), Some(AdapterKind::Claude));
+        assert_eq!(adapter_kind("kimi-k2-7-code"), Some(AdapterKind::Kimi));
+        assert_eq!(adapter_kind("gemini-3-5-flash"), None);
+        assert_eq!(adapter_kind("glm-5-2"), None);
+    }
+
+    #[test]
+    fn unserved_providers_are_dropped_from_the_ranked_catalog() {
+        let rows = vec![
+            role_at("gpt-5-6-sol", 0.7, 1.0).model,
+            role_at("claude-sonnet-5", 0.6, 1.0).model,
+            role_at("kimi-k2-7-code", 0.5, 1.0).model,
+            Row {
+                model: "gemini-3-5-flash".to_string(),
+                reasoning_effort: Some("high".to_string()),
+                pass_at_1: 0.9,
+                mean_cost_usd: 0.1,
+            },
+            Row {
+                model: "glm-5-2".to_string(),
+                reasoning_effort: Some("high".to_string()),
+                pass_at_1: 0.8,
+                mean_cost_usd: 0.1,
+            },
+        ];
+
+        let served = natively_served(rows);
+
+        assert_eq!(
+            served
+                .iter()
+                .map(|row| row.model.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-5-6-sol", "claude-sonnet-5", "kimi-k2-7-code"]
+        );
     }
 
     #[test]
@@ -2033,7 +2040,7 @@ mod tests {
         let rows = vec![
             role_at("gpt-5-6-sol", 0.7, 1.0).model,
             role_at("claude-sonnet-5", 0.6, 1.0).model,
-            role_at("gemini-3-5-flash", 0.5, 1.0).model,
+            role_at("kimi-k2-7-code", 0.5, 1.0).model,
         ];
 
         let codex = credentialed_provider_capabilities(&launch_for(AdapterKind::Codex), &rows)
@@ -2046,9 +2053,7 @@ mod tests {
         assert_eq!(claude.models.len(), 1);
         assert_eq!(claude.models[0].value, "claude-sonnet-5");
 
-        assert!(
-            credentialed_provider_capabilities(&launch_for(AdapterKind::Anvil), &rows).is_none()
-        );
+        assert!(credentialed_provider_capabilities(&custom_launch("bridge"), &rows).is_none());
     }
 
     #[test]
@@ -2068,18 +2073,11 @@ mod tests {
     }
 
     #[test]
-    fn anvil_launch_uses_inventory_resolved_binary() {
-        let launch = launch_for(AdapterKind::Anvil);
-        assert_eq!(launch.command, PathBuf::from("anvil"));
-        assert!(launch.args.is_empty());
-    }
-
-    #[test]
     fn adapter_display_names_match_the_primary_acp_products() {
         assert_eq!(AdapterKind::Codex.display_name(), "Codex");
         assert_eq!(AdapterKind::Claude.display_name(), "Claude Code");
         assert_eq!(AdapterKind::Kimi.display_name(), "Kimi Code");
-        assert_eq!(AdapterKind::Anvil.display_name(), "Anvil");
+        assert_eq!(AdapterKind::Custom.display_name(), "Custom");
     }
 
     #[test]
@@ -2129,7 +2127,7 @@ mod tests {
         });
         let mut inventory = discover_inventory(&config);
         for server in &mut inventory.servers {
-            if matches!(server.id.as_str(), "claude-acp" | "anvil") {
+            if matches!(server.id.as_str(), "claude-acp" | "kimi") {
                 server.detected = true;
                 server.selected = true;
             }
@@ -2146,15 +2144,15 @@ mod tests {
     #[test]
     fn explicit_policy_selects_a_builtin_without_detection() {
         let mut config = Config::default();
-        config.set_acp_server_policy("anvil", AcpServerPolicy::Enabled);
+        config.set_acp_server_policy("kimi", AcpServerPolicy::Enabled);
         let inventory = discover_inventory(&config);
-        let anvil = inventory
+        let kimi = inventory
             .servers
             .iter()
-            .find(|server| server.id == "anvil")
-            .expect("anvil");
-        assert!(anvil.selected);
-        assert_eq!(anvil.policy, AcpServerPolicy::Enabled);
+            .find(|server| server.id == "kimi")
+            .expect("kimi");
+        assert!(kimi.selected);
+        assert_eq!(kimi.policy, AcpServerPolicy::Enabled);
     }
 
     #[test]
@@ -2186,7 +2184,7 @@ mod tests {
     #[test]
     fn auto_misses_are_inventory_state_not_probe_errors() {
         let mut config = Config::default();
-        for id in ["codex-acp", "claude-acp", "kimi", "anvil"] {
+        for id in ["codex-acp", "claude-acp", "kimi"] {
             config.set_acp_server_policy(id, AcpServerPolicy::Disabled);
         }
         let inventory = discover_inventory(&config);
@@ -2199,17 +2197,21 @@ mod tests {
     }
 
     #[test]
-    fn route_precedence_is_custom_then_native_then_anvil() {
+    fn route_precedence_is_custom_then_native() {
         let rows = vec![
             role_at("gpt-5-5", 0.6, 5.0).model,
             role_at("claude-opus-4-8", 0.5, 4.0).model,
-            role_at("gemini-3-1-pro-preview", 0.1, 9.0).model,
+            role_at("kimi-k2-7-code", 0.1, 9.0).model,
         ];
         let custom = custom_launch("company");
         let discovery = resolve_probes(
             &rows,
             vec![
-                (0, custom.clone(), capabilities(true, &["gpt-5-5"])),
+                (
+                    0,
+                    custom.clone(),
+                    capabilities(true, &["gpt-5-5", "kimi-k2-7-code"]),
+                ),
                 (
                     1,
                     launch_for(AdapterKind::Codex),
@@ -2219,18 +2221,6 @@ mod tests {
                     2,
                     launch_for(AdapterKind::Claude),
                     capabilities(true, &["claude-opus-4-8"]),
-                ),
-                (
-                    3,
-                    launch_for(AdapterKind::Anvil),
-                    capabilities(
-                        true,
-                        &[
-                            "openai/gpt-5-5",
-                            "anthropic/claude-opus-4-8",
-                            "google/gemini-3-1-pro-preview",
-                        ],
-                    ),
                 ),
             ],
         );
@@ -2246,7 +2236,8 @@ mod tests {
         };
         assert_eq!(route("gpt-5-5"), "custom:company");
         assert_eq!(route("claude-opus-4-8"), "claude-acp");
-        assert_eq!(route("gemini-3-1-pro-preview"), "anvil");
+        // Only the custom server advertised this one, so it wins by default.
+        assert_eq!(route("kimi-k2-7-code"), "custom:company");
     }
 
     #[test]
@@ -2260,26 +2251,21 @@ mod tests {
                     launch_for(AdapterKind::Codex),
                     capabilities(true, &["gpt-5-5"]),
                 ),
-                (
-                    1,
-                    launch_for(AdapterKind::Anvil),
-                    capabilities(true, &["openai/gpt-5-5"]),
-                ),
+                (1, custom_launch("bridge"), capabilities(true, &["gpt-5-5"])),
             ],
         );
         assert_eq!(discovery.available.len(), 2);
 
         let mut config = Config::default();
         config.agent.model = "gpt-5-5".to_string();
-        config.agent.acp_priority = vec!["anvil".to_string(), "codex-acp".to_string()];
+        config.agent.acp_priority = vec!["custom:bridge".to_string(), "codex-acp".to_string()];
         config.subagents.model = "gpt-5-5".to_string();
-        config.subagents.acp_priority = vec!["codex-acp".to_string(), "anvil".to_string()];
+        config.subagents.acp_priority = vec!["codex-acp".to_string(), "custom:bridge".to_string()];
         let availability = Availability {
             codex_credentials: true,
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
-            anvil: Some(PathBuf::from("anvil")),
             subscriptions: Subscriptions::default(),
         };
         let roster = assemble_roster(
@@ -2291,7 +2277,7 @@ mod tests {
         )
         .expect("resolve independent seat priorities");
 
-        assert_eq!(roster.primary.launch.source_id, "anvil");
+        assert_eq!(roster.primary.launch.source_id, "custom:bridge");
         assert_eq!(
             roster
                 .subagent_default
@@ -2386,7 +2372,6 @@ mod tests {
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
-            anvil: None,
             subscriptions: Subscriptions::default(),
         };
         assert_eq!(
@@ -2394,9 +2379,12 @@ mod tests {
             Some("Codex credentials not found")
         );
         assert_eq!(
-            availability.missing_reason("glm-5-2"),
-            Some("managed Anvil is not ready")
+            availability.missing_reason("kimi-k2-7-code"),
+            Some("Kimi credentials not found")
         );
+        // No built-in adapter serves this provider at all, so there is no
+        // per-adapter reason to report.
+        assert_eq!(availability.missing_reason("glm-5-2"), None);
     }
 
     #[test]
@@ -2412,7 +2400,6 @@ mod tests {
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
-            anvil: None,
             subscriptions: Subscriptions::default(),
         };
         let error = explicit("Agent", "gpt-5-6-sol", &rows, &[], &[])
@@ -2493,7 +2480,6 @@ mod tests {
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
-            anvil: None,
             subscriptions: Subscriptions::default(),
         };
 

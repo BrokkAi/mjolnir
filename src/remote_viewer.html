@@ -923,12 +923,51 @@
 
       /* ---- session list: full-bleed hairline rows with a status rail ---- */
 
-      #sessions {
+      #session-lists {
         flex: 1;
         min-height: 0;
         overflow-y: auto;
         overscroll-behavior: contain;
         padding-bottom: env(safe-area-inset-bottom);
+      }
+
+      .history-toggle {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 42px;
+        padding: 10px 14px 10px 18px;
+        border: 0;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line-row);
+        background: var(--surface-terminal);
+        color: var(--muted);
+        cursor: pointer;
+        text-align: left;
+
+        &:hover {
+          color: var(--text-control);
+          background: var(--row-hover);
+        }
+      }
+
+      .history-toggle-label {
+        flex: 1;
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .history-toggle-summary {
+        font: 400 9.5px/1 var(--font-mono);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .history-toggle-chevron {
+        color: var(--red-hot);
+        font: 700 11px/1 var(--font-mono);
       }
 
       .session-item {
@@ -960,6 +999,14 @@
 
       .session-item.needs-approval:hover {
         background: linear-gradient(90deg, rgb(235 63 51 / 0.2), rgb(235 63 51 / 0.07) 66%, transparent);
+      }
+
+      .session-item.archived {
+        color: var(--muted);
+      }
+
+      .session-item.archived .live-dot {
+        background: var(--line-strong);
       }
 
       /* the .live-dot span doubles as the row's 2px status rail */
@@ -1121,6 +1168,17 @@
         animation: attention-fade 1.4s ease-in-out infinite;
       }
 
+      .session-archive {
+        flex: 0 0 auto;
+        padding: 4px 8px 3px;
+        clip-path: var(--shape-chip);
+        background: var(--inline-bg-strong);
+        color: var(--dim);
+        font: 700 9px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
       .session-meta {
         display: flex;
         flex-wrap: wrap;
@@ -1261,6 +1319,28 @@
         animation: attention-fade 1.4s ease-in-out infinite;
       }
 
+      .archive-badge {
+        flex: 0 0 auto;
+        padding: 5px 9px 4px;
+        clip-path: var(--shape-chip);
+        background: var(--inline-bg-strong);
+        color: var(--dim);
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .side-badge {
+        flex: 0 0 auto;
+        padding: 5px 9px 4px;
+        clip-path: var(--shape-chip);
+        background: color-mix(in srgb, var(--thought) 18%, var(--inline-bg-strong));
+        color: var(--thought);
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
       /* The TUI status line, mirrored: model via adapter, reasoning effort,
          per-seat token totals, context occupancy, provider quota
          windows and the current branch's open pull request. Field hues match
@@ -1329,6 +1409,134 @@
         color: var(--dim);
         font: 400 10px/1.5 var(--font-mono);
         letter-spacing: 0.04em;
+      }
+
+      /* Read-only projection of the local `/ragnarok` arena. Decisions stay
+         in the TUI; this panel only exposes the compact battle state. */
+      .ragnarok-panel {
+        display: grid;
+        gap: 10px;
+        padding: 10px 18px 12px;
+        padding-right: calc(18px + env(safe-area-inset-right));
+        border-bottom: 1px solid var(--line);
+        background:
+          linear-gradient(90deg, rgb(235 63 51 / 0.1), transparent 55%),
+          var(--surface-terminal);
+      }
+
+      .ragnarok-head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .ragnarok-kicker,
+      .ragnarok-read-only {
+        flex: none;
+        color: var(--red-hot);
+        font: 700 9.5px/1 var(--font-mono);
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .ragnarok-task {
+        flex: 1;
+        min-width: 0;
+        color: var(--text);
+        font: 600 12px/1.4 var(--font-body);
+        overflow-wrap: anywhere;
+      }
+
+      .ragnarok-read-only {
+        color: var(--dim);
+        letter-spacing: 0.08em;
+      }
+
+      .ragnarok-fighters {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        gap: 7px;
+      }
+
+      .ragnarok-fighter {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 5px 10px;
+        padding: 8px 9px;
+        border: 1px solid var(--line-row);
+        background: var(--surface-control);
+      }
+
+      .ragnarok-fighter-name {
+        min-width: 0;
+        color: var(--text-control);
+        font: 700 11px/1.35 var(--font-mono);
+        overflow-wrap: anywhere;
+      }
+
+      .ragnarok-fighter-source,
+      .ragnarok-fighter-status {
+        color: var(--dim);
+        font: 500 9.5px/1.35 var(--font-mono);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .ragnarok-fighter-status {
+        color: var(--muted);
+        text-align: right;
+      }
+
+      .ragnarok-vigor {
+        grid-column: 1 / -1;
+        height: 3px;
+        background: var(--line-row);
+        overflow: hidden;
+
+        &::before {
+          content: "";
+          display: block;
+          width: 24%;
+          height: 100%;
+          background: var(--thought);
+        }
+
+        &[data-vigor="active"]::before {
+          width: 66%;
+          background: var(--red-hot);
+        }
+
+        &[data-vigor="full"]::before {
+          width: 100%;
+          background: var(--agent);
+        }
+
+        &[data-vigor="empty"]::before {
+          width: 0;
+        }
+      }
+
+      .ragnarok-result {
+        display: grid;
+        gap: 4px;
+        padding-left: 9px;
+        border-left: 2px solid rgb(235 63 51 / 0.55);
+        color: var(--muted);
+        font: 400 11px/1.45 var(--font-body);
+      }
+
+      .ragnarok-verdict {
+        color: var(--text);
+      }
+
+      .ragnarok-adoption {
+        color: var(--thought);
+        font-family: var(--font-mono);
+      }
+
+      .ragnarok-failure {
+        color: var(--red-hot);
       }
 
       @keyframes attention-fade {
@@ -1402,6 +1610,7 @@
         &[data-kind="thought"] { --kind-color: var(--thought); }
         &[data-kind="tool"] { --kind-color: var(--tool); }
         &[data-actor="primary"] { --kind-color: var(--primary); }
+        &[data-actor="side"] { --kind-color: var(--thought); }
         &[data-actor="subagent"], &[data-actor="subagents"] { --kind-color: var(--subagent); }
       }
 
@@ -1960,6 +2169,14 @@
         color: var(--text-control);
       }
 
+      .queue-item-attachments {
+        margin-top: 5px;
+        color: var(--dim);
+        font: 700 9.5px/1.4 var(--font-mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
       /* Live per-subagent status rows, mirroring the TUI's subagent area:
          one line each, running rows first, done rows dimmed with a glyph. */
       .subagent-list {
@@ -2112,6 +2329,67 @@
         }
       }
 
+      .attachment-list {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        padding: 8px 12px 0 32px;
+
+        &:empty {
+          display: none;
+        }
+      }
+
+      .attachment-chip {
+        display: grid;
+        grid-template-columns: 34px minmax(0, 1fr) 22px;
+        align-items: center;
+        gap: 7px;
+        flex: 0 0 min(240px, 70vw);
+        min-width: 0;
+        padding: 5px;
+        clip-path: var(--shape-chip);
+        background: var(--surface-control);
+        border-left: 2px solid var(--red);
+      }
+
+      .attachment-thumb {
+        width: 34px;
+        height: 34px;
+        object-fit: cover;
+        background: var(--bg);
+      }
+
+      .attachment-copy {
+        min-width: 0;
+        display: grid;
+        gap: 2px;
+        font: 400 10px/1.3 var(--font-mono);
+      }
+
+      .attachment-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--text-control);
+      }
+
+      .attachment-meta {
+        color: var(--dim);
+      }
+
+      .attachment-remove {
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font: 700 16px/1 var(--font-mono);
+
+        &:hover {
+          color: var(--red-hot);
+        }
+      }
+
       .command-palette {
         margin: -3px 8px 8px 32px;
         max-height: 180px;
@@ -2171,6 +2449,29 @@
         gap: 6px 16px;
         padding: 7px 8px 7px 14px;
         border-top: 1px solid var(--line-row);
+      }
+
+      .attach-button {
+        flex: none;
+        height: 30px;
+        padding: 0 11px;
+        border: 1px solid var(--line-control);
+        background: var(--surface-control);
+        color: var(--text-control);
+        cursor: pointer;
+        font: 700 10px/1 var(--font-body);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+
+        &:hover:not(:disabled) {
+          border-color: var(--line-strong);
+          color: var(--button-hover-text);
+        }
+
+        &:disabled {
+          opacity: 0.45;
+          cursor: default;
+        }
       }
 
       .config-strip {
@@ -2815,6 +3116,21 @@
           padding-right: calc(12px + var(--theme-toggle-reserve) + env(safe-area-inset-right));
         }
 
+        .ragnarok-panel {
+          max-height: 34dvh;
+          overflow-y: auto;
+          padding: 9px 12px 10px;
+        }
+
+        .ragnarok-head {
+          flex-wrap: wrap;
+          gap: 5px 9px;
+        }
+
+        .ragnarok-task {
+          flex-basis: calc(100% - 90px);
+        }
+
         .composer {
           gap: 8px;
           padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
@@ -2932,7 +3248,15 @@
           </div>
           <p id="status">Loading…</p>
         </div>
-        <div id="sessions"></div>
+        <div id="session-lists">
+          <div id="sessions" aria-label="Live sessions"></div>
+          <button id="history-toggle" class="history-toggle" type="button" aria-expanded="false" aria-controls="history-sessions">
+            <span class="history-toggle-label">History</span>
+            <span id="history-toggle-summary" class="history-toggle-summary">Browse archive</span>
+            <span id="history-toggle-chevron" class="history-toggle-chevron" aria-hidden="true">▸</span>
+          </button>
+          <div id="history-sessions" aria-label="Archived sessions" hidden></div>
+        </div>
       </aside>
       <main class="main">
         <header class="chat-header">
@@ -2942,29 +3266,45 @@
             <p id="transcript-meta">Select a session to inspect its history.</p>
           </div>
           <span id="connection-badge" class="connection-badge" role="status" hidden>reconnecting</span>
+          <span id="archive-badge" class="archive-badge" hidden>archived</span>
+          <span id="side-badge" class="side-badge" hidden>side</span>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
           <span id="working-badge" class="working-badge" hidden>working</span>
+          <button id="workspace-diff-button" class="icon-button" type="button" aria-label="Show workspace changes" hidden>±</button>
           <button id="settings-button" class="icon-button" type="button" aria-label="Open viewer settings">⚙</button>
         </header>
         <div id="status-line" class="status-line" hidden>
           <div id="status-fields" class="status-fields"></div>
           <div id="status-quotas" class="status-quotas" hidden></div>
         </div>
+        <section id="ragnarok-panel" class="ragnarok-panel" aria-label="Ragnarok arena" hidden>
+          <div class="ragnarok-head">
+            <span id="ragnarok-phase" class="ragnarok-kicker"></span>
+            <span id="ragnarok-task" class="ragnarok-task"></span>
+            <span class="ragnarok-read-only">read only</span>
+          </div>
+          <div id="ragnarok-fighters" class="ragnarok-fighters"></div>
+          <div id="ragnarok-result" class="ragnarok-result" hidden></div>
+        </section>
         <div class="transcript-wrap">
           <div id="transcript" role="log" aria-label="Session transcript"></div>
           <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
         </div>
-        <section class="composer">
+        <section id="composer" class="composer">
           <div id="subagents" class="subagent-list" role="status" aria-label="Subagent status"></div>
           <div id="permissions" class="permission-list"></div>
           <div id="queue-list" class="queue-list"></div>
           <div class="console">
             <span class="console-frame" aria-hidden="true"></span>
             <textarea id="queue-input" placeholder="Message the agent" enterkeyhint="send" aria-label="Message the agent"></textarea>
+            <div id="attachment-list" class="attachment-list" aria-label="Attached images"></div>
             <div id="command-palette" class="command-palette" role="listbox" aria-label="Slash commands" hidden></div>
             <div class="console-strip">
               <div id="session-config" class="config-strip"></div>
+              <button id="attach-image" class="attach-button" type="button" hidden>Image</button>
+              <input id="image-picker" type="file" accept="image/*" multiple hidden>
               <span id="queue-status" class="queue-meta">Select a session.</span>
+              <button id="exit-side" class="stop-turn" type="button" hidden>Exit side</button>
               <button id="stop-turn" class="stop-turn" type="button" hidden>Stop</button>
               <button id="queue-submit" class="primary" type="button">Send</button>
             </div>
@@ -2991,6 +3331,17 @@
             </span>
           </label>
         </div>
+      </div>
+    </section>
+
+    <section id="workspace-diff-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="workspace-diff-title" hidden>
+      <div class="new-session-panel mjconfig-panel">
+        <header class="new-session-head">
+          <h2 id="workspace-diff-title">Workspace changes</h2>
+          <button id="workspace-diff-close" class="new-session-close" type="button" aria-label="Close workspace changes">×</button>
+        </header>
+        <div id="workspace-diff-notice" class="mjconfig-notice" role="status"></div>
+        <div id="workspace-diff-body" class="mjconfig-body"></div>
       </div>
     </section>
 
@@ -3046,12 +3397,28 @@
       </div>
     </section>
 
+    <section id="load-session-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="load-session-title" hidden>
+      <div class="new-session-panel">
+        <header class="new-session-head">
+          <h2 id="load-session-title">Load session</h2>
+          <button id="load-session-close" class="new-session-close" type="button" aria-label="Close session history picker">×</button>
+        </header>
+        <div class="fs-current">
+          <span class="fs-label">Compatible history</span>
+          <span id="load-session-context" class="fs-path"></span>
+        </div>
+        <div id="load-session-list" class="fs-list" aria-label="Previous sessions"></div>
+        <div id="load-session-status" class="new-session-status" role="status"></div>
+      </div>
+    </section>
+
     <template id="tpl-session">
       <button type="button" class="session-item">
         <div class="session-top">
           <span class="live-dot" aria-hidden="true"></span>
           <span class="session-title"></span>
           <span class="session-approval" hidden>approval</span>
+          <span class="session-archive" hidden>archived</span>
         </div>
         <div class="session-meta">
           <span class="session-project"></span>
@@ -3091,6 +3458,7 @@
       <section class="queue-item">
         <div class="queue-item-time" data-ts=""></div>
         <pre class="queue-item-text"></pre>
+        <div class="queue-item-attachments" hidden></div>
         <button class="queue-item-delete" type="button">Cancel</button>
       </section>
     </template>
@@ -3109,6 +3477,11 @@
       const logoutButtonEl = $("logout-button");
       const newSessionButtonEl = $("new-session-button");
       const settingsButtonEl = $("settings-button");
+      const workspaceDiffButtonEl = $("workspace-diff-button");
+      const workspaceDiffModalEl = $("workspace-diff-modal");
+      const workspaceDiffCloseEl = $("workspace-diff-close");
+      const workspaceDiffNoticeEl = $("workspace-diff-notice");
+      const workspaceDiffBodyEl = $("workspace-diff-body");
       const settingsModalEl = $("settings-modal");
       const settingsCloseEl = $("settings-close");
       const showDiffsToggleEl = $("show-diffs-toggle");
@@ -3119,31 +3492,52 @@
       const newSessionProgressEl = $("new-session-progress");
       const newSessionProgressTextEl = $("new-session-progress-text");
       const newSessionWorktreeEl = $("new-session-worktree");
+      const loadSessionModalEl = $("load-session-modal");
+      const loadSessionCloseEl = $("load-session-close");
+      const loadSessionContextEl = $("load-session-context");
+      const loadSessionListEl = $("load-session-list");
+      const loadSessionStatusEl = $("load-session-status");
       const fsCurrentPathEl = $("fs-current-path");
       const fsRootsEl = $("fs-roots");
       const fsParentButtonEl = $("fs-parent-button");
       const fsListEl = $("fs-list");
       const statusEl = $("status");
       const sessionsEl = $("sessions");
+      const historyToggleEl = $("history-toggle");
+      const historyToggleSummaryEl = $("history-toggle-summary");
+      const historyToggleChevronEl = $("history-toggle-chevron");
+      const historySessionsEl = $("history-sessions");
       const transcriptEl = $("transcript");
       const transcriptTitleEl = $("transcript-title");
       const transcriptMetaEl = $("transcript-meta");
       const statusLineEl = $("status-line");
       const statusFieldsEl = $("status-fields");
       const statusQuotasEl = $("status-quotas");
+      const ragnarokPanelEl = $("ragnarok-panel");
+      const ragnarokPhaseEl = $("ragnarok-phase");
+      const ragnarokTaskEl = $("ragnarok-task");
+      const ragnarokFightersEl = $("ragnarok-fighters");
+      const ragnarokResultEl = $("ragnarok-result");
       const workingBadgeEl = $("working-badge");
       const approvalBadgeEl = $("approval-badge");
       const connectionBadgeEl = $("connection-badge");
+      const archiveBadgeEl = $("archive-badge");
+      const sideBadgeEl = $("side-badge");
+      const exitSideEl = $("exit-side");
       const stopTurnEl = $("stop-turn");
       const backButtonEl = $("back-button");
       const permissionsEl = $("permissions");
       const subagentsEl = $("subagents");
       const sessionConfigEl = $("session-config");
       const queueInputEl = $("queue-input");
+      const attachmentListEl = $("attachment-list");
+      const attachImageEl = $("attach-image");
+      const imagePickerEl = $("image-picker");
       const commandPaletteEl = $("command-palette");
       const queueSubmitEl = $("queue-submit");
       const queueStatusEl = $("queue-status");
       const queueListEl = $("queue-list");
+      const composerEl = $("composer");
       const jumpToLatestEl = $("jump-to-latest");
       const sessionTpl = $("tpl-session");
       const entryTpl = $("tpl-entry");
@@ -3166,6 +3560,7 @@
       // dies with the session) server-side.
       const CONFIG_APPLY_TIMEOUT_MS = 60000;
       const STOP_REQUEST_TIMEOUT_MS = 15000;
+      const MAX_QUEUE_REQUEST_BYTES = 8 * 1024 * 1024;
       /* How long a session launch may take before the viewer calls it failed.
          Generous on purpose: a host already running other agents can take a
          long time to spawn one, and declaring failure early is how a launch
@@ -3177,6 +3572,11 @@
       const narrowScreen = window.matchMedia("(max-width: 800px)");
 
       let sessions = [];
+      let historySessions = [];
+      let historyVisible = false;
+      let historyLoading = false;
+      let historyLoaded = false;
+      let historyError = "";
       let queuedPrompts = [];
       let selectedSessionId = null;
       let refreshTimer = null;
@@ -3187,6 +3587,7 @@
       let filesystemState = null;
       let filesystemLoading = false;
       let creatingSession = false;
+      let loadingSessionHistory = false;
       let pendingSessionLaunch = null;
       /* Identifies which launch the list slot currently belongs to. Waiting on
          a launch outlives the dialog that started it, so a second launch can
@@ -3198,8 +3599,10 @@
       let commandSelected = 0;
       let showTranscriptDiffs = true;
       const draftBySessionId = new Map();
+      const attachmentsBySessionId = new Map();
       const activityBySessionId = new Map();
       const sessionCardById = new Map();
+      const historyCardById = new Map();
       const stopRequestBySessionId = new Map();
       const deletingQueuedPromptIds = new Set();
       // Decisions already POSTed, keyed "<session_id>\u001f<request_id>",
@@ -4199,12 +4602,21 @@
         authScreenEl.hidden = false;
         appEl.hidden = true;
         sessions = [];
+        historySessions = [];
+        historyVisible = false;
+        historyLoading = false;
+        historyLoaded = false;
+        historyError = "";
         queuedPrompts = [];
         selectedSessionId = null;
         filesystemState = null;
         filesystemLoading = false;
         creatingSession = false;
+        loadingSessionHistory = false;
         settingsModalEl.hidden = true;
+        workspaceDiffModalEl.hidden = true;
+        workspaceDiffButtonEl.hidden = true;
+        workspaceDiff = null;
         closeMjConfig();
         pendingSessionLaunch = null;
         if (launchSessionCard) {
@@ -4212,8 +4624,10 @@
         }
         launchSessionCard = null;
         newSessionModalEl.hidden = true;
+        loadSessionModalEl.hidden = true;
         setSessionCreationUi(false);
         sessionCardById.clear();
+        historyCardById.clear();
         activityBySessionId.clear();
         sentDecisions.clear();
         sentConfigChanges.clear();
@@ -4305,6 +4719,132 @@
           return;
         }
         newSessionModalEl.hidden = true;
+      }
+
+      function sessionHasCommand(session, name) {
+        return Array.isArray(session?.available_commands)
+          && session.available_commands.some((command) => command.name === name);
+      }
+
+      function closeLoadSessionPicker() {
+        if (!loadingSessionHistory) {
+          loadSessionModalEl.hidden = true;
+        }
+      }
+
+      async function queueSessionAction(text, successMessage) {
+        const sessionId = selectedSessionId;
+        if (!sessionId || !sessions.some((session) => session.session_id === sessionId)) {
+          return false;
+        }
+        try {
+          const response = await apiFetch("/api/queued-prompts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId, text }),
+          });
+          if (!response.ok) {
+            const detail = await response.text();
+            throw new Error(detail || `HTTP ${response.status}`);
+          }
+          loadSessionModalEl.hidden = true;
+          setQueueStatus(successMessage);
+          await refreshSessions();
+          return true;
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            setQueueStatus(`Session switch failed: ${error.message}`, true);
+          }
+          return false;
+        }
+      }
+
+      function renderLoadSessionHistory(history) {
+        loadSessionListEl.replaceChildren();
+        if (!history.length) {
+          loadSessionListEl.appendChild(emptyNote("No compatible disconnected sessions."));
+          return;
+        }
+        for (const session of history) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "fs-row";
+          const icon = document.createElement("span");
+          icon.className = "fs-row-icon";
+          icon.textContent = "↺";
+          const text = document.createElement("span");
+          text.className = "fs-row-text";
+          const name = document.createElement("span");
+          name.className = "fs-row-name";
+          name.textContent = sessionLabel(session);
+          const detail = document.createElement("span");
+          detail.className = "fs-row-path";
+          detail.textContent = `${session.session_id} · ${formatRelative(session.last_prompt_at || session.last_update || session.start_time)}`;
+          text.append(name, detail);
+          button.append(icon, text);
+          button.addEventListener("click", async () => {
+            button.disabled = true;
+            loadSessionStatusEl.textContent = `Loading ${sessionLabel(session)}…`;
+            const queued = await queueSessionAction(
+              `/load ${session.session_id}`,
+              "Session load queued.",
+            );
+            if (!queued) {
+              button.disabled = false;
+              loadSessionStatusEl.textContent = "Session load could not be queued.";
+              loadSessionStatusEl.classList.add("is-error");
+            }
+          });
+          loadSessionListEl.appendChild(button);
+        }
+      }
+
+      async function openLoadSessionPicker() {
+        const current = selectedSession();
+        if (!current || !sessionHasCommand(current, "load") || loadingSessionHistory) {
+          setQueueStatus("This session cannot load previous sessions.", true);
+          return;
+        }
+        const cwd = current.status?.cwd || "";
+        if (!cwd) {
+          setQueueStatus("This session did not publish its working directory.", true);
+          return;
+        }
+        loadingSessionHistory = true;
+        loadSessionModalEl.hidden = false;
+        loadSessionContextEl.textContent = cwd;
+        loadSessionListEl.replaceChildren(emptyNote("Loading session history…"));
+        loadSessionStatusEl.textContent = "";
+        loadSessionStatusEl.classList.remove("is-error");
+        loadSessionCloseEl.disabled = true;
+        try {
+          const response = await apiFetch("/sessions", { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const allSessions = await response.json();
+          const liveIds = new Set(sessions.map((session) => session.session_id));
+          const history = allSessions.filter((candidate) =>
+            candidate.session_id !== current.session_id
+              && !liveIds.has(candidate.session_id)
+              && candidate.status?.cwd === cwd
+              && candidate.agent === current.agent
+              && (candidate.status?.model_source || "") === (current.status?.model_source || ""),
+          );
+          renderLoadSessionHistory(history);
+          loadSessionStatusEl.textContent = history.length
+            ? "Choose a session to load into this agent."
+            : "Only disconnected sessions from the same agent and working directory are shown.";
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            loadSessionListEl.replaceChildren();
+            loadSessionStatusEl.textContent = `History load failed: ${error.message}`;
+            loadSessionStatusEl.classList.add("is-error");
+          }
+        } finally {
+          loadingSessionHistory = false;
+          loadSessionCloseEl.disabled = false;
+        }
       }
 
       function directoryButton(record, className, onClick) {
@@ -4610,6 +5150,9 @@
           restoreDraftForSelectedSession();
           void refreshQueuedPrompts();
         }
+        if (archivedSessionById(routed)) {
+          historyVisible = true;
+        }
         withViewTransition(() => {
           appEl.classList.toggle("show-chat", routed !== null);
           renderAll();
@@ -4688,6 +5231,29 @@
 
       function sessionPendingPermissions(session) {
         return session && Array.isArray(session.pending_permissions) ? session.pending_permissions : [];
+      }
+
+      function archivedSessions() {
+        const liveIds = new Set(sessions.map((session) => session.session_id));
+        return historySessions.filter((session) => !liveIds.has(session.session_id));
+      }
+
+      function archivedSessionById(sessionId) {
+        if (!sessionId || sessions.some((session) => session.session_id === sessionId)) {
+          return null;
+        }
+        return historySessions.find((session) => session.session_id === sessionId) || null;
+      }
+
+      function selectedSessionIsArchived() {
+        return Boolean(archivedSessionById(selectedSessionId));
+      }
+
+      function selectedSessionIsLive() {
+        return Boolean(
+          selectedSessionId
+            && sessions.some((session) => session.session_id === selectedSessionId),
+        );
       }
 
       function decisionKey(sessionId, requestId) {
@@ -4799,6 +5365,7 @@
           root,
           title: root.querySelector(".session-title"),
           approval: root.querySelector(".session-approval"),
+          archive: root.querySelector(".session-archive"),
           project: root.querySelector(".session-project"),
           worktree: root.querySelector(".session-worktree"),
           agent: root.querySelector(".session-agent"),
@@ -4807,22 +5374,29 @@
         };
       }
 
-      function updateSessionCard(card, session) {
+      function updateSessionCard(card, session, archived = false) {
         card.root.classList.toggle("active", session.session_id === selectedSessionId);
-        card.root.classList.toggle("working", sessionIsWorking(session));
+        card.root.classList.toggle("working", !archived && sessionIsWorking(session));
+        card.root.classList.toggle("archived", archived);
         card.title.textContent = sessionLabel(session);
         card.project.textContent = session.project || "-";
         card.worktree.textContent = session.worktree || "";
         card.worktree.hidden = !session.worktree;
         card.agent.textContent = session.agent || "-";
-        const queued = session.queued_prompt_count ?? 0;
+        const queued = archived ? 0 : session.queued_prompt_count ?? 0;
         card.counts.textContent = `${session.total_messages ?? 0} messages${queued ? ` · ${queued} queued` : ""}`;
         // Prefer prompt recency, but fall back to the heartbeat timestamp so
         // a connected-yet-quiet session doesn't read as stale.
-        setTimestamp(card.updated, session.last_prompt_at || session.last_update || session.start_time || "");
-        const needsApproval = sessionPendingPermissions(session).length > 0;
+        setTimestamp(
+          card.updated,
+          archived
+            ? session.last_update || session.last_prompt_at || session.start_time || ""
+            : session.last_prompt_at || session.last_update || session.start_time || "",
+        );
+        const needsApproval = !archived && sessionPendingPermissions(session).length > 0;
         card.root.classList.toggle("needs-approval", needsApproval);
         card.approval.hidden = !needsApproval;
+        card.archive.hidden = !archived;
       }
 
       function renderSessions() {
@@ -4867,6 +5441,66 @@
         }
         if (launchCardRoot && sessionsEl.firstElementChild !== launchCardRoot) {
           sessionsEl.prepend(launchCardRoot);
+        }
+      }
+
+      function renderHistorySessions() {
+        const archived = archivedSessions();
+        historyToggleEl.setAttribute("aria-expanded", historyVisible ? "true" : "false");
+        historyToggleChevronEl.textContent = historyVisible ? "▾" : "▸";
+        let summary = "Browse archive";
+        if (historyLoading) {
+          summary = "Loading…";
+        } else if (historyError) {
+          summary = "Unavailable";
+        } else if (historyLoaded) {
+          summary = `${archived.length} archived`;
+        }
+        historyToggleSummaryEl.textContent = summary;
+        historySessionsEl.hidden = !historyVisible;
+        if (!historyVisible) {
+          return;
+        }
+        if (historyLoading && !historyLoaded) {
+          historySessionsEl.replaceChildren(emptyNote("Loading retained sessions…"));
+          return;
+        }
+        if (historyError && !historyLoaded) {
+          historySessionsEl.replaceChildren(emptyNote(`Archive unavailable: ${historyError}`));
+          return;
+        }
+        if (!archived.length) {
+          historyCardById.clear();
+          historySessionsEl.replaceChildren(emptyNote("No disconnected sessions are retained."));
+          return;
+        }
+        if (historySessionsEl.querySelector(".empty")) {
+          historySessionsEl.replaceChildren();
+        }
+        const seen = new Set();
+        for (const session of archived) {
+          seen.add(session.session_id);
+          let card = historyCardById.get(session.session_id);
+          if (!card) {
+            card = createSessionCard(session.session_id);
+            historyCardById.set(session.session_id, card);
+            historySessionsEl.appendChild(card.root);
+          }
+          updateSessionCard(card, session, true);
+        }
+        for (const [id, card] of [...historyCardById]) {
+          if (!seen.has(id)) {
+            card.root.remove();
+            historyCardById.delete(id);
+          }
+        }
+        const desired = archived.map((session) => session.session_id);
+        const current = [...historySessionsEl.querySelectorAll(".session-item")]
+          .map((element) => element.dataset.sessionId);
+        if (desired.join("\u001f") !== current.join("\u001f")) {
+          for (const id of desired) {
+            historySessionsEl.appendChild(historyCardById.get(id).root);
+          }
         }
       }
 
@@ -6071,6 +6705,68 @@
         return Array.isArray(entry.tool_diffs) ? entry.tool_diffs : [];
       }
 
+      /* Workspace changes for the latest turn, mirroring the TUI's Ctrl-G
+         viewer. This is not the same thing as the tool-call diffs already in
+         the transcript: it reports what actually changed on disk, including
+         edits the agent never reported as a tool call. It reuses the same
+         renderer those diffs use. */
+      let workspaceDiff = null;
+
+      function renderWorkspaceDiff(diff) {
+        const files = Array.isArray(diff?.diffs) ? diff.diffs : [];
+        workspaceDiff = files.length ? diff : null;
+        workspaceDiffButtonEl.hidden = !workspaceDiff;
+        if (!workspaceDiff) {
+          workspaceDiffModalEl.hidden = true;
+          return;
+        }
+        const total = Number.isFinite(diff.total_files) ? diff.total_files : files.length;
+        workspaceDiffButtonEl.setAttribute(
+          "aria-label",
+          `Show workspace changes (${total} file${total === 1 ? "" : "s"})`,
+        );
+        if (!workspaceDiffModalEl.hidden) {
+          paintWorkspaceDiff();
+        }
+      }
+
+      function paintWorkspaceDiff() {
+        const files = Array.isArray(workspaceDiff?.diffs) ? workspaceDiff.diffs : [];
+        const total = Number.isFinite(workspaceDiff?.total_files)
+          ? workspaceDiff.total_files
+          : files.length;
+        /* Say when the payload was capped rather than showing a short list as
+           if it were the whole change, which is what the TUI does too. */
+        workspaceDiffNoticeEl.textContent =
+          total > files.length
+            ? `Showing ${files.length} of ${total} changed files.`
+            : `${total} changed file${total === 1 ? "" : "s"}.`;
+        const fragment = document.createDocumentFragment();
+        for (const file of files) {
+          const path = typeof file.path === "string" && file.path ? file.path : "file";
+          const oldText = typeof file.old_text === "string" ? file.old_text : "";
+          const newText = typeof file.new_text === "string" ? file.new_text : "";
+          const rows = diffDisplayRows(oldText, newText);
+          const added = rows.filter((row) => row.kind === "+").length;
+          const removed = rows.filter((row) => row.kind === "-").length;
+          fragment.appendChild(inlineTextPre([`${path}  +${added} -${removed}`]));
+          const build = () => buildDiffView(rows, file.truncated === true);
+          fragment.appendChild(
+            rows.length > FOLD_LINE_LIMIT ? foldBlock(`diff · ${rows.length} lines`, build) : build(),
+          );
+        }
+        workspaceDiffBodyEl.replaceChildren(fragment);
+      }
+
+      function openWorkspaceDiff() {
+        if (!workspaceDiff) {
+          return;
+        }
+        paintWorkspaceDiff();
+        workspaceDiffModalEl.hidden = false;
+        workspaceDiffCloseEl.focus();
+      }
+
       function appendToolDiffs(body, entry) {
         if (!showTranscriptDiffs) {
           return;
@@ -6171,9 +6867,12 @@
 
       function canMergeToolPlaceholder(titleEntry, bodyEntry) {
         const title = titleEntry.text || "";
+        const titleActor = typeof titleEntry.actor === "string" ? titleEntry.actor.toLowerCase() : "";
+        const bodyActor = typeof bodyEntry.actor === "string" ? bodyEntry.actor.toLowerCase() : "";
         return (
           entryKind(titleEntry) === "tool"
           && entryKind(bodyEntry) === "tool"
+          && titleActor === bodyActor
           && title.trim()
           && title.trim() !== "tool"
           && !title.includes("\n")
@@ -6205,7 +6904,7 @@
         const kind = entryKind(entry);
         const actor = typeof entry.actor === "string" ? entry.actor.toLowerCase() : "";
         el.dataset.kind = kind;
-        if (actor === "primary" || actor === "subagent" || actor === "subagents") {
+        if (actor === "primary" || actor === "side" || actor === "subagent" || actor === "subagents") {
           el.dataset.actor = actor;
         } else if (actor.startsWith("subagent-")) {
           el.dataset.actor = "subagent";
@@ -6250,7 +6949,7 @@
           : "Jump to latest";
       }
 
-      function renderTranscript(session) {
+      function renderTranscript(session, archived = false) {
         const pinned = forceScrollToBottom || shouldStickToBottom || isNearTranscriptBottom();
         if (!session) {
           renderedSessionId = null;
@@ -6258,6 +6957,7 @@
           transcriptTitleEl.textContent = "Transcript";
           transcriptMetaEl.textContent = "Select a session to inspect its history.";
           workingBadgeEl.hidden = true;
+          renderWorkspaceDiff(null);
           stopTurnEl.hidden = true;
           stopTurnEl.disabled = true;
           transcriptEl.replaceChildren(
@@ -6272,9 +6972,13 @@
         const rawTranscript = Array.isArray(session.transcript) ? session.transcript : [];
         const transcript = normalizeTranscript(rawTranscript);
         transcriptTitleEl.textContent = sessionLabel(session);
-        transcriptMetaEl.textContent = `${session.project || "-"}${session.worktree ? ` · ${session.worktree}` : ""} · ${session.agent || "-"} · ${transcript.length} entries`;
-        workingBadgeEl.hidden = !sessionIsWorking(session);
-        const activeTurn = sessionHasActiveTurn(session);
+        const archiveMeta = archived
+          ? `Archived ${formatRelative(session.last_update || session.start_time) || "session"} · `
+          : "";
+        transcriptMetaEl.textContent = `${archiveMeta}${session.project || "-"}${session.worktree ? ` · ${session.worktree}` : ""} · ${session.agent || "-"} · ${transcript.length} entries`;
+        workingBadgeEl.hidden = archived || !sessionIsWorking(session);
+        renderWorkspaceDiff(session.workspace_diff);
+        const activeTurn = !archived && sessionHasActiveTurn(session);
         stopTurnEl.hidden = !activeTurn;
         stopTurnEl.disabled = !activeTurn || stopRequestBySessionId.has(session.session_id);
         stopTurnEl.setAttribute("aria-label", `Stop active prompt for ${sessionLabel(session)}`);
@@ -6356,6 +7060,134 @@
           syncComposerHeight();
         }
         updateCommandPalette();
+        renderAttachments();
+      }
+
+      function selectedSession() {
+        return sessions.find((session) => session.session_id === selectedSessionId)
+          || archivedSessionById(selectedSessionId);
+      }
+
+      function selectedAttachments() {
+        if (!selectedSessionId) {
+          return [];
+        }
+        return attachmentsBySessionId.get(selectedSessionId) || [];
+      }
+
+      function renderAttachments() {
+        const session = selectedSession();
+        const attachments = selectedAttachments();
+        attachImageEl.hidden = !session?.prompt_images_supported;
+        attachImageEl.disabled = !session;
+        attachmentListEl.replaceChildren();
+        for (const [index, attachment] of attachments.entries()) {
+          const chip = document.createElement("div");
+          chip.className = "attachment-chip";
+
+          const thumb = document.createElement("img");
+          thumb.className = "attachment-thumb";
+          thumb.alt = "";
+          thumb.src = `data:${attachment.mime_type};base64,${attachment.data_base64}`;
+
+          const copy = document.createElement("span");
+          copy.className = "attachment-copy";
+          const name = document.createElement("span");
+          name.className = "attachment-name";
+          name.textContent = attachment.name || "Pasted image";
+          const meta = document.createElement("span");
+          meta.className = "attachment-meta";
+          meta.textContent = `${attachment.width}×${attachment.height}`;
+          copy.append(name, meta);
+
+          const remove = document.createElement("button");
+          remove.className = "attachment-remove";
+          remove.type = "button";
+          remove.setAttribute("aria-label", `Remove ${name.textContent}`);
+          remove.textContent = "×";
+          remove.addEventListener("click", () => {
+            const current = selectedAttachments();
+            current.splice(index, 1);
+            if (!current.length && selectedSessionId) {
+              attachmentsBySessionId.delete(selectedSessionId);
+            }
+            renderAttachments();
+          });
+          chip.append(thumb, copy, remove);
+          attachmentListEl.appendChild(chip);
+        }
+      }
+
+      function readFileAsDataUrl(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.addEventListener("load", () => resolve(String(reader.result || "")), { once: true });
+          reader.addEventListener("error", () => reject(reader.error || new Error("file read failed")), { once: true });
+          reader.readAsDataURL(file);
+        });
+      }
+
+      function imageDimensions(file) {
+        return new Promise((resolve, reject) => {
+          const url = URL.createObjectURL(file);
+          const image = new Image();
+          image.addEventListener("load", () => {
+            const dimensions = { width: image.naturalWidth, height: image.naturalHeight };
+            URL.revokeObjectURL(url);
+            resolve(dimensions);
+          }, { once: true });
+          image.addEventListener("error", () => {
+            URL.revokeObjectURL(url);
+            reject(new Error("the browser could not decode this image"));
+          }, { once: true });
+          image.src = url;
+        });
+      }
+
+      async function promptImageFromFile(file) {
+        if (!file.type.startsWith("image/")) {
+          throw new Error(`${file.name || "That file"} is not an image`);
+        }
+        if (file.size >= MAX_QUEUE_REQUEST_BYTES) {
+          throw new Error(`${file.name || "That image"} is too large for the 8 MiB request limit`);
+        }
+        const [dataUrl, dimensions] = await Promise.all([
+          readFileAsDataUrl(file),
+          imageDimensions(file),
+        ]);
+        const comma = dataUrl.indexOf(",");
+        if (comma < 0 || !dataUrl.slice(comma + 1)) {
+          throw new Error(`Couldn't read ${file.name || "that image"}`);
+        }
+        return {
+          data_base64: dataUrl.slice(comma + 1),
+          mime_type: file.type,
+          width: dimensions.width,
+          height: dimensions.height,
+          name: file.name || "Pasted image",
+        };
+      }
+
+      async function attachImageFiles(files) {
+        const sessionId = selectedSessionId;
+        const session = selectedSession();
+        if (!sessionId || !session?.prompt_images_supported || !files.length) {
+          return;
+        }
+        try {
+          const added = [];
+          for (const file of files) {
+            added.push(await promptImageFromFile(file));
+          }
+          const current = attachmentsBySessionId.get(sessionId) || [];
+          attachmentsBySessionId.set(sessionId, current.concat(added));
+          if (selectedSessionId === sessionId) {
+            renderAttachments();
+            setQueueStatus(`${added.length} image${added.length === 1 ? "" : "s"} attached.`);
+          }
+        } catch (error) {
+          setQueueStatus(error.message || "Couldn't attach image.", true);
+        }
       }
 
       function syncComposerHeight() {
@@ -6538,6 +7370,16 @@
         const trimmed = text.trim();
         if (trimmed === "/new") {
           openNewSessionPicker();
+        } else if (trimmed === "/clear") {
+          if (!session) {
+            return false;
+          }
+          void queueSessionAction("/clear", "Fresh session queued.");
+        } else if (trimmed === "/load") {
+          if (!session) {
+            return false;
+          }
+          void openLoadSessionPicker();
         } else if (trimmed === "/mjconfig") {
           void openMjConfig();
         } else if (trimmed === "/export") {
@@ -6562,6 +7404,10 @@
         queueListEl.replaceChildren();
         queueInputEl.disabled = !session;
         queueSubmitEl.disabled = !session;
+        const sideActive = sessionHasCommand(session, "exit");
+        exitSideEl.hidden = !sideActive;
+        exitSideEl.disabled = !sideActive;
+        renderAttachments();
 
         if (!session) {
           queueInputEl.placeholder = "Message the agent";
@@ -6573,15 +7419,25 @@
         // Verb = intent, status = mechanism: the button says Send while the
         // strip and rows report what is queued. The placeholder tracks the
         // agent state instead of explaining the queue transport.
-        queueInputEl.placeholder = session.prompt_in_flight
-          ? "Agent is working — your prompt runs when it's free"
-          : "Message the agent";
+        queueInputEl.placeholder = sideActive
+          ? (session.prompt_in_flight
+            ? "Side conversation is working — your prompt runs when it's free"
+            : "Message the side conversation — type exit to return")
+          : (session.prompt_in_flight
+            ? "Agent is working — your prompt runs when it's free"
+            : "Message the agent");
         setQueueStatus(queuedPrompts.length ? `${queuedPrompts.length} queued` : "");
 
         for (const prompt of queuedPrompts) {
           const item = cloneTemplate(queueTpl);
           setTimestamp(item.querySelector(".queue-item-time"), prompt.created_at || "");
-          item.querySelector(".queue-item-text").textContent = prompt.text || "";
+          const imageCount = Number(prompt.image_count ?? (Array.isArray(prompt.images) ? prompt.images.length : 0));
+          item.querySelector(".queue-item-text").textContent = prompt.text || (imageCount ? "Image prompt" : "");
+          const attachmentSummary = item.querySelector(".queue-item-attachments");
+          attachmentSummary.hidden = !imageCount;
+          attachmentSummary.textContent = imageCount
+            ? `${imageCount} image${imageCount === 1 ? "" : "s"}`
+            : "";
           const deleteButton = item.querySelector(".queue-item-delete");
           deleteButton.disabled = deletingQueuedPromptIds.has(prompt.id);
           deleteButton.setAttribute("aria-label", "Cancel queued prompt");
@@ -7296,23 +8152,156 @@
         statusLineEl.hidden = false;
       }
 
+      function renderRagnarok(session) {
+        const arena = session?.ragnarok;
+        if (!arena) {
+          ragnarokPanelEl.hidden = true;
+          ragnarokPhaseEl.textContent = "";
+          ragnarokTaskEl.textContent = "";
+          ragnarokFightersEl.replaceChildren();
+          ragnarokResultEl.replaceChildren();
+          ragnarokResultEl.hidden = true;
+          return;
+        }
+
+        const fighters = Array.isArray(arena.fighters) ? arena.fighters : [];
+        const fighterName = (id) => fighters.find((fighter) => fighter.id === id)?.model || `fighter ${id}`;
+        const phase = String(arena.phase || "arena").replaceAll("_", " ");
+        ragnarokPhaseEl.textContent = arena.awaiting_approval
+          ? `${phase} · awaiting local unleash`
+          : phase;
+        ragnarokTaskEl.textContent = arena.task || "Ragnarok arena";
+
+        ragnarokFightersEl.replaceChildren(...fighters.map((fighter) => {
+          const card = document.createElement("article");
+          card.className = "ragnarok-fighter";
+
+          const name = document.createElement("span");
+          name.className = "ragnarok-fighter-name";
+          name.textContent = fighter.model || `fighter ${fighter.id}`;
+          const status = document.createElement("span");
+          status.className = "ragnarok-fighter-status";
+          status.textContent = fighter.status || "waiting";
+          const source = document.createElement("span");
+          source.className = "ragnarok-fighter-source";
+          source.textContent = fighter.source || "unknown source";
+          const vigor = document.createElement("span");
+          vigor.className = "ragnarok-vigor";
+          vigor.dataset.vigor = fighter.vigor || "waiting";
+          vigor.setAttribute("aria-label", `Vigor: ${fighter.vigor || "waiting"}`);
+          card.append(name, status, source, vigor);
+          return card;
+        }));
+
+        const result = [];
+        const verdict = arena.verdict;
+        if (verdict) {
+          const summary = document.createElement("div");
+          summary.className = "ragnarok-verdict";
+          if (verdict.clear_winner != null) {
+            summary.textContent = `Winner: ${fighterName(verdict.clear_winner)}`;
+          } else if (Array.isArray(verdict.finalists) && verdict.finalists.length === 2) {
+            summary.textContent = `Finalists: ${fighterName(verdict.finalists[0])} and ${fighterName(verdict.finalists[1])}`;
+          } else {
+            summary.textContent = "Verdict available";
+          }
+          if (verdict.thor_fallback) {
+            summary.textContent += " · local fallback judgment";
+          }
+          result.push(summary);
+          if (verdict.reasoning) {
+            const reasoning = document.createElement("div");
+            reasoning.textContent = verdict.reasoning;
+            result.push(reasoning);
+          }
+        }
+        if (arena.adoption_hint) {
+          const adoption = document.createElement("div");
+          adoption.className = "ragnarok-adoption";
+          adoption.textContent = arena.adoption_hint;
+          result.push(adoption);
+        }
+        if (arena.failed) {
+          const failure = document.createElement("div");
+          failure.className = "ragnarok-failure";
+          failure.textContent = `Arena failed: ${arena.failed}`;
+          result.push(failure);
+        }
+        ragnarokResultEl.replaceChildren(...result);
+        ragnarokResultEl.hidden = !result.length;
+        ragnarokPanelEl.hidden = false;
+      }
+
       function renderChat() {
-        const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
-        renderTranscript(session);
+        const session = selectedSession();
+        const archived = selectedSessionIsArchived();
+        const readOnly = Boolean(selectedSessionId) && !selectedSessionIsLive();
+        const sideActive = sessionHasCommand(session, "exit");
+        composerEl.hidden = readOnly;
+        archiveBadgeEl.hidden = !archived;
+        sideBadgeEl.hidden = readOnly || !sideActive;
         renderStatusLine(session);
-        renderConfig(session);
+        renderRagnarok(session);
+        renderTranscript(session, archived);
+        renderConfig(readOnly || sideActive ? null : session);
         renderSubagents(session);
-        renderPermissions(session);
-        renderQueue(session);
+        renderPermissions(readOnly ? null : session);
+        renderQueue(readOnly ? null : session);
         updateCommandPalette();
       }
 
       function renderAll() {
         renderSessions();
+        renderHistorySessions();
         renderChat();
       }
 
       /* ---- network ---- */
+
+      async function refreshHistory(render = true) {
+        if (!authenticated || historyLoading) {
+          return;
+        }
+        historyLoading = true;
+        historyError = "";
+        if (render) {
+          renderHistorySessions();
+        }
+        try {
+          const response = await apiFetch("/sessions", { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const retained = await response.json();
+          historySessions = (Array.isArray(retained) ? retained : []).sort((left, right) => {
+            const leftTime = new Date(left.last_update || left.start_time || 0).getTime();
+            const rightTime = new Date(right.last_update || right.start_time || 0).getTime();
+            return rightTime - leftTime;
+          });
+          historyLoaded = true;
+          if (archivedSessionById(routeSessionId())) {
+            historyVisible = true;
+          }
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            historyError = error.message;
+          }
+        } finally {
+          historyLoading = false;
+          if (render && authenticated) {
+            renderAll();
+            refreshTimestamps();
+          }
+        }
+      }
+
+      async function toggleHistory() {
+        historyVisible = !historyVisible;
+        renderHistorySessions();
+        if (historyVisible) {
+          await refreshHistory();
+        }
+      }
 
       async function tryResumeViewerSession() {
         if (viewerToken) {
@@ -7339,6 +8328,10 @@
           syncPendingStopState();
           noteSessionActivity();
           showApp();
+          const routed = routeSessionId();
+          if (routed && !sessions.some((session) => session.session_id === routed)) {
+            await refreshHistory(false);
+          }
           statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
           applyRoute();
           await refreshQueuedPrompts();
@@ -7353,6 +8346,10 @@
           return;
         }
         try {
+          const previousLiveIdSet = new Set(
+            sessions.map((session) => session.session_id),
+          );
+          const previousLiveIds = [...previousLiveIdSet].sort().join("\u001f");
           const response = await apiFetch("/live/sessions", {
             cache: "no-store",
           });
@@ -7360,6 +8357,22 @@
             throw new Error(`HTTP ${response.status}`);
           }
           sessions = await response.json();
+          const nextLiveIds = sessions
+            .map((session) => session.session_id)
+            .sort()
+            .join("\u001f");
+          const routed = routeSessionId();
+          const routedMissing = routed
+            && !sessions.some((session) => session.session_id === routed)
+            && !historySessions.some((session) => session.session_id === routed);
+          const missingRouteNeedsHistory = routedMissing
+            && (previousLiveIdSet.has(routed) || (!historyLoaded && !historyError));
+          if (missingRouteNeedsHistory || (historyVisible && previousLiveIds !== nextLiveIds)) {
+            await refreshHistory(false);
+          }
+          if (!authenticated) {
+            return;
+          }
           syncPendingStopState();
           noteSessionActivity();
           statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -7380,7 +8393,7 @@
           return;
         }
         const sessionId = selectedSessionId;
-        if (!sessionId) {
+        if (!sessionId || !selectedSessionIsLive()) {
           queuedPrompts = [];
           renderQueue(null);
           return;
@@ -7410,12 +8423,36 @@
           return;
         }
         const sessionId = selectedSessionId;
-        const text = queueInputEl.value;
-        if (!sessionId || !text.trim()) {
+        const session = sessions.find((candidate) => candidate.session_id === sessionId) || null;
+        if (!session) {
+          setQueueStatus("Only live sessions can accept prompts.", true);
           return;
         }
-        const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
-        if (consumeLocalSlashCommand(session, text)) {
+        const text = queueInputEl.value;
+        const attachments = selectedAttachments();
+        if (!sessionId || (!text.trim() && !attachments.length)) {
+          return;
+        }
+        if (attachments.length && !session?.prompt_images_supported) {
+          setQueueStatus("This session does not support image prompts.", true);
+          return;
+        }
+        if (!attachments.length && consumeLocalSlashCommand(session, text)) {
+          return;
+        }
+        const images = attachments.map(({ data_base64, mime_type, width, height }) => ({
+          data_base64,
+          mime_type,
+          width,
+          height,
+        }));
+        const body = JSON.stringify({
+          session_id: sessionId,
+          text,
+          images,
+        });
+        if (new TextEncoder().encode(body).byteLength > MAX_QUEUE_REQUEST_BYTES) {
+          setQueueStatus("Prompt attachments exceed the 8 MiB request limit.", true);
           return;
         }
         queueSubmitInFlight = true;
@@ -7426,16 +8463,15 @@
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({
-              session_id: sessionId,
-              text,
-            }),
+            body,
           });
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }
           queueInputEl.value = "";
           draftBySessionId.set(sessionId, "");
+          attachmentsBySessionId.delete(sessionId);
+          renderAttachments();
           clearCommandPalette();
           syncComposerHeight();
           pendingNewEntries = 0;
@@ -7564,6 +8600,15 @@
           closeMjConfig();
         }
       });
+      workspaceDiffButtonEl.addEventListener("click", openWorkspaceDiff);
+      workspaceDiffCloseEl.addEventListener("click", () => {
+        workspaceDiffModalEl.hidden = true;
+      });
+      workspaceDiffModalEl.addEventListener("click", (event) => {
+        if (event.target === workspaceDiffModalEl) {
+          workspaceDiffModalEl.hidden = true;
+        }
+      });
       settingsCloseEl.addEventListener("click", closeViewerSettings);
       settingsModalEl.addEventListener("click", (event) => {
         if (event.target === settingsModalEl) {
@@ -7576,6 +8621,9 @@
       authFormEl.addEventListener("submit", submitAuth);
       logoutButtonEl.addEventListener("click", logout);
       newSessionButtonEl.addEventListener("click", openNewSessionPicker);
+      historyToggleEl.addEventListener("click", () => {
+        void toggleHistory();
+      });
       newSessionCloseEl.addEventListener("click", closeNewSessionPicker);
       newSessionStartEl.addEventListener("click", startNewSession);
       newSessionModalEl.addEventListener("click", (event) => {
@@ -7583,16 +8631,28 @@
           closeNewSessionPicker();
         }
       });
+      loadSessionCloseEl.addEventListener("click", closeLoadSessionPicker);
+      loadSessionModalEl.addEventListener("click", (event) => {
+        if (event.target === loadSessionModalEl) {
+          closeLoadSessionPicker();
+        }
+      });
       window.addEventListener("keydown", (event) => {
         if (event.key !== "Escape") {
           return;
         }
-        if (!mjconfigModalEl.hidden) {
+        if (!workspaceDiffModalEl.hidden) {
+          event.preventDefault();
+          workspaceDiffModalEl.hidden = true;
+        } else if (!mjconfigModalEl.hidden) {
           event.preventDefault();
           closeMjConfig();
         } else if (!settingsModalEl.hidden) {
           event.preventDefault();
           closeViewerSettings();
+        } else if (!loadSessionModalEl.hidden) {
+          event.preventDefault();
+          closeLoadSessionPicker();
         } else if (!newSessionModalEl.hidden) {
           event.preventDefault();
           closeNewSessionPicker();
@@ -7624,10 +8684,30 @@
         updateJumpToLatestVisibility();
       }, { passive: true });
       queueSubmitEl.addEventListener("click", submitQueuedPrompt);
+      exitSideEl.addEventListener("click", () => {
+        void queueSessionAction("/exit", "Side conversation exit queued.");
+      });
+      attachImageEl.addEventListener("click", () => imagePickerEl.click());
+      imagePickerEl.addEventListener("change", () => {
+        const files = Array.from(imagePickerEl.files || []);
+        imagePickerEl.value = "";
+        void attachImageFiles(files);
+      });
       queueInputEl.addEventListener("input", () => {
         saveDraftForSelectedSession();
         syncComposerHeight();
         updateCommandPalette();
+      });
+      queueInputEl.addEventListener("paste", (event) => {
+        const files = Array.from(event.clipboardData?.items || [])
+          .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+          .map((item) => item.getAsFile())
+          .filter(Boolean);
+        if (!files.length || !selectedSession()?.prompt_images_supported) {
+          return;
+        }
+        event.preventDefault();
+        void attachImageFiles(files);
       });
       queueInputEl.addEventListener("keydown", (event) => {
         // While an IME composition is active, Enter/arrows confirm or steer the

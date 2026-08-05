@@ -198,19 +198,6 @@ impl SettingsEditor {
             match self.acp_view {
                 AcpView::Catalog { .. } => return self.handle_catalog_key(code),
                 AcpView::Custom { .. } => return self.handle_custom_key(code),
-                AcpView::Servers
-                    if code == KeyCode::Char('r')
-                        && self
-                            .selected
-                            .checked_sub(SERVER_ROW_OFFSET)
-                            .and_then(|index| self.inventory.servers.get(index))
-                            .is_some_and(|server| {
-                                server.id == "anvil" && server.error.is_some()
-                            }) =>
-                {
-                    crate::anvil::retry_background_install();
-                    return SettingsAction::None;
-                }
                 AcpView::Servers => {}
             }
         }
@@ -352,9 +339,6 @@ impl SettingsEditor {
                     .unwrap_or(0);
                 let next = (current as i32 + delta).rem_euclid(choices.len() as i32) as usize;
                 self.config.set_acp_server_policy(&id, choices[next]);
-                if id == "anvil" && choices[next] == AcpServerPolicy::Enabled {
-                    crate::anvil::retry_background_install();
-                }
                 self.refresh_inventory();
             }
             SettingsTab::Appearance if self.selected == 0 => {
@@ -425,9 +409,6 @@ impl SettingsEditor {
                     AcpServerPolicy::Disabled
                 };
                 self.config.set_acp_server_policy(&id, policy);
-                if id == "anvil" && policy == AcpServerPolicy::Enabled {
-                    crate::anvil::retry_background_install();
-                }
                 self.refresh_inventory();
             }
             _ => return SettingsAction::None,
@@ -1395,8 +1376,13 @@ pub fn reset_unroutable_models(config: &mut Config, choices: &[ModelChoice]) -> 
             .iter()
             .find(|choice| choice.model == model)
             .and_then(|choice| choice.adapter.clone())
-            .unwrap_or_else(|| crate::roster::native_source_id(&model));
-        if source_disabled(config, &route) {
+            .or_else(|| crate::roster::native_source_id(&model));
+        // No catalog entry and no built-in adapter for the model's provider
+        // means nothing enabled can serve the pin either.
+        if route
+            .as_deref()
+            .is_none_or(|route| source_disabled(config, route))
+        {
             let slot = match seat {
                 Seat::Agent => &mut config.agent.model,
                 Seat::Review => &mut config.review.model,
@@ -1723,7 +1709,7 @@ fn draw_acp_priority(
                 Style::default().ink(theme.muted),
             ),
             Line::styled(
-                "r resets to Codex → Claude → Kimi → Anvil",
+                "r resets to Codex → Claude → Kimi",
                 Style::default().ink(theme.muted),
             ),
             Line::raw(""),
@@ -1887,8 +1873,6 @@ fn draw_servers(
                 "[{}] {:<16} {status}",
                 if server.installing {
                     "installing".to_string()
-                } else if server.error.is_some() && server.id == "anvil" {
-                    "failed".to_string()
                 } else {
                     server.policy.to_string()
                 },
@@ -1896,9 +1880,7 @@ fn draw_servers(
             ),
             theme,
         ));
-        let detail = if server.id == "anvil" {
-            server.evidence.clone()
-        } else {
+        let detail = {
             let args = server.launch.args.join(" ");
             let command = if args.is_empty() {
                 server.launch.command.display().to_string()
@@ -2239,7 +2221,11 @@ mod tests {
 
     #[test]
     fn agent_panel_saves_primary_option_without_overwriting_live_route_cache() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         let server = editor
             .inventory
             .servers
@@ -2291,7 +2277,11 @@ mod tests {
 
     #[test]
     fn primary_and_subagent_panels_edit_arbitrary_options_with_separate_scope() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         let server = editor
             .inventory
             .servers
@@ -2355,7 +2345,11 @@ mod tests {
 
     #[test]
     fn primary_and_subagent_panels_use_their_selected_adapters_options() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         editor.inventory.servers.truncate(1);
         ensure_two_inventory_servers(&mut editor);
         let primary_index = 0;
@@ -2390,7 +2384,11 @@ mod tests {
 
     #[test]
     fn active_source_wins_for_the_current_explicit_model() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         editor.inventory.servers.truncate(1);
         ensure_two_inventory_servers(&mut editor);
         let active_source = editor.inventory.servers[1].id.clone();
@@ -2421,7 +2419,11 @@ mod tests {
 
     #[test]
     fn legacy_adapter_default_is_shown_until_a_scoped_value_is_chosen() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         let server = editor
             .inventory
             .servers
@@ -2466,7 +2468,11 @@ mod tests {
 
     #[test]
     fn stale_session_default_is_visible_and_cycles_to_an_advertised_value() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         let server = editor
             .inventory
             .servers
@@ -2507,7 +2513,11 @@ mod tests {
 
     #[test]
     fn agent_panel_scrolls_dynamic_options_into_view_at_narrow_width() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         let server = editor
             .inventory
             .servers
@@ -2709,21 +2719,25 @@ mod tests {
 
     #[test]
     fn auto_server_can_be_explicitly_enabled() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        // An explicit policy keeps a built-in visible regardless of whether
+        // this host actually has it installed.
+        let mut config = Config::default();
+        config.set_acp_server_policy("kimi", AcpServerPolicy::Disabled);
+        let mut editor = SettingsEditor::new(config, Vec::new(), None);
         editor.tab = SettingsTab::AcpServers;
         let server_index = editor
             .inventory
             .servers
             .iter()
-            .position(|server| server.id == "anvil")
-            .expect("anvil");
+            .position(|server| server.id == "kimi")
+            .expect("kimi");
         editor.selected = server_index + SERVER_ROW_OFFSET;
         editor.inventory.servers[server_index].detected = false;
         editor.inventory.servers[server_index].policy = AcpServerPolicy::Auto;
 
         // Exercise the transition without refreshing host-specific discovery.
         assert_eq!(editor.toggle_selected(), SettingsAction::Changed);
-        assert_eq!(editor.config.acp.policy("anvil"), AcpServerPolicy::Enabled);
+        assert_eq!(editor.config.acp.policy("kimi"), AcpServerPolicy::Enabled);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use tokio::sync::oneshot;
 
 /// Image block submitted by the UI with a prompt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PromptImage {
     pub data_base64: String,
     pub mime_type: String,
@@ -80,6 +80,7 @@ pub enum UiEvent {
         agent_version: Option<String>,
         prompt_images_supported: bool,
         session_fork_supported: bool,
+        session_load_supported: bool,
         side_session_supported: bool,
         side_session_unsupported_reason: Option<String>,
     },
@@ -87,6 +88,10 @@ pub enum UiEvent {
     Side(Box<UiEvent>),
     /// Side startup failed after the UI switched views.
     SideStartFailed { message: String },
+    /// The remote viewer asked the attached local UI to enter side mode.
+    RemoteSideStartRequested { initial_prompt: Option<String> },
+    /// The remote viewer closed a side conversation that the local UI opened.
+    RemoteSideExitRequested,
     /// A session has been opened or loaded; future updates carry this session id.
     SessionStarted { session_id: String, resumed: bool },
     /// A streaming or status update from the agent. We forward the raw
@@ -290,6 +295,13 @@ pub struct ElicitationPrompt {
     pub message: String,
     /// The elicitation mode (single-select form or URL) and its fields.
     pub mode: ElicitationMode,
+    /// Identifier assigned by the remote tracker when this prompt was
+    /// published to the remote-control viewer, so a decision claimed from the
+    /// viewer can be matched back to this exact queued prompt. Unlike a
+    /// permission request, an elicitation carries no intrinsic id to match on.
+    /// `None` whenever the prompt was never published: headless runs, remote
+    /// publishing disabled, or a schema shape the viewer cannot render.
+    pub remote_id: Option<String>,
     /// One-shot to the ACP runtime. Dropping the sender is treated as Cancel.
     pub responder: oneshot::Sender<ElicitationOutcome>,
 }
@@ -380,13 +392,17 @@ pub enum UiCommand {
     },
     /// Fork the current ACP session and continue in the forked session.
     ForkSession,
+    /// Start a fresh ACP session on the existing agent connection.
+    NewSession {
+        responder: oneshot::Sender<LoadSessionResult>,
+    },
     /// Return the active main session that an isolated side runtime should
     /// resume and fork on its own connection when it has persisted history.
     ForkSideSession {
         responder: oneshot::Sender<Result<SideSessionSource, String>>,
     },
     /// Enter an isolated side conversation, optionally sending an initial prompt.
-    StartSide,
+    StartSide { initial_prompt: Option<String> },
     /// Leave and delete the active ephemeral side conversation.
     ExitSide,
     /// Force a command to the hidden main runtime while side mode is visible.

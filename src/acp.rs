@@ -15,17 +15,17 @@ use agent_client_protocol::schema::v1::{
     ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
     ElicitationFormCapabilities, ElicitationUrlCapabilities, ErrorCode, FileSystemCapabilities,
     ForkSessionRequest, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, McpServer, NewSessionRequest, PermissionOption,
-    PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
-    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
-    SessionInfoUpdate, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, TextContent, ToolCall, ToolCallContent,
-    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    KillTerminalResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionId, SessionInfoUpdate, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus,
+    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent, ToolCall,
+    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    ToolKind, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
     WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
@@ -125,7 +125,6 @@ pub struct RuntimeRoleConfig {
 enum NativeReadOnlyPolicy {
     Codex,
     Claude,
-    Anvil,
 }
 
 const CLAUDE_READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebFetch", "WebSearch"];
@@ -166,7 +165,6 @@ fn native_read_only_policy(
     let policy = match crate::roster::AdapterKind::from_source_id(&role.adapter_source_id) {
         Some(crate::roster::AdapterKind::Codex) => NativeReadOnlyPolicy::Codex,
         Some(crate::roster::AdapterKind::Claude) => NativeReadOnlyPolicy::Claude,
-        Some(crate::roster::AdapterKind::Anvil) => NativeReadOnlyPolicy::Anvil,
         Some(crate::roster::AdapterKind::Kimi | crate::roster::AdapterKind::Custom) | None => {
             anyhow::bail!(
                 "native read-only enforcement is unavailable for adapter '{}'; review lane disabled",
@@ -293,6 +291,7 @@ struct ConnectedEventFields {
     agent_version: Option<String>,
     prompt_images_supported: bool,
     session_fork_supported: bool,
+    session_load_supported: bool,
     side_session_supported: bool,
     side_session_unsupported_reason: Option<String>,
 }
@@ -707,6 +706,37 @@ fn new_session_request(
         request.meta(claude_read_only_meta())
     } else {
         request
+    }
+}
+
+async fn create_new_session(
+    conn: &ConnectionTo<Agent>,
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
+    native_read_only: Option<NativeReadOnlyPolicy>,
+    auth_methods: &[AuthMethod],
+) -> std::result::Result<NewSessionResponse, LaunchError> {
+    let request = || {
+        new_session_request(
+            cwd.clone(),
+            additional_directories,
+            mcp_servers,
+            native_read_only,
+        )
+    };
+    match conn.send_request(request()).block_task().await {
+        Ok(response) => Ok(response),
+        Err(source) => match auth_required_detail(&source) {
+            Some(detail) => {
+                authenticate_after_auth_required(conn, auth_methods, detail).await?;
+                conn.send_request(request())
+                    .block_task()
+                    .await
+                    .map_err(classify_session_error)
+            }
+            None => Err(classify_session_error(source)),
+        },
     }
 }
 
@@ -1782,6 +1812,9 @@ where
                 let prompt = ElicitationPrompt {
                     message: request.message.clone(),
                     mode: request.mode.clone(),
+                    // Assigned downstream by the remote tracker if and when
+                    // this prompt is published to the viewer.
+                    remote_id: None,
                     responder: tx,
                 };
                 if elicit_ui_tx
@@ -2022,6 +2055,14 @@ async fn drive_session(
             .session_capabilities
             .fork
             .is_some(),
+        // Loading a different session on the same connection first closes the
+        // active one, so both capabilities are required for the web picker.
+        session_load_supported: init_resp.agent_capabilities.load_session
+            && init_resp
+                .agent_capabilities
+                .session_capabilities
+                .close
+                .is_some(),
         side_session_supported: side_session_unsupported_reason.is_none(),
         side_session_unsupported_reason,
     };
@@ -2073,15 +2114,15 @@ async fn drive_session(
             };
             (session_id, initial_config, true)
         }
-        None => match conn
-            .send_request(new_session_request(
-                cwd.clone(),
-                &additional_directories,
-                &mcp_servers,
-                native_read_only,
-            ))
-            .block_task()
-            .await
+        None => match create_new_session(
+            &conn,
+            cwd.clone(),
+            &additional_directories,
+            &mcp_servers,
+            native_read_only,
+            &init_resp.auth_methods,
+        )
+        .await
         {
             Ok(s) => {
                 let config = session_config_from_parts(s.config_options, s.modes);
@@ -2095,53 +2136,11 @@ async fn drive_session(
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 (s.session_id, config, false)
             }
-            Err(source) => match auth_required_detail(&source) {
-                Some(detail) => {
-                    if let Err(launch_err) =
-                        authenticate_after_auth_required(&conn, &init_resp.auth_methods, detail)
-                            .await
-                    {
-                        let text = launch_err.to_string();
-                        emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                        return Err(anyhow::anyhow!(text));
-                    }
-                    match conn
-                        .send_request(new_session_request(
-                            cwd.clone(),
-                            &additional_directories,
-                            &mcp_servers,
-                            native_read_only,
-                        ))
-                        .block_task()
-                        .await
-                    {
-                        Ok(s) => {
-                            let config = session_config_from_parts(s.config_options, s.modes);
-                            session_state
-                                .set_active_session_with_roots(
-                                    s.session_id.clone(),
-                                    &cwd,
-                                    &additional_directories,
-                                )
-                                .await
-                                .map_err(|e| anyhow::anyhow!("{e}"))?;
-                            (s.session_id, config, false)
-                        }
-                        Err(source) => {
-                            let launch_err = classify_session_error(source);
-                            let text = launch_err.to_string();
-                            emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                            return Err(anyhow::anyhow!(text));
-                        }
-                    }
-                }
-                None => {
-                    let launch_err = classify_session_error(source);
-                    let text = launch_err.to_string();
-                    emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                    return Err(anyhow::anyhow!(text));
-                }
-            },
+            Err(launch_err) => {
+                let text = launch_err.to_string();
+                emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                return Err(anyhow::anyhow!(text));
+            }
         },
     };
     let (session_config_options, session_config_targets) = initial_config.unwrap_or_default();
@@ -2174,7 +2173,7 @@ async fn drive_session(
         }
     }
     // Do not require the primary agent to eagerly list the injected subagent MCP
-    // tools before the first prompt. Some ACP agents, including Anvil, accept
+    // tools before the first prompt. Some ACP agents accept
     // lifecycle `mcpServers` during `session/new` but intentionally construct
     // their tool registry lazily when handling `session/prompt`. Waiting here
     // deadlocks those agents: Mjolnir waits for `tools/list` while the agent
@@ -2353,6 +2352,38 @@ async fn drive_session(
                     break;
                 }
             }
+            UiCommand::NewSession { responder } => {
+                match start_fresh_session(
+                    &conn,
+                    &session_id,
+                    cwd.clone(),
+                    &additional_directories,
+                    &mcp_servers,
+                    native_read_only,
+                    &init_resp.auth_methods,
+                    role_config.as_ref(),
+                    &saved_session_config,
+                    &session_state,
+                    &terminals,
+                    &hidden_config_ids,
+                    &connected_fields,
+                    ui_tx,
+                )
+                .await
+                {
+                    Ok((new_session_id, new_config)) => {
+                        session_id = new_session_id;
+                        session_config = new_config;
+                        context_usage.reset_for_session();
+                        session_has_history = false;
+                        next_turn_diff_id = 1;
+                        let _ = responder.send(LoadSessionResult::Switched);
+                    }
+                    Err(message) => {
+                        let _ = responder.send(LoadSessionResult::Fallback { message });
+                    }
+                }
+            }
             UiCommand::ForkSideSession { responder } => {
                 let result = if let Some(reason) =
                     connected_fields.side_session_unsupported_reason.clone()
@@ -2482,10 +2513,7 @@ async fn drive_session(
                     vec![ContentBlock::Text(TextContent::new(format!("/{name}")))],
                 );
                 let outcome = match conn.send_request(request).block_task().await {
-                    Ok(response) => match anvil_turn_failure_message(response.meta.as_ref()) {
-                        Some(message) => AgentCommandOutcome::Failed(message),
-                        None => AgentCommandOutcome::Completed,
-                    },
+                    Ok(_) => AgentCommandOutcome::Completed,
                     Err(error) => AgentCommandOutcome::Failed(error.to_string()),
                 };
                 control_in_flight.store(false, Ordering::Release);
@@ -2498,7 +2526,7 @@ async fn drive_session(
                 let _ = responder.send(outcome);
             }
             UiCommand::CancelPrompt => {}
-            UiCommand::StartSide | UiCommand::ExitSide | UiCommand::Main(_) => {}
+            UiCommand::StartSide { .. } | UiCommand::ExitSide | UiCommand::Main(_) => {}
             UiCommand::Shutdown => break,
         }
     }
@@ -2529,9 +2557,100 @@ fn emit_connected(ui_tx: &mpsc::UnboundedSender<UiEvent>, fields: &ConnectedEven
         agent_version: fields.agent_version.clone(),
         prompt_images_supported: fields.prompt_images_supported,
         session_fork_supported: fields.session_fork_supported,
+        session_load_supported: fields.session_load_supported,
         side_session_supported: fields.side_session_supported,
         side_session_unsupported_reason: fields.side_session_unsupported_reason.clone(),
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_fresh_session(
+    conn: &ConnectionTo<Agent>,
+    current_session_id: &SessionId,
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
+    native_read_only: Option<NativeReadOnlyPolicy>,
+    auth_methods: &[AuthMethod],
+    role_config: Option<&RuntimeRoleConfig>,
+    saved_session_config: &HashMap<String, String>,
+    session_state: &RuntimeSessionState,
+    terminals: &ManagedTerminals,
+    hidden_config_ids: &[String],
+    connected_fields: &ConnectedEventFields,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) -> std::result::Result<(SessionId, SessionConfigCache), String> {
+    let created = create_new_session(
+        conn,
+        cwd.clone(),
+        additional_directories,
+        mcp_servers,
+        native_read_only,
+        auth_methods,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let new_session_id = created.session_id;
+    let (options, targets) =
+        session_config_from_parts(created.config_options, created.modes).unwrap_or_default();
+    let mut new_config = SessionConfigCache { options, targets };
+
+    session_state
+        .set_active_session_with_roots(new_session_id.clone(), &cwd, additional_directories)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let configured = async {
+        if let Some(role) = role_config {
+            for warning in apply_runtime_role_config(conn, &new_session_id, &mut new_config, role)
+                .await
+                .map_err(|error| format!("{} configuration failed: {error}", role.label))?
+            {
+                let _ = ui_tx.send(UiEvent::Warning(warning));
+            }
+        }
+        if !saved_session_config.is_empty() {
+            apply_saved_session_config(
+                conn,
+                &new_session_id,
+                &mut new_config,
+                saved_session_config,
+                ui_tx,
+            )
+            .await;
+        }
+        if let Some(policy) = native_read_only {
+            enforce_native_read_only(conn, &new_session_id, &mut new_config, policy, false)
+                .await
+                .map_err(|error| format!("native read-only policy failed: {error}"))?;
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Err(error) = configured {
+        let _ = session_state
+            .set_active_session_with_roots(current_session_id.clone(), &cwd, additional_directories)
+            .await;
+        return Err(error);
+    }
+
+    session_state
+        .mark_permissions_cancelled(current_session_id)
+        .await;
+    terminals.shutdown_session(current_session_id).await;
+    emit_connected(ui_tx, connected_fields);
+    let _ = ui_tx.send(UiEvent::SessionStarted {
+        session_id: new_session_id.to_string(),
+        resumed: false,
+    });
+    let _ = ui_tx.send(UiEvent::SessionConfigOptions {
+        options: new_config.options.clone(),
+        targets: new_config.targets.clone(),
+        hidden_config_ids: hidden_config_ids.to_vec(),
+    });
+    let _ = ui_tx.send(UiEvent::Info("new session started".to_string()));
+    Ok((new_session_id, new_config))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2619,6 +2738,14 @@ async fn switch_existing_session(
         .set_active_session_with_roots(target_session_id.clone(), &cwd, additional_directories)
         .await
         .map_err(|source| LaunchError::SessionCreateFailed { source })?;
+    // Agents may stream replay notifications before replying to session/load.
+    // Move every consumer to the target first so replay cannot be recorded on
+    // the old session and then discarded by the reset below.
+    emit_connected(ui_tx, connected_fields);
+    let _ = ui_tx.send(UiEvent::SessionStarted {
+        session_id: target_session_id.to_string(),
+        resumed: true,
+    });
     let loaded_config = load_existing_session(
         conn,
         target_session_id.clone(),
@@ -2636,11 +2763,6 @@ async fn switch_existing_session(
             options: Vec::new(),
             targets: Vec::new(),
         });
-    emit_connected(ui_tx, connected_fields);
-    let _ = ui_tx.send(UiEvent::SessionStarted {
-        session_id: target_session_id.to_string(),
-        resumed: true,
-    });
     let _ = ui_tx.send(UiEvent::SessionConfigOptions {
         options: session_config.options.clone(),
         targets: session_config.targets.clone(),
@@ -2766,6 +2888,11 @@ async fn drive_fork_session(
                                 .to_string(),
                         ));
                     }
+                    Some(UiCommand::NewSession { responder }) => {
+                        let _ = responder.send(LoadSessionResult::Fallback {
+                            message: "session fork already in flight".to_string(),
+                        });
+                    }
                     Some(UiCommand::LoadSession { responder, .. }) => {
                         let _ = responder.send(LoadSessionResult::Fallback {
                             message: "session fork already in flight".to_string(),
@@ -2779,7 +2906,7 @@ async fn drive_fork_session(
                             "session fork already in flight".to_string(),
                         ));
                     }
-                    Some(UiCommand::StartSide)
+                    Some(UiCommand::StartSide { .. })
                     | Some(UiCommand::ExitSide)
                     | Some(UiCommand::Main(_)) => {}
                 }
@@ -4422,7 +4549,6 @@ pub(crate) fn session_config_option_contains_value(
 fn native_read_only_config_id(policy: NativeReadOnlyPolicy) -> Option<&'static str> {
     match policy {
         NativeReadOnlyPolicy::Codex => Some("mode"),
-        NativeReadOnlyPolicy::Anvil => Some("permission_mode"),
         NativeReadOnlyPolicy::Claude => None,
     }
 }
@@ -4430,7 +4556,6 @@ fn native_read_only_config_id(policy: NativeReadOnlyPolicy) -> Option<&'static s
 fn native_read_only_config_value(policy: NativeReadOnlyPolicy) -> Option<&'static str> {
     match policy {
         NativeReadOnlyPolicy::Codex => Some("read-only"),
-        NativeReadOnlyPolicy::Anvil => Some("readOnly"),
         NativeReadOnlyPolicy::Claude => None,
     }
 }
@@ -4667,23 +4792,20 @@ fn select_role_model(
     }
 }
 
-/// Wire id for the ACP reasoning-effort config option. Mirrors Anvil's
-/// `REASONING_EFFORT_CONFIG_ID` (anvil/src/acp.rs) and its always-present
-/// "off" sentinel (anvil's `REASONING_EFFORT_OFF_VALUE`, session.rs), which
-/// explicitly disables reasoning rather than falling back to the model's
-/// default.
+/// Wire id for the ACP reasoning-effort config option, alongside its
+/// always-present "off" sentinel, which explicitly disables reasoning rather
+/// than falling back to the model's default.
 pub(crate) const REASONING_EFFORT_CONFIG_ID: &str = "reasoning_effort";
 
 /// Locates the session's reasoning-effort selector, if the adapter
 /// advertises one.
 ///
 /// ACP defines `SessionConfigOptionCategory::ThoughtLevel` for exactly this
-/// purpose, so that's tried first. In practice Anvil (the only adapter this
-/// ships against today) tags its reasoning-effort option `Model` instead —
-/// the same category as the model selector itself, since which efforts are
-/// valid depends on the chosen model — so category matching alone would
-/// never find it there. The fallback matches the well-known
-/// `reasoning_effort` config id, which is stable across adapters.
+/// purpose, so that's tried first. Some adapters tag their reasoning-effort
+/// option `Model` instead — the same category as the model selector itself,
+/// since which efforts are valid depends on the chosen model — so category
+/// matching alone would never find it there. The fallback matches the
+/// well-known `reasoning_effort` config id, which is stable across adapters.
 fn find_reasoning_effort_option(session_config: &SessionConfigCache) -> Option<usize> {
     session_config
         .options
@@ -4961,6 +5083,11 @@ async fn drive_config_update(
                             "side session fork is unavailable during a config update".to_string(),
                         ));
                     }
+                    Some(UiCommand::NewSession { responder }) => {
+                        let _ = responder.send(LoadSessionResult::Fallback {
+                            message: "config update already in flight".to_string(),
+                        });
+                    }
                     Some(UiCommand::LoadSession { responder, .. }) => {
                         let _ = responder.send(LoadSessionResult::Fallback {
                             message: "config update already in flight".to_string(),
@@ -4974,7 +5101,7 @@ async fn drive_config_update(
                             "session config update already in flight".to_string(),
                         ));
                     }
-                    Some(UiCommand::StartSide)
+                    Some(UiCommand::StartSide { .. })
                     | Some(UiCommand::ExitSide)
                     | Some(UiCommand::Main(_)) => {}
                 }
@@ -5031,22 +5158,6 @@ struct PromptTurnDiffConfig<'a> {
     turn_id: u64,
 }
 
-fn anvil_turn_failure_message(
-    meta: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> Option<String> {
-    let failure = meta?.get("anvil")?.get("turnFailure")?.as_object()?;
-    let message = failure.get("message")?.as_str()?.trim();
-    if message.is_empty() {
-        return None;
-    }
-    let retryable = failure
-        .get("retryable")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let class = if retryable { "retryable" } else { "fatal" };
-    Some(format!("agent turn failed ({class}): {message}"))
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn drive_prompt_turn(
     conn: &ConnectionTo<Agent>,
@@ -5075,14 +5186,10 @@ async fn drive_prompt_turn(
                         turn_diff_tracker
                             .emit_if_changed(ui_tx, diff_config.turn_id)
                             .await;
-                        if let Some(message) = anvil_turn_failure_message(resp.meta.as_ref()) {
-                            let _ = ui_tx.send(UiEvent::PromptFailed { message });
-                        } else {
-                            let _ = ui_tx.send(UiEvent::PromptDone {
-                                stop_reason: resp.stop_reason,
-                                usage: resp.usage,
-                            });
-                        }
+                        let _ = ui_tx.send(UiEvent::PromptDone {
+                            stop_reason: resp.stop_reason,
+                            usage: resp.usage,
+                        });
                     }
                     Err(e) => {
                         turn_diff_tracker
@@ -5144,6 +5251,11 @@ async fn drive_prompt_turn(
                             has_history: side_source_has_history,
                         }));
                     }
+                    Some(UiCommand::NewSession { responder }) => {
+                        let _ = responder.send(LoadSessionResult::Fallback {
+                            message: "prompt already in flight".to_string(),
+                        });
+                    }
                     Some(UiCommand::LoadSession { responder, .. }) => {
                         let _ = responder.send(LoadSessionResult::Fallback {
                             message: "prompt already in flight".to_string(),
@@ -5156,7 +5268,7 @@ async fn drive_prompt_turn(
                             "prompt already in flight".to_string(),
                         ));
                     }
-                    Some(UiCommand::StartSide)
+                    Some(UiCommand::StartSide { .. })
                     | Some(UiCommand::ExitSide)
                     | Some(UiCommand::Main(_)) => {}
                 }
@@ -5462,24 +5574,6 @@ mod tests {
     #[cfg(windows)]
     use tokio::io::AsyncWriteExt as _;
     use tokio::io::split;
-
-    #[test]
-    fn anvil_failure_metadata_becomes_prompt_error() {
-        let meta = serde_json::json!({
-            "anvil": {
-                "turnFailure": {
-                    "message": "stream read error",
-                    "retryable": true
-                }
-            }
-        });
-        let meta = meta.as_object().expect("metadata object");
-
-        assert_eq!(
-            anvil_turn_failure_message(Some(meta)).as_deref(),
-            Some("agent turn failed (retryable): stream read error")
-        );
-    }
 
     #[test]
     fn exact_command_discovery_does_not_guess_aliases_or_case() {
@@ -6942,7 +7036,7 @@ mod tests {
 
     #[test]
     fn reasoning_effort_option_falls_back_to_well_known_id_when_category_is_model() {
-        // Mirrors Anvil, which tags its reasoning-effort selector `Model`
+        // Mirrors adapters that tag the reasoning-effort selector `Model`
         // (the same category as the model selector) rather than
         // `ThoughtLevel`, since which efforts are valid depends on the
         // chosen model. Category matching alone would never find it there,
@@ -7468,12 +7562,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn codex_native_read_only_is_confirmed_before_review_prompt() {
         assert_native_read_only_is_confirmed_before_prompt("codex-acp", "mode", "read-only").await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn anvil_native_read_only_is_confirmed_before_review_prompt() {
-        assert_native_read_only_is_confirmed_before_prompt("anvil", "permission_mode", "readOnly")
-            .await;
     }
 
     async fn run_mock_agent_with_additional_directories(
@@ -8316,19 +8404,18 @@ mod tests {
                     assert_eq!(req.session_id.to_string(), "target-session");
                     load_seen_for_req.store(true, Ordering::SeqCst);
                     let target_session_id = req.session_id.clone();
-                    let target_cx = cx.clone();
                     let stale_permission_cx = cx.clone();
                     let stale_permission_cancelled_for_req =
                         stale_permission_cancelled_for_load_req.clone();
+                    let _ = cx.send_notification(SessionNotification::new(
+                        target_session_id,
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("target load replay"),
+                        ))),
+                    ));
                     let response = responder.respond(LoadSessionResponse::new());
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(10)).await;
-                        let _ = target_cx.send_notification(SessionNotification::new(
-                            target_session_id,
-                            SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                ContentBlock::Text(TextContent::new("target load replay")),
-                            )),
-                        ));
                         let permission_response = stale_permission_cx
                             .send_request(RequestPermissionRequest::new(
                                 SessionId::new("old-session"),
@@ -8385,6 +8472,42 @@ mod tests {
                         }
                     });
                     responder.respond(ResumeSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_fresh_session(
+        stream: tokio::io::DuplexStream,
+        new_session_calls: Arc<AtomicUsize>,
+    ) {
+        let calls = new_session_calls.clone();
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(InitializeResponse::new(ProtocolVersion::V1))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: NewSessionRequest, responder, _cx| {
+                    let call = calls.fetch_add(1, Ordering::SeqCst);
+                    let session_id = if call == 0 {
+                        "old-session"
+                    } else {
+                        "fresh-session"
+                    };
+                    responder.respond(NewSessionResponse::new(SessionId::new(session_id)))
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -10962,10 +11085,10 @@ mod tests {
         // do not just see "acp: ..." with no remediation.
         let cases = [
             LaunchError::CommandNotFound {
-                command: "anvil".into(),
+                command: "bridge".into(),
             },
             LaunchError::SpawnFailed {
-                command: "anvil".into(),
+                command: "bridge".into(),
                 source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             },
             LaunchError::StderrFileOpen {
@@ -11239,6 +11362,45 @@ mod tests {
         assert!(!resumed);
         assert!(!fatal_emitted.load(Ordering::SeqCst));
 
+        client_task.abort();
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn new_session_command_starts_fresh_session_on_existing_connection() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let new_session_calls = Arc::new(AtomicUsize::new(0));
+        let agent_task = tokio::spawn(run_mock_agent_fresh_session(
+            agent_side,
+            new_session_calls.clone(),
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "old-session").await;
+        let (responder, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::NewSession { responder })
+            .expect("send new session");
+        assert_eq!(
+            response.await.expect("new session response"),
+            LoadSessionResult::Switched
+        );
+        wait_for_session_started(&mut ui_rx, "fresh-session").await;
+        assert_eq!(new_session_calls.load(Ordering::SeqCst), 2);
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         client_task.abort();
         agent_task.abort();
     }

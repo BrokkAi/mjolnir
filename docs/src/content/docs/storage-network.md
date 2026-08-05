@@ -18,7 +18,7 @@ equivalents.
 | DeepSWE cache | Live model-ranking snapshot, refreshed on a time-to-live |
 | ACP probe cache | Adapter model/capability results, invalidated by age or binary change |
 | ACP registry cache | Public registry metadata used for installable agents |
-| Managed agents | Downloaded Kimi/registry agents and the managed Anvil runtime |
+| Managed agents | Downloaded Kimi and ACP registry agents |
 | Voice cache | Speech-recognition model data downloaded on first dictation use |
 | Remote-control state | SQLite session/transcript data, login/cookie material, and certificates |
 | `.mjolnir/worktrees/` | Linked Git worktrees created inside a project |
@@ -31,7 +31,7 @@ a worktree does not delete remote or provider session records.
 
 | Service | Why it is contacted |
 | --- | --- |
-| GitHub | Release installation, update checks, managed Anvil assets |
+| GitHub | Release installation and update checks |
 | DeepSWE/DataCurve | Model ranking refresh |
 | ACP registry CDN | Adapter catalog and supported binary downloads |
 | npm registry | `npx`-launched Codex and Claude ACP bridges |

@@ -1,13 +1,10 @@
 THIRD_PARTY_LICENSES.html -text linguist-generated=true
 SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt -text linguist-generated=true
-anvil-v*/THIRD_PARTY_LICENSES.html -text linguist-generated=true
-anvil-v*/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt -text linguist-generated=true
 
 # Preserve canonical and generated license text verbatim, including upstream
 # trailing spaces and terminal blank lines.
 OFL-1.1.md -text whitespace=-blank-at-eol
 SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt whitespace=-blank-at-eol
 THIRD_PARTY_LICENSES.html whitespace=-blank-at-eol
-anvil-v*/THIRD_PARTY_LICENSES.html whitespace=-blank-at-eol
 native/* -text
 native/KISSFFT_COPYING.txt whitespace=-blank-at-eof

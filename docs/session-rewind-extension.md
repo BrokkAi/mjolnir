@@ -3,8 +3,8 @@
 Issue #213 asked whether `mjolnir` should support rewinding an ACP session to an
 earlier point in time. ACP 0.14 has no standard `session/rewind` method, but the
 Rust SDK exposes `_meta` on `session/fork`, `session/load`, and `session/resume`.
-This note records the proposed experiment so `mjolnir` and Anvil, as the first
-reference implementation, can evolve the same behavior without inventing a
+This note records the proposed experiment so `mjolnir` and a first reference
+agent implementation can evolve the same behavior without inventing a
 client-only UX. `mjolnir` support must be gated only on advertised protocol
 metadata, never on the agent binary name.
 
@@ -172,8 +172,8 @@ The extension must not promise impossible undo behavior.
 
 ## Implementation Stages
 
-1. Add Anvil-side `ai.brokk/sessionRewindCheckpoints` listing and `session/fork`
-   `_meta` handling as the first reference implementation.
+1. Add agent-side `ai.brokk/sessionRewindCheckpoints` listing and `session/fork`
+   `_meta` handling in a first reference implementation.
 2. Add a small `mjolnir` parser for `ai.brokk.sessionRewind` initialize metadata.
 3. Add `UiCommand::ListRewindCheckpoints { responder }` and keep all agent I/O
    in the ACP runtime.
@@ -191,7 +191,7 @@ The extension must not promise impossible undo behavior.
 
 - Whether the experimental checkpoint listing method should eventually move into
   ACP proper or become metadata on existing session listing.
-- Whether Anvil can provide filesystem snapshots, or whether rewind should
+- Whether an agent can provide filesystem snapshots, or whether rewind should
   require the existing `mj --worktree` flow for stronger isolation.
 - Whether ACP should standardize checkpoint ids and labels before standardizing
   a rewind method.

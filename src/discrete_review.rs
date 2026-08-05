@@ -2147,14 +2147,7 @@ pub(crate) fn synthesis_verdict(text: &str) -> ReviewVerdict {
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
     let severity = synthesis_severity(&lines);
-    // Anvil appends a transport recap after the model's reply. Treat that
-    // known wrapper as out-of-band when locating the final verdict, while
-    // still scanning the entire response for contradictory priority findings.
-    let verdict_lines = lines
-        .iter()
-        .position(|line| line.eq_ignore_ascii_case("**Anvil Recap**"))
-        .map_or(lines.as_slice(), |index| &lines[..index]);
-    let ends_with_clean_sentinel = verdict_lines.last().is_some_and(|line| {
+    let ends_with_clean_sentinel = lines.last().is_some_and(|line| {
         line.trim_matches('*')
             .trim()
             .eq_ignore_ascii_case(CLEAN_SENTINEL)
@@ -4003,31 +3996,10 @@ mod tests {
             ReviewVerdict::Findings { .. }
         ));
         assert_eq!(
-            synthesis_verdict(
-                "Inspected the changed paths.\n\nNo material findings.\n\n**Anvil Recap**\nNo material findings.\n\n- *Stop: completed*."
-            ),
-            ReviewVerdict::Clean,
-            "Anvil's appended transport recap must not turn a clean verdict into correction"
-        );
-        assert_eq!(
-            synthesis_verdict(
-                "Inspected the changed paths.\n\n**No material findings.**\n\n**Anvil Recap**\nNo material findings."
-            ),
+            synthesis_verdict("Inspected the changed paths.\n\n**No material findings.**"),
             ReviewVerdict::Clean,
             "Markdown emphasis around the final sentinel must not trigger correction"
         );
-        assert!(matches!(
-            synthesis_verdict(
-                "No material findings.\n\nAdditional rationale after the verdict.\n\n**Anvil Recap**\nNo material findings."
-            ),
-            ReviewVerdict::Findings { .. }
-        ));
-        assert!(matches!(
-            synthesis_verdict(
-                "No material findings.\n\n**Anvil Recap**\n[P2] src/a.rs:2 -- contradictory recap finding"
-            ),
-            ReviewVerdict::Advisory { .. }
-        ));
         assert!(matches!(
             synthesis_verdict(
                 "Review summary:\n- [P2] src/a.rs:2 -- still broken\n\nNo material findings."

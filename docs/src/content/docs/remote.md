@@ -33,6 +33,15 @@ the right nested request while several run at once. MCP approvals for
 `mcp__mj_subagents__create_subagent` and `mcp__mj_subagents__subagent_cancel`
 are recognized as Mjolnir's own tools rather than third-party ones.
 
+## Side conversations in the viewer
+
+When the connected agent supports ephemeral side sessions, the web command
+palette exposes `/side` with an optional question. The same transcript stays
+open in a visible side mode, but side prompts, replies, and tools are labelled
+with the `Side` actor so they cannot be mistaken for main-session history. Use
+the **Exit side** action (or send `exit`) to delete the temporary session and
+return the composer to the main conversation.
+
 ## Status line in the viewer
 
 Under the chat header the browser mirrors the terminal status line: primary
@@ -46,6 +55,14 @@ Cost is deliberately not shown here. Only some ACP adapters report one, and
 seats bind adapters independently, so a single session-wide figure would
 silently cover just the seats that happen to report. `/agents` in the terminal
 breaks cost down per seat and per model, where the unpriced seats are visible.
+
+## Ragnarok in the viewer
+
+While a local `/ragnarok` arena is active, the browser shows its task and
+phase, each fighter's model source, status, and vigor, plus the final verdict
+and adoption guidance when available. This view is read-only: summoning the
+arena, approving `UNLEASH`, choosing between finalists, and publishing a draft
+pull request remain local TUI actions.
 
 ## Tailscale
 

@@ -20,7 +20,6 @@ body:
         - Self-update
         - Configuration or first-run setup
         - Voice worker discovery or model download
-        - Managed Anvil installation
         - Documentation
         - Other
     validations:

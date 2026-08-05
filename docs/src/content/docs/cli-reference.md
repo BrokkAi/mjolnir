@@ -20,7 +20,6 @@ description: Common commands, options, slash commands, and terminal controls.
 | `--debug-file PATH` | Write Mjolnir diagnostics without corrupting the TUI |
 | `--agent-stderr PATH` | Capture ACP adapter stderr |
 | `--no-update-check` | Skip the startup release check |
-| `--anvil-path PATH` | Use a development Anvil binary |
 
 `--model`, `--review-model`, and `--subagent-model` require `--print` and
 explicit model IDs. The optional `+EFFORT` suffix (`off`, `none`, `minimal`,
