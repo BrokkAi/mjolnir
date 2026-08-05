@@ -1233,7 +1233,7 @@
       }
 
       /* The TUI status line, mirrored: model via adapter, reasoning effort,
-         per-seat token totals, cost, context occupancy, provider quota
+         per-seat token totals, context occupancy, provider quota
          windows and the current branch's open pull request. Field hues match
          the TUI status row (model=primary, effort=amber, primary=green,
          review=red, PR=accent). */
@@ -7107,9 +7107,6 @@
         fields.push(statusField(`review: ${compactTokenCount(status.review_tokens)}`, "review"));
         if (status.subagent_tokens) {
           fields.push(statusField(`subagents: ${compactTokenCount(status.subagent_tokens)}`, "subagents"));
-        }
-        if (status.cost) {
-          fields.push(statusField(status.cost, "cost"));
         }
         if (status.context_used != null && status.context_size) {
           const percent = Math.min(100, Math.round((status.context_used / status.context_size) * 100));

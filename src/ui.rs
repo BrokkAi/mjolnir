@@ -7748,6 +7748,21 @@ fn seat_usage_label(usage: &crate::agent_usage::RoleUsage) -> String {
     label
 }
 
+/// Footnote for the `/agents` panel. Cost figures are whatever the adapter
+/// reported over ACP: Claude adapters derive one from published per-model
+/// prices, Codex adapters report none at all. Neither kind is a billed amount,
+/// and a seat showing no figure is unpriced rather than free.
+const COST_ESTIMATE_NOTE: &str = "\n\nCost is an estimate reported by the agent, not a bill. Seats whose adapter reports no cost show tokens only.";
+
+/// Whether the panel will show any cost at all. Per-model buckets fold the same
+/// deltas as the seat buckets, so the three seats cover every figure the panel
+/// can render; a session with no costs gets no footnote to explain.
+fn any_seat_reports_cost(usage: &crate::agent_usage::Snapshot) -> bool {
+    [&usage.primary, &usage.subagents, &usage.review]
+        .into_iter()
+        .any(|role| !role.costs.is_empty())
+}
+
 /// The `/agents` panel body: the models each seat is currently bound to,
 /// per-seat usage, and a per-model breakdown when more than the two bound
 /// models did work.
@@ -7766,7 +7781,7 @@ fn active_models_and_usage_report(state: &AppState) -> String {
         |source| format!("{} via {source}", state.active_models.subagent),
     );
     let mut report = format!(
-        "Active models\nprimary    {}\nreview     {}\nsubagents  {}\n\nUsage (tokens)\nprimary    {}\nsubagents  {}\nreview     {}",
+        "Active models\nprimary    {}\nreview     {}\nsubagents  {}\n\nUsage\nprimary    {}\nsubagents  {}\nreview     {}",
         primary,
         review,
         subagent,
@@ -7779,6 +7794,9 @@ fn active_models_and_usage_report(state: &AppState) -> String {
         for (model, model_usage) in &usage.per_model {
             report.push_str(&format!("\n{model}  {}", seat_usage_label(model_usage)));
         }
+    }
+    if any_seat_reports_cost(usage) {
+        report.push_str(COST_ESTIMATE_NOTE);
     }
     report
 }
@@ -15470,6 +15488,43 @@ mod tests {
         assert!(report.contains("\nBy model"), "{report}");
         assert!(report.contains("\nclaude-opus  100 tokens"), "{report}");
         assert!(report.contains("\ngpt-worker  100 tokens"), "{report}");
+        // No seat reported a cost, so there is no figure to explain.
+        assert!(!report.contains("Cost is an estimate"), "{report}");
+    }
+
+    #[test]
+    fn slash_agents_panel_explains_the_cost_figure_it_shows() {
+        let mut state = AppState::new();
+        state.agent_usage.observe(crate::agent_usage::Record {
+            seat: crate::agent_usage::Seat::Review,
+            model: Some("claude-opus".to_string()),
+            usage: Some(agent_client_protocol::schema::v1::Usage::new(60, 50, 10)),
+            update: Some(
+                agent_client_protocol::schema::v1::UsageUpdate::new(60, 200_000)
+                    .cost(agent_client_protocol::schema::v1::Cost::new(0.0421, "USD")),
+            ),
+            session_id: Some("review-1".to_string()),
+        });
+        // A seat on an adapter that reports no cost still shows its tokens; the
+        // footnote is what keeps that from reading as free work.
+        state.agent_usage.observe(crate::agent_usage::Record {
+            seat: crate::agent_usage::Seat::Primary,
+            model: Some("gpt-worker".to_string()),
+            usage: Some(agent_client_protocol::schema::v1::Usage::new(400, 380, 20)),
+            update: None,
+            session_id: Some("primary-1".to_string()),
+        });
+
+        let report = active_models_and_usage_report(&state);
+        assert!(
+            report.contains("review     60 tokens · 0.0421 USD"),
+            "{report}"
+        );
+        assert!(report.contains("primary    400 tokens\n"), "{report}");
+        assert!(
+            report.ends_with(COST_ESTIMATE_NOTE.trim_start()),
+            "{report}"
+        );
     }
 
     #[test]
@@ -17926,7 +17981,7 @@ mod tests {
             state.transcript.last(),
             Some(Entry::System(text))
                 if text
-                    == "Active models\nprimary    claude-opus via claude-acp\nreview     gpt-5.6 via codex-acp\nsubagents  gpt-5.5 via anvil\n\nUsage (tokens)\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
+                    == "Active models\nprimary    claude-opus via claude-acp\nreview     gpt-5.6 via codex-acp\nsubagents  gpt-5.5 via anvil\n\nUsage\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
         ));
     }
 

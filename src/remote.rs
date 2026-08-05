@@ -215,9 +215,6 @@ pub struct SessionStatusRecord {
     pub context_used: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_size: Option<u64>,
-    /// Formatted session cost across every seat, e.g. `0.1234 USD`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<String>,
     /// Preformatted provider quota lines (Codex/Claude subscription windows),
     /// exactly as the TUI usage row shows them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1791,19 +1788,6 @@ impl TrackerState {
 
     fn status_record(&self) -> SessionStatusRecord {
         let usage = &self.agent_usage;
-        let mut costs: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
-        for role in [&usage.primary, &usage.review, &usage.subagents] {
-            for (currency, amount) in &role.costs {
-                *costs.entry(currency.clone()).or_default() += amount;
-            }
-        }
-        let cost = (!costs.is_empty()).then(|| {
-            costs
-                .iter()
-                .map(|(currency, amount)| format!("{amount:.4} {currency}"))
-                .collect::<Vec<_>>()
-                .join(" · ")
-        });
         let has_context = usage.primary.context_size > 0;
         SessionStatusRecord {
             model: self.agent.clone(),
@@ -1814,7 +1798,6 @@ impl TrackerState {
             subagent_tokens: usage.subagents.total_tokens,
             context_used: has_context.then_some(usage.primary.context_used),
             context_size: has_context.then_some(usage.primary.context_size),
-            cost,
             quotas: [self.codex_quota.clone(), self.claude_quota.clone()]
                 .into_iter()
                 .flatten()
@@ -9262,7 +9245,6 @@ mod tests {
                 subagent_tokens: 40,
                 context_used: Some(9000),
                 context_size: Some(272_000),
-                cost: Some("0.1234 USD".to_string()),
                 quotas: vec!["Codex usage: 5h 81% left".to_string()],
                 pull_request: Some(PullRequestRecord {
                     number: 42,
