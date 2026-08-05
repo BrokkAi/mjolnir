@@ -8240,9 +8240,9 @@
         composerEl.hidden = readOnly;
         archiveBadgeEl.hidden = !archived;
         sideBadgeEl.hidden = readOnly || !sideActive;
-        renderTranscript(session, archived);
         renderStatusLine(session);
         renderRagnarok(session);
+        renderTranscript(session, archived);
         renderConfig(readOnly || sideActive ? null : session);
         renderSubagents(session);
         renderPermissions(readOnly ? null : session);

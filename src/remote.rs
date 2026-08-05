@@ -1998,7 +1998,9 @@ impl TrackerState {
         self.subagents.clear();
         // The diff described the previous session's workspace turn.
         self.workspace_diff = None;
-        self.ragnarok = None;
+        // Ragnarok runs on independent ACP connections and can outlive a
+        // primary-session id change in the same TUI. Its observer retracts it
+        // when the arena actually closes.
         self.pending_permissions.clear();
         self.session_config.clear();
         self.native_mode = None;
@@ -9783,6 +9785,16 @@ mod tests {
         assert!(viewer.contains("arena.adoption_hint"));
         assert!(viewer.contains("read only"));
         assert!(viewer.contains("renderRagnarok(session)"));
+        let arena_render = viewer
+            .find("renderRagnarok(session);")
+            .expect("arena render call");
+        let transcript_render = viewer
+            .find("renderTranscript(session, archived);")
+            .expect("transcript render call");
+        assert!(
+            arena_render < transcript_render,
+            "arena geometry must settle before transcript scroll anchoring"
+        );
         assert!(!viewer.contains("queueSessionAction(\"/ragnarok"));
     }
 
@@ -11336,19 +11348,6 @@ mod tests {
         assert!(wire["fighters"][0].get("diffstat").is_none());
         assert!(wire["fighters"][0].get("transcript").is_none());
 
-        tracker.observe_ragnarok(None);
-        assert!(
-            tracker
-                .state
-                .lock()
-                .expect("state")
-                .snapshot()
-                .expect("snapshot")
-                .ragnarok
-                .is_none()
-        );
-
-        tracker.observe_ragnarok(Some(observation()));
         tracker.observe_event(&UiEvent::SessionStarted {
             session_id: "sess-2".to_string(),
             resumed: false,
@@ -11361,8 +11360,21 @@ mod tests {
                 .snapshot()
                 .expect("snapshot")
                 .ragnarok
+                .is_some(),
+            "the independent arena must survive a primary-session id change"
+        );
+
+        tracker.observe_ragnarok(None);
+        assert!(
+            tracker
+                .state
+                .lock()
+                .expect("state")
+                .snapshot()
+                .expect("snapshot")
+                .ragnarok
                 .is_none(),
-            "arena state belongs only to the session that started it"
+            "closing the arena must retract its remote projection"
         );
     }
 
