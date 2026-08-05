@@ -57,7 +57,7 @@ use crate::clipboard::{
 use crate::config;
 use crate::event::{
     PermissionDecision, PermissionPrompt, PromptImage, ReviewTarget, SessionConfigTarget,
-    SubagentEvent, SubagentOutcome, UiCommand, UiEvent,
+    SubagentEvent, SubagentOutcome, UiCommand, UiEvent, WorkspaceHeadDiffUnavailable,
 };
 use crate::ink::{Ink, InkStyle};
 use crate::notifications::TerminalNotificationBackend;
@@ -1370,6 +1370,7 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
         | UiEvent::ContextCompacted
         | UiEvent::SessionConfigOptions { .. }
         | UiEvent::WorkspaceDiff(_)
+        | UiEvent::WorkspaceHeadDiff(_)
         | UiEvent::PermissionRequest(_)
         | UiEvent::ElicitationRequest(_)
         | UiEvent::CancelPendingPermissions
@@ -2983,6 +2984,10 @@ fn handle_crossterm(
             state.close_workspace_diff_viewer();
         } else {
             state.open_workspace_diff_viewer();
+            // Pull on open. The worktree may have changed since the last read
+            // for reasons Mjolnir never observes — a build, another terminal,
+            // a rebase — so opening is the only honest time to look.
+            let _ = cmd_tx.send(UiCommand::RefreshWorkspaceDiff);
         }
         return inline_repair_request(mode);
     }
@@ -2994,7 +2999,7 @@ fn handle_crossterm(
         && !state.has_pending_permission()
         && !state.has_pending_elicitation()
     {
-        return handle_workspace_diff_viewer_key(state, key.modifiers, key.code, mode);
+        return handle_workspace_diff_viewer_key(state, cmd_tx, key.modifiers, key.code, mode);
     }
     if state.review_issue_viewer
         && !state.has_pending_permission()
@@ -4605,6 +4610,7 @@ fn handle_terminals_viewer_key(
 
 fn handle_workspace_diff_viewer_key(
     state: &mut AppState,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     modifiers: KeyModifiers,
     code: KeyCode,
     mode: UiMode,
@@ -4641,6 +4647,10 @@ fn handle_workspace_diff_viewer_key(
         KeyCode::End => state.workspace_diff_scroll_offset = usize::MAX,
         KeyCode::Char('n') if modifiers.is_empty() => state.select_workspace_diff_file(true),
         KeyCode::Char('p') if modifiers.is_empty() => state.select_workspace_diff_file(false),
+        KeyCode::Char('r') if modifiers.is_empty() => {
+            state.begin_workspace_diff_refresh();
+            let _ = cmd_tx.send(UiCommand::RefreshWorkspaceDiff);
+        }
         _ => {}
     }
     TerminalRequest::None
@@ -7666,7 +7676,8 @@ fn draw_workspace_diff_viewer(
     if inline {
         f.render_widget(Clear, area);
     }
-    let footer = "Ctrl-G/Esc close · Up/Down PgUp/PgDn Home/End scroll · n/p previous/next file";
+    let footer =
+        "Ctrl-G/Esc close · r refresh · Up/Down PgUp/PgDn Home/End scroll · n/p previous/next file";
     let footer_height = Paragraph::new(footer)
         .wrap(Wrap { trim: false })
         .line_count(area.width)
@@ -7676,28 +7687,36 @@ fn draw_workspace_diff_viewer(
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(footer_height)])
         .split(area);
-    let Some(event) = state.workspace_diffs.last() else {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" workspace diff — no workspace changes ")
-            .style(Style::default().ink(state.theme.agent));
-        let inner = block.inner(layout[0]);
-        f.render_widget(block, layout[0]);
-        if inner.width > 0 && inner.height > 0 {
-            f.render_widget(
-                Paragraph::new("No workspace changes have been captured for this session.")
-                    .style(Style::default().ink(state.theme.muted)),
-                inner,
-            );
-        }
-        f.render_widget(
-            Paragraph::new(footer)
-                .style(Style::default().ink(state.theme.muted))
-                .wrap(Wrap { trim: false }),
-            layout[1],
-        );
+    let refreshing = state.workspace_diff_loading;
+    // Nothing read yet. "Still reading" and "read it, found nothing" must not
+    // render alike, or a slow worktree looks like a clean one.
+    let Some(event) = state.workspace_head_diff.as_ref() else {
+        let (title, body) = if refreshing {
+            (
+                " uncommitted vs HEAD — reading ",
+                "Reading the worktree…".to_string(),
+            )
+        } else {
+            (
+                " uncommitted vs HEAD — not read ",
+                "The worktree has not been read yet. Press r to read it.".to_string(),
+            )
+        };
+        draw_workspace_diff_notice(f, layout[0], layout[1], state, title, &body, footer);
         return;
     };
+    if let Some(WorkspaceHeadDiffUnavailable::NotAGitRepository) = event.unavailable {
+        draw_workspace_diff_notice(
+            f,
+            layout[0],
+            layout[1],
+            state,
+            " uncommitted vs HEAD — unavailable ",
+            "No workspace root is inside a Git repository, so there is no HEAD to compare against.",
+            footer,
+        );
+        return;
+    }
     let retained = event.diffs.len();
     let selected = state
         .workspace_diff_selected_file
@@ -7708,26 +7727,30 @@ fn draw_workspace_diff_viewer(
     } else {
         "files"
     };
+    // Every title states the comparison it performed. The reader shows the
+    // worktree against HEAD; naming that inline is what keeps a stale mental
+    // model from forming in the first place.
     let title = if let Some(diff) = event.diffs.get(selected) {
-        let capped = event.truncated || retained < event.total_files;
-        let suffix = if capped {
+        let suffix = if event.truncated {
             format!(" — showing {retained} of {}", event.total_files)
         } else {
             String::new()
         };
+        let refreshing_suffix = if refreshing { " — refreshing" } else { "" };
         format!(
-            " workspace diff — {} {noun} changed — retained {}/{} {}{} ",
+            " uncommitted vs HEAD — {} {noun} — {}/{} {}{}{} ",
             event.total_files,
             selected + 1,
             retained,
             diff.path.display(),
-            suffix
+            suffix,
+            refreshing_suffix
         )
     } else if event.total_files == 0 {
-        " workspace diff — no workspace changes ".to_string()
+        " uncommitted vs HEAD — no uncommitted changes ".to_string()
     } else {
         format!(
-            " workspace diff — {} {noun} changed — no retained file ",
+            " uncommitted vs HEAD — {} {noun} — none retained ",
             event.total_files
         )
     };
@@ -7758,9 +7781,9 @@ fn draw_workspace_diff_viewer(
         }
     } else if inner.width > 0 && inner.height > 0 {
         let message = if event.total_files == 0 {
-            "No workspace changes were captured for this event."
+            "No uncommitted changes: the worktree matches HEAD."
         } else {
-            "No retained diff is available for this event."
+            "Changed files were found, but none could be rendered as text."
         };
         f.render_widget(
             Paragraph::new(message).style(Style::default().ink(state.theme.muted)),
@@ -7772,6 +7795,39 @@ fn draw_workspace_diff_viewer(
             .style(Style::default().ink(state.theme.muted))
             .wrap(Wrap { trim: false }),
         layout[1],
+    );
+}
+
+/// Render the reader's chrome around a single status message, for the states
+/// that have no diff to show at all.
+fn draw_workspace_diff_notice(
+    f: &mut ratatui::Frame,
+    body_area: Rect,
+    footer_area: Rect,
+    state: &AppState,
+    title: &str,
+    message: &str,
+    footer: &str,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title.to_string())
+        .style(Style::default().ink(state.theme.agent));
+    let inner = block.inner(body_area);
+    f.render_widget(block, body_area);
+    if inner.width > 0 && inner.height > 0 {
+        f.render_widget(
+            Paragraph::new(message.to_string())
+                .style(Style::default().ink(state.theme.muted))
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+    }
+    f.render_widget(
+        Paragraph::new(footer)
+            .style(Style::default().ink(state.theme.muted))
+            .wrap(Wrap { trim: false }),
+        footer_area,
     );
 }
 
@@ -20574,24 +20630,124 @@ mod tests {
         assert_eq!(state.scroll_offset, 0);
     }
 
-    fn workspace_diff_event(
+    fn workspace_head_diff_event(
         diffs: Vec<crate::event::WorkspaceDiff>,
         total_files: usize,
-    ) -> crate::event::WorkspaceDiffEvent {
-        crate::event::WorkspaceDiffEvent {
-            turn_id: 1,
+    ) -> crate::event::WorkspaceHeadDiffEvent {
+        let truncated = diffs.len() < total_files;
+        crate::event::WorkspaceHeadDiffEvent {
             diffs,
             total_files,
-            max_files: 20,
-            truncated: false,
+            max_files: 100,
+            truncated,
+            unavailable: None,
         }
+    }
+
+    /// The reader is pull-based: every way of showing it has to ask the
+    /// runtime to read the worktree, and closing it must not.
+    #[test]
+    fn workspace_diff_reader_pulls_on_open_and_on_refresh() {
+        let mut state = AppState::new();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        super::handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            UiMode::InlineChat,
+        );
+        assert!(state.workspace_diff_viewer);
+        assert!(state.workspace_diff_loading);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::RefreshWorkspaceDiff)
+        ));
+
+        state.apply_event(UiEvent::WorkspaceHeadDiff(workspace_head_diff_event(
+            vec![],
+            0,
+        )));
+        assert!(!state.workspace_diff_loading);
+
+        super::handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key(KeyCode::Char('r')),
+            UiMode::InlineChat,
+        );
+        assert!(state.workspace_diff_loading);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::RefreshWorkspaceDiff)
+        ));
+
+        super::handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            UiMode::InlineChat,
+        );
+        assert!(!state.workspace_diff_viewer);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "closing the reader must not read the worktree"
+        );
+    }
+
+    /// An in-flight read must not render as a clean worktree.
+    #[test]
+    fn workspace_diff_viewer_separates_reading_from_no_changes() {
+        let mut state = AppState::new();
+        state.open_workspace_diff_viewer();
+        let mut terminal = Terminal::new(TestBackend::new(70, 8)).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_workspace_diff_viewer(frame, frame.area(), &mut state, false))
+            .expect("draw");
+        let reading = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(reading.contains("Reading the worktree"), "{reading}");
+
+        state.apply_event(UiEvent::WorkspaceHeadDiff(workspace_head_diff_event(
+            vec![],
+            0,
+        )));
+        terminal
+            .draw(|frame| draw_workspace_diff_viewer(frame, frame.area(), &mut state, false))
+            .expect("draw");
+        let clean = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(clean.contains("no uncommitted changes"), "{clean}");
+        assert!(!clean.contains("Reading the worktree"), "{clean}");
+    }
+
+    #[test]
+    fn workspace_diff_viewer_names_a_missing_repository() {
+        let mut state = AppState::new();
+        state.open_workspace_diff_viewer();
+        state.apply_event(UiEvent::WorkspaceHeadDiff(
+            crate::event::WorkspaceHeadDiffEvent {
+                diffs: Vec::new(),
+                total_files: 0,
+                max_files: 100,
+                truncated: false,
+                unavailable: Some(WorkspaceHeadDiffUnavailable::NotAGitRepository),
+            },
+        ));
+
+        let mut terminal = Terminal::new(TestBackend::new(70, 8)).expect("terminal");
+        terminal
+            .draw(|frame| draw_workspace_diff_viewer(frame, frame.area(), &mut state, false))
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("unavailable"), "{rendered}");
+        assert!(rendered.contains("Git repository"), "{rendered}");
     }
 
     #[test]
     fn fullscreen_workspace_diff_viewer_owns_ctrl_g_navigation_and_prompt_input() {
         let mut state = AppState::new();
         state.runtime_closed = true;
-        state.workspace_diffs.push(workspace_diff_event(
+        state.workspace_head_diff = Some(workspace_head_diff_event(
             vec![
                 crate::event::WorkspaceDiff {
                     path: "first.rs".into(),
@@ -20673,7 +20829,7 @@ mod tests {
     #[test]
     fn inline_workspace_diff_viewer_handles_keys_and_ignores_mouse() {
         let mut state = AppState::new();
-        state.workspace_diffs.push(workspace_diff_event(
+        state.workspace_head_diff = Some(workspace_head_diff_event(
             vec![
                 crate::event::WorkspaceDiff {
                     path: "one.rs".into(),
@@ -20766,7 +20922,7 @@ mod tests {
         let mut state = AppState::new();
         // Row fills only exist when the terminal reported its background.
         state.theme = measured_theme();
-        state.workspace_diffs.push(workspace_diff_event(
+        state.workspace_head_diff = Some(workspace_head_diff_event(
             vec![
                 crate::event::WorkspaceDiff {
                     path: "first.rs".into(),
@@ -20782,6 +20938,8 @@ mod tests {
             2,
         ));
         state.open_workspace_diff_viewer();
+        // The pull these tests skip has already landed; assert the settled view.
+        state.workspace_diff_loading = false;
         let backend = TestBackend::new(100, 14);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
@@ -20789,8 +20947,11 @@ mod tests {
             .expect("draw");
         let buffer = terminal.backend().buffer();
         let rendered = buffer_lines(buffer).join("\n");
-        assert!(rendered.contains("2 files changed"), "{rendered}");
-        assert!(rendered.contains("retained 1/2 first.rs"), "{rendered}");
+        assert!(
+            rendered.contains("uncommitted vs HEAD — 2 files"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("1/2 first.rs"), "{rendered}");
         assert!(
             rendered.contains("old token") && rendered.contains("new token"),
             "{rendered}"
@@ -20808,7 +20969,7 @@ mod tests {
             .draw(|frame| draw_workspace_diff_viewer(frame, frame.area(), &mut state, false))
             .expect("draw");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("retained 2/2 second.rs"), "{rendered}");
+        assert!(rendered.contains("2/2 second.rs"), "{rendered}");
         assert!(
             rendered.contains("after marker") && !rendered.contains("new token"),
             "{rendered}"
@@ -20818,51 +20979,53 @@ mod tests {
     #[test]
     fn workspace_diff_viewer_explains_capped_and_empty_events_without_panicking_when_narrow() {
         let mut state = AppState::new();
-        state
-            .workspace_diffs
-            .push(crate::event::WorkspaceDiffEvent {
-                turn_id: 1,
-                diffs: vec![crate::event::WorkspaceDiff {
-                    path: "kept.rs".into(),
-                    old_text: None,
-                    new_text: "kept content\n".into(),
-                }],
-                total_files: 4,
-                max_files: 1,
-                truncated: true,
-            });
+        state.workspace_head_diff = Some(crate::event::WorkspaceHeadDiffEvent {
+            diffs: vec![crate::event::WorkspaceDiff {
+                path: "kept.rs".into(),
+                old_text: None,
+                new_text: "kept content\n".into(),
+            }],
+            total_files: 4,
+            max_files: 1,
+            truncated: true,
+            unavailable: None,
+        });
         state.open_workspace_diff_viewer();
+        // The pull these tests skip has already landed; assert the settled view.
+        state.workspace_diff_loading = false;
         let mut terminal = Terminal::new(TestBackend::new(100, 10)).expect("terminal");
         terminal
             .draw(|frame| draw_workspace_diff_viewer(frame, frame.area(), &mut state, false))
             .expect("draw");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("4 files changed")
-                && rendered.contains("retained 1/1")
+            rendered.contains("uncommitted vs HEAD")
+                && rendered.contains("4 files")
+                && rendered.contains("1/1")
                 && rendered.contains("showing 1 of 4"),
             "{rendered}"
         );
 
-        state.workspace_diffs.push(workspace_diff_event(vec![], 3));
+        state.workspace_head_diff = Some(workspace_head_diff_event(vec![], 3));
         terminal
             .draw(|frame| draw_workspace_diff_viewer(frame, frame.area(), &mut state, false))
             .expect("draw");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains("3 files changed")
-                && rendered.contains("No retained diff is available"),
+            rendered.contains("3 files")
+                && rendered.contains("none retained")
+                && rendered.contains("none could be rendered as text"),
             "{rendered}"
         );
 
-        state.workspace_diffs.push(workspace_diff_event(vec![], 0));
+        state.workspace_head_diff = Some(workspace_head_diff_event(vec![], 0));
         terminal
             .draw(|frame| draw_workspace_diff_viewer(frame, frame.area(), &mut state, false))
             .expect("draw");
         assert!(
             buffer_lines(terminal.backend().buffer())
                 .join("\n")
-                .contains("No workspace changes were captured")
+                .contains("No uncommitted changes")
         );
 
         let mut narrow = Terminal::new(TestBackend::new(2, 2)).expect("terminal");
@@ -20876,7 +21039,7 @@ mod tests {
         let long_line =
             "release-build-long-diff-line-that-must-remain-readable-through-the-final-token";
         let mut state = AppState::new();
-        state.workspace_diffs.push(workspace_diff_event(
+        state.workspace_head_diff = Some(workspace_head_diff_event(
             vec![crate::event::WorkspaceDiff {
                 path: "long.txt".into(),
                 old_text: None,
@@ -20885,6 +21048,8 @@ mod tests {
             1,
         ));
         state.open_workspace_diff_viewer();
+        // The pull these tests skip has already landed; assert the settled view.
+        state.workspace_diff_loading = false;
 
         let mut terminal = Terminal::new(TestBackend::new(68, 20)).expect("terminal");
         terminal
@@ -20909,7 +21074,7 @@ mod tests {
     #[test]
     fn workspace_diff_viewer_uses_full_inline_height_and_fullscreen_transcript_pane() {
         let mut state = AppState::new();
-        state.workspace_diffs.push(workspace_diff_event(
+        state.workspace_head_diff = Some(workspace_head_diff_event(
             vec![crate::event::WorkspaceDiff {
                 path: "pane.rs".into(),
                 old_text: None,
@@ -20918,6 +21083,8 @@ mod tests {
             1,
         ));
         state.open_workspace_diff_viewer();
+        // The pull these tests skip has already landed; assert the settled view.
+        state.workspace_diff_loading = false;
         assert_eq!(
             desired_inline_height(
                 &state,

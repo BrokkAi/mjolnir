@@ -43,7 +43,7 @@ use crate::event::{
     AgentCommandOutcome, CompactTrigger, ElicitationOutcome, ElicitationPrompt, LoadSessionResult,
     PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, SideSessionSource,
     TerminalOutputSnapshot, UiCommand, UiEvent, WorkspaceDiff, WorkspaceDiffEvent,
-    content_block_text,
+    WorkspaceHeadDiffEvent, WorkspaceHeadDiffUnavailable, content_block_text,
 };
 use crate::paths::{WorkspaceRoots, normalize_spawn_program, path_is_under_any_root};
 use crate::subagent;
@@ -2481,7 +2481,9 @@ async fn drive_session(
                     }
                 }
             }
-            UiCommand::SetReviewPolicy { .. } | UiCommand::RunReview { .. } => {}
+            UiCommand::SetReviewPolicy { .. }
+            | UiCommand::RunReview { .. }
+            | UiCommand::RefreshWorkspaceDiff => {}
             UiCommand::CompactPrimary => {
                 let _ = ui_tx.send(UiEvent::Warning(
                     "compact command bypassed its coordinator".to_string(),
@@ -2899,7 +2901,11 @@ async fn drive_fork_session(
                         });
                     }
                     Some(UiCommand::CancelPrompt) => {}
-                    Some(UiCommand::SetReviewPolicy { .. } | UiCommand::RunReview { .. }) => {}
+                    Some(
+                        UiCommand::SetReviewPolicy { .. }
+                        | UiCommand::RunReview { .. }
+                        | UiCommand::RefreshWorkspaceDiff,
+                    ) => {}
                     Some(UiCommand::CompactPrimary) => {}
                     Some(UiCommand::RunAdvertisedCommand { responder, .. }) => {
                         let _ = responder.send(AgentCommandOutcome::Failed(
@@ -5094,7 +5100,11 @@ async fn drive_config_update(
                         });
                     }
                     Some(UiCommand::CancelPrompt) => {}
-                    Some(UiCommand::SetReviewPolicy { .. } | UiCommand::RunReview { .. }) => {}
+                    Some(
+                        UiCommand::SetReviewPolicy { .. }
+                        | UiCommand::RunReview { .. }
+                        | UiCommand::RefreshWorkspaceDiff,
+                    ) => {}
                     Some(UiCommand::CompactPrimary) => {}
                     Some(UiCommand::RunAdvertisedCommand { responder, .. }) => {
                         let _ = responder.send(AgentCommandOutcome::Failed(
@@ -5261,7 +5271,11 @@ async fn drive_prompt_turn(
                             message: "prompt already in flight".to_string(),
                         });
                     }
-                    Some(UiCommand::SetReviewPolicy { .. } | UiCommand::RunReview { .. }) => {}
+                    Some(
+                        UiCommand::SetReviewPolicy { .. }
+                        | UiCommand::RunReview { .. }
+                        | UiCommand::RefreshWorkspaceDiff,
+                    ) => {}
                     Some(UiCommand::CompactPrimary) => {}
                     Some(UiCommand::RunAdvertisedCommand { responder, .. }) => {
                         let _ = responder.send(AgentCommandOutcome::Failed(
@@ -5341,6 +5355,119 @@ impl TurnDiffTracker {
             max_files: TURN_DIFF_MAX_FILES,
             truncated: total > TURN_DIFF_MAX_FILES,
         }));
+    }
+}
+
+/// File cap for the on-demand worktree diff. Higher than the per-turn cap
+/// because a branch's uncommitted state is routinely wider than one turn's
+/// edits; the reader reports the cap rather than silently trimming.
+pub(crate) const WORKSPACE_DIFF_MAX_FILES: usize = 100;
+
+/// Cumulative text budget across all retained files. Each file is already
+/// bounded by `max_text_bytes`, but a wide branch of large files would still
+/// pin an unbounded amount of memory for a reader that shows one file at a
+/// time, so retention stops once the budget is spent.
+pub(crate) const WORKSPACE_DIFF_TEXT_BUDGET: u64 = 8 * 1024 * 1024;
+
+/// Diff every workspace root's worktree against `HEAD`, covering tracked
+/// modifications and untracked files alike.
+///
+/// Unlike [`TurnDiffTracker`], this takes no baseline snapshot: `HEAD` is the
+/// baseline, so the answer depends only on the workspace as it exists now.
+/// That is what lets the reader pull on open instead of replaying a captured
+/// event, and it is why the result cannot go stale.
+pub(crate) async fn workspace_head_diff(
+    workspace_roots: &[PathBuf],
+    exclusions: &[PathBuf],
+    max_text_bytes: u64,
+) -> WorkspaceHeadDiffEvent {
+    let mut excluded = HashSet::new();
+    for path in exclusions {
+        if let Ok(canonical) = tokio::fs::canonicalize(path).await {
+            excluded.insert(canonical);
+        } else {
+            excluded.insert(path.clone());
+        }
+    }
+
+    let mut seen_roots = HashSet::new();
+    let mut seen_files = HashSet::new();
+    let mut diffs = Vec::new();
+    let mut total_files = 0usize;
+    let mut budget = WORKSPACE_DIFF_TEXT_BUDGET;
+    let mut any_repo = false;
+
+    for workspace_root in workspace_roots {
+        let Ok(workspace_root) = tokio::fs::canonicalize(workspace_root).await else {
+            continue;
+        };
+        let Some(repo_root) = git_repo_root(&workspace_root).await else {
+            continue;
+        };
+        let Some(pathspec) = git_pathspec_for_workspace(&repo_root, &workspace_root) else {
+            continue;
+        };
+        any_repo = true;
+        // Additional directories inside one repository would otherwise report
+        // the same file once per overlapping root.
+        if !seen_roots.insert((repo_root.clone(), pathspec.clone())) {
+            continue;
+        }
+        let Some(changed_paths) = git_status_paths(&repo_root, &pathspec).await else {
+            continue;
+        };
+
+        for rel_path in changed_paths {
+            let abs_path = repo_root.join(&rel_path);
+            if excluded.contains(&abs_path) || !seen_files.insert(abs_path.clone()) {
+                continue;
+            }
+            let Some(new_state) = read_workspace_text_state(&abs_path, max_text_bytes).await else {
+                continue;
+            };
+            let Some(old_state) = read_head_text_state(&repo_root, &rel_path, max_text_bytes).await
+            else {
+                continue;
+            };
+            if old_state == new_state {
+                continue;
+            }
+            // Counted before the caps so the reader can say how much it is
+            // holding back rather than presenting a trimmed set as complete.
+            total_files += 1;
+            if diffs.len() >= WORKSPACE_DIFF_MAX_FILES {
+                continue;
+            }
+            let old_text = match old_state {
+                TextFileState::Present(text) => Some(text),
+                TextFileState::Absent => None,
+            };
+            let new_text = match new_state {
+                TextFileState::Present(text) => text,
+                TextFileState::Absent => String::new(),
+            };
+            let cost =
+                old_text.as_ref().map_or(0, |text| text.len() as u64) + new_text.len() as u64;
+            let Some(remaining) = budget.checked_sub(cost) else {
+                continue;
+            };
+            budget = remaining;
+            diffs.push(WorkspaceDiff {
+                path: abs_path,
+                old_text,
+                new_text,
+            });
+        }
+    }
+
+    diffs.sort_by(|a, b| a.path.cmp(&b.path));
+    let retained = diffs.len();
+    WorkspaceHeadDiffEvent {
+        diffs,
+        total_files,
+        max_files: WORKSPACE_DIFF_MAX_FILES,
+        truncated: retained < total_files,
+        unavailable: (!any_repo).then_some(WorkspaceHeadDiffUnavailable::NotAGitRepository),
     }
 }
 
@@ -9118,6 +9245,157 @@ mod tests {
         join.expect("client task panicked")
             .expect("drive_client returned error");
         agent_task.abort();
+    }
+
+    /// A committed baseline plus one of every uncommitted shape the reader has
+    /// to render: modified, untracked, and deleted.
+    async fn seeded_workspace_repo() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("tempdir");
+        init_git_repo(temp.path());
+        tokio::fs::write(temp.path().join("tracked.txt"), "committed\n")
+            .await
+            .expect("seed tracked");
+        tokio::fs::write(temp.path().join("removed.txt"), "doomed\n")
+            .await
+            .expect("seed removed");
+        run_git(temp.path(), &["add", "tracked.txt", "removed.txt"]);
+        run_git(temp.path(), &["commit", "-m", "seed"]);
+        temp
+    }
+
+    fn diff_named<'a>(diffs: &'a [WorkspaceDiff], name: &str) -> Option<&'a WorkspaceDiff> {
+        diffs
+            .iter()
+            .find(|diff| diff.path.file_name().is_some_and(|file| file == name))
+    }
+
+    #[tokio::test]
+    async fn workspace_head_diff_reports_every_uncommitted_shape_against_head() {
+        let temp = seeded_workspace_repo().await;
+        tokio::fs::write(temp.path().join("tracked.txt"), "edited\n")
+            .await
+            .expect("modify tracked");
+        tokio::fs::write(temp.path().join("fresh.txt"), "brand new\n")
+            .await
+            .expect("write untracked");
+        tokio::fs::remove_file(temp.path().join("removed.txt"))
+            .await
+            .expect("delete tracked");
+
+        let event =
+            workspace_head_diff(&[temp.path().to_path_buf()], &[], DEFAULT_FS_TEXT_BYTES).await;
+
+        assert!(event.unavailable.is_none());
+        assert_eq!(event.total_files, 3, "{:?}", event.diffs);
+        assert!(!event.truncated);
+
+        let modified = diff_named(&event.diffs, "tracked.txt").expect("tracked diff");
+        assert_eq!(modified.old_text.as_deref(), Some("committed\n"));
+        assert_eq!(modified.new_text, "edited\n");
+
+        // Untracked files have no HEAD blob, which is what makes them render
+        // as pure additions rather than being skipped.
+        let untracked = diff_named(&event.diffs, "fresh.txt").expect("untracked diff");
+        assert_eq!(untracked.old_text, None);
+        assert_eq!(untracked.new_text, "brand new\n");
+
+        let deleted = diff_named(&event.diffs, "removed.txt").expect("deleted diff");
+        assert_eq!(deleted.old_text.as_deref(), Some("doomed\n"));
+        assert_eq!(deleted.new_text, "");
+    }
+
+    /// The baseline is HEAD, not a captured snapshot: committing work makes it
+    /// leave the diff even though the files certainly changed on disk. This is
+    /// the whole behavioral difference from [`TurnDiffTracker`].
+    #[tokio::test]
+    async fn workspace_head_diff_is_empty_once_changes_are_committed() {
+        let temp = seeded_workspace_repo().await;
+        tokio::fs::write(temp.path().join("tracked.txt"), "edited\n")
+            .await
+            .expect("modify tracked");
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        run_git(temp.path(), &["commit", "-m", "follow-up"]);
+
+        let event =
+            workspace_head_diff(&[temp.path().to_path_buf()], &[], DEFAULT_FS_TEXT_BYTES).await;
+
+        assert!(event.diffs.is_empty(), "{:?}", event.diffs);
+        assert_eq!(event.total_files, 0);
+        assert!(event.unavailable.is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_head_diff_includes_staged_changes() {
+        let temp = seeded_workspace_repo().await;
+        tokio::fs::write(temp.path().join("tracked.txt"), "staged\n")
+            .await
+            .expect("modify tracked");
+        run_git(temp.path(), &["add", "tracked.txt"]);
+
+        let event =
+            workspace_head_diff(&[temp.path().to_path_buf()], &[], DEFAULT_FS_TEXT_BYTES).await;
+
+        let staged = diff_named(&event.diffs, "tracked.txt").expect("staged diff");
+        assert_eq!(staged.old_text.as_deref(), Some("committed\n"));
+        assert_eq!(staged.new_text, "staged\n");
+    }
+
+    #[tokio::test]
+    async fn workspace_head_diff_skips_excluded_paths() {
+        let temp = seeded_workspace_repo().await;
+        let log = temp.path().join("mj.log");
+        tokio::fs::write(&log, "noise\n").await.expect("write log");
+        tokio::fs::write(temp.path().join("fresh.txt"), "signal\n")
+            .await
+            .expect("write untracked");
+
+        let event =
+            workspace_head_diff(&[temp.path().to_path_buf()], &[log], DEFAULT_FS_TEXT_BYTES).await;
+
+        assert!(diff_named(&event.diffs, "fresh.txt").is_some());
+        assert!(diff_named(&event.diffs, "mj.log").is_none());
+        assert_eq!(event.total_files, 1);
+    }
+
+    #[tokio::test]
+    async fn workspace_head_diff_reports_a_missing_repository_rather_than_no_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(temp.path().join("loose.txt"), "not versioned\n")
+            .await
+            .expect("write file");
+
+        let event =
+            workspace_head_diff(&[temp.path().to_path_buf()], &[], DEFAULT_FS_TEXT_BYTES).await;
+
+        assert_eq!(
+            event.unavailable,
+            Some(WorkspaceHeadDiffUnavailable::NotAGitRepository),
+            "a clean worktree and an unreadable one must not look alike"
+        );
+        assert!(event.diffs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn workspace_head_diff_reports_each_file_once_across_overlapping_roots() {
+        let temp = seeded_workspace_repo().await;
+        tokio::fs::write(temp.path().join("tracked.txt"), "edited\n")
+            .await
+            .expect("modify tracked");
+        let nested = temp.path().join("nested");
+        tokio::fs::create_dir(&nested).await.expect("create nested");
+        tokio::fs::write(nested.join("inner.txt"), "inner\n")
+            .await
+            .expect("write nested");
+
+        let event = workspace_head_diff(
+            &[temp.path().to_path_buf(), nested.clone(), nested],
+            &[],
+            DEFAULT_FS_TEXT_BYTES,
+        )
+        .await;
+
+        assert_eq!(event.total_files, 2, "{:?}", event.diffs);
+        assert_eq!(event.diffs.len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

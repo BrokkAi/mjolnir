@@ -22,12 +22,38 @@ pub struct PromptImage {
     pub height: u32,
 }
 
-/// A text-file change observed in the workspace during one prompt turn.
+/// A text-file change between two workspace endpoints. Used both for one
+/// prompt turn's delta and for the uncommitted worktree-versus-`HEAD` diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceDiff {
     pub path: PathBuf,
     pub old_text: Option<String>,
     pub new_text: String,
+}
+
+/// Why a worktree-versus-`HEAD` diff could not be produced. Rendered instead of
+/// an empty diff so the reader never implies "no changes" when it simply could
+/// not look.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceHeadDiffUnavailable {
+    /// No workspace root resolved to a Git repository.
+    NotAGitRepository,
+}
+
+/// The uncommitted state of the workspace: every tracked modification plus
+/// every untracked file, compared against `HEAD`. Recomputed on demand rather
+/// than accumulated from turn events, so it is never stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceHeadDiffEvent {
+    pub diffs: Vec<WorkspaceDiff>,
+    /// Number of changed files before the payload was capped.
+    pub total_files: usize,
+    /// Maximum number of file diffs retained in `diffs`.
+    pub max_files: usize,
+    pub truncated: bool,
+    /// Set when the diff could not be computed at all; `diffs` is then empty
+    /// for a reason other than a clean worktree.
+    pub unavailable: Option<WorkspaceHeadDiffUnavailable>,
 }
 
 /// Workspace changes captured around a prompt turn, independent of ACP tool
@@ -132,8 +158,15 @@ pub enum UiEvent {
     /// render a modal and answer through `responder` exactly once.
     PermissionRequest(PermissionPrompt),
     /// Changes observed in the local workspace after a prompt turn. This is
-    /// Mjolnir-native state, not an ACP tool call or transcript entry.
+    /// Mjolnir-native state, not an ACP tool call or transcript entry. It
+    /// answers "what did this turn touch", which is the status-line and
+    /// remote-mirror question, not the one the Ctrl-G reader asks.
     WorkspaceDiff(WorkspaceDiffEvent),
+    /// Result of one on-demand worktree-versus-`HEAD` diff, requested by
+    /// [`UiCommand::RefreshWorkspaceDiff`]. Replaces any previous result
+    /// wholesale: there is no history to accumulate because the workspace has
+    /// exactly one current state.
+    WorkspaceHeadDiff(WorkspaceHeadDiffEvent),
     /// `elicitation/create` from the agent (single-select form or URL). The
     /// UI renders a modal and answers through `responder` exactly once. Used
     /// by agent-driven `/setup` menus, which are global (not per-session) and
@@ -381,6 +414,10 @@ pub enum UiCommand {
     SetReviewPolicy { enabled: bool },
     /// Run one Mjolnir-owned findings-only review while the primary is idle.
     RunReview { target: ReviewTarget },
+    /// Recompute the worktree-versus-`HEAD` diff for the Ctrl-G reader. Sent
+    /// on open and on explicit refresh; the reader pulls rather than replaying
+    /// retained turn events, so what it shows is current as of the request.
+    RefreshWorkspaceDiff,
     /// Compact the primary session using the exact portable command it
     /// advertises.
     CompactPrimary,

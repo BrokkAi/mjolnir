@@ -2957,7 +2957,8 @@ async fn run(
                         | UiEvent::SessionConfigOptions { .. }
                         | UiEvent::RosterUpdate { .. }
                         | UiEvent::Workflow(_)
-                        | UiEvent::WorkspaceDiff(_) => {}
+                        | UiEvent::WorkspaceDiff(_)
+                        | UiEvent::WorkspaceHeadDiff(_) => {}
                         UiEvent::SessionUpdate(update) => {
                             tool_lifecycle.observe(&update);
                             if let SessionUpdate::UsageUpdate(value) = &update {

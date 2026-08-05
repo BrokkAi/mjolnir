@@ -3270,7 +3270,7 @@
           <span id="side-badge" class="side-badge" hidden>side</span>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
           <span id="working-badge" class="working-badge" hidden>working</span>
-          <button id="workspace-diff-button" class="icon-button" type="button" aria-label="Show workspace changes" hidden>±</button>
+          <button id="workspace-diff-button" class="icon-button" type="button" aria-label="Show uncommitted changes">±</button>
           <button id="settings-button" class="icon-button" type="button" aria-label="Open viewer settings">⚙</button>
         </header>
         <div id="status-line" class="status-line" hidden>
@@ -3337,8 +3337,9 @@
     <section id="workspace-diff-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="workspace-diff-title" hidden>
       <div class="new-session-panel mjconfig-panel">
         <header class="new-session-head">
-          <h2 id="workspace-diff-title">Workspace changes</h2>
-          <button id="workspace-diff-close" class="new-session-close" type="button" aria-label="Close workspace changes">×</button>
+          <h2 id="workspace-diff-title">Uncommitted changes</h2>
+          <button id="workspace-diff-refresh" class="new-session-close" type="button" aria-label="Re-read the worktree">⟳</button>
+          <button id="workspace-diff-close" class="new-session-close" type="button" aria-label="Close uncommitted changes">×</button>
         </header>
         <div id="workspace-diff-notice" class="mjconfig-notice" role="status"></div>
         <div id="workspace-diff-body" class="mjconfig-body"></div>
@@ -3480,6 +3481,7 @@
       const workspaceDiffButtonEl = $("workspace-diff-button");
       const workspaceDiffModalEl = $("workspace-diff-modal");
       const workspaceDiffCloseEl = $("workspace-diff-close");
+      const workspaceDiffRefreshEl = $("workspace-diff-refresh");
       const workspaceDiffNoticeEl = $("workspace-diff-notice");
       const workspaceDiffBodyEl = $("workspace-diff-body");
       const settingsModalEl = $("settings-modal");
@@ -4615,8 +4617,9 @@
         loadingSessionHistory = false;
         settingsModalEl.hidden = true;
         workspaceDiffModalEl.hidden = true;
-        workspaceDiffButtonEl.hidden = true;
         workspaceDiff = null;
+        workspaceHeadDiff = null;
+        workspaceDiffReading = false;
         closeMjConfig();
         pendingSessionLaunch = null;
         if (launchSessionCard) {
@@ -6705,42 +6708,93 @@
         return Array.isArray(entry.tool_diffs) ? entry.tool_diffs : [];
       }
 
-      /* Workspace changes for the latest turn, mirroring the TUI's Ctrl-G
-         viewer. This is not the same thing as the tool-call diffs already in
-         the transcript: it reports what actually changed on disk, including
-         edits the agent never reported as a tool call. It reuses the same
-         renderer those diffs use. */
+      /* Workspace changes for the latest turn. This is not the same thing as
+         the tool-call diffs already in the transcript: it reports what actually
+         changed on disk, including edits the agent never reported as a tool
+         call. It reuses the same renderer those diffs use. Nor is it the TUI's
+         Ctrl-G reader, which pulls the whole worktree against HEAD on demand
+         and has no push equivalent here. */
       let workspaceDiff = null;
+      let workspaceHeadDiff = null;
+      let workspaceDiffReading = false;
 
+      /* The per-turn record no longer opens the modal; it only labels the
+         button, the way the TUI status line does. The modal shows the pulled
+         worktree-versus-HEAD read, which is what Ctrl-G shows. */
       function renderWorkspaceDiff(diff) {
         const files = Array.isArray(diff?.diffs) ? diff.diffs : [];
         workspaceDiff = files.length ? diff : null;
-        workspaceDiffButtonEl.hidden = !workspaceDiff;
-        if (!workspaceDiff) {
-          workspaceDiffModalEl.hidden = true;
-          return;
-        }
-        const total = Number.isFinite(diff.total_files) ? diff.total_files : files.length;
+        const total = Number.isFinite(diff?.total_files) ? diff.total_files : files.length;
         workspaceDiffButtonEl.setAttribute(
           "aria-label",
-          `Show workspace changes (${total} file${total === 1 ? "" : "s"})`,
+          workspaceDiff
+            ? `Show uncommitted changes (last turn changed ${total} file${total === 1 ? "" : "s"})`
+            : "Show uncommitted changes",
         );
+      }
+
+      function renderWorkspaceHeadDiff(diff) {
+        workspaceHeadDiff = diff ?? null;
+        if (diff) {
+          workspaceDiffReading = false;
+        }
         if (!workspaceDiffModalEl.hidden) {
           paintWorkspaceDiff();
         }
       }
 
-      function paintWorkspaceDiff() {
-        const files = Array.isArray(workspaceDiff?.diffs) ? workspaceDiff.diffs : [];
-        const total = Number.isFinite(workspaceDiff?.total_files)
-          ? workspaceDiff.total_files
+      function formatWorkspaceDiffReadAt(value) {
+        const parsed = value ? new Date(value) : null;
+        return parsed && !Number.isNaN(parsed.getTime())
+          ? parsed.toLocaleTimeString()
+          : "an unknown time";
+      }
+
+      function workspaceDiffNotice() {
+        if (!workspaceHeadDiff) {
+          return workspaceDiffReading
+            ? "Reading the worktree…"
+            : "The worktree has not been read yet.";
+        }
+        if (workspaceHeadDiff.unavailable === "not_a_git_repository") {
+          return "No workspace root is inside a Git repository, so there is no HEAD to compare against.";
+        }
+        const files = Array.isArray(workspaceHeadDiff.diffs) ? workspaceHeadDiff.diffs : [];
+        const total = Number.isFinite(workspaceHeadDiff.total_files)
+          ? workspaceHeadDiff.total_files
           : files.length;
         /* Say when the payload was capped rather than showing a short list as
            if it were the whole change, which is what the TUI does too. */
-        workspaceDiffNoticeEl.textContent =
-          total > files.length
-            ? `Showing ${files.length} of ${total} changed files.`
-            : `${total} changed file${total === 1 ? "" : "s"}.`;
+        const scope =
+          total === 0
+            ? "No uncommitted changes: the worktree matches HEAD."
+            : total > files.length
+              ? `Showing ${files.length} of ${total} changed files.`
+              : `${total} changed file${total === 1 ? "" : "s"}.`;
+        /* Always state the age. This is a pulled view delivered by push, so
+           without a timestamp there is no way to tell it from a guess. */
+        return workspaceDiffReading
+          ? `${scope} Re-reading…`
+          : `${scope} Read at ${formatWorkspaceDiffReadAt(workspaceHeadDiff.read_at)}.`;
+      }
+
+      async function requestWorkspaceDiffRefresh() {
+        workspaceDiffReading = true;
+        if (!workspaceDiffModalEl.hidden) {
+          paintWorkspaceDiff();
+        }
+        const queued = await queueSessionAction("/diff", "reading the worktree");
+        if (!queued) {
+          workspaceDiffReading = false;
+          if (!workspaceDiffModalEl.hidden) {
+            paintWorkspaceDiff();
+          }
+        }
+      }
+
+      function paintWorkspaceDiff() {
+        const files = Array.isArray(workspaceHeadDiff?.diffs) ? workspaceHeadDiff.diffs : [];
+        workspaceDiffNoticeEl.textContent = workspaceDiffNotice();
         const fragment = document.createDocumentFragment();
         for (const file of files) {
           const path = typeof file.path === "string" && file.path ? file.path : "file";
@@ -6759,12 +6813,13 @@
       }
 
       function openWorkspaceDiff() {
-        if (!workspaceDiff) {
-          return;
-        }
+        /* Pull on open, exactly as Ctrl-G does. The worktree can change for
+           reasons this session never observes, so opening is the only honest
+           time to look. */
         paintWorkspaceDiff();
         workspaceDiffModalEl.hidden = false;
         workspaceDiffCloseEl.focus();
+        void requestWorkspaceDiffRefresh();
       }
 
       function appendToolDiffs(body, entry) {
@@ -6978,6 +7033,7 @@
         transcriptMetaEl.textContent = `${archiveMeta}${session.project || "-"}${session.worktree ? ` · ${session.worktree}` : ""} · ${session.agent || "-"} · ${transcript.length} entries`;
         workingBadgeEl.hidden = archived || !sessionIsWorking(session);
         renderWorkspaceDiff(session.workspace_diff);
+        renderWorkspaceHeadDiff(session.workspace_head_diff);
         const activeTurn = !archived && sessionHasActiveTurn(session);
         stopTurnEl.hidden = !activeTurn;
         stopTurnEl.disabled = !activeTurn || stopRequestBySessionId.has(session.session_id);
@@ -8601,6 +8657,9 @@
         }
       });
       workspaceDiffButtonEl.addEventListener("click", openWorkspaceDiff);
+      workspaceDiffRefreshEl.addEventListener("click", () => {
+        void requestWorkspaceDiffRefresh();
+      });
       workspaceDiffCloseEl.addEventListener("click", () => {
         workspaceDiffModalEl.hidden = true;
       });

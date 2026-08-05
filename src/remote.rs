@@ -206,11 +206,16 @@ pub struct SessionRecord {
     /// Live per-subagent status rows, mirroring the TUI's subagent status area.
     #[serde(default)]
     pub subagents: Vec<SubagentStatusRecord>,
-    /// Workspace changes observed during the most recent turn, mirroring the
-    /// TUI's `Ctrl-G` viewer. Independent of ACP tool calls: it reports what
-    /// actually changed on disk, including edits the agent never reported.
+    /// Workspace changes observed during the most recent turn. Independent of
+    /// ACP tool calls: it reports what actually changed on disk, including
+    /// edits the agent never reported. This is per-turn attribution, not the
+    /// worktree-versus-`HEAD` view the TUI's `Ctrl-G` reader pulls on demand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_diff: Option<WorkspaceDiffRecord>,
+    /// Uncommitted changes as of the last explicit read. Absent until a viewer
+    /// asks, because nothing computes it otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_head_diff: Option<WorkspaceHeadDiffRecord>,
     /// Active `/ragnarok` arena projected from the TUI's authoritative
     /// reducer. The web view is deliberately observational only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -961,6 +966,27 @@ pub struct WorkspaceDiffRecord {
     pub diffs: Vec<TranscriptDiff>,
 }
 
+/// The uncommitted worktree-versus-`HEAD` diff, mirroring the TUI's Ctrl-G
+/// reader. `read_at` is mandatory: this is a pulled view delivered by push, so
+/// without its age the viewer cannot tell a current answer from a stale one.
+///
+/// Deliberately not persisted to sqlite. A reconnecting browser must ask for a
+/// fresh read rather than resurrect one taken against a worktree that has since
+/// moved on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceHeadDiffRecord {
+    pub read_at: String,
+    pub total_files: usize,
+    #[serde(default)]
+    pub truncated: bool,
+    /// Set when no workspace root was a Git repository, so the viewer can say
+    /// "could not look" instead of "nothing changed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+    #[serde(default)]
+    pub diffs: Vec<TranscriptDiff>,
+}
+
 /// Marker left behind when an entry is shrunk to fit a published snapshot.
 const PUBLISH_TRUNCATION_MARKER: &str = "\n… truncated for the remote snapshot";
 
@@ -1157,6 +1183,7 @@ enum RemoteQueuedPromptAction {
     RunReview(crate::event::ReviewTarget),
     RejectInvalidReview,
     CompactPrimary,
+    RefreshWorkspaceDiff,
 }
 
 fn remote_queued_prompt_action(
@@ -1228,6 +1255,11 @@ fn remote_queued_prompt_action(
             RemoteQueuedPromptAction::RejectInvalidReview,
             RemoteQueuedPromptAction::RunReview,
         );
+    }
+    // Mirrors the TUI's Ctrl-G. Reading the worktree is not a prompt turn, so
+    // this is answered locally rather than forwarded to the agent.
+    if trimmed == "/diff" {
+        return RemoteQueuedPromptAction::RefreshWorkspaceDiff;
     }
     // Headless trackers have no coordinator to run the compact command, so
     // there `/compact` stays literal prompt text for agents that implement
@@ -1516,8 +1548,9 @@ struct TrackerState {
     /// lifecycle notices are rendered from the reduced state, not from the
     /// transition alone.
     workflows: crate::workflow::WorkflowStore,
-    /// Latest published workspace diff, mirroring the TUI's Ctrl-G viewer.
+    /// Latest published per-turn workspace diff.
     workspace_diff: Option<WorkspaceDiffRecord>,
+    workspace_head_diff: Option<WorkspaceHeadDiffRecord>,
     ragnarok: Option<RagnarokRecord>,
     pending_permissions: Vec<PendingPermissionRecord>,
     session_config: Vec<SessionConfigOptionRecord>,
@@ -1911,6 +1944,7 @@ impl TrackerState {
             nested_roles: HashMap::new(),
             workflows: crate::workflow::WorkflowStore::default(),
             workspace_diff: None,
+            workspace_head_diff: None,
             ragnarok: None,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
@@ -1990,6 +2024,8 @@ impl TrackerState {
         self.subagents.clear();
         // The diff described the previous session's workspace turn.
         self.workspace_diff = None;
+        // A new session may have a different workspace root entirely.
+        self.workspace_head_diff = None;
         // Ragnarok runs on independent ACP connections and can outlive a
         // primary-session id change in the same TUI. Its observer retracts it
         // when the arena actually closes.
@@ -2116,12 +2152,25 @@ impl TrackerState {
                 self.observe_session_update(update);
             }
             UiEvent::ContextCompacted => {}
+            UiEvent::WorkspaceHeadDiff(diff) => {
+                self.workspace_head_diff = Some(WorkspaceHeadDiffRecord {
+                    read_at: now_rfc3339(),
+                    total_files: diff.total_files,
+                    truncated: diff.truncated,
+                    unavailable: diff.unavailable.as_ref().map(|reason| match reason {
+                        crate::event::WorkspaceHeadDiffUnavailable::NotAGitRepository => {
+                            "not_a_git_repository".to_string()
+                        }
+                    }),
+                    diffs: workspace_transcript_diffs(&diff.diffs),
+                });
+                self.touch();
+            }
             UiEvent::WorkspaceDiff(diff) => {
-                // The TUI keeps a per-turn history behind Ctrl-G; the mirror
-                // publishes the latest turn only. Every snapshot re-sends the
-                // whole record, so retaining a history here would reintroduce
-                // the unbounded-payload problem the transcript budget exists
-                // to prevent.
+                // The mirror publishes the latest turn only. Every snapshot
+                // re-sends the whole record, so retaining a history here would
+                // reintroduce the unbounded-payload problem the transcript
+                // budget exists to prevent.
                 self.workspace_diff = Some(WorkspaceDiffRecord {
                     turn_id: diff.turn_id,
                     total_files: diff.total_files,
@@ -2276,6 +2325,7 @@ impl TrackerState {
             | UiEvent::AgentUsage(_)
             | UiEvent::SubagentPoolModelChanged { .. }
             | UiEvent::WorkspaceDiff(_)
+            | UiEvent::WorkspaceHeadDiff(_)
             | UiEvent::PermissionRequest(_)
             | UiEvent::ElicitationRequest(_)
             | UiEvent::Subagent(_)
@@ -2932,6 +2982,7 @@ impl TrackerState {
             available_commands: self.available_commands.clone(),
             subagents: self.subagents.values().cloned().collect(),
             workspace_diff: self.workspace_diff.clone(),
+            workspace_head_diff: self.workspace_head_diff.clone(),
             ragnarok: self.ragnarok.clone(),
             status: Some(self.status_record()),
         })
@@ -3975,6 +4026,19 @@ impl RemoteSessionTracker {
                                     break;
                                 }
                             }
+                            RemoteQueuedPromptAction::RefreshWorkspaceDiff => {
+                                // Reading the worktree never produces a
+                                // PromptDone, so the queue slot must be freed
+                                // here or the next prompt would starve behind
+                                // a turn that never ends.
+                                let sent = command_tx.send(UiCommand::RefreshWorkspaceDiff).is_ok();
+                                if let Ok(mut guard) = state.lock() {
+                                    guard.release_remote_prompt_slot();
+                                }
+                                if !sent {
+                                    break;
+                                }
+                            }
                             RemoteQueuedPromptAction::RejectInvalidReview => {
                                 let message = "usage: /review recent|uncommitted|head".to_string();
                                 if let Some(ui_event_tx) = ui_event_tx.as_ref() {
@@ -4486,6 +4550,9 @@ fn start_server_agent_session(
             let primary_orchestrator = primary_orchestrator.clone();
             let workspace_roots = workspace_roots.clone();
             let side_event_tx = side_event_tx.clone();
+            // Only the newest read may publish; see the TUI's identical guard.
+            let workspace_diff_generation =
+                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
             tokio::spawn(async move {
                 let mut side_runtime: Option<crate::side::Runtime> = None;
                 let mut local_epoch = 0_u64;
@@ -4537,6 +4604,30 @@ fn start_server_agent_session(
                         {
                             let _ = side_event_tx.send(UiEvent::Warning(message));
                         }
+                        continue;
+                    }
+                    // Answered before side forwarding, exactly as the TUI does:
+                    // the worktree is shared with any side conversation, so
+                    // routing this into a side runtime would only lose it.
+                    if matches!(command, UiCommand::RefreshWorkspaceDiff) {
+                        let ticket = workspace_diff_generation
+                            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                            + 1;
+                        let generation = workspace_diff_generation.clone();
+                        let roots = workspace_roots.clone();
+                        let exclusions = snapshot_exclusions.clone();
+                        let tx = side_event_tx.clone();
+                        tokio::spawn(async move {
+                            let event = crate::acp::workspace_head_diff(
+                                &roots,
+                                &exclusions,
+                                fs_max_text_bytes,
+                            )
+                            .await;
+                            if generation.load(std::sync::atomic::Ordering::Acquire) == ticket {
+                                let _ = tx.send(UiEvent::WorkspaceHeadDiff(event));
+                            }
+                        });
                         continue;
                     }
                     let (command, force_main) = match command {
@@ -8258,6 +8349,10 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         workspace_diff: workspace_diff_json
             .as_deref()
             .and_then(|json| serde_json::from_str(json).ok()),
+        // Never restored from history. A worktree read is only true for the
+        // instant it was taken, so a reconnecting viewer asks again rather
+        // than inheriting an answer about a workspace that has moved on.
+        workspace_head_diff: None,
         ragnarok: ragnarok_json
             .as_deref()
             .and_then(|json| serde_json::from_str(json).ok()),
@@ -10830,6 +10925,94 @@ mod tests {
         }
     }
 
+    fn head_diff_event(
+        files: usize,
+        unavailable: Option<crate::event::WorkspaceHeadDiffUnavailable>,
+    ) -> crate::event::WorkspaceHeadDiffEvent {
+        crate::event::WorkspaceHeadDiffEvent {
+            diffs: (0..files)
+                .map(|index| crate::event::WorkspaceDiff {
+                    path: PathBuf::from(format!("src/head{index}.rs")),
+                    old_text: Some("committed\n".to_string()),
+                    new_text: "uncommitted\n".to_string(),
+                })
+                .collect(),
+            total_files: files,
+            max_files: 100,
+            truncated: false,
+            unavailable,
+        }
+    }
+
+    #[test]
+    fn tracker_publishes_the_pulled_worktree_diff_with_its_read_time() {
+        let mut state = started_session_tracker();
+        assert!(
+            state
+                .snapshot()
+                .expect("snapshot")
+                .workspace_head_diff
+                .is_none(),
+            "nothing computes the worktree diff until a viewer asks"
+        );
+
+        state.observe_event(&UiEvent::WorkspaceHeadDiff(head_diff_event(2, None)));
+        let record = state
+            .snapshot()
+            .expect("snapshot")
+            .workspace_head_diff
+            .expect("head diff");
+        assert_eq!(record.total_files, 2);
+        assert_eq!(record.diffs.len(), 2);
+        assert_eq!(record.diffs[0].path, "src/head0.rs");
+        assert!(record.unavailable.is_none());
+        // Without an age this record is indistinguishable from a guess.
+        assert!(!record.read_at.is_empty());
+
+        // A newer read supersedes the old one outright: the workspace has one
+        // current state, so there is no history to accumulate.
+        state.observe_event(&UiEvent::WorkspaceHeadDiff(head_diff_event(1, None)));
+        let record = state
+            .snapshot()
+            .expect("snapshot")
+            .workspace_head_diff
+            .expect("head diff");
+        assert_eq!(record.total_files, 1);
+        assert_eq!(record.diffs.len(), 1);
+    }
+
+    #[test]
+    fn tracker_distinguishes_an_unreadable_workspace_from_a_clean_one() {
+        let mut state = started_session_tracker();
+        state.observe_event(&UiEvent::WorkspaceHeadDiff(head_diff_event(
+            0,
+            Some(crate::event::WorkspaceHeadDiffUnavailable::NotAGitRepository),
+        )));
+        let record = state
+            .snapshot()
+            .expect("snapshot")
+            .workspace_head_diff
+            .expect("head diff");
+        assert_eq!(record.unavailable.as_deref(), Some("not_a_git_repository"));
+        assert!(record.diffs.is_empty());
+    }
+
+    /// A remote `/diff` is a client-side command like `/review`, not text for
+    /// the agent, and it must never be forwarded as a prompt.
+    #[test]
+    fn remote_diff_command_requests_a_worktree_read() {
+        assert_eq!(
+            remote_queued_prompt_action("/diff".to_string(), false, true, true, true, false, false),
+            RemoteQueuedPromptAction::RefreshWorkspaceDiff,
+        );
+        // Attaching an image makes slash text a prompt, matching every other
+        // client-side command.
+        assert_eq!(
+            remote_queued_prompt_action("/diff".to_string(), true, true, true, true, false, false),
+            RemoteQueuedPromptAction::SendPrompt("/diff".to_string()),
+        );
+    }
+
     /// The tracker dropped `UiEvent::WorkspaceDiff` on the floor, so the web
     /// viewer had no changed-files view at all (#571).
     #[test]
@@ -11819,6 +12002,7 @@ mod tests {
                 outcome: None,
             }],
             workspace_diff: None,
+            workspace_head_diff: None,
             ragnarok: None,
             status: Some(SessionStatusRecord {
                 model: "gpt-5.6".to_string(),
@@ -12167,6 +12351,7 @@ mod tests {
             subagents: Vec::new(),
             native_mode: None,
             workspace_diff: None,
+            workspace_head_diff: None,
             ragnarok: None,
             status: None,
         };
@@ -13136,6 +13321,7 @@ mod tests {
             subagents: Vec::new(),
             native_mode: None,
             workspace_diff: None,
+            workspace_head_diff: None,
             ragnarok: None,
             status: None,
         }
@@ -14029,6 +14215,7 @@ mod tests {
             subagents: Vec::new(),
             native_mode: None,
             workspace_diff: None,
+            workspace_head_diff: None,
             ragnarok: None,
             status: None,
         };
@@ -15081,6 +15268,7 @@ mod tests {
             subagents: Vec::new(),
             native_mode: None,
             workspace_diff: None,
+            workspace_head_diff: None,
             ragnarok: None,
             status: None,
         };

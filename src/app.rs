@@ -461,7 +461,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
-        text: "Scroll the transcript normally; Ctrl+T expands details and Ctrl+G opens the latest workspace diff.",
+        text: "Scroll the transcript normally; Ctrl+T expands details and Ctrl+G shows uncommitted workspace changes.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -1020,9 +1020,13 @@ pub struct AppState {
     /// Per-tool expansion choices, keyed by ACP tool-call ID. `true` means
     /// expanded; entries matching the renderer's default are omitted.
     tool_detail_overrides: HashMap<String, bool>,
-    /// Workspace diffs observed locally after prompt turns. These deliberately
-    /// remain outside ACP tool-call and transcript state.
-    pub workspace_diffs: Vec<crate::event::WorkspaceDiffEvent>,
+    /// Latest on-demand worktree-versus-`HEAD` diff backing the Ctrl-G reader.
+    /// One `Option` rather than a history: the workspace has a single current
+    /// state, and every refresh supersedes the last.
+    pub workspace_head_diff: Option<crate::event::WorkspaceHeadDiffEvent>,
+    /// A refresh is in flight. Distinguishes "still reading the worktree" from
+    /// "read the worktree and found nothing", which must not look alike.
+    pub workspace_diff_loading: bool,
     /// Accurate changed-file count reported for the current prompt turn.
     /// Consumed when that turn completes so an older diff cannot affect a
     /// later no-diff turn's status.
@@ -1664,7 +1668,8 @@ impl AppState {
             agent_open_message_index: None,
             tool_calls: HashMap::new(),
             tool_detail_overrides: HashMap::new(),
-            workspace_diffs: Vec::new(),
+            workspace_head_diff: None,
+            workspace_diff_loading: false,
             suppressed_tool_calls: HashSet::new(),
             terminal_outputs: HashMap::new(),
             terminal_registry: Vec::new(),
@@ -2498,8 +2503,9 @@ impl AppState {
         self.nested_agent(id).map(|state| (id, state))
     }
 
-    /// Open the native workspace-diff reader. It always starts at the first
-    /// retained file and top of that file, including when there are no diffs.
+    /// Open the workspace-diff reader. It always starts at the first retained
+    /// file and top of that file, including when there are no diffs. The
+    /// caller is responsible for requesting the refresh this marks pending.
     pub fn open_workspace_diff_viewer(&mut self) {
         self.close_nested_agent_viewer();
         self.close_transcript_viewer();
@@ -2508,18 +2514,29 @@ impl AppState {
         self.workspace_diff_viewer = true;
         self.workspace_diff_selected_file = 0;
         self.workspace_diff_scroll_offset = 0;
+        self.workspace_diff_loading = true;
+    }
+
+    /// Mark an explicit refresh pending. Selection survives so re-reading after
+    /// an edit keeps the file the user was looking at; the renderer clamps it
+    /// if that file is no longer part of the diff.
+    pub fn begin_workspace_diff_refresh(&mut self) {
+        self.workspace_diff_loading = true;
     }
 
     /// Close the workspace-diff reader and discard its ephemeral navigation.
+    /// The last result is kept: reopening shows it immediately while the
+    /// refresh runs, which beats flashing an empty reader.
     pub fn close_workspace_diff_viewer(&mut self) {
         self.workspace_diff_viewer = false;
         self.workspace_diff_selected_file = 0;
         self.workspace_diff_scroll_offset = 0;
+        self.workspace_diff_loading = false;
     }
 
     pub fn workspace_diff_file_count(&self) -> usize {
-        self.workspace_diffs
-            .last()
+        self.workspace_head_diff
+            .as_ref()
             .map_or(0, |event| event.diffs.len())
     }
 
@@ -3475,7 +3492,7 @@ impl AppState {
                 }
                 if self.session_id.as_deref() != Some(&session_id) {
                     self.cleanup_nested_history();
-                    self.workspace_diffs.clear();
+                    self.workspace_head_diff = None;
                     self.pending_workspace_diff_total = None;
                     self.close_workspace_diff_viewer();
                     self.close_nested_agent_viewer();
@@ -3563,11 +3580,16 @@ impl AppState {
                 self.active_models.subagent_source = Some(source_id);
             }
             UiEvent::WorkspaceDiff(diff) => {
+                // Per-turn attribution only: it reports how much this turn
+                // touched, for the status line and the remote mirror. The
+                // Ctrl-G reader deliberately does not read it, because
+                // "what this turn changed" and "what is uncommitted" are
+                // different questions with different answers.
                 self.pending_workspace_diff_total = Some(diff.total_files);
-                self.workspace_diffs.push(diff);
-                // A newer event replaces the display source. Keep the reader
-                // open, but make it coherent with its first retained file.
-                self.workspace_diff_selected_file = 0;
+            }
+            UiEvent::WorkspaceHeadDiff(diff) => {
+                self.workspace_diff_loading = false;
+                self.workspace_head_diff = Some(diff);
                 self.workspace_diff_scroll_offset = 0;
             }
             UiEvent::PermissionRequest(prompt) => {
@@ -3645,7 +3667,9 @@ impl AppState {
                         let noun = if total_files == 1 { "file" } else { "files" };
                         self.set_status_line(
                             StatusKind::Info,
-                            format!("workspace changes: {total_files} {noun} · Ctrl-G diff"),
+                            format!(
+                                "this turn changed {total_files} {noun} · Ctrl-G workspace diff"
+                            ),
                         );
                     } else {
                         self.set_status_line(
@@ -5874,8 +5898,25 @@ mod tests {
         );
     }
 
+    fn head_diff_event(paths: &[&str]) -> crate::event::WorkspaceHeadDiffEvent {
+        crate::event::WorkspaceHeadDiffEvent {
+            diffs: paths
+                .iter()
+                .map(|path| crate::event::WorkspaceDiff {
+                    path: PathBuf::from(path),
+                    old_text: Some("old\n".to_string()),
+                    new_text: "new\n".to_string(),
+                })
+                .collect(),
+            total_files: paths.len(),
+            max_files: 100,
+            truncated: false,
+            unavailable: None,
+        }
+    }
+
     #[test]
-    fn workspace_diffs_are_retained_without_transcript_or_tool_call_entries() {
+    fn turn_workspace_diffs_arm_the_status_total_without_feeding_the_reader() {
         let mut state = AppState::new();
         state.apply_event(UiEvent::SessionStarted {
             session_id: "first-session".to_string(),
@@ -5895,55 +5936,76 @@ mod tests {
             truncated: false,
         }));
 
-        assert_eq!(state.workspace_diffs.len(), 1);
-        assert_eq!(state.workspace_diffs[0].turn_id, 7);
+        // The per-turn event feeds the status line only. Routing it into the
+        // reader is what used to make Ctrl-G show one turn while claiming to
+        // show the session.
+        assert_eq!(state.pending_workspace_diff_total, Some(1));
+        assert!(state.workspace_head_diff.is_none());
+        assert_eq!(state.workspace_diff_file_count(), 0);
         assert!(state.transcript.is_empty());
         assert!(state.tool_calls.is_empty());
         assert_eq!(state.transcript_revision, revision);
-
-        state.apply_event(UiEvent::SessionStarted {
-            session_id: "next-session".to_string(),
-            resumed: false,
-        });
-        assert!(state.workspace_diffs.is_empty());
     }
 
     #[test]
-    fn workspace_diff_viewer_resets_for_session_and_newer_diff_without_transcript_mutation() {
+    fn workspace_head_diff_replaces_rather_than_accumulates() {
         let mut state = AppState::new();
         state
             .transcript
             .push(Entry::UserPrompt("keep me".to_string()));
         let transcript_len = state.transcript.len();
-        for (turn_id, path) in [(1, "one.rs"), (2, "two.rs")] {
-            state.apply_event(UiEvent::WorkspaceDiff(crate::event::WorkspaceDiffEvent {
-                turn_id,
-                diffs: vec![crate::event::WorkspaceDiff {
-                    path: PathBuf::from(path),
-                    old_text: Some("old\n".to_string()),
-                    new_text: "new\n".to_string(),
-                }],
-                total_files: 1,
-                max_files: 20,
-                truncated: false,
-            }));
-            if turn_id == 1 {
-                state.open_workspace_diff_viewer();
-                state.workspace_diff_selected_file = 9;
-                state.workspace_diff_scroll_offset = 9;
-            }
-        }
-        assert!(state.workspace_diff_viewer);
-        assert_eq!(state.workspace_diff_selected_file, 0);
-        assert_eq!(state.workspace_diff_scroll_offset, 0);
-        assert_eq!(state.workspace_diffs.last().unwrap().turn_id, 2);
+
+        state.open_workspace_diff_viewer();
+        assert!(state.workspace_diff_loading, "opening requests a refresh");
+
+        state.apply_event(UiEvent::WorkspaceHeadDiff(head_diff_event(&[
+            "one.rs", "two.rs",
+        ])));
+        assert!(!state.workspace_diff_loading);
+        assert_eq!(state.workspace_diff_file_count(), 2);
+
+        // A second result supersedes the first outright: the workspace has one
+        // current state, so there is no history to page back through.
+        state.apply_event(UiEvent::WorkspaceHeadDiff(head_diff_event(&["three.rs"])));
+        assert_eq!(state.workspace_diff_file_count(), 1);
+        assert_eq!(
+            state.workspace_head_diff.as_ref().unwrap().diffs[0].path,
+            PathBuf::from("three.rs")
+        );
         assert_eq!(state.transcript.len(), transcript_len);
+    }
+
+    #[test]
+    fn workspace_diff_refresh_keeps_the_selected_file() {
+        let mut state = AppState::new();
+        state.open_workspace_diff_viewer();
+        state.apply_event(UiEvent::WorkspaceHeadDiff(head_diff_event(&[
+            "one.rs", "two.rs",
+        ])));
+        state.select_workspace_diff_file(true);
+        assert_eq!(state.workspace_diff_selected_file, 1);
+
+        state.begin_workspace_diff_refresh();
+        assert!(state.workspace_diff_loading);
+        assert_eq!(
+            state.workspace_diff_selected_file, 1,
+            "an explicit refresh must not yank the reader back to the first file"
+        );
+    }
+
+    #[test]
+    fn workspace_head_diff_clears_for_a_new_session() {
+        let mut state = AppState::new();
+        state.open_workspace_diff_viewer();
+        state.apply_event(UiEvent::WorkspaceHeadDiff(head_diff_event(&["one.rs"])));
+        state.workspace_diff_selected_file = 9;
+        state.workspace_diff_scroll_offset = 9;
 
         state.apply_event(UiEvent::SessionStarted {
             session_id: "replacement".to_string(),
             resumed: false,
         });
-        assert!(state.workspace_diffs.is_empty());
+        assert!(state.workspace_head_diff.is_none());
         assert!(!state.workspace_diff_viewer);
         assert_eq!(state.workspace_diff_selected_file, 0);
         assert_eq!(state.workspace_diff_scroll_offset, 0);
@@ -5978,8 +6040,8 @@ mod tests {
     #[test]
     fn completed_turn_surfaces_workspace_diff_hint_with_singular_and_plural_counts() {
         for (total_files, expected) in [
-            (1, "workspace changes: 1 file · Ctrl-G diff"),
-            (3, "workspace changes: 3 files · Ctrl-G diff"),
+            (1, "this turn changed 1 file · Ctrl-G workspace diff"),
+            (3, "this turn changed 3 files · Ctrl-G workspace diff"),
         ] {
             let mut state = AppState::new();
             state.record_user_prompt("make a change".to_string());
@@ -6072,7 +6134,7 @@ mod tests {
                 .status_line
                 .as_ref()
                 .map(|status| status.text.as_str()),
-            Some("workspace changes: 21 files · Ctrl-G diff")
+            Some("this turn changed 21 files · Ctrl-G workspace diff")
         );
     }
 
