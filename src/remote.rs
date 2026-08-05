@@ -8198,7 +8198,12 @@ mod tests {
     async fn mjconfig_snapshot_reports_probed_session_options() {
         use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
         let runtime = test_mjconfig_runtime();
-        let mut inventory = roster::discover_inventory(&config::Config::default());
+        // The snapshot re-derives the inventory from the *saved* config, so
+        // the explicit policy has to be on disk: an undetected built-in left
+        // on `Auto` is hidden, and rediscovery would drop the seeded options.
+        let config = roster::config_with_a_visible_builtin();
+        config.save(&runtime.config_path).expect("seed config");
+        let mut inventory = roster::discover_inventory(&config);
         let server = inventory.servers.first_mut().expect("visible ACP server");
         let server_id = server.id.clone();
         server.session_config = vec![SessionConfigOption::select(

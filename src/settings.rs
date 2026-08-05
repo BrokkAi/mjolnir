@@ -2187,7 +2187,11 @@ mod tests {
 
     #[test]
     fn agent_panel_saves_primary_option_without_overwriting_live_route_cache() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         let server = editor
             .inventory
             .servers
@@ -2239,7 +2243,11 @@ mod tests {
 
     #[test]
     fn primary_and_subagent_panels_edit_arbitrary_options_with_separate_scope() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         let server = editor
             .inventory
             .servers
@@ -2303,7 +2311,11 @@ mod tests {
 
     #[test]
     fn primary_and_subagent_panels_use_their_selected_adapters_options() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         editor.inventory.servers.truncate(1);
         ensure_two_inventory_servers(&mut editor);
         let primary_index = 0;
@@ -2338,7 +2350,11 @@ mod tests {
 
     #[test]
     fn active_source_wins_for_the_current_explicit_model() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         editor.inventory.servers.truncate(1);
         ensure_two_inventory_servers(&mut editor);
         let active_source = editor.inventory.servers[1].id.clone();
@@ -2369,7 +2385,11 @@ mod tests {
 
     #[test]
     fn legacy_adapter_default_is_shown_until_a_scoped_value_is_chosen() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         let server = editor
             .inventory
             .servers
@@ -2414,7 +2434,11 @@ mod tests {
 
     #[test]
     fn stale_session_default_is_visible_and_cycles_to_an_advertised_value() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         let server = editor
             .inventory
             .servers
@@ -2455,7 +2479,11 @@ mod tests {
 
     #[test]
     fn agent_panel_scrolls_dynamic_options_into_view_at_narrow_width() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
         let server = editor
             .inventory
             .servers

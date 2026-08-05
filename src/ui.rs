@@ -18449,7 +18449,7 @@ mod tests {
     fn saving_mjconfig_preserves_probed_session_options() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        let config = config::Config::default();
+        let config = crate::roster::config_with_a_visible_builtin();
         let mut state = AppState::new();
         state.config_path = Some(path);
         state.acp_inventory = crate::roster::discover_inventory(&config);

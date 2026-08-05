@@ -430,6 +430,20 @@ pub(crate) fn model_has_builtin_adapter(model: &str) -> bool {
     adapter_kind(model).is_some()
 }
 
+/// A config that discovery is guaranteed to surface at least one built-in
+/// server for.
+///
+/// `inventory_server_is_visible` hides an undetected built-in left on `Auto`,
+/// so a test that just needs a server row would otherwise depend on whichever
+/// credentials the host running it happens to have — passing on a developer
+/// machine and failing in CI. An explicit policy is visible either way.
+#[cfg(test)]
+pub(crate) fn config_with_a_visible_builtin() -> Config {
+    let mut config = Config::default();
+    config.set_acp_server_policy("codex-acp", AcpServerPolicy::Enabled);
+    config
+}
+
 fn adapter_accepts_model(kind: AdapterKind, model: &str) -> bool {
     match kind {
         AdapterKind::Codex => deepswe::model_provider(model) == "openai",
@@ -1542,7 +1556,7 @@ mod tests {
 
     #[test]
     fn rediscovery_preserves_probe_only_inventory_fields() {
-        let config = Config::default();
+        let config = config_with_a_visible_builtin();
         let mut previous = discover_inventory(&config);
         let server = previous.servers.first_mut().expect("visible ACP server");
         let server_id = server.id.clone();
