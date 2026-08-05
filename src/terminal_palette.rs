@@ -239,6 +239,46 @@ fn parse_osc_color(buffer: &[u8], code: u8) -> Option<(u8, u8, u8)> {
     Some((parse_component()?, parse_component()?, parse_component()?))
 }
 
+/// True once a complete primary device attributes (DA1) response has arrived.
+///
+/// DA1 is a CSI sequence ending in `c`, usually `ESC [ ? ... c`. Looking for a
+/// bare `c` is not enough because it is also a valid hex digit in OSC color
+/// responses; stopping on one leaves the rest of the reply in the terminal's
+/// input queue, where it is mistaken for user input when the TUI starts.
+#[cfg(any(unix, test))]
+fn contains_da1_response(buffer: &[u8]) -> bool {
+    let mut offset = 0;
+    while offset < buffer.len() {
+        let parameter_start = if buffer[offset] == 0x9b {
+            offset + 1
+        } else if buffer[offset..].starts_with(b"\x1b[") {
+            offset + 2
+        } else {
+            offset += 1;
+            continue;
+        };
+
+        let mut cursor = parameter_start;
+        while buffer
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, 0x30..=0x3f))
+        {
+            cursor += 1;
+        }
+        while buffer
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, 0x20..=0x2f))
+        {
+            cursor += 1;
+        }
+        if buffer.get(cursor) == Some(&b'c') {
+            return true;
+        }
+        offset = parameter_start;
+    }
+    false
+}
+
 /// Ask the terminal for its default foreground and background.
 ///
 /// Returns `None` whenever the answer would be a guess: not a TTY, the terminal
@@ -296,7 +336,7 @@ mod imp {
     use std::os::fd::AsRawFd;
     use std::time::{Duration, Instant};
 
-    use super::{DefaultColors, parse_osc_color};
+    use super::{DefaultColors, contains_da1_response, parse_osc_color};
 
     /// Upper bound on how long startup may block waiting for the terminal.
     ///
@@ -334,10 +374,10 @@ mod imp {
                 Ok(0) => break,
                 Ok(n) => {
                     buffer.extend_from_slice(&chunk[..n]);
-                    // The DA1 reply ends with 'c'; once it arrives, anything
-                    // the terminal meant to say about colors has already been
+                    // Once the complete DA1 reply arrives, anything the
+                    // terminal meant to say about colors has already been
                     // said, because it answers queries in order.
-                    if buffer.contains(&b'c') && buffer.len() > 3 {
+                    if contains_da1_response(&buffer) {
                         break;
                     }
                 }
@@ -444,6 +484,16 @@ mod tests {
         let buffer = b"\x1b]10;rgb:ffff/ffff/ffff\x07\x1b]11;rgb:0000/0000/0000\x07\x1b[?62c";
         assert_eq!(parse_osc_color(buffer, 10), Some((255, 255, 255)));
         assert_eq!(parse_osc_color(buffer, 11), Some((0, 0, 0)));
+    }
+
+    #[test]
+    fn color_hex_digits_do_not_end_the_probe_before_da1() {
+        let colors = b"\x1b]10;rgb:cccc/eeee/ffff\x07\x1b]11;rgb:213d/2743/33e7\x07";
+        assert!(!contains_da1_response(colors));
+
+        let mut completed = colors.to_vec();
+        completed.extend_from_slice(b"\x1b[?62;4c");
+        assert!(contains_da1_response(&completed));
     }
 
     #[test]
