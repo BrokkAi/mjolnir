@@ -153,8 +153,9 @@ mj --worktree
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, runtime
-invariants, tests, dependency-license maintenance, and the release checklist.
-Repository-specific agent guidance lives in [AGENTS.md](AGENTS.md).
+invariants, tests, and dependency-license maintenance. Maintainers tagging a
+release should follow [RELEASING.md](RELEASING.md). Repository-specific agent
+guidance lives in [AGENTS.md](AGENTS.md).
 
 ## License
 
