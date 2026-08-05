@@ -1406,7 +1406,20 @@ impl TrackerState {
                 .workflows
                 .get(event.workflow_id)
                 .map(|state| state.terminal_notice(*outcome)),
-            _ => None,
+            // Listed rather than caught by `_` on purpose: a new transition
+            // variant should make whoever adds it decide whether the remote
+            // transcript wants it, instead of silently defaulting to "no".
+            // Per-actor transitions drive the subagent status rows, and the
+            // issue transitions are status-line only in the TUI too.
+            WorkflowTransition::PhaseChanged { .. }
+            | WorkflowTransition::CoverageChanged { .. }
+            | WorkflowTransition::ActorStarted { .. }
+            | WorkflowTransition::ActorSessionBound { .. }
+            | WorkflowTransition::ActorWaiting { .. }
+            | WorkflowTransition::ActorResumed { .. }
+            | WorkflowTransition::ActorFinished { .. }
+            | WorkflowTransition::IssuesValidated { .. }
+            | WorkflowTransition::IssuesResolved { .. } => None,
         };
 
         if let Some(notice) = notice {
