@@ -3171,6 +3171,8 @@
          long time to spawn one, and declaring failure early is how a launch
          that was merely slow ends up looking broken. */
       const SESSION_LAUNCH_TIMEOUT_MS = 120000;
+      const SESSION_LAUNCH_TIMEOUT_DETAIL =
+        "Timed out waiting for the session to start. It may still be starting on a busy host — refresh to check before retrying.";
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
       const narrowScreen = window.matchMedia("(max-width: 800px)");
 
@@ -3186,6 +3188,11 @@
       let filesystemLoading = false;
       let creatingSession = false;
       let pendingSessionLaunch = null;
+      /* Identifies which launch the list slot currently belongs to. Waiting on
+         a launch outlives the dialog that started it, so a second launch can
+         begin while the first is still outstanding; its watcher retires
+         quietly instead of writing over the newer card. */
+      let sessionLaunchSeq = 0;
       let launchSessionCard = null;
       let commandMatches = [];
       let commandSelected = 0;
@@ -4390,7 +4397,10 @@
           return;
         }
         creatingSession = true;
+        sessionLaunchSeq += 1;
+        const launchId = sessionLaunchSeq;
         pendingSessionLaunch = {
+          id: launchId,
           cwd: current.display_path || current.path,
           detail: "Creating ACP session…",
           startedAt: Date.now(),
@@ -4428,10 +4438,12 @@
           if (error.message === "HTTP 401") {
             /* Re-authentication clears the launch itself; there is no failure
                to report and no session to keep waiting for. */
-            pendingSessionLaunch = null;
-            renderSessions();
+            if (pendingSessionLaunch?.id === launchId) {
+              pendingSessionLaunch = null;
+              renderSessions();
+            }
           } else {
-            failSessionLaunch(`Start failed: ${error.message}`);
+            failSessionLaunch(`Start failed: ${error.message}`, launchId);
             setNewSessionStatus(`Start failed: ${error.message}`, true);
           }
           return;
@@ -4446,12 +4458,12 @@
            and holding the dialog hostage for it would be its own bug — the
            launch card tracks this phase now. */
         try {
-          await selectNewlyStartedSession(knownSessionIds);
+          await selectNewlyStartedSession(knownSessionIds, launchId);
         } catch (error) {
           /* The modal is hidden by this point, so its status line is a
              surface nobody can see. The card carries the failure instead,
              and stays until dismissed. */
-          failSessionLaunch(`Start failed: ${error.message}`);
+          failSessionLaunch(`Start failed: ${error.message}`, launchId);
         }
       }
 
@@ -4459,13 +4471,15 @@
          Watching for only a few seconds and then giving up is what left a slow
          launch with nothing tracking it: the card sat on a stale message until
          its timer quietly deleted it. */
-      async function selectNewlyStartedSession(knownSessionIds) {
+      async function selectNewlyStartedSession(knownSessionIds, launchId) {
         const deadline = (pendingSessionLaunch?.startedAt ?? Date.now()) + SESSION_LAUNCH_TIMEOUT_MS;
         for (let attempt = 0; Date.now() < deadline; attempt += 1) {
           /* Back off once the fast path has clearly missed, so a two-minute
              wait does not mean two minutes of once-a-second requests. */
           await sleep(attempt === 0 ? 300 : attempt < 10 ? 1000 : 2500);
-          if (!pendingSessionLaunch || pendingSessionLaunch.failed) {
+          /* Dismissed, already failed, or superseded by a newer launch: this
+             watcher no longer owns the slot and must not write to it. */
+          if (pendingSessionLaunch?.id !== launchId || pendingSessionLaunch.failed) {
             return;
           }
           await refreshSessions();
@@ -4473,12 +4487,14 @@
             .filter((session) => !knownSessionIds.has(session.session_id))
             .sort((a, b) => new Date(b.start_time || 0) - new Date(a.start_time || 0))[0];
           if (created) {
-            pendingSessionLaunch = null;
-            renderSessions();
+            if (pendingSessionLaunch?.id === launchId) {
+              pendingSessionLaunch = null;
+              renderSessions();
+            }
             navigateToSession(created.session_id);
             return;
           }
-          if (attempt === 10 && pendingSessionLaunch) {
+          if (attempt === 10 && pendingSessionLaunch?.id === launchId) {
             pendingSessionLaunch = {
               ...pendingSessionLaunch,
               detail: "Still waiting for the agent to publish the session…",
@@ -4486,9 +4502,7 @@
             renderSessions();
           }
         }
-        failSessionLaunch(
-          "Timed out waiting for the session to start. It may still be starting on a busy host — refresh to check before retrying.",
-        );
+        failSessionLaunch(SESSION_LAUNCH_TIMEOUT_DETAIL, launchId);
       }
 
       /* ---- timestamps ---- */
@@ -4689,8 +4703,12 @@
       /* Move a launch into its failed state. The card stays in the list until
          the user dismisses it: a launch that vanishes on its own leaves them
          unable to tell a failure from a session that never existed. */
-      function failSessionLaunch(detail) {
-        if (!pendingSessionLaunch || pendingSessionLaunch.failed) {
+      function failSessionLaunch(detail, launchId) {
+        if (
+          !pendingSessionLaunch ||
+          pendingSessionLaunch.failed ||
+          pendingSessionLaunch.id !== launchId
+        ) {
           return;
         }
         pendingSessionLaunch = { ...pendingSessionLaunch, failed: true, detail };
@@ -4709,8 +4727,7 @@
           pendingSessionLaunch = {
             ...pendingSessionLaunch,
             failed: true,
-            detail:
-              "Timed out waiting for the session to start. It may still be starting on a busy host — refresh to check before retrying.",
+            detail: SESSION_LAUNCH_TIMEOUT_DETAIL,
           };
         }
         if (!pendingSessionLaunch) {
