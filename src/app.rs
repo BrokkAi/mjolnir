@@ -225,6 +225,7 @@ const BUILTIN_AGENTS_COMMAND: &str = "agents";
 const BUILTIN_SUBAGENTS_COMMAND: &str = "subagents";
 const BUILTIN_REVIEW_COMMAND: &str = "review";
 const BUILTIN_RAGNAROK_COMMAND: &str = "ragnarok";
+const BUILTIN_TERMINALS_COMMAND: &str = "terminals";
 const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
 
 fn builtin_new_command() -> AvailableCommand {
@@ -305,6 +306,13 @@ fn builtin_ragnarok_command() -> AvailableCommand {
     )
 }
 
+fn builtin_terminals_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_TERMINALS_COMMAND,
+        "view terminals the agent started, including ones still running",
+    )
+}
+
 fn install_builtin_commands(
     commands: &mut Vec<AvailableCommand>,
     include_fork: bool,
@@ -323,6 +331,7 @@ fn install_builtin_commands(
             && command.name != BUILTIN_SUBAGENTS_COMMAND
             && command.name != BUILTIN_REVIEW_COMMAND
             && command.name != BUILTIN_RAGNAROK_COMMAND
+            && command.name != BUILTIN_TERMINALS_COMMAND
     });
     if include_fork {
         commands.insert(0, builtin_fork_command());
@@ -333,6 +342,7 @@ fn install_builtin_commands(
     commands.insert(0, builtin_ragnarok_command());
     commands.insert(0, builtin_mjconfig_command());
     commands.insert(0, builtin_review_command());
+    commands.insert(0, builtin_terminals_command());
     commands.insert(0, builtin_subagents_command());
     commands.insert(0, builtin_agents_command());
     commands.insert(0, builtin_export_command());
@@ -356,6 +366,7 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
             BUILTIN_SUBAGENTS_COMMAND,
             BUILTIN_REVIEW_COMMAND,
             BUILTIN_RAGNAROK_COMMAND,
+            BUILTIN_TERMINALS_COMMAND,
         ]
         .contains(&command.name.as_str())
     });
@@ -541,6 +552,38 @@ pub enum ToolCallOutput {
         exit_status: Option<TerminalExitStatus>,
     },
     Note(String),
+}
+
+/// A terminal the agent started, tracked independently of the transcript.
+///
+/// Terminal output is inherently open-ended: a dev server or watcher never
+/// reports an exit status, so it can never become an immutable transcript
+/// record. Registering terminals here gives `/terminals` a stable, ordered
+/// place to read them from without the transcript having to carry live state.
+#[derive(Debug, Clone)]
+struct TerminalRegistration {
+    terminal_id: String,
+    /// Tool call that started it, used to resolve current output and status.
+    tool_call_id: String,
+    /// Human label for the viewer, taken from the tool call title.
+    label: String,
+}
+
+/// A terminal as `/terminals` presents it, resolved from whichever source
+/// still holds its state.
+#[derive(Debug, Clone)]
+pub struct TerminalSummary {
+    pub label: String,
+    pub truncated: bool,
+    pub exit_status: Option<TerminalExitStatus>,
+}
+
+impl TerminalSummary {
+    /// A terminal with no exit status is still running. That is exactly the
+    /// state that cannot be represented as a finished transcript entry.
+    pub fn is_running(&self) -> bool {
+        self.exit_status.is_none()
+    }
 }
 
 impl ToolCallOutput {
@@ -999,6 +1042,10 @@ pub struct AppState {
     /// the transcript so it cannot pin nested activity behind a pending tool.
     suppressed_tool_calls: HashSet<String>,
     terminal_outputs: HashMap<String, TerminalOutputSnapshot>,
+    /// Every terminal seen this session, in the order the agent started them.
+    /// `terminal_outputs` is keyed for lookup and loses ordering; this keeps
+    /// the sequence and labels that `/terminals` presents.
+    terminal_registry: Vec<TerminalRegistration>,
     /// Bumped whenever `transcript` or `tool_calls` change in a way that
     /// affects rendering. The UI layer uses this as a cache key so it can
     /// skip rebuilding `Vec<Line>` and re-running word-wrap when nothing
@@ -1071,6 +1118,10 @@ pub struct AppState {
     pub nested_agent_viewer: bool,
     pub nested_agent_selected: Option<u64>,
     pub nested_agent_scroll_offset: usize,
+    /// On-demand reader for agent-started terminals, opened with `/terminals`.
+    pub terminals_viewer: bool,
+    pub terminals_selected: usize,
+    pub terminals_scroll_offset: usize,
     /// Session-wide review finding ledger, opened with F9.
     pub review_issue_viewer: bool,
     pub review_issue_scroll_offset: usize,
@@ -1634,6 +1685,7 @@ impl AppState {
             workspace_diffs: Vec::new(),
             suppressed_tool_calls: HashSet::new(),
             terminal_outputs: HashMap::new(),
+            terminal_registry: Vec::new(),
             transcript_revision: 0,
             stream_visible_bytes: HashMap::new(),
             input: String::new(),
@@ -1658,6 +1710,9 @@ impl AppState {
             nested_agent_viewer: false,
             nested_agent_selected: None,
             nested_agent_scroll_offset: 0,
+            terminals_viewer: false,
+            terminals_selected: 0,
+            terminals_scroll_offset: 0,
             review_issue_viewer: false,
             review_issue_scroll_offset: 0,
             workspace_diff_viewer: false,
@@ -2228,6 +2283,7 @@ impl AppState {
     pub fn open_transcript_viewer(&mut self) {
         self.close_nested_agent_viewer();
         self.close_workspace_diff_viewer();
+        self.close_terminals_viewer();
         self.transcript_viewer = true;
         self.scroll_offset = usize::MAX;
     }
@@ -2249,6 +2305,7 @@ impl AppState {
         self.close_transcript_viewer();
         self.close_workspace_diff_viewer();
         self.close_review_issue_viewer();
+        self.close_terminals_viewer();
         self.nested_agent_viewer = true;
         self.nested_agent_selected = Some(selected);
         self.nested_agent_scroll_offset = usize::MAX;
@@ -2260,10 +2317,185 @@ impl AppState {
         self.nested_agent_scroll_offset = 0;
     }
 
+    /// Record any terminals a tool call owns. Called whenever a tool call is
+    /// created or updated, so a terminal is registered the moment the agent
+    /// starts it rather than when (or if) it ever exits.
+    fn register_terminals_for_tool_call(&mut self, tool_call_id: &str) {
+        let Some(view) = self.tool_calls.get(tool_call_id) else {
+            return;
+        };
+        let label = view.title.clone();
+        let ids = view
+            .body
+            .iter()
+            .filter_map(|output| match output {
+                ToolCallOutput::Terminal { terminal_id, .. } => Some(terminal_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for terminal_id in ids {
+            match self
+                .terminal_registry
+                .iter_mut()
+                .find(|record| record.terminal_id == terminal_id)
+            {
+                // A tool call's title can sharpen after the first update
+                // (generic "tool" becoming the real command), so keep it fresh.
+                Some(record) => record.label = label.clone(),
+                None => self.terminal_registry.push(TerminalRegistration {
+                    terminal_id,
+                    tool_call_id: tool_call_id.to_string(),
+                    label: label.clone(),
+                }),
+            }
+        }
+    }
+
+    /// Every registered terminal, running ones first, each in the order the
+    /// agent started it. Terminals whose state has been dropped (an offloaded
+    /// nested actor) are omitted rather than shown empty.
+    pub fn terminal_summaries(&self) -> Vec<TerminalSummary> {
+        self.ordered_terminal_records()
+            .into_iter()
+            .filter_map(|record| {
+                let (_, truncated, exit_status) = self.terminal_state(record)?;
+                Some(TerminalSummary {
+                    label: record.label.clone(),
+                    truncated,
+                    exit_status: exit_status.cloned(),
+                })
+            })
+            .collect()
+    }
+
+    /// Registered terminals in display order — running first, each otherwise in
+    /// the order the agent started it. Borrows throughout: terminal output can
+    /// reach a megabyte apiece, and this ordering is recomputed on every frame
+    /// the affordance row is measured.
+    fn ordered_terminal_records(&self) -> Vec<&TerminalRegistration> {
+        let mut records = self
+            .terminal_registry
+            .iter()
+            .filter(|record| self.terminal_state(record).is_some())
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| {
+            self.terminal_state(record)
+                .is_none_or(|(_, _, exit_status)| exit_status.is_some())
+        });
+        records
+    }
+
+    /// Output of the terminal at `index` in display order, borrowed rather than
+    /// cloned so the viewer can render a large buffer without copying it.
+    pub fn terminal_output_at(&self, index: usize) -> Option<&str> {
+        let record = *self.ordered_terminal_records().get(index)?;
+        self.terminal_state(record).map(|(output, _, _)| output)
+    }
+
+    /// Resolve a terminal from the tool call that owns it, falling back to the
+    /// raw snapshot. The tool call view is preferred because it is kept in
+    /// sync by `apply_terminal_output` and carries the same fields.
+    fn terminal_state(
+        &self,
+        record: &TerminalRegistration,
+    ) -> Option<(&str, bool, Option<&TerminalExitStatus>)> {
+        let from_view = self.tool_calls.get(&record.tool_call_id).and_then(|view| {
+            view.body.iter().find_map(|output| match output {
+                ToolCallOutput::Terminal {
+                    terminal_id,
+                    output,
+                    truncated,
+                    exit_status,
+                } if terminal_id == &record.terminal_id => {
+                    Some((output.as_str(), *truncated, exit_status.as_ref()))
+                }
+                _ => None,
+            })
+        });
+        from_view.or_else(|| {
+            let snapshot = self.terminal_outputs.get(&record.terminal_id)?;
+            Some((
+                snapshot.output.as_str(),
+                snapshot.truncated,
+                snapshot.exit_status.as_ref(),
+            ))
+        })
+    }
+
+    /// Terminals still running. This is what the status affordance counts, so
+    /// it must not include ones that have already exited. Counts without
+    /// materialising any output, because it runs on every frame.
+    pub fn running_terminal_count(&self) -> usize {
+        self.terminal_registry
+            .iter()
+            .filter(|record| {
+                self.terminal_state(record)
+                    .is_some_and(|(_, _, exit_status)| exit_status.is_none())
+            })
+            .count()
+    }
+
+    /// Label of the first running terminal, for the affordance row.
+    pub fn first_running_terminal_label(&self) -> Option<&str> {
+        self.terminal_registry
+            .iter()
+            .find(|record| {
+                self.terminal_state(record)
+                    .is_some_and(|(_, _, exit_status)| exit_status.is_none())
+            })
+            .map(|record| record.label.as_str())
+    }
+
+    pub fn terminal_count(&self) -> usize {
+        self.ordered_terminal_records().len()
+    }
+
+    /// Open the terminal reader. Returns `false` when there is nothing to show
+    /// so the caller can explain that instead of opening an empty pane.
+    pub fn open_terminals_viewer(&mut self) -> bool {
+        if self.terminal_count() == 0 {
+            return false;
+        }
+        self.close_transcript_viewer();
+        self.close_nested_agent_viewer();
+        self.close_workspace_diff_viewer();
+        self.close_review_issue_viewer();
+        self.terminals_viewer = true;
+        self.terminals_selected = 0;
+        // Running terminals are tailed, so start pinned to the newest output.
+        self.terminals_scroll_offset = usize::MAX;
+        true
+    }
+
+    pub fn close_terminals_viewer(&mut self) {
+        self.terminals_viewer = false;
+        self.terminals_selected = 0;
+        self.terminals_scroll_offset = 0;
+    }
+
+    pub fn select_terminal(&mut self, next: bool) {
+        let count = self.terminal_count();
+        if count == 0 {
+            self.terminals_selected = 0;
+            self.terminals_scroll_offset = 0;
+            return;
+        }
+        let current = self.terminals_selected.min(count - 1);
+        self.terminals_selected = if next {
+            (current + 1) % count
+        } else if current == 0 {
+            count - 1
+        } else {
+            current - 1
+        };
+        self.terminals_scroll_offset = usize::MAX;
+    }
+
     pub fn open_review_issue_viewer(&mut self) {
         self.close_nested_agent_viewer();
         self.close_transcript_viewer();
         self.close_workspace_diff_viewer();
+        self.close_terminals_viewer();
         self.review_issue_viewer = true;
         self.review_issue_scroll_offset = 0;
     }
@@ -2328,6 +2560,7 @@ impl AppState {
         self.close_nested_agent_viewer();
         self.close_transcript_viewer();
         self.close_review_issue_viewer();
+        self.close_terminals_viewer();
         self.workspace_diff_viewer = true;
         self.workspace_diff_selected_file = 0;
         self.workspace_diff_scroll_offset = 0;
@@ -4461,6 +4694,7 @@ impl AppState {
                 let suppressed = is_subagent_transport_call(&tc);
                 self.tool_calls
                     .insert(id.clone(), ToolCallView::from_tool_call(&tc));
+                self.register_terminals_for_tool_call(&id);
                 if suppressed {
                     self.suppressed_tool_calls.insert(id);
                 } else {
@@ -4496,9 +4730,10 @@ impl AppState {
                     }
                     self.tool_calls.insert(id.clone(), view);
                     if !suppressed {
-                        self.transcript.push(Entry::ToolCall(id));
+                        self.transcript.push(Entry::ToolCall(id.clone()));
                     }
                 }
+                self.register_terminals_for_tool_call(&id);
                 self.bump_transcript_revision();
             }
             SessionUpdate::Plan(Plan { entries, .. }) => {
@@ -7333,6 +7568,126 @@ mod tests {
         }
     }
 
+    /// Build a tool call that owns one terminal, the shape `/terminals` reads.
+    fn terminal_tool_call(call_id: &'static str, title: &str, terminal_id: &str) -> UiEvent {
+        let mut fields = agent_client_protocol::schema::v1::ToolCallUpdateFields::default();
+        fields.title = Some(title.to_string());
+        fields.content = Some(vec![ToolCallContent::Terminal(Terminal::new(
+            agent_client_protocol::schema::v1::TerminalId::new(terminal_id.to_string()),
+        ))]);
+        UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            call_id, fields,
+        )))
+    }
+
+    /// A terminal is registered the moment the agent starts it, not when it
+    /// exits — which is the whole point, since a background one never exits.
+    #[test]
+    fn starting_a_terminal_registers_it_as_running() {
+        let mut state = AppState::new();
+        state.apply_event(terminal_tool_call("call-1", "npm run dev", "term-1"));
+
+        let summaries = state.terminal_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].label, "npm run dev");
+        assert!(summaries[0].is_running(), "no exit status means running");
+        assert_eq!(state.running_terminal_count(), 1);
+    }
+
+    #[test]
+    fn terminal_output_and_exit_status_reach_the_viewer() {
+        let mut state = AppState::new();
+        state.apply_event(terminal_tool_call("call-1", "cargo test", "term-1"));
+        state.apply_event(UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "running 3 tests".to_string(),
+            truncated: false,
+            exit_status: None,
+        }));
+
+        let summaries = state.terminal_summaries();
+        assert_eq!(state.terminal_output_at(0), Some("running 3 tests"));
+        assert!(summaries[0].is_running());
+
+        state.apply_event(UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "test result: ok".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        }));
+        let summaries = state.terminal_summaries();
+        assert!(!summaries[0].is_running(), "an exit status ends the run");
+        assert_eq!(state.running_terminal_count(), 0);
+    }
+
+    /// Running terminals are the ones the user needs to reach, so they lead.
+    #[test]
+    fn running_terminals_sort_ahead_of_finished_ones() {
+        let mut state = AppState::new();
+        state.apply_event(terminal_tool_call("call-1", "finished", "term-1"));
+        state.apply_event(terminal_tool_call("call-2", "still going", "term-2"));
+        state.apply_event(UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: String::new(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        }));
+
+        let summaries = state.terminal_summaries();
+        let labels: Vec<&str> = summaries
+            .iter()
+            .map(|summary| summary.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["still going", "finished"]);
+    }
+
+    #[test]
+    fn terminals_viewer_opens_only_when_there_is_something_to_show() {
+        let mut state = AppState::new();
+        assert!(
+            !state.open_terminals_viewer(),
+            "opening must fail with no terminals so the caller can explain"
+        );
+        assert!(!state.terminals_viewer);
+
+        state.apply_event(terminal_tool_call("call-1", "npm run dev", "term-1"));
+        assert!(state.open_terminals_viewer());
+        assert!(state.terminals_viewer);
+
+        state.close_terminals_viewer();
+        assert!(!state.terminals_viewer);
+        assert_eq!(state.terminals_scroll_offset, 0);
+    }
+
+    #[test]
+    fn selecting_terminals_wraps_in_both_directions() {
+        let mut state = AppState::new();
+        state.apply_event(terminal_tool_call("call-1", "first", "term-1"));
+        state.apply_event(terminal_tool_call("call-2", "second", "term-2"));
+        assert!(state.open_terminals_viewer());
+        assert_eq!(state.terminals_selected, 0);
+
+        state.select_terminal(true);
+        assert_eq!(state.terminals_selected, 1);
+        state.select_terminal(true);
+        assert_eq!(state.terminals_selected, 0, "forward wraps to the start");
+        state.select_terminal(false);
+        assert_eq!(state.terminals_selected, 1, "backward wraps to the end");
+    }
+
+    /// Opening another reader must not leave two viewers believing they own
+    /// the screen.
+    #[test]
+    fn opening_another_viewer_closes_the_terminals_reader() {
+        let mut state = AppState::new();
+        state.apply_event(terminal_tool_call("call-1", "npm run dev", "term-1"));
+        assert!(state.open_terminals_viewer());
+
+        state.open_workspace_diff_viewer();
+        assert!(!state.terminals_viewer);
+        assert!(state.workspace_diff_viewer);
+    }
+
     #[test]
     fn tool_call_content_diff_and_terminal_are_kept_structured() {
         let mut s = AppState::new();
@@ -9432,6 +9787,7 @@ mod tests {
                 "export",
                 "agents",
                 "subagents",
+                "terminals",
                 "review",
                 "mjconfig",
                 "ragnarok"
@@ -9470,6 +9826,7 @@ mod tests {
                 "export",
                 "agents",
                 "subagents",
+                "terminals",
                 "review",
                 "mjconfig",
                 "ragnarok",
@@ -9515,6 +9872,7 @@ mod tests {
                 "export",
                 "agents",
                 "subagents",
+                "terminals",
                 "review",
                 "mjconfig",
                 "ragnarok",
@@ -9544,7 +9902,7 @@ mod tests {
             "show active model selections and usage"
         );
         assert_eq!(
-            s.available_commands[10].description,
+            s.available_commands[11].description,
             "fork the current session (unstable ACP extension)"
         );
     }
@@ -9574,6 +9932,7 @@ mod tests {
                 "export",
                 "agents",
                 "subagents",
+                "terminals",
                 "review",
                 "mjconfig",
                 "ragnarok",

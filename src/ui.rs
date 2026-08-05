@@ -462,10 +462,16 @@ fn inline_reader_accepts_input(state: &AppState) -> bool {
         || (state.workspace_diff_viewer
             && !state.has_pending_permission()
             && !state.has_pending_elicitation())
+        || (state.terminals_viewer
+            && !state.has_pending_permission()
+            && !state.has_pending_elicitation())
 }
 
 fn inline_reader_is_open(state: &AppState) -> bool {
-    state.transcript_viewer || state.nested_agent_viewer || state.workspace_diff_viewer
+    state.transcript_viewer
+        || state.nested_agent_viewer
+        || state.workspace_diff_viewer
+        || state.terminals_viewer
 }
 
 #[derive(Debug)]
@@ -1860,6 +1866,7 @@ async fn ui_loop(
             && !state.transcript_viewer
             && !state.nested_agent_viewer
             && !state.workspace_diff_viewer
+            && !state.terminals_viewer
             && state.ragnarok.is_none()
             && !inline_resize_reflow.is_pending()
         {
@@ -2285,6 +2292,7 @@ fn should_run_inline_resize_reflow(
         && !state.transcript_viewer
         && !state.nested_agent_viewer
         && !state.workspace_diff_viewer
+        && !state.terminals_viewer
 }
 
 struct InlineResizeReflowSnapshot {
@@ -2654,7 +2662,10 @@ fn inline_viewport_resize_plan(
 fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
     // Full-history readers take the whole terminal (minus one row) so long
     // documents and complete nested-actor rosters are calm to page through.
-    if (state.transcript_viewer || state.nested_agent_viewer || state.workspace_diff_viewer)
+    if (state.transcript_viewer
+        || state.nested_agent_viewer
+        || state.workspace_diff_viewer
+        || state.terminals_viewer)
         && !state.has_pending_permission()
         && !state.has_pending_elicitation()
     {
@@ -2794,7 +2805,10 @@ fn handle_crossterm(
         CtEvent::Mouse(mouse) => {
             // The diff reader does not support mouse scrolling yet. In
             // particular, do not mutate the hidden transcript's offset.
-            if state.workspace_diff_viewer || state.nested_agent_viewer || state.review_issue_viewer
+            if state.workspace_diff_viewer
+                || state.nested_agent_viewer
+                || state.review_issue_viewer
+                || state.terminals_viewer
             {
                 return TerminalRequest::None;
             } else if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
@@ -2944,6 +2958,10 @@ fn handle_crossterm(
             _ => {}
         }
         return inline_repair_request(mode);
+    }
+    if state.terminals_viewer && !state.has_pending_permission() && !state.has_pending_elicitation()
+    {
+        return handle_terminals_viewer_key(state, key.modifiers, key.code, mode);
     }
     if state.nested_agent_viewer
         && !state.has_pending_permission()
@@ -4477,6 +4495,49 @@ fn handle_nested_agent_viewer_key(
     TerminalRequest::None
 }
 
+fn handle_terminals_viewer_key(
+    state: &mut AppState,
+    modifiers: KeyModifiers,
+    code: KeyCode,
+    mode: UiMode,
+) -> TerminalRequest {
+    if matches!(code, KeyCode::Esc) || (modifiers.is_empty() && matches!(code, KeyCode::Char('q')))
+    {
+        state.close_terminals_viewer();
+        return inline_repair_request(mode);
+    }
+
+    match code {
+        KeyCode::Left | KeyCode::Char('p') if modifiers.is_empty() => state.select_terminal(false),
+        KeyCode::Right | KeyCode::Char('n') | KeyCode::Tab if modifiers.is_empty() => {
+            state.select_terminal(true)
+        }
+        KeyCode::BackTab => state.select_terminal(false),
+        KeyCode::Up => {
+            state.terminals_scroll_offset = state.terminals_scroll_offset.saturating_sub(1)
+        }
+        KeyCode::Down => {
+            state.terminals_scroll_offset = state.terminals_scroll_offset.saturating_add(1)
+        }
+        KeyCode::PageUp => {
+            state.terminals_scroll_offset = state
+                .terminals_scroll_offset
+                .saturating_sub(TRANSCRIPT_SCROLL_PAGE_STEP)
+        }
+        KeyCode::PageDown => {
+            state.terminals_scroll_offset = state
+                .terminals_scroll_offset
+                .saturating_add(TRANSCRIPT_SCROLL_PAGE_STEP)
+        }
+        KeyCode::Home => state.terminals_scroll_offset = 0,
+        // `usize::MAX` is the "pin to newest" sentinel the draw pass clamps,
+        // which keeps a running terminal tailing as output arrives.
+        KeyCode::End => state.terminals_scroll_offset = usize::MAX,
+        _ => {}
+    }
+    TerminalRequest::None
+}
+
 fn handle_workspace_diff_viewer_key(
     state: &mut AppState,
     modifiers: KeyModifiers,
@@ -4733,6 +4794,17 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
                 StatusKind::Warning,
                 format!("transcript export failed: {e:#}"),
             ),
+        }
+        return;
+    }
+
+    if images.is_empty() && text == "/terminals" {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        if !state.open_terminals_viewer() {
+            state.record_status_message(StatusKind::Info, "no terminals started this session");
         }
         return;
     }
@@ -6200,12 +6272,14 @@ fn draw(
 
     let queued_row = queued_prompt_row_count(state);
     let workflow_rows = workflow_progress_row_count(state);
+    let terminal_rows = running_terminals_row_count(state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(1),
             Constraint::Length(workflow_rows),
+            Constraint::Length(terminal_rows),
             Constraint::Length(queued_row),
             Constraint::Length(input_height),
             Constraint::Length(usage_quota_rows),
@@ -6219,15 +6293,18 @@ fn draw(
         draw_nested_agent_viewer(f, chunks[0], state, false);
     } else if state.workspace_diff_viewer {
         draw_workspace_diff_viewer(f, chunks[0], state, false);
+    } else if state.terminals_viewer {
+        draw_terminals_viewer(f, chunks[0], state, false);
     } else {
         draw_transcript(f, chunks[0], state, transcript_scroll);
     }
     draw_header(f, chunks[1], state);
     draw_workflow_progress_rows(f, chunks[2], state);
-    draw_queued_prompt_row(f, chunks[3], state);
-    draw_input(f, chunks[4], state, mode);
-    draw_usage_quota_row(f, chunks[5], state);
-    draw_status_line(f, chunks[6], state);
+    draw_running_terminals_row(f, chunks[3], state);
+    draw_queued_prompt_row(f, chunks[4], state);
+    draw_input(f, chunks[5], state, mode);
+    draw_usage_quota_row(f, chunks[6], state);
+    draw_status_line(f, chunks[7], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -6321,6 +6398,7 @@ fn inline_transcript_tail_height(state: &AppState, area: Rect) -> u16 {
     }
     let reserved_rows = 1u16
         .saturating_add(workflow_progress_row_count(state))
+        .saturating_add(running_terminals_row_count(state))
         .saturating_add(queued_prompt_row_count(state))
         .saturating_add(MIN_INPUT_HEIGHT)
         .saturating_add(usage_quota_row_count(state, area.width) as u16)
@@ -6330,13 +6408,14 @@ fn inline_transcript_tail_height(state: &AppState, area: Rect) -> u16 {
         .min(INLINE_TRANSCRIPT_TAIL_MAX_ROWS as u16)
 }
 
-fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 7] {
+fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 8] {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(inline_transcript_tail_height(state, area)),
             Constraint::Length(1),
             Constraint::Length(workflow_progress_row_count(state)),
+            Constraint::Length(running_terminals_row_count(state)),
             Constraint::Length(queued_prompt_row_count(state)),
             Constraint::Min(MIN_INPUT_HEIGHT),
             Constraint::Length(usage_quota_row_count(state, area.width) as u16),
@@ -6413,6 +6492,10 @@ fn draw_inline_chat(
         return;
     }
 
+    if state.terminals_viewer {
+        draw_terminals_viewer(f, f.area(), state, true);
+        return;
+    }
     if state.nested_agent_viewer {
         draw_nested_agent_viewer(f, f.area(), state, true);
         return;
@@ -6428,10 +6511,11 @@ fn draw_inline_chat(
     draw_inline_transcript_tail(f, chunks[0], state);
     draw_header(f, chunks[1], state);
     draw_workflow_progress_rows(f, chunks[2], state);
-    draw_queued_prompt_row(f, chunks[3], state);
-    draw_input(f, chunks[4], state, UiMode::InlineChat);
-    draw_usage_quota_row(f, chunks[5], state);
-    draw_status_line(f, chunks[6], state);
+    draw_running_terminals_row(f, chunks[3], state);
+    draw_queued_prompt_row(f, chunks[4], state);
+    draw_input(f, chunks[5], state, UiMode::InlineChat);
+    draw_usage_quota_row(f, chunks[6], state);
+    draw_status_line(f, chunks[7], state);
 
     if state.autocomplete.visible
         && !state.has_pending_permission()
@@ -7213,6 +7297,157 @@ fn render_nested_agent_lines(
 /// On-demand reader for every nested implementation and review actor. The
 /// same rendering path is used in inline and fullscreen modes so opening the
 /// reader never changes terminal ownership.
+/// Reader for agent-started terminals.
+///
+/// Deliberately separate from the transcript: a running terminal has no final
+/// state to record, so it is presented as live state you go look at rather
+/// than as history that scrolls past.
+fn draw_terminals_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppState, inline: bool) {
+    if inline {
+        f.render_widget(Clear, area);
+    }
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    let footer = "Esc close · Left/Right terminal · Up/Down scroll · Fn+Up/Down page · Home/End";
+    #[cfg(not(target_os = "macos"))]
+    let footer = "Esc close · Left/Right terminal · Up/Down scroll · PgUp/PgDn page · Home/End";
+    let footer_height = Paragraph::new(footer)
+        .wrap(Wrap { trim: false })
+        .line_count(area.width)
+        .max(1)
+        .min(usize::from(u16::MAX)) as u16;
+
+    let summaries = state.terminal_summaries();
+    let roster_rows = summaries.len().clamp(1, usize::from(u16::MAX)) as u16;
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(roster_rows.saturating_add(2)),
+            Constraint::Min(1),
+            Constraint::Length(footer_height),
+        ])
+        .split(area);
+
+    let running = summaries.iter().filter(|s| s.is_running()).count();
+    let roster_title = if running > 0 {
+        format!(" terminals — {running} of {} running ", summaries.len())
+    } else {
+        " terminals — none running ".to_string()
+    };
+    let roster_block = Block::default()
+        .borders(Borders::ALL)
+        .title(roster_title)
+        .style(Style::default().fg(state.theme.agent));
+    let roster_inner = roster_block.inner(layout[0]);
+    f.render_widget(roster_block, layout[0]);
+
+    let selected_index = state
+        .terminals_selected
+        .min(summaries.len().saturating_sub(1));
+    if roster_inner.width > 0 && roster_inner.height > 0 {
+        let roster = summaries
+            .iter()
+            .enumerate()
+            .map(|(index, summary)| {
+                let marker = if index == selected_index { "›" } else { " " };
+                let status = match &summary.exit_status {
+                    Some(status) => terminal_exit_status_label(status),
+                    None => "running".to_string(),
+                };
+                let style = if index == selected_index {
+                    Style::default()
+                        .fg(state.theme.agent)
+                        .add_modifier(Modifier::BOLD)
+                } else if summary.is_running() {
+                    Style::default().fg(state.theme.secondary)
+                } else {
+                    Style::default().fg(state.theme.thought)
+                };
+                Line::from(vec![Span::styled(
+                    truncate_text_to_width(
+                        format!("{marker} {} · {status}", summary.label),
+                        roster_inner.width,
+                    ),
+                    style,
+                )])
+            })
+            .collect::<Vec<_>>();
+        let visible = usize::from(roster_inner.height);
+        let start = selected_index
+            .saturating_sub(visible.saturating_sub(1))
+            .min(roster.len().saturating_sub(visible));
+        f.render_widget(
+            Paragraph::new(
+                roster
+                    .into_iter()
+                    .skip(start)
+                    .take(visible)
+                    .collect::<Vec<_>>(),
+            ),
+            roster_inner,
+        );
+    }
+
+    let selected = summaries.get(selected_index);
+    let output_title = match selected {
+        Some(summary) if summary.truncated => format!(" {} · output truncated ", summary.label),
+        Some(summary) => format!(" {} ", summary.label),
+        None => " output ".to_string(),
+    };
+    let output_block = Block::default()
+        .borders(Borders::ALL)
+        .title(output_title)
+        .style(Style::default().fg(state.theme.agent));
+    let output_inner = output_block.inner(layout[1]);
+    f.render_widget(output_block, layout[1]);
+
+    if output_inner.width > 0 && output_inner.height > 0 {
+        // Borrowed, not cloned: a terminal buffer can reach a megabyte and
+        // this runs on every frame the viewer is open.
+        let body = state.terminal_output_at(selected_index).unwrap_or_default();
+        let lines: Vec<Line<'static>> = if body.trim().is_empty() {
+            vec![Line::from(Span::styled(
+                "no output yet".to_string(),
+                Style::default().fg(state.theme.thought),
+            ))]
+        } else {
+            // Snapshots are already ANSI/VT-sanitized upstream in `acp.rs`, and
+            // the viewer deliberately shows the full output rather than the
+            // transcript's collapsed preview.
+            body.split('\n')
+                .map(|line| Line::from(line.to_string()))
+                .collect()
+        };
+        let total = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(output_inner.width);
+        let max_offset = total.saturating_sub(usize::from(output_inner.height));
+        // Clamp the "pin to newest" sentinel here, where the rendered height
+        // is finally known.
+        let offset = state.terminals_scroll_offset.min(max_offset);
+        state.terminals_scroll_offset = offset;
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((offset.min(usize::from(u16::MAX)) as u16, 0)),
+            output_inner,
+        );
+    }
+
+    let footer_area = layout[2];
+    if footer_area.height > 0 && footer_area.width > 0 {
+        f.render_widget(
+            Paragraph::new(footer)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(state.theme.thought)),
+            footer_area,
+        );
+    }
+}
+
 fn draw_nested_agent_viewer(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -8596,6 +8831,7 @@ const AGENT_GLYPH: &str = "●";
 const SUBAGENT_GLYPH: &str = "◆";
 const THOUGHT_GLYPH: &str = "○";
 const SUBAGENT_THOUGHT_GLYPH: &str = "◇";
+const TERMINAL_GLYPH: &str = "▣";
 const ROLE_GUTTER_WIDTH: u16 = 2;
 
 fn push_role_plain_message(
@@ -11151,6 +11387,48 @@ fn workflow_progress_row_count(state: &AppState) -> u16 {
     let visible = count.min(WORKFLOW_PROGRESS_VISIBLE_ROWS);
     let overflow = usize::from(count > WORKFLOW_PROGRESS_VISIBLE_ROWS);
     (visible + overflow).min(u16::MAX as usize) as u16
+}
+
+/// One row while any agent-started terminal is still running.
+///
+/// A running terminal has no natural place in the transcript — it never
+/// finishes, so it can never become a settled record. This row is the standing
+/// affordance for it: it says the terminals exist and how to reach them.
+fn running_terminals_row_count(state: &AppState) -> u16 {
+    u16::from(state.running_terminal_count() > 0)
+}
+
+fn running_terminals_row_line(state: &AppState, width: u16) -> Option<Line<'static>> {
+    let running = state.running_terminal_count();
+    if running == 0 || width == 0 {
+        return None;
+    }
+    let label = state
+        .first_running_terminal_label()
+        .unwrap_or("terminal")
+        .to_string();
+    // Name the single running terminal; past that a count reads better than a
+    // truncated list.
+    let subject = if running == 1 {
+        label
+    } else {
+        format!("{running} terminals running")
+    };
+    let text = format!("{TERMINAL_GLYPH} {subject} · /terminals to view");
+    Some(Line::from(vec![Span::styled(
+        truncate_text_to_width(text, width),
+        Style::default().fg(state.theme.secondary),
+    )]))
+}
+
+fn draw_running_terminals_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let Some(line) = running_terminals_row_line(state, area.width) else {
+        return;
+    };
+    f.render_widget(Paragraph::new(vec![line]), area);
 }
 
 /// One stable line per visible delegation or review workflow, shared by inline
@@ -16538,6 +16816,177 @@ mod tests {
         assert!(!state.has_active_workflows());
     }
 
+    fn terminal_tool_call_event(call_id: &'static str, title: &str, terminal_id: &str) -> UiEvent {
+        let mut fields = agent_client_protocol::schema::v1::ToolCallUpdateFields::default();
+        fields.title = Some(title.to_string());
+        fields.content = Some(vec![
+            agent_client_protocol::schema::v1::ToolCallContent::Terminal(
+                agent_client_protocol::schema::v1::Terminal::new(
+                    agent_client_protocol::schema::v1::TerminalId::new(terminal_id.to_string()),
+                ),
+            ),
+        ]);
+        UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            agent_client_protocol::schema::v1::ToolCallUpdate::new(call_id, fields),
+        ))
+    }
+
+    /// The affordance only exists while something is running, and it has to
+    /// name the way to reach it or it is just noise.
+    #[test]
+    fn running_terminal_row_names_the_terminal_and_the_command() {
+        let mut state = AppState::new();
+        assert_eq!(running_terminals_row_count(&state), 0, "idle shows no row");
+
+        state.apply_event(terminal_tool_call_event("call-1", "npm run dev", "term-1"));
+        assert_eq!(running_terminals_row_count(&state), 1);
+        let line = running_terminals_row_line(&state, 80).expect("row");
+        let text = line_text(&line);
+        assert!(text.contains("npm run dev"), "got {text:?}");
+        assert!(text.contains("/terminals"), "got {text:?}");
+    }
+
+    #[test]
+    fn running_terminal_row_counts_beyond_the_first_and_clears_on_exit() {
+        let mut state = AppState::new();
+        state.apply_event(terminal_tool_call_event("call-1", "npm run dev", "term-1"));
+        state.apply_event(terminal_tool_call_event("call-2", "cargo watch", "term-2"));
+        let text = line_text(&running_terminals_row_line(&state, 80).expect("row"));
+        assert!(text.contains("2 terminals running"), "got {text:?}");
+
+        for terminal_id in ["term-1", "term-2"] {
+            state.apply_event(UiEvent::TerminalOutput(
+                crate::event::TerminalOutputSnapshot {
+                    terminal_id: terminal_id.to_string(),
+                    output: String::new(),
+                    truncated: false,
+                    exit_status: Some(
+                        agent_client_protocol::schema::v1::TerminalExitStatus::new().exit_code(0),
+                    ),
+                },
+            ));
+        }
+        assert_eq!(
+            running_terminals_row_count(&state),
+            0,
+            "the row must not linger once everything has exited"
+        );
+        assert!(running_terminals_row_line(&state, 80).is_none());
+    }
+
+    #[test]
+    fn terminals_viewer_renders_the_selected_terminal_output() {
+        let mut state = AppState::new();
+        state.apply_event(terminal_tool_call_event("call-1", "npm run dev", "term-1"));
+        state.apply_event(terminal_tool_call_event("call-2", "cargo watch", "term-2"));
+        state.apply_event(UiEvent::TerminalOutput(
+            crate::event::TerminalOutputSnapshot {
+                terminal_id: "term-1".to_string(),
+                output: "server listening on 3000".to_string(),
+                truncated: false,
+                exit_status: None,
+            },
+        ));
+        assert!(state.open_terminals_viewer());
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_terminals_viewer(frame, frame.area(), &mut state, true))
+            .expect("draw");
+        let lines = buffer_lines(terminal.backend().buffer());
+        let text = lines.join("\n");
+        assert!(text.contains("npm run dev"), "roster missing: {text}");
+        assert!(text.contains("cargo watch"), "roster missing: {text}");
+        assert!(
+            text.contains("server listening on 3000"),
+            "output missing: {text}"
+        );
+        assert!(text.contains("Esc close"), "footer missing: {text}");
+
+        // Switching selection shows the other terminal, which has no output yet.
+        state.select_terminal(true);
+        terminal
+            .draw(|frame| draw_terminals_viewer(frame, frame.area(), &mut state, true))
+            .expect("draw");
+        let text = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(text.contains("no output yet"), "got {text}");
+    }
+
+    /// The reader takes the whole inline viewport like the other readers, so
+    /// it has to count as active for mouse capture and viewport geometry.
+    /// Otherwise the pane is sized full-height but never repositioned.
+    #[test]
+    fn open_terminals_viewer_counts_as_an_active_inline_reader() {
+        let mut state = AppState::new();
+        state.apply_event(terminal_tool_call_event("call-1", "npm run dev", "term-1"));
+        assert!(!inline_reader_accepts_input(&state));
+        assert!(state.open_terminals_viewer());
+
+        assert!(inline_reader_is_open(&state));
+        assert!(
+            inline_reader_accepts_input(&state),
+            "the reader owns the viewport, so it must accept input"
+        );
+        let size = Size {
+            width: 80,
+            height: 40,
+        };
+        assert!(
+            desired_inline_height(&state, size) > INLINE_CHAT_HEIGHT,
+            "a full-height reader must grow the inline viewport"
+        );
+    }
+
+    /// A wheel event while the reader is open must not reach the transcript
+    /// hidden underneath it.
+    #[test]
+    fn terminals_viewer_swallows_mouse_scroll() {
+        let mut state = AppState::new();
+        for index in 0..40 {
+            state.push_system_message(format!("line {index}"));
+        }
+        state.apply_event(terminal_tool_call_event("call-1", "npm run dev", "term-1"));
+        assert!(state.open_terminals_viewer());
+        let before = state.scroll_offset;
+
+        let (_tx, rx) = mpsc::unbounded_channel::<UiCommand>();
+        drop(rx);
+        let request = handle_crossterm(
+            &mut state,
+            &_tx,
+            CtEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::empty(),
+            }),
+        );
+
+        assert!(matches!(request, TerminalRequest::None));
+        assert_eq!(
+            state.scroll_offset, before,
+            "the hidden transcript must not move"
+        );
+    }
+
+    /// Esc must hand the keyboard back rather than leaving the reader latched
+    /// over the prompt.
+    #[test]
+    fn terminals_viewer_closes_on_escape() {
+        let mut state = AppState::new();
+        state.apply_event(terminal_tool_call_event("call-1", "npm run dev", "term-1"));
+        assert!(state.open_terminals_viewer());
+
+        let _ = handle_terminals_viewer_key(
+            &mut state,
+            KeyModifiers::empty(),
+            KeyCode::Esc,
+            UiMode::InlineChat,
+        );
+        assert!(!state.terminals_viewer);
+    }
+
     #[test]
     fn nested_agent_viewer_switches_between_separate_implementation_and_review_histories() {
         use crate::workflow::{
@@ -19537,7 +19986,7 @@ mod tests {
         let baseline = desired_inline_height(&state, terminal_size);
         let area = Rect::new(0, 0, terminal_size.width, baseline);
         let baseline_tail_height = inline_transcript_tail_height(&state, area);
-        let baseline_input_area = inline_chat_layout(&state, area)[4];
+        let baseline_input_area = inline_chat_layout(&state, area)[5];
         let mut terminal =
             Terminal::new(TestBackend::new(terminal_size.width, baseline)).expect("terminal");
         terminal
@@ -19583,7 +20032,7 @@ mod tests {
             streamed_header_row, baseline_header_row,
             "streaming must not move the header inside the fixed viewport"
         );
-        let streamed_input_area = inline_chat_layout(&state, area)[4];
+        let streamed_input_area = inline_chat_layout(&state, area)[5];
         assert_eq!(
             streamed_input_area, baseline_input_area,
             "the input panel rendered by the inline layout must not move or resize"
