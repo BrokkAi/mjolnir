@@ -434,4 +434,107 @@ mod tests {
             KeyOutcome::Choose(1)
         );
     }
+
+    #[test]
+    fn navigation_keys_cover_every_selection_boundary() {
+        let opts = options();
+        assert_eq!(
+            key_outcome(KeyCode::Left, KeyModifiers::NONE, 0, &opts),
+            KeyOutcome::Select(1)
+        );
+        assert_eq!(
+            key_outcome(KeyCode::BackTab, KeyModifiers::SHIFT, 1, &opts),
+            KeyOutcome::Select(0)
+        );
+        assert_eq!(
+            key_outcome(KeyCode::Right, KeyModifiers::NONE, 1, &opts),
+            KeyOutcome::Select(0)
+        );
+        assert_eq!(
+            key_outcome(KeyCode::Home, KeyModifiers::NONE, 1, &opts),
+            KeyOutcome::Select(0)
+        );
+        assert_eq!(
+            key_outcome(KeyCode::End, KeyModifiers::NONE, 0, &opts),
+            KeyOutcome::Select(1)
+        );
+        assert_eq!(
+            key_outcome(KeyCode::Char('0'), KeyModifiers::NONE, 0, &opts),
+            KeyOutcome::Ignored
+        );
+        assert_eq!(
+            key_outcome(KeyCode::F(1), KeyModifiers::NONE, 0, &opts),
+            KeyOutcome::Ignored
+        );
+    }
+
+    #[test]
+    fn public_selectors_reject_invalid_options_before_terminal_access() {
+        let error = select_inline("Question", "Footer", &[], 0).unwrap_err();
+        assert!(error.to_string().contains("needs options"));
+
+        let opts = options();
+        let error = select_inline_cancelable("Question", "Footer", &opts, opts.len()).unwrap_err();
+        assert!(error.to_string().contains("valid initial index"));
+    }
+
+    #[test]
+    fn draw_renders_selected_and_unselected_rows() {
+        let opts = options();
+        let mut output = Vec::new();
+
+        draw(
+            &mut output,
+            "Clean up?",
+            "Enter confirms",
+            &opts,
+            1,
+            48,
+            false,
+        )
+        .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Clean up?"));
+        assert!(output.contains("Keep"));
+        assert!(output.contains("leave it"));
+        assert!(output.contains("❯ Remove"));
+        assert!(output.contains("delete it"));
+        assert!(output.contains("Enter confirms"));
+        assert!(output.contains('╭'));
+        assert!(output.contains('╯'));
+    }
+
+    #[test]
+    fn draw_redraws_and_clamps_content_to_narrow_terminals() {
+        let opts = vec![MenuOption {
+            label: "Wide界",
+            hint: "a hint that will be truncated".to_string(),
+            shortcuts: &['w'],
+        }];
+        let mut output = Vec::new();
+
+        draw(
+            &mut output,
+            "a question that will be truncated",
+            "a footer that will be truncated",
+            &opts,
+            0,
+            1,
+            true,
+        )
+        .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.starts_with("\x1b[7A"));
+        assert!(output.contains("Wide界"));
+    }
+
+    #[test]
+    fn layout_helpers_use_display_width() {
+        assert_eq!(menu_height(3), 9);
+        assert_eq!(rule(3), "───");
+        assert_eq!(pad_to_width("界", 4), "界  ");
+        assert_eq!(pad_to_width("already long", 4), "already long");
+    }
 }
