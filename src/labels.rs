@@ -48,3 +48,57 @@ pub fn stop_reason_label(reason: StopReason) -> &'static str {
         _ => "other",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_kind_labels_are_stable_for_every_known_variant() {
+        let cases = [
+            (ToolKind::Read, "read"),
+            (ToolKind::Edit, "edit"),
+            (ToolKind::Delete, "delete"),
+            (ToolKind::Move, "move"),
+            (ToolKind::Search, "search"),
+            (ToolKind::Execute, "execute"),
+            (ToolKind::Think, "think"),
+            (ToolKind::Fetch, "fetch"),
+            (ToolKind::SwitchMode, "switch_mode"),
+            (ToolKind::Other, "other"),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(tool_kind_label(kind), expected);
+        }
+    }
+
+    #[test]
+    fn tool_status_labels_are_stable_for_every_known_variant() {
+        let cases = [
+            (ToolCallStatus::Pending, "pending"),
+            (ToolCallStatus::InProgress, "in_progress"),
+            (ToolCallStatus::Completed, "completed"),
+            (ToolCallStatus::Failed, "failed"),
+        ];
+
+        for (status, expected) in cases {
+            assert_eq!(tool_status_label(status), expected);
+        }
+    }
+
+    #[test]
+    fn stop_reason_labels_are_stable_for_every_known_variant() {
+        let cases = [
+            (StopReason::EndTurn, "end_turn"),
+            (StopReason::MaxTokens, "max_tokens"),
+            (StopReason::MaxTurnRequests, "max_turn_requests"),
+            (StopReason::Refusal, "refusal"),
+            (StopReason::Cancelled, "cancelled"),
+        ];
+
+        for (reason, expected) in cases {
+            assert_eq!(stop_reason_label(reason), expected);
+        }
+    }
+}
