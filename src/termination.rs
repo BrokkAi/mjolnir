@@ -183,12 +183,14 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_cancellation_fans_out_to_late_subscribers() {
+        let lock = INTERRUPT_SUPPRESSION_TEST_LOCK.lock().unwrap();
         let coordinator = Coordinator {
             token: CancellationToken::new(),
             signals_seen: Arc::new(AtomicU8::new(0)),
         };
         let early = coordinator.token().child_token();
         coordinator.received_signal(0);
+        drop(lock);
         let late = coordinator.token().child_token();
         early.cancelled().await;
         late.cancelled().await;
