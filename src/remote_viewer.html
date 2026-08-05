@@ -6710,9 +6710,12 @@
 
       function canMergeToolPlaceholder(titleEntry, bodyEntry) {
         const title = titleEntry.text || "";
+        const titleActor = typeof titleEntry.actor === "string" ? titleEntry.actor.toLowerCase() : "";
+        const bodyActor = typeof bodyEntry.actor === "string" ? bodyEntry.actor.toLowerCase() : "";
         return (
           entryKind(titleEntry) === "tool"
           && entryKind(bodyEntry) === "tool"
+          && titleActor === bodyActor
           && title.trim()
           && title.trim() !== "tool"
           && !title.includes("\n")

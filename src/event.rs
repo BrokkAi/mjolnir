@@ -88,6 +88,10 @@ pub enum UiEvent {
     Side(Box<UiEvent>),
     /// Side startup failed after the UI switched views.
     SideStartFailed { message: String },
+    /// The remote viewer asked the attached local UI to enter side mode.
+    RemoteSideStartRequested { initial_prompt: Option<String> },
+    /// The remote viewer closed a side conversation that the local UI opened.
+    RemoteSideExitRequested,
     /// A session has been opened or loaded; future updates carry this session id.
     SessionStarted { session_id: String, resumed: bool },
     /// A streaming or status update from the agent. We forward the raw

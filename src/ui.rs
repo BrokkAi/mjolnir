@@ -1349,7 +1349,9 @@ fn streaming_redraw_budget(mode: UiMode) -> Duration {
 fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
     match event {
         UiEvent::Side(event) => ui_event_redraw_cause(event),
-        UiEvent::SideStartFailed { .. } => RedrawCause::Interactive,
+        UiEvent::SideStartFailed { .. }
+        | UiEvent::RemoteSideStartRequested { .. }
+        | UiEvent::RemoteSideExitRequested => RedrawCause::Interactive,
         UiEvent::SessionUpdate(_) | UiEvent::TerminalOutput(_) => RedrawCause::Stream,
         // Nested activity only rewrites private actor detail, so it coalesces
         // with streaming output. Lifecycle events also update transcript and
@@ -1401,6 +1403,35 @@ fn is_side_remote_decision(event: &UiEvent) -> bool {
             if request_id.starts_with("side:")
                 || request_id.starts_with("elicitation:side:")
     )
+}
+
+fn apply_remote_side_lifecycle(state: &mut AppState, side_visible: bool, event: &UiEvent) -> bool {
+    match event {
+        UiEvent::RemoteSideStartRequested { initial_prompt } => {
+            if side_visible || state.side_start_requested {
+                state.record_status_message(
+                    StatusKind::Warning,
+                    "a side conversation is already active".to_string(),
+                );
+            } else {
+                state.side_start_requested = true;
+                state.side_initial_question = initial_prompt.clone();
+            }
+            true
+        }
+        UiEvent::RemoteSideExitRequested => {
+            if side_visible {
+                state.side_exit_requested = true;
+            } else {
+                state.record_status_message(
+                    StatusKind::Warning,
+                    "no side conversation is active".to_string(),
+                );
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 fn drain_hidden_main_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
@@ -1635,6 +1666,10 @@ async fn ui_loop(
             maybe_ev = event_rx.recv(), if !state.runtime_closed || main_state.is_some() => {
                 match maybe_ev {
                     Some(ev) => {
+                        if apply_remote_side_lifecycle(&mut state, main_state.is_some(), &ev) {
+                            pending_redraw.mark_interactive();
+                            continue;
+                        }
                         let ev = match ev {
                             UiEvent::Side(event) if main_state.is_some() => *event,
                             UiEvent::Side(_) => continue,
@@ -18899,6 +18934,29 @@ mod tests {
                 option_id: "allow".to_string(),
             }
         ));
+    }
+
+    #[test]
+    fn remote_side_lifecycle_drives_the_attached_ui_state() {
+        let mut state = AppState::new();
+
+        assert!(apply_remote_side_lifecycle(
+            &mut state,
+            false,
+            &UiEvent::RemoteSideStartRequested {
+                initial_prompt: Some("explain this".to_string()),
+            },
+        ));
+        assert!(state.side_start_requested);
+        assert_eq!(state.side_initial_question.as_deref(), Some("explain this"));
+
+        state.side_start_requested = false;
+        assert!(apply_remote_side_lifecycle(
+            &mut state,
+            true,
+            &UiEvent::RemoteSideExitRequested,
+        ));
+        assert!(state.side_exit_requested);
     }
 
     #[test]

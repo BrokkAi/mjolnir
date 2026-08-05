@@ -3715,6 +3715,7 @@ impl AppState {
             UiEvent::SideStartFailed { message } => {
                 self.record_status_message(StatusKind::Warning, message);
             }
+            UiEvent::RemoteSideStartRequested { .. } | UiEvent::RemoteSideExitRequested => {}
             UiEvent::Warning(msg) => {
                 self.record_status_message(StatusKind::Warning, msg);
             }

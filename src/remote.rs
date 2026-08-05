@@ -1079,6 +1079,34 @@ fn remote_queued_prompt_action(
     }
 }
 
+fn dispatch_remote_side_start(
+    command_tx: &tokio::sync::mpsc::UnboundedSender<UiCommand>,
+    ui_event_tx: Option<&tokio::sync::mpsc::UnboundedSender<UiEvent>>,
+    attached_ui: bool,
+    initial_prompt: Option<String>,
+) -> bool {
+    if attached_ui {
+        return ui_event_tx.is_some_and(|tx| {
+            tx.send(UiEvent::RemoteSideStartRequested { initial_prompt })
+                .is_ok()
+        });
+    }
+    command_tx
+        .send(UiCommand::StartSide { initial_prompt })
+        .is_ok()
+}
+
+fn dispatch_remote_side_exit(
+    command_tx: &tokio::sync::mpsc::UnboundedSender<UiCommand>,
+    ui_event_tx: Option<&tokio::sync::mpsc::UnboundedSender<UiEvent>>,
+    attached_ui: bool,
+) -> bool {
+    if attached_ui {
+        return ui_event_tx.is_some_and(|tx| tx.send(UiEvent::RemoteSideExitRequested).is_ok());
+    }
+    command_tx.send(UiCommand::ExitSide).is_ok()
+}
+
 fn record_remote_action_error(
     state: &Arc<Mutex<TrackerState>>,
     ui_event_tx: Option<&tokio::sync::mpsc::UnboundedSender<UiEvent>>,
@@ -1271,6 +1299,8 @@ pub struct RemoteSessionTracker {
     /// Channel back to the TUI, kept so the publisher can tell the operator
     /// when the viewer has stopped receiving updates. Absent when headless.
     ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
+    /// Whether side lifecycle actions must keep an attached TUI view in sync.
+    attached_ui: bool,
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -1331,6 +1361,7 @@ struct TrackerState {
     session_fork_supported: bool,
     session_load_supported: bool,
     side_session_supported: bool,
+    side_coordinator_supported: bool,
     sessions_to_disconnect: Vec<String>,
 }
 
@@ -1722,6 +1753,7 @@ impl TrackerState {
             session_fork_supported: false,
             session_load_supported: false,
             side_session_supported: false,
+            side_coordinator_supported: true,
             sessions_to_disconnect: Vec::new(),
         }
     }
@@ -1827,6 +1859,7 @@ impl TrackerState {
                 );
                 self.touch();
             }
+            UiEvent::RemoteSideStartRequested { .. } | UiEvent::RemoteSideExitRequested => {}
             UiEvent::Connected {
                 prompt_images_supported,
                 session_fork_supported,
@@ -1837,7 +1870,8 @@ impl TrackerState {
                 self.prompt_images_supported = *prompt_images_supported;
                 self.session_fork_supported = *session_fork_supported;
                 self.session_load_supported = *session_load_supported;
-                self.side_session_supported = *side_session_supported;
+                self.side_session_supported =
+                    *side_session_supported && self.side_coordinator_supported;
                 self.main_available_commands = available_command_records(
                     &[],
                     self.session_fork_supported,
@@ -2061,6 +2095,8 @@ impl TrackerState {
             }
             UiEvent::Side(_)
             | UiEvent::SideStartFailed { .. }
+            | UiEvent::RemoteSideStartRequested { .. }
+            | UiEvent::RemoteSideExitRequested
             | UiEvent::Connected { .. }
             | UiEvent::SessionConfigOptions { .. }
             | UiEvent::RosterUpdate { .. }
@@ -2865,10 +2901,12 @@ impl RemoteSessionTracker {
         status: TrackerStatusSeed,
         command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
         ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
+        attached_ui: bool,
     ) -> Self {
         let dir = remote_control_dir();
         let connection = build_connection(&dir);
         let mut state = TrackerState::new(project, agent);
+        state.side_coordinator_supported = ui_event_tx.is_some();
         state.worktree = worktree;
         state.model_source = status.model_source;
         state.reasoning_effort = status.reasoning_effort;
@@ -2885,6 +2923,7 @@ impl RemoteSessionTracker {
             next_elicitation_id: Arc::new(AtomicU64::new(1)),
             publish_permissions: ui_event_tx.is_some(),
             ui_event_tx: ui_event_tx.clone(),
+            attached_ui,
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
         tracker.ensure_queue_poller(command_tx.clone(), ui_event_tx.clone());
@@ -2946,6 +2985,7 @@ impl RemoteSessionTracker {
             next_elicitation_id: Arc::new(AtomicU64::new(1)),
             publish_permissions: true,
             ui_event_tx: None,
+            attached_ui: false,
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -3426,6 +3466,7 @@ impl RemoteSessionTracker {
         }
         let tracker = self.clone();
         let state = Arc::clone(&self.state);
+        let attached_ui = self.attached_ui;
         *slot = Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -3589,16 +3630,21 @@ impl RemoteSessionTracker {
                             side_active,
                         ) {
                             RemoteQueuedPromptAction::StartSide(initial_prompt) => {
-                                if command_tx
-                                    .send(UiCommand::StartSide { initial_prompt })
-                                    .is_err()
-                                {
+                                if !dispatch_remote_side_start(
+                                    &command_tx,
+                                    ui_event_tx.as_ref(),
+                                    attached_ui,
+                                    initial_prompt,
+                                ) {
                                     break;
                                 }
                             }
                             RemoteQueuedPromptAction::ExitSide => {
-                                let sent = command_tx.send(UiCommand::ExitSide).is_ok();
-                                if !sent {
+                                if !dispatch_remote_side_exit(
+                                    &command_tx,
+                                    ui_event_tx.as_ref(),
+                                    attached_ui,
+                                ) {
                                     break;
                                 }
                             }
@@ -4071,6 +4117,7 @@ fn start_server_agent_session(
         },
         Some(server_cmd_tx.clone()),
         Some(remote_event_tx),
+        false,
     );
     if let Some(resolved) = roster.as_ref() {
         for warning in &resolved.warnings {
@@ -9516,6 +9563,7 @@ mod tests {
         assert!(viewer.contains("sessionHasCommand(session, \"exit\")"));
         assert!(viewer.contains("queueSessionAction(\"/exit\""));
         assert!(viewer.contains("type exit to return"));
+        assert!(viewer.contains("titleActor === bodyActor"));
     }
 
     #[test]
@@ -12282,6 +12330,74 @@ mod tests {
             remote_queued_prompt_action("/clear".to_string(), false, true, true, true, true, true,),
             RemoteQueuedPromptAction::SendPrompt("/clear".to_string()),
             "main-only commands become literal side prompts"
+        );
+    }
+
+    #[test]
+    fn attached_ui_owns_remote_side_lifecycle_transitions() {
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(dispatch_remote_side_start(
+            &command_tx,
+            Some(&event_tx),
+            true,
+            Some("question".to_string()),
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(UiEvent::RemoteSideStartRequested { initial_prompt })
+                if initial_prompt.as_deref() == Some("question")
+        ));
+        assert!(command_rx.try_recv().is_err());
+
+        assert!(dispatch_remote_side_exit(
+            &command_tx,
+            Some(&event_tx),
+            true,
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(UiEvent::RemoteSideExitRequested)
+        ));
+        assert!(command_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn server_owned_session_receives_remote_side_commands_directly() {
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(dispatch_remote_side_start(&command_tx, None, false, None,));
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(UiCommand::StartSide {
+                initial_prompt: None
+            })
+        ));
+
+        assert!(dispatch_remote_side_exit(&command_tx, None, false));
+        assert!(matches!(command_rx.try_recv(), Ok(UiCommand::ExitSide)));
+    }
+
+    #[test]
+    fn headless_session_does_not_advertise_side_mode_without_a_coordinator() {
+        let mut state = TrackerState::new("project".to_string(), "agent".to_string());
+        state.side_coordinator_supported = false;
+        state.observe_event(&UiEvent::Connected {
+            agent_name: None,
+            agent_version: None,
+            prompt_images_supported: false,
+            session_fork_supported: false,
+            session_load_supported: false,
+            side_session_supported: true,
+            side_session_unsupported_reason: None,
+        });
+        assert!(!state.side_session_supported);
+        assert!(
+            state
+                .available_commands
+                .iter()
+                .all(|command| command.name != REMOTE_BUILTIN_SIDE_COMMAND)
         );
     }
 

@@ -2924,7 +2924,10 @@ async fn run(
                     let boundary = tracker.observe(&event);
                     activity.observe(&event, boundary.as_ref());
                     match event {
-                        UiEvent::Side(_) | UiEvent::SideStartFailed { .. } => {}
+                        UiEvent::Side(_)
+                        | UiEvent::SideStartFailed { .. }
+                        | UiEvent::RemoteSideStartRequested { .. }
+                        | UiEvent::RemoteSideExitRequested => {}
                         UiEvent::Connected { .. } => {}
                         UiEvent::ContextCompacted => {}
                         UiEvent::SessionStarted { session_id: started, .. } if awaiting_session_start => {

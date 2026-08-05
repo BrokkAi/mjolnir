@@ -2178,6 +2178,7 @@ async fn run_session(
         },
         Some(cmd_tx.clone()),
         Some(ui_event_tx.clone()),
+        true,
     );
     let orchestrated = orchestrator::spawn(
         runtime_event_rx,
