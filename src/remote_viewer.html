@@ -6894,12 +6894,12 @@
         for (const prompt of queuedPrompts) {
           const item = cloneTemplate(queueTpl);
           setTimestamp(item.querySelector(".queue-item-time"), prompt.created_at || "");
-          const images = Array.isArray(prompt.images) ? prompt.images : [];
-          item.querySelector(".queue-item-text").textContent = prompt.text || (images.length ? "Image prompt" : "");
+          const imageCount = Number(prompt.image_count ?? (Array.isArray(prompt.images) ? prompt.images.length : 0));
+          item.querySelector(".queue-item-text").textContent = prompt.text || (imageCount ? "Image prompt" : "");
           const attachmentSummary = item.querySelector(".queue-item-attachments");
-          attachmentSummary.hidden = !images.length;
-          attachmentSummary.textContent = images.length
-            ? `${images.length} image${images.length === 1 ? "" : "s"}`
+          attachmentSummary.hidden = !imageCount;
+          attachmentSummary.textContent = imageCount
+            ? `${imageCount} image${imageCount === 1 ? "" : "s"}`
             : "";
           const deleteButton = item.querySelector(".queue-item-delete");
           deleteButton.disabled = deletingQueuedPromptIds.has(prompt.id);

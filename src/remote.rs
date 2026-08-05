@@ -862,6 +862,30 @@ pub struct QueuedPrompt {
     pub created_at: String,
 }
 
+/// Viewer-facing queue row. The full image payload stays in sqlite until the
+/// live session claims it; the browser polls this list every two seconds and
+/// only needs enough metadata to render the row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuedPromptSummary {
+    pub id: i64,
+    pub session_id: String,
+    pub text: String,
+    pub image_count: usize,
+    pub created_at: String,
+}
+
+impl From<QueuedPrompt> for QueuedPromptSummary {
+    fn from(prompt: QueuedPrompt) -> Self {
+        Self {
+            id: prompt.id,
+            session_id: prompt.session_id,
+            text: prompt.text,
+            image_count: prompt.images.len(),
+            created_at: prompt.created_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptCancelRequestRecord {
     pub id: i64,
@@ -6128,7 +6152,7 @@ async fn server_session_launch_state(
 async fn list_queued_prompts(
     State(state): State<ServerState>,
     Query(query): Query<SessionQueueQuery>,
-) -> std::result::Result<Json<Vec<QueuedPrompt>>, (StatusCode, String)> {
+) -> std::result::Result<Json<Vec<QueuedPromptSummary>>, (StatusCode, String)> {
     let db_path = Arc::clone(&state.db_path);
     let session_id = query.session_id;
     let prompts = tokio::task::spawn_blocking(move || {
@@ -6137,7 +6161,9 @@ async fn list_queued_prompts(
     .await
     .map_err(internal_error)?
     .map_err(internal_error)?;
-    Ok(Json(prompts))
+    Ok(Json(
+        prompts.into_iter().map(QueuedPromptSummary::from).collect(),
+    ))
 }
 
 async fn queue_prompt(
@@ -11073,6 +11099,30 @@ mod tests {
         let other = load_queued_prompts(&db_path, "sess-2").expect("load sess-2");
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].text, "other");
+    }
+
+    #[test]
+    fn queued_prompt_summary_omits_polled_image_payloads() {
+        let summary = QueuedPromptSummary::from(QueuedPrompt {
+            id: 1,
+            session_id: "sess-1".to_string(),
+            text: "inspect".to_string(),
+            images: vec![PromptImage {
+                data_base64: "aW1hZ2U=".to_string(),
+                mime_type: "image/png".to_string(),
+                width: 32,
+                height: 24,
+            }],
+            created_at: "2026-06-10T10:00:00Z".to_string(),
+        });
+
+        let json = serde_json::to_value(summary).expect("summary json");
+        assert_eq!(json["image_count"], 1);
+        assert!(json.get("images").is_none());
+        assert!(
+            !json.to_string().contains("aW1hZ2U="),
+            "the polling response must not carry base64 image data"
+        );
     }
 
     #[test]
