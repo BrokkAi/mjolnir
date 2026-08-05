@@ -50,9 +50,9 @@ use crate::acp::{self, AcpRuntimeConfig};
 use crate::app::{StatusKind, status_transcript_text};
 use crate::config::{self, SelectedAgent};
 use crate::event::{
-    ElicitationOutcome, ElicitationPrompt, PermissionDecision, PermissionPrompt, PromptImage,
-    SessionConfigTarget, SubagentEvent, SubagentOutcome, TerminalOutputSnapshot, UiCommand,
-    UiEvent,
+    ElicitationOutcome, ElicitationPrompt, LoadSessionResult, PermissionDecision, PermissionPrompt,
+    PromptImage, SessionConfigTarget, SubagentEvent, SubagentOutcome, TerminalOutputSnapshot,
+    UiCommand, UiEvent,
 };
 use crate::{roster, subagent};
 
@@ -229,6 +229,10 @@ pub struct SessionStatusRecord {
     pub model_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Working directory the ACP session was opened against. The remote
+    /// session picker uses it to avoid offering histories from another tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     #[serde(default)]
     pub primary_tokens: u64,
     #[serde(default)]
@@ -315,11 +319,17 @@ fn command_record(
     }
 }
 
-fn remote_builtin_command_records(include_fork: bool) -> Vec<CommandRecord> {
+fn remote_builtin_command_records(include_fork: bool, include_load: bool) -> Vec<CommandRecord> {
     let mut commands = vec![
         command_record(
             REMOTE_BUILTIN_NEW_COMMAND,
             "start a new web session",
+            None,
+            "mjolnir",
+        ),
+        command_record(
+            REMOTE_BUILTIN_CLEAR_COMMAND,
+            "start a fresh session with the same agent",
             None,
             "mjolnir",
         ),
@@ -356,6 +366,14 @@ fn remote_builtin_command_records(include_fork: bool) -> Vec<CommandRecord> {
             "mjolnir",
         ));
     }
+    if include_load {
+        commands.push(command_record(
+            REMOTE_BUILTIN_LOAD_COMMAND,
+            "load a previous session",
+            None,
+            "mjolnir",
+        ));
+    }
     commands
 }
 
@@ -378,8 +396,9 @@ fn is_remote_reserved_command(name: &str) -> bool {
 fn available_command_records(
     commands: &[AvailableCommand],
     include_fork: bool,
+    include_load: bool,
 ) -> Vec<CommandRecord> {
-    let mut records = remote_builtin_command_records(include_fork);
+    let mut records = remote_builtin_command_records(include_fork, include_load);
     let mut seen: HashSet<String> = records
         .iter()
         .map(|command| command.name.to_ascii_lowercase())
@@ -896,6 +915,10 @@ pub struct PromptCancelRequestRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RemoteQueuedPromptAction {
     SendPrompt(String),
+    ClearSession,
+    LoadSession(String),
+    RejectInvalidLoad,
+    RejectUnsupportedLoad,
     ForkSession,
     RejectUnsupportedFork,
     RunReview(crate::event::ReviewTarget),
@@ -907,6 +930,7 @@ fn remote_queued_prompt_action(
     text: String,
     has_images: bool,
     session_fork_supported: bool,
+    session_load_supported: bool,
     compact_command_supported: bool,
 ) -> RemoteQueuedPromptAction {
     // Match the TUI: attaching an image makes slash-prefixed text an agent
@@ -915,6 +939,22 @@ fn remote_queued_prompt_action(
         return RemoteQueuedPromptAction::SendPrompt(text);
     }
     let trimmed = text.trim();
+    if trimmed == "/clear" {
+        return RemoteQueuedPromptAction::ClearSession;
+    }
+    if let Some(rest) = trimmed.strip_prefix("/load")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        let session_id = rest.trim();
+        if session_id.is_empty() || session_id.chars().any(char::is_whitespace) {
+            return RemoteQueuedPromptAction::RejectInvalidLoad;
+        }
+        return if session_load_supported {
+            RemoteQueuedPromptAction::LoadSession(session_id.to_string())
+        } else {
+            RemoteQueuedPromptAction::RejectUnsupportedLoad
+        };
+    }
     if let Some(rest) = trimmed.strip_prefix("/review")
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
     {
@@ -942,6 +982,52 @@ fn remote_queued_prompt_action(
         RemoteQueuedPromptAction::ForkSession
     } else {
         RemoteQueuedPromptAction::RejectUnsupportedFork
+    }
+}
+
+fn record_remote_action_error(
+    state: &Arc<Mutex<TrackerState>>,
+    ui_event_tx: Option<&tokio::sync::mpsc::UnboundedSender<UiEvent>>,
+    claimed_session_id: &str,
+    message: String,
+) {
+    let forwarded =
+        ui_event_tx.is_some_and(|sender| sender.send(UiEvent::Warning(message.clone())).is_ok());
+    if let Ok(mut guard) = state.lock() {
+        guard.release_remote_prompt_slot_for(claimed_session_id);
+        if !forwarded {
+            guard.record_status_notice(StatusKind::Warning, &message);
+        }
+    }
+}
+
+fn finish_remote_session_action(
+    state: &Arc<Mutex<TrackerState>>,
+    ui_event_tx: Option<&tokio::sync::mpsc::UnboundedSender<UiEvent>>,
+    claimed_session_id: &str,
+    action: &str,
+    result: std::result::Result<LoadSessionResult, tokio::sync::oneshot::error::RecvError>,
+) {
+    match result {
+        Ok(LoadSessionResult::Switched) => {
+            if let Ok(mut guard) = state.lock() {
+                guard.release_remote_prompt_slot_for(claimed_session_id);
+            }
+        }
+        Ok(LoadSessionResult::Fallback { message }) => {
+            record_remote_action_error(
+                state,
+                ui_event_tx,
+                claimed_session_id,
+                format!("{action} failed: {message}"),
+            );
+        }
+        Err(_) => record_remote_action_error(
+            state,
+            ui_event_tx,
+            claimed_session_id,
+            format!("{action} failed: agent runtime closed the response channel"),
+        ),
     }
 }
 
@@ -1101,6 +1187,7 @@ struct TrackerState {
     total_messages: u64,
     project: String,
     worktree: Option<String>,
+    cwd: Option<PathBuf>,
     agent: String,
     /// ACP adapter serving the primary model, for the `model via source`
     /// status-line field.
@@ -1140,6 +1227,7 @@ struct TrackerState {
     available_commands: Vec<CommandRecord>,
     prompt_images_supported: bool,
     session_fork_supported: bool,
+    session_load_supported: bool,
     sessions_to_disconnect: Vec<String>,
 }
 
@@ -1493,6 +1581,7 @@ impl TrackerState {
             total_messages: 0,
             project,
             worktree: None,
+            cwd: None,
             agent,
             model_source: None,
             reasoning_effort: None,
@@ -1513,9 +1602,10 @@ impl TrackerState {
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             native_mode: None,
-            available_commands: remote_builtin_command_records(false),
+            available_commands: remote_builtin_command_records(false, false),
             prompt_images_supported: false,
             session_fork_supported: false,
+            session_load_supported: false,
             sessions_to_disconnect: Vec::new(),
         }
     }
@@ -1544,7 +1634,11 @@ impl TrackerState {
         self.pending_permissions.clear();
         self.session_config.clear();
         self.native_mode = None;
-        self.available_commands = available_command_records(&[], self.session_fork_supported);
+        self.available_commands = available_command_records(
+            &[],
+            self.session_fork_supported,
+            self.session_load_supported,
+        );
         // A new session starts its token accounting from zero; adapter
         // identity, provider quotas and the branch PR are session-independent.
         self.agent_usage = crate::agent_usage::Snapshot::default();
@@ -1556,12 +1650,18 @@ impl TrackerState {
             UiEvent::Connected {
                 prompt_images_supported,
                 session_fork_supported,
+                session_load_supported,
                 ..
             } => {
                 self.prompt_images_supported = *prompt_images_supported;
                 self.session_fork_supported = *session_fork_supported;
+                self.session_load_supported = *session_load_supported;
                 self.available_commands =
-                    available_command_records(&[], self.session_fork_supported);
+                    available_command_records(
+                        &[],
+                        self.session_fork_supported,
+                        self.session_load_supported,
+                    );
                 self.touch();
             }
             UiEvent::SessionStarted { session_id, .. } => {
@@ -1586,7 +1686,11 @@ impl TrackerState {
                     self.session_config.clear();
                     self.native_mode = None;
                     self.available_commands =
-                        available_command_records(&[], self.session_fork_supported);
+                        available_command_records(
+                            &[],
+                            self.session_fork_supported,
+                            self.session_load_supported,
+                        );
                 }
                 self.last_update = Some(now);
             }
@@ -2010,6 +2114,7 @@ impl TrackerState {
                 self.available_commands = available_command_records(
                     &update.available_commands,
                     self.session_fork_supported,
+                    self.session_load_supported,
                 );
                 self.agent_message_open = false;
                 self.touch();
@@ -2308,6 +2413,7 @@ impl TrackerState {
             model: self.agent.clone(),
             model_source: self.model_source.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            cwd: self.cwd.as_ref().map(|cwd| cwd.display().to_string()),
             primary_tokens: usage.primary.total_tokens,
             review_tokens: usage.review.total_tokens,
             subagent_tokens: usage.subagents.total_tokens,
@@ -2363,6 +2469,12 @@ impl TrackerState {
     fn release_remote_prompt_slot(&mut self) {
         self.prompt_in_flight = false;
         self.prompt_turn_started_at = None;
+    }
+
+    fn release_remote_prompt_slot_for(&mut self, session_id: &str) {
+        if self.session_id.as_deref() == Some(session_id) {
+            self.release_remote_prompt_slot();
+        }
     }
 
     fn push_pending_permission(&mut self, record: PendingPermissionRecord) {
@@ -2423,6 +2535,7 @@ impl RemoteSessionTracker {
         state.worktree = worktree;
         state.model_source = status.model_source;
         state.reasoning_effort = status.reasoning_effort;
+        state.cwd = status.cwd.clone();
         let tracker = Self {
             remote_dir: Arc::new(dir),
             connection: Arc::new(Mutex::new(connection)),
@@ -3066,18 +3179,96 @@ impl RemoteSessionTracker {
                 let queued = claim_remote_prompt(connection.clone(), &session_id).await;
                 match queued {
                     Ok(Some(prompt)) => {
-                        let can_fork = state
+                        let (can_fork, can_load, cwd) = state
                             .lock()
-                            .map(|guard| guard.session_fork_supported)
-                            .unwrap_or(false);
+                            .map(|guard| {
+                                (
+                                    guard.session_fork_supported,
+                                    guard.session_load_supported,
+                                    guard.cwd.clone(),
+                                )
+                            })
+                            .unwrap_or((false, false, None));
                         let can_compact = ui_event_tx.is_some();
                         let QueuedPrompt { text, images, .. } = prompt;
                         match remote_queued_prompt_action(
                             text,
                             !images.is_empty(),
                             can_fork,
+                            can_load,
                             can_compact,
                         ) {
+                            RemoteQueuedPromptAction::ClearSession => {
+                                let (responder, response) = tokio::sync::oneshot::channel();
+                                if command_tx
+                                    .send(UiCommand::NewSession { responder })
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                let action_state = Arc::clone(&state);
+                                let action_events = ui_event_tx.clone();
+                                let claimed_session_id = session_id.clone();
+                                tokio::spawn(async move {
+                                    finish_remote_session_action(
+                                        &action_state,
+                                        action_events.as_ref(),
+                                        &claimed_session_id,
+                                        "clear",
+                                        response.await,
+                                    );
+                                });
+                            }
+                            RemoteQueuedPromptAction::LoadSession(target_session_id) => {
+                                let Some(cwd) = cwd else {
+                                    record_remote_action_error(
+                                        &state,
+                                        ui_event_tx.as_ref(),
+                                        &session_id,
+                                        "load failed: session working directory is unavailable"
+                                            .to_string(),
+                                    );
+                                    continue;
+                                };
+                                let (responder, response) = tokio::sync::oneshot::channel();
+                                let command = UiCommand::LoadSession {
+                                    session_id: target_session_id,
+                                    cwd,
+                                    title: None,
+                                    responder,
+                                };
+                                if command_tx.send(command).is_err() {
+                                    break;
+                                }
+                                let action_state = Arc::clone(&state);
+                                let action_events = ui_event_tx.clone();
+                                let claimed_session_id = session_id.clone();
+                                tokio::spawn(async move {
+                                    finish_remote_session_action(
+                                        &action_state,
+                                        action_events.as_ref(),
+                                        &claimed_session_id,
+                                        "load",
+                                        response.await,
+                                    );
+                                });
+                            }
+                            RemoteQueuedPromptAction::RejectInvalidLoad => {
+                                record_remote_action_error(
+                                    &state,
+                                    ui_event_tx.as_ref(),
+                                    &session_id,
+                                    "usage: /load <session-id>".to_string(),
+                                );
+                            }
+                            RemoteQueuedPromptAction::RejectUnsupportedLoad => {
+                                record_remote_action_error(
+                                    &state,
+                                    ui_event_tx.as_ref(),
+                                    &session_id,
+                                    "session loading is not supported by this agent".to_string(),
+                                );
+                            }
                             RemoteQueuedPromptAction::ForkSession => {
                                 if command_tx.send(UiCommand::ForkSession).is_err() {
                                     break;
@@ -6199,12 +6390,19 @@ async fn queue_prompt(
         !request.images.is_empty(),
         false,
         false,
+        false,
     ) {
         RemoteQueuedPromptAction::RunReview(_) => true,
         RemoteQueuedPromptAction::RejectInvalidReview => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "usage: /review recent|uncommitted|head".to_string(),
+            ));
+        }
+        RemoteQueuedPromptAction::RejectInvalidLoad => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "usage: /load <session-id>".to_string(),
             ));
         }
         _ => false,
@@ -8741,6 +8939,17 @@ mod tests {
         assert!(viewer.contains("MAX_QUEUE_REQUEST_BYTES"));
     }
 
+    #[test]
+    fn embedded_viewer_contains_session_switching_controls() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("id=\"load-session-modal\""));
+        assert!(viewer.contains("function openLoadSessionPicker"));
+        assert!(viewer.contains("apiFetch(\"/sessions\""));
+        assert!(viewer.contains("queueSessionAction(\"/clear\""));
+        assert!(viewer.contains("`/load ${session.session_id}`"));
+        assert!(viewer.contains("candidate.status?.cwd === cwd"));
+    }
+
     #[tokio::test]
     async fn select_elicitations_track_cards_and_forward_valid_choices() {
         for (tool, choice) in [
@@ -10527,6 +10736,7 @@ mod tests {
                 model: "gpt-5.6".to_string(),
                 model_source: Some("codex-acp".to_string()),
                 reasoning_effort: Some("high".to_string()),
+                cwd: Some("/tmp/project".to_string()),
                 primary_tokens: 1200,
                 review_tokens: 300,
                 subagent_tokens: 40,
@@ -11204,38 +11414,72 @@ mod tests {
     #[test]
     fn remote_queued_prompt_action_routes_fork_commands() {
         assert_eq!(
-            remote_queued_prompt_action("/fork".to_string(), false, true, true),
+            remote_queued_prompt_action("/fork".to_string(), false, true, true, true),
             RemoteQueuedPromptAction::ForkSession
         );
         assert_eq!(
-            remote_queued_prompt_action(" /fork ".to_string(), false, false, true),
+            remote_queued_prompt_action(" /fork ".to_string(), false, false, true, true),
             RemoteQueuedPromptAction::RejectUnsupportedFork
         );
         assert_eq!(
-            remote_queued_prompt_action("/fork later".to_string(), false, true, true),
+            remote_queued_prompt_action("/fork later".to_string(), false, true, true, true),
             RemoteQueuedPromptAction::SendPrompt("/fork later".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("hello".to_string(), false, true, true),
+            remote_queued_prompt_action("hello".to_string(), false, true, true, true),
             RemoteQueuedPromptAction::SendPrompt("hello".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("/review recent".to_string(), false, true, true),
+            remote_queued_prompt_action("/review recent".to_string(), false, true, true, true),
             RemoteQueuedPromptAction::RunReview(crate::event::ReviewTarget::Recent)
         );
         assert_eq!(
-            remote_queued_prompt_action("/review head".to_string(), false, true, true),
+            remote_queued_prompt_action("/review head".to_string(), false, true, true, true),
             RemoteQueuedPromptAction::RunReview(crate::event::ReviewTarget::Head)
         );
         assert_eq!(
-            remote_queued_prompt_action("/review".to_string(), false, true, true),
+            remote_queued_prompt_action("/review".to_string(), false, true, true, true),
             RemoteQueuedPromptAction::RejectInvalidReview
         );
         assert_eq!(
-            remote_queued_prompt_action("/fork".to_string(), true, true, true),
+            remote_queued_prompt_action("/fork".to_string(), true, true, true, true),
             RemoteQueuedPromptAction::SendPrompt("/fork".to_string()),
             "image prompts must not be consumed as local slash commands"
         );
+    }
+
+    #[test]
+    fn remote_queued_prompt_action_routes_session_switching_commands() {
+        assert_eq!(
+            remote_queued_prompt_action("/clear".to_string(), false, false, false, true),
+            RemoteQueuedPromptAction::ClearSession
+        );
+        assert_eq!(
+            remote_queued_prompt_action("/load session-2".to_string(), false, false, true, true,),
+            RemoteQueuedPromptAction::LoadSession("session-2".to_string())
+        );
+        assert_eq!(
+            remote_queued_prompt_action("/load".to_string(), false, false, true, true),
+            RemoteQueuedPromptAction::RejectInvalidLoad
+        );
+        assert_eq!(
+            remote_queued_prompt_action("/load session-2".to_string(), false, false, false, true,),
+            RemoteQueuedPromptAction::RejectUnsupportedLoad
+        );
+    }
+
+    #[test]
+    fn session_action_acknowledgement_does_not_release_new_session_prompt() {
+        let mut state = TrackerState::new("project".to_string(), "agent".to_string());
+        state.session_id = Some("old-session".to_string());
+        state.prompt_in_flight = true;
+
+        state.session_id = Some("new-session".to_string());
+        state.release_remote_prompt_slot_for("old-session");
+
+        assert!(state.prompt_in_flight);
+        state.release_remote_prompt_slot_for("new-session");
+        assert!(!state.prompt_in_flight);
     }
 
     #[test]
@@ -11336,21 +11580,21 @@ mod tests {
     #[test]
     fn remote_queued_prompt_action_routes_compact_when_a_coordinator_exists() {
         assert_eq!(
-            remote_queued_prompt_action("/compact".to_string(), false, true, true),
+            remote_queued_prompt_action("/compact".to_string(), false, true, true, true),
             RemoteQueuedPromptAction::CompactPrimary
         );
         assert_eq!(
-            remote_queued_prompt_action(" /compact ".to_string(), false, false, true),
+            remote_queued_prompt_action(" /compact ".to_string(), false, false, true, true),
             RemoteQueuedPromptAction::CompactPrimary
         );
         // Headless: no coordinator, keep the literal slash prompt for agents
         // that implement /compact natively.
         assert_eq!(
-            remote_queued_prompt_action("/compact".to_string(), false, true, false),
+            remote_queued_prompt_action("/compact".to_string(), false, true, true, false),
             RemoteQueuedPromptAction::SendPrompt("/compact".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("/compact now".to_string(), false, true, true),
+            remote_queued_prompt_action("/compact now".to_string(), false, true, true, true),
             RemoteQueuedPromptAction::SendPrompt("/compact now".to_string())
         );
     }
@@ -11887,6 +12131,7 @@ mod tests {
             agent_version: None,
             prompt_images_supported: true,
             session_fork_supported: true,
+            session_load_supported: true,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -11916,12 +12161,14 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["new", "compact", "export", "mjconfig", "review", "fork"]
+            vec![
+                "new", "clear", "compact", "export", "mjconfig", "review", "fork", "load",
+            ]
         );
         assert_eq!(snapshot.available_commands[0].source, "mjolnir");
-        assert_eq!(snapshot.available_commands[4].source, "mjolnir");
+        assert_eq!(snapshot.available_commands[5].source, "mjolnir");
         assert_eq!(
-            snapshot.available_commands[4].input_hint.as_deref(),
+            snapshot.available_commands[5].input_hint.as_deref(),
             Some("recent|uncommitted|head")
         );
     }
@@ -11934,6 +12181,7 @@ mod tests {
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: true,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -11968,7 +12216,9 @@ mod tests {
             .collect();
         assert_eq!(
             same_session_names,
-            vec!["new", "compact", "export", "mjconfig", "review", "fork"]
+            vec![
+                "new", "clear", "compact", "export", "mjconfig", "review", "fork",
+            ]
         );
 
         state.observe_event(&UiEvent::SessionUpdate(
@@ -11989,7 +12239,9 @@ mod tests {
             .collect();
         assert_eq!(
             new_session_names,
-            vec!["new", "compact", "export", "mjconfig", "review", "fork"]
+            vec![
+                "new", "clear", "compact", "export", "mjconfig", "review", "fork",
+            ]
         );
     }
 

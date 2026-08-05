@@ -3153,6 +3153,21 @@
       </div>
     </section>
 
+    <section id="load-session-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="load-session-title" hidden>
+      <div class="new-session-panel">
+        <header class="new-session-head">
+          <h2 id="load-session-title">Load session</h2>
+          <button id="load-session-close" class="new-session-close" type="button" aria-label="Close session history picker">×</button>
+        </header>
+        <div class="fs-current">
+          <span class="fs-label">Compatible history</span>
+          <span id="load-session-context" class="fs-path"></span>
+        </div>
+        <div id="load-session-list" class="fs-list" aria-label="Previous sessions"></div>
+        <div id="load-session-status" class="new-session-status" role="status"></div>
+      </div>
+    </section>
+
     <template id="tpl-session">
       <button type="button" class="session-item">
         <div class="session-top">
@@ -3232,6 +3247,11 @@
       const newSessionProgressEl = $("new-session-progress");
       const newSessionProgressTextEl = $("new-session-progress-text");
       const newSessionWorktreeEl = $("new-session-worktree");
+      const loadSessionModalEl = $("load-session-modal");
+      const loadSessionCloseEl = $("load-session-close");
+      const loadSessionContextEl = $("load-session-context");
+      const loadSessionListEl = $("load-session-list");
+      const loadSessionStatusEl = $("load-session-status");
       const fsCurrentPathEl = $("fs-current-path");
       const fsRootsEl = $("fs-roots");
       const fsParentButtonEl = $("fs-parent-button");
@@ -3304,6 +3324,7 @@
       let filesystemState = null;
       let filesystemLoading = false;
       let creatingSession = false;
+      let loadingSessionHistory = false;
       let pendingSessionLaunch = null;
       /* Identifies which launch the list slot currently belongs to. Waiting on
          a launch outlives the dialog that started it, so a second launch can
@@ -4322,6 +4343,7 @@
         filesystemState = null;
         filesystemLoading = false;
         creatingSession = false;
+        loadingSessionHistory = false;
         settingsModalEl.hidden = true;
         workspaceDiffModalEl.hidden = true;
         workspaceDiffButtonEl.hidden = true;
@@ -4333,6 +4355,7 @@
         }
         launchSessionCard = null;
         newSessionModalEl.hidden = true;
+        loadSessionModalEl.hidden = true;
         setSessionCreationUi(false);
         sessionCardById.clear();
         activityBySessionId.clear();
@@ -4426,6 +4449,132 @@
           return;
         }
         newSessionModalEl.hidden = true;
+      }
+
+      function sessionHasCommand(session, name) {
+        return Array.isArray(session?.available_commands)
+          && session.available_commands.some((command) => command.name === name);
+      }
+
+      function closeLoadSessionPicker() {
+        if (!loadingSessionHistory) {
+          loadSessionModalEl.hidden = true;
+        }
+      }
+
+      async function queueSessionAction(text, successMessage) {
+        const sessionId = selectedSessionId;
+        if (!sessionId) {
+          return false;
+        }
+        try {
+          const response = await apiFetch("/api/queued-prompts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId, text }),
+          });
+          if (!response.ok) {
+            const detail = await response.text();
+            throw new Error(detail || `HTTP ${response.status}`);
+          }
+          loadSessionModalEl.hidden = true;
+          setQueueStatus(successMessage);
+          await refreshSessions();
+          return true;
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            setQueueStatus(`Session switch failed: ${error.message}`, true);
+          }
+          return false;
+        }
+      }
+
+      function renderLoadSessionHistory(history) {
+        loadSessionListEl.replaceChildren();
+        if (!history.length) {
+          loadSessionListEl.appendChild(emptyNote("No compatible disconnected sessions."));
+          return;
+        }
+        for (const session of history) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "fs-row";
+          const icon = document.createElement("span");
+          icon.className = "fs-row-icon";
+          icon.textContent = "↺";
+          const text = document.createElement("span");
+          text.className = "fs-row-text";
+          const name = document.createElement("span");
+          name.className = "fs-row-name";
+          name.textContent = sessionLabel(session);
+          const detail = document.createElement("span");
+          detail.className = "fs-row-path";
+          detail.textContent = `${session.session_id} · ${formatRelative(session.last_prompt_at || session.last_update || session.start_time)}`;
+          text.append(name, detail);
+          button.append(icon, text);
+          button.addEventListener("click", async () => {
+            button.disabled = true;
+            loadSessionStatusEl.textContent = `Loading ${sessionLabel(session)}…`;
+            const queued = await queueSessionAction(
+              `/load ${session.session_id}`,
+              "Session load queued.",
+            );
+            if (!queued) {
+              button.disabled = false;
+              loadSessionStatusEl.textContent = "Session load could not be queued.";
+              loadSessionStatusEl.classList.add("is-error");
+            }
+          });
+          loadSessionListEl.appendChild(button);
+        }
+      }
+
+      async function openLoadSessionPicker() {
+        const current = selectedSession();
+        if (!current || !sessionHasCommand(current, "load") || loadingSessionHistory) {
+          setQueueStatus("This session cannot load previous sessions.", true);
+          return;
+        }
+        const cwd = current.status?.cwd || "";
+        if (!cwd) {
+          setQueueStatus("This session did not publish its working directory.", true);
+          return;
+        }
+        loadingSessionHistory = true;
+        loadSessionModalEl.hidden = false;
+        loadSessionContextEl.textContent = cwd;
+        loadSessionListEl.replaceChildren(emptyNote("Loading session history…"));
+        loadSessionStatusEl.textContent = "";
+        loadSessionStatusEl.classList.remove("is-error");
+        loadSessionCloseEl.disabled = true;
+        try {
+          const response = await apiFetch("/sessions", { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const allSessions = await response.json();
+          const liveIds = new Set(sessions.map((session) => session.session_id));
+          const history = allSessions.filter((candidate) =>
+            candidate.session_id !== current.session_id
+              && !liveIds.has(candidate.session_id)
+              && candidate.status?.cwd === cwd
+              && candidate.agent === current.agent
+              && (candidate.status?.model_source || "") === (current.status?.model_source || ""),
+          );
+          renderLoadSessionHistory(history);
+          loadSessionStatusEl.textContent = history.length
+            ? "Choose a session to load into this agent."
+            : "Only disconnected sessions from the same agent and working directory are shown.";
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            loadSessionListEl.replaceChildren();
+            loadSessionStatusEl.textContent = `History load failed: ${error.message}`;
+            loadSessionStatusEl.classList.add("is-error");
+          }
+        } finally {
+          loadingSessionHistory = false;
+          loadSessionCloseEl.disabled = false;
+        }
       }
 
       function directoryButton(record, className, onClick) {
@@ -6850,6 +6999,16 @@
         const trimmed = text.trim();
         if (trimmed === "/new") {
           openNewSessionPicker();
+        } else if (trimmed === "/clear") {
+          if (!session) {
+            return false;
+          }
+          void queueSessionAction("/clear", "Fresh session queued.");
+        } else if (trimmed === "/load") {
+          if (!session) {
+            return false;
+          }
+          void openLoadSessionPicker();
         } else if (trimmed === "/mjconfig") {
           void openMjConfig();
         } else if (trimmed === "/export") {
@@ -7930,6 +8089,12 @@
           closeNewSessionPicker();
         }
       });
+      loadSessionCloseEl.addEventListener("click", closeLoadSessionPicker);
+      loadSessionModalEl.addEventListener("click", (event) => {
+        if (event.target === loadSessionModalEl) {
+          closeLoadSessionPicker();
+        }
+      });
       window.addEventListener("keydown", (event) => {
         if (event.key !== "Escape") {
           return;
@@ -7943,6 +8108,9 @@
         } else if (!settingsModalEl.hidden) {
           event.preventDefault();
           closeViewerSettings();
+        } else if (!loadSessionModalEl.hidden) {
+          event.preventDefault();
+          closeLoadSessionPicker();
         } else if (!newSessionModalEl.hidden) {
           event.preventDefault();
           closeNewSessionPicker();

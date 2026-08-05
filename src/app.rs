@@ -8093,6 +8093,7 @@ mod tests {
             agent_version: Some("0.1".into()),
             prompt_images_supported: false,
             session_fork_supported: false,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -8129,6 +8130,7 @@ mod tests {
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -8164,6 +8166,7 @@ mod tests {
             agent_version: Some("1.0".into()),
             prompt_images_supported: false,
             session_fork_supported: false,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -8183,6 +8186,7 @@ mod tests {
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -8220,6 +8224,7 @@ mod tests {
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -8261,6 +8266,7 @@ mod tests {
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -8286,6 +8292,7 @@ mod tests {
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -8764,6 +8771,7 @@ mod tests {
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -9758,6 +9766,7 @@ mod tests {
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: true,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -9798,6 +9807,7 @@ mod tests {
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: true,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });
@@ -10063,6 +10073,7 @@ mod tests {
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
+            session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
         });

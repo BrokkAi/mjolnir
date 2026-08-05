@@ -15,17 +15,17 @@ use agent_client_protocol::schema::v1::{
     ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
     ElicitationFormCapabilities, ElicitationUrlCapabilities, ErrorCode, FileSystemCapabilities,
     ForkSessionRequest, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, McpServer, NewSessionRequest, PermissionOption,
-    PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
-    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
-    SessionInfoUpdate, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, TextContent, ToolCall, ToolCallContent,
-    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    KillTerminalResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionId, SessionInfoUpdate, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, TerminalExitStatus,
+    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent, ToolCall,
+    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    ToolKind, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
     WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
@@ -293,6 +293,7 @@ struct ConnectedEventFields {
     agent_version: Option<String>,
     prompt_images_supported: bool,
     session_fork_supported: bool,
+    session_load_supported: bool,
     side_session_supported: bool,
     side_session_unsupported_reason: Option<String>,
 }
@@ -707,6 +708,37 @@ fn new_session_request(
         request.meta(claude_read_only_meta())
     } else {
         request
+    }
+}
+
+async fn create_new_session(
+    conn: &ConnectionTo<Agent>,
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
+    native_read_only: Option<NativeReadOnlyPolicy>,
+    auth_methods: &[AuthMethod],
+) -> std::result::Result<NewSessionResponse, LaunchError> {
+    let request = || {
+        new_session_request(
+            cwd.clone(),
+            additional_directories,
+            mcp_servers,
+            native_read_only,
+        )
+    };
+    match conn.send_request(request()).block_task().await {
+        Ok(response) => Ok(response),
+        Err(source) => match auth_required_detail(&source) {
+            Some(detail) => {
+                authenticate_after_auth_required(conn, auth_methods, detail).await?;
+                conn.send_request(request())
+                    .block_task()
+                    .await
+                    .map_err(classify_session_error)
+            }
+            None => Err(classify_session_error(source)),
+        },
     }
 }
 
@@ -2022,6 +2054,14 @@ async fn drive_session(
             .session_capabilities
             .fork
             .is_some(),
+        // Loading a different session on the same connection first closes the
+        // active one, so both capabilities are required for the web picker.
+        session_load_supported: init_resp.agent_capabilities.load_session
+            && init_resp
+                .agent_capabilities
+                .session_capabilities
+                .close
+                .is_some(),
         side_session_supported: side_session_unsupported_reason.is_none(),
         side_session_unsupported_reason,
     };
@@ -2073,15 +2113,15 @@ async fn drive_session(
             };
             (session_id, initial_config, true)
         }
-        None => match conn
-            .send_request(new_session_request(
-                cwd.clone(),
-                &additional_directories,
-                &mcp_servers,
-                native_read_only,
-            ))
-            .block_task()
-            .await
+        None => match create_new_session(
+            &conn,
+            cwd.clone(),
+            &additional_directories,
+            &mcp_servers,
+            native_read_only,
+            &init_resp.auth_methods,
+        )
+        .await
         {
             Ok(s) => {
                 let config = session_config_from_parts(s.config_options, s.modes);
@@ -2095,53 +2135,11 @@ async fn drive_session(
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 (s.session_id, config, false)
             }
-            Err(source) => match auth_required_detail(&source) {
-                Some(detail) => {
-                    if let Err(launch_err) =
-                        authenticate_after_auth_required(&conn, &init_resp.auth_methods, detail)
-                            .await
-                    {
-                        let text = launch_err.to_string();
-                        emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                        return Err(anyhow::anyhow!(text));
-                    }
-                    match conn
-                        .send_request(new_session_request(
-                            cwd.clone(),
-                            &additional_directories,
-                            &mcp_servers,
-                            native_read_only,
-                        ))
-                        .block_task()
-                        .await
-                    {
-                        Ok(s) => {
-                            let config = session_config_from_parts(s.config_options, s.modes);
-                            session_state
-                                .set_active_session_with_roots(
-                                    s.session_id.clone(),
-                                    &cwd,
-                                    &additional_directories,
-                                )
-                                .await
-                                .map_err(|e| anyhow::anyhow!("{e}"))?;
-                            (s.session_id, config, false)
-                        }
-                        Err(source) => {
-                            let launch_err = classify_session_error(source);
-                            let text = launch_err.to_string();
-                            emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                            return Err(anyhow::anyhow!(text));
-                        }
-                    }
-                }
-                None => {
-                    let launch_err = classify_session_error(source);
-                    let text = launch_err.to_string();
-                    emit_fatal(ui_tx, &fatal_emitted, text.clone());
-                    return Err(anyhow::anyhow!(text));
-                }
-            },
+            Err(launch_err) => {
+                let text = launch_err.to_string();
+                emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                return Err(anyhow::anyhow!(text));
+            }
         },
     };
     let (session_config_options, session_config_targets) = initial_config.unwrap_or_default();
@@ -2353,6 +2351,38 @@ async fn drive_session(
                     break;
                 }
             }
+            UiCommand::NewSession { responder } => {
+                match start_fresh_session(
+                    &conn,
+                    &session_id,
+                    cwd.clone(),
+                    &additional_directories,
+                    &mcp_servers,
+                    native_read_only,
+                    &init_resp.auth_methods,
+                    role_config.as_ref(),
+                    &saved_session_config,
+                    &session_state,
+                    &terminals,
+                    &hidden_config_ids,
+                    &connected_fields,
+                    ui_tx,
+                )
+                .await
+                {
+                    Ok((new_session_id, new_config)) => {
+                        session_id = new_session_id;
+                        session_config = new_config;
+                        context_usage.reset_for_session();
+                        session_has_history = false;
+                        next_turn_diff_id = 1;
+                        let _ = responder.send(LoadSessionResult::Switched);
+                    }
+                    Err(message) => {
+                        let _ = responder.send(LoadSessionResult::Fallback { message });
+                    }
+                }
+            }
             UiCommand::ForkSideSession { responder } => {
                 let result = if let Some(reason) =
                     connected_fields.side_session_unsupported_reason.clone()
@@ -2529,9 +2559,100 @@ fn emit_connected(ui_tx: &mpsc::UnboundedSender<UiEvent>, fields: &ConnectedEven
         agent_version: fields.agent_version.clone(),
         prompt_images_supported: fields.prompt_images_supported,
         session_fork_supported: fields.session_fork_supported,
+        session_load_supported: fields.session_load_supported,
         side_session_supported: fields.side_session_supported,
         side_session_unsupported_reason: fields.side_session_unsupported_reason.clone(),
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_fresh_session(
+    conn: &ConnectionTo<Agent>,
+    current_session_id: &SessionId,
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
+    native_read_only: Option<NativeReadOnlyPolicy>,
+    auth_methods: &[AuthMethod],
+    role_config: Option<&RuntimeRoleConfig>,
+    saved_session_config: &HashMap<String, String>,
+    session_state: &RuntimeSessionState,
+    terminals: &ManagedTerminals,
+    hidden_config_ids: &[String],
+    connected_fields: &ConnectedEventFields,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) -> std::result::Result<(SessionId, SessionConfigCache), String> {
+    let created = create_new_session(
+        conn,
+        cwd.clone(),
+        additional_directories,
+        mcp_servers,
+        native_read_only,
+        auth_methods,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let new_session_id = created.session_id;
+    let (options, targets) =
+        session_config_from_parts(created.config_options, created.modes).unwrap_or_default();
+    let mut new_config = SessionConfigCache { options, targets };
+
+    session_state
+        .set_active_session_with_roots(new_session_id.clone(), &cwd, additional_directories)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let configured = async {
+        if let Some(role) = role_config {
+            for warning in apply_runtime_role_config(conn, &new_session_id, &mut new_config, role)
+                .await
+                .map_err(|error| format!("{} configuration failed: {error}", role.label))?
+            {
+                let _ = ui_tx.send(UiEvent::Warning(warning));
+            }
+        }
+        if !saved_session_config.is_empty() {
+            apply_saved_session_config(
+                conn,
+                &new_session_id,
+                &mut new_config,
+                saved_session_config,
+                ui_tx,
+            )
+            .await;
+        }
+        if let Some(policy) = native_read_only {
+            enforce_native_read_only(conn, &new_session_id, &mut new_config, policy, false)
+                .await
+                .map_err(|error| format!("native read-only policy failed: {error}"))?;
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Err(error) = configured {
+        let _ = session_state
+            .set_active_session_with_roots(current_session_id.clone(), &cwd, additional_directories)
+            .await;
+        return Err(error);
+    }
+
+    session_state
+        .mark_permissions_cancelled(current_session_id)
+        .await;
+    terminals.shutdown_session(current_session_id).await;
+    emit_connected(ui_tx, connected_fields);
+    let _ = ui_tx.send(UiEvent::SessionStarted {
+        session_id: new_session_id.to_string(),
+        resumed: false,
+    });
+    let _ = ui_tx.send(UiEvent::SessionConfigOptions {
+        options: new_config.options.clone(),
+        targets: new_config.targets.clone(),
+        hidden_config_ids: hidden_config_ids.to_vec(),
+    });
+    let _ = ui_tx.send(UiEvent::Info("new session started".to_string()));
+    Ok((new_session_id, new_config))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2619,6 +2740,14 @@ async fn switch_existing_session(
         .set_active_session_with_roots(target_session_id.clone(), &cwd, additional_directories)
         .await
         .map_err(|source| LaunchError::SessionCreateFailed { source })?;
+    // Agents may stream replay notifications before replying to session/load.
+    // Move every consumer to the target first so replay cannot be recorded on
+    // the old session and then discarded by the reset below.
+    emit_connected(ui_tx, connected_fields);
+    let _ = ui_tx.send(UiEvent::SessionStarted {
+        session_id: target_session_id.to_string(),
+        resumed: true,
+    });
     let loaded_config = load_existing_session(
         conn,
         target_session_id.clone(),
@@ -2636,11 +2765,6 @@ async fn switch_existing_session(
             options: Vec::new(),
             targets: Vec::new(),
         });
-    emit_connected(ui_tx, connected_fields);
-    let _ = ui_tx.send(UiEvent::SessionStarted {
-        session_id: target_session_id.to_string(),
-        resumed: true,
-    });
     let _ = ui_tx.send(UiEvent::SessionConfigOptions {
         options: session_config.options.clone(),
         targets: session_config.targets.clone(),
@@ -2765,6 +2889,11 @@ async fn drive_fork_session(
                             "side session fork is unavailable while another fork is in flight"
                                 .to_string(),
                         ));
+                    }
+                    Some(UiCommand::NewSession { responder }) => {
+                        let _ = responder.send(LoadSessionResult::Fallback {
+                            message: "session fork already in flight".to_string(),
+                        });
                     }
                     Some(UiCommand::LoadSession { responder, .. }) => {
                         let _ = responder.send(LoadSessionResult::Fallback {
@@ -4961,6 +5090,11 @@ async fn drive_config_update(
                             "side session fork is unavailable during a config update".to_string(),
                         ));
                     }
+                    Some(UiCommand::NewSession { responder }) => {
+                        let _ = responder.send(LoadSessionResult::Fallback {
+                            message: "config update already in flight".to_string(),
+                        });
+                    }
                     Some(UiCommand::LoadSession { responder, .. }) => {
                         let _ = responder.send(LoadSessionResult::Fallback {
                             message: "config update already in flight".to_string(),
@@ -5143,6 +5277,11 @@ async fn drive_prompt_turn(
                             session_id: session_id.to_string(),
                             has_history: side_source_has_history,
                         }));
+                    }
+                    Some(UiCommand::NewSession { responder }) => {
+                        let _ = responder.send(LoadSessionResult::Fallback {
+                            message: "prompt already in flight".to_string(),
+                        });
                     }
                     Some(UiCommand::LoadSession { responder, .. }) => {
                         let _ = responder.send(LoadSessionResult::Fallback {
@@ -8316,19 +8455,18 @@ mod tests {
                     assert_eq!(req.session_id.to_string(), "target-session");
                     load_seen_for_req.store(true, Ordering::SeqCst);
                     let target_session_id = req.session_id.clone();
-                    let target_cx = cx.clone();
                     let stale_permission_cx = cx.clone();
                     let stale_permission_cancelled_for_req =
                         stale_permission_cancelled_for_load_req.clone();
+                    let _ = cx.send_notification(SessionNotification::new(
+                        target_session_id,
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("target load replay"),
+                        ))),
+                    ));
                     let response = responder.respond(LoadSessionResponse::new());
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(10)).await;
-                        let _ = target_cx.send_notification(SessionNotification::new(
-                            target_session_id,
-                            SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                ContentBlock::Text(TextContent::new("target load replay")),
-                            )),
-                        ));
                         let permission_response = stale_permission_cx
                             .send_request(RequestPermissionRequest::new(
                                 SessionId::new("old-session"),
@@ -8385,6 +8523,42 @@ mod tests {
                         }
                     });
                     responder.respond(ResumeSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_mock_agent_fresh_session(
+        stream: tokio::io::DuplexStream,
+        new_session_calls: Arc<AtomicUsize>,
+    ) {
+        let calls = new_session_calls.clone();
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(InitializeResponse::new(ProtocolVersion::V1))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: NewSessionRequest, responder, _cx| {
+                    let call = calls.fetch_add(1, Ordering::SeqCst);
+                    let session_id = if call == 0 {
+                        "old-session"
+                    } else {
+                        "fresh-session"
+                    };
+                    responder.respond(NewSessionResponse::new(SessionId::new(session_id)))
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -11239,6 +11413,45 @@ mod tests {
         assert!(!resumed);
         assert!(!fatal_emitted.load(Ordering::SeqCst));
 
+        client_task.abort();
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn new_session_command_starts_fresh_session_on_existing_connection() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let new_session_calls = Arc::new(AtomicUsize::new(0));
+        let agent_task = tokio::spawn(run_mock_agent_fresh_session(
+            agent_side,
+            new_session_calls.clone(),
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "old-session").await;
+        let (responder, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::NewSession { responder })
+            .expect("send new session");
+        assert_eq!(
+            response.await.expect("new session response"),
+            LoadSessionResult::Switched
+        );
+        wait_for_session_started(&mut ui_rx, "fresh-session").await;
+        assert_eq!(new_session_calls.load(Ordering::SeqCst), 2);
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         client_task.abort();
         agent_task.abort();
     }

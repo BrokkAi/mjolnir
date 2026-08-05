@@ -80,6 +80,7 @@ pub enum UiEvent {
         agent_version: Option<String>,
         prompt_images_supported: bool,
         session_fork_supported: bool,
+        session_load_supported: bool,
         side_session_supported: bool,
         side_session_unsupported_reason: Option<String>,
     },
@@ -380,6 +381,10 @@ pub enum UiCommand {
     },
     /// Fork the current ACP session and continue in the forked session.
     ForkSession,
+    /// Start a fresh ACP session on the existing agent connection.
+    NewSession {
+        responder: oneshot::Sender<LoadSessionResult>,
+    },
     /// Return the active main session that an isolated side runtime should
     /// resume and fork on its own connection when it has persisted history.
     ForkSideSession {
