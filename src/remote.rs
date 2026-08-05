@@ -791,8 +791,11 @@ impl PublishFailureReporter {
             "remote-control publish has failed {} times running: {error:#}",
             self.consecutive_failures
         );
+        // The full chain, not just the outer context: "remote-control server
+        // returned an error" tells the operator nothing, while the cause names
+        // the status code they need to act on.
         self.notify(UiEvent::Warning(format!(
-            "remote viewer is not receiving updates: {error} · this session is unaffected"
+            "remote viewer is not receiving updates: {error:#} · this session is unaffected"
         )));
     }
 
@@ -2056,21 +2059,27 @@ impl TrackerState {
         let kept = kept.max(1);
         let dropped = self.transcript.len() - kept;
         let mut published = Vec::with_capacity(kept + 1);
-        published.push(TranscriptEntry {
-            kind: "system".to_string(),
-            text: format!(
-                "… {dropped} earlier transcript {} not published (snapshot size limit) · the full history is in the terminal session",
-                if dropped == 1 { "entry" } else { "entries" }
-            ),
-            actor: None,
-            timestamp: self.transcript[dropped].timestamp.clone(),
-            tool_kind: None,
-            tool_title: None,
-            tool_body: None,
-            tool_diffs: Vec::new(),
-        });
+        // Nothing is dropped when the newest entry is over budget all by
+        // itself. It gets shrunk below, and a notice claiming "0 earlier
+        // entries not published" would be worse than no notice at all.
+        if dropped > 0 {
+            published.push(TranscriptEntry {
+                kind: "system".to_string(),
+                text: format!(
+                    "… {dropped} earlier transcript {} not published (snapshot size limit) · the full history is in the terminal session",
+                    if dropped == 1 { "entry" } else { "entries" }
+                ),
+                actor: None,
+                timestamp: self.transcript[dropped].timestamp.clone(),
+                tool_kind: None,
+                tool_title: None,
+                tool_body: None,
+                tool_diffs: Vec::new(),
+            });
+        }
+        let first_kept = published.len();
         published.extend(self.transcript[dropped..].iter().cloned());
-        if oversized_newest && let Some(entry) = published.get_mut(1) {
+        if oversized_newest && let Some(entry) = published.get_mut(first_kept) {
             entry.truncate_for_publishing(MAX_PUBLISHED_TRANSCRIPT_BYTES);
         }
         published
@@ -9099,6 +9108,22 @@ mod tests {
         assert!(published_len(&published) <= MAX_PUBLISHED_TRANSCRIPT_BYTES + 1024);
         assert!(published[1].text.ends_with(PUBLISH_TRUNCATION_MARKER));
         assert!(published[1].text.starts_with("entry-1-"));
+    }
+
+    /// The lone oversized entry drops nothing, so it must not claim to. A
+    /// "0 earlier entries not published" notice would be worse than silence.
+    #[test]
+    fn published_transcript_omits_the_notice_when_nothing_was_dropped() {
+        let mut state = started_session_tracker();
+        state.transcript = vec![bulky_entry(0, MAX_PUBLISHED_TRANSCRIPT_BYTES * 2)];
+
+        let published = state.published_transcript();
+
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].kind, "agent");
+        assert!(published[0].text.starts_with("entry-0-"));
+        assert!(published[0].text.ends_with(PUBLISH_TRUNCATION_MARKER));
+        assert!(published_len(&published) <= MAX_PUBLISHED_TRANSCRIPT_BYTES);
     }
 
     #[test]
