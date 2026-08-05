@@ -1,6 +1,7 @@
 //! Cached client for the canonical Agent Client Protocol registry.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -126,6 +127,18 @@ pub async fn load() -> Result<Registry> {
 }
 
 async fn load_with_cache(cache_path: &Path, ttl: Duration, url: &str) -> Result<Registry> {
+    load_with_cache_using(cache_path, ttl, || fetch(url)).await
+}
+
+async fn load_with_cache_using<F, Fut>(
+    cache_path: &Path,
+    ttl: Duration,
+    fetch: F,
+) -> Result<Registry>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<String>>,
+{
     let fresh = cache_path
         .metadata()
         .and_then(|metadata| metadata.modified())
@@ -139,7 +152,7 @@ async fn load_with_cache(cache_path: &Path, ttl: Duration, url: &str) -> Result<
         return Ok(registry);
     }
 
-    match fetch(url).await {
+    match fetch().await {
         Ok(contents) => {
             if let Some(parent) = cache_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -177,6 +190,7 @@ async fn fetch(url: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     const FIXTURE: &str = r#"{
         "agents": [{
@@ -208,6 +222,129 @@ mod tests {
         assert_eq!(
             registry.agents[0].preferred_kind("darwin-aarch64"),
             Some(DistributionKind::Npx)
+        );
+    }
+
+    #[test]
+    fn distribution_falls_back_to_uvx_or_none_and_labels_are_stable() {
+        let mut agent = Registry::from_json(FIXTURE).unwrap().agents.remove(0);
+        agent.distribution.binary = None;
+        agent.distribution.npx = None;
+        agent.distribution.uvx = Some(Package {
+            package: "codex-acp".to_string(),
+            args: Vec::new(),
+            env: HashMap::new(),
+        });
+        assert_eq!(
+            agent.preferred_kind("linux-x86_64"),
+            Some(DistributionKind::Uvx)
+        );
+        agent.distribution.uvx = None;
+        assert_eq!(agent.preferred_kind("linux-x86_64"), None);
+        assert_eq!(DistributionKind::Binary.label(), "binary");
+        assert_eq!(DistributionKind::Npx.label(), "npx");
+        assert_eq!(DistributionKind::Uvx.label(), "uvx");
+    }
+
+    #[test]
+    fn invalid_registry_json_has_parse_context() {
+        let error = Registry::from_json("not json").expect_err("invalid registry");
+        assert!(error.to_string().contains("parse ACP registry"), "{error}");
+    }
+
+    #[test]
+    fn platform_name_uses_registry_conventions() {
+        let expected_os = if std::env::consts::OS == "macos" {
+            "darwin"
+        } else {
+            std::env::consts::OS
+        };
+        let expected_arch = if std::env::consts::ARCH == "arm64" {
+            "aarch64"
+        } else {
+            std::env::consts::ARCH
+        };
+        assert_eq!(current_platform(), format!("{expected_os}-{expected_arch}"));
+    }
+
+    #[tokio::test]
+    async fn fresh_valid_cache_skips_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("registry.json");
+        std::fs::write(&cache, FIXTURE).unwrap();
+        let called = AtomicBool::new(false);
+
+        let registry = load_with_cache_using(&cache, Duration::from_secs(60), || async {
+            called.store(true, Ordering::Relaxed);
+            anyhow::bail!("fresh cache unexpectedly fetched")
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(registry.agents[0].id, "codex-acp");
+        assert!(!called.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn invalid_fresh_cache_is_replaced_by_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("registry.json");
+        std::fs::write(&cache, "not json").unwrap();
+
+        let registry = load_with_cache_using(&cache, Duration::from_secs(60), || async {
+            Ok(FIXTURE.to_string())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(registry.agents[0].id, "codex-acp");
+        assert_eq!(std::fs::read_to_string(cache).unwrap(), FIXTURE);
+    }
+
+    #[tokio::test]
+    async fn successful_fetch_creates_cache_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("nested/cache/registry.json");
+
+        let registry =
+            load_with_cache_using(&cache, Duration::ZERO, || async { Ok(FIXTURE.to_string()) })
+                .await
+                .unwrap();
+
+        assert_eq!(registry.agents[0].name, "Codex");
+        assert_eq!(std::fs::read_to_string(cache).unwrap(), FIXTURE);
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_falls_back_to_stale_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("registry.json");
+        std::fs::write(&cache, FIXTURE).unwrap();
+
+        let registry = load_with_cache_using(&cache, Duration::ZERO, || async {
+            anyhow::bail!("network unavailable")
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(registry.agents[0].id, "codex-acp");
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_without_cache_reports_both_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("missing.json");
+
+        let error = load_with_cache_using(&cache, Duration::ZERO, || async {
+            anyhow::bail!("network unavailable")
+        })
+        .await
+        .expect_err("missing cache");
+        let message = format!("{error:#}");
+        assert!(message.contains("network unavailable"), "{message}");
+        assert!(
+            message.contains("no cached registry available"),
+            "{message}"
         );
     }
 }
