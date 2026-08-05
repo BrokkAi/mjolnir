@@ -6398,6 +6398,10 @@ fn draw_inline_chat(
         draw_inline_transcript_viewer(f, f.area(), state, transcript_scroll);
         return;
     }
+    // The reader's fully expanded render is the larger of the two caches and
+    // is dead once it closes; reopening pays one rebuild instead of holding
+    // it for the rest of the session.
+    transcript_scroll.viewer_cache = None;
 
     if state.review_issue_viewer {
         draw_review_issue_viewer(f, f.area(), state);
@@ -8019,7 +8023,12 @@ fn wrapped_visible_window(
     top: usize,
     height: u16,
 ) -> (Vec<Line<'static>>, u16) {
-    if lines.is_empty() || height == 0 || row_starts.len() != lines.len() {
+    if height == 0 {
+        // A zero-height viewport shows nothing; cloning the transcript to
+        // render it would reintroduce the very cost this window avoids.
+        return (Vec::new(), 0);
+    }
+    if lines.is_empty() || row_starts.len() != lines.len() {
         return (lines.to_vec(), top.min(u16::MAX as usize) as u16);
     }
     let first = row_starts
@@ -20738,6 +20747,24 @@ mod tests {
                 "Answer {index}. {}\n\n- bullet one\n- bullet two\n",
                 "lorem ipsum dolor sit amet consectetur ".repeat(3)
             )));
+            // Tool output renders with a gutter and long unbroken tokens, the
+            // shape most likely to wrap differently than plain prose.
+            let id = format!("call-{index}");
+            state.tool_calls.insert(
+                id.clone(),
+                crate::app::ToolCallView {
+                    title: format!("run command {index}"),
+                    kind: ToolKind::Execute,
+                    status: ToolCallStatus::Completed,
+                    body: vec![ToolCallOutput::Terminal {
+                        terminal_id: format!("term-{index}"),
+                        output: format!("{}\n{}", "y".repeat(90), "output line ".repeat(9)),
+                        truncated: false,
+                        exit_status: None,
+                    }],
+                },
+            );
+            state.transcript.push(Entry::ToolCall(id));
         }
         state
     }
@@ -20784,7 +20811,15 @@ mod tests {
             buffer_lines(terminal.backend().buffer())
         };
 
-        for top in [0usize, 1, 7, 33, total.saturating_sub(usize::from(height))] {
+        let past_end = total.saturating_add(5);
+        for top in [
+            0usize,
+            1,
+            7,
+            33,
+            total.saturating_sub(usize::from(height)),
+            past_end,
+        ] {
             let (window, inner_scroll) = wrapped_visible_window(&lines, &row_starts, top, height);
             assert_eq!(
                 render(window, inner_scroll),
