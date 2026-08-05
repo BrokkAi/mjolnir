@@ -209,6 +209,131 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::Agent as AgentRole;
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, DeleteSessionResponse, InitializeResponse, McpCapabilities,
+        NewSessionResponse, SessionCapabilities, SessionConfigOptionCategory,
+        SessionConfigSelectOption, SessionDeleteCapabilities, SessionId,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tokio::io::{duplex, split};
+
+    fn client_transport(stream: tokio::io::DuplexStream) -> impl ConnectTo<Client> {
+        let (read, write) = split(stream);
+        ByteStreams::new(write.compat_write(), read.compat())
+    }
+
+    async fn run_successful_agent(stream: tokio::io::DuplexStream, delete_seen: Arc<AtomicBool>) {
+        let (read, write) = split(stream);
+        let transport = ByteStreams::new(write.compat_write(), read.compat());
+        let model = SessionConfigOption::select(
+            "model",
+            "Model",
+            "sonnet",
+            vec![
+                SessionConfigSelectOption::new("sonnet", "Sonnet").description("balanced model"),
+                SessionConfigSelectOption::new("opus", "Opus"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model);
+        let effort = SessionConfigOption::select(
+            "effort",
+            "Effort",
+            "high",
+            vec![SessionConfigSelectOption::new("high", "High")],
+        )
+        .category(SessionConfigOptionCategory::ThoughtLevel);
+
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: InitializeRequest, responder, _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                            AgentCapabilities::new()
+                                .mcp_capabilities(McpCapabilities::new().http(true))
+                                .session_capabilities(
+                                    SessionCapabilities::new()
+                                        .delete(SessionDeleteCapabilities::new()),
+                                ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: NewSessionRequest, responder, _cx| {
+                    assert_eq!(req.cwd, PathBuf::from("/workspace"));
+                    responder.respond(
+                        NewSessionResponse::new(SessionId::new("probe-session"))
+                            .config_options(vec![model.clone(), effort.clone()]),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: DeleteSessionRequest, responder, _cx| {
+                    assert_eq!(req.session_id, SessionId::new("probe-session"));
+                    delete_seen.store(true, Ordering::SeqCst);
+                    responder.respond(DeleteSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_unsupported_agent(stream: tokio::io::DuplexStream) {
+        let (read, write) = split(stream);
+        let transport = ByteStreams::new(write.compat_write(), read.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: InitializeRequest, responder, _cx| {
+                    responder.respond(InitializeResponse::new(ProtocolVersion::V0))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn run_auth_required_agent(stream: tokio::io::DuplexStream, during_session: bool) {
+        let (read, write) = split(stream);
+        let transport = ByteStreams::new(write.compat_write(), read.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: InitializeRequest, responder, _cx| {
+                    if during_session {
+                        responder.respond(InitializeResponse::new(ProtocolVersion::V1))
+                    } else {
+                        responder.respond_with_error(agent_client_protocol::Error::auth_required())
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: NewSessionRequest, responder, _cx| {
+                    responder.respond_with_error(agent_client_protocol::Error::auth_required())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
 
     #[tokio::test]
     async fn missing_program_is_reported_without_installing() {
@@ -222,5 +347,129 @@ mod tests {
         .await
         .expect_err("missing adapter");
         assert_eq!(error, "not installed");
+    }
+
+    #[tokio::test]
+    async fn successful_probe_collects_models_capabilities_and_deletes_session() {
+        let (client_side, agent_side) = duplex(64 * 1024);
+        let delete_seen = Arc::new(AtomicBool::new(false));
+        let agent_task = tokio::spawn(run_successful_agent(agent_side, delete_seen.clone()));
+
+        let capabilities = session_adapter_capabilities(
+            client_transport(client_side),
+            PathBuf::from("/workspace"),
+        )
+        .await
+        .expect("probe succeeds");
+
+        assert!(capabilities.http_mcp);
+        assert!(capabilities.session_config_known);
+        assert_eq!(capabilities.session_config.len(), 2);
+        assert_eq!(capabilities.models.len(), 2);
+        assert_eq!(capabilities.models[0].value, "sonnet");
+        assert_eq!(capabilities.models[0].name, "Sonnet");
+        assert_eq!(
+            capabilities.models[0].description.as_deref(),
+            Some("balanced model")
+        );
+        assert_eq!(capabilities.models[1].value, "opus");
+        assert!(delete_seen.load(Ordering::SeqCst));
+        agent_task.abort();
+    }
+
+    #[tokio::test]
+    async fn protocol_and_auth_failures_are_classified() {
+        let (client_side, agent_side) = duplex(64 * 1024);
+        let agent_task = tokio::spawn(run_unsupported_agent(agent_side));
+        let error = session_adapter_capabilities(client_transport(client_side), PathBuf::from("."))
+            .await
+            .expect_err("unsupported protocol");
+        assert!(error.contains("unsupported protocol"), "{error}");
+        agent_task.abort();
+
+        for (during_session, expected) in [(false, "needs auth"), (true, "needs auth")] {
+            let (client_side, agent_side) = duplex(64 * 1024);
+            let agent_task = tokio::spawn(run_auth_required_agent(agent_side, during_session));
+            let error =
+                session_adapter_capabilities(client_transport(client_side), PathBuf::from("."))
+                    .await
+                    .expect_err("authentication required");
+            assert_eq!(error, expected);
+            agent_task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_transport_is_reported_as_connection_error() {
+        let (client_side, agent_side) = duplex(1024);
+        drop(agent_side);
+
+        let error = session_adapter_capabilities(client_transport(client_side), PathBuf::from("."))
+            .await
+            .expect_err("closed transport");
+
+        assert!(error.starts_with("connection error:"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detached_runner_reports_spawn_timeout_and_handler_outcomes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bad_program = dir.path().join("bad-agent");
+        std::fs::write(&bad_program, "#!/definitely/missing/interpreter\n").unwrap();
+        let mut permissions = std::fs::metadata(&bad_program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&bad_program, permissions).unwrap();
+
+        let result = run_detached_agent_session(
+            DetachedAgentLaunch {
+                program: bad_program,
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: dir.path().to_path_buf(),
+                timeout: Duration::from_secs(1),
+            },
+            DetachedAgentOutcomes {
+                missing: || "missing".to_string(),
+                spawn_failed: |error| error,
+                timed_out: || "timeout".to_string(),
+            },
+            |_transport, _cwd| async { "handled".to_string() },
+        )
+        .await;
+        assert!(result.starts_with("spawn failed:"), "{result}");
+
+        let shell_launch = |timeout| DetachedAgentLaunch {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), "sleep 30".to_string()],
+            env: HashMap::new(),
+            cwd: dir.path().to_path_buf(),
+            timeout,
+        };
+        let result = run_detached_agent_session(
+            shell_launch(Duration::from_secs(1)),
+            DetachedAgentOutcomes {
+                missing: || "missing".to_string(),
+                spawn_failed: |error| error,
+                timed_out: || "timeout".to_string(),
+            },
+            |_transport, cwd| async move { cwd.display().to_string() },
+        )
+        .await;
+        assert_eq!(result, dir.path().display().to_string());
+
+        let result = run_detached_agent_session(
+            shell_launch(Duration::from_millis(10)),
+            DetachedAgentOutcomes {
+                missing: || "missing".to_string(),
+                spawn_failed: |error| error,
+                timed_out: || "timeout".to_string(),
+            },
+            |_transport, _cwd| async move { futures::future::pending::<String>().await },
+        )
+        .await;
+        assert_eq!(result, "timeout");
     }
 }
