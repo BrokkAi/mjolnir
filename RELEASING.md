@@ -17,12 +17,15 @@ version bump must regenerate it. CI diffs the checked-in report against a fresh
 
 ## What a tag triggers
 
-A `vX.Y.Z` tag triggers the GitHub release and crates.io workflows. The publish
-workflow refuses to publish when the tag differs from either crate version. The
-release workflow builds Linux x86-64 and ARM64, Android ARM64, Windows x86-64,
-and a universal macOS archive. Desktop archives contain `mj` and the voice
-worker; Android omits the voice worker. Every archive includes the applicable
-licenses and notices and is published with a SHA-256 sidecar.
+A `vX.Y.Z` tag triggers the GitHub release and docs workflows. The release
+workflow builds Linux x86-64 and ARM64, Android ARM64, Windows x86-64, and a
+universal macOS archive. Desktop archives contain `mj` and the voice worker;
+Android omits the voice worker. Every archive includes the applicable licenses
+and notices and is published with a SHA-256 sidecar.
+
+Neither registry publish runs off the tag push. Both wait for the release
+workflow to succeed, so a build that fails on any target stops the release
+before anything reaches crates.io or npm.
 
 ## Discord announcement
 
@@ -32,6 +35,24 @@ webhook URL. The release workflow reuses GitHub's generated release notes,
 prevents mentions from being parsed, suppresses automatic link embeds, and
 leaves a failed Discord delivery as a warning so it cannot invalidate an
 already-published release.
+
+## crates.io publishing
+
+`publish.yml` publishes `brokk-mj-voice-worker` and `brokk-mjolnir`. It refuses
+to publish when the tag differs from either crate version, and packages both
+crates ahead of the `crates-io` environment gate so a packaging failure surfaces
+without spending an approval.
+
+Publishing runs automatically once the release workflow succeeds. Both the
+release event and the release workflow's completion trigger it, and each crate
+is skipped when that version is already on the registry, so the overlap cannot
+fail a run with nothing left to publish. That skip is also the recovery path: if
+one crate publishes and the other fails, re-running resumes at the crate that
+did not land. crates.io reserves a version number permanently once published and
+yanking does not release it, so a shipped version can never be republished.
+
+To package a tag without publishing, run the workflow manually with `publish`
+off and inspect its `.crate` artifact.
 
 ## npm publishing
 
