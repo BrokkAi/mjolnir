@@ -2142,6 +2142,15 @@ fn on_off(enabled: bool) -> &'static str {
 mod tests {
     use super::*;
 
+    fn render(editor: &SettingsEditor, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_settings_panel(frame, frame.area(), editor, "mj config"))
+            .expect("draw");
+        terminal.backend().to_string()
+    }
+
     #[test]
     fn reset_unroutable_models_flips_seats_whose_route_is_disabled() {
         let mut config = Config::default();
@@ -2794,5 +2803,109 @@ mod tests {
         assert!(!editor.config.feature_hints);
         assert_eq!(editor.handle_key(KeyCode::Char(' ')), SettingsAction::None);
         assert!(!editor.config.feature_hints);
+    }
+
+    #[test]
+    fn standard_tabs_render_their_saved_controls() {
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
+
+        editor.tab = SettingsTab::Agents;
+        let agents = render(&editor, 100, 30);
+        assert!(agents.contains("Primary model"), "rendered:\n{agents}");
+        assert!(agents.contains("Discrete review"), "rendered:\n{agents}");
+
+        editor.tab = SettingsTab::Subagents;
+        let subagents = render(&editor, 100, 30);
+        assert!(
+            subagents.contains("Subagent model"),
+            "rendered:\n{subagents}"
+        );
+        assert!(
+            subagents.contains("Automatic quota failover"),
+            "rendered:\n{subagents}"
+        );
+
+        editor.tab = SettingsTab::AcpServers;
+        let servers = render(&editor, 100, 30);
+        assert!(servers.contains("Accounts"), "rendered:\n{servers}");
+        assert!(servers.contains("+ Add server"), "rendered:\n{servers}");
+        assert!(servers.contains("Servers"), "rendered:\n{servers}");
+
+        editor.tab = SettingsTab::Appearance;
+        let appearance = render(&editor, 100, 30);
+        assert!(appearance.contains("Theme"), "rendered:\n{appearance}");
+        assert!(appearance.contains("Spinner"), "rendered:\n{appearance}");
+        assert!(
+            appearance.contains("Feature tips"),
+            "rendered:\n{appearance}"
+        );
+
+        assert!(!render(&editor, 27, 11).contains("mj config"));
+    }
+
+    #[test]
+    fn server_catalog_and_custom_views_render_recovery_details() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::AcpServers;
+        editor.acp_view = AcpView::Catalog {
+            filter: "gem".to_string(),
+        };
+        editor.registry = RegistryState::Error("offline".to_string());
+        let unavailable = render(&editor, 100, 30);
+        assert!(
+            unavailable.contains("Registry unavailable: offline"),
+            "rendered:\n{unavailable}"
+        );
+        assert!(
+            unavailable.contains("Custom command"),
+            "rendered:\n{unavailable}"
+        );
+
+        editor.registry = RegistryState::Ready(
+            Registry::from_json(
+                r#"{"agents":[{"id":"gemini","name":"Gemini","version":"1","description":"Google agent","distribution":{"npx":{"package":"@google/gemini-cli","args":["--acp"]}}}]}"#,
+            )
+            .expect("registry"),
+        );
+        editor.selected = 1;
+        let catalog = render(&editor, 100, 30);
+        assert!(catalog.contains("Gemini · v1"), "rendered:\n{catalog}");
+        assert!(
+            catalog.contains("npx -y @google/gemini-cli"),
+            "rendered:\n{catalog}"
+        );
+
+        editor.acp_view = AcpView::Custom {
+            name: "Local".to_string(),
+            command: "adapter --stdio".to_string(),
+            field: 1,
+        };
+        let custom = render(&editor, 100, 30);
+        assert!(custom.contains("Name     Local"), "rendered:\n{custom}");
+        assert!(
+            custom.contains("Command  adapter --stdio"),
+            "rendered:\n{custom}"
+        );
+    }
+
+    #[test]
+    fn notice_and_priority_editor_footer_are_visible() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::AcpPriority;
+        editor.priority_editor = Some(PrioritySeat::Primary);
+        editor.notice = Some("restart required".to_string());
+
+        let rendered = render(&editor, 100, 30);
+
+        assert!(
+            rendered.contains("restart required"),
+            "rendered:\n{rendered}"
+        );
+        assert!(rendered.contains("move"), "rendered:\n{rendered}");
+        assert!(rendered.contains("reset default"), "rendered:\n{rendered}");
     }
 }
