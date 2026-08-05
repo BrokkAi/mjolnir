@@ -279,6 +279,58 @@ fn contains_da1_response(buffer: &[u8]) -> bool {
     false
 }
 
+/// Read replies until the DA1 sentinel lands, the source ends, or time is up.
+///
+/// Split out of [`imp::probe`] so the part that decides *when the terminal has
+/// finished answering* can be tested against a scripted source. That decision
+/// is the whole correctness question here — stopping early leaves the rest of
+/// the reply in the input queue, where the TUI reads it as user keystrokes —
+/// and it is the one part that needs no terminal to exercise.
+///
+/// `ready` reports whether the budget allows another blocking read; `read`
+/// fills a chunk the way [`std::io::Read::read`] does.
+#[cfg(any(unix, test))]
+fn drain_replies(
+    mut read: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
+    mut ready: impl FnMut() -> bool,
+) -> Vec<u8> {
+    let mut buffer = Vec::with_capacity(128);
+    let mut chunk = [0u8; 128];
+    loop {
+        if !ready() {
+            break;
+        }
+        match read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buffer.extend_from_slice(&chunk[..n]);
+                // Once the complete DA1 reply arrives, anything the terminal
+                // meant to say about colors has already been said, because it
+                // answers queries in order.
+                if contains_da1_response(&buffer) {
+                    break;
+                }
+            }
+            // A signal mid-read is not the terminal declining to answer.
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    buffer
+}
+
+/// Pick the foreground and background out of a drained reply buffer.
+///
+/// Both must be present: a terminal that answered one query but not the other
+/// tells us nothing safe about the pair, so callers fall back to modifiers.
+#[cfg(any(unix, test))]
+fn colors_from_replies(buffer: &[u8]) -> Option<DefaultColors> {
+    Some(DefaultColors {
+        fg: parse_osc_color(buffer, 10)?,
+        bg: parse_osc_color(buffer, 11)?,
+    })
+}
+
 /// Ask the terminal for its default foreground and background.
 ///
 /// Returns `None` whenever the answer would be a guess: not a TTY, the terminal
@@ -298,6 +350,16 @@ pub fn probe_default_colors() -> Option<DefaultColors> {
 /// it is only ever used to pick a blend direction and a light/dark branch,
 /// where being roughly right beats having nothing.
 fn colorfgbg_fallback() -> Option<DefaultColors> {
+    colorfgbg_from_value(&std::env::var("COLORFGBG").ok()?)
+}
+
+/// Parse a `COLORFGBG` value into approximate defaults.
+///
+/// Split out from [`colorfgbg_fallback`] for the same reason
+/// [`color_level_from_env`] is split out of [`stdout_color_level`]: it can then
+/// be tested without mutating the process environment, which races across
+/// parallel test threads.
+fn colorfgbg_from_value(raw: &str) -> Option<DefaultColors> {
     // Nominal appearance of ANSI 0..=15 in a default xterm scheme.
     const ANSI_16: [(u8, u8, u8); 16] = [
         (0, 0, 0),
@@ -318,7 +380,6 @@ fn colorfgbg_fallback() -> Option<DefaultColors> {
         (255, 255, 255),
     ];
 
-    let raw = std::env::var("COLORFGBG").ok()?;
     let mut parts = raw.split(';');
     let fg = parts.next()?.trim().parse::<usize>().ok()?;
     // Some terminals emit "fg;<something>;bg"; the background is always last.
@@ -336,7 +397,7 @@ mod imp {
     use std::os::fd::AsRawFd;
     use std::time::{Duration, Instant};
 
-    use super::{DefaultColors, contains_da1_response, parse_osc_color};
+    use super::{DefaultColors, colors_from_replies, drain_replies};
 
     /// Upper bound on how long startup may block waiting for the terminal.
     ///
@@ -362,34 +423,17 @@ mod imp {
         tty.write_all(b"\x1b]10;?\x07\x1b]11;?\x07\x1b[c").ok()?;
         tty.flush().ok()?;
 
-        let mut buffer = Vec::with_capacity(128);
+        let fd = tty.as_raw_fd();
         let deadline = Instant::now() + PROBE_TIMEOUT;
-        let mut chunk = [0u8; 128];
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() || !wait_readable(tty.as_raw_fd(), remaining) {
-                break;
-            }
-            match tty.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    buffer.extend_from_slice(&chunk[..n]);
-                    // Once the complete DA1 reply arrives, anything the
-                    // terminal meant to say about colors has already been
-                    // said, because it answers queries in order.
-                    if contains_da1_response(&buffer) {
-                        break;
-                    }
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
+        let buffer = drain_replies(
+            |chunk| tty.read(chunk),
+            || {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                !remaining.is_zero() && wait_readable(fd, remaining)
+            },
+        );
 
-        Some(DefaultColors {
-            fg: parse_osc_color(&buffer, 10)?,
-            bg: parse_osc_color(&buffer, 11)?,
-        })
+        colors_from_replies(&buffer)
     }
 
     fn wait_readable(fd: i32, timeout: Duration) -> bool {
@@ -616,5 +660,476 @@ mod tests {
             _ => None,
         });
         assert_eq!(level, StdoutColorLevel::Unknown);
+    }
+
+    /// Build a `var`-style lookup over a fixed set of pairs.
+    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let owned: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |key: &str| {
+            owned
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[test]
+    fn empty_no_color_does_not_suppress_color() {
+        // The convention is that `NO_COLOR` opts out only when it is set to a
+        // non-empty value; an empty one must not disable an otherwise
+        // truecolor terminal.
+        assert_eq!(
+            color_level_from_env(env_of(&[("NO_COLOR", ""), ("COLORTERM", "truecolor")])),
+            StdoutColorLevel::TrueColor
+        );
+    }
+
+    #[test]
+    fn colorterm_matches_case_insensitively_and_accepts_24bit() {
+        assert_eq!(
+            color_level_from_env(env_of(&[("COLORTERM", "TrueColor")])),
+            StdoutColorLevel::TrueColor
+        );
+        assert_eq!(
+            color_level_from_env(env_of(&[("COLORTERM", "24BIT")])),
+            StdoutColorLevel::TrueColor
+        );
+        // An unrecognised COLORTERM must fall through to the TERM hints rather
+        // than being treated as a truecolor claim.
+        assert_eq!(
+            color_level_from_env(env_of(&[("COLORTERM", "yes"), ("TERM", "xterm-256color")])),
+            StdoutColorLevel::Ansi256
+        );
+    }
+
+    #[test]
+    fn known_terminal_programs_are_truecolor_without_colorterm() {
+        // These export no COLORTERM over SSH or through a scrubbing login
+        // shell, which is the whole reason the allowlist exists.
+        for program in ["iTerm.app", "WezTerm", "ghostty", "vscode", "Hyper", "rio"] {
+            assert_eq!(
+                color_level_from_env(env_of(&[("TERM_PROGRAM", program), ("TERM", "xterm")])),
+                StdoutColorLevel::TrueColor,
+                "{program} should be treated as truecolor"
+            );
+        }
+    }
+
+    #[test]
+    fn unlisted_terminal_program_falls_through_to_term() {
+        // Apple Terminal genuinely is not truecolor, so it must not be granted
+        // one by the allowlist.
+        assert_eq!(
+            color_level_from_env(env_of(&[
+                ("TERM_PROGRAM", "Apple_Terminal"),
+                ("TERM", "xterm-256color")
+            ])),
+            StdoutColorLevel::Ansi256
+        );
+    }
+
+    #[test]
+    fn term_names_that_advertise_direct_color_are_truecolor() {
+        for term in ["xterm-direct", "xterm-truecolor", "iterm2-direct"] {
+            assert_eq!(
+                color_level_from_env(env_of(&[("TERM", term)])),
+                StdoutColorLevel::TrueColor,
+                "{term} should be treated as truecolor"
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognised_term_names_fall_back_to_unknown() {
+        // The floor matters more than a guess: an unknown TERM gets modifiers,
+        // not a fill that might be invisible.
+        for term in ["vt100", "linux", "ansi", "sun"] {
+            assert_eq!(
+                color_level_from_env(env_of(&[("TERM", term)])),
+                StdoutColorLevel::Unknown,
+                "{term} should not be assumed to have color"
+            );
+        }
+    }
+
+    #[test]
+    fn screen_and_color_suffixed_terms_get_sixteen_colors() {
+        assert_eq!(
+            color_level_from_env(env_of(&[("TERM", "screen")])),
+            StdoutColorLevel::Ansi16
+        );
+        assert_eq!(
+            color_level_from_env(env_of(&[("TERM", "rxvt-unicode-color")])),
+            StdoutColorLevel::Ansi16
+        );
+        // `screen-256color` contains both "256" and "screen"; the richer hint
+        // has to win, so ordering inside the resolver is load-bearing.
+        assert_eq!(
+            color_level_from_env(env_of(&[("TERM", "screen-256color")])),
+            StdoutColorLevel::Ansi256
+        );
+    }
+
+    #[test]
+    fn recording_default_colors_is_idempotent() {
+        // A second probe (after a suspend/resume, say) must not panic and must
+        // not be able to change what the session already resolved. Asserting
+        // against the first observed value rather than a literal keeps this
+        // independent of whichever test in the binary touched the OnceLock
+        // first.
+        let first = default_colors();
+        set_default_colors(Some(DefaultColors {
+            fg: (1, 2, 3),
+            bg: (4, 5, 6),
+        }));
+        set_default_colors(None);
+        assert_eq!(default_colors(), first, "the first recorded value wins");
+    }
+
+    #[test]
+    fn da1_is_recognised_in_its_single_byte_csi_form() {
+        // A terminal may answer with the C1 control byte 0x9b instead of the
+        // two-byte `ESC [` sequence.
+        assert!(contains_da1_response(b"\x9b?62c"));
+        assert!(contains_da1_response(b"\x1b]11;rgb:00/00/00\x07\x9b?1;2c"));
+    }
+
+    #[test]
+    fn da1_is_recognised_with_intermediate_bytes() {
+        // CSI allows 0x20..=0x2f intermediates between the parameters and the
+        // final byte; skipping them would miss the terminator.
+        assert!(contains_da1_response(b"\x1b[?62;1 c"));
+        assert!(contains_da1_response(b"\x1b[?62;1!c"));
+    }
+
+    #[test]
+    fn non_da1_csi_sequences_are_skipped_rather_than_ending_the_scan() {
+        // An SGR reset ahead of the real answer must not stop the search, or
+        // the rest of the reply is left in the input queue and shows up as
+        // stray keystrokes once the TUI starts.
+        assert!(contains_da1_response(b"\x1b[0m\x1b[?62c"));
+        assert!(!contains_da1_response(b"\x1b[0m"));
+        assert!(!contains_da1_response(b"\x1b[2J\x1b[H"));
+    }
+
+    #[test]
+    fn incomplete_or_empty_buffers_are_not_mistaken_for_da1() {
+        assert!(!contains_da1_response(b""));
+        assert!(!contains_da1_response(b"\x1b"));
+        assert!(!contains_da1_response(b"\x1b["));
+        assert!(!contains_da1_response(b"\x1b[?62"));
+        // A bare `c` is a hex digit in an OSC color reply, not a terminator.
+        assert!(!contains_da1_response(b"\x1b]11;rgb:cccc/cccc/cccc\x07"));
+    }
+
+    #[test]
+    fn osc_components_scale_from_one_and_three_digit_widths() {
+        // Terminals are free to answer at any width from 1 to 4 hex digits.
+        assert_eq!(
+            parse_osc_color(b"\x1b]11;rgb:f/0/8\x07", 11),
+            Some((255, 0, 136))
+        );
+        assert_eq!(
+            parse_osc_color(b"\x1b]11;rgb:fff/000/800\x07", 11),
+            Some((255, 0, 128))
+        );
+    }
+
+    #[test]
+    fn osc_parse_rejects_the_wrong_code_and_missing_prefix() {
+        // Asking for the background must not accidentally read the foreground
+        // reply that shares the buffer.
+        assert_eq!(parse_osc_color(b"\x1b]10;rgb:ff/ff/ff\x07", 11), None);
+        // Some terminals answer `#rrggbb`; we do not claim to parse that.
+        assert_eq!(parse_osc_color(b"\x1b]11;#1c1c1c\x07", 11), None);
+        // Wider than 4 hex digits is out of spec and must not be truncated
+        // into a plausible-looking color.
+        assert_eq!(parse_osc_color(b"\x1b]11;rgb:fffff/00/00\x07", 11), None);
+        assert_eq!(parse_osc_color(b"", 11), None);
+    }
+
+    #[test]
+    fn colorfgbg_maps_ansi_indices_to_nominal_rgb() {
+        // rxvt and tmux export "<fg>;<bg>"; light-on-dark is the common case.
+        assert_eq!(
+            colorfgbg_from_value("15;0"),
+            Some(DefaultColors {
+                fg: (255, 255, 255),
+                bg: (0, 0, 0)
+            })
+        );
+        assert_eq!(
+            colorfgbg_from_value("0;15"),
+            Some(DefaultColors {
+                fg: (0, 0, 0),
+                bg: (255, 255, 255)
+            })
+        );
+    }
+
+    #[test]
+    fn colorfgbg_takes_the_background_from_the_last_field() {
+        // Some terminals emit a three-field "fg;<something>;bg" form, where
+        // reading the second field would pick up the wrong color entirely.
+        assert_eq!(
+            colorfgbg_from_value("15;default;0"),
+            Some(DefaultColors {
+                fg: (255, 255, 255),
+                bg: (0, 0, 0)
+            })
+        );
+        assert_eq!(
+            colorfgbg_from_value(" 7 ; 0 "),
+            Some(DefaultColors {
+                fg: (229, 229, 229),
+                bg: (0, 0, 0)
+            })
+        );
+    }
+
+    #[test]
+    fn colorfgbg_rejects_values_it_cannot_trust() {
+        // Anything unparseable yields None so the caller uses modifiers rather
+        // than tinting against a background that may not exist.
+        assert_eq!(colorfgbg_from_value(""), None);
+        assert_eq!(colorfgbg_from_value("default;default"), None);
+        // Out of the 16-entry table: an index we have no nominal RGB for.
+        assert_eq!(colorfgbg_from_value("15;16"), None);
+        assert_eq!(colorfgbg_from_value("-1;0"), None);
+        assert_eq!(colorfgbg_from_value("15;"), None);
+    }
+
+    #[test]
+    fn colorfgbg_without_a_separator_reads_one_field_as_both() {
+        // A separator-less value makes the first and last field the same, so
+        // foreground and background come back identical. Documented rather
+        // than rejected: no terminal emits this, and a matching pair is inert
+        // downstream — the blend has nowhere to move and the light/dark branch
+        // still resolves.
+        assert_eq!(
+            colorfgbg_from_value("15"),
+            Some(DefaultColors {
+                fg: (255, 255, 255),
+                bg: (255, 255, 255)
+            })
+        );
+    }
+
+    #[test]
+    fn colorfgbg_classification_matches_the_light_dark_branch() {
+        // The only two things this fallback feeds are a blend direction and a
+        // light/dark decision, so that is what is worth asserting.
+        let dark = colorfgbg_from_value("15;0").expect("parses");
+        let light = colorfgbg_from_value("0;15").expect("parses");
+        assert!(!is_light(dark.bg));
+        assert!(is_light(light.bg));
+    }
+
+    #[test]
+    fn xterm_cube_and_grayscale_ramp_match_the_specification() {
+        assert_eq!(xterm_rgb(16), (0, 0, 0));
+        assert_eq!(xterm_rgb(231), (255, 255, 255));
+        assert_eq!(xterm_rgb(196), (255, 0, 0));
+        // The grayscale ramp starts at 8 and steps by 10.
+        assert_eq!(xterm_rgb(232), (8, 8, 8));
+        assert_eq!(xterm_rgb(255), (238, 238, 238));
+    }
+
+    #[test]
+    fn perceptual_distance_is_zero_for_identical_colors_and_symmetric() {
+        assert_eq!(perceptual_distance((18, 24, 30), (18, 24, 30)), 0.0);
+        let forward = perceptual_distance((0, 0, 0), (255, 255, 255));
+        let backward = perceptual_distance((255, 255, 255), (0, 0, 0));
+        assert!((forward - backward).abs() < f32::EPSILON);
+        // Black to white is the largest lightness gap there is.
+        assert!(forward > perceptual_distance((0, 0, 0), (128, 128, 128)));
+    }
+
+    #[test]
+    fn blend_clamps_alpha_outside_the_unit_range() {
+        assert_eq!(blend((255, 0, 0), (0, 0, 255), -1.0), (0, 0, 255));
+        assert_eq!(blend((255, 0, 0), (0, 0, 255), 2.0), (255, 0, 0));
+    }
+
+    /// A `read`-shaped closure that replays a fixed script, then reports EOF.
+    fn scripted_reads(
+        steps: Vec<std::io::Result<&'static [u8]>>,
+    ) -> impl FnMut(&mut [u8]) -> std::io::Result<usize> {
+        let mut steps = steps.into_iter();
+        move |chunk: &mut [u8]| match steps.next() {
+            Some(Ok(bytes)) => {
+                chunk[..bytes.len()].copy_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            Some(Err(err)) => Err(err),
+            None => Ok(0),
+        }
+    }
+
+    const OSC_REPLIES: &[u8] = b"\x1b]10;rgb:ffff/ffff/ffff\x07\x1b]11;rgb:0000/0000/0000\x07";
+
+    #[test]
+    fn draining_stops_as_soon_as_the_da1_sentinel_arrives() {
+        // The read after the sentinel must never happen: anything past it is
+        // the user's own typing, and consuming it swallows a keystroke.
+        let mut reads = 0;
+        let buffer = drain_replies(
+            |chunk| {
+                reads += 1;
+                let bytes: &[u8] = match reads {
+                    1 => OSC_REPLIES,
+                    2 => b"\x1b[?62;4c",
+                    _ => panic!("read past the DA1 sentinel"),
+                };
+                chunk[..bytes.len()].copy_from_slice(bytes);
+                Ok(bytes.len())
+            },
+            || true,
+        );
+        assert_eq!(reads, 2);
+        assert_eq!(
+            colors_from_replies(&buffer),
+            Some(DefaultColors {
+                fg: (255, 255, 255),
+                bg: (0, 0, 0)
+            })
+        );
+    }
+
+    #[test]
+    fn draining_reassembles_a_reply_split_across_reads() {
+        // Terminals are under no obligation to deliver a reply in one chunk,
+        // and a byte-at-a-time split is the worst realistic case.
+        let mut pending: Vec<&'static [u8]> = vec![
+            b"\x1b]10;rgb:1111/2222/3333\x07",
+            b"\x1b]11;rgb:4444/5555/6666\x07",
+            b"\x1b[",
+            b"?62",
+            b"c",
+        ];
+        pending.reverse();
+        let buffer = drain_replies(
+            |chunk| match pending.pop() {
+                Some(bytes) => {
+                    chunk[..bytes.len()].copy_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                None => Ok(0),
+            },
+            || true,
+        );
+        assert!(pending.is_empty(), "should have consumed the whole script");
+        assert_eq!(
+            colors_from_replies(&buffer),
+            Some(DefaultColors {
+                fg: (17, 34, 51),
+                bg: (68, 85, 102)
+            })
+        );
+    }
+
+    #[test]
+    fn draining_retries_after_an_interrupted_read() {
+        // A signal landing mid-probe is not the terminal declining to answer,
+        // so EINTR has to be retried rather than treated as the end.
+        let buffer = drain_replies(
+            scripted_reads(vec![
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+                Ok(OSC_REPLIES),
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+                Ok(b"\x1b[?62c"),
+            ]),
+            || true,
+        );
+        assert!(colors_from_replies(&buffer).is_some());
+    }
+
+    #[test]
+    fn draining_gives_up_on_a_real_read_error_but_keeps_what_it_has() {
+        let buffer = drain_replies(
+            scripted_reads(vec![
+                Ok(OSC_REPLIES),
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            ]),
+            || true,
+        );
+        // Both colors did arrive before the failure, so the partial read is
+        // still usable — the error ends the wait, it does not void the answer.
+        assert_eq!(
+            colors_from_replies(&buffer),
+            Some(DefaultColors {
+                fg: (255, 255, 255),
+                bg: (0, 0, 0)
+            })
+        );
+    }
+
+    #[test]
+    fn draining_ends_at_end_of_input_without_a_sentinel() {
+        // A terminal that answers the color queries but ignores DA1 still has
+        // to terminate the loop when the source runs dry.
+        let buffer = drain_replies(scripted_reads(vec![Ok(OSC_REPLIES)]), || true);
+        assert!(colors_from_replies(&buffer).is_some());
+    }
+
+    #[test]
+    fn draining_returns_nothing_when_the_budget_is_already_spent() {
+        // The timeout path: a terminal that never answers must cost the
+        // budget and nothing more, and must not yield a guessed color.
+        let mut reads = 0;
+        let buffer = drain_replies(
+            |_chunk| {
+                reads += 1;
+                Ok(0)
+            },
+            || false,
+        );
+        assert_eq!(reads, 0, "must not read once the budget is gone");
+        assert!(buffer.is_empty());
+        assert_eq!(colors_from_replies(&buffer), None);
+    }
+
+    #[test]
+    fn draining_stops_when_the_budget_runs_out_partway_through() {
+        // Readiness is re-checked every iteration, so a terminal that dribbles
+        // out a reply cannot hold the probe open past its deadline.
+        let mut allowed = 2;
+        let buffer = drain_replies(
+            scripted_reads(vec![
+                Ok(b"\x1b]10;rgb:ffff/ffff/ffff\x07"),
+                Ok(b"\x1b]11;rgb:0000/"),
+                Ok(b"0000/0000\x07\x1b[?62c"),
+            ]),
+            || {
+                allowed -= 1;
+                allowed >= 0
+            },
+        );
+        // Only the first two chunks got through, so the background reply is
+        // still truncated and the pair must be refused rather than guessed.
+        assert_eq!(colors_from_replies(&buffer), None);
+    }
+
+    #[test]
+    fn a_half_answered_probe_is_refused_rather_than_half_guessed() {
+        // Assuming a background when only the foreground came back is exactly
+        // the "assume dark" failure the module is built to avoid.
+        assert_eq!(colors_from_replies(b"\x1b]10;rgb:ffff/ffff/ffff\x07"), None);
+        assert_eq!(colors_from_replies(b"\x1b]11;rgb:0000/0000/0000\x07"), None);
+        assert_eq!(colors_from_replies(b""), None);
+        assert_eq!(colors_from_replies(b"\x1b[?62c"), None);
+    }
+
+    #[test]
+    fn is_light_sits_on_the_rec601_midpoint() {
+        // Mid grey lands just above the threshold; one step down does not.
+        assert!(is_light((129, 129, 129)));
+        assert!(!is_light((128, 128, 128)));
+        // Luma is not a plain average: full green reads light, full blue dark.
+        assert!(is_light((0, 255, 0)));
+        assert!(!is_light((0, 0, 255)));
     }
 }
