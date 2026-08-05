@@ -9469,7 +9469,10 @@ mod tests {
 
         assert_eq!(event.total_files, 1, "{:?}", event.diffs);
         assert!(event.diffs.is_empty(), "{:?}", event.diffs);
-        assert!(event.truncated, "an uncounted retained set reads as complete");
+        assert!(
+            event.truncated,
+            "an uncounted retained set reads as complete"
+        );
         assert!(event.unavailable.is_none());
     }
 

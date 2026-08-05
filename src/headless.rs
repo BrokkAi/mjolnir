@@ -360,7 +360,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         event_tx.clone(),
     );
 
-    let runtime = tokio::spawn(async move { acp::run(runtime_cfg, event_tx, runtime_cmd_rx).await });
+    let runtime =
+        tokio::spawn(async move { acp::run(runtime_cfg, event_tx, runtime_cmd_rx).await });
     // No UI event channel: headless answers permissions by policy, so
     // remote decisions have nothing to resolve.
     let remote_tracker = remote::RemoteSessionTracker::new(
@@ -1376,8 +1377,7 @@ mod tests {
             Vec::new(),
             64 * 1024,
         );
-        let pump =
-            spawn_workspace_diff_command_pump(cmd_rx, runtime_cmd_tx, refresher, event_tx);
+        let pump = spawn_workspace_diff_command_pump(cmd_rx, runtime_cmd_tx, refresher, event_tx);
 
         cmd_tx
             .send(UiCommand::RefreshWorkspaceDiff)
