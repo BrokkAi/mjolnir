@@ -462,6 +462,9 @@ fn inline_reader_accepts_input(state: &AppState) -> bool {
         || (state.workspace_diff_viewer
             && !state.has_pending_permission()
             && !state.has_pending_elicitation())
+        || (state.terminals_viewer
+            && !state.has_pending_permission()
+            && !state.has_pending_elicitation())
 }
 
 fn inline_reader_is_open(state: &AppState) -> bool {
@@ -2802,7 +2805,10 @@ fn handle_crossterm(
         CtEvent::Mouse(mouse) => {
             // The diff reader does not support mouse scrolling yet. In
             // particular, do not mutate the hidden transcript's offset.
-            if state.workspace_diff_viewer || state.nested_agent_viewer || state.review_issue_viewer
+            if state.workspace_diff_viewer
+                || state.nested_agent_viewer
+                || state.review_issue_viewer
+                || state.terminals_viewer
             {
                 return TerminalRequest::None;
             } else if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
@@ -7399,9 +7405,9 @@ fn draw_terminals_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppStat
     f.render_widget(output_block, layout[1]);
 
     if output_inner.width > 0 && output_inner.height > 0 {
-        let body = selected
-            .map(|summary| summary.output.clone())
-            .unwrap_or_default();
+        // Borrowed, not cloned: a terminal buffer can reach a megabyte and
+        // this runs on every frame the viewer is open.
+        let body = state.terminal_output_at(selected_index).unwrap_or_default();
         let lines: Vec<Line<'static>> = if body.trim().is_empty() {
             vec![Line::from(Span::styled(
                 "no output yet".to_string(),
@@ -11398,11 +11404,9 @@ fn running_terminals_row_line(state: &AppState, width: u16) -> Option<Line<'stat
         return None;
     }
     let label = state
-        .terminal_summaries()
-        .into_iter()
-        .find(|summary| summary.is_running())
-        .map(|summary| summary.label)
-        .unwrap_or_else(|| "terminal".to_string());
+        .first_running_terminal_label()
+        .unwrap_or("terminal")
+        .to_string();
     // Name the single running terminal; past that a count reads better than a
     // truncated list.
     let subject = if running == 1 {
@@ -16907,6 +16911,63 @@ mod tests {
             .expect("draw");
         let text = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(text.contains("no output yet"), "got {text}");
+    }
+
+    /// The reader takes the whole inline viewport like the other readers, so
+    /// it has to count as active for mouse capture and viewport geometry.
+    /// Otherwise the pane is sized full-height but never repositioned.
+    #[test]
+    fn open_terminals_viewer_counts_as_an_active_inline_reader() {
+        let mut state = AppState::new();
+        state.apply_event(terminal_tool_call_event("call-1", "npm run dev", "term-1"));
+        assert!(!inline_reader_accepts_input(&state));
+        assert!(state.open_terminals_viewer());
+
+        assert!(inline_reader_is_open(&state));
+        assert!(
+            inline_reader_accepts_input(&state),
+            "the reader owns the viewport, so it must accept input"
+        );
+        let size = Size {
+            width: 80,
+            height: 40,
+        };
+        assert!(
+            desired_inline_height(&state, size) > INLINE_CHAT_HEIGHT,
+            "a full-height reader must grow the inline viewport"
+        );
+    }
+
+    /// A wheel event while the reader is open must not reach the transcript
+    /// hidden underneath it.
+    #[test]
+    fn terminals_viewer_swallows_mouse_scroll() {
+        let mut state = AppState::new();
+        for index in 0..40 {
+            state.push_system_message(format!("line {index}"));
+        }
+        state.apply_event(terminal_tool_call_event("call-1", "npm run dev", "term-1"));
+        assert!(state.open_terminals_viewer());
+        let before = state.scroll_offset;
+
+        let (_tx, rx) = mpsc::unbounded_channel::<UiCommand>();
+        drop(rx);
+        let request = handle_crossterm(
+            &mut state,
+            &_tx,
+            CtEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::empty(),
+            }),
+        );
+
+        assert!(matches!(request, TerminalRequest::None));
+        assert_eq!(
+            state.scroll_offset, before,
+            "the hidden transcript must not move"
+        );
     }
 
     /// Esc must hand the keyboard back rather than leaving the reader latched

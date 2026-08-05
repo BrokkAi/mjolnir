@@ -574,7 +574,6 @@ struct TerminalRegistration {
 #[derive(Debug, Clone)]
 pub struct TerminalSummary {
     pub label: String,
-    pub output: String,
     pub truncated: bool,
     pub exit_status: Option<TerminalExitStatus>,
 }
@@ -2356,19 +2355,50 @@ impl AppState {
     /// agent started it. Terminals whose state has been dropped (an offloaded
     /// nested actor) are omitted rather than shown empty.
     pub fn terminal_summaries(&self) -> Vec<TerminalSummary> {
-        let mut summaries = self
+        self.ordered_terminal_records()
+            .into_iter()
+            .filter_map(|record| {
+                let (_, truncated, exit_status) = self.terminal_state(record)?;
+                Some(TerminalSummary {
+                    label: record.label.clone(),
+                    truncated,
+                    exit_status: exit_status.cloned(),
+                })
+            })
+            .collect()
+    }
+
+    /// Registered terminals in display order — running first, each otherwise in
+    /// the order the agent started it. Borrows throughout: terminal output can
+    /// reach a megabyte apiece, and this ordering is recomputed on every frame
+    /// the affordance row is measured.
+    fn ordered_terminal_records(&self) -> Vec<&TerminalRegistration> {
+        let mut records = self
             .terminal_registry
             .iter()
-            .filter_map(|record| self.resolve_terminal(record))
+            .filter(|record| self.terminal_state(record).is_some())
             .collect::<Vec<_>>();
-        summaries.sort_by_key(|summary| !summary.is_running());
-        summaries
+        records.sort_by_key(|record| {
+            self.terminal_state(record)
+                .is_none_or(|(_, _, exit_status)| exit_status.is_some())
+        });
+        records
+    }
+
+    /// Output of the terminal at `index` in display order, borrowed rather than
+    /// cloned so the viewer can render a large buffer without copying it.
+    pub fn terminal_output_at(&self, index: usize) -> Option<&str> {
+        let record = *self.ordered_terminal_records().get(index)?;
+        self.terminal_state(record).map(|(output, _, _)| output)
     }
 
     /// Resolve a terminal from the tool call that owns it, falling back to the
     /// raw snapshot. The tool call view is preferred because it is kept in
     /// sync by `apply_terminal_output` and carries the same fields.
-    fn resolve_terminal(&self, record: &TerminalRegistration) -> Option<TerminalSummary> {
+    fn terminal_state(
+        &self,
+        record: &TerminalRegistration,
+    ) -> Option<(&str, bool, Option<&TerminalExitStatus>)> {
         let from_view = self.tool_calls.get(&record.tool_call_id).and_then(|view| {
             view.body.iter().find_map(|output| match output {
                 ToolCallOutput::Terminal {
@@ -2376,39 +2406,54 @@ impl AppState {
                     output,
                     truncated,
                     exit_status,
-                } if terminal_id == &record.terminal_id => Some(TerminalSummary {
-                    label: record.label.clone(),
-                    output: output.clone(),
-                    truncated: *truncated,
-                    exit_status: exit_status.clone(),
-                }),
+                } if terminal_id == &record.terminal_id => {
+                    Some((output.as_str(), *truncated, exit_status.as_ref()))
+                }
                 _ => None,
             })
         });
         from_view.or_else(|| {
             let snapshot = self.terminal_outputs.get(&record.terminal_id)?;
-            Some(TerminalSummary {
-                label: record.label.clone(),
-                output: snapshot.output.clone(),
-                truncated: snapshot.truncated,
-                exit_status: snapshot.exit_status.clone(),
-            })
+            Some((
+                snapshot.output.as_str(),
+                snapshot.truncated,
+                snapshot.exit_status.as_ref(),
+            ))
         })
     }
 
     /// Terminals still running. This is what the status affordance counts, so
-    /// it must not include ones that have already exited.
+    /// it must not include ones that have already exited. Counts without
+    /// materialising any output, because it runs on every frame.
     pub fn running_terminal_count(&self) -> usize {
-        self.terminal_summaries()
+        self.terminal_registry
             .iter()
-            .filter(|summary| summary.is_running())
+            .filter(|record| {
+                self.terminal_state(record)
+                    .is_some_and(|(_, _, exit_status)| exit_status.is_none())
+            })
             .count()
+    }
+
+    /// Label of the first running terminal, for the affordance row.
+    pub fn first_running_terminal_label(&self) -> Option<&str> {
+        self.terminal_registry
+            .iter()
+            .find(|record| {
+                self.terminal_state(record)
+                    .is_some_and(|(_, _, exit_status)| exit_status.is_none())
+            })
+            .map(|record| record.label.as_str())
+    }
+
+    pub fn terminal_count(&self) -> usize {
+        self.ordered_terminal_records().len()
     }
 
     /// Open the terminal reader. Returns `false` when there is nothing to show
     /// so the caller can explain that instead of opening an empty pane.
     pub fn open_terminals_viewer(&mut self) -> bool {
-        if self.terminal_summaries().is_empty() {
+        if self.terminal_count() == 0 {
             return false;
         }
         self.close_transcript_viewer();
@@ -2429,7 +2474,7 @@ impl AppState {
     }
 
     pub fn select_terminal(&mut self, next: bool) {
-        let count = self.terminal_summaries().len();
+        let count = self.terminal_count();
         if count == 0 {
             self.terminals_selected = 0;
             self.terminals_scroll_offset = 0;
@@ -7561,7 +7606,7 @@ mod tests {
         }));
 
         let summaries = state.terminal_summaries();
-        assert_eq!(summaries[0].output, "running 3 tests");
+        assert_eq!(state.terminal_output_at(0), Some("running 3 tests"));
         assert!(summaries[0].is_running());
 
         state.apply_event(UiEvent::TerminalOutput(TerminalOutputSnapshot {
