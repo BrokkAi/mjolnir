@@ -575,10 +575,9 @@ impl std::fmt::Display for LaunchError {
                     f,
                     "detail: the agent failed to launch a child process while creating the session"
                 )?;
-                let errno_detail =
-                    macos_unknown_spawn_error_detail(&error_text, std::env::consts::OS);
-                if let Some(detail) = errno_detail {
-                    writeln!(f, "detail: {detail}")?;
+                let decoded_error = unknown_spawn_error_detail(&error_text, std::env::consts::OS);
+                if let Some(decoded) = decoded_error {
+                    writeln!(f, "detail: {}", decoded.detail)?;
                 }
                 let servers = if stdio_mcp_servers.is_empty() {
                     "none".to_string()
@@ -586,11 +585,8 @@ impl std::fmt::Display for LaunchError {
                     stdio_mcp_servers.join(", ")
                 };
                 writeln!(f, "stdio MCP servers forwarded on session/new: {servers}")?;
-                if errno_detail.is_some() {
-                    write!(
-                        f,
-                        "hint: reinstall or repair the agent CLI, verify any listed stdio MCP server commands, then retry"
-                    )
+                if let Some(decoded) = decoded_error {
+                    write!(f, "hint: {}", decoded.hint)
                 } else {
                     write!(
                         f,
@@ -660,16 +656,42 @@ fn session_error_search_text(source: &agent_client_protocol::Error) -> String {
     text
 }
 
-fn macos_unknown_spawn_error_detail(error_text: &str, host_os: &str) -> Option<&'static str> {
-    if host_os != "macos" {
-        return None;
-    }
-    if error_text.contains("unknown system error -86") {
-        Some("macOS errno -86 is EBADARCH: the executable has the wrong CPU architecture")
-    } else if error_text.contains("unknown system error -88") {
-        Some("macOS errno -88 is EBADMACHO: the executable is malformed or truncated")
-    } else {
-        None
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnknownSpawnErrorDetail {
+    detail: &'static str,
+    hint: &'static str,
+}
+
+fn unknown_spawn_error_detail(error_text: &str, host_os: &str) -> Option<UnknownSpawnErrorDetail> {
+    const REPAIR_EXECUTABLE_HINT: &str = "reinstall or repair the agent CLI, verify any listed stdio MCP server commands, then retry";
+    const CHECK_IPC_HINT: &str = "restart the agent adapter, inspect its stdio/IPC setup and any listed stdio MCP servers, then retry";
+
+    match (host_os, error_text) {
+        ("macos", text) if text.contains("unknown system error -86") => {
+            Some(UnknownSpawnErrorDetail {
+                detail: "macOS errno -86 is EBADARCH: the executable has the wrong CPU architecture",
+                hint: REPAIR_EXECUTABLE_HINT,
+            })
+        }
+        ("macos", text) if text.contains("unknown system error -88") => {
+            Some(UnknownSpawnErrorDetail {
+                detail: "macOS errno -88 is EBADMACHO: the executable is malformed or truncated",
+                hint: REPAIR_EXECUTABLE_HINT,
+            })
+        }
+        ("linux", text) if text.contains("unknown system error -86") => {
+            Some(UnknownSpawnErrorDetail {
+                detail: "Linux/WSL errno -86 is ESTRPIPE: a streams pipe operation failed",
+                hint: CHECK_IPC_HINT,
+            })
+        }
+        ("linux", text) if text.contains("unknown system error -88") => {
+            Some(UnknownSpawnErrorDetail {
+                detail: "Linux/WSL errno -88 is ENOTSOCK: a socket operation targeted a non-socket",
+                hint: CHECK_IPC_HINT,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -11616,21 +11638,37 @@ mod tests {
     }
 
     #[test]
-    fn unnamed_spawn_errno_decoding_is_macos_only() {
+    fn unnamed_spawn_errno_decoding_is_platform_specific() {
         assert_eq!(
-            macos_unknown_spawn_error_detail("spawn unknown system error -86", "macos"),
-            Some("macOS errno -86 is EBADARCH: the executable has the wrong CPU architecture")
+            unknown_spawn_error_detail("spawn unknown system error -86", "macos"),
+            Some(UnknownSpawnErrorDetail {
+                detail: "macOS errno -86 is EBADARCH: the executable has the wrong CPU architecture",
+                hint: "reinstall or repair the agent CLI, verify any listed stdio MCP server commands, then retry",
+            })
         );
         assert_eq!(
-            macos_unknown_spawn_error_detail("spawn unknown system error -88", "macos"),
-            Some("macOS errno -88 is EBADMACHO: the executable is malformed or truncated")
+            unknown_spawn_error_detail("spawn unknown system error -88", "macos"),
+            Some(UnknownSpawnErrorDetail {
+                detail: "macOS errno -88 is EBADMACHO: the executable is malformed or truncated",
+                hint: "reinstall or repair the agent CLI, verify any listed stdio MCP server commands, then retry",
+            })
         );
         assert_eq!(
-            macos_unknown_spawn_error_detail("spawn unknown system error -88", "windows"),
-            None
+            unknown_spawn_error_detail("spawn unknown system error -86", "linux"),
+            Some(UnknownSpawnErrorDetail {
+                detail: "Linux/WSL errno -86 is ESTRPIPE: a streams pipe operation failed",
+                hint: "restart the agent adapter, inspect its stdio/IPC setup and any listed stdio MCP servers, then retry",
+            })
         );
         assert_eq!(
-            macos_unknown_spawn_error_detail("spawn unknown system error -88", "linux"),
+            unknown_spawn_error_detail("spawn unknown system error -88", "linux"),
+            Some(UnknownSpawnErrorDetail {
+                detail: "Linux/WSL errno -88 is ENOTSOCK: a socket operation targeted a non-socket",
+                hint: "restart the agent adapter, inspect its stdio/IPC setup and any listed stdio MCP servers, then retry",
+            })
+        );
+        assert_eq!(
+            unknown_spawn_error_detail("spawn unknown system error -88", "windows"),
             None
         );
     }
