@@ -681,13 +681,13 @@ fn unknown_spawn_error_detail(error_text: &str, host_os: &str) -> Option<Unknown
         }
         ("linux", text) if text.contains("unknown system error -86") => {
             Some(UnknownSpawnErrorDetail {
-                detail: "Linux/WSL errno -86 is ESTRPIPE: a streams pipe operation failed",
+                detail: "Linux errno -86 is ESTRPIPE: a streams pipe operation failed",
                 hint: CHECK_IPC_HINT,
             })
         }
         ("linux", text) if text.contains("unknown system error -88") => {
             Some(UnknownSpawnErrorDetail {
-                detail: "Linux/WSL errno -88 is ENOTSOCK: a socket operation targeted a non-socket",
+                detail: "Linux errno -88 is ENOTSOCK: a socket operation targeted a non-socket",
                 hint: CHECK_IPC_HINT,
             })
         }
@@ -11656,14 +11656,14 @@ mod tests {
         assert_eq!(
             unknown_spawn_error_detail("spawn unknown system error -86", "linux"),
             Some(UnknownSpawnErrorDetail {
-                detail: "Linux/WSL errno -86 is ESTRPIPE: a streams pipe operation failed",
+                detail: "Linux errno -86 is ESTRPIPE: a streams pipe operation failed",
                 hint: "restart the agent adapter, inspect its stdio/IPC setup and any listed stdio MCP servers, then retry",
             })
         );
         assert_eq!(
             unknown_spawn_error_detail("spawn unknown system error -88", "linux"),
             Some(UnknownSpawnErrorDetail {
-                detail: "Linux/WSL errno -88 is ENOTSOCK: a socket operation targeted a non-socket",
+                detail: "Linux errno -88 is ENOTSOCK: a socket operation targeted a non-socket",
                 hint: "restart the agent adapter, inspect its stdio/IPC setup and any listed stdio MCP servers, then retry",
             })
         );
