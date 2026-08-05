@@ -7357,6 +7357,38 @@ mod tests {
             .await;
     }
 
+    /// Waits for the next UI event while watching the detached mock agent.
+    ///
+    /// The mock agent carries the ordering assertions for this test. Without
+    /// racing its `JoinHandle`, a tripped assertion kills the mock silently, the
+    /// client never gets its response, and the test later dies as an anonymous
+    /// timeout that cannot be told apart from a slow CI runner.
+    async fn next_event_or_mock_agent_death(
+        ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
+        agent_task: &mut tokio::task::JoinHandle<()>,
+        stage: &str,
+    ) -> UiEvent {
+        tokio::select! {
+            event = tokio::time::timeout(Duration::from_secs(30), ui_rx.recv()) => event
+                .unwrap_or_else(|_| {
+                    panic!("timed out waiting for {stage} with the mock agent still alive")
+                })
+                .expect("ui event channel closed"),
+            exited = &mut *agent_task => match exited {
+                Err(err) if err.is_panic() => {
+                    let payload = err.into_panic();
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                    panic!("mock agent panicked before {stage}: {message}");
+                }
+                other => panic!("mock agent exited before {stage}: {other:?}"),
+            },
+        }
+    }
+
     async fn assert_native_read_only_is_confirmed_before_prompt(
         adapter_source_id: &'static str,
         config_id: &'static str,
@@ -7366,7 +7398,7 @@ mod tests {
         let (cr, cw) = split(client_side);
         let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
         let startup_stage = Arc::new(AtomicUsize::new(0));
-        let agent_task = tokio::spawn(run_mock_agent_confirming_native_read_only(
+        let mut agent_task = tokio::spawn(run_mock_agent_confirming_native_read_only(
             agent_side,
             config_id,
             read_only_value,
@@ -7403,7 +7435,14 @@ mod tests {
             false,
         ));
 
-        wait_for_session_started(&mut ui_rx, "test-session").await;
+        loop {
+            let event =
+                next_event_or_mock_agent_death(&mut ui_rx, &mut agent_task, "SessionStarted").await;
+            if let UiEvent::SessionStarted { session_id, .. } = event {
+                assert_eq!(session_id, "test-session");
+                break;
+            }
+        }
         assert_eq!(startup_stage.load(Ordering::SeqCst), 1);
         cmd_tx
             .send(UiCommand::SendPrompt {
@@ -7412,10 +7451,8 @@ mod tests {
             })
             .expect("send review prompt");
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
-                .await
-                .expect("prompt timeout")
-                .expect("event channel closed");
+            let event =
+                next_event_or_mock_agent_death(&mut ui_rx, &mut agent_task, "PromptDone").await;
             if matches!(event, UiEvent::PromptDone { .. }) {
                 break;
             }
