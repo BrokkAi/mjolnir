@@ -1,0 +1,33 @@
+{
+  "aggregate": {
+    "lines": 81.60,
+    "material_regression_tolerance": 0.25
+  },
+  "production_module_line_target": 70.0,
+  "module_exceptions": {
+    "src/main.rs": {
+      "minimum": 52.0,
+      "reason": "The binary entrypoint is exercised primarily through PTY and end-to-end process tests."
+    },
+    "src/pull_request.rs": {
+      "minimum": 0.0,
+      "reason": "This boundary shells out to an authenticated GitHub CLI and needs a hermetic integration harness."
+    },
+    "src/quota.rs": {
+      "minimum": 59.5,
+      "reason": "Remaining branches depend on live provider-specific quota responses."
+    },
+    "src/ragnarok.rs": {
+      "minimum": 62.5,
+      "reason": "Full battle paths require multiple real ACP runtimes, git worktrees, timers, and GitHub or git subprocesses."
+    },
+    "src/side.rs": {
+      "minimum": 29.0,
+      "reason": "Side-session lifecycle branches require a multi-session ACP integration harness."
+    },
+    "src/terminal_output.rs": {
+      "minimum": 68.5,
+      "reason": "The remaining gap is split terminal byte-stream behavior at the PTY boundary."
+    }
+  }
+}
