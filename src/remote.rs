@@ -8960,9 +8960,11 @@ mod tests {
         assert!(viewer.contains("id=\"history-sessions\""));
         assert!(viewer.contains("apiFetch(\"/sessions\""));
         assert!(viewer.contains("function archivedSessions"));
-        assert!(viewer.contains("composerEl.hidden = archived"));
-        assert!(viewer.contains("renderPermissions(archived ? null : session)"));
+        assert!(viewer.contains("composerEl.hidden = readOnly"));
+        assert!(viewer.contains("renderPermissions(readOnly ? null : session)"));
         assert!(viewer.contains("selectedSessionIsArchived()"));
+        assert!(viewer.contains("!selectedSessionIsLive()"));
+        assert!(viewer.contains("Only live sessions can accept prompts."));
     }
 
     #[tokio::test]

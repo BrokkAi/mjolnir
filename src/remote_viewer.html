@@ -5076,6 +5076,13 @@
         return Boolean(archivedSessionById(selectedSessionId));
       }
 
+      function selectedSessionIsLive() {
+        return Boolean(
+          selectedSessionId
+            && sessions.some((session) => session.session_id === selectedSessionId),
+        );
+      }
+
       function decisionKey(sessionId, requestId) {
         return `${sessionId}\u001f${requestId}`;
       }
@@ -7965,14 +7972,15 @@
       function renderChat() {
         const session = selectedSession();
         const archived = selectedSessionIsArchived();
-        composerEl.hidden = archived;
+        const readOnly = Boolean(selectedSessionId) && !selectedSessionIsLive();
+        composerEl.hidden = readOnly;
         archiveBadgeEl.hidden = !archived;
         renderTranscript(session, archived);
         renderStatusLine(session);
-        renderConfig(archived ? null : session);
+        renderConfig(readOnly ? null : session);
         renderSubagents(session);
-        renderPermissions(archived ? null : session);
-        renderQueue(archived ? null : session);
+        renderPermissions(readOnly ? null : session);
+        renderQueue(readOnly ? null : session);
         updateCommandPalette();
       }
 
@@ -8119,7 +8127,7 @@
           return;
         }
         const sessionId = selectedSessionId;
-        if (!sessionId || selectedSessionIsArchived()) {
+        if (!sessionId || !selectedSessionIsLive()) {
           queuedPrompts = [];
           renderQueue(null);
           return;
@@ -8148,17 +8156,17 @@
         if (queueSubmitInFlight) {
           return;
         }
-        if (selectedSessionIsArchived()) {
-          setQueueStatus("Archived sessions are read-only.", true);
+        const sessionId = selectedSessionId;
+        const session = sessions.find((candidate) => candidate.session_id === sessionId) || null;
+        if (!session) {
+          setQueueStatus("Only live sessions can accept prompts.", true);
           return;
         }
-        const sessionId = selectedSessionId;
         const text = queueInputEl.value;
         const attachments = selectedAttachments();
         if (!sessionId || (!text.trim() && !attachments.length)) {
           return;
         }
-        const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
         if (attachments.length && !session?.prompt_images_supported) {
           setQueueStatus("This session does not support image prompts.", true);
           return;
