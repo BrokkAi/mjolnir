@@ -12158,6 +12158,40 @@ mod tests {
     }
 
     #[test]
+    fn launch_registry_preserves_actionable_session_spawn_diagnostics_for_viewer() {
+        let registry = Arc::new(ServerSessionLaunchRegistry::default());
+        let launch_id = registry.begin();
+        let reporter = ServerSessionLaunchReporter {
+            registry: Arc::clone(&registry),
+            launch_id,
+        };
+        let error = crate::acp::LaunchError::SessionCreateFailed {
+            source: agent_client_protocol::Error::internal_error().data(serde_json::json!({
+                "details": "spawn Unknown system error -88"
+            })),
+            stdio_mcp_servers: vec!["workspace-tools (/opt/mjolnir/workspace-tools)".to_string()]
+                .into_boxed_slice(),
+        }
+        .to_string();
+
+        reporter.failed(error);
+
+        let Some(ServerSessionLaunchState::Failed { error }) = registry.get(launch_id) else {
+            panic!("viewer launch state did not retain the failure");
+        };
+        assert!(
+            error.contains("failed to launch a child process"),
+            "{error}"
+        );
+        assert!(error.contains("EBADMACHO"), "{error}");
+        assert!(
+            error.contains("workspace-tools (/opt/mjolnir/workspace-tools)"),
+            "{error}"
+        );
+        assert!(!error.contains("--cwd"), "{error}");
+    }
+
+    #[test]
     fn launch_registry_evicts_the_oldest_records() {
         let registry = ServerSessionLaunchRegistry::default();
         let first = registry.begin();
