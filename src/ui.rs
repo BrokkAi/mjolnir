@@ -7231,6 +7231,9 @@ fn render_nested_agent_lines(
     if let Some(history) = actor.archived_history_markdown() {
         push_markdown_lines(&mut out, history, 0, width, state.theme);
     }
+    // See `render_transcript_entry_range_with_turns`: the branch tick keys off
+    // rows actually drawn, not off neighboring transcript entries.
+    let mut tool_block_end: Option<usize> = None;
     for (entry_index, entry) in actor.transcript.iter().enumerate() {
         match entry {
             Entry::UserPrompt(text) => {
@@ -7307,31 +7310,26 @@ fn render_nested_agent_lines(
                         ));
                     }
                     let content_width = width.saturating_sub(TOOL_GUTTER_WIDTH);
-                    let mut block = vec![Line::from(spans)];
+                    let mut body = Vec::new();
                     let collapse_limit = match state.tool_detail_expanded(id) {
                         Some(false) => Some(TOOL_OUTPUT_COLLAPSED_LINES),
                         _ => None,
                     };
                     push_tool_outputs(
-                        &mut block,
+                        &mut body,
                         &view.body,
                         view.status,
                         content_width,
                         collapse_limit,
                         state.theme,
                     );
-                    for line in block {
-                        for row in wrap_tool_line(line, content_width as usize) {
-                            out.push(with_tool_gutter(row, color));
-                        }
-                    }
-                    let next_is_tool = actor.transcript.get(entry_index + 1).is_some_and(|next| {
-                        matches!(
-                            next,
-                            Entry::ToolCall(next_id) | Entry::SubagentToolCall(next_id)
-                                if state.tool_calls.contains_key(next_id)
-                        )
-                    });
+                    let continues_run = tool_block_end == Some(out.len());
+                    push_tool_block(&mut out, spans, body, content_width, color, continues_run);
+                    tool_block_end = Some(out.len());
+                    let next_is_tool = actor
+                        .transcript
+                        .get(entry_index + 1)
+                        .is_some_and(|next| is_rendered_tool_call(next, &state.tool_calls));
                     if !next_is_tool {
                         out.push(Line::from(""));
                     }
@@ -8549,6 +8547,28 @@ fn render_transcript_entry_range_with_turns(
     turns: &[TranscriptTurn],
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
+    // Whether the entry at `index` draws as a tool block here. Being a tool
+    // call is not enough: successful calls inside a compacted turn are folded
+    // into the turn summary and emit no rows at all.
+    let renders_as_tool_block = |index: usize| {
+        state.transcript.get(index).is_some_and(|entry| {
+            is_rendered_tool_call(entry, &state.tool_calls)
+                && !(compact_completed_turns
+                    && turns.iter().any(|turn| {
+                        turn.is_compactable && (turn.prompt_index..turn.end).contains(&index)
+                    })
+                    && tool_entry_is_successful(state, entry))
+        })
+    };
+    // Row index just past the last tool block drawn, so a call can tell whether
+    // it directly abuts another one. Seeded when this range opens straight onto
+    // a tool block that continues one from the previous range: the scrollback
+    // sink renders the transcript in batches, and a run of calls split across
+    // two batches must still read the same as a single full render.
+    let mut tool_block_end: Option<usize> = (entry_range.start > 0
+        && renders_as_tool_block(entry_range.start - 1)
+        && renders_as_tool_block(entry_range.start))
+    .then_some(0usize);
     for (offset, entry) in state.transcript[entry_range.clone()].iter().enumerate() {
         let entry_index = entry_range.start + offset;
         let compact_turn = if compact_completed_turns {
@@ -8727,46 +8747,32 @@ fn render_transcript_entry_range_with_turns(
                             terminal_header_outcome_style(exit_status, theme),
                         ));
                     }
-                    // Render the whole tool call — header plus outputs — into a
-                    // temporary buffer, wrap each line to the width left of the
-                    // gutter, then frame every resulting row with a colored left
-                    // rail so the block reads as one unit, visually distinct from
-                    // the role-marked agent prose around it. Wrapping here — rather
-                    // than letting the transcript Paragraph wrap — keeps the rail
-                    // on continuation rows; a rail prepended to a single logical
-                    // line would land only on the first wrapped row. The rail
-                    // color carries the tool status. See issue #257.
                     let content_width = width.saturating_sub(TOOL_GUTTER_WIDTH);
-                    let mut block: Vec<Line<'static>> = vec![Line::from(spans)];
+                    let mut body: Vec<Line<'static>> = Vec::new();
                     let tool_collapse_limit = match state.tool_detail_expanded(id) {
                         Some(true) => None,
                         Some(false) => Some(TOOL_OUTPUT_COLLAPSED_LINES),
                         None => collapse_limit,
                     };
                     push_tool_outputs(
-                        &mut block,
+                        &mut body,
                         &view.body,
                         view.status,
                         content_width,
                         tool_collapse_limit,
                         theme,
                     );
-                    for line in block {
-                        for row in wrap_tool_line(line, content_width as usize) {
-                            out.push(with_tool_gutter(row, color));
-                        }
-                    }
                     // Consecutive tool calls read as one activity run: let
                     // their rails abut instead of separating every call with
-                    // a blank row.
-                    let next_is_tool_call =
-                        state.transcript.get(entry_index + 1).is_some_and(|next| {
-                            matches!(
-                                next,
-                                Entry::ToolCall(next_id) | Entry::SubagentToolCall(next_id)
-                                    if state.tool_calls.contains_key(next_id)
-                            )
-                        });
+                    // a blank row. The branch tick on the opening row marks
+                    // the boundary the blank row would have.
+                    let continues_run = tool_block_end == Some(out.len());
+                    push_tool_block(&mut out, spans, body, content_width, color, continues_run);
+                    tool_block_end = Some(out.len());
+                    let next_is_tool_call = state
+                        .transcript
+                        .get(entry_index + 1)
+                        .is_some_and(|next| is_rendered_tool_call(next, &state.tool_calls));
                     if !next_is_tool_call {
                         out.push(Line::from(""));
                     }
@@ -9735,21 +9741,88 @@ fn find_underscore_emphasis_end(after: &str, marker: &str) -> Option<usize> {
 /// Left rail drawn before every line of a tool-call block, and its width in
 /// cells. The rail frames tool output as a distinct unit so it never blurs
 /// into the role-marked agent messages around it. See issue #257. The two must
-/// stay in sync; the `debug_assert` in `with_tool_gutter` guards against drift
+/// stay in sync; the `debug_assert` in `with_tool_rail` guards against drift
 /// if the glyph ever changes (`str::width` is not usable in a `const`).
 const TOOL_GUTTER: &str = "│ ";
 const TOOL_GUTTER_WIDTH: u16 = 2;
+
+/// Rail variant drawn on the first row of a tool call that directly follows
+/// another one. Consecutive calls abut so they read as a single activity run,
+/// which leaves no blank row to mark where one call ends and the next begins;
+/// the branch tick restores that boundary as a notch the eye can scan down the
+/// left edge, without spending a row on it. Same width as [`TOOL_GUTTER`].
+const TOOL_GUTTER_BRANCH: &str = "├ ";
 
 /// Prefix an already-rendered tool-call line with the colored gutter rail.
 /// The color reflects the tool's status (green when done, red on failure, …)
 /// so a glance at the rail communicates both "this is a tool block" and how
 /// it ended.
 fn with_tool_gutter(line: Line<'static>, ink: Ink) -> Line<'static> {
-    debug_assert_eq!(TOOL_GUTTER.width(), TOOL_GUTTER_WIDTH as usize);
+    with_tool_rail(line, TOOL_GUTTER, ink)
+}
+
+/// [`with_tool_gutter`] with an explicit rail glyph, for the branch tick that
+/// opens a call inside a run of them.
+fn with_tool_rail(line: Line<'static>, rail: &'static str, ink: Ink) -> Line<'static> {
+    debug_assert_eq!(rail.width(), TOOL_GUTTER_WIDTH as usize);
     let mut spans = Vec::with_capacity(line.spans.len() + 1);
-    spans.push(Span::styled(TOOL_GUTTER, Style::default().ink(ink)));
+    spans.push(Span::styled(rail, Style::default().ink(ink)));
     spans.extend(line.spans);
     Line::from(spans)
+}
+
+/// Whether a transcript entry draws as a tool-call block, i.e. it is a tool
+/// call whose view still exists. Used to decide where a run of calls starts
+/// and ends, which drives both the branch tick and the trailing blank row.
+fn is_rendered_tool_call(
+    entry: &Entry,
+    tool_calls: &std::collections::HashMap<String, crate::app::ToolCallView>,
+) -> bool {
+    matches!(
+        entry,
+        Entry::ToolCall(id) | Entry::SubagentToolCall(id) if tool_calls.contains_key(id)
+    )
+}
+
+/// Render one tool call — header plus outputs — wrapped to the width left of
+/// the gutter and framed with the status-colored rail on every row, so the
+/// block reads as one unit distinct from the role-marked prose around it.
+/// Wrapping here, rather than letting the transcript `Paragraph` wrap, keeps
+/// the rail on continuation rows; a rail prepended to a single logical line
+/// would land only on the first wrapped row. See issue #257.
+///
+/// `continues_run` marks a call that directly follows another one, which opens
+/// with the branch tick instead of the plain rail.
+fn push_tool_block(
+    out: &mut Vec<Line<'static>>,
+    header: Vec<Span<'static>>,
+    body: Vec<Line<'static>>,
+    content_width: u16,
+    color: Ink,
+    continues_run: bool,
+) {
+    let content_width = content_width as usize;
+    let opening_rail = if continues_run {
+        TOOL_GUTTER_BRANCH
+    } else {
+        TOOL_GUTTER
+    };
+    for (index, row) in wrap_tool_header_line(Line::from(header), content_width)
+        .into_iter()
+        .enumerate()
+    {
+        let rail = if index == 0 {
+            opening_rail
+        } else {
+            TOOL_GUTTER
+        };
+        out.push(with_tool_rail(row, rail, color));
+    }
+    for line in body {
+        for row in wrap_tool_line(line, content_width) {
+            out.push(with_tool_gutter(row, color));
+        }
+    }
 }
 
 /// Word-wrap a rendered tool-call line to `width` display cells, preserving
@@ -9767,11 +9840,35 @@ fn wrap_tool_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     wrap_markdown_line(line, width)
 }
 
+/// Hanging indent applied to the wrapped rows of a tool-call header. Headers
+/// start flush against the rail while output rows are indented, so column zero
+/// is the only marker of "a new call starts here" — and a header long enough to
+/// wrap would otherwise put its own continuation there too, reading as a second
+/// call. Indenting past the output indent keeps that column unambiguous.
+const TOOL_HEADER_CONTINUATION_INDENT: usize = 4;
+
+/// [`wrap_tool_line`] for the header row of a tool call, hanging continuation
+/// rows under the command instead of leaving them flush at column zero.
+fn wrap_tool_header_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    wrap_line_with_continuation(line, width, Some(TOOL_HEADER_CONTINUATION_INDENT))
+}
+
 /// Wrap a rendered Markdown line while retaining its leading block indentation
 /// and, for recognized list and quote prefixes, hanging subsequent rows under
 /// the item text. Styles stay attached to individual characters as wrapping
 /// crosses inline spans.
 fn wrap_markdown_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    wrap_line_with_continuation(line, width, None)
+}
+
+/// Shared wrapper for [`wrap_markdown_line`] and [`wrap_tool_header_line`].
+/// `continuation` overrides the indent given to rows after the first; `None`
+/// derives it from the line's own leading indentation and list/quote prefix.
+fn wrap_line_with_continuation(
+    line: Line<'static>,
+    width: usize,
+    continuation: Option<usize>,
+) -> Vec<Line<'static>> {
     let width = width.max(1);
 
     // Flatten to (char, style) so wrapping can cross span boundaries while
@@ -9798,7 +9895,7 @@ fn wrap_markdown_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
 
     let cell_width =
         |t: &[(char, Style)]| t.iter().map(|(c, _)| c.width().unwrap_or(0)).sum::<usize>();
-    let continuation_width = markdown_continuation_width(&line);
+    let continuation_width = continuation.unwrap_or_else(|| markdown_continuation_width(&line));
     let continuation_style = line
         .spans
         .first()
@@ -19827,8 +19924,18 @@ mod tests {
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
+        // The failed command survives an 18-cell render whole, wherever the
+        // wrap happens to fall: strip the rail and the header's hanging indent,
+        // then read the header rows back as one string.
+        let narrow_header = narrow
+            .iter()
+            .skip_while(|line| !line.contains("tool [failed]"))
+            .take_while(|line| !line.contains("error"))
+            .map(|line| line.trim_start_matches(['│', '├', ' ']))
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
-            narrow.iter().any(|line| line.contains("cargo test")),
+            narrow_header.contains("cargo test -p mjolnir"),
             "{narrow:?}"
         );
         assert!(
@@ -23658,6 +23765,120 @@ mod tests {
                 row.width()
             );
         }
+    }
+
+    /// Push `count` completed `exec` calls with the given titles and a one-line
+    /// body each, so tests can look at how a run of calls is delimited.
+    fn push_exec_calls(state: &mut AppState, titles: &[&str]) {
+        for (index, title) in titles.iter().enumerate() {
+            let id = format!("run-{index}");
+            state.tool_calls.insert(
+                id.clone(),
+                crate::app::ToolCallView {
+                    title: (*title).to_string(),
+                    kind: ToolKind::Execute,
+                    status: ToolCallStatus::Completed,
+                    body: vec![ToolCallOutput::Text(format!("out-{index}"))],
+                },
+            );
+            state.transcript.push(Entry::ToolCall(id));
+        }
+    }
+
+    #[test]
+    fn wrapped_tool_header_hangs_under_the_command() {
+        let mut state = AppState::new();
+        // A command far wider than the render width, so the header must wrap.
+        push_exec_calls(&mut state, &["git log --oneline --stat -- src/ui.rs"]);
+
+        let width = 24u16;
+        let rendered: Vec<String> = render_transcript_lines(&state, width)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        // Column zero after the rail must mean "a new tool call starts here",
+        // so no continuation row may sit flush against it — otherwise a wrapped
+        // command reads as a second call in a run of them.
+        assert_eq!(
+            rendered.first().map(String::as_str),
+            Some("│ tool exec git log")
+        );
+        let header_rows: Vec<&String> = rendered
+            .iter()
+            .take_while(|row| !row.contains("out-0"))
+            .collect();
+        assert!(
+            header_rows.len() > 1,
+            "expected the long command to wrap, got {rendered:?}"
+        );
+        for row in header_rows.iter().skip(1) {
+            let indent = format!(
+                "{TOOL_GUTTER}{}",
+                " ".repeat(TOOL_HEADER_CONTINUATION_INDENT)
+            );
+            assert!(
+                row.starts_with(&indent),
+                "header continuation is not hung under the command: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn consecutive_tool_calls_open_with_a_branch_tick() {
+        let mut state = AppState::new();
+        push_exec_calls(&mut state, &["first", "second", "third"]);
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        // The run stays visually continuous — no blank row splits it — but each
+        // call after the first opens with the branch tick, so the boundary is
+        // legible without spending a row on it.
+        assert_eq!(
+            rendered
+                .iter()
+                .take_while(|row| !row.is_empty())
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "│ tool exec first",
+                "│   out-0",
+                "├ tool exec second",
+                "│   out-1",
+                "├ tool exec third",
+                "│   out-2",
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_call_after_prose_opens_with_the_plain_rail() {
+        let mut state = AppState::new();
+        state
+            .transcript
+            .push(Entry::AgentMessage("checking".to_string()));
+        push_exec_calls(&mut state, &["first"]);
+
+        let rendered: Vec<String> = render_transcript_lines(&state, 80)
+            .iter()
+            .map(line_text)
+            .collect();
+
+        // A lone call, or the first of a run, has a visible boundary already:
+        // the blank row above it. The tick would be noise there.
+        assert!(
+            rendered.iter().any(|row| row == "│ tool exec first"),
+            "expected a plain rail after prose, got {rendered:?}"
+        );
+        assert!(
+            !rendered
+                .iter()
+                .any(|row| row.starts_with(TOOL_GUTTER_BRANCH)),
+            "branch tick leaked onto a call that opens a run: {rendered:?}"
+        );
     }
 
     #[test]
