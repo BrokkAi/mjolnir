@@ -1495,9 +1495,10 @@ impl TrackerState {
                 self.pending_permissions.clear();
                 self.touch();
             }
+            // Both prompt kinds are published by the tracker's intercept path
+            // (`track_permission_prompt` / `track_elicitation_prompt`), which
+            // owns the pending-record lifecycle. Nothing to fold in here.
             UiEvent::PermissionRequest(_)
-            // Elicitation modals are answered locally in the host TUI; the
-            // remote viewer is a read-only mirror and has nothing to track.
             | UiEvent::ElicitationRequest(_)
             | UiEvent::RemotePermissionDecision { .. }
             | UiEvent::RosterUpdate { .. } => {}
@@ -2326,6 +2327,13 @@ impl RemoteSessionTracker {
             UiEvent::PermissionRequest(prompt) => {
                 UiEvent::PermissionRequest(self.track_permission_prompt(prompt))
             }
+            // Question menus (`AskUserQuestion`) arrive as elicitations, not
+            // permission requests. A TUI session renders them locally, so an
+            // unpublishable shape passes straight through rather than being
+            // declined the way a headless `mj server` session must.
+            UiEvent::ElicitationRequest(prompt) => {
+                UiEvent::ElicitationRequest(self.track_elicitation_prompt(prompt, None).1)
+            }
             other => other,
         }
     }
@@ -2384,17 +2392,19 @@ impl RemoteSessionTracker {
         }
     }
 
-    /// Publish every elicitation shape the shared classifier can render.
-    /// Unknown future schema shapes remain private and are declined by the
-    /// server-session loop.
+    /// Publish every elicitation shape the shared classifier can render, and
+    /// return the prompt to forward on. The returned id is `Some` only when the
+    /// prompt was published; unknown future schema shapes remain private and
+    /// come back with `None` plus the untouched prompt, so each path decides
+    /// what to do with them: the server-session loop declines them, a TUI
+    /// session renders them locally.
     fn track_elicitation_prompt(
         &self,
         prompt: ElicitationPrompt,
         owner_prefix: Option<&str>,
-    ) -> Option<(String, ElicitationPrompt)> {
+    ) -> (Option<String>, ElicitationPrompt) {
         let Some(elicitation) = remote_elicitation_record(&prompt) else {
-            let _ = prompt.responder.send(ElicitationOutcome::Decline);
-            return None;
+            return (None, prompt);
         };
 
         let sequence = self.next_elicitation_id.fetch_add(1, Ordering::Relaxed);
@@ -2418,6 +2428,7 @@ impl RemoteSessionTracker {
             message,
             mode,
             responder,
+            ..
         } = prompt;
         let (wrapped_tx, wrapped_rx) = tokio::sync::oneshot::channel();
         let tracker = self.clone();
@@ -2432,14 +2443,17 @@ impl RemoteSessionTracker {
             }
             tracker.request_flush();
         });
-        Some((
-            request_id,
+        (
+            Some(request_id.clone()),
             ElicitationPrompt {
                 message,
                 mode,
+                // Lets a TUI session match a decision claimed from the viewer
+                // back to this queued prompt.
+                remote_id: Some(request_id),
                 responder: wrapped_tx,
             },
-        ))
+        )
     }
 
     pub fn observe_command(&self, command: &UiCommand) {
@@ -3562,11 +3576,15 @@ fn handle_server_agent_event(
                 prompt,
             } => {
                 let owner_prefix = format!("subagent-{subagent_id}");
-                if let Some((request_id, prompt)) =
-                    tracker.track_elicitation_prompt(prompt, Some(&owner_prefix))
-                {
-                    pending_permissions
-                        .insert(request_id, RemotePendingApproval::Elicitation(prompt));
+                match tracker.track_elicitation_prompt(prompt, Some(&owner_prefix)) {
+                    (Some(request_id), prompt) => {
+                        pending_permissions
+                            .insert(request_id, RemotePendingApproval::Elicitation(prompt));
+                    }
+                    // No TUI is attached to render an unsupported shape.
+                    (None, prompt) => {
+                        let _ = prompt.responder.send(ElicitationOutcome::Decline);
+                    }
                 }
             }
             crate::event::SubagentEvent::CancelPendingPermissions { subagent_id } => {
@@ -3581,8 +3599,14 @@ fn handle_server_agent_event(
         return;
     }
     if let UiEvent::ElicitationRequest(prompt) = event {
-        if let Some((request_id, prompt)) = tracker.track_elicitation_prompt(prompt, None) {
-            pending_permissions.insert(request_id, RemotePendingApproval::Elicitation(prompt));
+        match tracker.track_elicitation_prompt(prompt, None) {
+            (Some(request_id), prompt) => {
+                pending_permissions.insert(request_id, RemotePendingApproval::Elicitation(prompt));
+            }
+            // No TUI is attached to render an unsupported shape.
+            (None, prompt) => {
+                let _ = prompt.responder.send(ElicitationOutcome::Decline);
+            }
         }
         return;
     }
@@ -3741,7 +3765,12 @@ const REMOTE_ELICITATION_ACCEPT_PREFIX: &str = "elicitation:accept:";
 const REMOTE_ELICITATION_CANCEL: &str = "elicitation:cancel";
 const REMOTE_ELICITATION_DECLINE: &str = "elicitation:decline";
 
-fn remote_elicitation_outcome(
+/// Validate a viewer-supplied decision against the prompt it claims to answer
+/// and project it onto an [`ElicitationOutcome`]. `None` rejects the decision:
+/// the content must satisfy the prompt's own schema, so a stale or malformed
+/// payload is dropped rather than answered with something the agent never
+/// offered. Shared by the `mj server` loop and the TUI's remote-decision path.
+pub(crate) fn remote_elicitation_outcome(
     prompt: &ElicitationPrompt,
     option_id: &str,
 ) -> Option<ElicitationOutcome> {
@@ -8211,6 +8240,7 @@ mod tests {
                 message: message.into(),
                 mode: ElicitationFormMode::new(ElicitationSessionScope::new("session"), schema)
                     .into(),
+                remote_id: None,
                 responder,
             },
             rx,
@@ -8257,6 +8287,7 @@ mod tests {
                 "https://example.com/login",
             )
             .into(),
+            remote_id: None,
             responder,
         };
         let url_record = remote_elicitation_record(&url).expect("URL is supported");
@@ -8272,6 +8303,7 @@ mod tests {
                 "javascript:alert(1)",
             )
             .into(),
+            remote_id: None,
             responder,
         };
         assert!(remote_elicitation_record(&unsafe_url).is_none());
@@ -11015,6 +11047,174 @@ mod tests {
                 .tool_transcript_entries
                 .values()
                 .any(|tool| tool.tool_call_id == "subagent:call-1")
+        );
+    }
+
+    /// Reproduces the TUI path from `src/main.rs`: every runtime event goes
+    /// through `intercept_event` then `observe_event` before reaching the UI.
+    /// An `AskUserQuestion` menu arrives as a single-select elicitation form,
+    /// so the remote viewer must be able to see and answer it.
+    #[tokio::test]
+    async fn tui_path_publishes_pending_elicitation() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let (prompt, _rx) = mcp_approval_prompt(
+            "Which approach?",
+            ElicitationSchema::new().property(
+                "question_0",
+                StringPropertySchema::new()
+                    .title("Which approach?")
+                    .one_of(vec![
+                        EnumOption::new("a", "Option A"),
+                        EnumOption::new("b", "Option B"),
+                    ]),
+                true,
+            ),
+        );
+
+        let event = tracker.intercept_event(UiEvent::ElicitationRequest(prompt));
+        tracker.observe_event(&event);
+
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(
+            snapshot.pending_permissions.len(),
+            1,
+            "the remote viewer never sees question menus raised by a TUI session"
+        );
+        let pending = &snapshot.pending_permissions[0];
+        assert_eq!(pending.title, "Which approach?");
+        let elicitation = pending
+            .elicitation
+            .as_ref()
+            .expect("a question menu publishes an elicitation record");
+        assert_eq!(elicitation.mode, "select");
+        assert_eq!(elicitation.property_name.as_deref(), Some("question_0"));
+        assert_eq!(elicitation.options.len(), 2);
+
+        // The prompt handed on to the TUI carries the id the viewer will quote
+        // back, so a remote answer can be matched to this exact prompt.
+        let UiEvent::ElicitationRequest(tracked) = event else {
+            panic!("intercept must preserve the event kind");
+        };
+        assert_eq!(
+            tracked.remote_id.as_deref(),
+            Some(pending.request_id.as_str())
+        );
+    }
+
+    /// The TUI renders shapes the viewer cannot, so an unpublishable
+    /// elicitation must reach it untouched instead of being auto-declined.
+    #[tokio::test]
+    async fn tui_path_passes_unpublishable_elicitations_through() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        let (responder, mut rx) = tokio::sync::oneshot::channel();
+        let prompt = ElicitationPrompt {
+            message: "Open".to_string(),
+            mode: ElicitationUrlMode::new(
+                ElicitationSessionScope::new("session"),
+                ElicitationId::new("login"),
+                "javascript:alert(1)",
+            )
+            .into(),
+            remote_id: None,
+            responder,
+        };
+        assert!(
+            remote_elicitation_record(&prompt).is_none(),
+            "precondition: this shape is not publishable"
+        );
+
+        let event = tracker.intercept_event(UiEvent::ElicitationRequest(prompt));
+
+        let UiEvent::ElicitationRequest(passed) = event else {
+            panic!("intercept must preserve the event kind");
+        };
+        assert!(passed.remote_id.is_none());
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "the TUI still owns this prompt; it must not be answered for it"
+        );
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert!(snapshot.pending_permissions.is_empty());
+    }
+
+    /// End-to-end for the TUI path: publishing, then answering through the
+    /// wrapped responder the way `resolve_elicitation_remotely` does, forwards
+    /// the outcome to the runtime and retracts the viewer's pending entry.
+    #[tokio::test]
+    async fn tui_elicitation_answer_forwards_and_retracts() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        let (prompt, rx) = mcp_approval_prompt(
+            "Which approach?",
+            ElicitationSchema::new().property(
+                "question_0",
+                StringPropertySchema::new().one_of(vec![
+                    EnumOption::new("a", "Option A"),
+                    EnumOption::new("b", "Option B"),
+                ]),
+                true,
+            ),
+        );
+        let UiEvent::ElicitationRequest(tracked) =
+            tracker.intercept_event(UiEvent::ElicitationRequest(prompt))
+        else {
+            panic!("intercept must preserve the event kind");
+        };
+
+        let outcome =
+            remote_elicitation_outcome(&tracked, "elicitation:accept:{\"question_0\":\"b\"}")
+                .expect("a valid option for this prompt");
+        tracked
+            .responder
+            .send(outcome)
+            .expect("wrapped responder open");
+
+        match rx.await {
+            Ok(ElicitationOutcome::Accept(content)) => {
+                assert_eq!(
+                    content.get("question_0"),
+                    Some(&ElicitationContentValue::String("b".to_string()))
+                );
+            }
+            other => panic!("expected the forwarded answer, got {other:?}"),
+        }
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert!(
+            snapshot.pending_permissions.is_empty(),
+            "answering must retract the viewer's pending entry"
         );
     }
 

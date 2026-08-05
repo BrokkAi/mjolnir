@@ -1782,6 +1782,9 @@ where
                 let prompt = ElicitationPrompt {
                     message: request.message.clone(),
                     mode: request.mode.clone(),
+                    // Assigned downstream by the remote tracker if and when
+                    // this prompt is published to the viewer.
+                    remote_id: None,
                     responder: tx,
                 };
                 if elicit_ui_tx

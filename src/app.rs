@@ -2902,6 +2902,37 @@ impl AppState {
         true
     }
 
+    /// Resolve a queued elicitation (a question menu, `/setup` form, or sign-in
+    /// URL) with a decision made in the remote-control viewer. Matches on the
+    /// id the remote tracker stamped when it published the prompt, because an
+    /// elicitation carries no intrinsic id of its own. The decision must also
+    /// validate against this prompt's schema, so a stale decision for an
+    /// already-answered request is dropped instead of resolving whatever
+    /// happens to be queued now. Returns true when a prompt was resolved.
+    pub fn resolve_elicitation_remotely(&mut self, request_id: &str, option_id: &str) -> bool {
+        let Some(index) = self.elicitation_queue.iter().position(|pending| {
+            pending.prompt.remote_id.as_deref() == Some(request_id)
+                && crate::remote::remote_elicitation_outcome(&pending.prompt, option_id).is_some()
+        }) else {
+            return false;
+        };
+        let pending = self
+            .elicitation_queue
+            .remove(index)
+            .expect("position returned a valid index");
+        let Some(outcome) = crate::remote::remote_elicitation_outcome(&pending.prompt, option_id)
+        else {
+            return false;
+        };
+        let _ = pending.prompt.responder.send(outcome);
+        self.record_status_message(
+            StatusKind::Info,
+            "question answered from the remote viewer".to_string(),
+        );
+        self.update_autocomplete();
+        true
+    }
+
     /// The elicitation prompt the UI should currently render, if any.
     pub fn pending_elicitation(&self) -> Option<&PendingElicitation> {
         self.elicitation_queue.front()
@@ -3645,7 +3676,12 @@ impl AppState {
                 request_id,
                 option_id,
             } => {
-                self.resolve_permission_remotely(&request_id, &option_id);
+                // One remote decision channel carries both prompt kinds. The
+                // id namespaces never collide (tool-call id vs. `elicitation:N`),
+                // so an unmatched permission lookup simply falls through.
+                if !self.resolve_permission_remotely(&request_id, &option_id) {
+                    self.resolve_elicitation_remotely(&request_id, &option_id);
+                }
             }
             UiEvent::PromptDone { stop_reason, usage } => {
                 self.finalize_thinking(EntryKind::Thought);
@@ -9231,6 +9267,7 @@ mod tests {
         let prompt = ElicitationPrompt {
             message: "Pick a model".to_string(),
             mode,
+            remote_id: None,
             responder,
         };
         (prompt, rx)
@@ -9255,6 +9292,7 @@ mod tests {
         let prompt = ElicitationPrompt {
             message: "Pick a model".to_string(),
             mode,
+            remote_id: None,
             responder,
         };
         (prompt, rx)
@@ -9273,6 +9311,7 @@ mod tests {
         let prompt = ElicitationPrompt {
             message: "Open this URL to sign in".to_string(),
             mode,
+            remote_id: None,
             responder,
         };
         (prompt, rx)
@@ -9308,6 +9347,7 @@ mod tests {
         let prompt = ElicitationPrompt {
             message: "Configure".to_string(),
             mode,
+            remote_id: None,
             responder,
         };
         (prompt, rx)
@@ -9324,6 +9364,74 @@ mod tests {
             s.elicitation_view(),
             Some(ElicitationView::SingleSelect { .. })
         ));
+    }
+
+    /// A question menu raised by a TUI session and answered in the remote
+    /// viewer resolves the queued prompt and closes the local modal.
+    #[test]
+    fn remote_decision_resolves_a_queued_elicitation() {
+        let mut s = AppState::new();
+        let (mut prompt, rx) = elicitation_prompt();
+        prompt.remote_id = Some("elicitation:1".to_string());
+        s.apply_event(UiEvent::ElicitationRequest(prompt));
+        assert!(s.has_pending_elicitation());
+
+        s.apply_event(UiEvent::RemotePermissionDecision {
+            request_id: "elicitation:1".to_string(),
+            option_id: "elicitation:accept:{\"model\":\"smart\"}".to_string(),
+        });
+
+        assert!(
+            !s.has_pending_elicitation(),
+            "the local modal must close once the viewer answers"
+        );
+        match rx.blocking_recv() {
+            Ok(ElicitationOutcome::Accept(content)) => assert_eq!(
+                content.get("model"),
+                Some(&ElicitationContentValue::String("smart".to_string()))
+            ),
+            other => panic!("expected the remote answer, got {other:?}"),
+        }
+    }
+
+    /// A decision that does not validate against the queued prompt is dropped
+    /// rather than resolving it with something the agent never offered.
+    #[test]
+    fn remote_decision_ignores_mismatched_elicitations() {
+        let mut s = AppState::new();
+        let (mut prompt, _rx) = elicitation_prompt();
+        prompt.remote_id = Some("elicitation:1".to_string());
+        s.apply_event(UiEvent::ElicitationRequest(prompt));
+
+        // Right id, an option this prompt never offered.
+        s.apply_event(UiEvent::RemotePermissionDecision {
+            request_id: "elicitation:1".to_string(),
+            option_id: "elicitation:accept:{\"model\":\"nonexistent\"}".to_string(),
+        });
+        assert!(s.has_pending_elicitation());
+
+        // Valid payload, but for a different (already-answered) request.
+        s.apply_event(UiEvent::RemotePermissionDecision {
+            request_id: "elicitation:99".to_string(),
+            option_id: "elicitation:accept:{\"model\":\"smart\"}".to_string(),
+        });
+        assert!(s.has_pending_elicitation());
+    }
+
+    /// An elicitation that was never published has no remote id, so a decision
+    /// quoting any id must not resolve it.
+    #[test]
+    fn remote_decision_skips_unpublished_elicitations() {
+        let mut s = AppState::new();
+        let (prompt, _rx) = elicitation_prompt();
+        assert!(prompt.remote_id.is_none());
+        s.apply_event(UiEvent::ElicitationRequest(prompt));
+
+        assert!(!s.resolve_elicitation_remotely(
+            "elicitation:1",
+            "elicitation:accept:{\"model\":\"smart\"}"
+        ));
+        assert!(s.has_pending_elicitation());
     }
 
     #[test]
@@ -9467,6 +9575,7 @@ mod tests {
                 ElicitationSessionScope::new("setup-session".to_string()),
                 schema,
             )),
+            remote_id: None,
             responder,
         }));
         assert!(matches!(
@@ -9520,6 +9629,7 @@ mod tests {
                 ElicitationSessionScope::new("setup-session".to_string()),
                 schema,
             )),
+            remote_id: None,
             responder,
         }));
 
@@ -9568,6 +9678,7 @@ mod tests {
                 ElicitationSessionScope::new("setup-session".to_string()),
                 schema,
             )),
+            remote_id: None,
             responder,
         };
         assert_eq!(
@@ -9597,6 +9708,7 @@ mod tests {
                 ElicitationSessionScope::new("setup-session".to_string()),
                 schema,
             )),
+            remote_id: None,
             responder,
         }));
         if let Some(pending) = s.pending_elicitation_mut() {
@@ -9632,6 +9744,7 @@ mod tests {
                 ElicitationSessionScope::new("setup-session".to_string()),
                 schema,
             )),
+            remote_id: None,
             responder,
         }));
         s.resolve_elicitation_accept();

@@ -290,6 +290,13 @@ pub struct ElicitationPrompt {
     pub message: String,
     /// The elicitation mode (single-select form or URL) and its fields.
     pub mode: ElicitationMode,
+    /// Identifier assigned by the remote tracker when this prompt was
+    /// published to the remote-control viewer, so a decision claimed from the
+    /// viewer can be matched back to this exact queued prompt. Unlike a
+    /// permission request, an elicitation carries no intrinsic id to match on.
+    /// `None` whenever the prompt was never published: headless runs, remote
+    /// publishing disabled, or a schema shape the viewer cannot render.
+    pub remote_id: Option<String>,
     /// One-shot to the ACP runtime. Dropping the sender is treated as Cancel.
     pub responder: oneshot::Sender<ElicitationOutcome>,
 }
