@@ -2944,6 +2944,7 @@
           <span id="connection-badge" class="connection-badge" role="status" hidden>reconnecting</span>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
           <span id="working-badge" class="working-badge" hidden>working</span>
+          <button id="workspace-diff-button" class="icon-button" type="button" aria-label="Show workspace changes" hidden>⌥</button>
           <button id="settings-button" class="icon-button" type="button" aria-label="Open viewer settings">⚙</button>
         </header>
         <div id="status-line" class="status-line" hidden>
@@ -2991,6 +2992,17 @@
             </span>
           </label>
         </div>
+      </div>
+    </section>
+
+    <section id="workspace-diff-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="workspace-diff-title" hidden>
+      <div class="new-session-panel mjconfig-panel">
+        <header class="new-session-head">
+          <h2 id="workspace-diff-title">Workspace changes</h2>
+          <button id="workspace-diff-close" class="new-session-close" type="button" aria-label="Close workspace changes">×</button>
+        </header>
+        <div id="workspace-diff-notice" class="mjconfig-notice" role="status"></div>
+        <div id="workspace-diff-body" class="mjconfig-body"></div>
       </div>
     </section>
 
@@ -3109,6 +3121,11 @@
       const logoutButtonEl = $("logout-button");
       const newSessionButtonEl = $("new-session-button");
       const settingsButtonEl = $("settings-button");
+      const workspaceDiffButtonEl = $("workspace-diff-button");
+      const workspaceDiffModalEl = $("workspace-diff-modal");
+      const workspaceDiffCloseEl = $("workspace-diff-close");
+      const workspaceDiffNoticeEl = $("workspace-diff-notice");
+      const workspaceDiffBodyEl = $("workspace-diff-body");
       const settingsModalEl = $("settings-modal");
       const settingsCloseEl = $("settings-close");
       const showDiffsToggleEl = $("show-diffs-toggle");
@@ -4205,6 +4222,9 @@
         filesystemLoading = false;
         creatingSession = false;
         settingsModalEl.hidden = true;
+        workspaceDiffModalEl.hidden = true;
+        workspaceDiffButtonEl.hidden = true;
+        workspaceDiff = null;
         closeMjConfig();
         pendingSessionLaunch = null;
         if (launchSessionCard) {
@@ -6071,6 +6091,68 @@
         return Array.isArray(entry.tool_diffs) ? entry.tool_diffs : [];
       }
 
+      /* Workspace changes for the latest turn, mirroring the TUI's Ctrl-G
+         viewer. This is not the same thing as the tool-call diffs already in
+         the transcript: it reports what actually changed on disk, including
+         edits the agent never reported as a tool call. It reuses the same
+         renderer those diffs use. */
+      let workspaceDiff = null;
+
+      function renderWorkspaceDiff(diff) {
+        const files = Array.isArray(diff?.diffs) ? diff.diffs : [];
+        workspaceDiff = files.length ? diff : null;
+        workspaceDiffButtonEl.hidden = !workspaceDiff;
+        if (!workspaceDiff) {
+          workspaceDiffModalEl.hidden = true;
+          return;
+        }
+        const total = Number.isFinite(diff.total_files) ? diff.total_files : files.length;
+        workspaceDiffButtonEl.setAttribute(
+          "aria-label",
+          `Show workspace changes (${total} file${total === 1 ? "" : "s"})`,
+        );
+        if (!workspaceDiffModalEl.hidden) {
+          paintWorkspaceDiff();
+        }
+      }
+
+      function paintWorkspaceDiff() {
+        const files = Array.isArray(workspaceDiff?.diffs) ? workspaceDiff.diffs : [];
+        const total = Number.isFinite(workspaceDiff?.total_files)
+          ? workspaceDiff.total_files
+          : files.length;
+        /* Say when the payload was capped rather than showing a short list as
+           if it were the whole change, which is what the TUI does too. */
+        workspaceDiffNoticeEl.textContent =
+          total > files.length
+            ? `Showing ${files.length} of ${total} changed files.`
+            : `${total} changed file${total === 1 ? "" : "s"}.`;
+        const fragment = document.createDocumentFragment();
+        for (const file of files) {
+          const path = typeof file.path === "string" && file.path ? file.path : "file";
+          const oldText = typeof file.old_text === "string" ? file.old_text : "";
+          const newText = typeof file.new_text === "string" ? file.new_text : "";
+          const rows = diffDisplayRows(oldText, newText);
+          const added = rows.filter((row) => row.kind === "+").length;
+          const removed = rows.filter((row) => row.kind === "-").length;
+          fragment.appendChild(inlineTextPre([`${path}  +${added} -${removed}`]));
+          const build = () => buildDiffView(rows, file.truncated === true);
+          fragment.appendChild(
+            rows.length > FOLD_LINE_LIMIT ? foldBlock(`diff · ${rows.length} lines`, build) : build(),
+          );
+        }
+        workspaceDiffBodyEl.replaceChildren(fragment);
+      }
+
+      function openWorkspaceDiff() {
+        if (!workspaceDiff) {
+          return;
+        }
+        paintWorkspaceDiff();
+        workspaceDiffModalEl.hidden = false;
+        workspaceDiffCloseEl.focus();
+      }
+
       function appendToolDiffs(body, entry) {
         if (!showTranscriptDiffs) {
           return;
@@ -6258,6 +6340,7 @@
           transcriptTitleEl.textContent = "Transcript";
           transcriptMetaEl.textContent = "Select a session to inspect its history.";
           workingBadgeEl.hidden = true;
+          renderWorkspaceDiff(null);
           stopTurnEl.hidden = true;
           stopTurnEl.disabled = true;
           transcriptEl.replaceChildren(
@@ -6274,6 +6357,7 @@
         transcriptTitleEl.textContent = sessionLabel(session);
         transcriptMetaEl.textContent = `${session.project || "-"}${session.worktree ? ` · ${session.worktree}` : ""} · ${session.agent || "-"} · ${transcript.length} entries`;
         workingBadgeEl.hidden = !sessionIsWorking(session);
+        renderWorkspaceDiff(session.workspace_diff);
         const activeTurn = sessionHasActiveTurn(session);
         stopTurnEl.hidden = !activeTurn;
         stopTurnEl.disabled = !activeTurn || stopRequestBySessionId.has(session.session_id);
@@ -7564,6 +7648,15 @@
           closeMjConfig();
         }
       });
+      workspaceDiffButtonEl.addEventListener("click", openWorkspaceDiff);
+      workspaceDiffCloseEl.addEventListener("click", () => {
+        workspaceDiffModalEl.hidden = true;
+      });
+      workspaceDiffModalEl.addEventListener("click", (event) => {
+        if (event.target === workspaceDiffModalEl) {
+          workspaceDiffModalEl.hidden = true;
+        }
+      });
       settingsCloseEl.addEventListener("click", closeViewerSettings);
       settingsModalEl.addEventListener("click", (event) => {
         if (event.target === settingsModalEl) {
@@ -7587,7 +7680,10 @@
         if (event.key !== "Escape") {
           return;
         }
-        if (!mjconfigModalEl.hidden) {
+        if (!workspaceDiffModalEl.hidden) {
+          event.preventDefault();
+          workspaceDiffModalEl.hidden = true;
+        } else if (!mjconfigModalEl.hidden) {
           event.preventDefault();
           closeMjConfig();
         } else if (!settingsModalEl.hidden) {

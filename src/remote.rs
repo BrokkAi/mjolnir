@@ -201,6 +201,11 @@ pub struct SessionRecord {
     /// Live per-subagent status rows, mirroring the TUI's subagent status area.
     #[serde(default)]
     pub subagents: Vec<SubagentStatusRecord>,
+    /// Workspace changes observed during the most recent turn, mirroring the
+    /// TUI's `Ctrl-G` viewer. Independent of ACP tool calls: it reports what
+    /// actually changed on disk, including edits the agent never reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_diff: Option<WorkspaceDiffRecord>,
     /// Status-line data mirroring the TUI's bottom status row and usage
     /// displays: model, adapter, effort, per-seat token totals, quota lines
     /// and the current branch's open pull request.
@@ -685,6 +690,19 @@ pub struct TranscriptEntry {
     pub tool_diffs: Vec<TranscriptDiff>,
 }
 
+/// Workspace changes captured around one prompt turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceDiffRecord {
+    pub turn_id: u64,
+    /// Changed-file count before the payload was capped, so the viewer can
+    /// show the same "showing N of M" notice the TUI does.
+    pub total_files: usize,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub diffs: Vec<TranscriptDiff>,
+}
+
 /// Marker left behind when an entry is shrunk to fit a published snapshot.
 const PUBLISH_TRUNCATION_MARKER: &str = "\n… truncated for the remote snapshot";
 
@@ -1077,6 +1095,8 @@ struct TrackerState {
     /// lifecycle notices are rendered from the reduced state, not from the
     /// transition alone.
     workflows: crate::workflow::WorkflowStore,
+    /// Latest published workspace diff, mirroring the TUI's Ctrl-G viewer.
+    workspace_diff: Option<WorkspaceDiffRecord>,
     pending_permissions: Vec<PendingPermissionRecord>,
     session_config: Vec<SessionConfigOptionRecord>,
     native_mode: Option<NativeModeRecord>,
@@ -1451,6 +1471,7 @@ impl TrackerState {
             subagents: BTreeMap::new(),
             nested_roles: HashMap::new(),
             workflows: crate::workflow::WorkflowStore::default(),
+            workspace_diff: None,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             native_mode: None,
@@ -1479,6 +1500,8 @@ impl TrackerState {
         self.terminal_outputs.clear();
         self.tool_transcript_entries.clear();
         self.subagents.clear();
+        // The diff described the previous session's workspace turn.
+        self.workspace_diff = None;
         self.pending_permissions.clear();
         self.session_config.clear();
         self.native_mode = None;
@@ -1547,7 +1570,20 @@ impl TrackerState {
                 self.observe_session_update(update);
             }
             UiEvent::ContextCompacted => {}
-            UiEvent::WorkspaceDiff(_) => {}
+            UiEvent::WorkspaceDiff(diff) => {
+                // The TUI keeps a per-turn history behind Ctrl-G; the mirror
+                // publishes the latest turn only. Every snapshot re-sends the
+                // whole record, so retaining a history here would reintroduce
+                // the unbounded-payload problem the transcript budget exists
+                // to prevent.
+                self.workspace_diff = Some(WorkspaceDiffRecord {
+                    turn_id: diff.turn_id,
+                    total_files: diff.total_files,
+                    truncated: diff.truncated,
+                    diffs: workspace_transcript_diffs(&diff.diffs),
+                });
+                self.touch();
+            }
             UiEvent::TerminalOutput(snapshot) => {
                 self.observe_terminal_output(snapshot);
             }
@@ -2218,6 +2254,7 @@ impl TrackerState {
             native_mode: self.native_mode.clone(),
             available_commands: self.available_commands.clone(),
             subagents: self.subagents.values().cloned().collect(),
+            workspace_diff: self.workspace_diff.clone(),
             status: Some(self.status_record()),
         })
     }
@@ -6663,6 +6700,7 @@ fn init_db(db_path: &Path) -> Result<()> {
     ensure_sessions_column(&conn, "worktree", "text")?;
     ensure_sessions_column(&conn, "subagents_json", "text not null default '[]'")?;
     ensure_sessions_column(&conn, "status_json", "text")?;
+    ensure_sessions_column(&conn, "workspace_diff_json", "text")?;
     Ok(())
 }
 
@@ -6714,6 +6752,12 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
         .map(serde_json::to_string)
         .transpose()
         .context("serialize remote-control session status")?;
+    let workspace_diff_json = session
+        .workspace_diff
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("serialize remote-control workspace diff")?;
     let last_prompt_at = session_last_prompt_at(session);
     let prompt_in_flight = if session.prompt_in_flight { 1_i64 } else { 0 };
     // The conflict arm refuses to move `last_update` backwards: every state
@@ -6738,8 +6782,9 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             worktree,
             subagents_json,
             status_json,
+            workspace_diff_json,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -6761,6 +6806,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             worktree = excluded.worktree,
             subagents_json = excluded.subagents_json,
             status_json = excluded.status_json,
+            workspace_diff_json = excluded.workspace_diff_json,
             connected = 1
         where excluded.last_update >= sessions.last_update",
         params![
@@ -6780,6 +6826,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             session.worktree,
             subagents_json,
             status_json,
+            workspace_diff_json,
         ],
     )
     .context("upsert remote-control session")?;
@@ -6958,7 +7005,8 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                 ) as queued_prompt_count,
                 worktree,
                 subagents_json,
-                status_json
+                status_json,
+                workspace_diff_json
             from sessions
             order by session_id asc",
         )
@@ -7000,7 +7048,8 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                 ) as queued_prompt_count,
                 worktree,
                 subagents_json,
-                status_json
+                status_json,
+                workspace_diff_json
             from sessions
             where connected = 1 and last_update >= ?1
             order by session_id asc",
@@ -7027,6 +7076,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let queued_prompt_count: i64 = row.get(13)?;
     let subagents_json: String = row.get(15)?;
     let status_json: Option<String> = row.get(16)?;
+    let workspace_diff_json: Option<String> = row.get(17)?;
     let transcript: Vec<TranscriptEntry> =
         serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
@@ -7055,6 +7105,9 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         native_mode: None,
         available_commands,
         subagents,
+        workspace_diff: workspace_diff_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok()),
         status: status_json
             .as_deref()
             .and_then(|status| serde_json::from_str(status).ok()),
@@ -7719,15 +7772,47 @@ fn transcript_diffs(content: &[ToolCallContent]) -> Vec<TranscriptDiff> {
 }
 
 fn transcript_diff(diff: &Diff, remaining_budget: &mut usize) -> TranscriptDiff {
+    bounded_transcript_diff(
+        &diff.path,
+        diff.old_text.as_deref(),
+        &diff.new_text,
+        remaining_budget,
+    )
+}
+
+/// Workspace diffs from one turn, under the same total byte budget the
+/// tool-call diffs use. Both kinds ride in the same snapshot, so they answer
+/// to the same limit.
+fn workspace_transcript_diffs(diffs: &[crate::event::WorkspaceDiff]) -> Vec<TranscriptDiff> {
+    let mut remaining_budget = MAX_TRANSCRIPT_DIFF_TEXT_BYTES;
+    diffs
+        .iter()
+        .map(|diff| {
+            bounded_transcript_diff(
+                &diff.path,
+                diff.old_text.as_deref(),
+                &diff.new_text,
+                &mut remaining_budget,
+            )
+        })
+        .collect()
+}
+
+/// Convert one file change into a publishable diff, spending from a shared
+/// byte budget. Shared by the ACP tool-call and workspace paths so a change to
+/// the truncation rule cannot apply to only one of them.
+fn bounded_transcript_diff(
+    path: &std::path::Path,
+    old_text: Option<&str>,
+    new_text: &str,
+    remaining_budget: &mut usize,
+) -> TranscriptDiff {
     let diff_budget = (*remaining_budget).min(MAX_TRANSCRIPT_DIFF_TEXT_BYTES_PER_FILE);
-    let old_len = diff.old_text.as_ref().map_or(0, String::len);
-    let new_len = diff.new_text.len();
+    let old_len = old_text.map_or(0, str::len);
+    let new_len = new_text.len();
     let (old_budget, new_budget) = split_diff_text_budget(old_len, new_len, diff_budget);
-    let old_text = diff
-        .old_text
-        .as_ref()
-        .map(|text| truncate_str_to_budget(text, old_budget));
-    let new_text = truncate_str_to_budget(&diff.new_text, new_budget);
+    let old_text = old_text.map(|text| truncate_str_to_budget(text, old_budget));
+    let new_text = truncate_str_to_budget(new_text, new_budget);
     let truncated =
         old_text.as_ref().is_some_and(|text| text.len() < old_len) || new_text.len() < new_len;
     let used_budget = old_text
@@ -7737,7 +7822,7 @@ fn transcript_diff(diff: &Diff, remaining_budget: &mut usize) -> TranscriptDiff 
     *remaining_budget = (*remaining_budget).saturating_sub(used_budget);
 
     TranscriptDiff {
-        path: diff.path.display().to_string(),
+        path: path.display().to_string(),
         old_text,
         new_text,
         truncated,
@@ -9372,6 +9457,96 @@ mod tests {
         reporter.record_success();
     }
 
+    fn workspace_diff_event(turn_id: u64, files: usize) -> crate::event::WorkspaceDiffEvent {
+        crate::event::WorkspaceDiffEvent {
+            turn_id,
+            diffs: (0..files)
+                .map(|index| crate::event::WorkspaceDiff {
+                    path: PathBuf::from(format!("src/file{index}.rs")),
+                    old_text: Some("before\n".to_string()),
+                    new_text: "after\n".to_string(),
+                })
+                .collect(),
+            total_files: files,
+            max_files: files,
+            truncated: false,
+        }
+    }
+
+    /// The tracker dropped `UiEvent::WorkspaceDiff` on the floor, so the web
+    /// viewer had no changed-files view at all (#571).
+    #[test]
+    fn tracker_publishes_the_latest_workspace_diff() {
+        let mut state = started_session_tracker();
+
+        state.observe_event(&UiEvent::WorkspaceDiff(workspace_diff_event(1, 2)));
+        let snapshot = state.snapshot().expect("snapshot");
+        let diff = snapshot.workspace_diff.expect("workspace diff");
+        assert_eq!(diff.turn_id, 1);
+        assert_eq!(diff.total_files, 2);
+        assert_eq!(diff.diffs.len(), 2);
+        assert_eq!(diff.diffs[0].path, "src/file0.rs");
+        assert_eq!(diff.diffs[0].new_text, "after\n");
+
+        // A later turn replaces the previous one: every snapshot re-sends the
+        // whole record, so keeping a history here would grow without bound.
+        state.observe_event(&UiEvent::WorkspaceDiff(workspace_diff_event(2, 1)));
+        let diff = state
+            .snapshot()
+            .expect("snapshot")
+            .workspace_diff
+            .expect("workspace diff");
+        assert_eq!(diff.turn_id, 2);
+        assert_eq!(diff.diffs.len(), 1);
+    }
+
+    #[test]
+    fn tracker_drops_the_workspace_diff_when_the_session_changes() {
+        let mut state = started_session_tracker();
+        state.observe_event(&UiEvent::WorkspaceDiff(workspace_diff_event(1, 1)));
+
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-2".to_string(),
+            resumed: false,
+        });
+
+        assert!(
+            state.snapshot().expect("snapshot").workspace_diff.is_none(),
+            "the diff described the previous session's workspace"
+        );
+    }
+
+    #[test]
+    fn workspace_diffs_share_the_tool_diff_byte_budget() {
+        let oversized = crate::event::WorkspaceDiff {
+            path: PathBuf::from("src/huge.rs"),
+            old_text: Some("o".repeat(MAX_TRANSCRIPT_DIFF_TEXT_BYTES_PER_FILE * 2)),
+            new_text: "n".repeat(MAX_TRANSCRIPT_DIFF_TEXT_BYTES_PER_FILE * 2),
+        };
+
+        let published = workspace_transcript_diffs(std::slice::from_ref(&oversized));
+
+        assert_eq!(published.len(), 1);
+        assert!(published[0].truncated);
+        let bytes =
+            published[0].old_text.as_ref().map_or(0, String::len) + published[0].new_text.len();
+        assert!(
+            bytes <= MAX_TRANSCRIPT_DIFF_TEXT_BYTES_PER_FILE,
+            "workspace diffs must answer to the same per-file cap as tool diffs, got {bytes}"
+        );
+    }
+
+    #[test]
+    fn embedded_viewer_renders_workspace_changes() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("workspace-diff-modal"));
+        assert!(viewer.contains("function renderWorkspaceDiff"));
+        assert!(viewer.contains("session.workspace_diff"));
+        // Reuses the transcript diff renderer rather than a second one.
+        assert!(viewer.contains("paintWorkspaceDiff"));
+        assert!(viewer.contains("Showing ${files.length} of ${total} changed files."));
+    }
+
     fn started_session_tracker() -> TrackerState {
         let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
         state.observe_event(&UiEvent::SessionStarted {
@@ -10191,6 +10366,7 @@ mod tests {
                 finished_at: None,
                 outcome: None,
             }],
+            workspace_diff: None,
             status: Some(SessionStatusRecord {
                 model: "gpt-5.6".to_string(),
                 model_source: Some("codex-acp".to_string()),
@@ -10534,6 +10710,7 @@ mod tests {
             available_commands: Vec::new(),
             subagents: Vec::new(),
             native_mode: None,
+            workspace_diff: None,
             status: None,
         };
         let disconnected = SessionRecord {
@@ -11071,6 +11248,7 @@ mod tests {
             available_commands: Vec::new(),
             subagents: Vec::new(),
             native_mode: None,
+            workspace_diff: None,
             status: None,
         }
     }
@@ -11711,6 +11889,7 @@ mod tests {
             available_commands: Vec::new(),
             subagents: Vec::new(),
             native_mode: None,
+            workspace_diff: None,
             status: None,
         };
 
@@ -12760,6 +12939,7 @@ mod tests {
             available_commands: Vec::new(),
             subagents: Vec::new(),
             native_mode: None,
+            workspace_diff: None,
             status: None,
         };
 
