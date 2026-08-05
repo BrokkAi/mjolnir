@@ -21,6 +21,7 @@ mod deepswe;
 mod discrete_review;
 mod event;
 mod headless;
+mod ink;
 mod install;
 mod kimi;
 mod labels;
@@ -53,6 +54,7 @@ mod subscription;
 mod tailscale;
 mod term;
 mod terminal_output;
+mod terminal_palette;
 mod termination;
 mod text;
 mod theme;
@@ -589,6 +591,18 @@ async fn main() -> Result<()> {
         })
         .await;
     }
+
+    // Ask the terminal what its own foreground and background are before
+    // anything draws. The palette needs the real background to blend diff rows
+    // against it; without an answer every fill is dropped in favour of
+    // foreground-only styling, so a silent terminal costs appearance, not
+    // correctness.
+    //
+    // Deliberately placed after the subcommand and headless paths have had
+    // their chance to return: those never draw a palette, and probing there
+    // would spend ~120ms and write escape sequences to a terminal that is
+    // about to be handed back to the shell.
+    terminal_palette::set_default_colors(terminal_palette::probe_default_colors());
 
     let (cwd, worktree) = prepare_worktree_for_arg(cwd, cli.worktree.as_deref())?;
     let workspace_roots = validate_workspace_roots(&cwd, &top_level_additional_directories)?;
@@ -3609,13 +3623,13 @@ mod tests {
             reason: UiExitReason::ClearSession,
             session_id: Some("session-1".to_string()),
             session_title: Some("Current".to_string()),
-            theme_kind: theme::TerminalThemeKind::AnsiLight,
+            theme_kind: theme::TerminalThemeKind::Ansi,
             spinner_style: spinner::SpinnerStyle::Bars,
         };
 
         apply_session_result_to_config(&mut cfg, &result);
 
-        assert_eq!(cfg.theme, theme::TerminalThemeKind::AnsiLight);
+        assert_eq!(cfg.theme, theme::TerminalThemeKind::Ansi);
         assert_eq!(cfg.spinner, spinner::SpinnerStyle::Bars);
     }
 
@@ -3625,14 +3639,14 @@ mod tests {
             reason: UiExitReason::SwitchSession,
             session_id: Some("session-2".to_string()),
             session_title: Some("Selected".to_string()),
-            theme_kind: theme::TerminalThemeKind::Light,
+            theme_kind: theme::TerminalThemeKind::Adaptive,
             spinner_style: spinner::SpinnerStyle::Globe,
         });
 
         assert_eq!(result.reason, UiExitReason::SwitchSession);
         assert_eq!(result.session_id.as_deref(), Some("session-2"));
         assert_eq!(result.session_title.as_deref(), Some("Selected"));
-        assert_eq!(result.theme_kind, theme::TerminalThemeKind::Light);
+        assert_eq!(result.theme_kind, theme::TerminalThemeKind::Adaptive);
         assert_eq!(result.spinner_style, spinner::SpinnerStyle::Globe);
     }
 

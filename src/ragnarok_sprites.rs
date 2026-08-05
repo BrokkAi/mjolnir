@@ -12,6 +12,13 @@
 //! [`SPRITE_W`] chars, all from the palette. Misaligned art fails CI instead
 //! of rendering a mangled viking.
 
+// Pixel art, not UI chrome. Every RGB below is a texture — skin, wood, leather,
+// steel — where the exact value *is* the artwork. Snapping these onto the ANSI
+// 16 the way the rest of the TUI does would not adapt the sprites to a terminal
+// theme, it would destroy them. The palette-driven colors (`hero`, `accent`)
+// still arrive from the caller, so the parts that should follow the theme do.
+#![allow(clippy::disallowed_methods)]
+
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 

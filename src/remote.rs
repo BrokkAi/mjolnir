@@ -8094,7 +8094,7 @@ mod tests {
         assert_eq!(accounts.len(), crate::auth::AuthVendor::ALL.len());
 
         let themes = snapshot["appearance"]["themes"].as_array().expect("themes");
-        assert_eq!(themes.len(), 4);
+        assert_eq!(themes.len(), crate::theme::TerminalThemeKind::ALL.len());
         let spinners = snapshot["appearance"]["spinners"]
             .as_array()
             .expect("spinners");
@@ -8170,7 +8170,7 @@ mod tests {
                     "primary_model": "gpt-5-6-terra",
                     "discrete_review": false,
                     "max_parallel": 4,
-                    "theme": "ansi-dark",
+                    "theme": "ansi",
                     "spinner": "wave",
                     "feature_hints": false,
                     "primary_session_defaults": {
@@ -8192,7 +8192,7 @@ mod tests {
         assert_eq!(snapshot["agents"]["roles"][0]["model"], "gpt-5-6-terra");
         assert_eq!(snapshot["agents"]["discrete_review"], false);
         assert_eq!(snapshot["agents"]["max_parallel"], 4);
-        assert_eq!(snapshot["appearance"]["theme"], "ansi-dark");
+        assert_eq!(snapshot["appearance"]["theme"], "ansi");
         assert_eq!(snapshot["appearance"]["spinner"], "wave");
         assert_eq!(snapshot["appearance"]["feature_hints"], false);
 
@@ -8200,7 +8200,7 @@ mod tests {
         assert_eq!(saved.agent.model, "gpt-5-6-terra");
         assert!(!saved.agent.discrete_review);
         assert_eq!(saved.subagents.max_parallel, 4);
-        assert_eq!(saved.theme, crate::theme::TerminalThemeKind::AnsiDark);
+        assert_eq!(saved.theme, crate::theme::TerminalThemeKind::Ansi);
         assert_eq!(saved.spinner, crate::spinner::SpinnerStyle::Wave);
         assert!(!saved.feature_hints);
         assert_eq!(

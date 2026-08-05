@@ -15,6 +15,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, ONBOARDING_CONTENT_VERSION};
+use crate::ink::{Ink, InkStyle};
 use crate::palette::TerminalTheme;
 use crate::roster::{AcpInventory, Roster};
 use crate::settings::{SettingsAction, SettingsEditor, draw_settings_panel};
@@ -569,14 +570,14 @@ fn draw(frame: &mut ratatui::Frame, state: &mut State) {
     let content_width = panel_width.saturating_sub(2).max(1);
     let mut lines = screen_lines(state, theme);
     if let Some(notice) = &state.notice {
-        let (label, color) = match state.notice_tone {
+        let (label, ink) = match state.notice_tone {
             NoticeTone::Info => ("SETUP STATUS", theme.primary),
             NoticeTone::Success => ("CONNECTED", theme.success),
             NoticeTone::Warning => ("NEEDS ATTENTION", theme.warning),
         };
         lines.push(Line::raw(""));
-        lines.push(section_heading(label, color));
-        lines.push(Line::styled(notice.clone(), Style::default().fg(color)));
+        lines.push(section_heading(label, ink));
+        lines.push(Line::styled(notice.clone(), Style::default().ink(ink)));
     }
     let measured_lines = Paragraph::new(lines.clone())
         .wrap(Wrap { trim: false })
@@ -603,7 +604,7 @@ fn draw(frame: &mut ratatui::Frame, state: &mut State) {
     let panel = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.primary));
+        .border_style(Style::default().ink(theme.primary));
     let inner = panel.inner(panel_area);
     frame.render_widget(panel, panel_area);
     if inner.width == 0 || inner.height == 0 {
@@ -632,7 +633,7 @@ fn draw(frame: &mut ratatui::Frame, state: &mut State) {
     let selected_bounds = (state.screen == Screen::Connections && state.reveal_selection)
         .then(|| connection_selection_bounds(&lines, rows[2].width));
     let paragraph = Paragraph::new(lines)
-        .style(Style::default().fg(theme.text))
+        .style(Style::default().ink(theme.text))
         .wrap(Wrap { trim: false });
     let line_count = paragraph.line_count(rows[2].width);
     let max_scroll = line_count
@@ -712,7 +713,7 @@ fn header_line(state: &State, width: u16, theme: TerminalTheme) -> Line<'static>
     let mut spans = vec![Span::styled(
         brand,
         Style::default()
-            .fg(theme.primary)
+            .ink(theme.primary)
             .add_modifier(Modifier::BOLD),
     )];
     if gap > 1 {
@@ -720,7 +721,7 @@ fn header_line(state: &State, width: u16, theme: TerminalTheme) -> Line<'static>
         spans.push(Span::styled(
             context,
             Style::default()
-                .fg(theme.muted)
+                .ink(theme.muted)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -738,7 +739,7 @@ fn progress_line(state: &State, width: u16, theme: TerminalTheme) -> Line<'stati
         return Line::styled(
             label,
             Style::default()
-                .fg(theme.primary)
+                .ink(theme.primary)
                 .add_modifier(Modifier::BOLD),
         )
         .centered();
@@ -760,7 +761,7 @@ fn progress_line(state: &State, width: u16, theme: TerminalTheme) -> Line<'stati
                 steps[current]
             ),
             Style::default()
-                .fg(theme.primary)
+                .ink(theme.primary)
                 .add_modifier(Modifier::BOLD),
         )
         .centered();
@@ -769,25 +770,25 @@ fn progress_line(state: &State, width: u16, theme: TerminalTheme) -> Line<'stati
     let mut spans = Vec::new();
     for (index, label) in steps.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled(" ─── ", Style::default().fg(theme.subtle)));
+            spans.push(Span::styled(" ─── ", Style::default().ink(theme.subtle)));
         }
         let (marker, style) = if index < current {
             (
                 "✓".to_string(),
                 Style::default()
-                    .fg(theme.success)
+                    .ink(theme.success)
                     .add_modifier(Modifier::BOLD),
             )
         } else if index == current {
             (
                 (index + 1).to_string(),
                 Style::default()
-                    .fg(theme.selection_fg)
-                    .bg(theme.selection_bg)
+                    .ink(theme.selection_fg)
+                    .ink_bg(theme.selection_bg)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            ((index + 1).to_string(), Style::default().fg(theme.muted))
+            ((index + 1).to_string(), Style::default().ink(theme.muted))
         };
         spans.push(Span::styled(format!(" {marker} {label} "), style));
     }
@@ -803,31 +804,27 @@ fn hero(
         Line::styled(
             title.into(),
             Style::default()
-                .fg(theme.primary)
+                .ink(theme.primary)
                 .add_modifier(Modifier::BOLD),
         )
         .centered(),
-        Line::styled(subtitle.into(), Style::default().fg(theme.muted)).centered(),
+        Line::styled(subtitle.into(), Style::default().ink(theme.muted)).centered(),
         Line::raw(""),
     ]
 }
 
-fn section_heading(text: impl Into<String>, color: ratatui::style::Color) -> Line<'static> {
+fn section_heading(text: impl Into<String>, ink: Ink) -> Line<'static> {
     Line::styled(
         format!("  {}", text.into()),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
+        Style::default().ink(ink).add_modifier(Modifier::BOLD),
     )
 }
 
-fn role_line(
-    label: &str,
-    detail: impl Into<String>,
-    color: ratatui::style::Color,
-) -> Line<'static> {
+fn role_line(label: &str, detail: impl Into<String>, ink: Ink) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("  {label:<12}"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            Style::default().ink(ink).add_modifier(Modifier::BOLD),
         ),
         Span::raw(detail.into()),
     ])
@@ -838,11 +835,11 @@ fn choice_line(selected: bool, label: &str, status: &str, theme: TerminalTheme) 
     let text = format!(" {marker} {label:<28} {status}");
     let style = if selected {
         Style::default()
-            .fg(theme.selection_fg)
-            .bg(theme.selection_bg)
+            .ink(theme.selection_fg)
+            .ink_bg(theme.selection_bg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.text)
+        Style::default().ink(theme.text)
     };
     Line::styled(text, style)
 }
@@ -865,7 +862,7 @@ fn connection_selection_bounds(lines: &[Line<'static>], width: u16) -> (usize, u
 fn detail_line(detail: impl Into<String>, theme: TerminalTheme) -> Line<'static> {
     Line::styled(
         format!("     {}", detail.into()),
-        Style::default().fg(theme.muted),
+        Style::default().ink(theme.muted),
     )
 }
 
@@ -887,19 +884,19 @@ fn welcome_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
     );
     lines.push(
         Line::from(vec![
-            Span::styled("YOU", Style::default().fg(theme.text)),
-            Span::styled("  ──►  ", Style::default().fg(theme.subtle)),
+            Span::styled("YOU", Style::default().ink(theme.text)),
+            Span::styled("  ──►  ", Style::default().ink(theme.subtle)),
             Span::styled(
                 "PRIMARY",
                 Style::default()
-                    .fg(theme.primary)
+                    .ink(theme.primary)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  ──►  ", Style::default().fg(theme.subtle)),
+            Span::styled("  ──►  ", Style::default().ink(theme.subtle)),
             Span::styled(
                 "VERIFIED RESULT",
                 Style::default()
-                    .fg(theme.success)
+                    .ink(theme.success)
                     .add_modifier(Modifier::BOLD),
             ),
         ])
@@ -925,7 +922,7 @@ fn welcome_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
     lines.push(
         Line::styled(
             "One worktree  ·  visible delegation  ·  one verified result",
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         )
         .centered(),
     );
@@ -940,11 +937,11 @@ fn whats_new_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     );
     lines.push(
         Line::from(vec![
-            Span::styled("PRIMARY  CODEX", Style::default().fg(theme.primary)),
-            Span::styled("   ·   ", Style::default().fg(theme.subtle)),
-            Span::styled("BUILD  CODEX", Style::default().fg(theme.secondary)),
-            Span::styled("   ·   ", Style::default().fg(theme.subtle)),
-            Span::styled("CHECK  CODEX", Style::default().fg(theme.success)),
+            Span::styled("PRIMARY  CODEX", Style::default().ink(theme.primary)),
+            Span::styled("   ·   ", Style::default().ink(theme.subtle)),
+            Span::styled("BUILD  CODEX", Style::default().ink(theme.secondary)),
+            Span::styled("   ·   ", Style::default().ink(theme.subtle)),
+            Span::styled("CHECK  CODEX", Style::default().ink(theme.success)),
         ])
         .centered(),
     );
@@ -957,7 +954,7 @@ fn whats_new_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     lines.push(Line::styled(
         "  ✓  Your saved providers, routes, and settings will not change.",
         Style::default()
-            .fg(theme.success)
+            .ink(theme.success)
             .add_modifier(Modifier::BOLD),
     ));
     if let Some(roster) = &state.roster {
@@ -999,7 +996,7 @@ fn whats_new_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     lines.push(
         Line::styled(
             "Continue as-is, review the setup, or dismiss this update.",
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         )
         .centered(),
     );
@@ -1086,12 +1083,12 @@ fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
         if ready == 0 {
             lines.push(Line::styled(
                 "     No launchable ACP runtime is ready yet",
-                Style::default().fg(theme.warning),
+                Style::default().ink(theme.warning),
             ));
         } else {
             lines.push(Line::styled(
                 format!("     ✓ {ready} runtime(s) ready  ·  {models} model route(s)"),
-                Style::default().fg(theme.success),
+                Style::default().ink(theme.success),
             ));
         }
         for server in &state.inventory.servers {
@@ -1109,7 +1106,7 @@ fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
             if let Some(issue) = issue {
                 lines.push(Line::styled(
                     format!("     {} ({})  ·  {issue}", server.label, server.id),
-                    Style::default().fg(theme.warning),
+                    Style::default().ink(theme.warning),
                 ));
             }
         }
@@ -1123,13 +1120,13 @@ fn readiness_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
             Line::styled(
                 "ROUTES NOT READY",
                 Style::default()
-                    .fg(theme.warning)
+                    .ink(theme.warning)
                     .add_modifier(Modifier::BOLD),
             )
             .centered(),
             Line::styled(
                 "Press R to check the configured routes again.",
-                Style::default().fg(theme.muted),
+                Style::default().ink(theme.muted),
             )
             .centered(),
         ];
@@ -1216,14 +1213,14 @@ fn readiness_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     lines.push(
         Line::styled(
             "Usage is reported separately for primary, subagent, and review roles.",
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         )
         .centered(),
     );
     for warning in &roster.warnings {
         lines.push(Line::styled(
             format!("Warning: {warning}"),
-            Style::default().fg(theme.warning),
+            Style::default().ink(theme.warning),
         ));
     }
     lines
@@ -1243,13 +1240,13 @@ fn footer_line(
         spans.push(Span::styled(
             format!(" {key} "),
             Style::default()
-                .fg(theme.selection_fg)
-                .bg(theme.selection_bg)
+                .ink(theme.selection_fg)
+                .ink_bg(theme.selection_bg)
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             format!(" {label}"),
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ));
     };
     match screen {

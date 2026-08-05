@@ -1046,7 +1046,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nope.toml");
         let cfg = Config::load(&path).expect("load");
-        assert_eq!(cfg.theme, TerminalThemeKind::Dark);
+        assert_eq!(cfg.theme, TerminalThemeKind::Adaptive);
         assert_eq!(cfg.model_names(), ModelsConfig::default());
         assert!(cfg.agent.discrete_review);
         assert_eq!(cfg.agent.max_correction_rounds, 1);
@@ -1182,7 +1182,7 @@ origin = "custom"
 
         let cfg = Config::load(&path).expect("migrate v2");
         assert_eq!(cfg.version, CONFIG_VERSION);
-        assert_eq!(cfg.theme, TerminalThemeKind::AnsiLight);
+        assert_eq!(cfg.theme, TerminalThemeKind::Ansi);
         assert_eq!(cfg.spinner, SpinnerStyle::Bars);
         assert_eq!(cfg.agent.model, "gpt-5-6-sol");
         assert_eq!(cfg.agent.reasoning_effort.as_deref(), Some("high"));
@@ -1322,7 +1322,7 @@ origin = "custom"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let cfg = Config {
-            theme: TerminalThemeKind::Light,
+            theme: TerminalThemeKind::Ansi,
             agent: AgentConfig {
                 model: "gpt-5-6-sol".to_string(),
                 acp_source: None,
@@ -1352,7 +1352,7 @@ origin = "custom"
         };
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
-        assert_eq!(loaded.theme, TerminalThemeKind::Light);
+        assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
         assert_eq!(loaded.agent.model, "gpt-5-6-sol");
         assert!(!loaded.agent.discrete_review);
         assert!(!loaded.subagents.auto_failover);
@@ -1412,7 +1412,7 @@ origin = "custom"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nested").join("deep").join("config.toml");
         let cfg = Config {
-            theme: TerminalThemeKind::Dark,
+            theme: TerminalThemeKind::Adaptive,
             ..Config::default()
         };
         cfg.save(&path).expect("save");
@@ -1505,7 +1505,7 @@ origin = "custom"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut cfg = Config {
-            theme: TerminalThemeKind::Dark,
+            theme: TerminalThemeKind::Ansi,
             ..Config::default()
         };
         cfg.agent.discrete_review = false;
@@ -1529,7 +1529,7 @@ origin = "custom"
         .expect("persist model b");
 
         let loaded = Config::load(&path).expect("load merged config");
-        assert_eq!(loaded.theme, TerminalThemeKind::Dark);
+        assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
         assert!(!loaded.agent.discrete_review);
         assert_eq!(
             loaded.session_config["codex-acp"].models["model-a"]["config:service_tier"],
@@ -1562,12 +1562,12 @@ origin = "custom"
             "priority".to_string(),
         )
         .expect("persist accepted route");
-        editor_snapshot.theme = TerminalThemeKind::Dark;
+        editor_snapshot.theme = TerminalThemeKind::Ansi;
         save_user_config_preserving_session_routes(&path, &mut editor_snapshot)
             .expect("save settings");
 
         let loaded = Config::load(&path).expect("load merged config");
-        assert_eq!(loaded.theme, TerminalThemeKind::Dark);
+        assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
         assert_eq!(
             loaded.session_config["codex-acp"].models["model-a"]["config:service_tier"],
             "priority"
@@ -1761,18 +1761,18 @@ mode = "ask"
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "").expect("write");
         let cfg = Config::load(&path).expect("load default");
-        assert_eq!(cfg.theme, TerminalThemeKind::Dark);
+        assert_eq!(cfg.theme, TerminalThemeKind::Adaptive);
 
         let cfg = Config {
-            theme: TerminalThemeKind::AnsiLight,
+            theme: TerminalThemeKind::Ansi,
             ..Config::default()
         };
         cfg.save(&path).expect("save");
         let body = std::fs::read_to_string(&path).expect("read");
-        assert!(body.contains("theme = \"ansi-light\""));
+        assert!(body.contains("theme = \"ansi\""));
 
         let loaded = Config::load(&path).expect("load saved");
-        assert_eq!(loaded.theme, TerminalThemeKind::AnsiLight);
+        assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
     }
 
     #[test]

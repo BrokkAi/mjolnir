@@ -59,6 +59,7 @@ use crate::event::{
     PermissionDecision, PermissionPrompt, PromptImage, ReviewTarget, SessionConfigTarget,
     SubagentEvent, SubagentOutcome, UiCommand, UiEvent,
 };
+use crate::ink::{Ink, InkStyle};
 use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
 use crate::ragnarok;
@@ -5470,7 +5471,7 @@ fn plan_status_style(
         agent_client_protocol::schema::v1::PlanEntryStatus::Completed => theme.success,
         _ => theme.error,
     };
-    Style::default().fg(color)
+    Style::default().ink(color)
 }
 
 fn plan_row(
@@ -5491,16 +5492,16 @@ fn plan_row(
         PlanEntryPriority::High => spans.push(Span::styled(
             format!(" [{}]", plan_priority_label(&entry.priority)),
             Style::default()
-                .fg(theme.warning)
+                .ink(theme.warning)
                 .add_modifier(Modifier::BOLD),
         )),
         PlanEntryPriority::Low => spans.push(Span::styled(
             format!(" [{}]", plan_priority_label(&entry.priority)),
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         )),
         _ => spans.push(Span::styled(
             format!(" [{}]", plan_priority_label(&entry.priority)),
-            Style::default().fg(theme.error),
+            Style::default().ink(theme.error),
         )),
     }
     let content_style = if matches!(entry.status, PlanEntryStatus::Completed) {
@@ -6569,7 +6570,7 @@ fn draw_inline_permission_view(
 
     f.render_widget(
         Paragraph::new("Up/Down choose | PgUp/PgDn read | Enter to confirm | Esc cancel")
-            .style(Style::default().fg(theme.muted)),
+            .style(Style::default().ink(theme.muted)),
         layout[1],
     );
 }
@@ -6658,7 +6659,7 @@ fn draw_inline_agent_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState
     f.render_widget(
         Paragraph::new("Configure primary model").style(
             Style::default()
-                .fg(state.theme.primary)
+                .ink(state.theme.primary)
                 .add_modifier(Modifier::BOLD),
         ),
         layout[0],
@@ -6675,7 +6676,7 @@ fn draw_inline_agent_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState
         AgentPickerStep::StartNewSession => "Saved. Start a new session now to apply the change?",
     };
     f.render_widget(
-        Paragraph::new(detail).style(Style::default().fg(state.theme.muted)),
+        Paragraph::new(detail).style(Style::default().ink(state.theme.muted)),
         layout[1],
     );
     if step == AgentPickerStep::ConfirmSave {
@@ -6720,7 +6721,7 @@ fn draw_inline_agent_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState
         AgentPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
     };
     f.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(state.theme.muted)),
+        Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
         layout[3],
     );
 }
@@ -6773,7 +6774,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
         Paragraph::new(Line::from(Span::styled(
             title,
             Style::default()
-                .fg(state.theme.primary)
+                .ink(state.theme.primary)
                 .add_modifier(Modifier::BOLD),
         ))),
         layout[0],
@@ -6786,14 +6787,14 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
         format!("filter: {}", picker.search_query)
     };
     f.render_widget(
-        Paragraph::new(search_text).style(Style::default().fg(state.theme.muted)),
+        Paragraph::new(search_text).style(Style::default().ink(state.theme.muted)),
         layout[2],
     );
 
     let total = picker.filtered_indices.len();
     if total == 0 {
         f.render_widget(
-            Paragraph::new("No matches").style(Style::default().fg(state.theme.muted)),
+            Paragraph::new("No matches").style(Style::default().ink(state.theme.muted)),
             layout[3],
         );
     } else {
@@ -6817,7 +6818,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
 
     if let Some(legend) = legend {
         f.render_widget(
-            Paragraph::new(legend).style(Style::default().fg(state.theme.muted)),
+            Paragraph::new(legend).style(Style::default().ink(state.theme.muted)),
             layout[4],
         );
     }
@@ -6828,7 +6829,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
         "Up/Down choose | Backspace clear | Enter apply | Esc cancel"
     };
     f.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(state.theme.muted)),
+        Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
         layout[5],
     );
 }
@@ -6852,7 +6853,7 @@ fn draw_inline_transcript_viewer(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" transcript — full history · / or Ctrl-F searches ")
-        .style(Style::default().fg(state.theme.agent));
+        .style(Style::default().ink(state.theme.agent));
     let inner = block.inner(layout[0]);
     f.render_widget(block, layout[0]);
 
@@ -6946,7 +6947,7 @@ fn draw_inline_transcript_viewer(
             .to_string()
     };
     f.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(state.theme.muted)),
+        Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
         layout[1],
     );
 }
@@ -6962,7 +6963,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" review issues — session ledger ")
-        .style(Style::default().fg(state.theme.agent));
+        .style(Style::default().ink(state.theme.agent));
     let inner = block.inner(layout[0]);
     f.render_widget(block, layout[0]);
 
@@ -6996,13 +6997,13 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
             " found {found} · validated {validated} · fixed {fixed} · invalidated {invalidated}"
         ),
         Style::default()
-            .fg(state.theme.accent)
+            .ink(state.theme.accent)
             .add_modifier(Modifier::BOLD),
     ))];
     if issues.is_empty() {
         lines.push(Line::from(Span::styled(
             " No review issues recorded yet.",
-            Style::default().fg(state.theme.muted),
+            Style::default().ink(state.theme.muted),
         )));
     } else {
         lines.extend(issues.into_iter().map(|(_, issue)| {
@@ -7019,7 +7020,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
                     issue.pass + 1,
                     issue.summary
                 ),
-                Style::default().fg(color),
+                Style::default().ink(color),
             ))
         }));
     }
@@ -7037,7 +7038,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
     );
     f.render_widget(
         Paragraph::new("F9/Esc close · Up/Down PgUp/PgDn Home/End scroll")
-            .style(Style::default().fg(state.theme.muted)),
+            .style(Style::default().ink(state.theme.muted)),
         layout[1],
     );
 }
@@ -7113,11 +7114,11 @@ fn nested_agent_roster_line(
         fit_width(text, width),
         if selected {
             Style::default()
-                .fg(theme.selection_fg)
-                .bg(theme.selection_bg)
+                .ink(theme.selection_fg)
+                .ink_bg(theme.selection_bg)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme.muted)
+            Style::default().ink(theme.muted)
         },
     ))
 }
@@ -7154,7 +7155,7 @@ fn nested_internal_message_style(
         crate::event::InternalMessageKind::Delegation
         | crate::event::InternalMessageKind::DiscreteReview => theme.muted,
     };
-    Style::default().fg(color).add_modifier(Modifier::BOLD)
+    Style::default().ink(color).add_modifier(Modifier::BOLD)
 }
 
 fn render_nested_agent_lines(
@@ -7212,7 +7213,7 @@ fn render_nested_agent_lines(
                 out.push(Line::from(Span::styled(
                     "plan",
                     Style::default()
-                        .fg(state.theme.tool)
+                        .ink(state.theme.tool)
                         .add_modifier(Modifier::BOLD),
                 )));
                 for entry in entries {
@@ -7222,7 +7223,7 @@ fn render_nested_agent_lines(
             }
             Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
                 if let Some(view) = state.tool_calls.get(id) {
-                    let color = tool_status_color(view.status, state.theme);
+                    let color = tool_status_ink(view.status, state.theme);
                     let terminal_exit_status = view.body.iter().rev().find_map(|output| {
                         if let ToolCallOutput::Terminal { exit_status, .. } = output {
                             exit_status.as_ref()
@@ -7340,7 +7341,7 @@ fn draw_terminals_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppStat
     let roster_block = Block::default()
         .borders(Borders::ALL)
         .title(roster_title)
-        .style(Style::default().fg(state.theme.agent));
+        .style(Style::default().ink(state.theme.agent));
     let roster_inner = roster_block.inner(layout[0]);
     f.render_widget(roster_block, layout[0]);
 
@@ -7359,12 +7360,12 @@ fn draw_terminals_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppStat
                 };
                 let style = if index == selected_index {
                     Style::default()
-                        .fg(state.theme.agent)
+                        .ink(state.theme.agent)
                         .add_modifier(Modifier::BOLD)
                 } else if summary.is_running() {
-                    Style::default().fg(state.theme.secondary)
+                    Style::default().ink(state.theme.secondary)
                 } else {
-                    Style::default().fg(state.theme.thought)
+                    Style::default().ink(state.theme.thought)
                 };
                 Line::from(vec![Span::styled(
                     truncate_text_to_width(
@@ -7400,7 +7401,7 @@ fn draw_terminals_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppStat
     let output_block = Block::default()
         .borders(Borders::ALL)
         .title(output_title)
-        .style(Style::default().fg(state.theme.agent));
+        .style(Style::default().ink(state.theme.agent));
     let output_inner = output_block.inner(layout[1]);
     f.render_widget(output_block, layout[1]);
 
@@ -7411,7 +7412,7 @@ fn draw_terminals_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppStat
         let lines: Vec<Line<'static>> = if body.trim().is_empty() {
             vec![Line::from(Span::styled(
                 "no output yet".to_string(),
-                Style::default().fg(state.theme.thought),
+                Style::default().ink(state.theme.thought),
             ))]
         } else {
             // Snapshots are already ANSI/VT-sanitized upstream in `acp.rs`, and
@@ -7442,7 +7443,7 @@ fn draw_terminals_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppStat
         f.render_widget(
             Paragraph::new(footer)
                 .wrap(Wrap { trim: false })
-                .style(Style::default().fg(state.theme.thought)),
+                .style(Style::default().ink(state.theme.thought)),
             footer_area,
         );
     }
@@ -7496,7 +7497,7 @@ fn draw_nested_agent_viewer(
     let roster_block = Block::default()
         .borders(Borders::ALL)
         .title(roster_title)
-        .style(Style::default().fg(state.theme.agent));
+        .style(Style::default().ink(state.theme.agent));
     let roster_inner = roster_block.inner(layout[0]);
     f.render_widget(roster_block, layout[0]);
     if roster_inner.width > 0 && roster_inner.height > 0 {
@@ -7556,7 +7557,7 @@ fn draw_nested_agent_viewer(
     let transcript_block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(Style::default().fg(state.theme.secondary));
+        .style(Style::default().ink(state.theme.secondary));
     let transcript_inner = transcript_block.inner(layout[1]);
     f.render_widget(transcript_block, layout[1]);
     if transcript_inner.width > 0 && transcript_inner.height > 0 {
@@ -7566,7 +7567,7 @@ fn draw_nested_agent_viewer(
             .unwrap_or_else(|| {
                 vec![Line::from(Span::styled(
                     "No nested transcript events have arrived yet.",
-                    Style::default().fg(state.theme.muted),
+                    Style::default().ink(state.theme.muted),
                 ))]
             });
         let total = Paragraph::new(lines.clone())
@@ -7584,7 +7585,7 @@ fn draw_nested_agent_viewer(
     }
     f.render_widget(
         Paragraph::new(footer)
-            .style(Style::default().fg(state.theme.muted))
+            .style(Style::default().ink(state.theme.muted))
             .wrap(Wrap { trim: false }),
         layout[2],
     );
@@ -7615,19 +7616,19 @@ fn draw_workspace_diff_viewer(
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" workspace diff — no workspace changes ")
-            .style(Style::default().fg(state.theme.agent));
+            .style(Style::default().ink(state.theme.agent));
         let inner = block.inner(layout[0]);
         f.render_widget(block, layout[0]);
         if inner.width > 0 && inner.height > 0 {
             f.render_widget(
                 Paragraph::new("No workspace changes have been captured for this session.")
-                    .style(Style::default().fg(state.theme.muted)),
+                    .style(Style::default().ink(state.theme.muted)),
                 inner,
             );
         }
         f.render_widget(
             Paragraph::new(footer)
-                .style(Style::default().fg(state.theme.muted))
+                .style(Style::default().ink(state.theme.muted))
                 .wrap(Wrap { trim: false }),
             layout[1],
         );
@@ -7669,7 +7670,7 @@ fn draw_workspace_diff_viewer(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(Style::default().fg(state.theme.agent));
+        .style(Style::default().ink(state.theme.agent));
     let inner = block.inner(layout[0]);
     f.render_widget(block, layout[0]);
     if let Some(diff) = event.diffs.get(selected) {
@@ -7698,13 +7699,13 @@ fn draw_workspace_diff_viewer(
             "No retained diff is available for this event."
         };
         f.render_widget(
-            Paragraph::new(message).style(Style::default().fg(state.theme.muted)),
+            Paragraph::new(message).style(Style::default().ink(state.theme.muted)),
             inner,
         );
     }
     f.render_widget(
         Paragraph::new(footer)
-            .style(Style::default().fg(state.theme.muted))
+            .style(Style::default().ink(state.theme.muted))
             .wrap(Wrap { trim: false }),
         layout[1],
     );
@@ -7731,7 +7732,7 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let width = area.width as usize;
     let mut spans = vec![Span::styled(
         mjolnir_version_label(),
-        Style::default().fg(state.theme.accent),
+        Style::default().ink(state.theme.accent),
     )];
     if let Some(title) = state.session_title.as_deref() {
         let title = title.trim();
@@ -7745,7 +7746,7 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
                 spans.push(Span::styled(
                     compact_middle_display(title, max_width),
                     Style::default()
-                        .fg(state.theme.terminal)
+                        .ink(state.theme.terminal)
                         .add_modifier(Modifier::ITALIC),
                 ));
             }
@@ -7801,10 +7802,7 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
         (review_field.clone(), state.theme.error),
     ];
     if let Some(pull_request) = state.current_branch_pull_request.as_ref() {
-        full_fields.push((
-            format!("PR #{}", pull_request.number),
-            status_pr_color(state),
-        ));
+        full_fields.push((format!("PR #{}", pull_request.number), state.theme.accent));
     }
     if status_fields_width(&full_fields) <= width {
         return status_line_from_fields(full_fields, state.theme.muted);
@@ -7820,10 +7818,7 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
         (review_field.clone(), state.theme.error),
     ];
     if let Some(pull_request) = state.current_branch_pull_request.as_ref() {
-        medium_fields.push((
-            format!("PR #{}", pull_request.number),
-            status_pr_color(state),
-        ));
+        medium_fields.push((format!("PR #{}", pull_request.number), state.theme.accent));
     }
     let path_width = width.saturating_sub(status_fields_width(&medium_fields));
     if path_width >= 9 {
@@ -7844,10 +7839,7 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
         (format!("r: {review}"), state.theme.error),
     ];
     if let Some(pull_request) = state.current_branch_pull_request.as_ref() {
-        narrow_fields.push((
-            format!("PR #{}", pull_request.number),
-            status_pr_color(state),
-        ));
+        narrow_fields.push((format!("PR #{}", pull_request.number), state.theme.accent));
     }
     if status_fields_width(&narrow_fields) <= width {
         return status_line_from_fields(narrow_fields, state.theme.muted);
@@ -7866,13 +7858,13 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
                         compact_middle_display(model_name, model_width),
                         state.theme.primary,
                     ),
-                    (pr, status_pr_color(state)),
+                    (pr, state.theme.accent),
                 ],
                 state.theme.muted,
             );
         }
         return status_line_from_fields(
-            vec![(compact_middle_display(&pr, width), status_pr_color(state))],
+            vec![(compact_middle_display(&pr, width), state.theme.accent)],
             state.theme.muted,
         );
     }
@@ -7886,26 +7878,19 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
     )
 }
 
-fn status_fields_width(fields: &[(String, Color)]) -> usize {
+fn status_fields_width(fields: &[(String, Ink)]) -> usize {
     fields.iter().map(|(text, _)| text.width()).sum::<usize>() + fields.len().saturating_sub(1) * 3
 }
 
-fn status_line_from_fields(fields: Vec<(String, Color)>, separator_color: Color) -> Line<'static> {
+fn status_line_from_fields(fields: Vec<(String, Ink)>, separator: Ink) -> Line<'static> {
     let mut spans = Vec::with_capacity(fields.len() * 2);
-    for (index, (text, color)) in fields.into_iter().enumerate() {
+    for (index, (text, ink)) in fields.into_iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled(" · ", Style::default().fg(separator_color)));
+            spans.push(Span::styled(" · ", Style::default().ink(separator)));
         }
-        spans.push(Span::styled(text, Style::default().fg(color)));
+        spans.push(Span::styled(text, Style::default().ink(ink)));
     }
     Line::from(spans)
-}
-
-fn status_pr_color(state: &AppState) -> Color {
-    match state.theme.kind {
-        TerminalThemeKind::AnsiLight => Color::Cyan,
-        _ => state.theme.accent,
-    }
 }
 
 fn compact_middle_display(text: &str, max_width: usize) -> String {
@@ -8394,8 +8379,8 @@ fn highlight_search_matches(
                 .any(|range| range.start <= absolute_start && absolute_start < range.end);
             let style = if matched {
                 span.style
-                    .fg(theme.selection_fg)
-                    .bg(theme.selection_bg)
+                    .ink(theme.selection_fg)
+                    .ink_bg(theme.selection_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
                 span.style
@@ -8615,7 +8600,7 @@ fn render_transcript_entry_range_with_turns(
                 out.push(Line::from(Span::styled(
                     title,
                     Style::default()
-                        .fg(theme.muted)
+                        .ink(theme.muted)
                         .add_modifier(Modifier::BOLD),
                 )));
                 push_markdown_message(&mut out, &message.text, collapse_message, width, theme);
@@ -8626,17 +8611,21 @@ fn render_transcript_entry_range_with_turns(
                     heading.push(Span::styled(
                         format!("{SUBAGENT_GLYPH} "),
                         Style::default()
-                            .fg(theme.secondary)
+                            .ink(theme.secondary)
                             .add_modifier(Modifier::BOLD),
                     ));
                     heading.push(Span::styled(
                         "subagent plan",
-                        Style::default().fg(theme.tool).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .ink(theme.tool)
+                            .add_modifier(Modifier::BOLD),
                     ));
                 } else {
                     heading.push(Span::styled(
                         "plan",
-                        Style::default().fg(theme.tool).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .ink(theme.tool)
+                            .add_modifier(Modifier::BOLD),
                     ));
                 }
                 out.push(Line::from(heading));
@@ -8647,7 +8636,7 @@ fn render_transcript_entry_range_with_turns(
             }
             Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
                 if let Some(view) = state.tool_calls.get(id) {
-                    let color = tool_status_color(view.status, theme);
+                    let color = tool_status_ink(view.status, theme);
                     let terminal_exit_status = view.body.iter().rev().find_map(|output| {
                         if let ToolCallOutput::Terminal { exit_status, .. } = output {
                             exit_status.as_ref()
@@ -8760,7 +8749,7 @@ fn push_turn_header(out: &mut Vec<Line<'static>>, elapsed: Option<Duration>, the
     out.push(Line::from(Span::styled(
         label,
         Style::default()
-            .fg(theme.primary)
+            .ink(theme.primary)
             .add_modifier(Modifier::BOLD),
     )));
 }
@@ -8791,7 +8780,7 @@ fn push_turn_tool_summary(
     }
     out.push(Line::from(Span::styled(
         format!("│ {}", facts.join(" · ")),
-        Style::default().fg(theme.muted),
+        Style::default().ink(theme.muted),
     )));
 }
 
@@ -8799,7 +8788,7 @@ fn push_turn_final_response_label(out: &mut Vec<Line<'static>>, theme: TerminalT
     out.push(Line::from(Span::styled(
         "└─ final response",
         Style::default()
-            .fg(theme.primary)
+            .ink(theme.primary)
             .add_modifier(Modifier::BOLD),
     )));
 }
@@ -8812,14 +8801,14 @@ fn session_boundary_line(text: &str, width: u16, theme: TerminalTheme) -> Line<'
     let left = remaining / 2;
     let right = remaining.saturating_sub(left);
     Line::from(vec![
-        Span::styled("─".repeat(left), Style::default().fg(theme.muted)),
+        Span::styled("─".repeat(left), Style::default().ink(theme.muted)),
         Span::styled(
             label,
             Style::default()
-                .fg(theme.accent)
+                .ink(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("─".repeat(right), Style::default().fg(theme.muted)),
+        Span::styled("─".repeat(right), Style::default().ink(theme.muted)),
     ])
 }
 
@@ -8837,7 +8826,7 @@ const ROLE_GUTTER_WIDTH: u16 = 2;
 fn push_role_plain_message(
     out: &mut Vec<Line<'static>>,
     glyph: &str,
-    color: Color,
+    ink: Ink,
     text: &str,
     collapse: bool,
     width: u16,
@@ -8852,13 +8841,13 @@ fn push_role_plain_message(
     if collapsed {
         push_message_collapse_hint(&mut rows, theme);
     }
-    push_role_rows(out, glyph, color, rows);
+    push_role_rows(out, glyph, ink, rows);
 }
 
 fn push_role_markdown_message(
     out: &mut Vec<Line<'static>>,
     glyph: &str,
-    color: Color,
+    ink: Ink,
     text: &str,
     collapse: bool,
     width: u16,
@@ -8871,12 +8860,12 @@ fn push_role_markdown_message(
     if collapsed {
         push_message_collapse_hint(&mut rows, theme);
     }
-    push_role_rows(out, glyph, color, rows);
+    push_role_rows(out, glyph, ink, rows);
 }
 
 fn push_role_thinking(
     out: &mut Vec<Line<'static>>,
-    role: (&str, Color),
+    role: (&str, Ink),
     source: &str,
     completed: bool,
     compact: bool,
@@ -8896,12 +8885,7 @@ fn push_role_thinking(
 /// Prefix the first visible row with a colored role glyph and keep every
 /// continuation row aligned beneath the content. Empty Markdown rows remain
 /// truly empty so paragraph spacing stays airy instead of turning into rails.
-fn push_role_rows(
-    out: &mut Vec<Line<'static>>,
-    glyph: &str,
-    color: Color,
-    rows: Vec<Line<'static>>,
-) {
+fn push_role_rows(out: &mut Vec<Line<'static>>, glyph: &str, ink: Ink, rows: Vec<Line<'static>>) {
     debug_assert_eq!(
         glyph.width() + 1,
         ROLE_GUTTER_WIDTH as usize,
@@ -8922,7 +8906,7 @@ fn push_role_rows(
         glyph_pending = false;
         let mut spans = vec![Span::styled(
             marker,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            Style::default().ink(ink).add_modifier(Modifier::BOLD),
         )];
         spans.extend(row.spans);
         out.push(Line::from(spans));
@@ -8951,7 +8935,7 @@ fn push_thinking(
     if text.is_empty() {
         return;
     }
-    let thought_style = Style::default().fg(theme.thought);
+    let thought_style = Style::default().ink(theme.thought);
     if compact && completed {
         let lines = text.lines().count();
         let unit = if lines == 1 { "line" } else { "lines" };
@@ -8994,7 +8978,7 @@ fn active_thought_tail(text: &str) -> String {
 fn push_styled_message(
     out: &mut Vec<Line<'static>>,
     text: &str,
-    color: Color,
+    ink: Ink,
     collapse: bool,
     theme: TerminalTheme,
 ) {
@@ -9002,7 +8986,7 @@ fn push_styled_message(
     for raw in preview.split('\n') {
         out.push(Line::from(Span::styled(
             raw.to_string(),
-            Style::default().fg(color),
+            Style::default().ink(ink),
         )));
     }
     if collapsed {
@@ -9081,7 +9065,7 @@ fn push_message_collapse_hint(out: &mut Vec<Line<'static>>, theme: TerminalTheme
     out.push(Line::from(Span::styled(
         "… details hidden · Ctrl-T full transcript",
         Style::default()
-            .fg(theme.muted)
+            .ink(theme.muted)
             .add_modifier(Modifier::ITALIC),
     )));
 }
@@ -9264,7 +9248,7 @@ fn push_markdown_lines_limited_inner(
             }
             out.push(Line::from(Span::styled(
                 format!("{prefix}  {original}"),
-                Style::default().fg(theme.quote),
+                Style::default().ink(theme.quote),
             )));
             line_index += 1;
             continue;
@@ -9287,7 +9271,7 @@ fn push_markdown_lines_limited_inner(
             out.push(Line::from(Span::styled(
                 format!("{prefix}{title}"),
                 Style::default()
-                    .fg(theme.muted)
+                    .ink(theme.muted)
                     .add_modifier(Modifier::BOLD),
             )));
             line_index += 1;
@@ -9338,7 +9322,7 @@ fn push_markdown_lines_limited_inner(
                     "{prefix}{}",
                     "─".repeat(usize::from(width).saturating_sub(indent).max(1))
                 ),
-                base_style.fg(if use_tool_output_style {
+                base_style.ink(if use_tool_output_style {
                     theme.subtle
                 } else {
                     theme.muted
@@ -9350,8 +9334,8 @@ fn push_markdown_lines_limited_inner(
 
         if let Some(quoted) = trimmed.strip_prefix("> ") {
             out.push(Line::from(vec![
-                Span::styled(format!("{prefix}> "), Style::default().fg(theme.muted)),
-                Span::styled(quoted.to_string(), Style::default().fg(theme.quote)),
+                Span::styled(format!("{prefix}> "), Style::default().ink(theme.muted)),
+                Span::styled(quoted.to_string(), Style::default().ink(theme.quote)),
             ]));
             line_index += 1;
             continue;
@@ -9360,7 +9344,7 @@ fn push_markdown_lines_limited_inner(
         if let Some((source_indent, item)) = markdown_unordered_item(raw) {
             let mut spans = vec![Span::styled(
                 format!("{prefix}{source_indent}- "),
-                Style::default().fg(theme.muted),
+                Style::default().ink(theme.muted),
             )];
             spans.extend(inline_markdown_spans_with_style(item, theme, base_style));
             out.push(Line::from(spans));
@@ -9371,7 +9355,7 @@ fn push_markdown_lines_limited_inner(
         if let Some((source_indent, number, item)) = markdown_ordered_item(raw) {
             let mut spans = vec![Span::styled(
                 format!("{prefix}{source_indent}{number}. "),
-                Style::default().fg(theme.muted),
+                Style::default().ink(theme.muted),
             )];
             spans.extend(inline_markdown_spans_with_style(item, theme, base_style));
             out.push(Line::from(spans));
@@ -9497,7 +9481,7 @@ fn push_markdown_table_row(
     let mut spans = vec![Span::styled(prefix.to_string(), base_style)];
     for (index, cell) in cells.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled(" | ", base_style.fg(theme.muted)));
+            spans.push(Span::styled(" | ", base_style.ink(theme.muted)));
         }
         let style = if header {
             base_style.add_modifier(Modifier::BOLD)
@@ -9524,20 +9508,22 @@ fn markdown_heading_style(
     }
     match level {
         1 => Style::default()
-            .fg(theme.primary)
+            .ink(theme.primary)
             .add_modifier(Modifier::BOLD),
         2 => Style::default()
-            .fg(theme.accent)
+            .ink(theme.accent)
             .add_modifier(Modifier::BOLD),
-        3 => Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        3 => Style::default()
+            .ink(theme.text)
+            .add_modifier(Modifier::BOLD),
         4 => Style::default()
-            .fg(theme.secondary)
+            .ink(theme.secondary)
             .add_modifier(Modifier::BOLD),
         5 => Style::default()
-            .fg(theme.muted)
+            .ink(theme.muted)
             .add_modifier(Modifier::UNDERLINED),
         _ => Style::default()
-            .fg(theme.muted)
+            .ink(theme.muted)
             .add_modifier(Modifier::ITALIC),
     }
 }
@@ -9582,7 +9568,7 @@ fn inline_markdown_spans_with_style(
             spans.extend(inline_markdown_spans_with_style(label, theme, base_style));
             spans.push(Span::styled(
                 format!(" ({url})"),
-                base_style.fg(theme.muted),
+                base_style.ink(theme.muted),
             ));
             rest = &after_label[url_start + url_end + 1..];
             previous = url.chars().next_back();
@@ -9592,7 +9578,7 @@ fn inline_markdown_spans_with_style(
             && let Some(end) = after.find('`')
         {
             let (code, tail) = after.split_at(end);
-            spans.push(Span::styled(code.to_string(), base_style.fg(theme.code)));
+            spans.push(Span::styled(code.to_string(), base_style.ink(theme.code)));
             rest = &tail[1..];
             previous = code.chars().next_back();
             continue;
@@ -9694,10 +9680,10 @@ const TOOL_GUTTER_WIDTH: u16 = 2;
 /// The color reflects the tool's status (green when done, red on failure, …)
 /// so a glance at the rail communicates both "this is a tool block" and how
 /// it ended.
-fn with_tool_gutter(line: Line<'static>, color: Color) -> Line<'static> {
+fn with_tool_gutter(line: Line<'static>, ink: Ink) -> Line<'static> {
     debug_assert_eq!(TOOL_GUTTER.width(), TOOL_GUTTER_WIDTH as usize);
     let mut spans = Vec::with_capacity(line.spans.len() + 1);
-    spans.push(Span::styled(TOOL_GUTTER, Style::default().fg(color)));
+    spans.push(Span::styled(TOOL_GUTTER, Style::default().ink(ink)));
     spans.extend(line.spans);
     Line::from(spans)
 }
@@ -9895,7 +9881,7 @@ fn push_tool_outputs(
                 if *truncated {
                     out.push(Line::from(Span::styled(
                         "  [output truncated]",
-                        Style::default().fg(theme.muted),
+                        Style::default().ink(theme.muted),
                     )));
                 }
                 if !output.trim().is_empty() {
@@ -9909,20 +9895,20 @@ fn push_tool_outputs(
                 } else if exit_status.is_some() {
                     out.push(Line::from(Span::styled(
                         "  no stdout/stderr captured",
-                        Style::default().fg(theme.muted),
+                        Style::default().ink(theme.muted),
                     )));
                 } else {
                     let state = terminal_empty_state_label(tool_status);
                     out.push(Line::from(Span::styled(
                         format!("  {state}"),
-                        Style::default().fg(theme.muted),
+                        Style::default().ink(theme.muted),
                     )));
                 }
             }
             ToolCallOutput::Note(note) => {
                 out.push(Line::from(Span::styled(
                     format!("  [{note}]"),
-                    Style::default().fg(theme.muted),
+                    Style::default().ink(theme.muted),
                 )));
             }
         }
@@ -9964,11 +9950,11 @@ fn terminal_header_outcome_style(
 ) -> Style {
     if status.exit_code == Some(0) && status.signal.is_none() {
         Style::default()
-            .fg(theme.muted)
+            .ink(theme.muted)
             .add_modifier(Modifier::ITALIC)
     } else {
         Style::default()
-            .fg(theme.error)
+            .ink(theme.error)
             .add_modifier(Modifier::BOLD)
     }
 }
@@ -10007,7 +9993,7 @@ fn push_tool_collapse_hint(
             out.push(Line::from(Span::styled(
                 format!("{prefix}… details hidden · Ctrl-T full transcript · Alt-T latest tool"),
                 Style::default()
-                    .fg(theme.muted)
+                    .ink(theme.muted)
                     .add_modifier(Modifier::ITALIC),
             )));
         }
@@ -10018,7 +10004,7 @@ fn push_tool_collapse_hint(
                     "{prefix}… earlier terminal output hidden · Ctrl-T full transcript · Alt-T latest tool"
                 ),
                 Style::default()
-                    .fg(theme.muted)
+                    .ink(theme.muted)
                     .add_modifier(Modifier::ITALIC),
             )));
         }
@@ -10049,7 +10035,7 @@ fn push_collapse_hint(
             "{prefix}... {hidden} earlier lines hidden · Ctrl-T full transcript · Alt-T latest tool"
         ),
         Style::default()
-            .fg(theme.muted)
+            .ink(theme.muted)
             .add_modifier(Modifier::ITALIC),
     )));
 }
@@ -10071,16 +10057,16 @@ fn tool_output_line_style(raw: &str, theme: TerminalTheme) -> Style {
         || lower.contains("test result: ok");
     if error || failed {
         Style::default()
-            .fg(theme.error)
+            .ink(theme.error)
             .add_modifier(Modifier::BOLD)
     } else if contains_word(&lower, "warning") || contains_word(&lower, "warn") {
-        Style::default().fg(theme.warning)
+        Style::default().ink(theme.warning)
     } else if success {
-        Style::default().fg(theme.success)
+        Style::default().ink(theme.success)
     } else if raw.trim_start().starts_with('$') {
-        Style::default().fg(theme.primary)
+        Style::default().ink(theme.primary)
     } else {
-        Style::default().fg(theme.subtle)
+        Style::default().ink(theme.subtle)
     }
 }
 
@@ -10132,19 +10118,19 @@ fn push_diff_output(
         .filter(|row| row.kind == DiffLineKind::Removed)
         .count();
     let mut header = vec![
-        Span::styled("  diff ", Style::default().fg(theme.muted)),
-        Span::styled(path.to_string(), Style::default().fg(theme.primary)),
+        Span::styled("  diff ", Style::default().ink(theme.muted)),
+        Span::styled(path.to_string(), Style::default().ink(theme.primary)),
     ];
     if added > 0 {
         header.push(Span::styled(
             format!("  +{added}"),
-            Style::default().fg(theme.diff_added),
+            Style::default().ink(theme.diff_added),
         ));
     }
     if removed > 0 {
         header.push(Span::styled(
             format!(" -{removed}"),
-            Style::default().fg(theme.diff_removed),
+            Style::default().ink(theme.diff_removed),
         ));
     }
     out.push(Line::from(header));
@@ -10196,7 +10182,7 @@ fn render_diff_row_full(
     if row.kind == DiffLineKind::Omitted {
         return Line::from(Span::styled(
             format!("  {:>gutter_width$} ··· {}", "", row.text()),
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ));
     }
     let (marker, accent, row_bg, emph_bg) = match row.kind {
@@ -10221,15 +10207,15 @@ fn render_diff_row_full(
     let mut spans = vec![Span::styled(
         prefix,
         match row_bg {
-            Some(bg) => Style::default().fg(accent).bg(bg),
-            None => Style::default().fg(accent),
+            Some(bg) => Style::default().ink(accent).bg(bg),
+            None => Style::default().ink(accent),
         },
     )];
     spans.extend(row.segments.iter().map(|segment| {
         let style = match (row_bg, segment.emphasized.then_some(emph_bg).flatten()) {
-            (None, _) => Style::default().fg(accent),
-            (Some(bg), None) => Style::default().fg(theme.text).bg(bg),
-            (Some(_), Some(emph)) => Style::default().fg(theme.text).bg(emph),
+            (None, _) => Style::default().ink(accent),
+            (Some(bg), None) => Style::default().ink(theme.text).bg(bg),
+            (Some(_), Some(emph)) => Style::default().ink(theme.text).bg(emph),
         };
         Span::styled(segment.text.clone(), style)
     }));
@@ -10245,7 +10231,7 @@ fn render_diff_row(
     if row.kind == DiffLineKind::Omitted {
         return Line::from(Span::styled(
             format!("  {:>gutter_width$} ··· {}", "", row.text()),
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ));
     }
     let (marker, accent, row_bg, emph_bg) = match row.kind {
@@ -10273,14 +10259,14 @@ fn render_diff_row(
     let prefix = format!("  {number:>gutter_width$} {marker} ");
     let prefix_width = prefix.chars().count();
     let mut used = prefix_width;
-    let mut spans = vec![Span::styled(prefix, on_row(Style::default().fg(accent)))];
+    let mut spans = vec![Span::styled(prefix, on_row(Style::default().ink(accent)))];
     for segment in truncate_segments(&row.segments, width.saturating_sub(prefix_width)) {
         used += segment.text.chars().count();
         let style = match (row_bg, segment.emphasized.then_some(emph_bg).flatten()) {
             // Foreground-only fallback: context rows and ANSI palettes.
-            (None, _) => Style::default().fg(accent),
-            (Some(bg), None) => Style::default().fg(theme.text).bg(bg),
-            (Some(_), Some(emph)) => Style::default().fg(theme.text).bg(emph),
+            (None, _) => Style::default().ink(accent),
+            (Some(bg), None) => Style::default().ink(theme.text).bg(bg),
+            (Some(_), Some(emph)) => Style::default().ink(theme.text).bg(emph),
         };
         spans.push(Span::styled(segment.text, style));
     }
@@ -10762,24 +10748,24 @@ fn tool_header_spans(
     subagent: bool,
     theme: TerminalTheme,
 ) -> Vec<Span<'static>> {
-    let color = tool_status_color(view.status, theme);
+    let color = tool_status_ink(view.status, theme);
     let mut spans = Vec::new();
     if subagent {
         spans.push(Span::styled(
             "subagent ",
             Style::default()
-                .fg(theme.secondary)
+                .ink(theme.secondary)
                 .add_modifier(Modifier::BOLD),
         ));
     }
     spans.extend([
         Span::styled(
             format!("tool {status}"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            Style::default().ink(color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{} ", tool_kind_label(view.kind)),
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ),
     ]);
     if matches!(
@@ -10790,7 +10776,7 @@ fn tool_header_spans(
     } else {
         spans.push(Span::styled(
             view.title.clone(),
-            Style::default().fg(theme.text),
+            Style::default().ink(theme.text),
         ));
     }
     spans
@@ -10808,12 +10794,12 @@ fn is_shell_operator(token: &str) -> bool {
 /// first subcommand, flags, operators, and ordinary arguments.
 fn highlight_command(cmd: &str, theme: TerminalTheme) -> Vec<Span<'static>> {
     let program_style = Style::default()
-        .fg(theme.primary)
+        .ink(theme.primary)
         .add_modifier(Modifier::BOLD);
-    let subcommand_style = Style::default().fg(theme.secondary);
-    let flag_style = Style::default().fg(theme.accent);
-    let operator_style = Style::default().fg(theme.muted);
-    let arg_style = Style::default().fg(theme.text);
+    let subcommand_style = Style::default().ink(theme.secondary);
+    let flag_style = Style::default().ink(theme.accent);
+    let operator_style = Style::default().ink(theme.muted);
+    let arg_style = Style::default().ink(theme.text);
     let mut spans = Vec::new();
     let mut expect_program = true;
     let mut subcommand_seen = false;
@@ -10892,10 +10878,10 @@ fn tool_status_label(status: agent_client_protocol::schema::v1::ToolCallStatus) 
     }
 }
 
-fn tool_status_color(
+fn tool_status_ink(
     status: agent_client_protocol::schema::v1::ToolCallStatus,
     theme: TerminalTheme,
-) -> Color {
+) -> Ink {
     match status {
         agent_client_protocol::schema::v1::ToolCallStatus::Failed => theme.error,
         agent_client_protocol::schema::v1::ToolCallStatus::Completed => theme.success,
@@ -11070,8 +11056,8 @@ fn attachment_span(label: String, theme: TerminalTheme) -> Span<'static> {
     Span::styled(
         label,
         Style::default()
-            .fg(theme.selection_fg)
-            .bg(theme.selection_bg)
+            .ink(theme.selection_fg)
+            .ink_bg(theme.selection_bg)
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -11300,7 +11286,7 @@ fn prompt_title_spans(state: &AppState) -> Vec<Span<'static>> {
         .map(|(text, ink)| {
             Span::styled(
                 text.as_str(),
-                Style::default().fg(state.theme.spinner_ink(*ink)),
+                Style::default().ink(state.theme.spinner_ink(*ink)),
             )
         })
         .collect();
@@ -11417,7 +11403,7 @@ fn running_terminals_row_line(state: &AppState, width: u16) -> Option<Line<'stat
     let text = format!("{TERMINAL_GLYPH} {subject} · /terminals to view");
     Some(Line::from(vec![Span::styled(
         truncate_text_to_width(text, width),
-        Style::default().fg(state.theme.secondary),
+        Style::default().ink(state.theme.secondary),
     )]))
 }
 
@@ -11489,7 +11475,7 @@ fn draw_workflow_progress_rows(f: &mut ratatui::Frame, area: Rect, state: &AppSt
     if total > visible && lines.len() < capacity {
         lines.push(Line::from(Span::styled(
             fit_width(format!(" … {} more", total - visible), width),
-            Style::default().fg(state.theme.muted),
+            Style::default().ink(state.theme.muted),
         )));
     }
     f.render_widget(Paragraph::new(lines), area);
@@ -11654,8 +11640,8 @@ fn workflow_progress_line(
         width.saturating_sub(head_width),
     );
     Line::from(vec![
-        Span::styled(head, Style::default().fg(head_color)),
-        Span::styled(detail, Style::default().fg(detail_color)),
+        Span::styled(head, Style::default().ink(head_color)),
+        Span::styled(detail, Style::default().ink(detail_color)),
     ])
 }
 
@@ -11688,8 +11674,8 @@ fn draw_queued_prompt_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) 
             Line::from(Span::styled(
                 label,
                 Style::default()
-                    .fg(state.theme.selection_fg)
-                    .bg(if idx == 0 {
+                    .ink(state.theme.selection_fg)
+                    .ink_bg(if idx == 0 {
                         state.theme.warning
                     } else {
                         state.theme.permission
@@ -11701,7 +11687,7 @@ fn draw_queued_prompt_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) 
     if total > visible && lines.len() < usize::from(area.height) {
         lines.push(Line::from(Span::styled(
             format!(" ↳ ... {} more queued ", total - visible),
-            Style::default().fg(state.theme.warning),
+            Style::default().ink(state.theme.warning),
         )));
     }
     let chip = Paragraph::new(lines);
@@ -11729,7 +11715,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         idle_prompt_title(state, voice_input_supported(), &text_selection_hint)
     };
     let style = if state.runtime_closed {
-        Style::default().fg(state.theme.muted)
+        Style::default().ink(state.theme.muted)
     } else {
         Style::default()
     };
@@ -11797,10 +11783,10 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         content_area.height,
     );
     let gutter_style = if state.runtime_closed {
-        Style::default().fg(state.theme.muted)
+        Style::default().ink(state.theme.muted)
     } else {
         Style::default()
-            .fg(state.theme.primary)
+            .ink(state.theme.primary)
             .add_modifier(Modifier::BOLD)
     };
     let gutter = Paragraph::new(">").style(gutter_style);
@@ -11850,10 +11836,10 @@ fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
                 Line::from(vec![
                     Span::styled(
                         format!("[{}]", owner.display_label()),
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        Style::default().ink(color).add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(" "),
-                    Span::styled(quota, Style::default().fg(color)),
+                    Span::styled(quota, Style::default().ink(color)),
                 ])
             })
             .collect::<Vec<_>>();
@@ -11866,10 +11852,10 @@ fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     } else if wraps {
         Paragraph::new(label)
             .wrap(Wrap { trim: false })
-            .style(Style::default().fg(state.theme.warning))
+            .style(Style::default().ink(state.theme.warning))
     } else {
         Paragraph::new(truncate_text_to_width(label, area.width))
-            .style(Style::default().fg(state.theme.warning))
+            .style(Style::default().ink(state.theme.warning))
     };
     f.render_widget(paragraph, area);
 }
@@ -12071,7 +12057,7 @@ fn draw_permission_modal(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(Style::default().fg(theme.permission));
+        .style(Style::default().ink(theme.permission));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -12098,7 +12084,7 @@ fn draw_permission_modal(
     );
     f.render_widget(Paragraph::new(visible_lines), layout[0]);
 
-    let footer = Paragraph::new(footer_text).style(Style::default().fg(theme.muted));
+    let footer = Paragraph::new(footer_text).style(Style::default().ink(theme.muted));
     f.render_widget(footer, layout[1]);
 }
 
@@ -12118,8 +12104,8 @@ fn permission_option_lines(
             let marker = if i == selected { "> " } else { "  " };
             let style = if i == selected {
                 Style::default()
-                    .fg(theme.selection_fg)
-                    .bg(theme.permission)
+                    .ink(theme.selection_fg)
+                    .ink_bg(theme.permission)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -12170,14 +12156,14 @@ fn permission_view_lines(
     let mut lines = vec![Line::from(Span::styled(
         title,
         Style::default()
-            .fg(theme.permission)
+            .ink(theme.permission)
             .add_modifier(Modifier::BOLD),
     ))];
 
     lines.extend(
         wrap_text_to_width(&permission_detail_text(pending), width)
             .into_iter()
-            .map(|line| Line::from(Span::styled(line, Style::default().fg(theme.text)))),
+            .map(|line| Line::from(Span::styled(line, Style::default().ink(theme.text)))),
     );
     lines.push(Line::from(""));
     lines.extend(
@@ -12262,7 +12248,7 @@ fn elicitation_view_lines(
     let mut lines = vec![Line::from(Span::styled(
         heading,
         Style::default()
-            .fg(theme.permission)
+            .ink(theme.permission)
             .add_modifier(Modifier::BOLD),
     ))];
 
@@ -12270,7 +12256,7 @@ fn elicitation_view_lines(
     lines.extend(
         wrap_text_to_width(&pending.prompt.message, width)
             .into_iter()
-            .map(|line| Line::from(Span::styled(line, Style::default().fg(theme.text)))),
+            .map(|line| Line::from(Span::styled(line, Style::default().ink(theme.text)))),
     );
 
     let mut selected_row = 0;
@@ -12280,7 +12266,7 @@ fn elicitation_view_lines(
                 lines.push(Line::from(""));
                 lines.extend(
                     wrap_text_to_width(&title, width).into_iter().map(|line| {
-                        Line::from(Span::styled(line, Style::default().fg(theme.muted)))
+                        Line::from(Span::styled(line, Style::default().ink(theme.muted)))
                     }),
                 );
             }
@@ -12293,11 +12279,11 @@ fn elicitation_view_lines(
                 let marker = if i == selected { "> " } else { "  " };
                 let style = if i == selected {
                     Style::default()
-                        .fg(theme.selection_fg)
-                        .bg(theme.permission)
+                        .ink(theme.selection_fg)
+                        .ink_bg(theme.permission)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme.text)
+                    Style::default().ink(theme.text)
                 };
                 for line in wrap_prefixed_text_to_width(&opt.title, width, marker, "  ") {
                     let line = if i == selected {
@@ -12314,19 +12300,17 @@ fn elicitation_view_lines(
             let label = "URL (press c to copy): ";
             if label.width() + url.width() <= usize::from(width) {
                 lines.push(Line::from(vec![
-                    Span::styled(label, Style::default().fg(theme.muted)),
-                    Span::styled(url.clone(), Style::default().fg(theme.accent)),
+                    Span::styled(label, Style::default().ink(theme.muted)),
+                    Span::styled(url.clone(), Style::default().ink(theme.accent)),
                 ]));
             } else {
                 lines.push(Line::from(Span::styled(
                     label.trim_end().to_string(),
-                    Style::default().fg(theme.muted),
+                    Style::default().ink(theme.muted),
                 )));
-                lines.extend(
-                    wrap_text_to_width(&url, width).into_iter().map(|line| {
-                        Line::from(Span::styled(line, Style::default().fg(theme.accent)))
-                    }),
-                );
+                lines.extend(wrap_text_to_width(&url, width).into_iter().map(|line| {
+                    Line::from(Span::styled(line, Style::default().ink(theme.accent)))
+                }));
             }
             lines.push(Line::from(""));
             match crate::qr::render_qr(&url) {
@@ -12336,19 +12320,19 @@ fn elicitation_view_lines(
                         lines.extend(qr.lines().map(|line| {
                             Line::from(Span::styled(
                                 line.to_string(),
-                                Style::default().fg(theme.text),
+                                Style::default().ink(theme.text),
                             ))
                         }));
                     } else {
                         lines.push(Line::from(Span::styled(
                             "(terminal too narrow for QR; press c to copy URL)".to_string(),
-                            Style::default().fg(theme.muted),
+                            Style::default().ink(theme.muted),
                         )));
                     }
                 }
                 Err(_) => lines.push(Line::from(Span::styled(
                     "(could not render QR code; use the URL above)".to_string(),
-                    Style::default().fg(theme.muted),
+                    Style::default().ink(theme.muted),
                 ))),
             }
         }
@@ -12359,7 +12343,7 @@ fn elicitation_view_lines(
                 lines.push(Line::from(""));
                 lines.extend(
                     wrap_text_to_width(&title, width).into_iter().map(|line| {
-                        Line::from(Span::styled(line, Style::default().fg(theme.muted)))
+                        Line::from(Span::styled(line, Style::default().ink(theme.muted)))
                     }),
                 );
             }
@@ -12368,7 +12352,7 @@ fn elicitation_view_lines(
                     wrap_text_to_width(&description, width)
                         .into_iter()
                         .map(|line| {
-                            Line::from(Span::styled(line, Style::default().fg(theme.muted)))
+                            Line::from(Span::styled(line, Style::default().ink(theme.muted)))
                         }),
                 );
             }
@@ -12378,7 +12362,9 @@ fn elicitation_view_lines(
             let shown = pad_text_to_width(format!("{}\u{2588}", pending.input), width);
             lines.push(Line::from(Span::styled(
                 shown,
-                Style::default().fg(theme.selection_fg).bg(theme.permission),
+                Style::default()
+                    .ink(theme.selection_fg)
+                    .ink_bg(theme.permission),
             )));
         }
         ElicitationView::Form { title, fields } => {
@@ -12386,7 +12372,7 @@ fn elicitation_view_lines(
                 lines.push(Line::from(""));
                 lines.extend(
                     wrap_text_to_width(&title, width).into_iter().map(|line| {
-                        Line::from(Span::styled(line, Style::default().fg(theme.muted)))
+                        Line::from(Span::styled(line, Style::default().ink(theme.muted)))
                     }),
                 );
             }
@@ -12401,13 +12387,13 @@ fn elicitation_view_lines(
             lines.push(Line::from(Span::styled(
                 format!("Field {} of {}", field_index + 1, fields.len()),
                 Style::default()
-                    .fg(theme.permission)
+                    .ink(theme.permission)
                     .add_modifier(Modifier::BOLD),
             )));
             if let Some(title) = field.title.as_deref().filter(|title| !title.is_empty()) {
                 lines.extend(
                     wrap_text_to_width(title, width).into_iter().map(|line| {
-                        Line::from(Span::styled(line, Style::default().fg(theme.text)))
+                        Line::from(Span::styled(line, Style::default().ink(theme.text)))
                     }),
                 );
             }
@@ -12420,7 +12406,7 @@ fn elicitation_view_lines(
                     wrap_text_to_width(description, width)
                         .into_iter()
                         .map(|line| {
-                            Line::from(Span::styled(line, Style::default().fg(theme.muted)))
+                            Line::from(Span::styled(line, Style::default().ink(theme.muted)))
                         }),
                 );
             }
@@ -12435,11 +12421,11 @@ fn elicitation_view_lines(
                         let marker = if index == selected { "> " } else { "  " };
                         let style = if index == selected {
                             Style::default()
-                                .fg(theme.selection_fg)
-                                .bg(theme.permission)
+                                .ink(theme.selection_fg)
+                                .ink_bg(theme.permission)
                                 .add_modifier(Modifier::BOLD)
                         } else {
-                            Style::default().fg(theme.text)
+                            Style::default().ink(theme.text)
                         };
                         for line in wrap_prefixed_text_to_width(&option.title, width, marker, "  ")
                         {
@@ -12473,11 +12459,11 @@ fn elicitation_view_lines(
                         let continuation = " ".repeat(marker.width());
                         let style = if index == selected {
                             Style::default()
-                                .fg(theme.selection_fg)
-                                .bg(theme.permission)
+                                .ink(theme.selection_fg)
+                                .ink_bg(theme.permission)
                                 .add_modifier(Modifier::BOLD)
                         } else {
-                            Style::default().fg(theme.text)
+                            Style::default().ink(theme.text)
                         };
                         for line in wrap_prefixed_text_to_width(
                             &option.title,
@@ -12503,7 +12489,9 @@ fn elicitation_view_lines(
                     let shown = pad_text_to_width(format!("{}\u{2588}", pending.input), width);
                     lines.push(Line::from(Span::styled(
                         shown,
-                        Style::default().fg(theme.selection_fg).bg(theme.permission),
+                        Style::default()
+                            .ink(theme.selection_fg)
+                            .ink_bg(theme.permission),
                     )));
                 }
                 ElicitationFormFieldKind::Boolean => {
@@ -12515,11 +12503,11 @@ fn elicitation_view_lines(
                         let marker = if index == selected { "> " } else { "  " };
                         let style = if index == selected {
                             Style::default()
-                                .fg(theme.selection_fg)
-                                .bg(theme.permission)
+                                .ink(theme.selection_fg)
+                                .ink_bg(theme.permission)
                                 .add_modifier(Modifier::BOLD)
                         } else {
-                            Style::default().fg(theme.text)
+                            Style::default().ink(theme.text)
                         };
                         let line = format!("{marker}{label}");
                         lines.push(Line::from(Span::styled(
@@ -12538,7 +12526,7 @@ fn elicitation_view_lines(
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "This setup step isn't supported in this build.".to_string(),
-                Style::default().fg(theme.warning),
+                Style::default().ink(theme.warning),
             )));
         }
     }
@@ -12726,7 +12714,7 @@ fn draw_elicitation_modal(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(Style::default().fg(theme.permission));
+        .style(Style::default().ink(theme.permission));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -12749,7 +12737,7 @@ fn draw_elicitation_modal(
         elicitation_visible_window(&content_lines, pending.scroll_offset, layout[0].height);
     f.render_widget(Paragraph::new(visible_lines), layout[0]);
 
-    let footer = Paragraph::new(footer_text).style(Style::default().fg(theme.muted));
+    let footer = Paragraph::new(footer_text).style(Style::default().ink(theme.muted));
     f.render_widget(footer, layout[1]);
 }
 
@@ -12790,7 +12778,7 @@ fn draw_inline_elicitation_view(
     f.render_widget(Paragraph::new(visible_lines), layout[0]);
 
     f.render_widget(
-        Paragraph::new(elicitation_footer_text(&view)).style(Style::default().fg(theme.muted)),
+        Paragraph::new(elicitation_footer_text(&view)).style(Style::default().ink(theme.muted)),
         layout[1],
     );
 }
@@ -12958,14 +12946,14 @@ fn draw_help_modal(
         .borders(Borders::ALL)
         .title(" help ")
         .title_bottom(" Up/Down PgUp/PgDn scroll · F10/Esc close ")
-        .style(Style::default().fg(theme.success));
+        .style(Style::default().ink(theme.success));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
     let lines = help_modal_lines(mode, voice_input_supported(), theme);
 
     let paragraph = Paragraph::new(lines)
-        .style(Style::default().fg(theme.text))
+        .style(Style::default().ink(theme.text))
         .wrap(Wrap { trim: false });
     let max_scroll = paragraph
         .line_count(inner.width)
@@ -13149,7 +13137,7 @@ fn help_section_line(label: &'static str, theme: TerminalTheme) -> Line<'static>
     Line::from(Span::styled(
         label,
         Style::default()
-            .fg(theme.header)
+            .ink(theme.header)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
     ))
 }
@@ -13165,24 +13153,24 @@ fn help_binding_line(
 fn help_binding_line_with_color(
     binding: &'static str,
     description: &'static str,
-    binding_color: Color,
+    binding_ink: Ink,
     theme: TerminalTheme,
 ) -> Line<'static> {
     const HELP_BINDING_WIDTH: usize = 27;
     let binding_width = binding.width();
     let gap = HELP_BINDING_WIDTH.saturating_sub(binding_width).max(1);
     let mut spans = vec![
-        Span::styled("  ", Style::default().fg(theme.muted)),
+        Span::styled("  ", Style::default().ink(theme.muted)),
         Span::styled(
             binding,
             Style::default()
-                .fg(binding_color)
+                .ink(binding_ink)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" ".repeat(gap), Style::default().fg(theme.muted)),
+        Span::styled(" ".repeat(gap), Style::default().ink(theme.muted)),
     ];
     if !description.is_empty() {
-        spans.push(Span::styled(description, Style::default().fg(theme.text)));
+        spans.push(Span::styled(description, Style::default().ink(theme.text)));
     }
     Line::from(spans)
 }
@@ -13196,11 +13184,11 @@ fn help_command_line(
         Span::styled(
             prefix,
             Style::default()
-                .fg(theme.header)
+                .ink(theme.header)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" ", Style::default().fg(theme.text)),
-        Span::styled(description, Style::default().fg(theme.text)),
+        Span::styled(" ", Style::default().ink(theme.text)),
+        Span::styled(description, Style::default().ink(theme.text)),
     ])
 }
 
@@ -13233,17 +13221,17 @@ fn review_picker_lines(state: &AppState) -> Vec<Line<'static>> {
         let marker = if index == selected { "› " } else { "  " };
         let style = if index == selected {
             Style::default()
-                .fg(state.theme.primary)
+                .ink(state.theme.primary)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(state.theme.text)
+            Style::default().ink(state.theme.text)
         };
         Line::from(vec![
             Span::styled(marker, style),
             Span::styled(name, style),
             Span::styled(
                 format!(" — {description}"),
-                Style::default().fg(state.theme.muted),
+                Style::default().ink(state.theme.muted),
             ),
         ])
     })
@@ -13261,7 +13249,7 @@ fn draw_review_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Review target ")
-        .style(Style::default().fg(state.theme.primary));
+        .style(Style::default().ink(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let layout = Layout::default()
@@ -13271,7 +13259,7 @@ fn draw_review_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState
     f.render_widget(Paragraph::new(review_picker_lines(state)), layout[0]);
     f.render_widget(
         Paragraph::new("Up/Down choose | Enter review | Esc cancel")
-            .style(Style::default().fg(state.theme.muted)),
+            .style(Style::default().ink(state.theme.muted)),
         layout[1],
     );
 }
@@ -13293,7 +13281,7 @@ fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppStat
     f.render_widget(
         Paragraph::new("Review target").style(
             Style::default()
-                .fg(state.theme.primary)
+                .ink(state.theme.primary)
                 .add_modifier(Modifier::BOLD),
         ),
         layout[0],
@@ -13301,7 +13289,7 @@ fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppStat
     f.render_widget(Paragraph::new(review_picker_lines(state)), layout[1]);
     f.render_widget(
         Paragraph::new("Up/Down choose | Enter review | Esc cancel")
-            .style(Style::default().fg(state.theme.muted)),
+            .style(Style::default().ink(state.theme.muted)),
         layout[2],
     );
 }
@@ -13327,7 +13315,7 @@ fn draw_agent_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState)
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Configure primary model and effort ")
-        .style(Style::default().fg(state.theme.primary));
+        .style(Style::default().ink(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let layout = Layout::default()
@@ -13394,7 +13382,7 @@ fn draw_agent_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState)
         AgentPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
     };
     f.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(state.theme.muted)),
+        Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
         layout[2],
     );
 }
@@ -13442,7 +13430,7 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(Style::default().fg(state.theme.primary));
+        .style(Style::default().ink(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -13460,7 +13448,7 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     if let Some(legend) = legend {
         header_lines.push(Line::from(Span::styled(
             legend,
-            Style::default().fg(state.theme.muted),
+            Style::default().ink(state.theme.muted),
         )));
     }
     header_lines.push(Line::from("Enter to apply | Esc cancel".to_string()));
@@ -13471,11 +13459,11 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     let search_text = if picker.search_query.is_empty() {
         Line::from(Span::styled(
             "🔍 type to filter...",
-            Style::default().fg(state.theme.muted),
+            Style::default().ink(state.theme.muted),
         ))
     } else {
         Line::from(vec![
-            Span::styled("🔍 ", Style::default().fg(state.theme.muted)),
+            Span::styled("🔍 ", Style::default().ink(state.theme.muted)),
             Span::raw(picker.search_query.clone()),
         ])
     };
@@ -13483,11 +13471,12 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     f.render_widget(search, layout[1]);
 
     if total == 0 {
-        let no_matches = Paragraph::new("No matches").style(Style::default().fg(state.theme.muted));
+        let no_matches =
+            Paragraph::new("No matches").style(Style::default().ink(state.theme.muted));
         f.render_widget(no_matches, layout[2]);
 
         let footer = Paragraph::new("Backspace to clear | Esc cancel")
-            .style(Style::default().fg(state.theme.muted));
+            .style(Style::default().ink(state.theme.muted));
         f.render_widget(footer, layout[3]);
         return;
     }
@@ -13514,7 +13503,7 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     } else {
         "Up/Down to choose | Backspace to clear | Enter to apply | Esc cancel"
     };
-    let footer = Paragraph::new(filter_hint).style(Style::default().fg(state.theme.muted));
+    let footer = Paragraph::new(filter_hint).style(Style::default().ink(state.theme.muted));
     f.render_widget(footer, layout[3]);
 }
 
@@ -13547,7 +13536,7 @@ fn draw_autocomplete_popover(f: &mut ratatui::Frame, input_area: Rect, state: &A
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" commands (Tab/Enter accept, Esc cancel) ")
-        .style(Style::default().fg(state.theme.primary));
+        .style(Style::default().ink(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -13602,7 +13591,7 @@ fn draw_inline_autocomplete_popover(f: &mut ratatui::Frame, area: Rect, state: &
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" commands (Tab/Enter accept, Esc cancel) ")
-        .style(Style::default().fg(state.theme.primary));
+        .style(Style::default().ink(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -13651,8 +13640,8 @@ fn truncate_line(
     }
     let style = if selected {
         Style::default()
-            .fg(theme.selection_fg)
-            .bg(theme.selection_bg)
+            .ink(theme.selection_fg)
+            .ink_bg(theme.selection_bg)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -13907,7 +13896,7 @@ fn battle_clock(arena: &RagnarokUi) -> String {
 }
 
 /// A stable, distinct-ish color per fighter.
-fn fighter_color(theme: TerminalTheme, id: ragnarok::FighterId) -> Color {
+fn fighter_ink(theme: TerminalTheme, id: ragnarok::FighterId) -> Ink {
     let cycle = [
         theme.primary,
         theme.secondary,
@@ -13932,7 +13921,7 @@ fn draw_ragnarok(f: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
     if area.width < 10 || area.height < 4 {
         let line = Line::from(Span::styled(
             "⚡ RAGNAROK rages (terminal too small for the arena)",
-            Style::default().fg(theme.warning),
+            Style::default().ink(theme.warning),
         ));
         f.render_widget(Paragraph::new(line), area);
         return;
@@ -13961,7 +13950,7 @@ fn ragnarok_banner_line(arena: &RagnarokUi, theme: TerminalTheme, width: u16) ->
     Line::from(Span::styled(
         text,
         Style::default()
-            .fg(if arena.failed.is_some() {
+            .ink(if arena.failed.is_some() {
                 theme.error
             } else {
                 theme.warning
@@ -14001,16 +13990,16 @@ fn ragnarok_footer_line(arena: &RagnarokUi, theme: TerminalTheme, width: u16) ->
     };
     if arena.awaiting_approval() && !arena.quit_armed {
         let style = Style::default()
-            .fg(theme.warning)
+            .ink(theme.warning)
             .add_modifier(Modifier::BOLD);
         return Line::from(Span::styled(fit_width(&hints, width as usize), style)).centered();
     }
     let style = if arena.quit_armed {
         Style::default()
-            .fg(theme.error)
+            .ink(theme.error)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.muted)
+        Style::default().ink(theme.muted)
     };
     Line::from(Span::styled(fit_width(&hints, width as usize), style)).centered()
 }
@@ -14078,13 +14067,13 @@ fn draw_ragnarok_arena_pane(
         chunks[0],
     );
     let task_line = Line::from(vec![
-        Span::styled("quest: ", Style::default().fg(theme.muted)),
+        Span::styled("quest: ", Style::default().ink(theme.muted)),
         Span::styled(
             fit_width(
                 arena.task.replace('\n', " "),
                 chunks[1].width.saturating_sub(7) as usize,
             ),
-            Style::default().fg(theme.text),
+            Style::default().ink(theme.text),
         ),
     ]);
     f.render_widget(Paragraph::new(task_line), chunks[1]);
@@ -14169,7 +14158,7 @@ fn thor_action_lines(arena: &RagnarokUi, theme: TerminalTheme, width: u16) -> Ve
         Line::from(Span::styled(
             fit_width(line, width as usize),
             Style::default()
-                .fg(theme.warning)
+                .ink(theme.warning)
                 .add_modifier(Modifier::BOLD),
         ))
         .centered()
@@ -14252,7 +14241,7 @@ fn draw_ragnarok_summoning(
     let art = thor_summoning_scene_rows(arena, frame);
     lines.extend(
         art.into_iter()
-            .map(|l| Line::from(Span::styled(l, Style::default().fg(theme.accent))).centered()),
+            .map(|l| Line::from(Span::styled(l, Style::default().ink(theme.accent))).centered()),
     );
     lines.push(
         Line::from(Span::styled(
@@ -14260,7 +14249,7 @@ fn draw_ragnarok_summoning(
                 ragnarok::Phase::Mustering => "« the war horn calls champions to the arena »",
                 _ => "« Thor weighs the quest upon his scales »",
             },
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ))
         .centered(),
     );
@@ -14364,11 +14353,11 @@ fn compact_fighter_line(
     );
     Line::from(Span::styled(
         fit_width(&text, width as usize),
-        Style::default().fg(state_color),
+        Style::default().ink(state_color),
     ))
 }
 
-fn fighter_state_label(state: &ragnarok::FighterState, theme: TerminalTheme) -> (String, Color) {
+fn fighter_state_label(state: &ragnarok::FighterState, theme: TerminalTheme) -> (String, Ink) {
     match state {
         ragnarok::FighterState::Summoned => ("SUMMONED".to_string(), theme.muted),
         ragnarok::FighterState::Forging => ("FORGING CAMP".to_string(), theme.accent),
@@ -14449,9 +14438,14 @@ fn fighter_bounce_offset(fighter: &RagnarokFighterUi) -> usize {
 
 /// Which pixel-art animation a fighter plays right now, plus the accent color
 /// for its `M` pixels (sparks, lightning, orb, notes, blood).
-fn sprite_for(fighter: &RagnarokFighterUi, theme: TerminalTheme) -> (SpriteKind, Color) {
-    const GOLD: Color = Color::Rgb(240, 196, 60);
-    const BLOOD: Color = Color::Rgb(202, 44, 44);
+///
+/// The accents are ANSI rather than the RGB they used to be: they are sprite
+/// *foregrounds*, and a hardcoded gold is exactly what stops reading as gold on
+/// a terminal theme we never saw. The sprite body keeps its RGB texture (see
+/// [`crate::ragnarok_sprites`]); only these highlights follow the palette.
+fn sprite_for(fighter: &RagnarokFighterUi, theme: TerminalTheme) -> (SpriteKind, Ink) {
+    const GOLD: Ink = Ink::ansi(Color::Yellow);
+    const BLOOD: Ink = Ink::ansi(Color::Red);
     match &fighter.state {
         ragnarok::FighterState::Slain(_) => (SpriteKind::Slain, BLOOD),
         ragnarok::FighterState::Standing => (SpriteKind::Victor, GOLD),
@@ -14459,10 +14453,14 @@ fn sprite_for(fighter: &RagnarokFighterUi, theme: TerminalTheme) -> (SpriteKind,
         | ragnarok::FighterState::Forging
         | ragnarok::FighterState::Connecting => (SpriteKind::March, theme.muted),
         _ => match animated_action_kind(fighter) {
-            Some(ragnarok::ActionKind::Forge) => (SpriteKind::Swing, Color::Rgb(255, 150, 60)),
-            Some(ragnarok::ActionKind::Strike) => (SpriteKind::Swing, Color::Rgb(250, 224, 84)),
-            Some(ragnarok::ActionKind::Scry) => (SpriteKind::Cast, Color::Rgb(196, 112, 240)),
-            Some(ragnarok::ActionKind::Ponder) => (SpriteKind::Cast, Color::Rgb(176, 176, 188)),
+            Some(ragnarok::ActionKind::Forge) => (SpriteKind::Swing, GOLD),
+            // Lightning reads as the brighter of the two yellows so a strike
+            // stays distinguishable from a hammer blow.
+            Some(ragnarok::ActionKind::Strike) => {
+                (SpriteKind::Swing, Ink::ansi(Color::LightYellow))
+            }
+            Some(ragnarok::ActionKind::Scry) => (SpriteKind::Cast, Ink::ansi(Color::Magenta)),
+            Some(ragnarok::ActionKind::Ponder) => (SpriteKind::Cast, Ink::dim()),
             Some(ragnarok::ActionKind::Chant) => (SpriteKind::Cast, GOLD),
             Some(ragnarok::ActionKind::Wound) => (SpriteKind::Wound, BLOOD),
             Some(ragnarok::ActionKind::Guard) | None => (SpriteKind::Idle, theme.accent),
@@ -14551,12 +14549,12 @@ fn draw_fighter_card(
         return;
     }
     let selected = index == arena.selected_fighter;
-    let color = fighter_color(theme, fighter.card.id);
+    let color = fighter_ink(theme, fighter.card.id);
     let (state_word, state_color) = fighter_state_label(&fighter.state, theme);
     let border_style = if selected {
-        Style::default().fg(color).add_modifier(Modifier::BOLD)
+        Style::default().ink(color).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.muted)
+        Style::default().ink(theme.muted)
     };
     let title = format!(
         " {}{} ",
@@ -14568,7 +14566,7 @@ fn draw_fighter_card(
         .border_style(border_style)
         .title(Span::styled(
             fit_width(&title, area.width.saturating_sub(2) as usize),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            Style::default().ink(color).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -14588,7 +14586,7 @@ fn draw_fighter_card(
             ),
             inner_width,
         ),
-        Style::default().fg(theme.muted),
+        Style::default().ink(theme.muted),
     )));
 
     let (sprite_kind, accent) = sprite_for(fighter, theme);
@@ -14597,7 +14595,9 @@ fn draw_fighter_card(
     // march in eerie unison.
     let frame = &frame_set[arena_frame().wrapping_add(fighter.card.id) % frame_set.len()];
     let pad = " ".repeat(inner_width.saturating_sub(ragnarok_sprites::SPRITE_W) / 2);
-    let sprite_lines = ragnarok_sprites::render(frame, color, accent);
+    // The sprite renderer paints raw pixels, so inks are resolved to concrete
+    // colors at this boundary rather than carried into the artwork.
+    let sprite_lines = ragnarok_sprites::render(frame, color.color(), accent.color());
     let bounce = fighter_bounce_offset(fighter);
     let sprite_rows = sprite_lines.len();
     if bounce > 0 {
@@ -14617,13 +14617,13 @@ fn draw_fighter_card(
     lines.push(Line::from(vec![
         Span::styled(
             vigor_bar(fighter, bar_width),
-            Style::default().fg(state_color),
+            Style::default().ink(state_color),
         ),
         Span::raw(" "),
         Span::styled(
             state_word,
             Style::default()
-                .fg(state_color)
+                .ink(state_color)
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -14651,7 +14651,7 @@ fn draw_fighter_card(
     };
     lines.push(Line::from(Span::styled(
         fit_width(&caption, inner_width),
-        Style::default().fg(theme.subtle),
+        Style::default().ink(theme.subtle),
     )));
 
     lines.truncate(inner.height as usize);
@@ -14677,10 +14677,10 @@ fn draw_ragnarok_feed(
     };
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(theme.muted))
+        .border_style(Style::default().ink(theme.muted))
         .title(Span::styled(
             fit_width(title, area.width as usize),
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -14698,12 +14698,12 @@ fn draw_ragnarok_feed(
         .take(end.saturating_sub(start))
         .map(|(fighter, text)| {
             let color = match fighter {
-                Some(id) => fighter_color(theme, *id),
+                Some(id) => fighter_ink(theme, *id),
                 None => theme.text,
             };
             Line::from(Span::styled(
                 fit_width(text, inner.width as usize),
-                Style::default().fg(color),
+                Style::default().ink(color),
             ))
         })
         .collect();
@@ -14727,7 +14727,7 @@ fn draw_ragnarok_judgment(
     ];
     let mut lines: Vec<Line> = art
         .into_iter()
-        .map(|l| Line::from(Span::styled(l, Style::default().fg(theme.warning))).centered())
+        .map(|l| Line::from(Span::styled(l, Style::default().ink(theme.warning))).centered())
         .collect();
     lines.push(Line::default());
     let remaining = (area.height as usize).saturating_sub(lines.len());
@@ -14736,7 +14736,7 @@ fn draw_ragnarok_judgment(
         for l in wrap_tail_lines(&arena.thor_text, width.max(8), remaining) {
             lines.push(Line::from(Span::styled(
                 l,
-                Style::default().fg(theme.thought),
+                Style::default().ink(theme.thought),
             )));
         }
     }
@@ -14767,7 +14767,7 @@ fn draw_ragnarok_verdict(
                 Line::from(Span::styled(
                     format!("{crown} VICTOR: {tag} {crown}"),
                     Style::default()
-                        .fg(theme.success)
+                        .ink(theme.success)
                         .add_modifier(Modifier::BOLD),
                 ))
                 .centered(),
@@ -14776,7 +14776,7 @@ fn draw_ragnarok_verdict(
                 lines.push(
                     Line::from(Span::styled(
                         format!("Thor recommends this work — adopt it: mj --worktree {name}"),
-                        Style::default().fg(theme.accent),
+                        Style::default().ink(theme.accent),
                     ))
                     .centered(),
                 );
@@ -14787,7 +14787,7 @@ fn draw_ragnarok_verdict(
                 Line::from(Span::styled(
                     "⚖ SPLIT DECISION — choose your champion ⚖",
                     Style::default()
-                        .fg(theme.warning)
+                        .ink(theme.warning)
                         .add_modifier(Modifier::BOLD),
                 ))
                 .centered(),
@@ -14810,10 +14810,10 @@ fn draw_ragnarok_verdict(
                     ),
                     if chosen {
                         Style::default()
-                            .fg(theme.success)
+                            .ink(theme.success)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(fighter_color(theme, id))
+                        Style::default().ink(fighter_ink(theme, id))
                     },
                 )));
             }
@@ -14825,7 +14825,7 @@ fn draw_ragnarok_verdict(
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
             line,
-            Style::default().fg(theme.accent),
+            Style::default().ink(theme.accent),
         )));
     }
 
@@ -14835,7 +14835,7 @@ fn draw_ragnarok_verdict(
                 "(Thor's judgment was garbled; finalists stand in Pass@1 order)",
                 width,
             ),
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         )));
     }
 
@@ -14847,7 +14847,7 @@ fn draw_ragnarok_verdict(
             .collect();
         lines.push(Line::from(Span::styled(
             fit_width(format!("ranking: {}", names.join(" > ")), width),
-            Style::default().fg(theme.subtle),
+            Style::default().ink(theme.subtle),
         )));
     }
     for rv in &verdict.review_verdicts {
@@ -14863,7 +14863,7 @@ fn draw_ragnarok_verdict(
                 ),
                 width,
             ),
-            Style::default().fg(theme.thought),
+            Style::default().ink(theme.thought),
         )));
     }
 
@@ -14872,7 +14872,10 @@ fn draw_ragnarok_verdict(
     let remaining = (area.height as usize).saturating_sub(used);
     if remaining > 0 {
         for l in wrap_tail_lines(&verdict.reasoning, width.max(8), remaining) {
-            lines.push(Line::from(Span::styled(l, Style::default().fg(theme.text))));
+            lines.push(Line::from(Span::styled(
+                l,
+                Style::default().ink(theme.text),
+            )));
         }
     }
     lines.truncate(area.height as usize);
@@ -14921,7 +14924,7 @@ fn draw_ragnarok_transcript_pane(
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "no champions yet — the muster is still on",
-                Style::default().fg(theme.muted),
+                Style::default().ink(theme.muted),
             ))),
             chunks[2],
         );
@@ -14949,7 +14952,7 @@ fn draw_ragnarok_transcript_pane(
         Paragraph::new(Line::from(Span::styled(
             fit_width(&header, chunks[1].width as usize),
             Style::default()
-                .fg(fighter_color(theme, fighter.card.id))
+                .ink(fighter_ink(theme, fighter.card.id))
                 .add_modifier(Modifier::BOLD),
         ))),
         chunks[1],
@@ -14968,12 +14971,12 @@ fn draw_ragnarok_transcript_pane(
                 (false, ragnarok::FighterState::Summoned) => "…awaiting the horn",
                 _ => "…silence on the battlefield",
             },
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ))]
     } else {
         wrap_tail_lines(body, width.max(8), chunks[2].height as usize)
             .into_iter()
-            .map(|l| Line::from(Span::styled(l, Style::default().fg(theme.text))))
+            .map(|l| Line::from(Span::styled(l, Style::default().ink(theme.text))))
             .collect()
     };
     f.render_widget(Paragraph::new(lines), chunks[2]);
@@ -15585,6 +15588,22 @@ mod tests {
             .collect()
     }
 
+    /// A palette built as though the terminal had answered the startup probe
+    /// with a dark background over a truecolor connection.
+    ///
+    /// The test process never runs that probe, so `AppState::new()` yields a
+    /// palette with every blended fill dropped. Tests that care about diff row
+    /// backgrounds have to opt into a measured terminal explicitly.
+    fn measured_theme() -> TerminalTheme {
+        TerminalThemeKind::Adaptive.palette_with(
+            Some(crate::terminal_palette::DefaultColors {
+                fg: (204, 204, 204),
+                bg: (24, 24, 24),
+            }),
+            crate::terminal_palette::StdoutColorLevel::TrueColor,
+        )
+    }
+
     #[test]
     fn plan_rows_use_readable_status_and_priority_labels_in_every_transcript_view() {
         let mut state = AppState::new();
@@ -15620,17 +15639,26 @@ mod tests {
         assert!(!normal.iter().any(|line| line_text(line).contains("[!]")));
         assert!(!normal.iter().any(|line| line_text(line).contains("[*]")));
 
-        assert_eq!(normal[1].spans[1].style.fg, Some(state.theme.muted));
-        assert_eq!(normal[2].spans[1].style.fg, Some(state.theme.primary));
-        assert_eq!(normal[3].spans[1].style.fg, Some(state.theme.success));
-        assert_eq!(normal[2].spans[2].style.fg, Some(state.theme.warning));
+        assert_eq!(normal[1].spans[1].style.fg, Some(state.theme.muted.color()));
+        assert_eq!(
+            normal[2].spans[1].style.fg,
+            Some(state.theme.primary.color())
+        );
+        assert_eq!(
+            normal[3].spans[1].style.fg,
+            Some(state.theme.success.color())
+        );
+        assert_eq!(
+            normal[2].spans[2].style.fg,
+            Some(state.theme.warning.color())
+        );
         assert!(
             normal[2].spans[2]
                 .style
                 .add_modifier
                 .contains(Modifier::BOLD)
         );
-        assert_eq!(normal[3].spans[2].style.fg, Some(state.theme.muted));
+        assert_eq!(normal[3].spans[2].style.fg, Some(state.theme.muted.color()));
         assert!(
             normal[3]
                 .spans
@@ -15658,14 +15686,17 @@ mod tests {
         let expected = vec!["◆ subagent plan", "  [running] inspect the renderer", ""];
         assert_eq!(normal.iter().map(line_text).collect::<Vec<_>>(), expected);
         assert_eq!(full.iter().map(line_text).collect::<Vec<_>>(), expected);
-        assert_eq!(normal[0].spans[0].style.fg, Some(state.theme.secondary));
+        assert_eq!(
+            normal[0].spans[0].style.fg,
+            Some(state.theme.secondary.color())
+        );
         assert!(
             normal[0].spans[0]
                 .style
                 .add_modifier
                 .contains(Modifier::BOLD)
         );
-        assert_eq!(normal[0].spans[1].style.fg, Some(state.theme.tool));
+        assert_eq!(normal[0].spans[1].style.fg, Some(state.theme.tool.color()));
     }
 
     #[test]
@@ -15825,40 +15856,38 @@ mod tests {
             "gpt-5-6-terra via codex-acp · effort: high · ~/code/mjolnir/.mjolnir/worktrees/slim-hawk · primary: 68k · review: 311k · PR #487"
         );
         assert!(!line_text(&line).contains("github.com"));
-        let colors: Vec<_> = line
+        // Compare whole styles rather than bare colors: hierarchy now lives
+        // partly on the modifier axis, so two roles can share `Color::Reset`
+        // and still be visually distinct.
+        let field_styles: Vec<_> = line
             .spans
             .iter()
-            .filter_map(|span| span.style.fg)
-            .filter(|color| *color != state.theme.muted)
+            .filter(|span| span.content.trim() != "·")
+            .map(|span| span.style)
             .collect();
         assert_eq!(
-            colors,
+            field_styles,
             vec![
-                state.theme.primary,
-                state.theme.warning,
-                state.theme.secondary,
-                state.theme.success,
-                state.theme.error,
-                status_pr_color(&state),
+                state.theme.primary.style(),
+                state.theme.warning.style(),
+                state.theme.secondary.style(),
+                state.theme.success.style(),
+                state.theme.error.style(),
+                state.theme.accent.style(),
             ]
         );
-        for theme in [
-            TerminalThemeKind::Light,
-            TerminalThemeKind::Dark,
-            TerminalThemeKind::AnsiLight,
-            TerminalThemeKind::AnsiDark,
-        ] {
+        for theme in TerminalThemeKind::ALL {
             state.set_theme(theme);
-            let colors: Vec<_> = status_line(&state, 200)
+            let styles: Vec<_> = status_line(&state, 200)
                 .spans
                 .iter()
-                .filter_map(|span| span.style.fg)
-                .filter(|color| *color != state.theme.muted)
+                .filter(|span| span.content.trim() != "·")
+                .map(|span| span.style)
                 .collect();
-            for (index, color) in colors.iter().enumerate() {
+            for (index, style) in styles.iter().enumerate() {
                 assert!(
-                    !colors[..index].contains(color),
-                    "duplicate status-line color {color:?} in {theme:?}"
+                    !styles[..index].contains(style),
+                    "duplicate status-line style {style:?} in {theme:?}"
                 );
             }
         }
@@ -20678,6 +20707,8 @@ mod tests {
     #[test]
     fn workspace_diff_viewer_renders_title_navigation_and_diff_colors() {
         let mut state = AppState::new();
+        // Row fills only exist when the terminal reported its background.
+        state.theme = measured_theme();
         state.workspace_diffs.push(workspace_diff_event(
             vec![
                 crate::event::WorkspaceDiff {
@@ -21424,8 +21455,8 @@ mod tests {
             .flat_map(|line| line.spans.iter())
             .find(|span| span.content.eq_ignore_ascii_case("needle"))
             .expect("highlighted match span");
-        assert_eq!(hit.style.bg, Some(state.theme.selection_bg));
-        assert_eq!(hit.style.fg, Some(state.theme.selection_fg));
+        assert_eq!(hit.style.bg, Some(state.theme.selection_bg.color()));
+        assert_eq!(hit.style.fg, Some(state.theme.selection_fg.color()));
     }
 
     #[test]
@@ -21489,7 +21520,7 @@ mod tests {
         let ranges = line_search_match_ranges("vorher Äpfel danach", "äPFEL");
         assert_eq!(&"vorher Äpfel danach"[ranges[0].clone()], "Äpfel");
 
-        let theme = TerminalThemeKind::Dark.palette();
+        let theme = TerminalThemeKind::Adaptive.palette();
         let highlighted = highlight_search_matches(
             Line::from("vorher Äpfel danach".to_string()),
             "äPFEL",
@@ -21500,7 +21531,7 @@ mod tests {
             .iter()
             .find(|span| span.content == "Äpfel")
             .expect("unicode match highlighted");
-        assert_eq!(hit.style.bg, Some(theme.selection_bg));
+        assert_eq!(hit.style.bg, Some(theme.selection_bg.color()));
     }
 
     #[test]
@@ -21640,7 +21671,10 @@ mod tests {
             .find(|line| line_text(line).contains("transcript exported to"))
             .expect("export status line rendered");
 
-        assert_eq!(system_line.spans[0].style.fg, Some(Color::LightBlue));
+        assert_eq!(
+            system_line.spans[0].style.fg,
+            Some(state.theme.accent.color())
+        );
     }
 
     #[test]
@@ -22620,10 +22654,10 @@ mod tests {
             text,
             vec!["○ thought · 5 lines", "", "◇ thought · 1 line", "",]
         );
-        assert_eq!(rendered[0].spans[0].style.fg, Some(theme.thought));
-        assert_eq!(rendered[2].spans[0].style.fg, Some(theme.secondary));
-        assert_eq!(rendered[0].spans[1].style.fg, Some(theme.thought));
-        assert_eq!(rendered[2].spans[1].style.fg, Some(theme.thought));
+        assert_eq!(rendered[0].spans[0].style.fg, Some(theme.thought.color()));
+        assert_eq!(rendered[2].spans[0].style.fg, Some(theme.secondary.color()));
+        assert_eq!(rendered[0].spans[1].style.fg, Some(theme.thought.color()));
+        assert_eq!(rendered[2].spans[1].style.fg, Some(theme.thought.color()));
     }
 
     #[test]
@@ -22676,7 +22710,7 @@ mod tests {
                 line.spans
                     .iter()
                     .skip(1)
-                    .all(|span| span.style.fg == Some(theme.thought))
+                    .all(|span| span.style.fg == Some(theme.thought.color()))
             );
         }
 
@@ -22775,7 +22809,10 @@ mod tests {
             .find(|line| line_text(line) == "│ subagent tool edit edit file")
             .expect("subagent tool header");
         assert_eq!(subagent_tool.spans[1].content.as_ref(), "subagent ");
-        assert_eq!(subagent_tool.spans[1].style.fg, Some(state.theme.secondary));
+        assert_eq!(
+            subagent_tool.spans[1].style.fg,
+            Some(state.theme.secondary.color())
+        );
         assert!(
             subagent_tool.spans[1]
                 .style
@@ -22785,7 +22822,7 @@ mod tests {
     }
 
     fn command_spans(command: &str) -> Vec<(String, Style)> {
-        let theme = TerminalThemeKind::Dark.palette();
+        let theme = TerminalThemeKind::Adaptive.palette();
         highlight_command(command, theme)
             .into_iter()
             .map(|span| (span.content.into_owned(), span.style))
@@ -22802,7 +22839,7 @@ mod tests {
 
     #[test]
     fn execute_tool_headers_restore_command_syntax_colors() {
-        let theme = TerminalThemeKind::Dark.palette();
+        let theme = TerminalThemeKind::Adaptive.palette();
         let spans = command_spans("FOO=bar cargo test --all | grep failed");
         assert_eq!(
             spans
@@ -22811,12 +22848,18 @@ mod tests {
                 .collect::<String>(),
             "FOO=bar cargo test --all | grep failed"
         );
-        assert_eq!(command_style(&spans, "FOO=bar").fg, Some(theme.text));
-        assert_eq!(command_style(&spans, "cargo").fg, Some(theme.primary));
-        assert_eq!(command_style(&spans, "test").fg, Some(theme.secondary));
-        assert_eq!(command_style(&spans, "--all").fg, Some(theme.accent));
-        assert_eq!(command_style(&spans, "|").fg, Some(theme.muted));
-        assert_eq!(command_style(&spans, "grep").fg, Some(theme.primary));
+        assert_eq!(*command_style(&spans, "FOO=bar"), theme.text.style());
+        assert_eq!(
+            *command_style(&spans, "cargo"),
+            theme.primary.with_bold().style()
+        );
+        assert_eq!(*command_style(&spans, "test"), theme.secondary.style());
+        assert_eq!(*command_style(&spans, "--all"), theme.accent.style());
+        assert_eq!(*command_style(&spans, "|"), theme.muted.style());
+        assert_eq!(
+            *command_style(&spans, "grep"),
+            theme.primary.with_bold().style()
+        );
 
         let mut state = AppState::new();
         state.theme = theme;
@@ -22844,25 +22887,25 @@ mod tests {
             .map(|span| (span.content.to_string(), span.style))
             .collect::<Vec<_>>();
         assert_eq!(
-            command_style(&rendered_spans, "FOO=bar").fg,
-            Some(theme.text)
+            *command_style(&rendered_spans, "FOO=bar"),
+            theme.text.style()
         );
         assert_eq!(
-            command_style(&rendered_spans, "cargo").fg,
-            Some(theme.primary)
+            *command_style(&rendered_spans, "cargo"),
+            theme.primary.with_bold().style()
         );
         assert_eq!(
-            command_style(&rendered_spans, "test").fg,
-            Some(theme.secondary)
+            *command_style(&rendered_spans, "test"),
+            theme.secondary.style()
         );
         assert_eq!(
-            command_style(&rendered_spans, "--all").fg,
-            Some(theme.accent)
+            *command_style(&rendered_spans, "--all"),
+            theme.accent.style()
         );
-        assert_eq!(command_style(&rendered_spans, "|").fg, Some(theme.muted));
+        assert_eq!(*command_style(&rendered_spans, "|"), theme.muted.style());
         assert_eq!(
-            command_style(&rendered_spans, "grep").fg,
-            Some(theme.primary)
+            *command_style(&rendered_spans, "grep"),
+            theme.primary.with_bold().style()
         );
     }
 
@@ -22957,7 +23000,7 @@ mod tests {
             .find(|line| line_text(line) == "│ tool exec cargo test · exit 101")
             .expect("terminal tool header");
         let outcome = header.spans.last().expect("terminal outcome span");
-        assert_eq!(outcome.style.fg, Some(state.theme.error));
+        assert_eq!(outcome.style.fg, Some(state.theme.error.color()));
         assert!(outcome.style.add_modifier.contains(Modifier::BOLD));
         assert!(
             !rendered.iter().any(|line| line.contains("call_q403")),
@@ -23119,7 +23162,7 @@ mod tests {
         };
         assert!(span("bold").style.add_modifier.contains(Modifier::BOLD));
         assert!(span("italic").style.add_modifier.contains(Modifier::ITALIC));
-        assert_eq!(span("code").style.fg, Some(theme.code));
+        assert_eq!(span("code").style.fg, Some(theme.code.color()));
         assert!(span("wide界").style.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -23173,7 +23216,7 @@ mod tests {
         };
         assert!(span("bold").style.add_modifier.contains(Modifier::BOLD));
         assert!(span("italic").style.add_modifier.contains(Modifier::ITALIC));
-        assert_eq!(span("code").style.fg, Some(theme.code));
+        assert_eq!(span("code").style.fg, Some(theme.code.color()));
     }
 
     #[test]
@@ -23243,8 +23286,8 @@ mod tests {
             .find(|line| line_text(line) == "  ###### Bottom")
             .unwrap();
         assert_ne!(top.spans[1].style, bottom.spans[1].style);
-        assert_eq!(top.spans[1].style.fg, Some(theme.primary));
-        assert_eq!(bottom.spans[1].style.fg, Some(theme.muted));
+        assert_eq!(top.spans[1].style.fg, Some(theme.primary.color()));
+        assert_eq!(bottom.spans[1].style.fg, Some(theme.muted.color()));
 
         let paragraph = Paragraph::new(normal).wrap(Wrap { trim: false });
         let height = paragraph.line_count(width);
@@ -23322,7 +23365,8 @@ mod tests {
             );
             for span in line.spans.iter().skip(1) {
                 assert!(
-                    span.style.fg == Some(theme.subtle) || span.style.fg == Some(theme.muted),
+                    span.style.fg == Some(theme.subtle.color())
+                        || span.style.fg == Some(theme.muted.color()),
                     "tool markdown recolored content: {line:?}"
                 );
             }
@@ -23332,7 +23376,7 @@ mod tests {
             .flat_map(|line| &line.spans)
             .find(|span| span.content.as_ref() == "left")
             .expect("bold table cell");
-        assert_eq!(emphasis.style.fg, Some(theme.subtle));
+        assert_eq!(emphasis.style.fg, Some(theme.subtle.color()));
         assert!(emphasis.style.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -23401,13 +23445,13 @@ mod tests {
                 .spans
                 .iter()
                 .skip(1)
-                .all(|span| span.style.fg == Some(theme.warning)),
+                .all(|span| span.style.fg == Some(theme.warning.color())),
             "warning output should be easy to spot: {warning_line:?}"
         );
         assert!(
             warning_line.spans.iter().skip(1).any(|span| {
                 span.content.as_ref() == "check"
-                    && span.style.fg == Some(theme.warning)
+                    && span.style.fg == Some(theme.warning.color())
                     && span.style.add_modifier.contains(Modifier::BOLD)
             }),
             "inline markdown should preserve emphasis with semantic color: {warning_line:?}"
@@ -23422,7 +23466,7 @@ mod tests {
                 .spans
                 .iter()
                 .skip(1)
-                .all(|span| span.style.fg == Some(theme.success)),
+                .all(|span| span.style.fg == Some(theme.success.color())),
             "zero failures must not override a successful summary: {success_line:?}"
         );
 
@@ -23432,7 +23476,7 @@ mod tests {
             .expect("failed test summary");
         assert!(
             error_line.spans.iter().skip(1).all(|span| {
-                span.style.fg == Some(theme.error)
+                span.style.fg == Some(theme.error.color())
                     && span.style.add_modifier.contains(Modifier::BOLD)
             }),
             "real failures should remain prominent: {error_line:?}"
@@ -23441,7 +23485,7 @@ mod tests {
 
     #[test]
     fn tool_output_semantic_colors_ignore_incidental_failure_words() {
-        let theme = TerminalThemeKind::Dark.palette();
+        let theme = TerminalThemeKind::Adaptive.palette();
         for line in [
             "0 errors",
             "Permission denied inside a deliberate check",
@@ -23450,13 +23494,13 @@ mod tests {
         ] {
             assert_eq!(
                 tool_output_line_style(line, theme).fg,
-                Some(theme.subtle),
+                Some(theme.subtle.color()),
                 "incidental status word in {line:?}"
             );
         }
         assert_eq!(
             tool_output_line_style("1 passed; 1 failed", theme).fg,
-            Some(theme.error)
+            Some(theme.error.color())
         );
     }
 
@@ -23485,7 +23529,7 @@ mod tests {
             .iter()
             .find(|line| line_text(line) == "│ tool exec cargo test")
             .expect("tool call line");
-        assert_eq!(call_line.spans[1].style.fg, Some(theme.success));
+        assert_eq!(call_line.spans[1].style.fg, Some(theme.success.color()));
         assert!(
             call_line.spans[1]
                 .style
@@ -23501,7 +23545,7 @@ mod tests {
             .filter(|l| line_text(l).starts_with(TOOL_GUTTER))
         {
             assert_eq!(line.spans[0].content.as_ref(), TOOL_GUTTER);
-            assert_eq!(line.spans[0].style.fg, Some(theme.success));
+            assert_eq!(line.spans[0].style.fg, Some(theme.success.color()));
         }
 
         // Agent prose uses its own role gutter rather than the tool rail.
@@ -23652,7 +23696,7 @@ mod tests {
         for span in &row.spans {
             assert_eq!(
                 span.style.fg,
-                Some(theme.thought),
+                Some(theme.thought.color()),
                 "thought body must read as secondary text: {row:?}"
             );
         }
@@ -23684,7 +23728,7 @@ mod tests {
             heading
                 .spans
                 .iter()
-                .all(|span| span.style.fg == Some(theme.thought)),
+                .all(|span| span.style.fg == Some(theme.thought.color())),
             "thought heading must be dimmed, not left at reply contrast: {heading:?}"
         );
     }
@@ -23820,7 +23864,7 @@ mod tests {
             code_row
                 .spans
                 .iter()
-                .any(|span| span.style.fg == Some(theme.quote)
+                .any(|span| span.style.fg == Some(theme.quote.color())
                     && span.content.contains("code line 1")),
             "tail must keep the code-block style: {code_row:?}"
         );
@@ -24447,7 +24491,7 @@ mod tests {
         assert!(rendered[1].starts_with("[SUBAGENTS] Codex usage unavailable"));
         assert_eq!(
             buffer.cell((1, 0)).expect("primary cell").style().fg,
-            Some(state.theme.primary)
+            Some(state.theme.primary.color())
         );
         let primary_quota_x = rendered[0].find("Claude usage").expect("primary quota") as u16;
         assert_eq!(
@@ -24456,11 +24500,11 @@ mod tests {
                 .expect("primary quota cell")
                 .style()
                 .fg,
-            Some(state.theme.primary)
+            Some(state.theme.primary.color())
         );
         assert_eq!(
             buffer.cell((1, 1)).expect("subagents cell").style().fg,
-            Some(state.theme.secondary)
+            Some(state.theme.secondary.color())
         );
         let subagent_quota_x = rendered[1].find("Codex usage").expect("subagent quota") as u16;
         assert_eq!(
@@ -24469,7 +24513,7 @@ mod tests {
                 .expect("subagent quota cell")
                 .style()
                 .fg,
-            Some(state.theme.secondary)
+            Some(state.theme.secondary.color())
         );
     }
 
@@ -25016,7 +25060,7 @@ mod tests {
 
     #[test]
     fn android_help_hides_voice_shortcut() {
-        let help = general_help_lines(false, TerminalThemeKind::Dark.palette())
+        let help = general_help_lines(false, TerminalThemeKind::Adaptive.palette())
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -25028,11 +25072,15 @@ mod tests {
 
     #[test]
     fn help_revisits_the_three_role_product_model() {
-        let help = help_modal_lines(UiMode::InlineChat, false, TerminalThemeKind::Dark.palette())
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let help = help_modal_lines(
+            UiMode::InlineChat,
+            false,
+            TerminalThemeKind::Adaptive.palette(),
+        )
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
 
         for expected in [
             "owns the request",
@@ -25047,14 +25095,14 @@ mod tests {
 
     #[test]
     fn help_lines_style_headings_bindings_and_descriptions_separately() {
-        let theme = TerminalThemeKind::Dark.palette();
+        let theme = TerminalThemeKind::Adaptive.palette();
         let lines = help_modal_lines(UiMode::InlineChat, false, theme);
 
         let heading = lines
             .iter()
             .find(|line| line_text(line) == "General")
             .expect("general heading");
-        assert_eq!(heading.spans[0].style.fg, Some(theme.header));
+        assert_eq!(heading.spans[0].style.fg, Some(theme.header.color()));
         assert!(heading.spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert!(
             heading.spans[0]
@@ -25072,7 +25120,7 @@ mod tests {
             .iter()
             .find(|span| span.content.as_ref() == "Ctrl-N")
             .expect("binding span");
-        assert_eq!(binding.style.fg, Some(theme.accent));
+        assert_eq!(binding.style.fg, Some(theme.accent.color()));
         assert!(binding.style.add_modifier.contains(Modifier::BOLD));
 
         let description = ctrl_n
@@ -25080,7 +25128,7 @@ mod tests {
             .iter()
             .find(|span| span.content.as_ref() == "new session")
             .expect("description span");
-        assert_eq!(description.style.fg, Some(theme.text));
+        assert_eq!(description.style.fg, Some(theme.text.color()));
         assert!(!description.style.add_modifier.contains(Modifier::BOLD));
     }
 

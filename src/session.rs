@@ -30,6 +30,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::acp;
 use crate::config::SelectedAgent;
+use crate::ink::InkStyle;
 use crate::palette::TerminalTheme;
 use crate::version::mjolnir_version_label;
 
@@ -583,7 +584,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState, theme
     f.render_widget(block, chunks[1]);
 
     if state.filtered.is_empty() {
-        let p = Paragraph::new("no sessions found").style(Style::default().fg(theme.muted));
+        let p = Paragraph::new("no sessions found").style(Style::default().ink(theme.muted));
         f.render_widget(p, inner);
     } else {
         let visible = inner.height as usize;
@@ -624,8 +625,8 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState, theme
                 let line = format!("{marker} {label}  -- {hint}");
                 let style = if absolute == state.selected {
                     Style::default()
-                        .fg(theme.selection_fg)
-                        .bg(theme.selection_bg)
+                        .ink(theme.selection_fg)
+                        .ink_bg(theme.selection_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -641,7 +642,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState, theme
     // Notice / confirmation
     if let Some(notice_text) = notice_text {
         let notice = Paragraph::new(notice_text)
-            .style(Style::default().fg(theme.warning))
+            .style(Style::default().ink(theme.warning))
             .scroll((state.notice_scroll, 0))
             .wrap(Wrap { trim: false });
         f.render_widget(notice, chunks[2]);
@@ -670,7 +671,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState, theme
     } else {
         "Up/Down navigate | Enter select | Esc cancel"
     };
-    let footer = Paragraph::new(footer_text).style(Style::default().fg(theme.muted));
+    let footer = Paragraph::new(footer_text).style(Style::default().ink(theme.muted));
     f.render_widget(footer, chunks[4]);
 }
 

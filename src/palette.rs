@@ -1,185 +1,189 @@
+//! The semantic palette the TUI draws with.
+//!
+//! Every foreground role is an [`Ink`], and most of them carry no color at all:
+//! body text is the terminal's own foreground, secondary text is that same
+//! foreground dimmed, headers are it in bold. Only roles that genuinely need to
+//! be told apart mid-sentence — success, error, the agent versus the user —
+//! spend one of the ANSI 16, which every terminal theme remaps to something
+//! that contrasts with its own background.
+//!
+//! Backgrounds are the one place RGB appears, and even there it is derived
+//! rather than chosen: a diff row is a small blend from the terminal's
+//! *measured* background toward green or red, so it reads as a tint of the
+//! user's own theme on black, on white, and on solarized alike. When the
+//! terminal will not say what its background is, or cannot render the result,
+//! the fill is dropped and the diff falls back to foreground-only styling.
+
 use ratatui::style::Color;
 
+use crate::ink::Ink;
 use crate::spinner::SpinnerInk;
+use crate::terminal_palette::{self, DefaultColors, StdoutColorLevel};
 use crate::theme::TerminalThemeKind;
+
+/// Hues the diff fills blend toward. These are never rendered directly — only
+/// as a low-alpha composite over the terminal's background — so they are picked
+/// for hue rather than for legibility on any particular backdrop.
+const ADDED_TINT: (u8, u8, u8) = (46, 160, 67);
+const REMOVED_TINT: (u8, u8, u8) = (248, 81, 73);
+/// Whole-row fill: present enough to band the row, faint enough to read text through.
+const ROW_ALPHA: f32 = 0.16;
+/// Changed-token fill, which must be distinguishable from the row it sits in.
+const EMPH_ALPHA: f32 = 0.34;
+/// Selection fill, blended from the background toward the foreground so it
+/// inverts by the terminal's own contrast rather than a color we picked.
+const SELECTION_ALPHA: f32 = 0.28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalTheme {
     pub kind: TerminalThemeKind,
-    pub text: Color,
-    pub muted: Color,
-    pub subtle: Color,
-    pub header: Color,
-    pub primary: Color,
-    pub secondary: Color,
-    pub accent: Color,
-    pub success: Color,
-    pub warning: Color,
-    pub error: Color,
-    pub selection_fg: Color,
-    pub selection_bg: Color,
-    pub user: Color,
-    pub agent: Color,
-    pub thought: Color,
-    pub tool: Color,
-    pub code: Color,
-    pub terminal: Color,
-    pub quote: Color,
-    pub diff_added: Color,
-    pub diff_removed: Color,
-    pub diff_context: Color,
-    /// Row and changed-token background fills for diff rendering. `None`
-    /// falls back to foreground-only styling, which the ANSI palettes need
-    /// because subtle backgrounds cannot be expressed in 16 colors.
+    pub text: Ink,
+    pub muted: Ink,
+    pub subtle: Ink,
+    pub header: Ink,
+    pub primary: Ink,
+    pub secondary: Ink,
+    pub accent: Ink,
+    pub success: Ink,
+    pub warning: Ink,
+    pub error: Ink,
+    pub selection_fg: Ink,
+    pub selection_bg: Ink,
+    pub user: Ink,
+    pub agent: Ink,
+    pub thought: Ink,
+    pub tool: Ink,
+    pub code: Ink,
+    pub terminal: Ink,
+    pub quote: Ink,
+    pub diff_added: Ink,
+    pub diff_removed: Ink,
+    pub diff_context: Ink,
+    /// Row and changed-token background fills for diff rendering. `None` falls
+    /// back to foreground-only styling, which happens whenever the terminal
+    /// declined to report its background, cannot render more than 16 colors, or
+    /// the user pinned [`TerminalThemeKind::Ansi`].
     pub diff_added_bg: Option<Color>,
     pub diff_removed_bg: Option<Color>,
     pub diff_added_emph_bg: Option<Color>,
     pub diff_removed_emph_bg: Option<Color>,
-    pub permission: Color,
+    pub permission: Ink,
 }
 
 impl TerminalThemeKind {
+    /// The palette for this mode, using whatever the startup probe learned
+    /// about the terminal.
     pub fn palette(self) -> TerminalTheme {
-        match self {
-            Self::Light => TerminalTheme {
-                kind: self,
-                text: Color::Black,
-                muted: Color::Rgb(88, 96, 105),
-                subtle: Color::Rgb(106, 115, 125),
-                header: Color::Black,
-                primary: Color::Rgb(0, 92, 197),
-                secondary: Color::Rgb(111, 66, 193),
-                accent: Color::Rgb(3, 102, 214),
-                success: Color::Rgb(34, 134, 58),
-                warning: Color::Rgb(154, 103, 0),
-                error: Color::Rgb(203, 36, 49),
-                selection_fg: Color::White,
-                selection_bg: Color::Rgb(3, 102, 214),
-                user: Color::Rgb(3, 102, 214),
-                agent: Color::Rgb(34, 134, 58),
-                thought: Color::Rgb(88, 96, 105),
-                tool: Color::Rgb(111, 66, 193),
-                code: Color::Rgb(154, 103, 0),
-                terminal: Color::Rgb(154, 103, 0),
-                quote: Color::Rgb(88, 96, 105),
-                diff_added: Color::Rgb(34, 134, 58),
-                diff_removed: Color::Rgb(203, 36, 49),
-                diff_context: Color::Rgb(88, 96, 105),
-                diff_added_bg: Some(Color::Rgb(230, 255, 237)),
-                diff_removed_bg: Some(Color::Rgb(255, 235, 233)),
-                diff_added_emph_bg: Some(Color::Rgb(171, 242, 189)),
-                diff_removed_emph_bg: Some(Color::Rgb(255, 197, 194)),
-                permission: Color::Rgb(154, 103, 0),
-            },
-            Self::Dark => TerminalTheme {
-                kind: self,
-                text: Color::White,
-                muted: Color::Gray,
-                subtle: Color::Gray,
-                header: Color::White,
-                primary: Color::Cyan,
-                secondary: Color::LightMagenta,
-                accent: Color::LightBlue,
-                success: Color::Green,
-                warning: Color::Yellow,
-                error: Color::Red,
-                selection_fg: Color::Black,
-                selection_bg: Color::Cyan,
-                user: Color::Cyan,
-                agent: Color::Green,
-                thought: Color::Gray,
-                tool: Color::Magenta,
-                code: Color::Yellow,
-                terminal: Color::LightYellow,
-                quote: Color::Gray,
-                diff_added: Color::Green,
-                diff_removed: Color::Red,
-                diff_context: Color::Gray,
-                diff_added_bg: Some(Color::Rgb(18, 53, 30)),
-                diff_removed_bg: Some(Color::Rgb(70, 22, 22)),
-                diff_added_emph_bg: Some(Color::Rgb(24, 100, 48)),
-                diff_removed_emph_bg: Some(Color::Rgb(130, 35, 35)),
-                permission: Color::Yellow,
-            },
-            Self::AnsiLight => TerminalTheme {
-                kind: self,
-                text: Color::Black,
-                muted: Color::Black,
-                subtle: Color::Black,
-                header: Color::Black,
-                primary: Color::Blue,
-                secondary: Color::Magenta,
-                accent: Color::Blue,
-                success: Color::Green,
-                warning: Color::Yellow,
-                error: Color::Red,
-                selection_fg: Color::White,
-                selection_bg: Color::Blue,
-                user: Color::Blue,
-                agent: Color::Green,
-                thought: Color::Black,
-                tool: Color::Magenta,
-                code: Color::Yellow,
-                terminal: Color::Yellow,
-                quote: Color::Black,
-                diff_added: Color::Green,
-                diff_removed: Color::Red,
-                diff_context: Color::Black,
-                diff_added_bg: None,
-                diff_removed_bg: None,
-                diff_added_emph_bg: None,
-                diff_removed_emph_bg: None,
-                permission: Color::Yellow,
-            },
-            Self::AnsiDark => TerminalTheme {
-                kind: self,
-                text: Color::White,
-                muted: Color::White,
-                subtle: Color::White,
-                header: Color::White,
-                primary: Color::Cyan,
-                secondary: Color::Magenta,
-                accent: Color::Blue,
-                success: Color::Green,
-                warning: Color::Yellow,
-                error: Color::Red,
-                selection_fg: Color::Black,
-                selection_bg: Color::Cyan,
-                user: Color::Cyan,
-                agent: Color::Green,
-                thought: Color::White,
-                tool: Color::Magenta,
-                code: Color::Yellow,
-                terminal: Color::Yellow,
-                quote: Color::White,
-                diff_added: Color::Green,
-                diff_removed: Color::Red,
-                diff_context: Color::White,
-                diff_added_bg: None,
-                diff_removed_bg: None,
-                diff_added_emph_bg: None,
-                diff_removed_emph_bg: None,
-                permission: Color::Yellow,
-            },
+        self.palette_with(
+            terminal_palette::default_colors(),
+            terminal_palette::stdout_color_level(),
+        )
+    }
+
+    /// The palette for explicitly supplied terminal colors and color level, so
+    /// the adaptation can be tested without a real terminal.
+    pub fn palette_with(
+        self,
+        terminal: Option<DefaultColors>,
+        level: StdoutColorLevel,
+    ) -> TerminalTheme {
+        // Strict ANSI mode refuses every derived fill, so it behaves as though
+        // the terminal never answered the color queries.
+        let measured = match self {
+            Self::Adaptive => terminal,
+            Self::Ansi => None,
+        };
+        let tint = |hue: (u8, u8, u8), alpha: f32| -> Option<Color> {
+            let bg = measured?.bg;
+            terminal_palette::best_color_for_level(terminal_palette::blend(hue, bg, alpha), level)
+        };
+
+        TerminalTheme {
+            kind: self,
+            // Hierarchy lives on the modifier axis: same color, less intensity.
+            // This is what removes the need for per-background palettes.
+            text: Ink::terminal(),
+            muted: Ink::dim(),
+            subtle: Ink::dim(),
+            header: Ink::bold(),
+            // Accents are restricted to the ANSI 16 so the terminal theme keeps
+            // control of the actual hue.
+            primary: Ink::ansi(Color::Cyan),
+            secondary: Ink::ansi(Color::Magenta),
+            accent: Ink::ansi(Color::Blue),
+            success: Ink::ansi(Color::Green),
+            warning: Ink::ansi(Color::Yellow),
+            error: Ink::ansi(Color::Red),
+            selection_fg: selection_fg(measured),
+            selection_bg: selection_bg(measured, level),
+            user: Ink::ansi(Color::Cyan),
+            agent: Ink::ansi(Color::Green),
+            thought: Ink::dim(),
+            tool: Ink::ansi(Color::Magenta),
+            code: Ink::ansi(Color::Yellow),
+            terminal: Ink::ansi(Color::Yellow),
+            quote: Ink::dim(),
+            diff_added: Ink::ansi(Color::Green),
+            diff_removed: Ink::ansi(Color::Red),
+            diff_context: Ink::dim(),
+            diff_added_bg: tint(ADDED_TINT, ROW_ALPHA),
+            diff_removed_bg: tint(REMOVED_TINT, ROW_ALPHA),
+            diff_added_emph_bg: tint(ADDED_TINT, EMPH_ALPHA),
+            diff_removed_emph_bg: tint(REMOVED_TINT, EMPH_ALPHA),
+            permission: Ink::ansi(Color::Yellow),
         }
     }
 }
 
+/// Text drawn on top of [`selection_bg`].
+///
+/// A selection is the one place a hardcoded black or white is right, and the
+/// style guide's stated exception: the fill underneath is one *we* painted, so
+/// the terminal's default foreground has no guaranteed contrast against it.
+fn selection_fg(terminal: Option<DefaultColors>) -> Ink {
+    match terminal {
+        // The fill leans toward the terminal's foreground, so the text on it
+        // has to lean back toward the background to stay legible.
+        Some(colors) if terminal_palette::is_light(colors.bg) => Ink::ansi(Color::White),
+        // Dark terminal (light fill) and the unmeasured case (a cyan fill,
+        // which is bright in every terminal theme) both want dark text.
+        _ => Ink::ansi(Color::Black),
+    }
+}
+
+/// The selection fill.
+///
+/// Blended from the terminal's background toward its *own* foreground rather
+/// than toward absolute white, so on a tinted theme the selection reads as a
+/// shade of that theme instead of a gray we invented.
+fn selection_bg(terminal: Option<DefaultColors>, level: StdoutColorLevel) -> Ink {
+    let derived = terminal.and_then(|colors| {
+        terminal_palette::best_color_for_level(
+            terminal_palette::blend(colors.fg, colors.bg, SELECTION_ALPHA),
+            level,
+        )
+    });
+    match derived {
+        Some(color) => Ink::ansi(color),
+        // Cyan is the conventional selection accent and is legible in every
+        // terminal theme, which a derived gray cannot be guaranteed to be when
+        // we could not measure the background it came from.
+        None => Ink::ansi(Color::Cyan),
+    }
+}
+
 impl TerminalTheme {
-    /// Resolve a spinner's semantic ink to a color from this palette.
+    /// Resolve a spinner's semantic ink to a palette role.
     ///
-    /// Every arm reuses a color the theme already declares rather than mixing
-    /// a new one, which is what lets the animated styles keep their gradients
-    /// on the 16-color ANSI palettes as well as the truecolor ones.
-    pub fn spinner_ink(self, ink: SpinnerInk) -> Color {
+    /// Every arm reuses a role the theme already declares rather than mixing a
+    /// new color, which is what lets the animated styles keep their gradients
+    /// on 16-color terminals as well as truecolor ones.
+    pub fn spinner_ink(self, ink: SpinnerInk) -> Ink {
         match ink {
-            // The ANSI palettes collapse `subtle` onto `text` because 16
-            // colors cannot express a gray ramp, which would make the faintest
-            // cells the most prominent ones — a pulse brighter at its tail
-            // than its core. Bright-black is part of the standard 16 and is
-            // the conventional dim slot, so it stands in wherever a palette
-            // has no subtle color of its own.
-            SpinnerInk::Faint if self.subtle == self.text => Color::DarkGray,
+            // Faint is the resting rail and the cold end of every gradient. It
+            // no longer needs the special-casing the old palettes required: DIM
+            // is always a step below plain text, on every terminal, so the
+            // gradient can never invert.
             SpinnerInk::Faint => self.subtle,
             SpinnerInk::Cool => self.primary,
             SpinnerInk::Bright => self.accent,
@@ -195,27 +199,166 @@ impl TerminalTheme {
 mod tests {
     use super::*;
 
+    /// Solarized dark, as the terminal would report it.
+    const DARK: Option<DefaultColors> = Some(DefaultColors {
+        fg: (131, 148, 150),
+        bg: (0, 43, 54),
+    });
+    /// Solarized light.
+    const LIGHT: Option<DefaultColors> = Some(DefaultColors {
+        fg: (101, 123, 131),
+        bg: (253, 246, 227),
+    });
+
+    fn adaptive(terminal: Option<DefaultColors>) -> TerminalTheme {
+        TerminalThemeKind::Adaptive.palette_with(terminal, StdoutColorLevel::TrueColor)
+    }
+
     #[test]
-    fn spinner_faint_never_matches_the_body_text_color() {
-        // Faint is the resting rail and the cold end of every gradient. If it
-        // resolved to the text color the idle ornament would read as loud and
-        // the motion styles would invert — brightest where they should fade.
+    fn body_text_never_pins_a_foreground_color() {
+        // The entire point of the adaptive palette: on any terminal theme, body
+        // text is that theme's foreground rather than our idea of white.
+        for bg in [DARK, LIGHT, None] {
+            assert_eq!(adaptive(bg).text.explicit_color(), None);
+        }
+        assert_eq!(
+            TerminalThemeKind::Ansi
+                .palette_with(DARK, StdoutColorLevel::TrueColor)
+                .text
+                .explicit_color(),
+            None
+        );
+    }
+
+    #[test]
+    fn secondary_roles_are_dimmed_rather_than_recolored() {
+        let theme = adaptive(DARK);
+        for role in [
+            theme.muted,
+            theme.subtle,
+            theme.thought,
+            theme.quote,
+            theme.diff_context,
+        ] {
+            assert_eq!(role.explicit_color(), None, "secondary role pinned a color");
+            assert!(role.is_dim(), "secondary role is not dimmed");
+        }
+    }
+
+    #[test]
+    fn accent_roles_stay_within_the_ansi_sixteen() {
+        // RGB foregrounds are what break on unfamiliar terminal themes, so no
+        // role may introduce one regardless of the terminal's capabilities.
         for kind in TerminalThemeKind::ALL {
-            let palette = kind.palette();
-            assert_ne!(
-                palette.spinner_ink(SpinnerInk::Faint),
-                palette.text,
-                "{kind} faint ink is indistinguishable from body text"
-            );
+            let theme = kind.palette_with(DARK, StdoutColorLevel::TrueColor);
+            for role in [
+                theme.primary,
+                theme.secondary,
+                theme.accent,
+                theme.success,
+                theme.warning,
+                theme.error,
+                theme.user,
+                theme.agent,
+                theme.tool,
+                theme.code,
+                theme.terminal,
+                theme.permission,
+                theme.diff_added,
+                theme.diff_removed,
+            ] {
+                let Some(color) = role.explicit_color() else {
+                    continue;
+                };
+                assert!(
+                    matches!(
+                        color,
+                        Color::Black
+                            | Color::Red
+                            | Color::Green
+                            | Color::Yellow
+                            | Color::Blue
+                            | Color::Magenta
+                            | Color::Cyan
+                            | Color::White
+                    ),
+                    "{kind} uses off-palette foreground {color:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn diff_fills_are_blended_from_the_measured_background() {
+        // A dark terminal should get a dark green row, a light terminal a pale
+        // one, from the same palette definition.
+        let dark = adaptive(DARK);
+        let light = adaptive(LIGHT);
+        let (Some(Color::Rgb(_, dg, _)), Some(Color::Rgb(_, lg, _))) =
+            (dark.diff_added_bg, light.diff_added_bg)
+        else {
+            panic!("expected blended diff fills on a truecolor terminal");
+        };
+        assert!(
+            lg > dg,
+            "light-terminal fill ({lg}) should be brighter than dark-terminal fill ({dg})"
+        );
+    }
+
+    #[test]
+    fn emphasis_fill_is_stronger_than_the_row_fill() {
+        // Changed tokens have to be visible against the row they sit inside.
+        let theme = adaptive(DARK);
+        assert_ne!(theme.diff_added_bg, theme.diff_added_emph_bg);
+        assert_ne!(theme.diff_removed_bg, theme.diff_removed_emph_bg);
+    }
+
+    #[test]
+    fn diff_fills_are_dropped_when_the_background_is_unknown() {
+        // Guessing a fill against an unmeasured background is how you get
+        // unreadable diffs; foreground-only styling is the safe fallback.
+        let theme = adaptive(None);
+        assert_eq!(theme.diff_added_bg, None);
+        assert_eq!(theme.diff_removed_bg, None);
+        assert_eq!(theme.diff_added_emph_bg, None);
+        assert_eq!(theme.diff_removed_emph_bg, None);
+    }
+
+    #[test]
+    fn diff_fills_are_dropped_on_sixteen_color_terminals() {
+        let theme = TerminalThemeKind::Adaptive.palette_with(DARK, StdoutColorLevel::Ansi16);
+        assert_eq!(theme.diff_added_bg, None);
+        assert_eq!(theme.diff_removed_bg, None);
+    }
+
+    #[test]
+    fn strict_ansi_mode_refuses_derived_fills_even_when_measurable() {
+        let theme = TerminalThemeKind::Ansi.palette_with(DARK, StdoutColorLevel::TrueColor);
+        assert_eq!(theme.diff_added_bg, None);
+        assert_eq!(theme.diff_removed_bg, None);
+        assert_eq!(theme.selection_bg, Ink::ansi(Color::Cyan));
+    }
+
+    #[test]
+    fn spinner_faint_is_distinguishable_from_body_text() {
+        // Faint is the resting rail; if it matched body text the idle ornament
+        // would read as loud and every gradient would invert.
+        for kind in TerminalThemeKind::ALL {
+            for bg in [DARK, LIGHT, None] {
+                let palette = kind.palette_with(bg, StdoutColorLevel::TrueColor);
+                assert_ne!(
+                    palette.spinner_ink(SpinnerInk::Faint),
+                    palette.text,
+                    "{kind} faint ink is indistinguishable from body text"
+                );
+            }
         }
     }
 
     #[test]
     fn spinner_inks_are_drawn_from_the_active_palette() {
-        // Every ink but Faint must be a color the theme already declares, so
-        // no style can smuggle in an off-palette color.
         for kind in TerminalThemeKind::ALL {
-            let palette = kind.palette();
+            let palette = kind.palette_with(DARK, StdoutColorLevel::TrueColor);
             let declared = [
                 palette.subtle,
                 palette.primary,
@@ -226,6 +369,7 @@ mod tests {
                 palette.error,
             ];
             for ink in [
+                SpinnerInk::Faint,
                 SpinnerInk::Cool,
                 SpinnerInk::Bright,
                 SpinnerInk::Vivid,
@@ -235,54 +379,31 @@ mod tests {
             ] {
                 assert!(
                     declared.contains(&palette.spinner_ink(ink)),
-                    "{kind} resolves {ink:?} to an off-palette color"
+                    "{kind} resolves {ink:?} to an off-palette ink"
                 );
             }
         }
     }
 
     #[test]
-    fn ansi_palettes_use_basic_terminal_colors() {
-        for kind in [TerminalThemeKind::AnsiLight, TerminalThemeKind::AnsiDark] {
-            let palette = kind.palette();
-            let colors = [
-                palette.primary,
-                palette.secondary,
-                palette.accent,
-                palette.success,
-                palette.warning,
-                palette.error,
-                palette.selection_fg,
-                palette.selection_bg,
-            ];
-            assert!(colors.iter().all(|color| matches!(
-                color,
-                Color::Black
-                    | Color::Red
-                    | Color::Green
-                    | Color::Yellow
-                    | Color::Blue
-                    | Color::Magenta
-                    | Color::Cyan
-                    | Color::White
-            )));
-        }
+    fn selection_text_leans_opposite_the_terminal_background() {
+        // The fill moves toward the foreground, so the text on it has to move
+        // back toward the background to stay legible.
+        assert_eq!(adaptive(DARK).selection_fg, Ink::ansi(Color::Black));
+        assert_eq!(adaptive(LIGHT).selection_fg, Ink::ansi(Color::White));
+        // Unmeasured backgrounds fall back to a cyan fill, which is bright in
+        // every terminal theme, so dark text is the safe pairing.
+        assert_eq!(adaptive(None).selection_fg, Ink::ansi(Color::Black));
     }
 
     #[test]
-    fn light_and_dark_palettes_have_readable_selection_contrast() {
-        for kind in [TerminalThemeKind::Light, TerminalThemeKind::Dark] {
-            let palette = kind.palette();
-            assert_ne!(palette.selection_fg, palette.selection_bg);
-            assert_ne!(palette.text, palette.muted);
+    fn selection_always_has_contrast_between_its_foreground_and_fill() {
+        for bg in [DARK, LIGHT, None] {
+            let theme = adaptive(bg);
+            assert_ne!(theme.selection_fg, theme.selection_bg);
+            // The fill must name a real color; a Reset fill would leave the
+            // selection foreground painted onto the ordinary background.
+            assert!(theme.selection_bg.explicit_color().is_some());
         }
-    }
-
-    #[test]
-    fn dark_palette_does_not_use_near_black_text() {
-        let palette = TerminalThemeKind::Dark.palette();
-        assert_ne!(palette.muted, Color::DarkGray);
-        assert_ne!(palette.thought, Color::DarkGray);
-        assert_ne!(palette.diff_context, Color::DarkGray);
     }
 }

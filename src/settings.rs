@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::config::{AcpServerOrigin, AcpServerPolicy, Config, ConfiguredAcpServer, ModelsConfig};
+use crate::ink::InkStyle;
 use crate::install::Progress;
 use crate::palette::TerminalTheme;
 use crate::registry::{Agent, DistributionKind, Registry};
@@ -1286,7 +1287,7 @@ pub fn draw_settings_panel(
     let block = Block::default()
         .title(format!(" {title} "))
         .borders(Borders::ALL)
-        .style(Style::default().fg(theme.text));
+        .style(Style::default().ink(theme.text));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -1310,7 +1311,7 @@ pub fn draw_settings_panel(
     if let Some(notice) = &editor.notice {
         frame.render_widget(
             Paragraph::new(notice.as_str())
-                .style(Style::default().fg(theme.error))
+                .style(Style::default().ink(theme.error))
                 .wrap(Wrap { trim: false }),
             rows[2],
         );
@@ -1338,7 +1339,7 @@ pub fn draw_settings_panel(
         }
     };
     frame.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(theme.muted)),
+        Paragraph::new(footer).style(Style::default().ink(theme.muted)),
         rows[3],
     );
 }
@@ -1445,11 +1446,11 @@ fn draw_tabs(
         let active = tab == editor.tab;
         let style = if active {
             Style::default()
-                .fg(theme.selection_fg)
-                .bg(theme.selection_bg)
+                .ink(theme.selection_fg)
+                .ink_bg(theme.selection_bg)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme.muted)
+            Style::default().ink(theme.muted)
         };
         [
             Span::styled(format!(" {} ", tab.label()), style),
@@ -1478,12 +1479,12 @@ fn draw_agents(
             None => "No primary ACP route is resolved; choose a model or source to discover its session options."
                 .to_string(),
         },
-        Style::default().fg(theme.muted),
+        Style::default().ink(theme.muted),
     )];
     if !has_options {
         lines.push(Line::styled(
             "No additional selectable session options were reported for this primary route.",
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ));
     }
     lines.push(Line::raw(""));
@@ -1507,7 +1508,7 @@ fn draw_agents(
                         editor.staged_model_detail(model),
                         editor.active_model_detail(0)
                     ),
-                    Style::default().fg(theme.muted),
+                    Style::default().ink(theme.muted),
                 ));
             }
             SettingsRow::ReviewModel => {
@@ -1523,7 +1524,7 @@ fn draw_agents(
                         editor.staged_model_detail(model),
                         editor.active_model_detail(1)
                     ),
-                    Style::default().fg(theme.muted),
+                    Style::default().ink(theme.muted),
                 ));
             }
             SettingsRow::SessionOption {
@@ -1554,7 +1555,7 @@ fn draw_agents(
                             server_id = server.id
                         )
                     },
-                    Style::default().fg(if compatible { theme.muted } else { theme.error }),
+                    Style::default().ink(if compatible { theme.muted } else { theme.error }),
                 ));
             }
             SettingsRow::DiscreteReview => lines.push(selected_line(
@@ -1592,12 +1593,12 @@ fn draw_subagents(
             None => "No subagent ACP route is resolved; choose a model or source to discover its session options."
                 .to_string(),
         },
-        Style::default().fg(theme.muted),
+        Style::default().ink(theme.muted),
     )];
     if !has_options && editor.config.subagents.model != crate::config::DISABLED_MODEL {
         lines.push(Line::styled(
             "No additional selectable session options were reported for this subagent route.",
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ));
     }
     lines.push(Line::raw(""));
@@ -1621,7 +1622,7 @@ fn draw_subagents(
                         editor.staged_model_detail(model),
                         editor.active_model_detail(2)
                     ),
-                    Style::default().fg(theme.muted),
+                    Style::default().ink(theme.muted),
                 ));
             }
             SettingsRow::SessionOption {
@@ -1648,7 +1649,7 @@ fn draw_subagents(
                             server_id = server.id
                         )
                     },
-                    Style::default().fg(if compatible { theme.muted } else { theme.error }),
+                    Style::default().ink(if compatible { theme.muted } else { theme.error }),
                 ));
             }
             SettingsRow::MaxParallelSubagents => lines.push(selected_line(
@@ -1719,11 +1720,11 @@ fn draw_acp_priority(
         let mut lines = vec![
             Line::styled(
                 format!("{title} · first matching adapter wins"),
-                Style::default().fg(theme.muted),
+                Style::default().ink(theme.muted),
             ),
             Line::styled(
                 "r resets to Codex → Claude → Kimi → Anvil",
-                Style::default().fg(theme.muted),
+                Style::default().ink(theme.muted),
             ),
             Line::raw(""),
         ];
@@ -1747,7 +1748,7 @@ fn draw_acp_priority(
     let lines = vec![
         Line::styled(
             "Left/Right constrains a seat to one source; Enter edits fallback priority.",
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ),
         Line::raw(""),
         selected_line(
@@ -1780,7 +1781,7 @@ fn draw_acp_priority(
         Line::raw(""),
         Line::styled(
             "ACP Servers controls eligibility; source constraints preserve Auto within one route.",
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
@@ -1805,7 +1806,7 @@ fn draw_servers(
             let lines = vec![
                 Line::styled(
                     "Add a custom ACP server command.",
-                    Style::default().fg(theme.muted),
+                    Style::default().ink(theme.muted),
                 ),
                 Line::raw(""),
                 selected_line(*field == 0, format!("Name     {name}"), theme),
@@ -1819,7 +1820,7 @@ fn draw_servers(
     let mut lines = vec![Line::styled(
         "Accounts",
         Style::default()
-            .fg(theme.muted)
+            .ink(theme.muted)
             .add_modifier(Modifier::BOLD),
     )];
     for (index, vendor) in crate::auth::AuthVendor::ALL.into_iter().enumerate() {
@@ -1845,7 +1846,7 @@ fn draw_servers(
     lines.push(Line::styled(
         "Servers",
         Style::default()
-            .fg(theme.muted)
+            .ink(theme.muted)
             .add_modifier(Modifier::BOLD),
     ));
     let rows_available = area.height.saturating_sub(lines.len() as u16) as usize / 2;
@@ -1908,7 +1909,7 @@ fn draw_servers(
         };
         lines.push(Line::styled(
             format!("      {detail}"),
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
@@ -1940,12 +1941,14 @@ fn draw_catalog(
             Paragraph::new(vec![
                 Line::styled(
                     format!("Installing {}", installing.agent.name),
-                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .ink(theme.text)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Line::raw(""),
                 Line::raw(status),
                 Line::raw(""),
-                Line::styled("Esc cancels this view", Style::default().fg(theme.muted)),
+                Line::styled("Esc cancels this view", Style::default().ink(theme.muted)),
             ]),
             area,
         );
@@ -1955,7 +1958,7 @@ fn draw_catalog(
     let mut lines = vec![
         Line::styled(
             format!("ACP registry · filter: {filter}"),
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ),
         Line::raw(""),
     ];
@@ -1971,7 +1974,7 @@ fn draw_catalog(
         RegistryState::Error(error) => {
             lines.push(Line::styled(
                 format!("Registry unavailable: {error}"),
-                Style::default().fg(theme.error),
+                Style::default().ink(theme.error),
             ));
             lines.push(selected_line(
                 editor.selected == 0,
@@ -2017,9 +2020,11 @@ fn draw_catalog(
                 };
                 lines.push(Line::styled(
                     format!("{} · v{} · {download}", agent.name, agent.version),
-                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .ink(theme.text)
+                        .add_modifier(Modifier::BOLD),
                 ));
-                lines.push(Line::styled(command, Style::default().fg(theme.muted)));
+                lines.push(Line::styled(command, Style::default().ink(theme.muted)));
                 lines.push(Line::raw(""));
             }
             lines.push(selected_line(
@@ -2059,13 +2064,21 @@ fn draw_appearance(
     let lines = vec![
         Line::styled(
             "Appearance changes preview immediately.",
-            Style::default().fg(theme.muted),
+            Style::default().ink(theme.muted),
         ),
         Line::raw(""),
         selected_line(
             editor.selected == 0,
             format!("Theme       < {} >", editor.config.theme),
             theme,
+        ),
+        Line::styled(
+            format!("            {}", editor.config.theme.description()),
+            Style::default().ink(theme.muted),
+        ),
+        Line::styled(
+            format!("            {}", terminal_report()),
+            Style::default().ink(theme.muted),
         ),
         spinner_preview_line(editor.selected == 1, editor.config.spinner, theme),
         selected_line(
@@ -2084,6 +2097,27 @@ fn draw_appearance(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// What the startup probe learned, phrased for the appearance tab.
+///
+/// Worth surfacing because it explains an otherwise mysterious difference
+/// between two machines: a terminal that answers the OSC queries gets tinted
+/// diff rows, and one that stays silent gets foreground-only diffs.
+fn terminal_report() -> String {
+    let level = match crate::terminal_palette::stdout_color_level() {
+        crate::terminal_palette::StdoutColorLevel::TrueColor => "truecolor",
+        crate::terminal_palette::StdoutColorLevel::Ansi256 => "256 colors",
+        crate::terminal_palette::StdoutColorLevel::Ansi16 => "16 colors",
+        crate::terminal_palette::StdoutColorLevel::Unknown => "no color reported",
+    };
+    match crate::terminal_palette::default_colors() {
+        Some(colors) => {
+            let (r, g, b) = colors.bg;
+            format!("terminal: {level}, background #{r:02x}{g:02x}{b:02x}")
+        }
+        None => format!("terminal: {level}, background unknown (diff fills off)"),
+    }
+}
+
 /// The spinner row, with a live preview of the style in its real colors.
 ///
 /// The preview trails the selection highlight rather than sitting inside it:
@@ -2098,7 +2132,7 @@ fn spinner_preview_line(
     let mut line = selected_line(selected, format!("Spinner     < {style} >  "), theme);
     line.spans
         .extend(style.current_frame().runs().iter().map(|(text, ink)| {
-            Span::styled(text.as_str(), Style::default().fg(theme.spinner_ink(*ink)))
+            Span::styled(text.as_str(), Style::default().ink(theme.spinner_ink(*ink)))
         }));
     line
 }
@@ -2106,11 +2140,11 @@ fn spinner_preview_line(
 fn selected_line(selected: bool, text: String, theme: TerminalTheme) -> Line<'static> {
     let style = if selected {
         Style::default()
-            .fg(theme.selection_fg)
-            .bg(theme.selection_bg)
+            .ink(theme.selection_fg)
+            .ink_bg(theme.selection_bg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.text)
+        Style::default().ink(theme.text)
     };
     Line::from(Span::styled(
         format!("{} {text}", if selected { ">" } else { " " }),
