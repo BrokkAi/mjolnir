@@ -923,12 +923,51 @@
 
       /* ---- session list: full-bleed hairline rows with a status rail ---- */
 
-      #sessions {
+      #session-lists {
         flex: 1;
         min-height: 0;
         overflow-y: auto;
         overscroll-behavior: contain;
         padding-bottom: env(safe-area-inset-bottom);
+      }
+
+      .history-toggle {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 42px;
+        padding: 10px 14px 10px 18px;
+        border: 0;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line-row);
+        background: var(--surface-terminal);
+        color: var(--muted);
+        cursor: pointer;
+        text-align: left;
+
+        &:hover {
+          color: var(--text-control);
+          background: var(--row-hover);
+        }
+      }
+
+      .history-toggle-label {
+        flex: 1;
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .history-toggle-summary {
+        font: 400 9.5px/1 var(--font-mono);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .history-toggle-chevron {
+        color: var(--red-hot);
+        font: 700 11px/1 var(--font-mono);
       }
 
       .session-item {
@@ -960,6 +999,14 @@
 
       .session-item.needs-approval:hover {
         background: linear-gradient(90deg, rgb(235 63 51 / 0.2), rgb(235 63 51 / 0.07) 66%, transparent);
+      }
+
+      .session-item.archived {
+        color: var(--muted);
+      }
+
+      .session-item.archived .live-dot {
+        background: var(--line-strong);
       }
 
       /* the .live-dot span doubles as the row's 2px status rail */
@@ -1121,6 +1168,17 @@
         animation: attention-fade 1.4s ease-in-out infinite;
       }
 
+      .session-archive {
+        flex: 0 0 auto;
+        padding: 4px 8px 3px;
+        clip-path: var(--shape-chip);
+        background: var(--inline-bg-strong);
+        color: var(--dim);
+        font: 700 9px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
       .session-meta {
         display: flex;
         flex-wrap: wrap;
@@ -1259,6 +1317,17 @@
         clip-path: var(--shape-chip);
         padding: 5px 9px 4px;
         animation: attention-fade 1.4s ease-in-out infinite;
+      }
+
+      .archive-badge {
+        flex: 0 0 auto;
+        padding: 5px 9px 4px;
+        clip-path: var(--shape-chip);
+        background: var(--inline-bg-strong);
+        color: var(--dim);
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
       }
 
       /* The TUI status line, mirrored: model via adapter, reasoning effort,
@@ -3024,7 +3093,15 @@
           </div>
           <p id="status">Loading…</p>
         </div>
-        <div id="sessions"></div>
+        <div id="session-lists">
+          <div id="sessions" aria-label="Live sessions"></div>
+          <button id="history-toggle" class="history-toggle" type="button" aria-expanded="false" aria-controls="history-sessions">
+            <span class="history-toggle-label">History</span>
+            <span id="history-toggle-summary" class="history-toggle-summary">Browse archive</span>
+            <span id="history-toggle-chevron" class="history-toggle-chevron" aria-hidden="true">▸</span>
+          </button>
+          <div id="history-sessions" aria-label="Archived sessions" hidden></div>
+        </div>
       </aside>
       <main class="main">
         <header class="chat-header">
@@ -3034,6 +3111,7 @@
             <p id="transcript-meta">Select a session to inspect its history.</p>
           </div>
           <span id="connection-badge" class="connection-badge" role="status" hidden>reconnecting</span>
+          <span id="archive-badge" class="archive-badge" hidden>archived</span>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
           <span id="working-badge" class="working-badge" hidden>working</span>
           <button id="workspace-diff-button" class="icon-button" type="button" aria-label="Show workspace changes" hidden>±</button>
@@ -3047,7 +3125,7 @@
           <div id="transcript" role="log" aria-label="Session transcript"></div>
           <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
         </div>
-        <section class="composer">
+        <section id="composer" class="composer">
           <div id="subagents" class="subagent-list" role="status" aria-label="Subagent status"></div>
           <div id="permissions" class="permission-list"></div>
           <div id="queue-list" class="queue-list"></div>
@@ -3174,6 +3252,7 @@
           <span class="live-dot" aria-hidden="true"></span>
           <span class="session-title"></span>
           <span class="session-approval" hidden>approval</span>
+          <span class="session-archive" hidden>archived</span>
         </div>
         <div class="session-meta">
           <span class="session-project"></span>
@@ -3258,6 +3337,10 @@
       const fsListEl = $("fs-list");
       const statusEl = $("status");
       const sessionsEl = $("sessions");
+      const historyToggleEl = $("history-toggle");
+      const historyToggleSummaryEl = $("history-toggle-summary");
+      const historyToggleChevronEl = $("history-toggle-chevron");
+      const historySessionsEl = $("history-sessions");
       const transcriptEl = $("transcript");
       const transcriptTitleEl = $("transcript-title");
       const transcriptMetaEl = $("transcript-meta");
@@ -3267,6 +3350,7 @@
       const workingBadgeEl = $("working-badge");
       const approvalBadgeEl = $("approval-badge");
       const connectionBadgeEl = $("connection-badge");
+      const archiveBadgeEl = $("archive-badge");
       const stopTurnEl = $("stop-turn");
       const backButtonEl = $("back-button");
       const permissionsEl = $("permissions");
@@ -3280,6 +3364,7 @@
       const queueSubmitEl = $("queue-submit");
       const queueStatusEl = $("queue-status");
       const queueListEl = $("queue-list");
+      const composerEl = $("composer");
       const jumpToLatestEl = $("jump-to-latest");
       const sessionTpl = $("tpl-session");
       const entryTpl = $("tpl-entry");
@@ -3314,6 +3399,11 @@
       const narrowScreen = window.matchMedia("(max-width: 800px)");
 
       let sessions = [];
+      let historySessions = [];
+      let historyVisible = false;
+      let historyLoading = false;
+      let historyLoaded = false;
+      let historyError = "";
       let queuedPrompts = [];
       let selectedSessionId = null;
       let refreshTimer = null;
@@ -3339,6 +3429,7 @@
       const attachmentsBySessionId = new Map();
       const activityBySessionId = new Map();
       const sessionCardById = new Map();
+      const historyCardById = new Map();
       const stopRequestBySessionId = new Map();
       const deletingQueuedPromptIds = new Set();
       // Decisions already POSTed, keyed "<session_id>\u001f<request_id>",
@@ -4338,6 +4429,11 @@
         authScreenEl.hidden = false;
         appEl.hidden = true;
         sessions = [];
+        historySessions = [];
+        historyVisible = false;
+        historyLoading = false;
+        historyLoaded = false;
+        historyError = "";
         queuedPrompts = [];
         selectedSessionId = null;
         filesystemState = null;
@@ -4358,6 +4454,7 @@
         loadSessionModalEl.hidden = true;
         setSessionCreationUi(false);
         sessionCardById.clear();
+        historyCardById.clear();
         activityBySessionId.clear();
         sentDecisions.clear();
         sentConfigChanges.clear();
@@ -4464,7 +4561,7 @@
 
       async function queueSessionAction(text, successMessage) {
         const sessionId = selectedSessionId;
-        if (!sessionId) {
+        if (!sessionId || !sessions.some((session) => session.session_id === sessionId)) {
           return false;
         }
         try {
@@ -4880,6 +4977,9 @@
           restoreDraftForSelectedSession();
           void refreshQueuedPrompts();
         }
+        if (archivedSessionById(routed)) {
+          historyVisible = true;
+        }
         withViewTransition(() => {
           appEl.classList.toggle("show-chat", routed !== null);
           renderAll();
@@ -4958,6 +5058,22 @@
 
       function sessionPendingPermissions(session) {
         return session && Array.isArray(session.pending_permissions) ? session.pending_permissions : [];
+      }
+
+      function archivedSessions() {
+        const liveIds = new Set(sessions.map((session) => session.session_id));
+        return historySessions.filter((session) => !liveIds.has(session.session_id));
+      }
+
+      function archivedSessionById(sessionId) {
+        if (!sessionId || sessions.some((session) => session.session_id === sessionId)) {
+          return null;
+        }
+        return historySessions.find((session) => session.session_id === sessionId) || null;
+      }
+
+      function selectedSessionIsArchived() {
+        return Boolean(archivedSessionById(selectedSessionId));
       }
 
       function decisionKey(sessionId, requestId) {
@@ -5069,6 +5185,7 @@
           root,
           title: root.querySelector(".session-title"),
           approval: root.querySelector(".session-approval"),
+          archive: root.querySelector(".session-archive"),
           project: root.querySelector(".session-project"),
           worktree: root.querySelector(".session-worktree"),
           agent: root.querySelector(".session-agent"),
@@ -5077,22 +5194,29 @@
         };
       }
 
-      function updateSessionCard(card, session) {
+      function updateSessionCard(card, session, archived = false) {
         card.root.classList.toggle("active", session.session_id === selectedSessionId);
-        card.root.classList.toggle("working", sessionIsWorking(session));
+        card.root.classList.toggle("working", !archived && sessionIsWorking(session));
+        card.root.classList.toggle("archived", archived);
         card.title.textContent = sessionLabel(session);
         card.project.textContent = session.project || "-";
         card.worktree.textContent = session.worktree || "";
         card.worktree.hidden = !session.worktree;
         card.agent.textContent = session.agent || "-";
-        const queued = session.queued_prompt_count ?? 0;
+        const queued = archived ? 0 : session.queued_prompt_count ?? 0;
         card.counts.textContent = `${session.total_messages ?? 0} messages${queued ? ` · ${queued} queued` : ""}`;
         // Prefer prompt recency, but fall back to the heartbeat timestamp so
         // a connected-yet-quiet session doesn't read as stale.
-        setTimestamp(card.updated, session.last_prompt_at || session.last_update || session.start_time || "");
-        const needsApproval = sessionPendingPermissions(session).length > 0;
+        setTimestamp(
+          card.updated,
+          archived
+            ? session.last_update || session.last_prompt_at || session.start_time || ""
+            : session.last_prompt_at || session.last_update || session.start_time || "",
+        );
+        const needsApproval = !archived && sessionPendingPermissions(session).length > 0;
         card.root.classList.toggle("needs-approval", needsApproval);
         card.approval.hidden = !needsApproval;
+        card.archive.hidden = !archived;
       }
 
       function renderSessions() {
@@ -5137,6 +5261,66 @@
         }
         if (launchCardRoot && sessionsEl.firstElementChild !== launchCardRoot) {
           sessionsEl.prepend(launchCardRoot);
+        }
+      }
+
+      function renderHistorySessions() {
+        const archived = archivedSessions();
+        historyToggleEl.setAttribute("aria-expanded", historyVisible ? "true" : "false");
+        historyToggleChevronEl.textContent = historyVisible ? "▾" : "▸";
+        let summary = "Browse archive";
+        if (historyLoading) {
+          summary = "Loading…";
+        } else if (historyError) {
+          summary = "Unavailable";
+        } else if (historyLoaded) {
+          summary = `${archived.length} archived`;
+        }
+        historyToggleSummaryEl.textContent = summary;
+        historySessionsEl.hidden = !historyVisible;
+        if (!historyVisible) {
+          return;
+        }
+        if (historyLoading && !historyLoaded) {
+          historySessionsEl.replaceChildren(emptyNote("Loading retained sessions…"));
+          return;
+        }
+        if (historyError && !historyLoaded) {
+          historySessionsEl.replaceChildren(emptyNote(`Archive unavailable: ${historyError}`));
+          return;
+        }
+        if (!archived.length) {
+          historyCardById.clear();
+          historySessionsEl.replaceChildren(emptyNote("No disconnected sessions are retained."));
+          return;
+        }
+        if (historySessionsEl.querySelector(".empty")) {
+          historySessionsEl.replaceChildren();
+        }
+        const seen = new Set();
+        for (const session of archived) {
+          seen.add(session.session_id);
+          let card = historyCardById.get(session.session_id);
+          if (!card) {
+            card = createSessionCard(session.session_id);
+            historyCardById.set(session.session_id, card);
+            historySessionsEl.appendChild(card.root);
+          }
+          updateSessionCard(card, session, true);
+        }
+        for (const [id, card] of [...historyCardById]) {
+          if (!seen.has(id)) {
+            card.root.remove();
+            historyCardById.delete(id);
+          }
+        }
+        const desired = archived.map((session) => session.session_id);
+        const current = [...historySessionsEl.querySelectorAll(".session-item")]
+          .map((element) => element.dataset.sessionId);
+        if (desired.join("\u001f") !== current.join("\u001f")) {
+          for (const id of desired) {
+            historySessionsEl.appendChild(historyCardById.get(id).root);
+          }
         }
       }
 
@@ -6582,7 +6766,7 @@
           : "Jump to latest";
       }
 
-      function renderTranscript(session) {
+      function renderTranscript(session, archived = false) {
         const pinned = forceScrollToBottom || shouldStickToBottom || isNearTranscriptBottom();
         if (!session) {
           renderedSessionId = null;
@@ -6605,10 +6789,13 @@
         const rawTranscript = Array.isArray(session.transcript) ? session.transcript : [];
         const transcript = normalizeTranscript(rawTranscript);
         transcriptTitleEl.textContent = sessionLabel(session);
-        transcriptMetaEl.textContent = `${session.project || "-"}${session.worktree ? ` · ${session.worktree}` : ""} · ${session.agent || "-"} · ${transcript.length} entries`;
-        workingBadgeEl.hidden = !sessionIsWorking(session);
+        const archiveMeta = archived
+          ? `Archived ${formatRelative(session.last_update || session.start_time) || "session"} · `
+          : "";
+        transcriptMetaEl.textContent = `${archiveMeta}${session.project || "-"}${session.worktree ? ` · ${session.worktree}` : ""} · ${session.agent || "-"} · ${transcript.length} entries`;
+        workingBadgeEl.hidden = archived || !sessionIsWorking(session);
         renderWorkspaceDiff(session.workspace_diff);
-        const activeTurn = sessionHasActiveTurn(session);
+        const activeTurn = !archived && sessionHasActiveTurn(session);
         stopTurnEl.hidden = !activeTurn;
         stopTurnEl.disabled = !activeTurn || stopRequestBySessionId.has(session.session_id);
         stopTurnEl.setAttribute("aria-label", `Stop active prompt for ${sessionLabel(session)}`);
@@ -6694,7 +6881,8 @@
       }
 
       function selectedSession() {
-        return sessions.find((session) => session.session_id === selectedSessionId) || null;
+        return sessions.find((session) => session.session_id === selectedSessionId)
+          || archivedSessionById(selectedSessionId);
       }
 
       function selectedAttachments() {
@@ -7775,22 +7963,71 @@
       }
 
       function renderChat() {
-        const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
-        renderTranscript(session);
+        const session = selectedSession();
+        const archived = selectedSessionIsArchived();
+        composerEl.hidden = archived;
+        archiveBadgeEl.hidden = !archived;
+        renderTranscript(session, archived);
         renderStatusLine(session);
-        renderConfig(session);
+        renderConfig(archived ? null : session);
         renderSubagents(session);
-        renderPermissions(session);
-        renderQueue(session);
+        renderPermissions(archived ? null : session);
+        renderQueue(archived ? null : session);
         updateCommandPalette();
       }
 
       function renderAll() {
         renderSessions();
+        renderHistorySessions();
         renderChat();
       }
 
       /* ---- network ---- */
+
+      async function refreshHistory(render = true) {
+        if (!authenticated || historyLoading) {
+          return;
+        }
+        historyLoading = true;
+        historyError = "";
+        if (render) {
+          renderHistorySessions();
+        }
+        try {
+          const response = await apiFetch("/sessions", { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const retained = await response.json();
+          historySessions = (Array.isArray(retained) ? retained : []).sort((left, right) => {
+            const leftTime = new Date(left.last_update || left.start_time || 0).getTime();
+            const rightTime = new Date(right.last_update || right.start_time || 0).getTime();
+            return rightTime - leftTime;
+          });
+          historyLoaded = true;
+          if (archivedSessionById(routeSessionId())) {
+            historyVisible = true;
+          }
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            historyError = error.message;
+          }
+        } finally {
+          historyLoading = false;
+          if (render && authenticated) {
+            renderAll();
+            refreshTimestamps();
+          }
+        }
+      }
+
+      async function toggleHistory() {
+        historyVisible = !historyVisible;
+        renderHistorySessions();
+        if (historyVisible) {
+          await refreshHistory();
+        }
+      }
 
       async function tryResumeViewerSession() {
         if (viewerToken) {
@@ -7817,6 +8054,10 @@
           syncPendingStopState();
           noteSessionActivity();
           showApp();
+          const routed = routeSessionId();
+          if (routed && !sessions.some((session) => session.session_id === routed)) {
+            await refreshHistory(false);
+          }
           statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
           applyRoute();
           await refreshQueuedPrompts();
@@ -7831,6 +8072,10 @@
           return;
         }
         try {
+          const previousLiveIdSet = new Set(
+            sessions.map((session) => session.session_id),
+          );
+          const previousLiveIds = [...previousLiveIdSet].sort().join("\u001f");
           const response = await apiFetch("/live/sessions", {
             cache: "no-store",
           });
@@ -7838,6 +8083,22 @@
             throw new Error(`HTTP ${response.status}`);
           }
           sessions = await response.json();
+          const nextLiveIds = sessions
+            .map((session) => session.session_id)
+            .sort()
+            .join("\u001f");
+          const routed = routeSessionId();
+          const routedMissing = routed
+            && !sessions.some((session) => session.session_id === routed)
+            && !historySessions.some((session) => session.session_id === routed);
+          const missingRouteNeedsHistory = routedMissing
+            && (previousLiveIdSet.has(routed) || (!historyLoaded && !historyError));
+          if (missingRouteNeedsHistory || (historyVisible && previousLiveIds !== nextLiveIds)) {
+            await refreshHistory(false);
+          }
+          if (!authenticated) {
+            return;
+          }
           syncPendingStopState();
           noteSessionActivity();
           statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -7858,7 +8119,7 @@
           return;
         }
         const sessionId = selectedSessionId;
-        if (!sessionId) {
+        if (!sessionId || selectedSessionIsArchived()) {
           queuedPrompts = [];
           renderQueue(null);
           return;
@@ -7885,6 +8146,10 @@
         // Enter calls this directly, bypassing the disabled Queue button, so a
         // second Enter before the POST resolves would queue the prompt twice.
         if (queueSubmitInFlight) {
+          return;
+        }
+        if (selectedSessionIsArchived()) {
+          setQueueStatus("Archived sessions are read-only.", true);
           return;
         }
         const sessionId = selectedSessionId;
@@ -8082,6 +8347,9 @@
       authFormEl.addEventListener("submit", submitAuth);
       logoutButtonEl.addEventListener("click", logout);
       newSessionButtonEl.addEventListener("click", openNewSessionPicker);
+      historyToggleEl.addEventListener("click", () => {
+        void toggleHistory();
+      });
       newSessionCloseEl.addEventListener("click", closeNewSessionPicker);
       newSessionStartEl.addEventListener("click", startNewSession);
       newSessionModalEl.addEventListener("click", (event) => {
