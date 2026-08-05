@@ -5422,11 +5422,18 @@ pub(crate) async fn workspace_head_diff(
             if excluded.contains(&abs_path) || !seen_files.insert(abs_path.clone()) {
                 continue;
             }
-            let Some(new_state) = read_workspace_text_state(&abs_path, max_text_bytes).await else {
-                continue;
+            let new_state = read_workspace_text_state(&abs_path, max_text_bytes).await;
+            let old_state = if new_state.is_some() {
+                read_head_text_state(&repo_root, &rel_path, max_text_bytes).await
+            } else {
+                None
             };
-            let Some(old_state) = read_head_text_state(&repo_root, &rel_path, max_text_bytes).await
-            else {
+            let (Some(old_state), Some(new_state)) = (old_state, new_state) else {
+                // A changed file that cannot be rendered as text — binary,
+                // oversized, non-UTF-8 — is still a changed file. Dropping it
+                // from the count would let a dirty worktree claim to match
+                // HEAD.
+                total_files += 1;
                 continue;
             };
             if old_state == new_state {
@@ -5468,6 +5475,55 @@ pub(crate) async fn workspace_head_diff(
         max_files: WORKSPACE_DIFF_MAX_FILES,
         truncated: retained < total_files,
         unavailable: (!any_repo).then_some(WorkspaceHeadDiffUnavailable::NotAGitRepository),
+    }
+}
+
+/// Shared handle for on-demand worktree reads against one set of workspace
+/// roots. Every session owner that answers [`UiCommand::RefreshWorkspaceDiff`]
+/// goes through this so overlapping reads resolve the same way everywhere.
+pub(crate) struct WorkspaceHeadDiffRefresher {
+    roots: Vec<PathBuf>,
+    exclusions: Vec<PathBuf>,
+    max_text_bytes: u64,
+    next_ticket: AtomicU64,
+    /// Newest ticket that has published. Checked and advanced under the same
+    /// lock as the send itself: a check-then-send against an atomic would
+    /// leave a window where two finished reads publish in the wrong order,
+    /// which is precisely the staleness the pull model exists to remove.
+    published: std::sync::Mutex<u64>,
+}
+
+impl WorkspaceHeadDiffRefresher {
+    pub(crate) fn new(
+        roots: Vec<PathBuf>,
+        exclusions: Vec<PathBuf>,
+        max_text_bytes: u64,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            roots,
+            exclusions,
+            max_text_bytes,
+            next_ticket: AtomicU64::new(0),
+            published: std::sync::Mutex::new(0),
+        })
+    }
+
+    /// Read the worktree in the background and publish the result to `tx`,
+    /// unless a refresh requested later has already published.
+    pub(crate) fn spawn(self: &Arc<Self>, tx: mpsc::UnboundedSender<UiEvent>) {
+        let ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed) + 1;
+        let this = self.clone();
+        tokio::spawn(async move {
+            let event =
+                workspace_head_diff(&this.roots, &this.exclusions, this.max_text_bytes).await;
+            let Ok(mut published) = this.published.lock() else {
+                return;
+            };
+            if *published < ticket {
+                *published = ticket;
+                let _ = tx.send(UiEvent::WorkspaceHeadDiff(event));
+            }
+        });
     }
 }
 
@@ -9396,6 +9452,47 @@ mod tests {
 
         assert_eq!(event.total_files, 2, "{:?}", event.diffs);
         assert_eq!(event.diffs.len(), 2);
+    }
+
+    /// A changed file that cannot be rendered as text still counts as changed.
+    /// Skipping it entirely would make a worktree whose only change is a
+    /// binary file claim to match HEAD.
+    #[tokio::test]
+    async fn workspace_head_diff_counts_files_it_cannot_render_as_text() {
+        let temp = seeded_workspace_repo().await;
+        tokio::fs::write(temp.path().join("blob.bin"), [0xFF, 0xFE, 0x00, 0x01])
+            .await
+            .expect("write binary");
+
+        let event =
+            workspace_head_diff(&[temp.path().to_path_buf()], &[], DEFAULT_FS_TEXT_BYTES).await;
+
+        assert_eq!(event.total_files, 1, "{:?}", event.diffs);
+        assert!(event.diffs.is_empty(), "{:?}", event.diffs);
+        assert!(event.truncated, "an uncounted retained set reads as complete");
+        assert!(event.unavailable.is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_head_diff_refresher_publishes_the_read() {
+        let temp = seeded_workspace_repo().await;
+        tokio::fs::write(temp.path().join("fresh.txt"), "brand new\n")
+            .await
+            .expect("write untracked");
+
+        let refresher = WorkspaceHeadDiffRefresher::new(
+            vec![temp.path().to_path_buf()],
+            Vec::new(),
+            DEFAULT_FS_TEXT_BYTES,
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        refresher.spawn(tx);
+
+        let event = rx.recv().await.expect("published event");
+        let UiEvent::WorkspaceHeadDiff(event) = event else {
+            panic!("unexpected event: {event:?}");
+        };
+        assert_eq!(event.total_files, 1, "{:?}", event.diffs);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

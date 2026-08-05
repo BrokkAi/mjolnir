@@ -4548,11 +4548,14 @@ fn start_server_agent_session(
             let runtime_cmd_tx = runtime_cmd_tx.clone();
             let handoffs = subagent_handoffs.clone();
             let primary_orchestrator = primary_orchestrator.clone();
-            let workspace_roots = workspace_roots.clone();
             let side_event_tx = side_event_tx.clone();
-            // Only the newest read may publish; see the TUI's identical guard.
-            let workspace_diff_generation =
-                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            // Only the newest read may publish; the refresher enforces that
+            // for every session owner.
+            let workspace_diff_refresher = crate::acp::WorkspaceHeadDiffRefresher::new(
+                workspace_roots.clone(),
+                snapshot_exclusions.clone(),
+                fs_max_text_bytes,
+            );
             tokio::spawn(async move {
                 let mut side_runtime: Option<crate::side::Runtime> = None;
                 let mut local_epoch = 0_u64;
@@ -4610,24 +4613,7 @@ fn start_server_agent_session(
                     // the worktree is shared with any side conversation, so
                     // routing this into a side runtime would only lose it.
                     if matches!(command, UiCommand::RefreshWorkspaceDiff) {
-                        let ticket = workspace_diff_generation
-                            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-                            + 1;
-                        let generation = workspace_diff_generation.clone();
-                        let roots = workspace_roots.clone();
-                        let exclusions = snapshot_exclusions.clone();
-                        let tx = side_event_tx.clone();
-                        tokio::spawn(async move {
-                            let event = crate::acp::workspace_head_diff(
-                                &roots,
-                                &exclusions,
-                                fs_max_text_bytes,
-                            )
-                            .await;
-                            if generation.load(std::sync::atomic::Ordering::Acquire) == ticket {
-                                let _ = tx.send(UiEvent::WorkspaceHeadDiff(event));
-                            }
-                        });
+                        workspace_diff_refresher.spawn(side_event_tx.clone());
                         continue;
                     }
                     let (command, force_main) = match command {

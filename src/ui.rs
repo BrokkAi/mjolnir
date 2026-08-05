@@ -4647,7 +4647,9 @@ fn handle_workspace_diff_viewer_key(
         KeyCode::End => state.workspace_diff_scroll_offset = usize::MAX,
         KeyCode::Char('n') if modifiers.is_empty() => state.select_workspace_diff_file(true),
         KeyCode::Char('p') if modifiers.is_empty() => state.select_workspace_diff_file(false),
-        KeyCode::Char('r') if modifiers.is_empty() => {
+        // One read at a time: the refresher already discards stale results,
+        // but a held-down key should not fan out worktree walks.
+        KeyCode::Char('r') if modifiers.is_empty() && !state.workspace_diff_loading => {
             state.begin_workspace_diff_refresh();
             let _ = cmd_tx.send(UiCommand::RefreshWorkspaceDiff);
         }
@@ -20663,6 +20665,18 @@ mod tests {
             cmd_rx.try_recv(),
             Ok(UiCommand::RefreshWorkspaceDiff)
         ));
+
+        // A refresh is already in flight; pressing r must not stack another.
+        super::handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key(KeyCode::Char('r')),
+            UiMode::InlineChat,
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "a second read while one is in flight is not requested"
+        );
 
         state.apply_event(UiEvent::WorkspaceHeadDiff(workspace_head_diff_event(
             vec![],

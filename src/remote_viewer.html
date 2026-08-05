@@ -6768,9 +6768,11 @@
         const scope =
           total === 0
             ? "No uncommitted changes: the worktree matches HEAD."
-            : total > files.length
-              ? `Showing ${files.length} of ${total} changed files.`
-              : `${total} changed file${total === 1 ? "" : "s"}.`;
+            : files.length === 0
+              ? `${total} changed file${total === 1 ? "" : "s"}, but none could be rendered as text.`
+              : total > files.length
+                ? `Showing ${files.length} of ${total} changed files.`
+                : `${total} changed file${total === 1 ? "" : "s"}.`;
         /* Always state the age. This is a pulled view delivered by push, so
            without a timestamp there is no way to tell it from a guess. */
         return workspaceDiffReading
@@ -6779,6 +6781,11 @@
       }
 
       async function requestWorkspaceDiffRefresh() {
+        /* One read at a time; the answer to an in-flight read is already the
+           freshest available. */
+        if (workspaceDiffReading) {
+          return;
+        }
         workspaceDiffReading = true;
         if (!workspaceDiffModalEl.hidden) {
           paintWorkspaceDiff();

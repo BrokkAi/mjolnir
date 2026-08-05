@@ -69,7 +69,7 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, MutexGuard,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -2278,11 +2278,14 @@ async fn run_session(
     cmd_workspace_roots.push(cwd.clone());
     cmd_workspace_roots.extend(runtime_options.additional_directories.iter().cloned());
     let cmd_snapshot_exclusions = runtime_options.snapshot_exclusions.clone();
-    let cmd_fs_max_text_bytes = runtime_options.fs_max_text_bytes;
-    // Ticket for workspace-diff refreshes. Two reads can overlap and finish out
-    // of order; publishing an older worktree state over a newer one is exactly
-    // the staleness this reader exists to avoid, so only the newest wins.
-    let workspace_diff_generation = Arc::new(AtomicU64::new(0));
+    // Two reads can overlap and finish out of order; the refresher publishes
+    // only the newest, because an older worktree state landing over a newer
+    // one is exactly the staleness this reader exists to avoid.
+    let workspace_diff_refresher = acp::WorkspaceHeadDiffRefresher::new(
+        cmd_workspace_roots.clone(),
+        cmd_snapshot_exclusions.clone(),
+        runtime_options.fs_max_text_bytes,
+    );
     let side_agent = agent.clone();
     let side_cwd = cwd.clone();
     let side_additional_directories = runtime_options.additional_directories.clone();
@@ -2341,18 +2344,7 @@ async fn run_session(
             // workspace on disk, which a side conversation shares, so routing
             // it into a side runtime would only lose it.
             if matches!(command, UiCommand::RefreshWorkspaceDiff) {
-                let ticket = workspace_diff_generation.fetch_add(1, Ordering::AcqRel) + 1;
-                let generation = workspace_diff_generation.clone();
-                let roots = cmd_workspace_roots.clone();
-                let exclusions = cmd_snapshot_exclusions.clone();
-                let tx = side_ui_event_tx.clone();
-                tokio::spawn(async move {
-                    let event =
-                        acp::workspace_head_diff(&roots, &exclusions, cmd_fs_max_text_bytes).await;
-                    if generation.load(Ordering::Acquire) == ticket {
-                        let _ = tx.send(UiEvent::WorkspaceHeadDiff(event));
-                    }
-                });
+                workspace_diff_refresher.spawn(side_ui_event_tx.clone());
                 continue;
             }
             let (command, force_main) = match command {

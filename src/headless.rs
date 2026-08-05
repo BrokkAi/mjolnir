@@ -340,7 +340,27 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         termination: Some(cfg.termination.clone()),
     };
 
-    let runtime = tokio::spawn(async move { acp::run(runtime_cfg, event_tx, cmd_rx).await });
+    // A remote viewer's `/diff` must be answered here: the ACP runtime treats
+    // `RefreshWorkspaceDiff` as a no-op, and dropping the command would leave
+    // the viewer reading the worktree forever. The pump sits ahead of the
+    // runtime so the answer does not depend on what the session is doing.
+    let (runtime_cmd_tx, runtime_cmd_rx) = mpsc::unbounded_channel();
+    let mut workspace_roots = Vec::with_capacity(1 + cfg.additional_directories.len());
+    workspace_roots.push(cfg.cwd.clone());
+    workspace_roots.extend(cfg.additional_directories.iter().cloned());
+    let workspace_diff_refresher = acp::WorkspaceHeadDiffRefresher::new(
+        workspace_roots,
+        cfg.snapshot_exclusions.clone(),
+        cfg.fs_max_text_bytes,
+    );
+    let command_pump = spawn_workspace_diff_command_pump(
+        cmd_rx,
+        runtime_cmd_tx,
+        workspace_diff_refresher,
+        event_tx.clone(),
+    );
+
+    let runtime = tokio::spawn(async move { acp::run(runtime_cfg, event_tx, runtime_cmd_rx).await });
     // No UI event channel: headless answers permissions by policy, so
     // remote decisions have nothing to resolve.
     let remote_tracker = remote::RemoteSessionTracker::new(
@@ -575,6 +595,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         }
     }
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), orchestrator_task).await;
+    command_pump.abort();
     remote_tracker.shutdown().await;
 
     let stop_reason_label = stop_reason.map(stop_reason_label).unwrap_or_else(|| {
@@ -1301,6 +1322,30 @@ pub(crate) fn choose_allow_option(
         .map(|option| option.option_id.to_string())
 }
 
+/// Forward commands to the ACP runtime, answering `RefreshWorkspaceDiff`
+/// locally. The runtime treats that command as a no-op, so without this a
+/// remote viewer's `/diff` would be dropped and its reader would show
+/// "reading" forever. The published event reaches the remote tracker through
+/// the ordinary runtime-event channel.
+fn spawn_workspace_diff_command_pump(
+    mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
+    runtime_cmd_tx: mpsc::UnboundedSender<UiCommand>,
+    refresher: Arc<acp::WorkspaceHeadDiffRefresher>,
+    event_tx: mpsc::UnboundedSender<UiEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(command) = cmd_rx.recv().await {
+            if matches!(command, UiCommand::RefreshWorkspaceDiff) {
+                refresher.spawn(event_tx.clone());
+                continue;
+            }
+            if runtime_cmd_tx.send(command).is_err() {
+                break;
+            }
+        }
+    })
+}
+
 fn emit_json<T: Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string(value)?);
     Ok(())
@@ -1315,6 +1360,47 @@ mod tests {
 
     fn record_json(record: &StreamRecord<'_>) -> serde_json::Value {
         serde_json::to_value(record).expect("stream record serializes")
+    }
+
+    /// A remote `/diff` against a headless session must be answered by the
+    /// pump itself: the ACP runtime ignores the command, and an unanswered
+    /// refresh leaves the web viewer reading the worktree forever.
+    #[tokio::test]
+    async fn command_pump_answers_workspace_diff_refreshes_without_the_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (runtime_cmd_tx, mut runtime_cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let refresher = acp::WorkspaceHeadDiffRefresher::new(
+            vec![temp.path().to_path_buf()],
+            Vec::new(),
+            64 * 1024,
+        );
+        let pump =
+            spawn_workspace_diff_command_pump(cmd_rx, runtime_cmd_tx, refresher, event_tx);
+
+        cmd_tx
+            .send(UiCommand::RefreshWorkspaceDiff)
+            .expect("send refresh");
+        let event = event_rx.recv().await.expect("published answer");
+        assert!(
+            matches!(event, UiEvent::WorkspaceHeadDiff(_)),
+            "unexpected event: {event:?}"
+        );
+        assert!(
+            runtime_cmd_rx.try_recv().is_err(),
+            "the refresh must not reach the runtime, which would drop it"
+        );
+
+        // Every other command passes through untouched.
+        cmd_tx.send(UiCommand::Shutdown).expect("send shutdown");
+        assert!(matches!(
+            runtime_cmd_rx.recv().await,
+            Some(UiCommand::Shutdown)
+        ));
+
+        drop(cmd_tx);
+        pump.await.expect("pump exits when senders drop");
     }
 
     #[test]
