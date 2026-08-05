@@ -96,6 +96,11 @@ pub enum InternalMessageKind {
     ReviewSynthesis,
 }
 
+/// Info notice emitted once a `session/load` replay has finished streaming
+/// its history. The UI closes the replayed turn's open message on it, so the
+/// emitting and consuming sides must agree on the exact text.
+pub const SESSION_LOADED_NOTICE: &str = "session loaded";
+
 /// Events flowing from the ACP runtime into the UI task.
 #[derive(Debug)]
 pub enum UiEvent {

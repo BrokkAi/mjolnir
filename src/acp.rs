@@ -2707,7 +2707,9 @@ async fn reload_active_session(
             SessionInfoUpdate::new().title(title),
         )));
     }
-    let _ = ui_tx.send(UiEvent::Info("session loaded".to_string()));
+    let _ = ui_tx.send(UiEvent::Info(
+        crate::event::SESSION_LOADED_NOTICE.to_string(),
+    ));
     Ok(())
 }
 
@@ -2775,7 +2777,9 @@ async fn switch_existing_session(
             SessionInfoUpdate::new().title(title),
         )));
     }
-    let _ = ui_tx.send(UiEvent::Info("session loaded".to_string()));
+    let _ = ui_tx.send(UiEvent::Info(
+        crate::event::SESSION_LOADED_NOTICE.to_string(),
+    ));
     Ok(target_session_id)
 }
 

@@ -3756,6 +3756,13 @@ impl AppState {
                 self.record_status_message(StatusKind::Warning, msg);
             }
             UiEvent::Info(msg) => {
+                // A session/load replay ends with an ordinary open agent
+                // message that no PromptDone will ever close; the load notice
+                // is its terminator, so the replayed turn can reach scrollback.
+                if msg == crate::event::SESSION_LOADED_NOTICE {
+                    self.finalize_thinking(EntryKind::Thought);
+                    self.finalize_message(EntryKind::Agent);
+                }
                 self.record_status_message(StatusKind::Info, msg);
             }
             UiEvent::Fatal(msg) => {

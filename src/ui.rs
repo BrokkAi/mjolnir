@@ -1106,12 +1106,13 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
         | Entry::InternalMessage(_) => true,
         Entry::AgentThought(thought) => thought.completed,
         Entry::SubagentThought(thought) => thought.completed,
-        // An actor may append coordination activity after its active message.
-        // Hold only that exact owned entry; historical messages from the same
-        // actor are already immutable and must remain flushable.
-        Entry::AgentMessage(_) => {
-            !state.is_streaming() || state.agent_open_message_index() != Some(idx)
-        }
+        // `append_message_chunk` appends only through the open-message index,
+        // so it is the sole authority on whether this entry can still grow.
+        // Connection state is no proxy: orchestration paths (delegation,
+        // review lanes) stream real answers while the connection stays Ready,
+        // and committing the open message then froze its first chunk in
+        // scrollback forever (#616).
+        Entry::AgentMessage(_) => state.agent_open_message_index() != Some(idx),
         // Nested prose now lives in an actor-owned transcript rather than the
         // primary stream. Legacy/replayed entries that still reach the main
         // transcript are therefore immutable.
@@ -19827,6 +19828,15 @@ mod tests {
         state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
             text_chunk("replayed answer"),
         )));
+        // The replayed answer is still an open message until the load notice
+        // terminates the replay; it must not flush before then.
+        assert_eq!(
+            stable_transcript_entry_count(&state),
+            state.transcript.len() - 1
+        );
+        state.apply_event(UiEvent::Info(
+            crate::event::SESSION_LOADED_NOTICE.to_string(),
+        ));
         assert_eq!(
             stable_transcript_entry_count(&state),
             state.transcript.len()
@@ -19838,7 +19848,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             replayed,
-            vec!["❯ replayed prompt", "", "● replayed answer", ""]
+            vec![
+                "❯ replayed prompt",
+                "",
+                "● replayed answer",
+                "",
+                "session loaded",
+                ""
+            ]
         );
 
         state.record_user_prompt("local prompt".to_string());
@@ -19854,7 +19871,7 @@ mod tests {
         state
             .transcript
             .push(Entry::ToolCall("local-tool".to_string()));
-        assert_eq!(stable_transcript_entry_count(&state), 4);
+        assert_eq!(stable_transcript_entry_count(&state), 5);
 
         state.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
@@ -19887,6 +19904,165 @@ mod tests {
         assert!(reflowed.contains("replayed answer"), "{reflowed}");
         assert!(reflowed.contains("write"), "{reflowed}");
         assert!(reflowed.contains("src/lib.rs"), "{reflowed}");
+    }
+
+    /// Drive one UI event through the same order the inline main loop uses:
+    /// flush the reveal lanes, apply, re-observe, then commit whatever the
+    /// scrollback sink now considers stable.
+    fn drive_inline_event(
+        state: &mut AppState,
+        reveal: &mut StreamRevealController,
+        sink: &mut TranscriptSink,
+        scrollback: &mut Vec<String>,
+        event: UiEvent,
+    ) {
+        reveal.flush_for_event(state, &event);
+        state.apply_event(event);
+        let _ = reveal.observe(state);
+        scrollback.extend(sink.pending_lines(state, 100).iter().map(line_text));
+    }
+
+    #[test]
+    fn inline_scrollback_keeps_whole_answer_when_the_turn_is_not_marked_streaming() {
+        // Orchestration paths (delegation, review lanes) stream real answers
+        // while the connection stays Ready. The open message used to be
+        // declared stable the moment is_streaming() was false, so scrollback
+        // committed just the first chunk — "● All" — forever (#616).
+        let mut state = AppState::new();
+        state.set_connection_state(ConnectionState::Ready);
+        let mut reveal = StreamRevealController::default();
+        let mut sink = TranscriptSink::default();
+        let mut scrollback = Vec::new();
+
+        for chunk in ["All", " CI checks", " pass on", " the merge commit."] {
+            drive_inline_event(
+                &mut state,
+                &mut reveal,
+                &mut sink,
+                &mut scrollback,
+                UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(text_chunk(chunk))),
+            );
+        }
+        // Scrollback cannot retract: nothing of the still-growing answer may
+        // commit before the terminating event.
+        assert!(
+            scrollback.join("\n").trim().is_empty(),
+            "committed an answer that could still grow: {scrollback:?}"
+        );
+
+        drive_inline_event(
+            &mut state,
+            &mut reveal,
+            &mut sink,
+            &mut scrollback,
+            UiEvent::SessionUpdate(SessionUpdate::ToolCall(ToolCall::new(
+                "call-1",
+                "gh pr merge",
+            ))),
+        );
+
+        let committed = scrollback.join("\n");
+        assert!(
+            committed.contains("All CI checks pass on the merge commit."),
+            "scrollback lost the tail of the answer: {committed:?}"
+        );
+    }
+
+    #[test]
+    fn inline_scrollback_keeps_whole_answer_on_the_normal_streaming_path() {
+        // Guard the ordinary turn: streamed while Streaming, closed by
+        // PromptDone.
+        let mut state = AppState::new();
+        let mut reveal = StreamRevealController::default();
+        let mut sink = TranscriptSink::default();
+        let mut scrollback = Vec::new();
+
+        state.record_user_prompt("merge it".to_string());
+        scrollback.extend(sink.pending_lines(&state, 100).iter().map(line_text));
+
+        for chunk in ["Merged. P", "R #652 is on master."] {
+            drive_inline_event(
+                &mut state,
+                &mut reveal,
+                &mut sink,
+                &mut scrollback,
+                UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(text_chunk(chunk))),
+            );
+        }
+        drive_inline_event(
+            &mut state,
+            &mut reveal,
+            &mut sink,
+            &mut scrollback,
+            UiEvent::PromptDone {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        );
+
+        let committed = scrollback.join("\n");
+        assert!(
+            committed.contains("Merged. PR #652 is on master."),
+            "scrollback lost the tail of the answer: {committed:?}"
+        );
+    }
+
+    #[test]
+    fn inline_scrollback_keeps_whole_answer_for_every_internal_message_kind() {
+        use crate::event::{InternalMessage, InternalMessageKind};
+
+        // Only DiscreteReview re-enters Streaming; every other orchestration
+        // kind leaves the connection Ready while the answer streams. The
+        // whole answer must survive either way.
+        for kind in [
+            InternalMessageKind::Delegation,
+            InternalMessageKind::DiscreteReview,
+            InternalMessageKind::ReviewLane,
+            InternalMessageKind::ReviewProgress,
+            InternalMessageKind::ReviewSynthesis,
+        ] {
+            let mut state = AppState::new();
+            state.set_connection_state(ConnectionState::Ready);
+            let mut reveal = StreamRevealController::default();
+            let mut sink = TranscriptSink::default();
+            let mut scrollback = Vec::new();
+
+            drive_inline_event(
+                &mut state,
+                &mut reveal,
+                &mut sink,
+                &mut scrollback,
+                UiEvent::InternalMessage(InternalMessage {
+                    source: "orchestrator".to_string(),
+                    target: "primary".to_string(),
+                    kind,
+                    text: "orchestration packet".to_string(),
+                    owner_subagent_id: None,
+                }),
+            );
+            for chunk in ["The answer", " streamed in", " several chunks."] {
+                drive_inline_event(
+                    &mut state,
+                    &mut reveal,
+                    &mut sink,
+                    &mut scrollback,
+                    UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(text_chunk(chunk))),
+                );
+            }
+            drive_inline_event(
+                &mut state,
+                &mut reveal,
+                &mut sink,
+                &mut scrollback,
+                UiEvent::SessionUpdate(SessionUpdate::ToolCall(ToolCall::new("call-1", "tool"))),
+            );
+
+            let committed = scrollback.join("\n");
+            assert!(
+                committed.contains("The answer streamed in several chunks."),
+                "scrollback lost the answer tail for {kind:?}: {committed:?}"
+            );
+        }
     }
 
     /// A running terminal registered against a tool-call entry: exactly the
