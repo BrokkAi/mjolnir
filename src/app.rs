@@ -5105,7 +5105,11 @@ fn config_select_choices(select: &SessionConfigSelect) -> Vec<ConfigValueChoice>
     }
 }
 
-fn status_transcript_text(kind: StatusKind, text: &str) -> String {
+/// Render one status message as transcript text. The TUI and the remote
+/// mirror both fold the status channel into a transcript, so they share this
+/// function rather than each spelling out the severity prefix — two copies of
+/// one rule is how the folds drift apart in the first place.
+pub(crate) fn status_transcript_text(kind: StatusKind, text: &str) -> String {
     match kind {
         StatusKind::Info => text.to_string(),
         StatusKind::Warning => format!("warning: {text}"),

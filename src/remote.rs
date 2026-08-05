@@ -47,6 +47,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::acp::{self, AcpRuntimeConfig};
+use crate::app::{StatusKind, status_transcript_text};
 use crate::config::{self, SelectedAgent};
 use crate::event::{
     ElicitationOutcome, ElicitationPrompt, PermissionDecision, PermissionPrompt,
@@ -1269,14 +1270,12 @@ impl TrackerState {
             UiEvent::TerminalOutput(snapshot) => {
                 self.observe_terminal_output(snapshot);
             }
-            UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } | UiEvent::Fatal(_) => {
-                self.agent_message_open = false;
-                self.prompt_in_flight = false;
-                self.prompt_turn_started_at = None;
-                // The turn is over; any prompt still listed here was
-                // cancelled by the runtime, so don't advertise it.
-                self.pending_permissions.clear();
-                self.touch();
+            UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } => {
+                self.end_prompt_turn();
+            }
+            UiEvent::Fatal(message) => {
+                self.end_prompt_turn();
+                self.record_status_notice(StatusKind::Fatal, message);
             }
             UiEvent::SessionForkFailed { .. } => {
                 self.prompt_in_flight = false;
@@ -1342,13 +1341,11 @@ impl TrackerState {
                     self.nested_roles.insert(*id, role.clone());
                 }
             }
-            // `Info` and `Warning` are the TUI's status channel, and both land
-            // in its transcript through one `record_status_message` path. The
-            // mirror keeps that pairing deliberately: a viewer that shows
-            // warnings but hides orchestrator progress is the more surprising
-            // of the two behaviours.
-            UiEvent::Info(message) | UiEvent::Warning(message) => {
-                self.record_status_notice(message.clone());
+            UiEvent::Info(message) => {
+                self.record_status_notice(StatusKind::Info, message);
+            }
+            UiEvent::Warning(message) => {
+                self.record_status_notice(StatusKind::Warning, message);
             }
             UiEvent::InternalMessage(message) => {
                 self.push_actor_transcript_entry(
@@ -1670,12 +1667,19 @@ impl TrackerState {
         self.touch();
     }
 
-    /// Record a status-channel message (`Info` / `Warning`), collapsing an
-    /// immediate repeat the way `AppState::record_status_message` does. Status
-    /// lines are re-emitted on every retry and every turn boundary, so without
-    /// this the mirror accumulates runs of identical entries the terminal
-    /// never shows.
-    fn record_status_notice(&mut self, text: String) {
+    /// Mirror of `AppState::record_status_message`: the whole status channel
+    /// (`Info`, `Warning`, `Fatal`) becomes a system transcript entry, rendered
+    /// by the shared `status_transcript_text` so severity survives the trip.
+    /// The viewer paints every system entry the same muted colour, so that
+    /// prefix is the only thing distinguishing a warning from routine status.
+    ///
+    /// An immediate repeat collapses, exactly as it does in the TUI. Status
+    /// lines are re-emitted on retries and turn boundaries, so without this the
+    /// mirror accumulates runs of identical entries the terminal never shows.
+    /// Deduplicating on the *rendered* text is what keeps an `Info` from
+    /// swallowing a same-worded `Warning`.
+    fn record_status_notice(&mut self, kind: StatusKind, text: &str) {
+        let text = status_transcript_text(kind, text);
         let repeated = self.transcript.last().is_some_and(|entry| {
             entry.kind == "system" && entry.actor.is_none() && entry.text == text
         });
@@ -1683,6 +1687,18 @@ impl TrackerState {
             return;
         }
         self.record_system_notice(text);
+    }
+
+    /// Reset the per-turn state a finished, failed or fatal prompt leaves
+    /// behind.
+    fn end_prompt_turn(&mut self) {
+        self.agent_message_open = false;
+        self.prompt_in_flight = false;
+        self.prompt_turn_started_at = None;
+        // The turn is over; any prompt still listed here was cancelled by the
+        // runtime, so don't advertise it.
+        self.pending_permissions.clear();
+        self.touch();
     }
 
     fn push_system_notice(&mut self, text: impl Into<String>) {
@@ -8744,10 +8760,11 @@ mod tests {
     }
 
     /// The TUI and the remote mirror fold the same event stream by hand. This
-    /// pins the two status kinds to the same treatment so a future edit cannot
-    /// quietly drop one of them again (#617).
+    /// pins the whole status channel to one shared rendering so a future edit
+    /// cannot quietly drop a kind again (#617). Every kind must reach the
+    /// transcript, and each must render exactly as the TUI renders it.
     #[test]
-    fn tracker_mirrors_info_and_warning_identically() {
+    fn tracker_mirrors_every_status_kind_like_the_tui() {
         let record_one = |event: UiEvent| {
             let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
             state.observe_event(&UiEvent::SessionStarted {
@@ -8758,14 +8775,18 @@ mod tests {
             state.snapshot().expect("snapshot").transcript
         };
 
-        let message = "next turn".to_string();
-        let from_info = record_one(UiEvent::Info(message.clone()));
-        let from_warning = record_one(UiEvent::Warning(message.clone()));
-
-        assert_eq!(from_info.len(), 1);
-        assert_eq!(from_info[0].kind, from_warning[0].kind);
-        assert_eq!(from_info[0].text, from_warning[0].text);
-        assert_eq!(from_info[0].actor, from_warning[0].actor);
+        let message = "next turn";
+        for (event, kind) in [
+            (UiEvent::Info(message.to_string()), StatusKind::Info),
+            (UiEvent::Warning(message.to_string()), StatusKind::Warning),
+            (UiEvent::Fatal(message.to_string()), StatusKind::Fatal),
+        ] {
+            let transcript = record_one(event);
+            assert_eq!(transcript.len(), 1, "{kind:?} should record one entry");
+            assert_eq!(transcript[0].kind, "system");
+            assert_eq!(transcript[0].actor, None);
+            assert_eq!(transcript[0].text, status_transcript_text(kind, message));
+        }
     }
 
     #[test]
@@ -8778,6 +8799,7 @@ mod tests {
 
         state.observe_event(&UiEvent::Info("mid-turn".to_string()));
         state.observe_event(&UiEvent::Info("mid-turn".to_string()));
+        // Same words, different severity: renders differently, so it stands.
         state.observe_event(&UiEvent::Warning("mid-turn".to_string()));
         state.observe_event(&UiEvent::Info("next turn".to_string()));
         state.observe_event(&UiEvent::Info("mid-turn".to_string()));
@@ -8789,7 +8811,32 @@ mod tests {
             .map(|entry| entry.text.as_str())
             .collect();
         // Only immediate repeats collapse; the message may recur later.
-        assert_eq!(texts, ["mid-turn", "next turn", "mid-turn"]);
+        assert_eq!(
+            texts,
+            ["mid-turn", "warning: mid-turn", "next turn", "mid-turn"]
+        );
+    }
+
+    #[test]
+    fn tracker_records_fatal_errors_without_stranding_the_turn() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        state.observe_command(&UiCommand::SendPrompt {
+            text: "hello".to_string(),
+            images: Vec::new(),
+        });
+
+        state.observe_event(&UiEvent::Fatal("agent connection closed".to_string()));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert!(!snapshot.prompt_in_flight);
+        assert!(snapshot.pending_permissions.is_empty());
+        let last = snapshot.transcript.last().expect("fatal entry");
+        assert_eq!(last.kind, "system");
+        assert_eq!(last.text, "fatal: agent connection closed");
     }
 
     #[test]
@@ -8805,7 +8852,10 @@ mod tests {
         let snapshot = state.snapshot().expect("snapshot");
         assert_eq!(snapshot.transcript.len(), 1);
         assert_eq!(snapshot.transcript[0].kind, "system");
-        assert_eq!(snapshot.transcript[0].text, "subagents are unavailable");
+        assert_eq!(
+            snapshot.transcript[0].text,
+            "warning: subagents are unavailable"
+        );
         assert_eq!(snapshot.transcript[0].actor, None);
     }
 
@@ -8834,7 +8884,10 @@ mod tests {
         );
         assert_eq!(snapshot.transcript.len(), 2);
         assert_eq!(snapshot.transcript[1].kind, "system");
-        assert_eq!(snapshot.transcript[1].text, "prompt already in flight");
+        assert_eq!(
+            snapshot.transcript[1].text,
+            "warning: prompt already in flight"
+        );
     }
 
     #[test]
