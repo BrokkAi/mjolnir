@@ -32,6 +32,10 @@ impl Tailscale {
                  (https://tailscale.com/download) or start `mj server` without --tailscale"
             )
         })?;
+        Self::discover_with_binary(binary)
+    }
+
+    fn discover_with_binary(binary: PathBuf) -> Result<Self> {
         let output = Command::new(&binary)
             .args(["status", "--json"])
             .output()
@@ -156,6 +160,19 @@ fn cert_domain(status: &Status) -> Result<String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn fake_tailscale(script: &str) -> (tempfile::TempDir, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("tailscale");
+        std::fs::write(&binary, script).expect("write fake tailscale");
+        let mut permissions = std::fs::metadata(&binary).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).expect("make fake tailscale executable");
+        (dir, binary)
+    }
+
     fn status(backend_state: &str, cert_domains: Option<Vec<&str>>) -> Status {
         Status {
             backend_state: backend_state.to_string(),
@@ -220,6 +237,116 @@ mod tests {
         std::fs::write(&binary, "").expect("write binary");
         let path = std::env::join_paths([dir.path()]).expect("join path");
         assert_eq!(find_binary_in_path(&path), Some(binary));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_reads_certificate_domain_from_cli() {
+        let (_dir, binary) = fake_tailscale(
+            r#"#!/bin/sh
+if [ "$1" = "status" ] && [ "$2" = "--json" ]; then
+  printf '%s' '{"BackendState":"Running","CertDomains":["node.tail1234.ts.net."]}'
+  exit 0
+fi
+printf '%s' 'unexpected arguments' >&2
+exit 9
+"#,
+        );
+
+        let tailscale = Tailscale::discover_with_binary(binary.clone()).expect("discover");
+        assert_eq!(tailscale.binary, binary);
+        assert_eq!(tailscale.cert_domain, "node.tail1234.ts.net");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_reports_status_command_failure() {
+        let (_dir, binary) = fake_tailscale(
+            r#"#!/bin/sh
+printf '%s' 'daemon unavailable' >&2
+exit 4
+"#,
+        );
+
+        let error = Tailscale::discover_with_binary(binary).expect_err("status failure");
+        let message = error.to_string();
+        assert!(message.contains("tailscale status"), "{message}");
+        assert!(message.contains("daemon unavailable"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_reports_malformed_status_json() {
+        let (_dir, binary) = fake_tailscale(
+            r#"#!/bin/sh
+printf '%s' 'not json'
+"#,
+        );
+
+        let error = Tailscale::discover_with_binary(binary).expect_err("malformed status");
+        assert!(
+            error
+                .to_string()
+                .contains("parse `tailscale status --json` output"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mint_cert_passes_paths_and_domain_to_cli() {
+        let (_dir, binary) = fake_tailscale(
+            r#"#!/bin/sh
+if [ "$1" != "cert" ] || [ "$2" != "--cert-file" ] || [ "$4" != "--key-file" ] || [ "$6" != "node.tail1234.ts.net" ]; then
+  printf '%s' 'unexpected arguments' >&2
+  exit 9
+fi
+printf '%s' 'certificate' > "$3"
+printf '%s' 'private key' > "$5"
+"#,
+        );
+        let output = tempfile::tempdir().expect("output tempdir");
+        let cert_path = output.path().join("node.crt");
+        let key_path = output.path().join("node.key");
+        let tailscale = Tailscale {
+            binary,
+            cert_domain: "node.tail1234.ts.net".to_string(),
+        };
+
+        tailscale
+            .mint_cert(&cert_path, &key_path)
+            .expect("mint certificate");
+        assert_eq!(std::fs::read_to_string(cert_path).unwrap(), "certificate");
+        assert_eq!(std::fs::read_to_string(key_path).unwrap(), "private key");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mint_cert_reports_cli_failure() {
+        let (_dir, binary) = fake_tailscale(
+            r#"#!/bin/sh
+printf '%s' 'certificate permission denied' >&2
+exit 5
+"#,
+        );
+        let output = tempfile::tempdir().expect("output tempdir");
+        let tailscale = Tailscale {
+            binary,
+            cert_domain: "node.tail1234.ts.net".to_string(),
+        };
+
+        let error = tailscale
+            .mint_cert(
+                &output.path().join("node.crt"),
+                &output.path().join("node.key"),
+            )
+            .expect_err("certificate failure");
+        let message = error.to_string();
+        assert!(message.contains("node.tail1234.ts.net"), "{message}");
+        assert!(
+            message.contains("certificate permission denied"),
+            "{message}"
+        );
     }
 
     #[cfg(windows)]
