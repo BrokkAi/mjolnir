@@ -1961,7 +1961,10 @@ async fn reviewed_repository_root(cwd: &Path) -> Option<PathBuf> {
         return None;
     }
     let root = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
-    (!root.as_os_str().is_empty()).then_some(root)
+    if root.as_os_str().is_empty() {
+        return None;
+    }
+    tokio::fs::canonicalize(root).await.ok()
 }
 
 fn same_snapshot_endpoints(left: &ReviewSnapshot, right: &ReviewSnapshot) -> bool {
