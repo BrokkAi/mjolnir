@@ -1032,15 +1032,13 @@ impl TranscriptDiff {
     }
 }
 
-/// Tells the operator once when snapshot publishing stops working, and once
-/// again when it recovers.
+/// Logs once when snapshot publishing stops working, and tells the operator
+/// once when it recovers.
 ///
-/// A publish rejection the session cannot grow out of leaves the viewer frozen
-/// on its last good snapshot while the terminal carries on, so reporting it at
-/// `debug!` — below the default `info` level — meant nobody found out at all.
-/// Reporting is deliberately edge-triggered: the failure repeats on every
-/// change and every heartbeat, and a warning per heartbeat would be its own
-/// bug.
+/// A failing publish stays out of the terminal: no viewer listening is the
+/// everyday state of a session, and the session itself is unaffected either
+/// way, so a banner about it is noise. Both edges are reported once, not per
+/// heartbeat, since the condition repeats on every change and every heartbeat.
 struct PublishFailureReporter {
     ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
     consecutive_failures: u32,
@@ -1067,12 +1065,6 @@ impl PublishFailureReporter {
             "remote-control publish has failed {} times running: {error:#}",
             self.consecutive_failures
         );
-        // The full chain, not just the outer context: "remote-control server
-        // returned an error" tells the operator nothing, while the cause names
-        // the status code they need to act on.
-        self.notify(UiEvent::Warning(format!(
-            "remote viewer is not receiving updates: {error:#} · this session is unaffected"
-        )));
     }
 
     fn record_success(&mut self) {
@@ -10789,28 +10781,17 @@ mod tests {
     }
 
     #[test]
-    fn publish_failure_reporter_warns_once_then_reports_recovery() {
+    fn publish_failure_reporter_stays_silent_until_publishing_recovers() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut reporter = PublishFailureReporter::new(Some(tx));
         let error = || anyhow::anyhow!("413 Payload Too Large");
 
-        for _ in 0..PUBLISH_FAILURE_WARN_THRESHOLD - 1 {
+        // A viewer nobody is watching is the common case, so however long the
+        // failures run they stay in the log.
+        for _ in 0..PUBLISH_FAILURE_WARN_THRESHOLD * 3 {
             reporter.record_failure(&error());
         }
-        assert!(
-            rx.try_recv().is_err(),
-            "should not warn on a transient blip"
-        );
-
-        reporter.record_failure(&error());
-        let warning = rx.try_recv().expect("warning after the threshold");
-        assert!(matches!(&warning, UiEvent::Warning(text) if text.contains("413")));
-
-        // The failure repeats every heartbeat; the warning must not.
-        for _ in 0..5 {
-            reporter.record_failure(&error());
-        }
-        assert!(rx.try_recv().is_err(), "warning should be edge-triggered");
+        assert!(rx.try_recv().is_err(), "a failing publish is not a banner");
 
         reporter.record_success();
         assert!(matches!(
@@ -10818,11 +10799,10 @@ mod tests {
             UiEvent::Info(text) if text.contains("resumed")
         ));
 
-        // A later failure run reports again.
-        for _ in 0..PUBLISH_FAILURE_WARN_THRESHOLD {
-            reporter.record_failure(&error());
-        }
-        assert!(matches!(rx.try_recv(), Ok(UiEvent::Warning(_))));
+        // Recovery is edge-triggered too: publishing that keeps working says
+        // so once.
+        reporter.record_success();
+        assert!(rx.try_recv().is_err(), "recovery should be edge-triggered");
     }
 
     #[test]
