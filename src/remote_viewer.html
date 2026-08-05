@@ -1330,6 +1330,17 @@
         text-transform: uppercase;
       }
 
+      .side-badge {
+        flex: 0 0 auto;
+        padding: 5px 9px 4px;
+        clip-path: var(--shape-chip);
+        background: color-mix(in srgb, var(--thought) 18%, var(--inline-bg-strong));
+        color: var(--thought);
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
       /* The TUI status line, mirrored: model via adapter, reasoning effort,
          per-seat token totals, context occupancy, provider quota
          windows and the current branch's open pull request. Field hues match
@@ -1471,6 +1482,7 @@
         &[data-kind="thought"] { --kind-color: var(--thought); }
         &[data-kind="tool"] { --kind-color: var(--tool); }
         &[data-actor="primary"] { --kind-color: var(--primary); }
+        &[data-actor="side"] { --kind-color: var(--thought); }
         &[data-actor="subagent"], &[data-actor="subagents"] { --kind-color: var(--subagent); }
       }
 
@@ -3112,6 +3124,7 @@
           </div>
           <span id="connection-badge" class="connection-badge" role="status" hidden>reconnecting</span>
           <span id="archive-badge" class="archive-badge" hidden>archived</span>
+          <span id="side-badge" class="side-badge" hidden>side</span>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
           <span id="working-badge" class="working-badge" hidden>working</span>
           <button id="workspace-diff-button" class="icon-button" type="button" aria-label="Show workspace changes" hidden>±</button>
@@ -3139,6 +3152,7 @@
               <button id="attach-image" class="attach-button" type="button" hidden>Image</button>
               <input id="image-picker" type="file" accept="image/*" multiple hidden>
               <span id="queue-status" class="queue-meta">Select a session.</span>
+              <button id="exit-side" class="stop-turn" type="button" hidden>Exit side</button>
               <button id="stop-turn" class="stop-turn" type="button" hidden>Stop</button>
               <button id="queue-submit" class="primary" type="button">Send</button>
             </div>
@@ -3351,6 +3365,8 @@
       const approvalBadgeEl = $("approval-badge");
       const connectionBadgeEl = $("connection-badge");
       const archiveBadgeEl = $("archive-badge");
+      const sideBadgeEl = $("side-badge");
+      const exitSideEl = $("exit-side");
       const stopTurnEl = $("stop-turn");
       const backButtonEl = $("back-button");
       const permissionsEl = $("permissions");
@@ -6728,7 +6744,7 @@
         const kind = entryKind(entry);
         const actor = typeof entry.actor === "string" ? entry.actor.toLowerCase() : "";
         el.dataset.kind = kind;
-        if (actor === "primary" || actor === "subagent" || actor === "subagents") {
+        if (actor === "primary" || actor === "side" || actor === "subagent" || actor === "subagents") {
           el.dataset.actor = actor;
         } else if (actor.startsWith("subagent-")) {
           el.dataset.actor = "subagent";
@@ -7228,6 +7244,9 @@
         queueListEl.replaceChildren();
         queueInputEl.disabled = !session;
         queueSubmitEl.disabled = !session;
+        const sideActive = sessionHasCommand(session, "exit");
+        exitSideEl.hidden = !sideActive;
+        exitSideEl.disabled = !sideActive;
         renderAttachments();
 
         if (!session) {
@@ -7240,9 +7259,13 @@
         // Verb = intent, status = mechanism: the button says Send while the
         // strip and rows report what is queued. The placeholder tracks the
         // agent state instead of explaining the queue transport.
-        queueInputEl.placeholder = session.prompt_in_flight
-          ? "Agent is working — your prompt runs when it's free"
-          : "Message the agent";
+        queueInputEl.placeholder = sideActive
+          ? (session.prompt_in_flight
+            ? "Side conversation is working — your prompt runs when it's free"
+            : "Message the side conversation — type exit to return")
+          : (session.prompt_in_flight
+            ? "Agent is working — your prompt runs when it's free"
+            : "Message the agent");
         setQueueStatus(queuedPrompts.length ? `${queuedPrompts.length} queued` : "");
 
         for (const prompt of queuedPrompts) {
@@ -7973,11 +7996,13 @@
         const session = selectedSession();
         const archived = selectedSessionIsArchived();
         const readOnly = Boolean(selectedSessionId) && !selectedSessionIsLive();
+        const sideActive = sessionHasCommand(session, "exit");
         composerEl.hidden = readOnly;
         archiveBadgeEl.hidden = !archived;
+        sideBadgeEl.hidden = readOnly || !sideActive;
         renderTranscript(session, archived);
         renderStatusLine(session);
-        renderConfig(readOnly ? null : session);
+        renderConfig(readOnly || sideActive ? null : session);
         renderSubagents(session);
         renderPermissions(readOnly ? null : session);
         renderQueue(readOnly ? null : session);
@@ -8418,6 +8443,9 @@
         updateJumpToLatestVisibility();
       }, { passive: true });
       queueSubmitEl.addEventListener("click", submitQueuedPrompt);
+      exitSideEl.addEventListener("click", () => {
+        void queueSessionAction("/exit", "Side conversation exit queued.");
+      });
       attachImageEl.addEventListener("click", () => imagePickerEl.click());
       imagePickerEl.addEventListener("change", () => {
         const files = Array.from(imagePickerEl.files || []);

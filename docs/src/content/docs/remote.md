@@ -33,6 +33,15 @@ the right nested request while several run at once. MCP approvals for
 `mcp__mj_subagents__create_subagent` and `mcp__mj_subagents__subagent_cancel`
 are recognized as Mjolnir's own tools rather than third-party ones.
 
+## Side conversations in the viewer
+
+When the connected agent supports ephemeral side sessions, the web command
+palette exposes `/side` with an optional question. The same transcript stays
+open in a visible side mode, but side prompts, replies, and tools are labelled
+with the `Side` actor so they cannot be mistaken for main-session history. Use
+the **Exit side** action (or send `exit`) to delete the temporary session and
+return the composer to the main conversation.
+
 ## Status line in the viewer
 
 Under the chat header the browser mirrors the terminal status line: primary

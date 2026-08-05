@@ -46,6 +46,7 @@ mod self_update;
 mod session;
 mod session_provenance;
 mod settings;
+mod side;
 mod speech;
 mod spinner;
 mod subagent;
@@ -1274,77 +1275,6 @@ async fn stop_new_session_loading(
     let _ = write!(stdout, "\r\x1b[2K").and_then(|()| stdout.flush());
 }
 
-struct ActiveSideRuntime {
-    session_id: String,
-    commands: mpsc::UnboundedSender<UiCommand>,
-    runtime_task: tokio::task::JoinHandle<()>,
-    event_task: tokio::task::JoinHandle<()>,
-}
-
-fn isolated_side_runtime_config(
-    agent: &SelectedAgent,
-    resume_session: Option<String>,
-    cwd: PathBuf,
-    additional_directories: Vec<PathBuf>,
-    agent_stderr: Option<PathBuf>,
-    fs_max_text_bytes: u64,
-) -> acp::AcpRuntimeConfig {
-    acp::AcpRuntimeConfig {
-        command: agent.program.clone(),
-        args: agent.args.clone(),
-        cwd,
-        additional_directories,
-        mcp_servers: Vec::new(),
-        resume_session,
-        session_restore_mode: acp::SessionRestoreMode::Continue,
-        env: agent.env.clone(),
-        agent_stderr,
-        fs_max_text_bytes,
-        access_mode: acp::RuntimeAccessMode::Full,
-        agent_source_id: None,
-        config_path: None,
-        saved_session_config: std::collections::HashMap::new(),
-        role_config: None,
-        subagents: None,
-        side_prompt_policy: true,
-        termination: None,
-    }
-}
-
-async fn discard_side_runtime(
-    side: ActiveSideRuntime,
-    agent: &SelectedAgent,
-    agent_stderr: Option<&Path>,
-) -> Option<String> {
-    let _ = side.commands.send(UiCommand::CancelPrompt);
-    let _ = side.commands.send(UiCommand::Shutdown);
-    let mut runtime_task = side.runtime_task;
-    if tokio::time::timeout(Duration::from_secs(2), &mut runtime_task)
-        .await
-        .is_err()
-    {
-        runtime_task.abort();
-        let _ = runtime_task.await;
-    }
-    side.event_task.abort();
-    match tokio::time::timeout(
-        Duration::from_secs(5),
-        session::delete_session(agent, side.session_id.clone(), agent_stderr),
-    )
-    .await
-    {
-        Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(format!(
-            "could not delete side session {}: {error:#}",
-            side.session_id
-        )),
-        Err(_) => Some(format!(
-            "timed out deleting side session {}",
-            side.session_id
-        )),
-    }
-}
-
 impl From<ui::UiRunResult> for RunSessionResult {
     fn from(result: ui::UiRunResult) -> Self {
         Self {
@@ -2287,7 +2217,18 @@ async fn run_session(
     let event_tracker = remote_tracker.clone();
     let event_primary = roster.primary.clone();
     let event_cwd = cwd.clone();
-    let side_ui_event_tx = ui_event_tx.clone();
+    let (side_ui_event_tx, mut side_ui_event_rx) = mpsc::unbounded_channel();
+    let side_event_tracker = remote_tracker.clone();
+    let side_events_for_ui = ui_event_tx.clone();
+    let side_event_proxy = tokio::spawn(async move {
+        while let Some(event) = side_ui_event_rx.recv().await {
+            let event = side_event_tracker.intercept_event(event);
+            side_event_tracker.observe_event(&event);
+            if side_events_for_ui.send(event).is_err() {
+                break;
+            }
+        }
+    });
     let event_proxy = tokio::spawn(async move {
         let mut events = orchestrated.events;
         while let Some(event) = events.recv().await {
@@ -2332,143 +2273,49 @@ async fn run_session(
     let side_agent_stderr = runtime_options.agent_stderr.clone();
     let side_fs_max_text_bytes = runtime_options.fs_max_text_bytes;
     let cmd_proxy = tokio::spawn(async move {
-        let mut side_runtime: Option<ActiveSideRuntime> = None;
+        let mut side_runtime: Option<side::Runtime> = None;
         let mut local_epoch = 0_u64;
         while let Some(command) = ui_cmd_rx.recv().await {
-            if matches!(&command, UiCommand::StartSide) {
+            if let UiCommand::StartSide { initial_prompt } = command {
                 if side_runtime.is_some() {
-                    let _ = side_ui_event_tx.send(UiEvent::SideStartFailed {
-                        message: "a side conversation is already active".to_string(),
-                    });
+                    let _ = side_ui_event_tx.send(UiEvent::Warning(
+                        "a side conversation is already active".to_string(),
+                    ));
                     continue;
                 }
-                let (responder, response) = tokio::sync::oneshot::channel();
-                if runtime_cmd_tx
-                    .send(UiCommand::ForkSideSession { responder })
-                    .is_err()
-                {
-                    let _ = side_ui_event_tx.send(UiEvent::SideStartFailed {
-                        message: "the main ACP runtime closed before side startup".to_string(),
-                    });
-                    continue;
-                }
-                let source = match response.await {
-                    Ok(Ok(source)) => source,
-                    Ok(Err(message)) => {
-                        let _ = side_ui_event_tx.send(UiEvent::SideStartFailed { message });
-                        continue;
-                    }
-                    Err(_) => {
-                        let _ = side_ui_event_tx.send(UiEvent::SideStartFailed {
-                            message: "the main ACP runtime dropped the side fork response"
-                                .to_string(),
-                        });
-                        continue;
-                    }
+                cmd_tracker.begin_side_start(initial_prompt.is_some());
+                let launch = side::Launch {
+                    agent: &side_agent,
+                    cwd: side_cwd.clone(),
+                    additional_directories: side_additional_directories.clone(),
+                    agent_stderr: side_agent_stderr.clone(),
+                    fs_max_text_bytes: side_fs_max_text_bytes,
                 };
-                let fork_source = source.has_history;
-                let resume_session = fork_source.then_some(source.session_id);
-
-                let (side_event_tx, mut side_event_rx) = mpsc::unbounded_channel();
-                let (side_cmd_tx, side_cmd_rx) = mpsc::unbounded_channel();
-                let side_cfg = isolated_side_runtime_config(
-                    &side_agent,
-                    resume_session,
-                    side_cwd.clone(),
-                    side_additional_directories.clone(),
-                    side_agent_stderr.clone(),
-                    side_fs_max_text_bytes,
-                );
-                let runtime_task = tokio::spawn(async move {
-                    let _ = acp::run(side_cfg, side_event_tx, side_cmd_rx).await;
-                });
-                let forwarded_events = side_ui_event_tx.clone();
-                let (child_ready_tx, child_ready_rx) = tokio::sync::oneshot::channel();
-                let expected_session_starts = if fork_source { 2 } else { 1 };
-                let event_task = tokio::spawn(async move {
-                    let mut child_ready_tx = Some(child_ready_tx);
-                    let mut session_starts = 0_u8;
-                    let mut started = false;
-                    while let Some(event) = side_event_rx.recv().await {
-                        if let UiEvent::SessionStarted { session_id, .. } = &event {
-                            session_starts = session_starts.saturating_add(1);
-                            if session_starts < expected_session_starts {
-                                continue;
-                            }
-                            if session_starts == expected_session_starts {
-                                started = true;
-                                if let Some(tx) = child_ready_tx.take() {
-                                    let _ = tx.send(Ok(session_id.clone()));
-                                }
-                            }
-                        } else if !started {
-                            let failure = match &event {
-                                UiEvent::SessionForkFailed { message }
-                                | UiEvent::Fatal(message) => Some(message.clone()),
-                                _ => None,
-                            };
-                            if let Some(message) = failure {
-                                if let Some(tx) = child_ready_tx.take() {
-                                    let _ = tx.send(Err(message));
-                                }
-                                break;
-                            }
-                            continue;
-                        }
-                        if forwarded_events
-                            .send(UiEvent::Side(Box::new(event)))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                });
-                if fork_source && side_cmd_tx.send(UiCommand::ForkSession).is_err() {
-                    runtime_task.abort();
-                    event_task.abort();
-                    let _ = side_ui_event_tx.send(UiEvent::SideStartFailed {
-                        message: "the side ACP runtime closed before forking".to_string(),
-                    });
-                    continue;
-                }
-                let child_session_id =
-                    match tokio::time::timeout(Duration::from_secs(15), child_ready_rx).await {
-                        Ok(Ok(Ok(session_id))) => session_id,
-                        Ok(Ok(Err(message))) => {
-                            let _ = side_cmd_tx.send(UiCommand::Shutdown);
-                            event_task.abort();
-                            let _ = side_ui_event_tx.send(UiEvent::SideStartFailed { message });
-                            continue;
-                        }
-                        Ok(Err(_)) => {
-                            let _ = side_cmd_tx.send(UiCommand::Shutdown);
-                            event_task.abort();
-                            let _ = side_ui_event_tx.send(UiEvent::SideStartFailed {
-                                message: "the side ACP runtime dropped its fork result".to_string(),
-                            });
-                            continue;
-                        }
-                        Err(_) => {
-                            let _ = side_cmd_tx.send(UiCommand::Shutdown);
-                            event_task.abort();
-                            let _ = side_ui_event_tx.send(UiEvent::SideStartFailed {
-                                message: "side session fork timed out".to_string(),
-                            });
+                let side =
+                    match side::start(launch, &runtime_cmd_tx, side_ui_event_tx.clone()).await {
+                        Ok(side) => side,
+                        Err(message) => {
+                            let event = UiEvent::SideStartFailed { message };
+                            let _ = side_ui_event_tx.send(event);
                             continue;
                         }
                     };
-                side_runtime = Some(ActiveSideRuntime {
-                    session_id: child_session_id,
-                    commands: side_cmd_tx,
-                    runtime_task,
-                    event_task,
-                });
+                if let Some(text) = initial_prompt {
+                    let prompt = UiCommand::SendPrompt {
+                        text,
+                        images: Vec::new(),
+                    };
+                    cmd_tracker.observe_side_command(&prompt);
+                    let _ = side.send(prompt);
+                }
+                side_runtime = Some(side);
                 continue;
             }
             if matches!(command, UiCommand::ExitSide) {
+                cmd_tracker.finish_side_exit();
                 if let Some(side) = side_runtime.take()
                     && let Some(message) =
-                        discard_side_runtime(side, &side_agent, side_agent_stderr.as_deref()).await
+                        side::discard(side, &side_agent, side_agent_stderr.as_deref()).await
                 {
                     let _ = side_ui_event_tx.send(UiEvent::Warning(message));
                 }
@@ -2481,13 +2328,14 @@ async fn run_session(
             if !force_main && side_runtime.is_some() {
                 if matches!(command, UiCommand::Shutdown) {
                     if let Some(side) = side_runtime.take() {
+                        cmd_tracker.finish_side_exit();
                         let _ =
-                            discard_side_runtime(side, &side_agent, side_agent_stderr.as_deref())
-                                .await;
+                            side::discard(side, &side_agent, side_agent_stderr.as_deref()).await;
                     }
                 } else {
                     let side = side_runtime.as_ref().expect("checked side runtime");
-                    let _ = side.commands.send(command);
+                    cmd_tracker.observe_side_command(&command);
+                    let _ = side.send(command);
                     continue;
                 }
             }
@@ -2524,11 +2372,13 @@ async fn run_session(
                 break;
             }
         }
-        if let Some(side) = side_runtime.take()
-            && let Some(message) =
-                discard_side_runtime(side, &side_agent, side_agent_stderr.as_deref()).await
-        {
-            let _ = side_ui_event_tx.send(UiEvent::Warning(message));
+        if let Some(side) = side_runtime.take() {
+            cmd_tracker.finish_side_exit();
+            if let Some(message) =
+                side::discard(side, &side_agent, side_agent_stderr.as_deref()).await
+            {
+                let _ = side_ui_event_tx.send(UiEvent::Warning(message));
+            }
         }
     });
 
@@ -2761,15 +2611,17 @@ async fn run_session(
     }
     drop(usage_turn_tx);
     let event_proxy_wait = wait_for_task("remote-control event proxy", event_proxy);
+    let side_event_proxy_wait = wait_for_task("side event proxy", side_event_proxy);
     let cmd_proxy_wait = wait_for_task("remote-control command proxy", cmd_proxy);
     if let Some(task) = usage_task {
         tokio::join!(
             event_proxy_wait,
+            side_event_proxy_wait,
             cmd_proxy_wait,
             wait_for_task("subscription usage poller", task),
         );
     } else {
-        tokio::join!(event_proxy_wait, cmd_proxy_wait);
+        tokio::join!(event_proxy_wait, side_event_proxy_wait, cmd_proxy_wait);
     }
     if let Some(task) = roster_update_task {
         task.abort();
@@ -3187,33 +3039,6 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-    }
-
-    #[test]
-    fn side_runtime_config_has_no_agent_services_or_persistence() {
-        let agent = SelectedAgent {
-            source_id: "test-agent".to_string(),
-            program: PathBuf::from("agent"),
-            args: vec!["acp".to_string()],
-            env: std::collections::HashMap::new(),
-        };
-        let cfg = isolated_side_runtime_config(
-            &agent,
-            Some("child-session".to_string()),
-            PathBuf::from("/workspace"),
-            vec![PathBuf::from("/extra")],
-            None,
-            acp::DEFAULT_FS_TEXT_BYTES,
-        );
-
-        assert!(cfg.mcp_servers.is_empty());
-        assert!(cfg.subagents.is_none());
-        assert!(cfg.role_config.is_none());
-        assert!(cfg.agent_source_id.is_none());
-        assert!(cfg.config_path.is_none());
-        assert!(cfg.saved_session_config.is_empty());
-        assert!(cfg.side_prompt_policy);
-        assert_eq!(cfg.resume_session.as_deref(), Some("child-session"));
     }
 
     #[test]

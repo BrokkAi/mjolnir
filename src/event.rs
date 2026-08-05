@@ -391,7 +391,7 @@ pub enum UiCommand {
         responder: oneshot::Sender<Result<SideSessionSource, String>>,
     },
     /// Enter an isolated side conversation, optionally sending an initial prompt.
-    StartSide,
+    StartSide { initial_prompt: Option<String> },
     /// Leave and delete the active ephemeral side conversation.
     ExitSide,
     /// Force a command to the hidden main runtime while side mode is visible.

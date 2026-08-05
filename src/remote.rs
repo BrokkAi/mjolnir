@@ -107,6 +107,8 @@ const REMOTE_BUILTIN_EXPORT_COMMAND: &str = "export";
 const REMOTE_BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
 const REMOTE_BUILTIN_REVIEW_COMMAND: &str = "review";
 const REMOTE_BUILTIN_RAGNAROK_COMMAND: &str = "ragnarok";
+const REMOTE_BUILTIN_SIDE_COMMAND: &str = "side";
+const REMOTE_BUILTIN_EXIT_SIDE_COMMAND: &str = "exit";
 /// Default lifetime of a viewer session cookie, in days. Long enough that an
 /// installed phone PWA stays signed in across app evictions for weeks, short
 /// enough to bound the exposure window if a device is lost. This is the default
@@ -377,6 +379,64 @@ fn remote_builtin_command_records(include_fork: bool, include_load: bool) -> Vec
     commands
 }
 
+fn install_remote_side_mode_command(
+    commands: &mut Vec<CommandRecord>,
+    side_session_supported: bool,
+    side_active: bool,
+) {
+    commands.retain(|command| {
+        command.name != REMOTE_BUILTIN_SIDE_COMMAND
+            && command.name != REMOTE_BUILTIN_EXIT_SIDE_COMMAND
+    });
+    if side_active {
+        commands.insert(
+            0,
+            command_record(
+                REMOTE_BUILTIN_EXIT_SIDE_COMMAND,
+                "leave and delete the side conversation",
+                None,
+                "mjolnir",
+            ),
+        );
+    } else if side_session_supported {
+        commands.push(command_record(
+            REMOTE_BUILTIN_SIDE_COMMAND,
+            "open an isolated ephemeral conversation",
+            Some("optional question".to_string()),
+            "mjolnir",
+        ));
+    }
+}
+
+fn remote_side_command_records(commands: &[AvailableCommand]) -> Vec<CommandRecord> {
+    let mut records = Vec::new();
+    let mut seen = HashSet::new();
+    for command in commands {
+        let name = command.name.trim();
+        if name.is_empty()
+            || name.chars().any(char::is_whitespace)
+            || is_remote_reserved_command(name)
+            || !seen.insert(name.to_ascii_lowercase())
+        {
+            continue;
+        }
+        records.push(command_record(
+            name.to_string(),
+            command.description.clone(),
+            available_command_input_hint(command.input.as_ref()),
+            "agent",
+        ));
+    }
+    install_remote_side_mode_command(&mut records, true, true);
+    records.push(command_record(
+        REMOTE_BUILTIN_EXPORT_COMMAND,
+        "download this transcript as markdown",
+        None,
+        "mjolnir",
+    ));
+    records
+}
+
 fn is_remote_reserved_command(name: &str) -> bool {
     let normalized = name.trim().to_ascii_lowercase();
     matches!(
@@ -390,6 +450,8 @@ fn is_remote_reserved_command(name: &str) -> bool {
             | REMOTE_BUILTIN_MJCONFIG_COMMAND
             | REMOTE_BUILTIN_REVIEW_COMMAND
             | REMOTE_BUILTIN_RAGNAROK_COMMAND
+            | REMOTE_BUILTIN_SIDE_COMMAND
+            | REMOTE_BUILTIN_EXIT_SIDE_COMMAND
     )
 }
 
@@ -915,6 +977,11 @@ pub struct PromptCancelRequestRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RemoteQueuedPromptAction {
     SendPrompt(String),
+    StartSide(Option<String>),
+    ExitSide,
+    RejectUnsupportedSide,
+    RejectNestedSide,
+    RejectInactiveSide,
     ClearSession,
     LoadSession(String),
     RejectInvalidLoad,
@@ -932,6 +999,8 @@ fn remote_queued_prompt_action(
     session_fork_supported: bool,
     session_load_supported: bool,
     compact_command_supported: bool,
+    side_session_supported: bool,
+    side_active: bool,
 ) -> RemoteQueuedPromptAction {
     // Match the TUI: attaching an image makes slash-prefixed text an agent
     // prompt rather than a client-side command.
@@ -939,6 +1008,31 @@ fn remote_queued_prompt_action(
         return RemoteQueuedPromptAction::SendPrompt(text);
     }
     let trimmed = text.trim();
+    if side_active {
+        if trimmed == "/exit" || trimmed.eq_ignore_ascii_case("exit") {
+            return RemoteQueuedPromptAction::ExitSide;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/side")
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return RemoteQueuedPromptAction::RejectNestedSide;
+        }
+        return RemoteQueuedPromptAction::SendPrompt(text);
+    }
+    if trimmed == "/exit" {
+        return RemoteQueuedPromptAction::RejectInactiveSide;
+    }
+    if let Some(rest) = trimmed.strip_prefix("/side")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        if !side_session_supported {
+            return RemoteQueuedPromptAction::RejectUnsupportedSide;
+        }
+        let question = rest.trim();
+        return RemoteQueuedPromptAction::StartSide(
+            (!question.is_empty()).then(|| question.to_string()),
+        );
+    }
     if trimmed == "/clear" {
         return RemoteQueuedPromptAction::ClearSession;
     }
@@ -1206,9 +1300,13 @@ struct TrackerState {
     /// Open pull request on the session's current branch, maintained by the
     /// tracker's own branch probe.
     pull_request: Option<PullRequestRecord>,
-    agent_message_open: bool,
+    open_agent_actors: HashSet<String>,
     prompt_in_flight: bool,
     prompt_turn_started_at: Option<String>,
+    side_prompt_in_flight: bool,
+    side_prompt_turn_started_at: Option<String>,
+    side_state: RemoteSideState,
+    side_initial_prompt_pending: bool,
     transcript: Vec<TranscriptEntry>,
     terminal_outputs: HashMap<String, TerminalOutputSnapshot>,
     tool_transcript_entries: HashMap<usize, ToolTranscriptEntry>,
@@ -1228,10 +1326,19 @@ struct TrackerState {
     session_config: Vec<SessionConfigOptionRecord>,
     native_mode: Option<NativeModeRecord>,
     available_commands: Vec<CommandRecord>,
+    main_available_commands: Vec<CommandRecord>,
     prompt_images_supported: bool,
     session_fork_supported: bool,
     session_load_supported: bool,
+    side_session_supported: bool,
     sessions_to_disconnect: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteSideState {
+    Inactive,
+    Starting,
+    Active,
 }
 
 #[derive(Debug, Clone)]
@@ -1592,9 +1699,13 @@ impl TrackerState {
             codex_quota: None,
             claude_quota: None,
             pull_request: None,
-            agent_message_open: false,
+            open_agent_actors: HashSet::new(),
             prompt_in_flight: false,
             prompt_turn_started_at: None,
+            side_prompt_in_flight: false,
+            side_prompt_turn_started_at: None,
+            side_state: RemoteSideState::Inactive,
+            side_initial_prompt_pending: false,
             transcript: Vec::new(),
             terminal_outputs: HashMap::new(),
             tool_transcript_entries: HashMap::new(),
@@ -1606,17 +1717,58 @@ impl TrackerState {
             session_config: Vec::new(),
             native_mode: None,
             available_commands: remote_builtin_command_records(false, false),
+            main_available_commands: remote_builtin_command_records(false, false),
             prompt_images_supported: false,
             session_fork_supported: false,
             session_load_supported: false,
+            side_session_supported: false,
             sessions_to_disconnect: Vec::new(),
         }
     }
 
     fn observe_command(&mut self, command: &UiCommand) {
         if let UiCommand::SendPrompt { text, .. } = command {
-            self.observe_prompt_text(text.clone(), None);
+            self.observe_prompt_text_as(text.clone(), None, "primary");
         }
+    }
+
+    fn observe_side_command(&mut self, command: &UiCommand) {
+        if let UiCommand::SendPrompt { text, .. } = command {
+            self.side_initial_prompt_pending = false;
+            self.observe_prompt_text_as(text.clone(), None, "side");
+        }
+    }
+
+    fn begin_side_start(&mut self, initial_prompt_pending: bool) {
+        // A remote `/side` claim reserves the visible main slot before the
+        // command is classified. Move that reservation into side state, but
+        // preserve a real main turn that the TUI deliberately hid behind a
+        // side conversation.
+        if self.prompt_in_flight && self.prompt_turn_started_at.is_none() {
+            self.prompt_in_flight = false;
+        }
+        self.side_state = RemoteSideState::Starting;
+        self.side_initial_prompt_pending = initial_prompt_pending;
+        self.side_prompt_in_flight = true;
+        self.side_prompt_turn_started_at = None;
+        self.close_agent_message("side");
+        self.available_commands = remote_side_command_records(&[]);
+        self.touch();
+    }
+
+    fn finish_side_exit(&mut self) {
+        if self.side_state == RemoteSideState::Inactive {
+            return;
+        }
+        self.close_agent_message("side");
+        self.side_state = RemoteSideState::Inactive;
+        self.side_initial_prompt_pending = false;
+        self.side_prompt_in_flight = false;
+        self.side_prompt_turn_started_at = None;
+        self.clear_side_pending_permissions();
+        self.available_commands = self.main_available_commands.clone();
+        self.push_actor_transcript_entry("system", "side", "Side conversation closed".to_string());
+        self.touch();
     }
 
     fn reset_for_session_change(&mut self, new_session_id: &str, now: &str) {
@@ -1625,9 +1777,13 @@ impl TrackerState {
         self.start_time = Some(now.to_string());
         self.last_prompt_at = None;
         self.total_messages = 0;
-        self.agent_message_open = false;
+        self.open_agent_actors.clear();
         self.prompt_in_flight = false;
         self.prompt_turn_started_at = None;
+        self.side_prompt_in_flight = false;
+        self.side_prompt_turn_started_at = None;
+        self.side_state = RemoteSideState::Inactive;
+        self.side_initial_prompt_pending = false;
         self.transcript.clear();
         self.terminal_outputs.clear();
         self.tool_transcript_entries.clear();
@@ -1637,11 +1793,17 @@ impl TrackerState {
         self.pending_permissions.clear();
         self.session_config.clear();
         self.native_mode = None;
-        self.available_commands = available_command_records(
+        self.main_available_commands = available_command_records(
             &[],
             self.session_fork_supported,
             self.session_load_supported,
         );
+        install_remote_side_mode_command(
+            &mut self.main_available_commands,
+            self.side_session_supported,
+            false,
+        );
+        self.available_commands = self.main_available_commands.clone();
         // A new session starts its token accounting from zero; adapter
         // identity, provider quotas and the branch PR are session-independent.
         self.agent_usage = crate::agent_usage::Snapshot::default();
@@ -1649,22 +1811,46 @@ impl TrackerState {
 
     fn observe_event(&mut self, event: &UiEvent) {
         match event {
-            UiEvent::Side(_) | UiEvent::SideStartFailed { .. } => {}
+            UiEvent::Side(event) => self.observe_side_event(event),
+            UiEvent::SideStartFailed { message } => {
+                self.close_agent_message("side");
+                self.side_state = RemoteSideState::Inactive;
+                self.side_initial_prompt_pending = false;
+                self.side_prompt_in_flight = false;
+                self.side_prompt_turn_started_at = None;
+                self.clear_side_pending_permissions();
+                self.available_commands = self.main_available_commands.clone();
+                self.push_actor_transcript_entry(
+                    "system",
+                    "side",
+                    format!("Side conversation failed: {message}"),
+                );
+                self.touch();
+            }
             UiEvent::Connected {
                 prompt_images_supported,
                 session_fork_supported,
                 session_load_supported,
+                side_session_supported,
                 ..
             } => {
                 self.prompt_images_supported = *prompt_images_supported;
                 self.session_fork_supported = *session_fork_supported;
                 self.session_load_supported = *session_load_supported;
-                self.available_commands =
-                    available_command_records(
-                        &[],
-                        self.session_fork_supported,
-                        self.session_load_supported,
-                    );
+                self.side_session_supported = *side_session_supported;
+                self.main_available_commands = available_command_records(
+                    &[],
+                    self.session_fork_supported,
+                    self.session_load_supported,
+                );
+                install_remote_side_mode_command(
+                    &mut self.main_available_commands,
+                    self.side_session_supported,
+                    false,
+                );
+                if self.side_state == RemoteSideState::Inactive {
+                    self.available_commands = self.main_available_commands.clone();
+                }
                 self.touch();
             }
             UiEvent::SessionStarted { session_id, .. } => {
@@ -1682,18 +1868,25 @@ impl TrackerState {
                     if self.start_time.is_none() {
                         self.start_time = Some(now.clone());
                     }
-                    self.agent_message_open = false;
+                    self.close_agent_message("primary");
                     self.prompt_in_flight = false;
                     self.prompt_turn_started_at = None;
-                    self.pending_permissions.clear();
+                    self.clear_main_pending_permissions();
                     self.session_config.clear();
                     self.native_mode = None;
-                    self.available_commands =
-                        available_command_records(
-                            &[],
-                            self.session_fork_supported,
-                            self.session_load_supported,
-                        );
+                    self.main_available_commands = available_command_records(
+                        &[],
+                        self.session_fork_supported,
+                        self.session_load_supported,
+                    );
+                    install_remote_side_mode_command(
+                        &mut self.main_available_commands,
+                        self.side_session_supported,
+                        false,
+                    );
+                    if self.side_state == RemoteSideState::Inactive {
+                        self.available_commands = self.main_available_commands.clone();
+                    }
                 }
                 self.last_update = Some(now);
             }
@@ -1787,7 +1980,7 @@ impl TrackerState {
             }
             UiEvent::SubagentPoolModelChanged { .. } => {}
             UiEvent::CancelPendingPermissions => {
-                self.pending_permissions.clear();
+                self.clear_main_pending_permissions();
                 self.touch();
             }
             UiEvent::PermissionRequest(_)
@@ -1813,6 +2006,100 @@ impl TrackerState {
                 self.touch();
             }
         }
+    }
+
+    fn observe_side_event(&mut self, event: &UiEvent) {
+        match event {
+            UiEvent::SessionStarted { .. } => {
+                self.side_state = RemoteSideState::Active;
+                self.available_commands = remote_side_command_records(&[]);
+                self.push_actor_transcript_entry(
+                    "system",
+                    "side",
+                    "Side conversation started".to_string(),
+                );
+                if !self.side_initial_prompt_pending && self.side_prompt_turn_started_at.is_none() {
+                    self.side_prompt_in_flight = false;
+                    self.side_prompt_turn_started_at = None;
+                }
+                self.touch();
+            }
+            UiEvent::SessionUpdate(update) => {
+                self.observe_session_update_as(update, "side", Some("side"));
+            }
+            UiEvent::TerminalOutput(snapshot) => {
+                let mut snapshot = snapshot.clone();
+                snapshot.terminal_id = namespace_remote_id(Some("side"), &snapshot.terminal_id);
+                self.observe_terminal_output(&snapshot);
+            }
+            UiEvent::PromptDone { .. } => self.end_side_prompt_turn(),
+            UiEvent::PromptFailed { message } => {
+                self.end_side_prompt_turn();
+                self.push_actor_transcript_entry("system", "side", format!("Warning: {message}"));
+                self.touch();
+            }
+            UiEvent::Fatal(message) => {
+                self.end_side_prompt_turn();
+                self.push_actor_transcript_entry("system", "side", format!("Fatal: {message}"));
+                self.touch();
+            }
+            UiEvent::Info(message) => {
+                self.push_actor_transcript_entry("system", "side", message.clone());
+                self.touch();
+            }
+            UiEvent::Warning(message) => {
+                self.push_actor_transcript_entry("system", "side", format!("Warning: {message}"));
+                self.touch();
+            }
+            UiEvent::CancelPendingPermissions => {
+                self.clear_side_pending_permissions();
+                self.touch();
+            }
+            UiEvent::ContextCompacted => {
+                self.push_actor_transcript_entry("system", "side", "Context compacted".to_string());
+                self.touch();
+            }
+            UiEvent::Side(_)
+            | UiEvent::SideStartFailed { .. }
+            | UiEvent::Connected { .. }
+            | UiEvent::SessionConfigOptions { .. }
+            | UiEvent::RosterUpdate { .. }
+            | UiEvent::InternalMessage(_)
+            | UiEvent::AgentUsage(_)
+            | UiEvent::SubagentPoolModelChanged { .. }
+            | UiEvent::WorkspaceDiff(_)
+            | UiEvent::PermissionRequest(_)
+            | UiEvent::ElicitationRequest(_)
+            | UiEvent::Subagent(_)
+            | UiEvent::Workflow(_)
+            | UiEvent::RemotePermissionDecision { .. }
+            | UiEvent::SessionForkFailed { .. }
+            | UiEvent::ClaudeUsage(_)
+            | UiEvent::CodexUsage(_) => {}
+        }
+    }
+
+    fn end_side_prompt_turn(&mut self) {
+        self.close_agent_message("side");
+        self.side_prompt_in_flight = false;
+        self.side_prompt_turn_started_at = None;
+        self.side_initial_prompt_pending = false;
+        self.clear_side_pending_permissions();
+        self.touch();
+    }
+
+    fn clear_side_pending_permissions(&mut self) {
+        self.pending_permissions.retain(|pending| {
+            !pending.request_id.starts_with("side:")
+                && !pending.request_id.starts_with("elicitation:side:")
+        });
+    }
+
+    fn clear_main_pending_permissions(&mut self) {
+        self.pending_permissions.retain(|pending| {
+            pending.request_id.starts_with("side:")
+                || pending.request_id.starts_with("elicitation:side:")
+        });
     }
 
     /// Mirror one workflow lifecycle transition.
@@ -2055,15 +2342,14 @@ impl TrackerState {
     ) {
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
-                if !self.agent_message_open {
+                if self.open_agent_actors.insert(actor.to_string()) {
                     self.total_messages = self.total_messages.saturating_add(1);
-                    self.agent_message_open = true;
                 }
                 self.append_transcript_text("agent", actor, content_block_text(&chunk.content));
                 self.touch();
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
-                self.agent_message_open = false;
+                self.close_agent_message(actor);
                 self.append_transcript_text("thought", actor, content_block_text(&chunk.content));
                 self.touch();
             }
@@ -2071,7 +2357,7 @@ impl TrackerState {
                 if actor == "primary" && crate::app::is_subagent_transport_call(tool_call) {
                     return;
                 }
-                self.agent_message_open = false;
+                self.close_agent_message(actor);
                 let mut content = tool_call.content.clone();
                 namespace_remote_terminals(&mut content, id_prefix);
                 self.push_tool_transcript_entry(
@@ -2088,7 +2374,7 @@ impl TrackerState {
                 if actor == "primary" && crate::app::is_subagent_transport_update(update) {
                     return;
                 }
-                self.agent_message_open = false;
+                self.close_agent_message(actor);
                 let tool_call_id = namespace_remote_id(id_prefix, &update.tool_call_id.to_string());
                 let mut fields = update.fields.clone();
                 if let Some(content) = fields.content.as_mut() {
@@ -2107,26 +2393,45 @@ impl TrackerState {
                 self.touch();
             }
             SessionUpdate::SessionInfoUpdate(info) => {
-                if let Some(title) = info.title.value() {
+                if actor == "primary"
+                    && let Some(title) = info.title.value()
+                {
                     self.name = Some(title.clone());
                 }
-                self.agent_message_open = false;
+                self.close_agent_message(actor);
                 self.touch();
             }
             SessionUpdate::AvailableCommandsUpdate(update) => {
-                self.available_commands = available_command_records(
-                    &update.available_commands,
-                    self.session_fork_supported,
-                    self.session_load_supported,
-                );
-                self.agent_message_open = false;
+                if actor == "primary" {
+                    self.main_available_commands = available_command_records(
+                        &update.available_commands,
+                        self.session_fork_supported,
+                        self.session_load_supported,
+                    );
+                    install_remote_side_mode_command(
+                        &mut self.main_available_commands,
+                        self.side_session_supported,
+                        false,
+                    );
+                    if self.side_state == RemoteSideState::Inactive {
+                        self.available_commands = self.main_available_commands.clone();
+                    }
+                } else if actor == "side" {
+                    self.available_commands =
+                        remote_side_command_records(&update.available_commands);
+                }
+                self.close_agent_message(actor);
                 self.touch();
             }
             _ => {
-                self.agent_message_open = false;
+                self.close_agent_message(actor);
                 self.touch();
             }
         }
+    }
+
+    fn close_agent_message(&mut self, actor: &str) {
+        self.open_agent_actors.remove(actor);
     }
 
     fn observe_terminal_output(&mut self, snapshot: &TerminalOutputSnapshot) {
@@ -2222,28 +2527,33 @@ impl TrackerState {
     /// Reset the per-turn state a finished, failed or fatal prompt leaves
     /// behind.
     fn end_prompt_turn(&mut self) {
-        self.agent_message_open = false;
+        self.close_agent_message("primary");
         self.prompt_in_flight = false;
         self.prompt_turn_started_at = None;
-        // The turn is over; any prompt still listed here was cancelled by the
-        // runtime, so don't advertise it.
-        self.pending_permissions.clear();
+        // The main turn is over; retain only approvals owned by a concurrent
+        // isolated side runtime.
+        self.clear_main_pending_permissions();
         self.touch();
     }
 
     fn push_system_notice(&mut self, text: impl Into<String>) {
-        self.agent_message_open = false;
+        self.close_agent_message("primary");
         self.prompt_in_flight = false;
         self.prompt_turn_started_at = None;
         self.record_system_notice(text);
     }
 
-    fn observe_prompt_text(&mut self, text: String, submitted_at: Option<String>) {
+    fn observe_prompt_text_as(&mut self, text: String, submitted_at: Option<String>, actor: &str) {
         let prompt_at = submitted_at.unwrap_or_else(now_rfc3339);
         self.total_messages = self.total_messages.saturating_add(1);
-        self.agent_message_open = false;
-        self.prompt_in_flight = true;
-        self.prompt_turn_started_at = Some(now_rfc3339());
+        self.close_agent_message(actor);
+        if actor == "side" {
+            self.side_prompt_in_flight = true;
+            self.side_prompt_turn_started_at = Some(now_rfc3339());
+        } else {
+            self.prompt_in_flight = true;
+            self.prompt_turn_started_at = Some(now_rfc3339());
+        }
         if self
             .last_prompt_at
             .as_deref()
@@ -2251,7 +2561,12 @@ impl TrackerState {
         {
             self.last_prompt_at = Some(prompt_at.clone());
         }
-        self.push_transcript_entry_at("user", text, prompt_at);
+        self.push_transcript_entry_at_with_actor(
+            "user",
+            text,
+            prompt_at,
+            (actor != "primary").then(|| actor.to_string()),
+        );
         self.touch();
     }
 
@@ -2397,7 +2712,11 @@ impl TrackerState {
             agent: self.agent.clone(),
             transcript: self.published_transcript(),
             queued_prompt_count: 0,
-            prompt_in_flight: self.prompt_in_flight && self.prompt_turn_started_at.is_some(),
+            prompt_in_flight: if self.side_state == RemoteSideState::Inactive {
+                self.prompt_in_flight && self.prompt_turn_started_at.is_some()
+            } else {
+                self.side_prompt_in_flight && self.side_prompt_turn_started_at.is_some()
+            },
             prompt_images_supported: self.prompt_images_supported,
             pending_permissions: self.pending_permissions.clone(),
             session_config: self.session_config.clone(),
@@ -2461,17 +2780,29 @@ impl TrackerState {
     }
 
     fn reserve_remote_prompt_slot(&mut self) -> Option<String> {
-        if self.prompt_in_flight {
-            return None;
-        }
         let session_id = self.session_id.clone()?;
-        self.prompt_in_flight = true;
+        if self.side_state == RemoteSideState::Inactive {
+            if self.prompt_in_flight {
+                return None;
+            }
+            self.prompt_in_flight = true;
+        } else {
+            if self.side_prompt_in_flight {
+                return None;
+            }
+            self.side_prompt_in_flight = true;
+        }
         Some(session_id)
     }
 
     fn release_remote_prompt_slot(&mut self) {
-        self.prompt_in_flight = false;
-        self.prompt_turn_started_at = None;
+        if self.side_state == RemoteSideState::Inactive {
+            self.prompt_in_flight = false;
+            self.prompt_turn_started_at = None;
+        } else {
+            self.side_prompt_in_flight = false;
+            self.side_prompt_turn_started_at = None;
+        }
     }
 
     fn release_remote_prompt_slot_for(&mut self, session_id: &str) {
@@ -2506,20 +2837,23 @@ impl TrackerState {
     /// queue, so claim nothing while a prompt turn is in flight — the change
     /// stays queued until the session is idle again.
     fn config_claim_session(&self) -> Option<String> {
-        if self.prompt_in_flight {
+        if self.side_state != RemoteSideState::Inactive || self.prompt_in_flight {
             return None;
         }
         self.session_id.clone()
     }
 
     fn prompt_cancel_claim(&self) -> Option<(String, String)> {
-        if !self.prompt_in_flight {
-            return None;
-        }
-        Some((
-            self.session_id.clone()?,
-            self.prompt_turn_started_at.clone()?,
-        ))
+        let started_at = if self.side_state == RemoteSideState::Inactive {
+            self.prompt_in_flight
+                .then(|| self.prompt_turn_started_at.clone())
+                .flatten()
+        } else {
+            self.side_prompt_in_flight
+                .then(|| self.side_prompt_turn_started_at.clone())
+                .flatten()
+        }?;
+        Some((self.session_id.clone()?, started_at))
     }
 }
 
@@ -2630,23 +2964,41 @@ impl RemoteSessionTracker {
         }
         match event {
             UiEvent::PermissionRequest(prompt) => {
-                UiEvent::PermissionRequest(self.track_permission_prompt(prompt))
+                UiEvent::PermissionRequest(self.track_permission_prompt(prompt, None))
+            }
+            UiEvent::Side(event) => {
+                let event = match *event {
+                    UiEvent::PermissionRequest(mut prompt) => {
+                        let local_id = prompt.tool_call.tool_call_id.to_string();
+                        prompt.tool_call.tool_call_id = format!("side:{local_id}").into();
+                        UiEvent::PermissionRequest(
+                            self.track_permission_prompt(prompt, Some("side")),
+                        )
+                    }
+                    event => event,
+                };
+                UiEvent::Side(Box::new(event))
             }
             other => other,
         }
     }
 
-    fn track_permission_prompt(&self, prompt: PermissionPrompt) -> PermissionPrompt {
+    fn track_permission_prompt(
+        &self,
+        prompt: PermissionPrompt,
+        actor: Option<&str>,
+    ) -> PermissionPrompt {
         let request_id = prompt.tool_call.tool_call_id.to_string();
+        let title = prompt
+            .tool_call
+            .fields
+            .title
+            .clone()
+            .map(|title| title.replace("\\n", "\n"))
+            .unwrap_or_else(|| request_id.clone());
         let record = PendingPermissionRecord {
             request_id: request_id.clone(),
-            title: prompt
-                .tool_call
-                .fields
-                .title
-                .clone()
-                .map(|title| title.replace("\\n", "\n"))
-                .unwrap_or_else(|| request_id.clone()),
+            title: actor.map_or(title.clone(), |actor| format!("{actor} · {title}")),
             options: prompt
                 .options
                 .iter()
@@ -2754,6 +3106,37 @@ impl RemoteSessionTracker {
         }
         if let Ok(mut state) = self.state.lock() {
             state.observe_command(command);
+        }
+        self.request_flush();
+    }
+
+    pub fn observe_side_command(&self, command: &UiCommand) {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.observe_side_command(command);
+        }
+        self.request_flush();
+    }
+
+    pub fn begin_side_start(&self, initial_prompt_pending: bool) {
+        if let Ok(mut state) = self.state.lock() {
+            state.begin_side_start(initial_prompt_pending);
+        }
+        self.request_flush();
+    }
+
+    pub fn finish_side_exit(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.finish_side_exit();
+        }
+        self.request_flush();
+    }
+
+    fn observe_side_event(&self, event: &UiEvent) {
+        if let Ok(mut state) = self.state.lock() {
+            state.observe_side_event(event);
         }
         self.request_flush();
     }
@@ -3182,16 +3565,18 @@ impl RemoteSessionTracker {
                 let queued = claim_remote_prompt(connection.clone(), &session_id).await;
                 match queued {
                     Ok(Some(prompt)) => {
-                        let (can_fork, can_load, cwd) = state
+                        let (can_fork, can_load, can_side, side_active, cwd) = state
                             .lock()
                             .map(|guard| {
                                 (
                                     guard.session_fork_supported,
                                     guard.session_load_supported,
+                                    guard.side_session_supported,
+                                    guard.side_state != RemoteSideState::Inactive,
                                     guard.cwd.clone(),
                                 )
                             })
-                            .unwrap_or((false, false, None));
+                            .unwrap_or((false, false, false, false, None));
                         let can_compact = ui_event_tx.is_some();
                         let QueuedPrompt { text, images, .. } = prompt;
                         match remote_queued_prompt_action(
@@ -3200,7 +3585,48 @@ impl RemoteSessionTracker {
                             can_fork,
                             can_load,
                             can_compact,
+                            can_side,
+                            side_active,
                         ) {
+                            RemoteQueuedPromptAction::StartSide(initial_prompt) => {
+                                if command_tx
+                                    .send(UiCommand::StartSide { initial_prompt })
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            RemoteQueuedPromptAction::ExitSide => {
+                                let sent = command_tx.send(UiCommand::ExitSide).is_ok();
+                                if !sent {
+                                    break;
+                                }
+                            }
+                            RemoteQueuedPromptAction::RejectUnsupportedSide => {
+                                record_remote_action_error(
+                                    &state,
+                                    ui_event_tx.as_ref(),
+                                    &session_id,
+                                    "side conversations are not supported by this agent"
+                                        .to_string(),
+                                );
+                            }
+                            RemoteQueuedPromptAction::RejectNestedSide => {
+                                record_remote_action_error(
+                                    &state,
+                                    ui_event_tx.as_ref(),
+                                    &session_id,
+                                    "nested side conversations are not supported".to_string(),
+                                );
+                            }
+                            RemoteQueuedPromptAction::RejectInactiveSide => {
+                                record_remote_action_error(
+                                    &state,
+                                    ui_event_tx.as_ref(),
+                                    &session_id,
+                                    "no side conversation is active".to_string(),
+                                );
+                            }
                             RemoteQueuedPromptAction::ClearSession => {
                                 let (responder, response) = tokio::sync::oneshot::channel();
                                 if command_tx
@@ -3594,10 +4020,14 @@ fn start_server_agent_session(
     fs_max_text_bytes: u64,
     launch_reporter: Option<ServerSessionLaunchReporter>,
 ) -> ServerAgentSession {
+    let side_agent = agent.clone();
+    let side_cwd = cwd.clone();
+    let side_additional_directories = additional_directories.clone();
     let (runtime_event_tx, runtime_event_rx) = mpsc::unbounded_channel();
     let (runtime_cmd_tx, runtime_cmd_rx) = mpsc::unbounded_channel();
     let (server_cmd_tx, mut server_cmd_rx) = mpsc::unbounded_channel();
     let (remote_event_tx, mut remote_event_rx) = mpsc::unbounded_channel();
+    let (side_event_tx, mut side_event_rx) = mpsc::unbounded_channel();
     // The adapter source id ("codex-acp", ...) — not the synthetic
     // `roster:{model}` launch id — so saved session options load from and
     // accepted live values persist to the same buckets the TUI uses.
@@ -3811,9 +4241,77 @@ fn start_server_agent_session(
             let handoffs = subagent_handoffs.clone();
             let primary_orchestrator = primary_orchestrator.clone();
             let workspace_roots = workspace_roots.clone();
+            let side_event_tx = side_event_tx.clone();
             tokio::spawn(async move {
+                let mut side_runtime: Option<crate::side::Runtime> = None;
                 let mut local_epoch = 0_u64;
                 while let Some(command) = server_cmd_rx.recv().await {
+                    if let UiCommand::StartSide { initial_prompt } = command {
+                        if side_runtime.is_some() {
+                            let _ = side_event_tx.send(UiEvent::Warning(
+                                "a side conversation is already active".to_string(),
+                            ));
+                            continue;
+                        }
+                        tracker.begin_side_start(initial_prompt.is_some());
+                        let launch = crate::side::Launch {
+                            agent: &side_agent,
+                            cwd: side_cwd.clone(),
+                            additional_directories: side_additional_directories.clone(),
+                            agent_stderr: None,
+                            fs_max_text_bytes,
+                        };
+                        let side = match crate::side::start(
+                            launch,
+                            &runtime_cmd_tx,
+                            side_event_tx.clone(),
+                        )
+                        .await
+                        {
+                            Ok(side) => side,
+                            Err(message) => {
+                                let _ = side_event_tx.send(UiEvent::SideStartFailed { message });
+                                continue;
+                            }
+                        };
+                        if let Some(text) = initial_prompt {
+                            let prompt = UiCommand::SendPrompt {
+                                text,
+                                images: Vec::new(),
+                            };
+                            tracker.observe_side_command(&prompt);
+                            let _ = side.send(prompt);
+                        }
+                        side_runtime = Some(side);
+                        continue;
+                    }
+                    if matches!(command, UiCommand::ExitSide) {
+                        tracker.finish_side_exit();
+                        if let Some(side) = side_runtime.take()
+                            && let Some(message) =
+                                crate::side::discard(side, &side_agent, None).await
+                        {
+                            let _ = side_event_tx.send(UiEvent::Warning(message));
+                        }
+                        continue;
+                    }
+                    let (command, force_main) = match command {
+                        UiCommand::Main(command) => (*command, true),
+                        command => (command, false),
+                    };
+                    if !force_main && side_runtime.is_some() {
+                        if matches!(command, UiCommand::Shutdown) {
+                            if let Some(side) = side_runtime.take() {
+                                tracker.finish_side_exit();
+                                let _ = crate::side::discard(side, &side_agent, None).await;
+                            }
+                        } else {
+                            let side = side_runtime.as_ref().expect("checked side runtime");
+                            tracker.observe_side_command(&command);
+                            let _ = side.send(command);
+                            continue;
+                        }
+                    }
                     if let UiCommand::RunReview { target } = command {
                         primary_orchestrator.request_review(target);
                         continue;
@@ -3844,6 +4342,12 @@ fn start_server_agent_session(
                     let shutdown = matches!(command, UiCommand::Shutdown);
                     if runtime_cmd_tx.send(command).is_err() || shutdown {
                         break;
+                    }
+                }
+                if let Some(side) = side_runtime.take() {
+                    tracker.finish_side_exit();
+                    if let Some(message) = crate::side::discard(side, &side_agent, None).await {
+                        let _ = side_event_tx.send(UiEvent::Warning(message));
                     }
                 }
             })
@@ -3884,6 +4388,12 @@ fn start_server_agent_session(
                         break;
                     };
                     handle_server_remote_event(event, &mut pending_permissions);
+                }
+                event = side_event_rx.recv() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    handle_server_side_event(event, &tracker, &mut pending_permissions);
                 }
                 joined = &mut runtime => {
                     if let Err(error) = joined {
@@ -4010,6 +4520,49 @@ fn handle_server_agent_event(
         | UiEvent::PromptFailed { .. }
         | UiEvent::Fatal(_) => {
             pending_permissions.clear();
+        }
+        _ => {}
+    }
+}
+
+fn handle_server_side_event(
+    event: UiEvent,
+    tracker: &RemoteSessionTracker,
+    pending_permissions: &mut HashMap<String, RemotePendingApproval>,
+) {
+    let event = match event {
+        UiEvent::Side(event) => *event,
+        event @ UiEvent::SideStartFailed { .. } | event @ UiEvent::Warning(_) => {
+            tracker.observe_event(&event);
+            return;
+        }
+        event => event,
+    };
+    if let UiEvent::ElicitationRequest(prompt) = event {
+        if let Some((request_id, prompt)) = tracker.track_elicitation_prompt(prompt, Some("side")) {
+            pending_permissions.insert(request_id, RemotePendingApproval::Elicitation(prompt));
+        }
+        return;
+    }
+
+    let event = tracker.intercept_event(UiEvent::Side(Box::new(event)));
+    let UiEvent::Side(event) = event else {
+        unreachable!("side event interceptor preserves the wrapper");
+    };
+    tracker.observe_side_event(&event);
+    match *event {
+        UiEvent::PermissionRequest(prompt) => {
+            pending_permissions.insert(
+                prompt.tool_call.tool_call_id.to_string(),
+                RemotePendingApproval::Permission(prompt),
+            );
+        }
+        UiEvent::CancelPendingPermissions
+        | UiEvent::PromptDone { .. }
+        | UiEvent::PromptFailed { .. }
+        | UiEvent::Fatal(_) => {
+            pending_permissions
+                .retain(|id, _| !id.starts_with("side:") && !id.starts_with("elicitation:side:"));
         }
         _ => {}
     }
@@ -6393,6 +6946,8 @@ async fn queue_prompt(
         !request.images.is_empty(),
         false,
         false,
+        false,
+        true,
         false,
     ) {
         RemoteQueuedPromptAction::RunReview(_) => true,
@@ -8954,6 +9509,16 @@ mod tests {
     }
 
     #[test]
+    fn embedded_viewer_contains_side_mode_controls() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("id=\"side-badge\""));
+        assert!(viewer.contains("id=\"exit-side\""));
+        assert!(viewer.contains("sessionHasCommand(session, \"exit\")"));
+        assert!(viewer.contains("queueSessionAction(\"/exit\""));
+        assert!(viewer.contains("type exit to return"));
+    }
+
+    #[test]
     fn embedded_viewer_contains_read_only_session_history() {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("id=\"history-toggle\""));
@@ -9244,6 +9809,120 @@ mod tests {
         assert_eq!(snapshot.transcript[1].kind, "agent");
         assert_eq!(snapshot.transcript[1].text, "hi there");
         assert!(!snapshot.transcript[1].timestamp.is_empty());
+    }
+
+    #[test]
+    fn tracker_keeps_side_transcript_and_turn_state_distinct_from_main() {
+        use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::Connected {
+            agent_name: None,
+            agent_version: None,
+            prompt_images_supported: false,
+            session_fork_supported: true,
+            session_load_supported: true,
+            side_session_supported: true,
+            side_session_unsupported_reason: None,
+        });
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "main-session".to_string(),
+            resumed: false,
+        });
+        state.observe_command(&UiCommand::SendPrompt {
+            text: "main question".to_string(),
+            images: Vec::new(),
+        });
+
+        state.begin_side_start(true);
+        // The command proxy can observe the initial prompt before the side
+        // event proxy folds SessionStarted. That ordering must not release the
+        // prompt slot while the side turn is actually running.
+        state.observe_side_command(&UiCommand::SendPrompt {
+            text: "side question".to_string(),
+            images: Vec::new(),
+        });
+        state.observe_side_event(&UiEvent::SessionStarted {
+            session_id: "side-session".to_string(),
+            resumed: false,
+        });
+        state.observe_side_event(&UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new("side answer"))),
+        )));
+
+        let active = state.snapshot().expect("active snapshot");
+        assert!(active.prompt_in_flight);
+        assert!(
+            active
+                .available_commands
+                .iter()
+                .any(|command| command.name == REMOTE_BUILTIN_EXIT_SIDE_COMMAND)
+        );
+        assert!(active.transcript.iter().any(|entry| {
+            entry.kind == "user"
+                && entry.actor.as_deref() == Some("side")
+                && entry.text == "side question"
+        }));
+        assert!(active.transcript.iter().any(|entry| {
+            entry.kind == "agent"
+                && entry.actor.as_deref() == Some("side")
+                && entry.text == "side answer"
+        }));
+
+        state.observe_side_event(&UiEvent::PromptDone {
+            stop_reason: agent_client_protocol::schema::v1::StopReason::EndTurn,
+            usage: None,
+        });
+        assert!(!state.snapshot().expect("idle side").prompt_in_flight);
+        state.finish_side_exit();
+
+        let main = state.snapshot().expect("main snapshot");
+        assert!(
+            main.prompt_in_flight,
+            "the hidden main turn remains in flight after side mode closes"
+        );
+        assert!(
+            main.available_commands
+                .iter()
+                .any(|command| command.name == REMOTE_BUILTIN_SIDE_COMMAND)
+        );
+        assert!(
+            !main
+                .available_commands
+                .iter()
+                .any(|command| command.name == REMOTE_BUILTIN_EXIT_SIDE_COMMAND)
+        );
+    }
+
+    #[test]
+    fn tracker_cancels_permissions_only_for_the_runtime_that_emitted_the_event() {
+        let pending = |request_id: &str| PendingPermissionRecord {
+            request_id: request_id.to_string(),
+            title: request_id.to_string(),
+            options: Vec::new(),
+            elicitation: None,
+            requested_at: "2026-08-05T00:00:00Z".to_string(),
+        };
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.pending_permissions = vec![
+            pending("main-call"),
+            pending("side:side-call"),
+            pending("elicitation:side:1"),
+        ];
+
+        state.observe_side_event(&UiEvent::CancelPendingPermissions);
+        assert_eq!(state.pending_permissions, vec![pending("main-call")]);
+
+        state.pending_permissions = vec![
+            pending("main-call"),
+            pending("side:side-call"),
+            pending("elicitation:side:1"),
+        ];
+        state.observe_event(&UiEvent::CancelPendingPermissions);
+        assert_eq!(
+            state.pending_permissions,
+            vec![pending("side:side-call"), pending("elicitation:side:1")]
+        );
     }
 
     #[test]
@@ -11431,35 +12110,75 @@ mod tests {
     #[test]
     fn remote_queued_prompt_action_routes_fork_commands() {
         assert_eq!(
-            remote_queued_prompt_action("/fork".to_string(), false, true, true, true),
+            remote_queued_prompt_action("/fork".to_string(), false, true, true, true, false, false),
             RemoteQueuedPromptAction::ForkSession
         );
         assert_eq!(
-            remote_queued_prompt_action(" /fork ".to_string(), false, false, true, true),
+            remote_queued_prompt_action(
+                " /fork ".to_string(),
+                false,
+                false,
+                true,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::RejectUnsupportedFork
         );
         assert_eq!(
-            remote_queued_prompt_action("/fork later".to_string(), false, true, true, true),
+            remote_queued_prompt_action(
+                "/fork later".to_string(),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::SendPrompt("/fork later".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("hello".to_string(), false, true, true, true),
+            remote_queued_prompt_action("hello".to_string(), false, true, true, true, false, false),
             RemoteQueuedPromptAction::SendPrompt("hello".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("/review recent".to_string(), false, true, true, true),
+            remote_queued_prompt_action(
+                "/review recent".to_string(),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::RunReview(crate::event::ReviewTarget::Recent)
         );
         assert_eq!(
-            remote_queued_prompt_action("/review head".to_string(), false, true, true, true),
+            remote_queued_prompt_action(
+                "/review head".to_string(),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::RunReview(crate::event::ReviewTarget::Head)
         );
         assert_eq!(
-            remote_queued_prompt_action("/review".to_string(), false, true, true, true),
+            remote_queued_prompt_action(
+                "/review".to_string(),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::RejectInvalidReview
         );
         assert_eq!(
-            remote_queued_prompt_action("/fork".to_string(), true, true, true, true),
+            remote_queued_prompt_action("/fork".to_string(), true, true, true, true, false, false),
             RemoteQueuedPromptAction::SendPrompt("/fork".to_string()),
             "image prompts must not be consumed as local slash commands"
         );
@@ -11468,20 +12187,101 @@ mod tests {
     #[test]
     fn remote_queued_prompt_action_routes_session_switching_commands() {
         assert_eq!(
-            remote_queued_prompt_action("/clear".to_string(), false, false, false, true),
+            remote_queued_prompt_action(
+                "/clear".to_string(),
+                false,
+                false,
+                false,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::ClearSession
         );
         assert_eq!(
-            remote_queued_prompt_action("/load session-2".to_string(), false, false, true, true,),
+            remote_queued_prompt_action(
+                "/load session-2".to_string(),
+                false,
+                false,
+                true,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::LoadSession("session-2".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("/load".to_string(), false, false, true, true),
+            remote_queued_prompt_action(
+                "/load".to_string(),
+                false,
+                false,
+                true,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::RejectInvalidLoad
         );
         assert_eq!(
-            remote_queued_prompt_action("/load session-2".to_string(), false, false, false, true,),
+            remote_queued_prompt_action(
+                "/load session-2".to_string(),
+                false,
+                false,
+                false,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::RejectUnsupportedLoad
+        );
+    }
+
+    #[test]
+    fn remote_queued_prompt_action_routes_side_mode_commands() {
+        assert_eq!(
+            remote_queued_prompt_action(
+                "/side explain this".to_string(),
+                false,
+                false,
+                false,
+                true,
+                true,
+                false,
+            ),
+            RemoteQueuedPromptAction::StartSide(Some("explain this".to_string()))
+        );
+        assert_eq!(
+            remote_queued_prompt_action(
+                "/side".to_string(),
+                false,
+                false,
+                false,
+                true,
+                false,
+                false,
+            ),
+            RemoteQueuedPromptAction::RejectUnsupportedSide
+        );
+        assert_eq!(
+            remote_queued_prompt_action("exit".to_string(), false, false, false, true, true, true,),
+            RemoteQueuedPromptAction::ExitSide
+        );
+        assert_eq!(
+            remote_queued_prompt_action(
+                "/side nested".to_string(),
+                false,
+                false,
+                false,
+                true,
+                true,
+                true,
+            ),
+            RemoteQueuedPromptAction::RejectNestedSide
+        );
+        assert_eq!(
+            remote_queued_prompt_action("/clear".to_string(), false, true, true, true, true, true,),
+            RemoteQueuedPromptAction::SendPrompt("/clear".to_string()),
+            "main-only commands become literal side prompts"
         );
     }
 
@@ -11613,21 +12413,53 @@ mod tests {
     #[test]
     fn remote_queued_prompt_action_routes_compact_when_a_coordinator_exists() {
         assert_eq!(
-            remote_queued_prompt_action("/compact".to_string(), false, true, true, true),
+            remote_queued_prompt_action(
+                "/compact".to_string(),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::CompactPrimary
         );
         assert_eq!(
-            remote_queued_prompt_action(" /compact ".to_string(), false, false, true, true),
+            remote_queued_prompt_action(
+                " /compact ".to_string(),
+                false,
+                false,
+                true,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::CompactPrimary
         );
         // Headless: no coordinator, keep the literal slash prompt for agents
         // that implement /compact natively.
         assert_eq!(
-            remote_queued_prompt_action("/compact".to_string(), false, true, true, false),
+            remote_queued_prompt_action(
+                "/compact".to_string(),
+                false,
+                true,
+                true,
+                false,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::SendPrompt("/compact".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("/compact now".to_string(), false, true, true, true),
+            remote_queued_prompt_action(
+                "/compact now".to_string(),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false
+            ),
             RemoteQueuedPromptAction::SendPrompt("/compact now".to_string())
         );
     }
@@ -12109,6 +12941,45 @@ mod tests {
             .snapshot()
             .expect("snapshot");
         assert!(snapshot.pending_permissions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn intercept_namespaces_side_permissions_for_remote_routing() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        let (prompt, rx) = permission_prompt("call-1");
+
+        let event =
+            tracker.intercept_event(UiEvent::Side(Box::new(UiEvent::PermissionRequest(prompt))));
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(snapshot.pending_permissions.len(), 1);
+        assert_eq!(snapshot.pending_permissions[0].request_id, "side:call-1");
+        assert!(snapshot.pending_permissions[0].title.starts_with("side · "));
+
+        let UiEvent::Side(event) = event else {
+            panic!("intercept must preserve side ownership");
+        };
+        let UiEvent::PermissionRequest(prompt) = *event else {
+            panic!("intercept must preserve permission event");
+        };
+        assert_eq!(prompt.tool_call.tool_call_id.to_string(), "side:call-1");
+        prompt
+            .responder
+            .send(PermissionDecision::Selected("allow".to_string()))
+            .expect("wrapped responder open");
+        assert!(matches!(
+            rx.await,
+            Ok(PermissionDecision::Selected(option)) if option == "allow"
+        ));
     }
 
     #[test]

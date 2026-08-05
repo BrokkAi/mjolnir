@@ -1394,6 +1394,15 @@ fn side_main_notice(event: &UiEvent) -> Option<&'static str> {
     }
 }
 
+fn is_side_remote_decision(event: &UiEvent) -> bool {
+    matches!(
+        event,
+        UiEvent::RemotePermissionDecision { request_id, .. }
+            if request_id.starts_with("side:")
+                || request_id.starts_with("elicitation:side:")
+    )
+}
+
 fn drain_hidden_main_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
     let (main_tx, mut main_rx) = mpsc::unbounded_channel();
     drain_queued_prompt(state, &main_tx);
@@ -1646,6 +1655,11 @@ async fn ui_loop(
                                 pending_redraw.mark_interactive();
                                 continue;
                             }
+                            side_decision
+                                if main_state.is_some()
+                                    && is_side_remote_decision(&side_decision) => {
+                                side_decision
+                            }
                             main_event if main_state.is_some() => {
                                 if let Some(notice) = side_main_notice(&main_event) {
                                     state.side_main_notice = Some(notice.to_string());
@@ -1695,11 +1709,7 @@ async fn ui_loop(
                             && state.session_id.is_some()
                             && let Some(question) = state.side_initial_question.take()
                         {
-                            state.record_user_prompt(question.clone());
-                            let _ = cmd_tx.send(UiCommand::SendPrompt {
-                                text: question,
-                                images: Vec::new(),
-                            });
+                            state.record_user_prompt(question);
                         }
                         if state.runtime_closed
                             && std::env::var_os("MJ_E2E_EXIT_ON_RUNTIME_CLOSE").is_some()
@@ -1785,8 +1795,9 @@ async fn ui_loop(
             let side_state = state.side_conversation(question.clone());
             let main = std::mem::replace(&mut state, side_state);
             main_state = Some(main);
-            let _ = question;
-            let _ = cmd_tx.send(UiCommand::StartSide);
+            let _ = cmd_tx.send(UiCommand::StartSide {
+                initial_prompt: question,
+            });
             main_transcript_scroll = Some(std::mem::take(&mut transcript_scroll));
             main_transcript_sink = Some(std::mem::take(&mut transcript_sink));
             stream_reveal = StreamRevealController::resume(&mut state);
@@ -18872,6 +18883,22 @@ mod tests {
         );
         assert!(state.transcript.is_empty());
         assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn remote_side_permission_decisions_stay_in_the_side_view() {
+        assert!(is_side_remote_decision(
+            &UiEvent::RemotePermissionDecision {
+                request_id: "side:call-1".to_string(),
+                option_id: "allow".to_string(),
+            }
+        ));
+        assert!(!is_side_remote_decision(
+            &UiEvent::RemotePermissionDecision {
+                request_id: "call-1".to_string(),
+                option_id: "allow".to_string(),
+            }
+        ));
     }
 
     #[test]

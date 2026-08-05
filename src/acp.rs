@@ -2528,7 +2528,7 @@ async fn drive_session(
                 let _ = responder.send(outcome);
             }
             UiCommand::CancelPrompt => {}
-            UiCommand::StartSide | UiCommand::ExitSide | UiCommand::Main(_) => {}
+            UiCommand::StartSide { .. } | UiCommand::ExitSide | UiCommand::Main(_) => {}
             UiCommand::Shutdown => break,
         }
     }
@@ -2908,7 +2908,7 @@ async fn drive_fork_session(
                             "session fork already in flight".to_string(),
                         ));
                     }
-                    Some(UiCommand::StartSide)
+                    Some(UiCommand::StartSide { .. })
                     | Some(UiCommand::ExitSide)
                     | Some(UiCommand::Main(_)) => {}
                 }
@@ -5108,7 +5108,7 @@ async fn drive_config_update(
                             "session config update already in flight".to_string(),
                         ));
                     }
-                    Some(UiCommand::StartSide)
+                    Some(UiCommand::StartSide { .. })
                     | Some(UiCommand::ExitSide)
                     | Some(UiCommand::Main(_)) => {}
                 }
@@ -5295,7 +5295,7 @@ async fn drive_prompt_turn(
                             "prompt already in flight".to_string(),
                         ));
                     }
-                    Some(UiCommand::StartSide)
+                    Some(UiCommand::StartSide { .. })
                     | Some(UiCommand::ExitSide)
                     | Some(UiCommand::Main(_)) => {}
                 }
