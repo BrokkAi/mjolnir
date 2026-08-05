@@ -575,28 +575,18 @@ impl std::fmt::Display for LaunchError {
                     f,
                     "detail: the agent failed to launch a child process while creating the session"
                 )?;
-                let known_errno = if error_text.contains("unknown system error -86") {
-                    writeln!(
-                        f,
-                        "detail: macOS errno -86 is EBADARCH: the executable has the wrong CPU architecture"
-                    )?;
-                    true
-                } else if error_text.contains("unknown system error -88") {
-                    writeln!(
-                        f,
-                        "detail: macOS errno -88 is EBADMACHO: the executable is malformed or truncated"
-                    )?;
-                    true
-                } else {
-                    false
-                };
+                let errno_detail =
+                    macos_unknown_spawn_error_detail(&error_text, std::env::consts::OS);
+                if let Some(detail) = errno_detail {
+                    writeln!(f, "detail: {detail}")?;
+                }
                 let servers = if stdio_mcp_servers.is_empty() {
                     "none".to_string()
                 } else {
                     stdio_mcp_servers.join(", ")
                 };
                 writeln!(f, "stdio MCP servers forwarded on session/new: {servers}")?;
-                if known_errno {
+                if errno_detail.is_some() {
                     write!(
                         f,
                         "hint: reinstall or repair the agent CLI, verify any listed stdio MCP server commands, then retry"
@@ -668,6 +658,19 @@ fn session_error_search_text(source: &agent_client_protocol::Error) -> String {
         text.push_str(&data.to_string().to_ascii_lowercase());
     }
     text
+}
+
+fn macos_unknown_spawn_error_detail(error_text: &str, host_os: &str) -> Option<&'static str> {
+    if host_os != "macos" {
+        return None;
+    }
+    if error_text.contains("unknown system error -86") {
+        Some("macOS errno -86 is EBADARCH: the executable has the wrong CPU architecture")
+    } else if error_text.contains("unknown system error -88") {
+        Some("macOS errno -88 is EBADMACHO: the executable is malformed or truncated")
+    } else {
+        None
+    }
 }
 
 fn stdio_mcp_server_descriptions(mcp_servers: &[McpServer]) -> Box<[String]> {
@@ -11594,28 +11597,42 @@ mod tests {
             ),
         )];
 
-        for (errno, name, explanation) in [
-            ("-86", "EBADARCH", "wrong CPU architecture"),
-            ("-88", "EBADMACHO", "malformed or truncated"),
-        ] {
+        for errno in ["-86", "-88"] {
             let source = agent_client_protocol::Error::internal_error().data(serde_json::json!({
                 "details": format!("spawn Unknown system error {errno}")
             }));
             let text = classify_session_error_with_mcp_servers(source, &mcp_servers).to_string();
 
             assert!(text.contains("failed to launch a child process"), "{text}");
-            assert!(text.contains(name), "{text}");
-            assert!(text.contains(explanation), "{text}");
             assert!(
                 text.contains("workspace-tools (/opt/mjolnir/workspace-tools)"),
                 "{text}"
             );
-            assert!(text.contains("reinstall or repair the agent CLI"), "{text}");
             assert!(
                 !text.contains("--cwd"),
                 "spawn failures must not blame cwd: {text}"
             );
         }
+    }
+
+    #[test]
+    fn unnamed_spawn_errno_decoding_is_macos_only() {
+        assert_eq!(
+            macos_unknown_spawn_error_detail("spawn unknown system error -86", "macos"),
+            Some("macOS errno -86 is EBADARCH: the executable has the wrong CPU architecture")
+        );
+        assert_eq!(
+            macos_unknown_spawn_error_detail("spawn unknown system error -88", "macos"),
+            Some("macOS errno -88 is EBADMACHO: the executable is malformed or truncated")
+        );
+        assert_eq!(
+            macos_unknown_spawn_error_detail("spawn unknown system error -88", "windows"),
+            None
+        );
+        assert_eq!(
+            macos_unknown_spawn_error_detail("spawn unknown system error -88", "linux"),
+            None
+        );
     }
 
     #[test]

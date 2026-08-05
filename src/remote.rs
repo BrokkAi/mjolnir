@@ -12183,7 +12183,6 @@ mod tests {
             error.contains("failed to launch a child process"),
             "{error}"
         );
-        assert!(error.contains("EBADMACHO"), "{error}");
         assert!(
             error.contains("workspace-tools (/opt/mjolnir/workspace-tools)"),
             "{error}"
