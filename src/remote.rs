@@ -137,6 +137,22 @@ const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// contents are too large to safely publish.
 const MAX_TRANSCRIPT_DIFF_TEXT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TRANSCRIPT_DIFF_TEXT_BYTES_PER_FILE: usize = 512 * 1024;
+/// Transcript bytes allowed in one published snapshot.
+///
+/// A session's transcript only grows, and every publish re-sends all of it,
+/// so without a bound the payload eventually crosses `MAX_BODY_BYTES` and
+/// every publish from then on fails — permanently, since it can only get
+/// bigger. Raising `MAX_BODY_BYTES` would move that cliff rather than remove
+/// it; bounding the payload removes it.
+///
+/// The gap to `MAX_BODY_BYTES` absorbs the record's other fields and the
+/// inflation JSON string escaping adds on top of the raw byte counts
+/// `approx_published_len` measures.
+const MAX_PUBLISHED_TRANSCRIPT_BYTES: usize = 4 * 1024 * 1024;
+/// Consecutive publish failures before the operator is told. A restarting
+/// server or a flapping link recovers well inside this; a payload the server
+/// refuses never does.
+const PUBLISH_FAILURE_WARN_THRESHOLD: u32 = 3;
 
 /// Tracks consecutive failed viewer-code attempts to rate-limit brute force.
 #[derive(Debug, Default)]
@@ -669,6 +685,149 @@ pub struct TranscriptEntry {
     pub tool_diffs: Vec<TranscriptDiff>,
 }
 
+/// Marker left behind when an entry is shrunk to fit a published snapshot.
+const PUBLISH_TRUNCATION_MARKER: &str = "\n… truncated for the remote snapshot";
+
+impl TranscriptEntry {
+    /// Approximate serialized size, used only to decide what fits in a
+    /// published snapshot.
+    ///
+    /// Counts raw bytes rather than serializing: this runs on every snapshot,
+    /// including the 20-second heartbeat, and serializing megabytes just to
+    /// measure them would cost more than the trimming saves. JSON escaping
+    /// makes the real payload somewhat larger, which is what the headroom
+    /// between `MAX_PUBLISHED_TRANSCRIPT_BYTES` and `MAX_BODY_BYTES` is for.
+    fn approx_published_len(&self) -> usize {
+        /// Field names, quoting, commas and braces per JSON object.
+        const OBJECT_OVERHEAD: usize = 128;
+        let optional = |field: &Option<String>| field.as_ref().map_or(0, String::len);
+        OBJECT_OVERHEAD
+            + self.kind.len()
+            + self.text.len()
+            + self.timestamp.len()
+            + optional(&self.actor)
+            + optional(&self.tool_kind)
+            + optional(&self.tool_title)
+            + optional(&self.tool_body)
+            + self
+                .tool_diffs
+                .iter()
+                .map(TranscriptDiff::approx_published_len)
+                .sum::<usize>()
+    }
+
+    /// Shrink one entry until it fits `budget`, so a single huge tool result
+    /// cannot blow the whole snapshot on its own.
+    ///
+    /// Structured diffs go first — the textual tool summary still names every
+    /// touched path — then the tool body, then the entry text.
+    fn truncate_for_publishing(&mut self, budget: usize) {
+        let mut excess = self.approx_published_len().saturating_sub(budget);
+        if excess == 0 {
+            return;
+        }
+        if !self.tool_diffs.is_empty() {
+            let freed: usize = self
+                .tool_diffs
+                .iter()
+                .map(TranscriptDiff::approx_published_len)
+                .sum();
+            self.tool_diffs.clear();
+            excess = excess.saturating_sub(freed);
+        }
+        if excess > 0
+            && let Some(body) = self.tool_body.as_mut()
+        {
+            excess = excess.saturating_sub(shrink_published_text(body, excess));
+        }
+        if excess > 0 {
+            shrink_published_text(&mut self.text, excess);
+        }
+    }
+}
+
+impl TranscriptDiff {
+    fn approx_published_len(&self) -> usize {
+        const OBJECT_OVERHEAD: usize = 64;
+        OBJECT_OVERHEAD
+            + self.path.len()
+            + self.old_text.as_ref().map_or(0, String::len)
+            + self.new_text.len()
+    }
+}
+
+/// Tells the operator once when snapshot publishing stops working, and once
+/// again when it recovers.
+///
+/// A publish rejection the session cannot grow out of leaves the viewer frozen
+/// on its last good snapshot while the terminal carries on, so reporting it at
+/// `debug!` — below the default `info` level — meant nobody found out at all.
+/// Reporting is deliberately edge-triggered: the failure repeats on every
+/// change and every heartbeat, and a warning per heartbeat would be its own
+/// bug.
+struct PublishFailureReporter {
+    ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
+    consecutive_failures: u32,
+    reported: bool,
+}
+
+impl PublishFailureReporter {
+    fn new(ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>) -> Self {
+        Self {
+            ui_event_tx,
+            consecutive_failures: 0,
+            reported: false,
+        }
+    }
+
+    fn record_failure(&mut self, error: &anyhow::Error) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.reported || self.consecutive_failures < PUBLISH_FAILURE_WARN_THRESHOLD {
+            debug!("remote-control publish failed: {error:#}");
+            return;
+        }
+        self.reported = true;
+        warn!(
+            "remote-control publish has failed {} times running: {error:#}",
+            self.consecutive_failures
+        );
+        self.notify(UiEvent::Warning(format!(
+            "remote viewer is not receiving updates: {error} · this session is unaffected"
+        )));
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        if !self.reported {
+            return;
+        }
+        self.reported = false;
+        self.notify(UiEvent::Info("remote viewer updates resumed".to_string()));
+    }
+
+    fn notify(&self, event: UiEvent) {
+        if let Some(tx) = self.ui_event_tx.as_ref() {
+            let _ = tx.send(event);
+        }
+    }
+}
+
+/// Drop up to `excess` bytes from the end of `text`, on a char boundary, and
+/// leave a marker saying so. Returns the number of bytes actually removed.
+fn shrink_published_text(text: &mut String, excess: usize) -> usize {
+    if excess == 0 || text.is_empty() {
+        return 0;
+    }
+    let before = text.len();
+    let mut keep = before.saturating_sub(excess + PUBLISH_TRUNCATION_MARKER.len());
+    while keep > 0 && !text.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    text.truncate(keep);
+    text.push_str(PUBLISH_TRUNCATION_MARKER);
+    before.saturating_sub(text.len())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueuedPrompt {
     pub id: i64,
@@ -864,6 +1023,9 @@ pub struct RemoteSessionTracker {
     /// decisions could never be applied, so pending permissions must not
     /// be advertised to viewers at all.
     publish_permissions: bool,
+    /// Channel back to the TUI, kept so the publisher can tell the operator
+    /// when the viewer has stopped receiving updates. Absent when headless.
+    ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -1860,6 +2022,60 @@ impl TrackerState {
         entry.tool_diffs = transcript_diffs(&tool_entry.content);
     }
 
+    /// The transcript as it goes on the wire: the newest entries that fit in
+    /// `MAX_PUBLISHED_TRANSCRIPT_BYTES`, with a note in place of whatever was
+    /// dropped.
+    ///
+    /// Only the published copy is trimmed. `self.transcript` keeps every entry
+    /// at its original index because `tool_transcript_entries` maps tool calls
+    /// to those indices and rewrites entries in place as a tool progresses;
+    /// renumbering the stored transcript would rewrite the wrong entries.
+    ///
+    /// Elision is announced rather than silent. A viewer that quietly starts
+    /// at an arbitrary point in history is worse than one that says where its
+    /// history begins.
+    fn published_transcript(&self) -> Vec<TranscriptEntry> {
+        let mut budget = MAX_PUBLISHED_TRANSCRIPT_BYTES;
+        let mut kept = 0usize;
+        for entry in self.transcript.iter().rev() {
+            let Some(remaining) = budget.checked_sub(entry.approx_published_len()) else {
+                break;
+            };
+            budget = remaining;
+            kept += 1;
+        }
+        if kept == self.transcript.len() {
+            return self.transcript.clone();
+        }
+
+        // Always publish something current. A single entry larger than the
+        // whole budget would otherwise leave the viewer frozen on nothing but
+        // the elision notice, which is the failure this change exists to end.
+        // That entry then has to be shrunk to fit, since nothing else can.
+        let oversized_newest = kept == 0;
+        let kept = kept.max(1);
+        let dropped = self.transcript.len() - kept;
+        let mut published = Vec::with_capacity(kept + 1);
+        published.push(TranscriptEntry {
+            kind: "system".to_string(),
+            text: format!(
+                "… {dropped} earlier transcript {} not published (snapshot size limit) · the full history is in the terminal session",
+                if dropped == 1 { "entry" } else { "entries" }
+            ),
+            actor: None,
+            timestamp: self.transcript[dropped].timestamp.clone(),
+            tool_kind: None,
+            tool_title: None,
+            tool_body: None,
+            tool_diffs: Vec::new(),
+        });
+        published.extend(self.transcript[dropped..].iter().cloned());
+        if oversized_newest && let Some(entry) = published.get_mut(1) {
+            entry.truncate_for_publishing(MAX_PUBLISHED_TRANSCRIPT_BYTES);
+        }
+        published
+    }
+
     fn snapshot(&self) -> Option<SessionRecord> {
         let session_id = self.session_id.clone()?;
         let start_time = self.start_time.clone()?;
@@ -1874,7 +2090,7 @@ impl TrackerState {
             project: self.project.clone(),
             worktree: self.worktree.clone(),
             agent: self.agent.clone(),
-            transcript: self.transcript.clone(),
+            transcript: self.published_transcript(),
             queued_prompt_count: 0,
             prompt_in_flight: self.prompt_in_flight && self.prompt_turn_started_at.is_some(),
             pending_permissions: self.pending_permissions.clone(),
@@ -2019,6 +2235,7 @@ impl RemoteSessionTracker {
             pr_probe: Arc::new(Mutex::new(None)),
             next_elicitation_id: Arc::new(AtomicU64::new(1)),
             publish_permissions: ui_event_tx.is_some(),
+            ui_event_tx: ui_event_tx.clone(),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
         tracker.ensure_queue_poller(command_tx.clone(), ui_event_tx.clone());
@@ -2079,6 +2296,7 @@ impl RemoteSessionTracker {
             pr_probe: Arc::new(Mutex::new(None)),
             next_elicitation_id: Arc::new(AtomicU64::new(1)),
             publish_permissions: true,
+            ui_event_tx: None,
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -2443,7 +2661,9 @@ impl RemoteSessionTracker {
         let tracker = self.clone();
         let state = Arc::clone(&self.state);
         let signal = Arc::clone(&self.publish_signal);
+        let ui_event_tx = self.ui_event_tx.clone();
         *slot = Some(tokio::spawn(async move {
+            let mut publish_failures = PublishFailureReporter::new(ui_event_tx);
             loop {
                 tokio::select! {
                     _ = signal.notified() => {}
@@ -2469,10 +2689,11 @@ impl RemoteSessionTracker {
                     continue;
                 };
                 if let Err(error) = send_snapshot(connection.clone(), snapshot).await {
-                    debug!("remote-control publish failed: {error:#}");
+                    publish_failures.record_failure(&error);
                     tracker.reload_connection();
                     continue;
                 }
+                publish_failures.record_success();
                 for old_session_id in sessions_to_disconnect {
                     let Some(connection) =
                         tracker.connection().or_else(|| tracker.reload_connection())
@@ -8798,6 +9019,164 @@ mod tests {
         });
         let session: SessionRecord = serde_json::from_value(legacy).expect("legacy record");
         assert!(session.subagents.is_empty());
+    }
+
+    /// A transcript entry of roughly `bytes` serialized size.
+    fn bulky_entry(index: usize, bytes: usize) -> TranscriptEntry {
+        TranscriptEntry {
+            kind: "agent".to_string(),
+            text: format!("entry-{index}-{}", "x".repeat(bytes)),
+            actor: None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            tool_kind: None,
+            tool_title: None,
+            tool_body: None,
+            tool_diffs: Vec::new(),
+        }
+    }
+
+    fn published_len(transcript: &[TranscriptEntry]) -> usize {
+        transcript
+            .iter()
+            .map(TranscriptEntry::approx_published_len)
+            .sum()
+    }
+
+    #[test]
+    fn published_transcript_passes_through_when_it_fits() {
+        let mut state = started_session_tracker();
+        state.transcript = (0..5).map(|index| bulky_entry(index, 1024)).collect();
+
+        let published = state.published_transcript();
+
+        assert_eq!(published, state.transcript);
+    }
+
+    /// The transcript only grows and every publish re-sends all of it, so an
+    /// unbounded payload eventually crosses the route's body limit and every
+    /// publish from then on fails permanently (#619).
+    #[test]
+    fn published_transcript_drops_oldest_entries_to_stay_within_the_body_limit() {
+        let mut state = started_session_tracker();
+        let entry_bytes = 256 * 1024;
+        let count = 1 + MAX_PUBLISHED_TRANSCRIPT_BYTES / entry_bytes * 2;
+        state.transcript = (0..count).map(|i| bulky_entry(i, entry_bytes)).collect();
+
+        let published = state.published_transcript();
+
+        assert!(published.len() < state.transcript.len());
+        assert!(published_len(&published) <= MAX_PUBLISHED_TRANSCRIPT_BYTES + 1024);
+        assert!(published_len(&published) < MAX_BODY_BYTES);
+        // Newest entries survive; the drop is announced, not silent.
+        assert_eq!(
+            published.last().map(|entry| &entry.text),
+            state.transcript.last().map(|entry| &entry.text)
+        );
+        let notice = &published[0];
+        assert_eq!(notice.kind, "system");
+        assert!(
+            notice
+                .text
+                .contains("earlier transcript entries not published"),
+            "unexpected elision notice: {}",
+            notice.text
+        );
+    }
+
+    /// A single tool result larger than the whole budget must still publish,
+    /// shrunk — freezing the viewer is the failure being fixed.
+    #[test]
+    fn published_transcript_shrinks_an_entry_too_large_to_fit() {
+        let mut state = started_session_tracker();
+        state.transcript = vec![
+            bulky_entry(0, 1024),
+            bulky_entry(1, MAX_PUBLISHED_TRANSCRIPT_BYTES * 2),
+        ];
+
+        let published = state.published_transcript();
+
+        assert_eq!(published.len(), 2);
+        assert!(published_len(&published) <= MAX_PUBLISHED_TRANSCRIPT_BYTES + 1024);
+        assert!(published[1].text.ends_with(PUBLISH_TRUNCATION_MARKER));
+        assert!(published[1].text.starts_with("entry-1-"));
+    }
+
+    #[test]
+    fn published_transcript_sheds_structured_diffs_before_prose() {
+        let mut entry = bulky_entry(0, 16);
+        entry.tool_body = Some("body".to_string());
+        entry.tool_diffs = vec![TranscriptDiff {
+            path: "src/main.rs".to_string(),
+            old_text: Some("a".repeat(4096)),
+            new_text: "b".repeat(4096),
+            truncated: false,
+        }];
+        let original_text = entry.text.clone();
+
+        entry.truncate_for_publishing(512);
+
+        // The textual summary still names every touched path, so dropping the
+        // structured payload first loses the least.
+        assert!(entry.tool_diffs.is_empty());
+        assert_eq!(entry.tool_body.as_deref(), Some("body"));
+        assert_eq!(entry.text, original_text);
+    }
+
+    #[test]
+    fn shrink_published_text_truncates_on_a_char_boundary() {
+        let mut text = "é".repeat(64);
+        shrink_published_text(&mut text, 64);
+        assert!(text.ends_with(PUBLISH_TRUNCATION_MARKER));
+        // Any invalid boundary would have panicked in `truncate`; assert the
+        // surviving prefix is still whole characters.
+        let kept = text.trim_end_matches(PUBLISH_TRUNCATION_MARKER);
+        assert!(kept.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn publish_failure_reporter_warns_once_then_reports_recovery() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut reporter = PublishFailureReporter::new(Some(tx));
+        let error = || anyhow::anyhow!("413 Payload Too Large");
+
+        for _ in 0..PUBLISH_FAILURE_WARN_THRESHOLD - 1 {
+            reporter.record_failure(&error());
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "should not warn on a transient blip"
+        );
+
+        reporter.record_failure(&error());
+        let warning = rx.try_recv().expect("warning after the threshold");
+        assert!(matches!(&warning, UiEvent::Warning(text) if text.contains("413")));
+
+        // The failure repeats every heartbeat; the warning must not.
+        for _ in 0..5 {
+            reporter.record_failure(&error());
+        }
+        assert!(rx.try_recv().is_err(), "warning should be edge-triggered");
+
+        reporter.record_success();
+        assert!(matches!(
+            rx.try_recv().expect("recovery notice"),
+            UiEvent::Info(text) if text.contains("resumed")
+        ));
+
+        // A later failure run reports again.
+        for _ in 0..PUBLISH_FAILURE_WARN_THRESHOLD {
+            reporter.record_failure(&error());
+        }
+        assert!(matches!(rx.try_recv(), Ok(UiEvent::Warning(_))));
+    }
+
+    #[test]
+    fn publish_failure_reporter_stays_quiet_without_a_ui_channel() {
+        let mut reporter = PublishFailureReporter::new(None);
+        for _ in 0..PUBLISH_FAILURE_WARN_THRESHOLD * 2 {
+            reporter.record_failure(&anyhow::anyhow!("offline"));
+        }
+        reporter.record_success();
     }
 
     fn started_session_tracker() -> TrackerState {
