@@ -1960,6 +1960,14 @@
         color: var(--text-control);
       }
 
+      .queue-item-attachments {
+        margin-top: 5px;
+        color: var(--dim);
+        font: 700 9.5px/1.4 var(--font-mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
       /* Live per-subagent status rows, mirroring the TUI's subagent area:
          one line each, running rows first, done rows dimmed with a glyph. */
       .subagent-list {
@@ -2112,6 +2120,67 @@
         }
       }
 
+      .attachment-list {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        padding: 8px 12px 0 32px;
+
+        &:empty {
+          display: none;
+        }
+      }
+
+      .attachment-chip {
+        display: grid;
+        grid-template-columns: 34px minmax(0, 1fr) 22px;
+        align-items: center;
+        gap: 7px;
+        flex: 0 0 min(240px, 70vw);
+        min-width: 0;
+        padding: 5px;
+        clip-path: var(--shape-chip);
+        background: var(--surface-control);
+        border-left: 2px solid var(--red);
+      }
+
+      .attachment-thumb {
+        width: 34px;
+        height: 34px;
+        object-fit: cover;
+        background: var(--bg);
+      }
+
+      .attachment-copy {
+        min-width: 0;
+        display: grid;
+        gap: 2px;
+        font: 400 10px/1.3 var(--font-mono);
+      }
+
+      .attachment-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--text-control);
+      }
+
+      .attachment-meta {
+        color: var(--dim);
+      }
+
+      .attachment-remove {
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font: 700 16px/1 var(--font-mono);
+
+        &:hover {
+          color: var(--red-hot);
+        }
+      }
+
       .command-palette {
         margin: -3px 8px 8px 32px;
         max-height: 180px;
@@ -2171,6 +2240,29 @@
         gap: 6px 16px;
         padding: 7px 8px 7px 14px;
         border-top: 1px solid var(--line-row);
+      }
+
+      .attach-button {
+        flex: none;
+        height: 30px;
+        padding: 0 11px;
+        border: 1px solid var(--line-control);
+        background: var(--surface-control);
+        color: var(--text-control);
+        cursor: pointer;
+        font: 700 10px/1 var(--font-body);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+
+        &:hover:not(:disabled) {
+          border-color: var(--line-strong);
+          color: var(--button-hover-text);
+        }
+
+        &:disabled {
+          opacity: 0.45;
+          cursor: default;
+        }
       }
 
       .config-strip {
@@ -2962,9 +3054,12 @@
           <div class="console">
             <span class="console-frame" aria-hidden="true"></span>
             <textarea id="queue-input" placeholder="Message the agent" enterkeyhint="send" aria-label="Message the agent"></textarea>
+            <div id="attachment-list" class="attachment-list" aria-label="Attached images"></div>
             <div id="command-palette" class="command-palette" role="listbox" aria-label="Slash commands" hidden></div>
             <div class="console-strip">
               <div id="session-config" class="config-strip"></div>
+              <button id="attach-image" class="attach-button" type="button" hidden>Image</button>
+              <input id="image-picker" type="file" accept="image/*" multiple hidden>
               <span id="queue-status" class="queue-meta">Select a session.</span>
               <button id="stop-turn" class="stop-turn" type="button" hidden>Stop</button>
               <button id="queue-submit" class="primary" type="button">Send</button>
@@ -3103,6 +3198,7 @@
       <section class="queue-item">
         <div class="queue-item-time" data-ts=""></div>
         <pre class="queue-item-text"></pre>
+        <div class="queue-item-attachments" hidden></div>
         <button class="queue-item-delete" type="button">Cancel</button>
       </section>
     </template>
@@ -3157,6 +3253,9 @@
       const subagentsEl = $("subagents");
       const sessionConfigEl = $("session-config");
       const queueInputEl = $("queue-input");
+      const attachmentListEl = $("attachment-list");
+      const attachImageEl = $("attach-image");
+      const imagePickerEl = $("image-picker");
       const commandPaletteEl = $("command-palette");
       const queueSubmitEl = $("queue-submit");
       const queueStatusEl = $("queue-status");
@@ -3183,6 +3282,7 @@
       // dies with the session) server-side.
       const CONFIG_APPLY_TIMEOUT_MS = 60000;
       const STOP_REQUEST_TIMEOUT_MS = 15000;
+      const MAX_QUEUE_REQUEST_BYTES = 8 * 1024 * 1024;
       /* How long a session launch may take before the viewer calls it failed.
          Generous on purpose: a host already running other agents can take a
          long time to spawn one, and declaring failure early is how a launch
@@ -3215,6 +3315,7 @@
       let commandSelected = 0;
       let showTranscriptDiffs = true;
       const draftBySessionId = new Map();
+      const attachmentsBySessionId = new Map();
       const activityBySessionId = new Map();
       const sessionCardById = new Map();
       const stopRequestBySessionId = new Map();
@@ -6440,6 +6541,133 @@
           syncComposerHeight();
         }
         updateCommandPalette();
+        renderAttachments();
+      }
+
+      function selectedSession() {
+        return sessions.find((session) => session.session_id === selectedSessionId) || null;
+      }
+
+      function selectedAttachments() {
+        if (!selectedSessionId) {
+          return [];
+        }
+        return attachmentsBySessionId.get(selectedSessionId) || [];
+      }
+
+      function renderAttachments() {
+        const session = selectedSession();
+        const attachments = selectedAttachments();
+        attachImageEl.hidden = !session?.prompt_images_supported;
+        attachImageEl.disabled = !session;
+        attachmentListEl.replaceChildren();
+        for (const [index, attachment] of attachments.entries()) {
+          const chip = document.createElement("div");
+          chip.className = "attachment-chip";
+
+          const thumb = document.createElement("img");
+          thumb.className = "attachment-thumb";
+          thumb.alt = "";
+          thumb.src = `data:${attachment.mime_type};base64,${attachment.data_base64}`;
+
+          const copy = document.createElement("span");
+          copy.className = "attachment-copy";
+          const name = document.createElement("span");
+          name.className = "attachment-name";
+          name.textContent = attachment.name || "Pasted image";
+          const meta = document.createElement("span");
+          meta.className = "attachment-meta";
+          meta.textContent = `${attachment.width}×${attachment.height}`;
+          copy.append(name, meta);
+
+          const remove = document.createElement("button");
+          remove.className = "attachment-remove";
+          remove.type = "button";
+          remove.setAttribute("aria-label", `Remove ${name.textContent}`);
+          remove.textContent = "×";
+          remove.addEventListener("click", () => {
+            const current = selectedAttachments();
+            current.splice(index, 1);
+            if (!current.length && selectedSessionId) {
+              attachmentsBySessionId.delete(selectedSessionId);
+            }
+            renderAttachments();
+          });
+          chip.append(thumb, copy, remove);
+          attachmentListEl.appendChild(chip);
+        }
+      }
+
+      function readFileAsDataUrl(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.addEventListener("load", () => resolve(String(reader.result || "")), { once: true });
+          reader.addEventListener("error", () => reject(reader.error || new Error("file read failed")), { once: true });
+          reader.readAsDataURL(file);
+        });
+      }
+
+      function imageDimensions(file) {
+        return new Promise((resolve, reject) => {
+          const url = URL.createObjectURL(file);
+          const image = new Image();
+          image.addEventListener("load", () => {
+            const dimensions = { width: image.naturalWidth, height: image.naturalHeight };
+            URL.revokeObjectURL(url);
+            resolve(dimensions);
+          }, { once: true });
+          image.addEventListener("error", () => {
+            URL.revokeObjectURL(url);
+            reject(new Error("the browser could not decode this image"));
+          }, { once: true });
+          image.src = url;
+        });
+      }
+
+      async function promptImageFromFile(file) {
+        if (!file.type.startsWith("image/")) {
+          throw new Error(`${file.name || "That file"} is not an image`);
+        }
+        if (file.size >= MAX_QUEUE_REQUEST_BYTES) {
+          throw new Error(`${file.name || "That image"} is too large for the 8 MiB request limit`);
+        }
+        const [dataUrl, dimensions] = await Promise.all([
+          readFileAsDataUrl(file),
+          imageDimensions(file),
+        ]);
+        const comma = dataUrl.indexOf(",");
+        if (comma < 0 || !dataUrl.slice(comma + 1)) {
+          throw new Error(`Couldn't read ${file.name || "that image"}`);
+        }
+        return {
+          data_base64: dataUrl.slice(comma + 1),
+          mime_type: file.type,
+          width: dimensions.width,
+          height: dimensions.height,
+          name: file.name || "Pasted image",
+        };
+      }
+
+      async function attachImageFiles(files) {
+        const sessionId = selectedSessionId;
+        const session = selectedSession();
+        if (!sessionId || !session?.prompt_images_supported || !files.length) {
+          return;
+        }
+        try {
+          const added = [];
+          for (const file of files) {
+            added.push(await promptImageFromFile(file));
+          }
+          const current = attachmentsBySessionId.get(sessionId) || [];
+          attachmentsBySessionId.set(sessionId, current.concat(added));
+          if (selectedSessionId === sessionId) {
+            renderAttachments();
+            setQueueStatus(`${added.length} image${added.length === 1 ? "" : "s"} attached.`);
+          }
+        } catch (error) {
+          setQueueStatus(error.message || "Couldn't attach image.", true);
+        }
       }
 
       function syncComposerHeight() {
@@ -6646,6 +6874,7 @@
         queueListEl.replaceChildren();
         queueInputEl.disabled = !session;
         queueSubmitEl.disabled = !session;
+        renderAttachments();
 
         if (!session) {
           queueInputEl.placeholder = "Message the agent";
@@ -6665,7 +6894,13 @@
         for (const prompt of queuedPrompts) {
           const item = cloneTemplate(queueTpl);
           setTimestamp(item.querySelector(".queue-item-time"), prompt.created_at || "");
-          item.querySelector(".queue-item-text").textContent = prompt.text || "";
+          const images = Array.isArray(prompt.images) ? prompt.images : [];
+          item.querySelector(".queue-item-text").textContent = prompt.text || (images.length ? "Image prompt" : "");
+          const attachmentSummary = item.querySelector(".queue-item-attachments");
+          attachmentSummary.hidden = !images.length;
+          attachmentSummary.textContent = images.length
+            ? `${images.length} image${images.length === 1 ? "" : "s"}`
+            : "";
           const deleteButton = item.querySelector(".queue-item-delete");
           deleteButton.disabled = deletingQueuedPromptIds.has(prompt.id);
           deleteButton.setAttribute("aria-label", "Cancel queued prompt");
@@ -7495,11 +7730,31 @@
         }
         const sessionId = selectedSessionId;
         const text = queueInputEl.value;
-        if (!sessionId || !text.trim()) {
+        const attachments = selectedAttachments();
+        if (!sessionId || (!text.trim() && !attachments.length)) {
           return;
         }
         const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
-        if (consumeLocalSlashCommand(session, text)) {
+        if (attachments.length && !session?.prompt_images_supported) {
+          setQueueStatus("This session does not support image prompts.", true);
+          return;
+        }
+        if (!attachments.length && consumeLocalSlashCommand(session, text)) {
+          return;
+        }
+        const images = attachments.map(({ data_base64, mime_type, width, height }) => ({
+          data_base64,
+          mime_type,
+          width,
+          height,
+        }));
+        const body = JSON.stringify({
+          session_id: sessionId,
+          text,
+          images,
+        });
+        if (new TextEncoder().encode(body).byteLength > MAX_QUEUE_REQUEST_BYTES) {
+          setQueueStatus("Prompt attachments exceed the 8 MiB request limit.", true);
           return;
         }
         queueSubmitInFlight = true;
@@ -7510,16 +7765,15 @@
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({
-              session_id: sessionId,
-              text,
-            }),
+            body,
           });
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }
           queueInputEl.value = "";
           draftBySessionId.set(sessionId, "");
+          attachmentsBySessionId.delete(sessionId);
+          renderAttachments();
           clearCommandPalette();
           syncComposerHeight();
           pendingNewEntries = 0;
@@ -7720,10 +7974,27 @@
         updateJumpToLatestVisibility();
       }, { passive: true });
       queueSubmitEl.addEventListener("click", submitQueuedPrompt);
+      attachImageEl.addEventListener("click", () => imagePickerEl.click());
+      imagePickerEl.addEventListener("change", () => {
+        const files = Array.from(imagePickerEl.files || []);
+        imagePickerEl.value = "";
+        void attachImageFiles(files);
+      });
       queueInputEl.addEventListener("input", () => {
         saveDraftForSelectedSession();
         syncComposerHeight();
         updateCommandPalette();
+      });
+      queueInputEl.addEventListener("paste", (event) => {
+        const files = Array.from(event.clipboardData?.items || [])
+          .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+          .map((item) => item.getAsFile())
+          .filter(Boolean);
+        if (!files.length || !selectedSession()?.prompt_images_supported) {
+          return;
+        }
+        event.preventDefault();
+        void attachImageFiles(files);
       });
       queueInputEl.addEventListener("keydown", (event) => {
         // While an IME composition is active, Enter/arrows confirm or steer the

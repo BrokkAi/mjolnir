@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use tokio::sync::oneshot;
 
 /// Image block submitted by the UI with a prompt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PromptImage {
     pub data_base64: String,
     pub mime_type: String,

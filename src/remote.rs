@@ -50,7 +50,7 @@ use crate::acp::{self, AcpRuntimeConfig};
 use crate::app::{StatusKind, status_transcript_text};
 use crate::config::{self, SelectedAgent};
 use crate::event::{
-    ElicitationOutcome, ElicitationPrompt, PermissionDecision, PermissionPrompt,
+    ElicitationOutcome, ElicitationPrompt, PermissionDecision, PermissionPrompt, PromptImage,
     SessionConfigTarget, SubagentEvent, SubagentOutcome, TerminalOutputSnapshot, UiCommand,
     UiEvent,
 };
@@ -183,6 +183,9 @@ pub struct SessionRecord {
     /// True while this session has an ACP prompt turn in flight.
     #[serde(default)]
     pub prompt_in_flight: bool,
+    /// Whether the live ACP agent accepts image blocks in prompts.
+    #[serde(default)]
+    pub prompt_images_supported: bool,
     /// Permission prompts currently waiting for an answer in this session.
     #[serde(default)]
     pub pending_permissions: Vec<PendingPermissionRecord>,
@@ -854,6 +857,8 @@ pub struct QueuedPrompt {
     pub id: i64,
     pub session_id: String,
     pub text: String,
+    #[serde(default)]
+    pub images: Vec<PromptImage>,
     pub created_at: String,
 }
 
@@ -876,9 +881,15 @@ enum RemoteQueuedPromptAction {
 
 fn remote_queued_prompt_action(
     text: String,
+    has_images: bool,
     session_fork_supported: bool,
     compact_command_supported: bool,
 ) -> RemoteQueuedPromptAction {
+    // Match the TUI: attaching an image makes slash-prefixed text an agent
+    // prompt rather than a client-side command.
+    if has_images {
+        return RemoteQueuedPromptAction::SendPrompt(text);
+    }
     let trimmed = text.trim();
     if let Some(rest) = trimmed.strip_prefix("/review")
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
@@ -924,6 +935,8 @@ struct SessionAuthQuery {
 struct QueuePromptRequest {
     session_id: String,
     text: String,
+    #[serde(default)]
+    images: Vec<PromptImage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1101,6 +1114,7 @@ struct TrackerState {
     session_config: Vec<SessionConfigOptionRecord>,
     native_mode: Option<NativeModeRecord>,
     available_commands: Vec<CommandRecord>,
+    prompt_images_supported: bool,
     session_fork_supported: bool,
     sessions_to_disconnect: Vec<String>,
 }
@@ -1476,6 +1490,7 @@ impl TrackerState {
             session_config: Vec::new(),
             native_mode: None,
             available_commands: remote_builtin_command_records(false),
+            prompt_images_supported: false,
             session_fork_supported: false,
             sessions_to_disconnect: Vec::new(),
         }
@@ -1515,9 +1530,11 @@ impl TrackerState {
         match event {
             UiEvent::Side(_) | UiEvent::SideStartFailed { .. } => {}
             UiEvent::Connected {
+                prompt_images_supported,
                 session_fork_supported,
                 ..
             } => {
+                self.prompt_images_supported = *prompt_images_supported;
                 self.session_fork_supported = *session_fork_supported;
                 self.available_commands =
                     available_command_records(&[], self.session_fork_supported);
@@ -2249,6 +2266,7 @@ impl TrackerState {
             transcript: self.published_transcript(),
             queued_prompt_count: 0,
             prompt_in_flight: self.prompt_in_flight && self.prompt_turn_started_at.is_some(),
+            prompt_images_supported: self.prompt_images_supported,
             pending_permissions: self.pending_permissions.clone(),
             session_config: self.session_config.clone(),
             native_mode: self.native_mode.clone(),
@@ -3029,7 +3047,13 @@ impl RemoteSessionTracker {
                             .map(|guard| guard.session_fork_supported)
                             .unwrap_or(false);
                         let can_compact = ui_event_tx.is_some();
-                        match remote_queued_prompt_action(prompt.text, can_fork, can_compact) {
+                        let QueuedPrompt { text, images, .. } = prompt;
+                        match remote_queued_prompt_action(
+                            text,
+                            !images.is_empty(),
+                            can_fork,
+                            can_compact,
+                        ) {
                             RemoteQueuedPromptAction::ForkSession => {
                                 if command_tx.send(UiCommand::ForkSession).is_err() {
                                     break;
@@ -3074,10 +3098,7 @@ impl RemoteSessionTracker {
                                 }
                             }
                             RemoteQueuedPromptAction::SendPrompt(text) => {
-                                let command = UiCommand::SendPrompt {
-                                    text,
-                                    images: Vec::new(),
-                                };
+                                let command = UiCommand::SendPrompt { text, images };
                                 if command_tx.send(command).is_err() {
                                     break;
                                 }
@@ -6123,13 +6144,36 @@ async fn queue_prompt(
     State(state): State<ServerState>,
     Json(request): Json<QueuePromptRequest>,
 ) -> std::result::Result<StatusCode, (StatusCode, String)> {
-    if request.text.trim().is_empty() {
+    if request.text.trim().is_empty() && request.images.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            "prompt text must not be empty".to_string(),
+            "prompt must contain text or an image".to_string(),
         ));
     }
-    let review = match remote_queued_prompt_action(request.text.clone(), false, false) {
+    validate_prompt_images(&request.images)
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    if !request.images.is_empty() {
+        let db_path = Arc::clone(&state.db_path);
+        let session_id = request.session_id.clone();
+        let supported = tokio::task::spawn_blocking(move || {
+            session_supports_prompt_images(db_path.as_ref().as_path(), &session_id)
+        })
+        .await
+        .map_err(internal_error)?
+        .map_err(internal_error)?;
+        if !supported {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "this session does not support image prompts".to_string(),
+            ));
+        }
+    }
+    let review = match remote_queued_prompt_action(
+        request.text.clone(),
+        !request.images.is_empty(),
+        false,
+        false,
+    ) {
         RemoteQueuedPromptAction::RunReview(_) => true,
         RemoteQueuedPromptAction::RejectInvalidReview => {
             return Err((
@@ -6148,6 +6192,7 @@ async fn queue_prompt(
             db_path.as_ref().as_path(),
             &request.session_id,
             &request.text,
+            &request.images,
         )?;
         Ok(true)
     })
@@ -6161,6 +6206,24 @@ async fn queue_prompt(
         ));
     }
     Ok(StatusCode::ACCEPTED)
+}
+
+fn validate_prompt_images(images: &[PromptImage]) -> std::result::Result<(), String> {
+    for image in images {
+        if !image.mime_type.starts_with("image/") {
+            return Err("image mime type must start with image/".to_string());
+        }
+        if image.width == 0 || image.height == 0 {
+            return Err("image dimensions must be greater than zero".to_string());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&image.data_base64)
+            .map_err(|_| "image data must be valid base64".to_string())?;
+        if bytes.is_empty() {
+            return Err("image data must not be empty".to_string());
+        }
+    }
+    Ok(())
 }
 
 async fn delete_queued_prompt(
@@ -6658,6 +6721,7 @@ fn init_db(db_path: &Path) -> Result<()> {
             id integer primary key autoincrement,
             session_id text not null,
             text text not null,
+            images_json text not null default '[]',
             created_at text not null
         );
         create table if not exists permission_decisions (
@@ -6697,30 +6761,50 @@ fn init_db(db_path: &Path) -> Result<()> {
         "text not null default '[]'",
     )?;
     ensure_sessions_column(&conn, "prompt_in_flight", "integer not null default 0")?;
+    ensure_sessions_column(
+        &conn,
+        "prompt_images_supported",
+        "integer not null default 0",
+    )?;
     ensure_sessions_column(&conn, "worktree", "text")?;
     ensure_sessions_column(&conn, "subagents_json", "text not null default '[]'")?;
     ensure_sessions_column(&conn, "status_json", "text")?;
     ensure_sessions_column(&conn, "workspace_diff_json", "text")?;
+    ensure_table_column(
+        &conn,
+        "queued_prompts",
+        "images_json",
+        "text not null default '[]'",
+    )?;
     Ok(())
 }
 
 fn ensure_sessions_column(conn: &Connection, column: &str, definition: &str) -> Result<()> {
+    ensure_table_column(conn, "sessions", column, definition)
+}
+
+fn ensure_table_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
     let mut stmt = conn
-        .prepare("pragma table_info(sessions)")
-        .context("prepare sessions schema query")?;
+        .prepare(&format!("pragma table_info({table})"))
+        .with_context(|| format!("prepare {table} schema query"))?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))
-        .context("query sessions schema")?
+        .with_context(|| format!("query {table} schema"))?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .context("collect sessions schema")?;
+        .with_context(|| format!("collect {table} schema"))?;
     if columns.iter().any(|existing| existing == column) {
         return Ok(());
     }
 
     conn.execute_batch(&format!(
-        "alter table sessions add column {column} {definition}"
+        "alter table {table} add column {column} {definition}"
     ))
-    .with_context(|| format!("add sessions.{column} column"))?;
+    .with_context(|| format!("add {table}.{column} column"))?;
     Ok(())
 }
 
@@ -6760,6 +6844,11 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
         .context("serialize remote-control workspace diff")?;
     let last_prompt_at = session_last_prompt_at(session);
     let prompt_in_flight = if session.prompt_in_flight { 1_i64 } else { 0 };
+    let prompt_images_supported = if session.prompt_images_supported {
+        1_i64
+    } else {
+        0
+    };
     // The conflict arm refuses to move `last_update` backwards: every state
     // change touches the timestamp before the snapshot is taken, so a
     // delayed or replayed upload can never overwrite newer session state
@@ -6779,12 +6868,13 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             session_config_json,
             available_commands_json,
             prompt_in_flight,
+            prompt_images_supported,
             worktree,
             subagents_json,
             status_json,
             workspace_diff_json,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -6803,6 +6893,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             session_config_json = excluded.session_config_json,
             available_commands_json = excluded.available_commands_json,
             prompt_in_flight = excluded.prompt_in_flight,
+            prompt_images_supported = excluded.prompt_images_supported,
             worktree = excluded.worktree,
             subagents_json = excluded.subagents_json,
             status_json = excluded.status_json,
@@ -6823,6 +6914,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             session_config_json,
             available_commands_json,
             prompt_in_flight,
+            prompt_images_supported,
             session.worktree,
             subagents_json,
             status_json,
@@ -7003,6 +7095,7 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                     from queued_prompts
                     where queued_prompts.session_id = sessions.session_id
                 ) as queued_prompt_count,
+                prompt_images_supported,
                 worktree,
                 subagents_json,
                 status_json,
@@ -7046,6 +7139,7 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                     from queued_prompts
                     where queued_prompts.session_id = sessions.session_id
                 ) as queued_prompt_count,
+                prompt_images_supported,
                 worktree,
                 subagents_json,
                 status_json,
@@ -7074,9 +7168,10 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let available_commands_json: String = row.get(11)?;
     let prompt_in_flight: i64 = row.get(12)?;
     let queued_prompt_count: i64 = row.get(13)?;
-    let subagents_json: String = row.get(15)?;
-    let status_json: Option<String> = row.get(16)?;
-    let workspace_diff_json: Option<String> = row.get(17)?;
+    let prompt_images_supported: i64 = row.get(14)?;
+    let subagents_json: String = row.get(16)?;
+    let status_json: Option<String> = row.get(17)?;
+    let workspace_diff_json: Option<String> = row.get(18)?;
     let transcript: Vec<TranscriptEntry> =
         serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
@@ -7095,11 +7190,12 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         last_prompt_at,
         total_messages: u64::try_from(total_messages).unwrap_or(0),
         project: row.get(6)?,
-        worktree: row.get::<_, Option<String>>(14)?,
+        worktree: row.get::<_, Option<String>>(15)?,
         agent: row.get(7)?,
         transcript,
         queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
         prompt_in_flight: prompt_in_flight != 0,
+        prompt_images_supported: prompt_images_supported != 0,
         pending_permissions,
         session_config,
         native_mode: None,
@@ -7151,7 +7247,7 @@ fn load_queued_prompts(db_path: &Path, session_id: &str) -> Result<Vec<QueuedPro
     let conn = open_db(db_path)?;
     let mut stmt = conn
         .prepare(
-            "select id, session_id, text, created_at
+            "select id, session_id, text, images_json, created_at
             from queued_prompts
             where session_id = ?1
             order by id asc",
@@ -7163,7 +7259,8 @@ fn load_queued_prompts(db_path: &Path, session_id: &str) -> Result<Vec<QueuedPro
                 id: row.get(0)?,
                 session_id: row.get(1)?,
                 text: row.get(2)?,
-                created_at: row.get(3)?,
+                images: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+                created_at: row.get(4)?,
             })
         })
         .context("query queued prompts")?;
@@ -7171,17 +7268,23 @@ fn load_queued_prompts(db_path: &Path, session_id: &str) -> Result<Vec<QueuedPro
         .context("collect queued prompts")
 }
 
-fn queue_prompt_record(db_path: &Path, session_id: &str, text: &str) -> Result<()> {
+fn queue_prompt_record(
+    db_path: &Path,
+    session_id: &str,
+    text: &str,
+    images: &[PromptImage],
+) -> Result<()> {
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
     let created_at = now_rfc3339();
+    let images_json = serde_json::to_string(images).context("serialize queued-prompt images")?;
     let tx = conn
         .transaction()
         .context("begin queued-prompt transaction")?;
     tx.execute(
-        "insert into queued_prompts (session_id, text, created_at)
-        values (?1, ?2, ?3)",
-        params![session_id, text, &created_at],
+        "insert into queued_prompts (session_id, text, images_json, created_at)
+        values (?1, ?2, ?3, ?4)",
+        params![session_id, text, images_json, &created_at],
     )
     .context("insert queued prompt")?;
     tx.execute(
@@ -7209,6 +7312,19 @@ fn session_prompt_in_flight(db_path: &Path, session_id: &str) -> Result<bool> {
         .is_some_and(|value| value != 0))
 }
 
+fn session_supports_prompt_images(db_path: &Path, session_id: &str) -> Result<bool> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    Ok(conn
+        .query_row(
+            "select prompt_images_supported from sessions where session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some_and(|value| value != 0))
+}
+
 fn claim_queued_prompt_record(db_path: &Path, session_id: &str) -> Result<Option<QueuedPrompt>> {
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
@@ -7218,7 +7334,7 @@ fn claim_queued_prompt_record(db_path: &Path, session_id: &str) -> Result<Option
     let prompt = {
         let mut stmt = tx
             .prepare(
-                "select id, session_id, text, created_at
+                "select id, session_id, text, images_json, created_at
                 from queued_prompts
                 where session_id = ?1
                 order by id asc
@@ -7230,7 +7346,8 @@ fn claim_queued_prompt_record(db_path: &Path, session_id: &str) -> Result<Option
                 id: row.get(0)?,
                 session_id: row.get(1)?,
                 text: row.get(2)?,
-                created_at: row.get(3)?,
+                images: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+                created_at: row.get(4)?,
             })
         })
         .optional()
@@ -8587,6 +8704,17 @@ mod tests {
         assert!(viewer.contains("control.value.trim()"));
     }
 
+    #[test]
+    fn embedded_viewer_contains_gated_image_prompt_controls() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("id=\"image-picker\""));
+        assert!(viewer.contains("prompt_images_supported"));
+        assert!(viewer.contains("function attachImageFiles"));
+        assert!(viewer.contains("queueInputEl.addEventListener(\"paste\""));
+        assert!(viewer.contains("images,"));
+        assert!(viewer.contains("MAX_QUEUE_REQUEST_BYTES"));
+    }
+
     #[tokio::test]
     async fn select_elicitations_track_cards_and_forward_valid_choices() {
         for (tool, choice) in [
@@ -9281,6 +9409,7 @@ mod tests {
         });
         let session: SessionRecord = serde_json::from_value(legacy).expect("legacy record");
         assert!(session.subagents.is_empty());
+        assert!(!session.prompt_images_supported);
     }
 
     /// A transcript entry of roughly `bytes` serialized size.
@@ -10348,6 +10477,7 @@ mod tests {
             ],
             queued_prompt_count: 0,
             prompt_in_flight: true,
+            prompt_images_supported: true,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: vec![command_record(
@@ -10422,6 +10552,7 @@ mod tests {
         assert_eq!(sessions[0].name, "demo");
         assert_eq!(sessions[0].total_messages, 6);
         assert!(sessions[0].prompt_in_flight);
+        assert!(sessions[0].prompt_images_supported);
         assert_eq!(sessions[0].start_time, "2026-06-03T10:00:00Z");
         assert_eq!(sessions[0].last_update, "2026-06-03T10:00:40Z");
         assert_eq!(
@@ -10705,6 +10836,7 @@ mod tests {
             transcript: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
+            prompt_images_supported: false,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -10806,7 +10938,7 @@ mod tests {
         )
         .expect("second");
 
-        queue_prompt_record(&db_path, "sess-first", "new work").expect("queue prompt");
+        queue_prompt_record(&db_path, "sess-first", "new work", &[]).expect("queue prompt");
 
         let sessions = load_session_records(&db_path).expect("load");
         assert_eq!(sessions[0].session_id, "sess-first");
@@ -10831,7 +10963,7 @@ mod tests {
         )
         .expect("insert session");
 
-        queue_prompt_record(&db_path, "sess-race", "remote prompt").expect("queue prompt");
+        queue_prompt_record(&db_path, "sess-race", "remote prompt", &[]).expect("queue prompt");
         let queued_prompt_at = load_session_records(&db_path).expect("load after queue")[0]
             .last_prompt_at
             .clone();
@@ -10899,20 +11031,30 @@ mod tests {
     fn queued_prompts_round_trip_and_claim_fifo() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("sessions.sqlite3");
+        let image = PromptImage {
+            data_base64: "aW1hZ2U=".to_string(),
+            mime_type: "image/png".to_string(),
+            width: 32,
+            height: 24,
+        };
 
-        queue_prompt_record(&db_path, "sess-1", "first").expect("queue first");
-        queue_prompt_record(&db_path, "sess-1", "second").expect("queue second");
-        queue_prompt_record(&db_path, "sess-2", "other").expect("queue other");
+        queue_prompt_record(&db_path, "sess-1", "first", std::slice::from_ref(&image))
+            .expect("queue first");
+        queue_prompt_record(&db_path, "sess-1", "second", &[]).expect("queue second");
+        queue_prompt_record(&db_path, "sess-2", "other", &[]).expect("queue other");
 
         let sess_1 = load_queued_prompts(&db_path, "sess-1").expect("load sess-1");
         assert_eq!(sess_1.len(), 2);
         assert_eq!(sess_1[0].text, "first");
+        assert_eq!(sess_1[0].images, vec![image.clone()]);
         assert_eq!(sess_1[1].text, "second");
+        assert!(sess_1[1].images.is_empty());
 
         let claimed = claim_queued_prompt_record(&db_path, "sess-1")
             .expect("claim first")
             .expect("prompt");
         assert_eq!(claimed.text, "first");
+        assert_eq!(claimed.images, vec![image]);
 
         let remaining = load_queued_prompts(&db_path, "sess-1").expect("load remaining");
         assert_eq!(remaining.len(), 1);
@@ -10934,13 +11076,37 @@ mod tests {
     }
 
     #[test]
+    fn queued_prompt_schema_migrates_existing_text_only_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let conn = open_db(&db_path).expect("open db");
+        conn.execute_batch(
+            "create table queued_prompts (
+                id integer primary key autoincrement,
+                session_id text not null,
+                text text not null,
+                created_at text not null
+            );
+            insert into queued_prompts (session_id, text, created_at)
+            values ('sess-1', 'legacy prompt', '2026-06-10T10:00:00Z');",
+        )
+        .expect("legacy queue schema");
+        drop(conn);
+
+        let prompts = load_queued_prompts(&db_path, "sess-1").expect("migrated queue");
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].text, "legacy prompt");
+        assert!(prompts[0].images.is_empty());
+    }
+
+    #[test]
     fn delete_queued_prompt_is_scoped_to_session() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("sessions.sqlite3");
 
-        queue_prompt_record(&db_path, "sess-1", "keep").expect("queue first");
-        queue_prompt_record(&db_path, "sess-1", "delete me").expect("queue second");
-        queue_prompt_record(&db_path, "sess-2", "other").expect("queue other");
+        queue_prompt_record(&db_path, "sess-1", "keep", &[]).expect("queue first");
+        queue_prompt_record(&db_path, "sess-1", "delete me", &[]).expect("queue second");
+        queue_prompt_record(&db_path, "sess-2", "other", &[]).expect("queue other");
 
         let sess_1 = load_queued_prompts(&db_path, "sess-1").expect("load sess-1");
         let delete_id = sess_1[1].id;
@@ -10988,53 +11154,153 @@ mod tests {
     #[test]
     fn remote_queued_prompt_action_routes_fork_commands() {
         assert_eq!(
-            remote_queued_prompt_action("/fork".to_string(), true, true),
+            remote_queued_prompt_action("/fork".to_string(), false, true, true),
             RemoteQueuedPromptAction::ForkSession
         );
         assert_eq!(
-            remote_queued_prompt_action(" /fork ".to_string(), false, true),
+            remote_queued_prompt_action(" /fork ".to_string(), false, false, true),
             RemoteQueuedPromptAction::RejectUnsupportedFork
         );
         assert_eq!(
-            remote_queued_prompt_action("/fork later".to_string(), true, true),
+            remote_queued_prompt_action("/fork later".to_string(), false, true, true),
             RemoteQueuedPromptAction::SendPrompt("/fork later".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("hello".to_string(), true, true),
+            remote_queued_prompt_action("hello".to_string(), false, true, true),
             RemoteQueuedPromptAction::SendPrompt("hello".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("/review recent".to_string(), true, true),
+            remote_queued_prompt_action("/review recent".to_string(), false, true, true),
             RemoteQueuedPromptAction::RunReview(crate::event::ReviewTarget::Recent)
         );
         assert_eq!(
-            remote_queued_prompt_action("/review head".to_string(), true, true),
+            remote_queued_prompt_action("/review head".to_string(), false, true, true),
             RemoteQueuedPromptAction::RunReview(crate::event::ReviewTarget::Head)
         );
         assert_eq!(
-            remote_queued_prompt_action("/review".to_string(), true, true),
+            remote_queued_prompt_action("/review".to_string(), false, true, true),
             RemoteQueuedPromptAction::RejectInvalidReview
         );
+        assert_eq!(
+            remote_queued_prompt_action("/fork".to_string(), true, true, true),
+            RemoteQueuedPromptAction::SendPrompt("/fork".to_string()),
+            "image prompts must not be consumed as local slash commands"
+        );
+    }
+
+    #[test]
+    fn prompt_image_validation_rejects_malformed_payloads() {
+        let valid = PromptImage {
+            data_base64: "aW1hZ2U=".to_string(),
+            mime_type: "image/png".to_string(),
+            width: 32,
+            height: 24,
+        };
+        assert!(validate_prompt_images(std::slice::from_ref(&valid)).is_ok());
+
+        let cases = [
+            PromptImage {
+                mime_type: "text/plain".to_string(),
+                ..valid.clone()
+            },
+            PromptImage {
+                width: 0,
+                ..valid.clone()
+            },
+            PromptImage {
+                data_base64: "not base64".to_string(),
+                ..valid.clone()
+            },
+            PromptImage {
+                data_base64: String::new(),
+                ..valid
+            },
+        ];
+        for image in cases {
+            assert!(validate_prompt_images(&[image]).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_prompt_endpoint_gates_and_persists_images() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let now = now_rfc3339();
+        let mut supported = session_named("sess-supported", &now);
+        supported.prompt_images_supported = true;
+        upsert_session_record(&db_path, &supported).expect("supported session");
+        upsert_session_record(&db_path, &session_named("sess-text-only", &now))
+            .expect("text-only session");
+
+        let token = "integration-token".to_string();
+        let app = build_router(RouterConfig {
+            db_path: db_path.clone(),
+            token: token.clone(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "test-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+            workspace_roots: test_workspace_roots(dir.path()),
+            session_manager: test_session_manager(),
+            mjconfig: test_mjconfig_runtime(),
+        });
+        let image = PromptImage {
+            data_base64: "aW1hZ2U=".to_string(),
+            mime_type: "image/png".to_string(),
+            width: 32,
+            height: 24,
+        };
+        let request = |session_id: &str| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/queued-prompts")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&QueuePromptRequest {
+                        session_id: session_id.to_string(),
+                        text: String::new(),
+                        images: vec![image.clone()],
+                    })
+                    .expect("request json"),
+                ))
+                .expect("request")
+        };
+
+        let rejected = app
+            .clone()
+            .oneshot(request("sess-text-only"))
+            .await
+            .expect("reject unsupported image");
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+        let accepted = app
+            .oneshot(request("sess-supported"))
+            .await
+            .expect("queue supported image");
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let queued = load_queued_prompts(&db_path, "sess-supported").expect("load queue");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].images, vec![image]);
     }
 
     #[test]
     fn remote_queued_prompt_action_routes_compact_when_a_coordinator_exists() {
         assert_eq!(
-            remote_queued_prompt_action("/compact".to_string(), true, true),
+            remote_queued_prompt_action("/compact".to_string(), false, true, true),
             RemoteQueuedPromptAction::CompactPrimary
         );
         assert_eq!(
-            remote_queued_prompt_action(" /compact ".to_string(), false, true),
+            remote_queued_prompt_action(" /compact ".to_string(), false, false, true),
             RemoteQueuedPromptAction::CompactPrimary
         );
         // Headless: no coordinator, keep the literal slash prompt for agents
         // that implement /compact natively.
         assert_eq!(
-            remote_queued_prompt_action("/compact".to_string(), true, false),
+            remote_queued_prompt_action("/compact".to_string(), false, true, false),
             RemoteQueuedPromptAction::SendPrompt("/compact".to_string())
         );
         assert_eq!(
-            remote_queued_prompt_action("/compact now".to_string(), true, true),
+            remote_queued_prompt_action("/compact now".to_string(), false, true, true),
             RemoteQueuedPromptAction::SendPrompt("/compact now".to_string())
         );
     }
@@ -11052,7 +11318,7 @@ mod tests {
             },
         )
         .expect("insert active session");
-        queue_prompt_record(&db_path, "sess-1", "queued").expect("queue prompt");
+        queue_prompt_record(&db_path, "sess-1", "queued", &[]).expect("queue prompt");
         let prompt_id = load_queued_prompts(&db_path, "sess-1").expect("load")[0].id;
         let token = "integration-token".to_string();
         let app = build_router(RouterConfig {
@@ -11243,6 +11509,7 @@ mod tests {
             transcript: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
+            prompt_images_supported: false,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -11309,7 +11576,7 @@ mod tests {
 
         // A prompt queued for a disconnected session must survive pruning
         // so `mj resume` can still claim it...
-        queue_prompt_record(&db_path, "sess-1", "run after resume").expect("queue fresh");
+        queue_prompt_record(&db_path, "sess-1", "run after resume", &[]).expect("queue fresh");
         // ...but an ancient one is dead weight.
         let conn = open_db(&db_path).expect("open db");
         conn.execute(
@@ -11345,7 +11612,7 @@ mod tests {
         )
         .expect("ancient");
         disconnect_session_record(&db_path, "sess-ancient").expect("disconnect ancient");
-        queue_prompt_record(&db_path, "sess-ancient", "never ran").expect("queue prompt");
+        queue_prompt_record(&db_path, "sess-ancient", "never ran", &[]).expect("queue prompt");
 
         // With history pruning disabled nothing is touched...
         let counts = prune_stale_records(&db_path, None).expect("prune disabled");
@@ -11383,7 +11650,7 @@ mod tests {
         queue_permission_decision_record(&db_path, "sess-1", "call-1", "allow")
             .expect("queue decision");
         assert!(queue_prompt_cancel_record(&db_path, "sess-1").expect("queue cancel"));
-        queue_prompt_record(&db_path, "sess-1", "next task").expect("queue prompt");
+        queue_prompt_record(&db_path, "sess-1", "next task", &[]).expect("queue prompt");
 
         disconnect_session_record(&db_path, "sess-1").expect("disconnect");
 
@@ -11568,7 +11835,7 @@ mod tests {
         state.observe_event(&UiEvent::Connected {
             agent_name: Some("agent".to_string()),
             agent_version: None,
-            prompt_images_supported: false,
+            prompt_images_supported: true,
             session_fork_supported: true,
             side_session_supported: false,
             side_session_unsupported_reason: None,
@@ -11591,6 +11858,7 @@ mod tests {
         ));
 
         let snapshot = state.snapshot().expect("snapshot");
+        assert!(snapshot.prompt_images_supported);
         let names: Vec<&str> = snapshot
             .available_commands
             .iter()
@@ -11884,6 +12152,7 @@ mod tests {
             transcript: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
+            prompt_images_supported: false,
             pending_permissions: vec![pending.clone()],
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -12934,6 +13203,7 @@ mod tests {
             transcript: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
+            prompt_images_supported: false,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
