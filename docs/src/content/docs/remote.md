@@ -37,10 +37,15 @@ are recognized as Mjolnir's own tools rather than third-party ones.
 
 Under the chat header the browser mirrors the terminal status line: primary
 model and its ACP adapter, reasoning effort, per-seat token totals
-(primary/review/subagents), session cost and context occupancy when the agent
-reports them, provider subscription quota windows (Codex/Claude), and a link to
-the current branch's open pull request. The pull-request badge comes from a
-`git`/`gh` probe on the session host and refreshes about twice a minute.
+(primary/review/subagents), context occupancy when the agent reports it,
+provider subscription quota windows (Codex/Claude), and a link to the current
+branch's open pull request. The pull-request badge comes from a `git`/`gh`
+probe on the session host and refreshes about twice a minute.
+
+Cost is deliberately not shown here. Only some ACP adapters report one, and
+seats bind adapters independently, so a single session-wide figure would
+silently cover just the seats that happen to report. `/agents` in the terminal
+breaks cost down per seat and per model, where the unpriced seats are visible.
 
 ## Tailscale
 
