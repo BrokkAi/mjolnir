@@ -4430,6 +4430,9 @@
             cwd: created.display_path || pendingSessionLaunch.cwd,
             detail: "Waiting for the agent to publish the session…",
             worktree: created.worktree || pendingSessionLaunch.worktree,
+            /* The POST only means the launch was accepted; the agent starts on
+               a detached task. This is how we learn whether it came up. */
+            serverLaunchId: created.launch_id,
           };
           renderSessions();
           newSessionModalEl.hidden = true;
@@ -4467,6 +4470,27 @@
         }
       }
 
+      /* The server's verdict on one launch, or null while it is still starting.
+         Never throws: this runs inside the watch loop, and a hiccup reading it
+         must not be mistaken for the launch itself failing. */
+      async function serverLaunchFailure(serverLaunchId) {
+        if (!serverLaunchId) {
+          return null;
+        }
+        try {
+          const response = await apiFetch(`/api/server-sessions/launches/${serverLaunchId}`, {
+            cache: "no-store",
+          });
+          if (!response.ok) {
+            return null;
+          }
+          const launch = await response.json();
+          return launch.state === "failed" ? launch.error || "the agent failed to start" : null;
+        } catch {
+          return null;
+        }
+      }
+
       /* Poll until the session shows up or the launch deadline passes.
          Watching for only a few seconds and then giving up is what left a slow
          launch with nothing tracking it: the card sat on a stale message until
@@ -4480,6 +4504,14 @@
           /* Dismissed, already failed, or superseded by a newer launch: this
              watcher no longer owns the slot and must not write to it. */
           if (pendingSessionLaunch?.id !== launchId || pendingSessionLaunch.failed) {
+            return;
+          }
+          /* Ask the server how the launch went before waiting another cycle.
+             A session that dies on startup never publishes anything, so
+             polling the session list alone can only ever time out. */
+          const launchFailure = await serverLaunchFailure(pendingSessionLaunch.serverLaunchId);
+          if (launchFailure) {
+            failSessionLaunch(`Start failed: ${launchFailure}`, launchId);
             return;
           }
           await refreshSessions();

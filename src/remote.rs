@@ -923,6 +923,10 @@ struct NewServerSessionResponse {
     display_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     worktree: Option<String>,
+    /// Poll `GET /api/server-sessions/launches/{launch_id}` for the outcome.
+    /// This response only means the launch was accepted.
+    #[serde(default)]
+    launch_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1147,6 +1151,95 @@ struct ServerSessionLaunch {
     config_hash: Option<u64>,
 }
 
+/// How far one requested session launch has got.
+///
+/// `POST /api/server-sessions` returns as soon as the launch has been
+/// *requested* — the agent is spawned on a detached task — so without this the
+/// only failure the viewer could ever report was its own timeout. A session
+/// that dies on startup never publishes a snapshot, so there is nothing in the
+/// session list to carry the error either.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum ServerSessionLaunchState {
+    Starting,
+    Started { session_id: String },
+    Failed { error: String },
+}
+
+/// Launch outcomes, keyed by the id handed back to the client that asked for
+/// the launch.
+#[derive(Debug, Default)]
+struct ServerSessionLaunchRegistry {
+    next_id: AtomicU64,
+    launches: Mutex<BTreeMap<u64, ServerSessionLaunchState>>,
+}
+
+/// Retained launch records. Each is a handful of bytes and only a viewer
+/// actively waiting on one ever reads it, so this only has to stop an
+/// long-lived server from growing a record per session forever.
+const MAX_RETAINED_LAUNCHES: usize = 64;
+
+impl ServerSessionLaunchRegistry {
+    fn begin(&self) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Ok(mut launches) = self.launches.lock() {
+            while launches.len() >= MAX_RETAINED_LAUNCHES {
+                let Some(oldest) = launches.keys().next().copied() else {
+                    break;
+                };
+                launches.remove(&oldest);
+            }
+            launches.insert(id, ServerSessionLaunchState::Starting);
+        }
+        id
+    }
+
+    fn resolve(&self, id: u64, state: ServerSessionLaunchState) {
+        if let Ok(mut launches) = self.launches.lock()
+            && let Some(slot) = launches.get_mut(&id)
+        {
+            // First outcome wins: a session that started and later failed is a
+            // session failure, which the transcript carries, not a launch
+            // failure.
+            if matches!(slot, ServerSessionLaunchState::Starting) {
+                *slot = state;
+            }
+        }
+    }
+
+    fn get(&self, id: u64) -> Option<ServerSessionLaunchState> {
+        self.launches.lock().ok()?.get(&id).cloned()
+    }
+}
+
+/// Records one launch's outcome. Held by the session task, which is the only
+/// place that learns whether the agent actually came up.
+#[derive(Debug, Clone)]
+struct ServerSessionLaunchReporter {
+    registry: Arc<ServerSessionLaunchRegistry>,
+    launch_id: u64,
+}
+
+impl ServerSessionLaunchReporter {
+    fn started(&self, session_id: &str) {
+        self.registry.resolve(
+            self.launch_id,
+            ServerSessionLaunchState::Started {
+                session_id: session_id.to_string(),
+            },
+        );
+    }
+
+    fn failed(&self, error: impl Into<String>) {
+        self.registry.resolve(
+            self.launch_id,
+            ServerSessionLaunchState::Failed {
+                error: error.into(),
+            },
+        );
+    }
+}
+
 #[derive(Debug)]
 struct ServerSessionManager {
     launch: RwLock<ServerSessionLaunch>,
@@ -1157,6 +1250,7 @@ struct ServerSessionManager {
     snapshot_exclusions: Vec<PathBuf>,
     fs_max_text_bytes: u64,
     sessions: Mutex<Vec<ServerAgentSession>>,
+    launches: Arc<ServerSessionLaunchRegistry>,
 }
 
 fn selected_agent_for_roster(roster: &roster::Roster) -> SelectedAgent {
@@ -1221,6 +1315,7 @@ impl ServerSessionManager {
             snapshot_exclusions: Vec::new(),
             fs_max_text_bytes,
             sessions: Mutex::new(Vec::new()),
+            launches: Arc::new(ServerSessionLaunchRegistry::default()),
         }
     }
 
@@ -1243,6 +1338,7 @@ impl ServerSessionManager {
             snapshot_exclusions,
             fs_max_text_bytes,
             sessions: Mutex::new(Vec::new()),
+            launches: Arc::new(ServerSessionLaunchRegistry::default()),
         }
     }
 
@@ -1284,8 +1380,20 @@ impl ServerSessionManager {
         }
     }
 
-    fn start_session(&self, cwd: PathBuf) {
+    fn launch_state(&self, launch_id: u64) -> Option<ServerSessionLaunchState> {
+        self.launches.get(launch_id)
+    }
+
+    /// Request a session launch. Returns the id the caller polls for the
+    /// outcome: the agent starts on a detached task, so the launch has not
+    /// succeeded merely because this returned.
+    fn start_session(&self, cwd: PathBuf) -> u64 {
         let launch = self.launch.read().expect("server launch lock").clone();
+        let launch_id = self.launches.begin();
+        let reporter = ServerSessionLaunchReporter {
+            registry: Arc::clone(&self.launches),
+            launch_id,
+        };
         let session = start_server_agent_session(
             launch.agent,
             launch.roster,
@@ -1293,12 +1401,15 @@ impl ServerSessionManager {
             self.additional_directories.clone(),
             self.snapshot_exclusions.clone(),
             self.fs_max_text_bytes,
+            Some(reporter.clone()),
         );
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.push(session);
         } else {
             session.task.abort();
+            reporter.failed("server is shutting down");
         }
+        launch_id
     }
 
     async fn shutdown_all(&self) {
@@ -3205,6 +3316,7 @@ fn start_server_agent_session(
     additional_directories: Vec<PathBuf>,
     snapshot_exclusions: Vec<PathBuf>,
     fs_max_text_bytes: u64,
+    launch_reporter: Option<ServerSessionLaunchReporter>,
 ) -> ServerAgentSession {
     let (runtime_event_tx, runtime_event_rx) = mpsc::unbounded_channel();
     let (runtime_cmd_tx, runtime_cmd_rx) = mpsc::unbounded_channel();
@@ -3392,15 +3504,31 @@ fn start_server_agent_session(
     let task = tokio::spawn(async move {
         let _subagent_homes = subagent_codex_home;
         if let Some(error) = roster_setup_error {
+            // The session never comes up, so nothing it could publish will
+            // ever carry this. Tell whoever asked for the launch directly.
+            if let Some(reporter) = launch_reporter.as_ref() {
+                reporter.failed(error.clone());
+            }
             tracker.observe_event(&UiEvent::Fatal(error));
             tracker.shutdown().await;
             return;
         }
-        let runtime = tokio::spawn(async move {
-            if let Err(error) = acp::run(runtime_cfg, runtime_event_tx, runtime_cmd_rx).await {
-                debug!("server agent session exited: {error:#}");
-            }
-        });
+        let runtime = {
+            let launch_reporter = launch_reporter.clone();
+            tokio::spawn(async move {
+                if let Err(error) = acp::run(runtime_cfg, runtime_event_tx, runtime_cmd_rx).await {
+                    // A spawn failure lands here — a missing adapter binary,
+                    // a bad command line, a handshake that never completes.
+                    // It used to stop at `debug!`, which is below the default
+                    // level, so the viewer saw a session that simply never
+                    // appeared.
+                    if let Some(reporter) = launch_reporter.as_ref() {
+                        reporter.failed(format!("{error:#}"));
+                    }
+                    debug!("server agent session exited: {error:#}");
+                }
+            })
+        };
         let command_proxy = {
             let tracker = tracker.clone();
             let runtime_cmd_tx = runtime_cmd_tx.clone();
@@ -3457,6 +3585,11 @@ fn start_server_agent_session(
                     let Some(event) = event else {
                         break;
                     };
+                    if let UiEvent::SessionStarted { session_id, .. } = &event
+                        && let Some(reporter) = launch_reporter.as_ref()
+                    {
+                        reporter.started(session_id);
+                    }
                     if let (Some(primary), UiEvent::SessionStarted { session_id, .. }) =
                         (provenance_primary.as_ref(), &event)
                     {
@@ -5308,6 +5441,10 @@ fn build_router(config: RouterConfig) -> Router {
         .route("/live/sessions", get(list_live_sessions))
         .route("/sessions", get(list_sessions))
         .route("/api/server-sessions", post(create_server_owned_session))
+        .route(
+            "/api/server-sessions/launches/{launch_id}",
+            get(server_session_launch_state),
+        )
         .route("/api/filesystem", get(browse_filesystem))
         .route("/api/sessions", post(upsert_session))
         .route(
@@ -5904,15 +6041,30 @@ async fn create_server_owned_session(
             ));
         }
     }
-    state.session_manager.start_session(cwd.clone());
+    let launch_id = state.session_manager.start_session(cwd.clone());
     Ok((
         StatusCode::ACCEPTED,
         Json(NewServerSessionResponse {
             display_path: crate::paths::display_path_with_tilde(&cwd),
             cwd: cwd.display().to_string(),
             worktree,
+            launch_id,
         }),
     ))
+}
+
+/// Report how a requested launch turned out. The client polls this while its
+/// session is still missing from the list, so a launch that dies on startup
+/// reports the real cause instead of just timing out.
+async fn server_session_launch_state(
+    State(state): State<ServerState>,
+    AxumPath(launch_id): AxumPath<u64>,
+) -> std::result::Result<Json<ServerSessionLaunchState>, (StatusCode, String)> {
+    state
+        .session_manager
+        .launch_state(launch_id)
+        .map(Json)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "unknown launch".to_string()))
 }
 
 async fn list_queued_prompts(
@@ -10166,6 +10318,125 @@ mod tests {
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(body.to_string()))
             .expect("request")
+    }
+
+    /// `POST /api/server-sessions` returns once the launch is *requested*, and
+    /// a session that dies on startup never publishes anything — so without a
+    /// launch record the viewer could only ever report its own timeout (#612).
+    #[test]
+    fn launch_registry_reports_the_first_outcome_for_a_launch() {
+        let registry = ServerSessionLaunchRegistry::default();
+        let id = registry.begin();
+        assert_eq!(registry.get(id), Some(ServerSessionLaunchState::Starting));
+
+        registry.resolve(
+            id,
+            ServerSessionLaunchState::Failed {
+                error: "adapter binary not found".to_string(),
+            },
+        );
+        assert_eq!(
+            registry.get(id),
+            Some(ServerSessionLaunchState::Failed {
+                error: "adapter binary not found".to_string()
+            })
+        );
+
+        // A session that already reported an outcome keeps it: a session that
+        // started and later died is a session failure, not a launch failure.
+        registry.resolve(
+            id,
+            ServerSessionLaunchState::Started {
+                session_id: "sess-1".to_string(),
+            },
+        );
+        assert!(matches!(
+            registry.get(id),
+            Some(ServerSessionLaunchState::Failed { .. })
+        ));
+    }
+
+    #[test]
+    fn launch_registry_evicts_the_oldest_records() {
+        let registry = ServerSessionLaunchRegistry::default();
+        let first = registry.begin();
+        for _ in 0..MAX_RETAINED_LAUNCHES {
+            registry.begin();
+        }
+
+        assert!(registry.get(first).is_none());
+        assert!(
+            registry.launches.lock().expect("launches").len() <= MAX_RETAINED_LAUNCHES,
+            "registry must stay bounded on a long-lived server"
+        );
+    }
+
+    #[test]
+    fn launch_state_serializes_for_the_viewer() {
+        let failed = serde_json::to_value(ServerSessionLaunchState::Failed {
+            error: "spawn failed".to_string(),
+        })
+        .expect("serialize");
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["error"], "spawn failed");
+
+        let starting =
+            serde_json::to_value(ServerSessionLaunchState::Starting).expect("serialize starting");
+        assert_eq!(starting["state"], "starting");
+    }
+
+    #[tokio::test]
+    async fn server_session_launch_endpoint_reports_failures_and_unknown_launches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = "launch-token".to_string();
+        let manager = test_session_manager();
+        let launch_id = manager.launches.begin();
+        manager.launches.resolve(
+            launch_id,
+            ServerSessionLaunchState::Failed {
+                error: "codex-acp: No such file or directory".to_string(),
+            },
+        );
+        let app = build_router(RouterConfig {
+            db_path: dir.path().join("sessions.sqlite3"),
+            token: token.clone(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "test-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+            workspace_roots: test_workspace_roots(dir.path()),
+            session_manager: Arc::clone(&manager),
+            mjconfig: test_mjconfig_runtime(),
+        });
+
+        let request = |uri: String| {
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .expect("request")
+        };
+
+        let response = app
+            .clone()
+            .oneshot(request(format!(
+                "/api/server-sessions/launches/{launch_id}"
+            )))
+            .await
+            .expect("launch state");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let state: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(state["state"], "failed");
+        assert_eq!(state["error"], "codex-acp: No such file or directory");
+
+        let missing = app
+            .oneshot(request("/api/server-sessions/launches/999999".to_string()))
+            .await
+            .expect("unknown launch");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
