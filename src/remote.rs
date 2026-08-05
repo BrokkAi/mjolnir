@@ -904,6 +904,10 @@ struct TrackerState {
     /// Runtime roles for nested review actors. Internal coordinators share the
     /// runner but stay out of the user-facing subagent roster.
     nested_roles: HashMap<u64, crate::workflow::WorkflowActorRole>,
+    /// Reduced workflow state, kept for the same reason the TUI keeps one:
+    /// lifecycle notices are rendered from the reduced state, not from the
+    /// transition alone.
+    workflows: crate::workflow::WorkflowStore,
     pending_permissions: Vec<PendingPermissionRecord>,
     session_config: Vec<SessionConfigOptionRecord>,
     native_mode: Option<NativeModeRecord>,
@@ -1170,6 +1174,7 @@ impl TrackerState {
             tool_transcript_entries: HashMap::new(),
             subagents: BTreeMap::new(),
             nested_roles: HashMap::new(),
+            workflows: crate::workflow::WorkflowStore::default(),
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             native_mode: None,
@@ -1332,15 +1337,7 @@ impl TrackerState {
             | UiEvent::RemotePermissionDecision { .. }
             | UiEvent::RosterUpdate { .. } => {}
             UiEvent::Subagent(subagent_event) => self.observe_subagent_event(subagent_event),
-            UiEvent::Workflow(event) => {
-                if let crate::workflow::WorkflowTransition::ActorStarted {
-                    actor_id: crate::workflow::WorkflowActorId::Subagent(id),
-                    role,
-                } = &event.transition
-                {
-                    self.nested_roles.insert(*id, role.clone());
-                }
-            }
+            UiEvent::Workflow(event) => self.observe_workflow_event(event),
             UiEvent::Info(message) => {
                 self.record_status_notice(StatusKind::Info, message);
             }
@@ -1355,6 +1352,65 @@ impl TrackerState {
                 );
                 self.touch();
             }
+        }
+    }
+
+    /// Mirror one workflow lifecycle transition.
+    ///
+    /// Reduce it into the tracker's own `WorkflowStore` first, exactly as
+    /// `AppState` does, then render the same notices the TUI writes to its
+    /// transcript. Review workflows are the longest-running thing a session
+    /// does, so without this a remote watcher sees a silent gap where the
+    /// terminal shows the review starting, waiting and finishing.
+    fn observe_workflow_event(&mut self, event: &crate::workflow::WorkflowEvent) {
+        use crate::workflow::{ApplyOutcome, WorkflowActorId, WorkflowState, WorkflowTransition};
+
+        // Role bookkeeping stays outside the reducer's verdict. It only names
+        // actors in the transcript, and a rejected transition is no reason to
+        // start labelling a subagent wrongly.
+        if let WorkflowTransition::ActorStarted {
+            actor_id: WorkflowActorId::Subagent(id),
+            role,
+        } = &event.transition
+        {
+            self.nested_roles.insert(*id, role.clone());
+        }
+
+        match self.workflows.apply(event) {
+            Ok(ApplyOutcome::Changed) => {}
+            Ok(ApplyOutcome::Duplicate) => return,
+            Err(error) => {
+                tracing::warn!(
+                    event = "workflow_transition_rejected_by_tracker",
+                    error = %error,
+                    "ignoring an invalid workflow transition"
+                );
+                return;
+            }
+        }
+
+        let notice = match &event.transition {
+            WorkflowTransition::Started { .. } => self
+                .workflows
+                .get(event.workflow_id)
+                .and_then(WorkflowState::started_notice),
+            WorkflowTransition::Waiting {
+                remaining,
+                requires_user_action,
+                ..
+            } => self
+                .workflows
+                .get(event.workflow_id)
+                .and_then(|state| state.waiting_notice(*remaining, *requires_user_action)),
+            WorkflowTransition::Terminal { outcome, .. } => self
+                .workflows
+                .get(event.workflow_id)
+                .map(|state| state.terminal_notice(*outcome)),
+            _ => None,
+        };
+
+        if let Some(notice) = notice {
+            self.record_system_notice(notice);
         }
     }
 
@@ -8729,6 +8785,175 @@ mod tests {
         });
         let session: SessionRecord = serde_json::from_value(legacy).expect("legacy record");
         assert!(session.subagents.is_empty());
+    }
+
+    fn started_session_tracker() -> TrackerState {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        state
+    }
+
+    fn transcript_texts(snapshot: &SessionRecord) -> Vec<&str> {
+        snapshot
+            .transcript
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn tracker_mirrors_review_workflow_lifecycle() {
+        use crate::workflow::{
+            WorkflowCoverage, WorkflowEvent, WorkflowId, WorkflowKind, WorkflowOutcome,
+            WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = started_session_tracker();
+        let workflow_id = WorkflowId::review(1);
+
+        for transition in [
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(1, WorkflowPhase::IntentAnalysis),
+            },
+            WorkflowTransition::Waiting {
+                dependency: "reviewer reports".to_string(),
+                remaining: Some(2),
+                requires_user_action: false,
+            },
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Clean,
+                coverage: WorkflowCoverage::Complete,
+            },
+        ] {
+            state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+                workflow_id,
+                transition,
+            )));
+        }
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(
+            transcript_texts(&snapshot),
+            [
+                "review started",
+                "review · waiting for 2 reviewers",
+                "review complete · no material findings",
+            ]
+        );
+    }
+
+    /// The upsert route refuses to move `last_update` backwards, so a fold
+    /// that mutates state without touching the timestamp produces a snapshot
+    /// the server rejects. Workflow transitions used to do exactly that.
+    #[test]
+    fn tracker_touches_the_snapshot_for_workflow_transitions() {
+        use crate::workflow::{
+            WorkflowEvent, WorkflowId, WorkflowKind, WorkflowPhase, WorkflowStage,
+            WorkflowTransition,
+        };
+
+        let mut state = started_session_tracker();
+        state.last_update = Some("2020-01-01T00:00:00Z".to_string());
+
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            WorkflowId::review(4),
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(1, WorkflowPhase::IntentAnalysis),
+            },
+        )));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_ne!(snapshot.last_update, "2020-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn tracker_summarises_delegation_workflow_completion() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowCoverage, WorkflowEvent, WorkflowId,
+            WorkflowKind, WorkflowOutcome, WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = started_session_tracker();
+        let workflow_id = WorkflowId::delegation(2);
+
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Delegation,
+                stage: WorkflowStage::new(1, WorkflowPhase::Delegating),
+            },
+        )));
+        // A delegation start is not worth a transcript line; only its outcome.
+        assert!(state.snapshot().expect("snapshot").transcript.is_empty());
+
+        for id in [7_u64, 8] {
+            state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorStarted {
+                    actor_id: WorkflowActorId::Subagent(id),
+                    role: WorkflowActorRole::Implementation,
+                },
+            )));
+        }
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorFinished {
+                actor_id: WorkflowActorId::Subagent(7),
+                outcome: SubagentOutcome::Completed,
+            },
+        )));
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorFinished {
+                actor_id: WorkflowActorId::Subagent(8),
+                outcome: SubagentOutcome::Failed("boom".to_string()),
+            },
+        )));
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Failed,
+                coverage: WorkflowCoverage::Complete,
+            },
+        )));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(
+            transcript_texts(&snapshot),
+            ["subagents failed · 1 completed · 1 failed"]
+        );
+    }
+
+    /// Actor roles name nested transcript entries and must survive a
+    /// transition the reducer rejects, so the labelling never goes wrong just
+    /// because a lifecycle event arrived out of order.
+    #[test]
+    fn tracker_keeps_actor_roles_when_the_reducer_rejects_a_transition() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowTransition,
+        };
+
+        let mut state = started_session_tracker();
+
+        // No `Started` for this workflow, so the reducer rejects the event.
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            WorkflowId::review(3),
+            WorkflowTransition::ActorStarted {
+                actor_id: WorkflowActorId::Subagent(42),
+                role: WorkflowActorRole::ReviewSupervisor,
+            },
+        )));
+
+        assert_eq!(
+            state.nested_roles.get(&42),
+            Some(&WorkflowActorRole::ReviewSupervisor)
+        );
+        assert!(state.snapshot().expect("snapshot").transcript.is_empty());
     }
 
     #[test]

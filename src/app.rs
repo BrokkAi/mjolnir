@@ -3733,20 +3733,23 @@ impl AppState {
 
     fn apply_workflow_transition(&mut self, event: &crate::workflow::WorkflowEvent) {
         use crate::workflow::{
-            WorkflowActorId, WorkflowActorLifecycle, WorkflowKind, WorkflowOutcome,
-            WorkflowTransition,
+            WorkflowActorId, WorkflowActorLifecycle, WorkflowState, WorkflowTransition,
         };
 
         match &event.transition {
-            WorkflowTransition::Started { kind, .. } => {
+            WorkflowTransition::Started { .. } => {
                 self.workflow_clocks
                     .entry(event.workflow_id)
                     .or_insert_with(|| WorkflowClock {
                         started_at: Instant::now(),
                         finished_at: None,
                     });
-                if *kind == WorkflowKind::Review {
-                    self.push_system_message("review started");
+                if let Some(notice) = self
+                    .workflows
+                    .get(event.workflow_id)
+                    .and_then(WorkflowState::started_notice)
+                {
+                    self.push_system_message(notice);
                 }
             }
             WorkflowTransition::ActorStarted { actor_id, role } => {
@@ -3809,24 +3812,10 @@ impl AppState {
                 requires_user_action,
                 ..
             } => {
-                let summary = self.workflows.get(event.workflow_id).and_then(|state| {
-                    (state.kind == WorkflowKind::Review).then(|| {
-                        if *requires_user_action {
-                            "review · waiting for user action".to_string()
-                        } else {
-                            let selected = state.selected_count();
-                            match remaining {
-                                Some(remaining) if selected > 0 => format!(
-                                    "review · waiting for {remaining} of {selected} selected reviewers"
-                                ),
-                                Some(remaining) => {
-                                    format!("review · waiting for {remaining} reviewers")
-                                }
-                                None => "review · waiting for reviewer reports".to_string(),
-                            }
-                        }
-                    })
-                });
+                let summary = self
+                    .workflows
+                    .get(event.workflow_id)
+                    .and_then(|state| state.waiting_notice(*remaining, *requires_user_action));
                 if let Some(summary) = summary {
                     self.push_system_message(summary);
                 }
@@ -3835,45 +3824,7 @@ impl AppState {
                 let summary = self
                     .workflows
                     .get(event.workflow_id)
-                    .map(|state| match state.kind {
-                        WorkflowKind::Review => match outcome {
-                            WorkflowOutcome::Clean => {
-                                "review complete · no material findings".to_string()
-                            }
-                            WorkflowOutcome::Completed => "review complete".to_string(),
-                            WorkflowOutcome::Degraded => {
-                                "review complete · degraded coverage".to_string()
-                            }
-                            WorkflowOutcome::Failed => "review failed".to_string(),
-                            WorkflowOutcome::Cancelled => "review cancelled".to_string(),
-                        },
-                        WorkflowKind::Delegation => {
-                            let completed = state.completed_count();
-                            let failed = state.failed_count();
-                            let cancelled = state.cancelled_count();
-                            let head = match outcome {
-                                WorkflowOutcome::Completed
-                                | WorkflowOutcome::Clean
-                                | WorkflowOutcome::Degraded => "subagents complete",
-                                WorkflowOutcome::Failed => "subagents failed",
-                                WorkflowOutcome::Cancelled => "subagents cancelled",
-                            };
-                            let mut parts = vec![head.to_string()];
-                            if completed > 0 {
-                                parts.push(format!("{completed} completed"));
-                            }
-                            if failed > 0 {
-                                parts.push(format!("{failed} failed"));
-                            }
-                            if cancelled > 0 {
-                                parts.push(format!("{cancelled} cancelled"));
-                            }
-                            if state.coverage == crate::workflow::WorkflowCoverage::Degraded {
-                                parts.push("degraded coverage".to_string());
-                            }
-                            parts.join(" · ")
-                        }
-                    });
+                    .map(|state| state.terminal_notice(*outcome));
                 if let Some(clock) = self.workflow_clocks.get_mut(&event.workflow_id) {
                     clock.finished_at = Some(Instant::now());
                 }

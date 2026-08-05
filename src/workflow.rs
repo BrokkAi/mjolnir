@@ -321,6 +321,75 @@ impl WorkflowState {
     fn unfinished_count(&self) -> usize {
         self.running_count() + self.waiting_count()
     }
+
+    /// Transcript line for this workflow starting, or `None` when the start is
+    /// not worth a permanent entry.
+    ///
+    /// The three `*_notice` renderers below live here rather than in either
+    /// consumer because the TUI and the remote mirror both fold workflow
+    /// lifecycle into a transcript. Duplicating the wording is how the two
+    /// transcripts drift apart.
+    pub fn started_notice(&self) -> Option<String> {
+        (self.kind == WorkflowKind::Review).then(|| "review started".to_string())
+    }
+
+    /// Transcript line for the workflow blocking on its actors.
+    pub fn waiting_notice(
+        &self,
+        remaining: Option<usize>,
+        requires_user_action: bool,
+    ) -> Option<String> {
+        if self.kind != WorkflowKind::Review {
+            return None;
+        }
+        if requires_user_action {
+            return Some("review · waiting for user action".to_string());
+        }
+        let selected = self.selected_count();
+        Some(match remaining {
+            Some(remaining) if selected > 0 => {
+                format!("review · waiting for {remaining} of {selected} selected reviewers")
+            }
+            Some(remaining) => format!("review · waiting for {remaining} reviewers"),
+            None => "review · waiting for reviewer reports".to_string(),
+        })
+    }
+
+    /// Transcript line summarising how this workflow ended.
+    pub fn terminal_notice(&self, outcome: WorkflowOutcome) -> String {
+        match self.kind {
+            WorkflowKind::Review => match outcome {
+                WorkflowOutcome::Clean => "review complete · no material findings".to_string(),
+                WorkflowOutcome::Completed => "review complete".to_string(),
+                WorkflowOutcome::Degraded => "review complete · degraded coverage".to_string(),
+                WorkflowOutcome::Failed => "review failed".to_string(),
+                WorkflowOutcome::Cancelled => "review cancelled".to_string(),
+            },
+            WorkflowKind::Delegation => {
+                let head = match outcome {
+                    WorkflowOutcome::Completed
+                    | WorkflowOutcome::Clean
+                    | WorkflowOutcome::Degraded => "subagents complete",
+                    WorkflowOutcome::Failed => "subagents failed",
+                    WorkflowOutcome::Cancelled => "subagents cancelled",
+                };
+                let mut parts = vec![head.to_string()];
+                for (count, label) in [
+                    (self.completed_count(), "completed"),
+                    (self.failed_count(), "failed"),
+                    (self.cancelled_count(), "cancelled"),
+                ] {
+                    if count > 0 {
+                        parts.push(format!("{count} {label}"));
+                    }
+                }
+                if self.coverage == WorkflowCoverage::Degraded {
+                    parts.push("degraded coverage".to_string());
+                }
+                parts.join(" · ")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
