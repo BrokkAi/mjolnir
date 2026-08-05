@@ -2067,15 +2067,7 @@ fn draw_appearance(
             format!("Theme       < {} >", editor.config.theme),
             theme,
         ),
-        selected_line(
-            editor.selected == 1,
-            format!(
-                "Spinner     < {} {} >",
-                editor.config.spinner,
-                editor.config.spinner.current_frame()
-            ),
-            theme,
-        ),
+        spinner_preview_line(editor.selected == 1, editor.config.spinner, theme),
         selected_line(
             editor.selected == 2,
             format!(
@@ -2090,6 +2082,28 @@ fn draw_appearance(
         ),
     ];
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The spinner row, with a live preview of the style in its real colors.
+///
+/// The preview trails the selection highlight rather than sitting inside it:
+/// the highlight is a high-contrast fg/bg pair, and several inks (green, gray)
+/// would be unreadable on it. Keeping the frame on the default background lets
+/// the row you are actually editing show the colors you are choosing.
+fn spinner_preview_line(
+    selected: bool,
+    style: crate::spinner::SpinnerStyle,
+    theme: TerminalTheme,
+) -> Line<'static> {
+    let mut line = selected_line(selected, format!("Spinner     < {style} >  "), theme);
+    line.spans.extend(
+        style
+            .current_frame()
+            .runs()
+            .into_iter()
+            .map(|(text, ink)| Span::styled(text, Style::default().fg(theme.spinner_ink(ink)))),
+    );
+    line
 }
 
 fn selected_line(selected: bool, text: String, theme: TerminalTheme) -> Line<'static> {

@@ -4436,7 +4436,13 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
             .into_iter()
             .map(|style| MjSpinnerEntry {
                 name: style.to_string(),
-                frames: style.frames().to_vec(),
+                // Glyphs only. The web viewer carries its own theme, so the
+                // TUI's per-cell inks would not resolve to anything there.
+                frames: style
+                    .frames()
+                    .iter()
+                    .map(|frame| frame.text().to_string())
+                    .collect(),
             })
             .collect(),
         feature_hints: config.feature_hints,
@@ -7627,7 +7633,7 @@ mod tests {
         let spinners = snapshot["appearance"]["spinners"]
             .as_array()
             .expect("spinners");
-        assert_eq!(spinners.len(), 4);
+        assert_eq!(spinners.len(), crate::spinner::SpinnerStyle::ALL.len());
         for spinner in spinners {
             assert!(!spinner["frames"].as_array().expect("frames").is_empty());
         }

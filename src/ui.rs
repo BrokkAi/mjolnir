@@ -4205,9 +4205,14 @@ fn finish_dictation(state: &mut AppState, result: std::result::Result<String, St
     }
 }
 
-fn dictation_prompt_title(state: &AppState) -> String {
+/// Dictation replaces the spinner with a live microphone meter, so this title
+/// carries no ornament and stays a single unstyled span.
+fn dictation_prompt_title(state: &AppState) -> Line<'static> {
     if let Some(level) = state.voice_input_level {
-        return format!(" 🎙 {} Ctrl-R stop ", voice_level_meter(Some(level)));
+        return Line::raw(format!(
+            " 🎙 {} Ctrl-R stop ",
+            voice_level_meter(Some(level))
+        ));
     }
 
     let message = state
@@ -4216,7 +4221,7 @@ fn dictation_prompt_title(state: &AppState) -> String {
         .filter(|status| status.kind == StatusKind::Info)
         .map(|status| status.text.as_str())
         .unwrap_or("preparing voice input...");
-    format!(" 🎙 {message} Ctrl-R stop ")
+    Line::raw(format!(" 🎙 {message} Ctrl-R stop "))
 }
 
 fn normalize_paste(text: &str) -> String {
@@ -10890,7 +10895,7 @@ fn voice_level_meter(level: Option<f32>) -> String {
     )
 }
 
-fn prompt_activity_ornament(state: &AppState) -> &'static str {
+fn prompt_activity_ornament(state: &AppState) -> &'static crate::spinner::SpinnerFrame {
     if should_show_spinner(state) {
         state.spinner_style.current_frame()
     } else {
@@ -10898,35 +10903,48 @@ fn prompt_activity_ornament(state: &AppState) -> &'static str {
     }
 }
 
-fn prompt_title_label(state: &AppState) -> String {
-    let ornament = prompt_activity_ornament(state);
+/// The ornament as styled spans, one per same-ink run. The surrounding title
+/// text stays unstyled so only the spinner carries color into the border.
+fn prompt_title_spans(state: &AppState) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = prompt_activity_ornament(state)
+        .runs()
+        .into_iter()
+        .map(|(text, ink)| Span::styled(text, Style::default().fg(state.theme.spinner_ink(ink))))
+        .collect();
     if let Some(elapsed) = turn_elapsed_value_label(state) {
-        format!("{ornament} {elapsed}")
-    } else {
-        ornament.to_string()
+        spans.push(Span::raw(format!(" {elapsed}")));
     }
+    spans
 }
 
 fn idle_prompt_title(
     state: &AppState,
     voice_input_supported: bool,
     text_selection_hint: &str,
-) -> String {
-    let label = prompt_title_label(state);
-    if voice_input_supported {
+) -> Line<'static> {
+    let hint = if voice_input_supported {
         format!(
-            " {label} (Enter send | {PROMPT_NEWLINE_HINT} newline | Shift-Tab model/effort | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " (Enter send | {PROMPT_NEWLINE_HINT} newline | Shift-Tab model/effort | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     } else {
         format!(
-            " {label} (Enter send | {PROMPT_NEWLINE_HINT} newline | Shift-Tab model/effort | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " (Enter send | {PROMPT_NEWLINE_HINT} newline | Shift-Tab model/effort | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
-    }
+    };
+    prompt_title_line(state, hint)
 }
 
-fn busy_prompt_title(state: &AppState) -> Option<String> {
+/// Assemble a prompt-block title: a leading space, the colored ornament, then
+/// the trailing affordance hint.
+fn prompt_title_line(state: &AppState, hint: String) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(prompt_title_spans(state));
+    spans.push(Span::raw(hint));
+    Line::from(spans)
+}
+
+fn busy_prompt_title(state: &AppState) -> Option<Line<'static>> {
     let queued = state.queued_prompt_count();
-    let label = prompt_title_label(state);
     // Matched exhaustively (no `_` arm) on purpose: this and
     // turn_elapsed_value_label must both be revisited when a variant is added,
     // and the missing-arm compile error is what forces that.
@@ -10952,7 +10970,7 @@ fn busy_prompt_title(state: &AppState) -> Option<String> {
         | ConnectionState::Fatal => return None,
     };
 
-    Some(format!(" {label} ({hint}) "))
+    Some(prompt_title_line(state, format!(" ({hint}) ")))
 }
 
 fn queued_prompt_row_count(state: &AppState) -> u16 {
@@ -11267,7 +11285,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         }
     };
     let title = if state.runtime_closed {
-        " runtime closed (/clear same agent | /new picker | Ctrl-C quit) ".to_string()
+        Line::raw(" runtime closed (/clear same agent | /new picker | Ctrl-C quit) ")
     } else if let Some(title) = busy_prompt_title(state) {
         title
     } else if state.voice_input_active {
@@ -15274,7 +15292,7 @@ mod tests {
         SpinnerStyle::ALL
             .iter()
             .flat_map(|style| style.frames())
-            .any(|frame| text.contains(frame.as_str()))
+            .any(|frame| text.contains(frame.text()))
     }
 
     #[test]
@@ -21338,7 +21356,7 @@ mod tests {
         let mut state = AppState::new();
 
         state.set_connection_state(ConnectionState::Cancelling);
-        let cancelling = busy_prompt_title(&state).expect("cancelling title");
+        let cancelling = line_text(&busy_prompt_title(&state).expect("cancelling title"));
         assert!(contains_prompt_activity_frame(&cancelling), "{cancelling}");
         assert!(cancelling.contains("Enter queue next"), "{cancelling}");
         assert!(
@@ -21354,18 +21372,60 @@ mod tests {
             images: Vec::new(),
             display_text: "next".to_string(),
         });
-        let queued = busy_prompt_title(&state).expect("queued title");
+        let queued = line_text(&busy_prompt_title(&state).expect("queued title"));
         assert!(queued.contains("1 queued"), "{queued}");
         assert!(queued.contains("Ctrl-C/Esc cancel current"), "{queued}");
 
         state.set_connection_state(ConnectionState::Forking);
-        let forking = busy_prompt_title(&state).expect("forking title");
+        let forking = line_text(&busy_prompt_title(&state).expect("forking title"));
         assert!(contains_prompt_activity_frame(&forking), "{forking}");
         assert!(forking.contains("1 queued"), "{forking}");
         assert!(forking.contains("Enter queue next"), "{forking}");
         assert!(!forking.contains("Ctrl-C/Esc cancel current"), "{forking}");
         assert!(!forking.contains("forking"), "{forking}");
         assert!(!forking.contains("prompt"), "{forking}");
+    }
+
+    #[test]
+    fn prompt_title_colors_only_the_ornament() {
+        // The ornament's inks must not bleed into the affordance hint, which
+        // shares the border with it.
+        let mut state = AppState::new();
+        state.set_spinner_style(SpinnerStyle::Pulse);
+        state.set_connection_state(ConnectionState::Streaming);
+
+        let title = idle_prompt_title(&state, false, "");
+        let colored: String = title
+            .spans
+            .iter()
+            .filter(|span| span.style.fg.is_some())
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        assert_eq!(colored, prompt_activity_ornament(&state).text());
+        assert!(
+            !colored.contains("Enter send"),
+            "hint text picked up spinner color: {colored:?}"
+        );
+    }
+
+    #[test]
+    fn idle_and_busy_ornaments_are_visually_distinguishable() {
+        // Idle sits at one muted ink; an active turn has to reach past it, or
+        // the border gives no signal that a turn is in flight.
+        for style in SpinnerStyle::ALL {
+            let mut state = AppState::new();
+            state.set_spinner_style(style);
+
+            state.set_connection_state(ConnectionState::Ready);
+            let idle: Vec<_> = prompt_activity_ornament(&state).runs();
+
+            state.set_connection_state(ConnectionState::Streaming);
+            let busy: Vec<_> = prompt_activity_ornament(&state).runs();
+
+            assert_eq!(idle.len(), 1, "{style} idle should be one flat run");
+            assert_ne!(idle, busy, "{style} busy ornament matches its idle one");
+        }
     }
 
     #[test]
@@ -24145,7 +24205,7 @@ mod tests {
     fn android_prompt_title_hides_voice_shortcut() {
         let mut state = AppState::new();
         state.set_connection_state(ConnectionState::Ready);
-        let title = idle_prompt_title(&state, false, "");
+        let title = line_text(&idle_prompt_title(&state, false, ""));
 
         assert!(!title.contains("Ctrl-R"));
         assert!(!title.contains("voice"));
@@ -24285,7 +24345,7 @@ mod tests {
             "downloading voice model (one-time): 42% of 464 MB",
         ));
 
-        let title = dictation_prompt_title(&state);
+        let title = line_text(&dictation_prompt_title(&state));
 
         assert!(title.contains("downloading voice model (one-time): 42% of 464 MB"));
         assert!(title.contains("Ctrl-R stop"));
@@ -24298,7 +24358,7 @@ mod tests {
         state.voice_input_level = Some(0.35);
         state.status_line = Some(StatusMessage::info("listening..."));
 
-        let title = dictation_prompt_title(&state);
+        let title = line_text(&dictation_prompt_title(&state));
 
         assert!(title.contains("[||||......]"));
         assert!(!title.contains("listening..."));

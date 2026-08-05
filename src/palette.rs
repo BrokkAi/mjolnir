@@ -1,5 +1,6 @@
 use ratatui::style::Color;
 
+use crate::spinner::SpinnerInk;
 use crate::theme::TerminalThemeKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,9 +165,81 @@ impl TerminalThemeKind {
     }
 }
 
+impl TerminalTheme {
+    /// Resolve a spinner's semantic ink to a color from this palette.
+    ///
+    /// Every arm reuses a color the theme already declares rather than mixing
+    /// a new one, which is what lets the animated styles keep their gradients
+    /// on the 16-color ANSI palettes as well as the truecolor ones.
+    pub fn spinner_ink(self, ink: SpinnerInk) -> Color {
+        match ink {
+            // The ANSI palettes collapse `subtle` onto `text` because 16
+            // colors cannot express a gray ramp, which would make the faintest
+            // cells the most prominent ones — a pulse brighter at its tail
+            // than its core. Bright-black is part of the standard 16 and is
+            // the conventional dim slot, so it stands in wherever a palette
+            // has no subtle color of its own.
+            SpinnerInk::Faint if self.subtle == self.text => Color::DarkGray,
+            SpinnerInk::Faint => self.subtle,
+            SpinnerInk::Cool => self.primary,
+            SpinnerInk::Bright => self.accent,
+            SpinnerInk::Vivid => self.secondary,
+            SpinnerInk::Calm => self.success,
+            SpinnerInk::Warm => self.warning,
+            SpinnerInk::Hot => self.error,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spinner_faint_never_matches_the_body_text_color() {
+        // Faint is the resting rail and the cold end of every gradient. If it
+        // resolved to the text color the idle ornament would read as loud and
+        // the motion styles would invert — brightest where they should fade.
+        for kind in TerminalThemeKind::ALL {
+            let palette = kind.palette();
+            assert_ne!(
+                palette.spinner_ink(SpinnerInk::Faint),
+                palette.text,
+                "{kind} faint ink is indistinguishable from body text"
+            );
+        }
+    }
+
+    #[test]
+    fn spinner_inks_are_drawn_from_the_active_palette() {
+        // Every ink but Faint must be a color the theme already declares, so
+        // no style can smuggle in an off-palette color.
+        for kind in TerminalThemeKind::ALL {
+            let palette = kind.palette();
+            let declared = [
+                palette.subtle,
+                palette.primary,
+                palette.secondary,
+                palette.accent,
+                palette.success,
+                palette.warning,
+                palette.error,
+            ];
+            for ink in [
+                SpinnerInk::Cool,
+                SpinnerInk::Bright,
+                SpinnerInk::Vivid,
+                SpinnerInk::Calm,
+                SpinnerInk::Warm,
+                SpinnerInk::Hot,
+            ] {
+                assert!(
+                    declared.contains(&palette.spinner_ink(ink)),
+                    "{kind} resolves {ink:?} to an off-palette color"
+                );
+            }
+        }
+    }
 
     #[test]
     fn ansi_palettes_use_basic_terminal_colors() {
