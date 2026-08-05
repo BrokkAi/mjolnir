@@ -1,6 +1,6 @@
 //! Simple remote-control server and local session registration.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::IsTerminal;
 use std::net::{IpAddr, TcpListener};
@@ -96,6 +96,29 @@ const NATIVE_MCP_APPROVAL_CHOICES: [(&str, &str, &str); 3] = [
 /// Keep them long enough for a live session's poller to claim, but prune old
 /// rows aggressively so they cannot affect a later turn.
 const PROMPT_CANCEL_TTL: Duration = Duration::from_secs(5 * 60);
+/// Bounds on the new-session picker's directory search. The search root is
+/// often a home directory, so the walk has to stay cheap no matter what it is
+/// pointed at: it goes wide before it goes deep, and stops at whichever of
+/// these it hits first.
+const FILESYSTEM_SEARCH_MAX_DEPTH: usize = 8;
+const FILESYSTEM_SEARCH_MAX_VISITED: usize = 20_000;
+const FILESYSTEM_SEARCH_MAX_MATCHES: usize = 40;
+const FILESYSTEM_SEARCH_TIME_BUDGET: Duration = Duration::from_millis(1_500);
+/// Directories worth matching but never worth descending into: dependency
+/// trees, build output, git internals, and the macOS home library hold nothing
+/// anyone starts a session in, and they would eat the whole visit budget before
+/// the walk reached real project folders.
+const FILESYSTEM_SEARCH_PRUNED_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "vendor",
+    "venv",
+    "__pycache__",
+    ".git",
+    "Library",
+];
 const SESSION_COOKIE_NAME: &str = "mj_remote_session";
 const REMOTE_BUILTIN_NEW_COMMAND: &str = "new";
 const REMOTE_BUILTIN_CLEAR_COMMAND: &str = "clear";
@@ -781,6 +804,32 @@ struct FilesystemBrowseResponse {
     parent: Option<FilesystemDirectoryRecord>,
     roots: Vec<FilesystemDirectoryRecord>,
     entries: Vec<FilesystemDirectoryRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct SearchFilesystemQuery {
+    path: Option<String>,
+    query: Option<String>,
+}
+
+/// One search hit. `relative_path` is the path below the searched directory,
+/// which is what the picker shows: `src/remote` reads better than the full
+/// `~/code/mjolnir/src/remote` when every hit shares the same prefix.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FilesystemSearchMatch {
+    #[serde(flatten)]
+    directory: FilesystemDirectoryRecord,
+    relative_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FilesystemSearchResponse {
+    root: FilesystemDirectoryRecord,
+    matches: Vec<FilesystemSearchMatch>,
+    /// Set when the walk hit a bound (depth, directories visited, wall clock)
+    /// or produced more hits than we return, so the viewer can say the list is
+    /// partial instead of implying "nothing else exists".
+    truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4979,6 +5028,7 @@ fn build_router(config: RouterConfig) -> Router {
         .route("/sessions", get(list_sessions))
         .route("/api/server-sessions", post(create_server_owned_session))
         .route("/api/filesystem", get(browse_filesystem))
+        .route("/api/filesystem/search", get(search_filesystem))
         .route("/api/sessions", post(upsert_session))
         .route(
             "/api/sessions/{session_id}",
@@ -5515,6 +5565,21 @@ async fn browse_filesystem(
     Ok(Json(response))
 }
 
+async fn search_filesystem(
+    State(state): State<ServerState>,
+    Query(query): Query<SearchFilesystemQuery>,
+) -> std::result::Result<Json<FilesystemSearchResponse>, (StatusCode, String)> {
+    let roots = Arc::clone(&state.workspace_roots);
+    let SearchFilesystemQuery { path, query } = query;
+    let needle = query.unwrap_or_default();
+    let response = tokio::task::spawn_blocking(move || {
+        search_filesystem_under_roots(roots.as_slice(), path.as_deref(), &needle)
+    })
+    .await
+    .map_err(internal_error)??;
+    Ok(Json(response))
+}
+
 async fn create_server_owned_session(
     State(state): State<ServerState>,
     Json(request): Json<NewServerSessionRequest>,
@@ -5897,6 +5962,167 @@ fn browse_filesystem_under_roots(
             .collect(),
         entries,
     })
+}
+
+/// Walk `requested_path` (or the first workspace root) breadth-first and return
+/// the directories whose name — or path below the search root, once the query
+/// contains a `/` — matches `query`.
+///
+/// Every axis of the walk is bounded because the search root is routinely a
+/// home directory: descend at most `FILESYSTEM_SEARCH_MAX_DEPTH`, read at most
+/// `FILESYSTEM_SEARCH_MAX_VISITED` directories, and give up after
+/// `FILESYSTEM_SEARCH_TIME_BUDGET`. Breadth-first order means the bounds cost
+/// deep matches, never shallow ones, which is what a folder picker wants.
+fn search_filesystem_under_roots(
+    roots: &[PathBuf],
+    requested_path: Option<&str>,
+    query: &str,
+) -> std::result::Result<FilesystemSearchResponse, (StatusCode, String)> {
+    if roots.is_empty() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no workspace roots configured".to_string(),
+        ));
+    }
+    let root = match requested_path {
+        Some(path) if !path.trim().is_empty() => directory_under_roots(roots, path.trim())?,
+        _ => roots[0].clone(),
+    };
+    let root_record = filesystem_directory_record(&root);
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(FilesystemSearchResponse {
+            root: root_record,
+            matches: Vec::new(),
+            truncated: false,
+        });
+    }
+    // A query with a separator is about the path below the search root
+    // ("src/re"); a bare query is about the folder name alone. Same for the
+    // leading dot: hidden directories stay out of the way until asked for.
+    let match_relative = needle.contains('/');
+    let include_hidden = needle.starts_with('.') || needle.contains("/.");
+
+    let deadline = Instant::now() + FILESYSTEM_SEARCH_TIME_BUDGET;
+    let mut pending = VecDeque::from([(root.clone(), 0usize)]);
+    let mut seen = HashSet::from([root.clone()]);
+    let mut visited = 0usize;
+    let mut scored: Vec<(u32, usize, usize, FilesystemSearchMatch)> = Vec::new();
+    let mut truncated = false;
+
+    while let Some((directory, depth)) = pending.pop_front() {
+        if visited >= FILESYSTEM_SEARCH_MAX_VISITED || Instant::now() >= deadline {
+            truncated = true;
+            break;
+        }
+        visited += 1;
+        // An unreadable directory (permissions, a race with a delete) is not an
+        // error for a search: skip it and keep walking.
+        let Ok(read_dir) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() && !file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') && !include_hidden {
+                continue;
+            }
+            let Ok(path) = std::fs::canonicalize(entry.path()) else {
+                continue;
+            };
+            if !path.is_dir() || !crate::paths::path_is_under_any_root(roots, &path) {
+                continue;
+            }
+            // Symlinks can point back up the tree; canonical paths make the
+            // loop guard exact.
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let relative = relative_display_path(&root, &path);
+            let haystack = if match_relative {
+                relative.to_lowercase()
+            } else {
+                name.to_lowercase()
+            };
+            if let Some(score) = directory_match_score(&haystack, &needle) {
+                scored.push((
+                    score,
+                    depth,
+                    name.chars().count(),
+                    FilesystemSearchMatch {
+                        directory: filesystem_directory_record(&path),
+                        relative_path: relative,
+                    },
+                ));
+            }
+            if depth < FILESYSTEM_SEARCH_MAX_DEPTH
+                && !FILESYSTEM_SEARCH_PRUNED_DIRS.contains(&name.as_str())
+            {
+                pending.push_back((path, depth + 1));
+            }
+        }
+    }
+
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.relative_path.cmp(&b.3.relative_path))
+    });
+    if scored.len() > FILESYSTEM_SEARCH_MAX_MATCHES {
+        scored.truncate(FILESYSTEM_SEARCH_MAX_MATCHES);
+        truncated = true;
+    }
+    Ok(FilesystemSearchResponse {
+        root: root_record,
+        matches: scored.into_iter().map(|entry| entry.3).collect(),
+        truncated,
+    })
+}
+
+/// Rank a directory against the picker query, highest first: exact name, then
+/// prefix, then a substring starting at a word boundary, then any substring,
+/// then a scattered subsequence (`mjw` finds `mjolnir-worktrees`). `None` means
+/// no match at all. Both arguments must already be lowercased.
+fn directory_match_score(haystack: &str, needle: &str) -> Option<u32> {
+    if haystack == needle {
+        return Some(500);
+    }
+    if haystack.starts_with(needle) {
+        return Some(400);
+    }
+    if let Some(index) = haystack.find(needle) {
+        let after_boundary = haystack[..index].ends_with(['-', '_', '.', '/', ' ']);
+        return Some(if after_boundary { 300 } else { 200 });
+    }
+    is_subsequence(haystack, needle).then_some(100)
+}
+
+/// True when every character of `needle` appears in `haystack` in order, which
+/// is the fuzzy half of the picker's matching.
+fn is_subsequence(haystack: &str, needle: &str) -> bool {
+    let mut remaining = haystack.chars();
+    needle
+        .chars()
+        .all(|wanted| remaining.any(|candidate| candidate == wanted))
+}
+
+/// `path` rendered relative to `root` with `/` separators, falling back to the
+/// tilde-shortened absolute path when the two are unrelated.
+fn relative_display_path(root: &Path, path: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(relative) => relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => crate::paths::display_path_with_tilde(path),
+    }
 }
 
 fn directory_under_roots(
@@ -8004,6 +8230,17 @@ mod tests {
         assert!(viewer.contains("control.value.trim()"));
     }
 
+    #[test]
+    fn embedded_viewer_contains_folder_search_controls() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains(r#"id="fs-search-input""#));
+        assert!(viewer.contains(r#"id="fs-search-clear""#));
+        assert!(viewer.contains("/api/filesystem/search?path="));
+        assert!(viewer.contains("onFilesystemSearchInput"));
+        assert!(viewer.contains("onFilesystemSearchKeydown"));
+        assert!(viewer.contains("localSearchMatches"));
+    }
+
     #[tokio::test]
     async fn select_elicitations_track_cards_and_forward_valid_choices() {
         for (tool, choice) in [
@@ -9407,6 +9644,58 @@ mod tests {
             crate::paths::worktree_name_from_cwd(session_cwd).as_deref(),
             Some(name.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn filesystem_search_endpoint_returns_ranked_matches_to_authorized_callers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("code/mjolnir/src")).expect("create tree");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let token = "integration-token".to_string();
+        let app = build_router(RouterConfig {
+            db_path,
+            token: token.clone(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "test-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+            workspace_roots: test_workspace_roots(dir.path()),
+            session_manager: test_session_manager(),
+            mjconfig: test_mjconfig_runtime(),
+        });
+        let search_request = |bearer: Option<&str>| {
+            let builder = axum::http::Request::builder()
+                .method("GET")
+                .uri("/api/filesystem/search?query=mjol");
+            let builder = match bearer {
+                Some(token) => {
+                    builder.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                }
+                None => builder,
+            };
+            builder.body(axum::body::Body::empty()).expect("request")
+        };
+
+        let unauthorized = app
+            .clone()
+            .oneshot(search_request(None))
+            .await
+            .expect("unauthenticated search");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(search_request(Some(&token)))
+            .await
+            .expect("search");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let parsed: FilesystemSearchResponse = serde_json::from_slice(&body).expect("parse");
+        assert_eq!(search_hits(&parsed), vec!["code/mjolnir"]);
+        assert_eq!(parsed.matches[0].directory.name, "mjolnir");
     }
 
     #[tokio::test]
@@ -11100,6 +11389,195 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["nested"]
         );
+    }
+
+    /// Relative paths of the hits, in returned (ranked) order.
+    fn search_hits(response: &FilesystemSearchResponse) -> Vec<&str> {
+        response
+            .matches
+            .iter()
+            .map(|hit| hit.relative_path.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn filesystem_search_finds_directories_below_the_search_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("alpha/beta/gamma")).expect("create nested dirs");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("create docs");
+        std::fs::write(dir.path().join("gamma.txt"), "not a dir").expect("write file");
+        let roots = test_workspace_roots(dir.path());
+
+        let found = search_filesystem_under_roots(&roots, None, "gamma").expect("search");
+
+        assert_eq!(search_hits(&found), vec!["alpha/beta/gamma"]);
+        assert_eq!(found.root.path, roots[0].display().to_string());
+        assert!(!found.truncated);
+        assert_eq!(
+            found.matches[0].directory.path,
+            std::fs::canonicalize(dir.path().join("alpha/beta/gamma"))
+                .expect("canonical hit")
+                .display()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn filesystem_search_is_scoped_to_the_requested_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("alpha/target-dir")).expect("create alpha child");
+        std::fs::create_dir_all(dir.path().join("beta/target-dir")).expect("create beta child");
+        let roots = test_workspace_roots(dir.path());
+        let alpha = dir.path().join("alpha").display().to_string();
+
+        let found = search_filesystem_under_roots(&roots, Some(&alpha), "target").expect("search");
+
+        assert_eq!(search_hits(&found), vec!["target-dir"]);
+    }
+
+    #[test]
+    fn filesystem_search_ranks_exact_and_prefix_hits_above_fuzzy_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["api", "api-gateway", "my-api", "alphabet-pizza-inn"] {
+            std::fs::create_dir_all(dir.path().join(name)).expect("create dir");
+        }
+        let roots = test_workspace_roots(dir.path());
+
+        let found = search_filesystem_under_roots(&roots, None, "api").expect("search");
+
+        assert_eq!(
+            search_hits(&found),
+            vec!["api", "api-gateway", "my-api", "alphabet-pizza-inn"]
+        );
+    }
+
+    #[test]
+    fn filesystem_search_prefers_shallow_hits_over_deep_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("service")).expect("create shallow");
+        std::fs::create_dir_all(dir.path().join("nested/deeper/service")).expect("create deep");
+        let roots = test_workspace_roots(dir.path());
+
+        let found = search_filesystem_under_roots(&roots, None, "service").expect("search");
+
+        assert_eq!(
+            search_hits(&found),
+            vec!["service", "nested/deeper/service"]
+        );
+    }
+
+    #[test]
+    fn filesystem_search_matches_relative_paths_once_the_query_has_a_separator() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("code/mjolnir")).expect("create code tree");
+        std::fs::create_dir_all(dir.path().join("notes/mjolnir")).expect("create notes tree");
+        let roots = test_workspace_roots(dir.path());
+
+        let found = search_filesystem_under_roots(&roots, None, "code/mj").expect("search");
+
+        assert_eq!(search_hits(&found), vec!["code/mjolnir"]);
+    }
+
+    #[test]
+    fn filesystem_search_hides_dot_directories_until_the_query_asks_for_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".hidden")).expect("create hidden dir");
+        let roots = test_workspace_roots(dir.path());
+
+        let visible = search_filesystem_under_roots(&roots, None, "hidden").expect("search");
+        assert!(visible.matches.is_empty());
+
+        let explicit = search_filesystem_under_roots(&roots, None, ".hidden").expect("search");
+        assert_eq!(search_hits(&explicit), vec![".hidden"]);
+    }
+
+    #[test]
+    fn filesystem_search_reaches_dot_directories_nested_in_a_path_query() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("code/.github")).expect("create hidden child");
+        let roots = test_workspace_roots(dir.path());
+
+        let found = search_filesystem_under_roots(&roots, None, "code/.git").expect("search");
+
+        assert_eq!(search_hits(&found), vec!["code/.github"]);
+    }
+
+    #[test]
+    fn filesystem_search_matches_dependency_trees_without_walking_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("node_modules/needle")).expect("create dep tree");
+        let roots = test_workspace_roots(dir.path());
+
+        let inside = search_filesystem_under_roots(&roots, None, "needle").expect("search");
+        assert!(inside.matches.is_empty());
+
+        let itself = search_filesystem_under_roots(&roots, None, "node_mod").expect("search");
+        assert_eq!(search_hits(&itself), vec!["node_modules"]);
+    }
+
+    #[test]
+    fn filesystem_search_returns_no_matches_for_a_blank_query() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("child")).expect("create child");
+        let roots = test_workspace_roots(dir.path());
+
+        let found = search_filesystem_under_roots(&roots, None, "   ").expect("search");
+
+        assert!(found.matches.is_empty());
+        assert!(!found.truncated);
+        assert_eq!(found.root.path, roots[0].display().to_string());
+    }
+
+    #[test]
+    fn filesystem_search_rejects_paths_outside_roots() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        let roots = test_workspace_roots(root.path());
+
+        let err = search_filesystem_under_roots(
+            &roots,
+            Some(&outside.path().display().to_string()),
+            "anything",
+        )
+        .expect_err("outside path should be rejected");
+
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_search_terminates_on_symlink_loops() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let child = dir.path().join("loopy");
+        std::fs::create_dir_all(&child).expect("create child");
+        std::os::unix::fs::symlink(dir.path(), child.join("back")).expect("create loop symlink");
+        let roots = test_workspace_roots(dir.path());
+
+        let found = search_filesystem_under_roots(&roots, None, "loopy").expect("search");
+
+        assert_eq!(search_hits(&found), vec!["loopy"]);
+    }
+
+    #[test]
+    fn directory_match_score_orders_match_quality() {
+        let exact = directory_match_score("api", "api").expect("exact match");
+        let prefix = directory_match_score("api-gateway", "api").expect("prefix match");
+        let boundary = directory_match_score("my-api", "api").expect("boundary match");
+        let inner = directory_match_score("rapid", "api").expect("inner match");
+        let fuzzy = directory_match_score("alphabet-pizza-inn", "api").expect("fuzzy match");
+
+        assert!(exact > prefix);
+        assert!(prefix > boundary);
+        assert!(boundary > inner);
+        assert!(inner > fuzzy);
+        assert!(directory_match_score("unrelated", "api").is_none());
+    }
+
+    #[test]
+    fn is_subsequence_requires_ordered_characters() {
+        assert!(is_subsequence("mjolnir-worktrees", "mjw"));
+        assert!(!is_subsequence("mjolnir-worktrees", "wmj"));
+        assert!(is_subsequence("anything", ""));
     }
 
     #[test]

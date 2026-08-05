@@ -718,6 +718,7 @@
 
       .modal-backdrop.is-creating .fs-list,
       .modal-backdrop.is-creating .fs-roots,
+      .modal-backdrop.is-creating .fs-search,
       .modal-backdrop.is-creating .fs-current {
         opacity: 0.58;
       }
@@ -864,6 +865,70 @@
         }
       }
 
+      .fs-search {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 10px;
+        border: 1px solid var(--line-control);
+        background: var(--bg);
+
+        &:focus-within {
+          border-color: rgb(235 63 51 / 0.6);
+        }
+      }
+
+      .fs-search-icon {
+        flex: 0 0 auto;
+        color: var(--red);
+        font: 700 15px/1 var(--font-mono);
+      }
+
+      .fs-search-input {
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 38px;
+        border: 0;
+        background: transparent;
+        color: var(--text);
+        caret-color: var(--red);
+        /* 16px: anything smaller makes iOS Safari zoom the panel on focus. */
+        font: 400 16px/1.4 var(--font-mono);
+
+        &::placeholder {
+          color: var(--dim);
+        }
+
+        &:focus-visible {
+          outline: none;
+        }
+
+        &:disabled {
+          opacity: 0.65;
+        }
+
+        /* The native affordance duplicates .fs-search-clear. */
+        &::-webkit-search-cancel-button {
+          appearance: none;
+        }
+      }
+
+      .fs-search-clear {
+        flex: 0 0 auto;
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font: 700 16px/1 var(--font-mono);
+        cursor: pointer;
+
+        &:hover:not(:disabled) {
+          color: var(--red-hot);
+        }
+      }
+
       .fs-list {
         min-height: 180px;
         max-height: min(42dvh, 360px);
@@ -886,6 +951,11 @@
 
         &:last-child {
           border-bottom: 0;
+        }
+
+        &.is-active {
+          border-color: rgb(235 63 51 / 0.5);
+          background: rgb(235 63 51 / 0.11);
         }
       }
 
@@ -3012,6 +3082,23 @@
           </div>
           <div id="new-session-progress-text" class="launch-text">Preparing agent runtime…</div>
         </div>
+        <div class="fs-search">
+          <span class="fs-search-icon" aria-hidden="true">⌕</span>
+          <input
+            id="fs-search-input"
+            class="fs-search-input"
+            type="search"
+            placeholder="Search folders"
+            aria-label="Search folders below the current folder"
+            aria-controls="fs-list"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="none"
+            spellcheck="false"
+            enterkeyhint="go"
+          />
+          <button id="fs-search-clear" class="fs-search-clear" type="button" aria-label="Clear folder search" hidden>×</button>
+        </div>
         <div id="fs-list" class="fs-list" aria-label="Folders"></div>
         <div id="new-session-status" class="new-session-status" role="status"></div>
       </div>
@@ -3093,6 +3180,8 @@
       const fsCurrentPathEl = $("fs-current-path");
       const fsRootsEl = $("fs-roots");
       const fsParentButtonEl = $("fs-parent-button");
+      const fsSearchInputEl = $("fs-search-input");
+      const fsSearchClearEl = $("fs-search-clear");
       const fsListEl = $("fs-list");
       const statusEl = $("status");
       const sessionsEl = $("sessions");
@@ -3151,6 +3240,18 @@
       let pendingNewEntries = 0;
       let filesystemState = null;
       let filesystemLoading = false;
+      // Folder search. `filesystemSearchResults === null` means "not searching"
+      // and the picker shows the plain directory listing; an array (even an
+      // empty one) means the list belongs to the current query.
+      let filesystemSearchQuery = "";
+      let filesystemSearchResults = null;
+      let filesystemSearchLoading = false;
+      let filesystemSearchTruncated = false;
+      let filesystemSearchTimer = null;
+      // Bumped on every keystroke and on clear, so a slow response for an
+      // abandoned query cannot overwrite the list.
+      let filesystemSearchSeq = 0;
+      let filesystemActiveIndex = 0;
       let creatingSession = false;
       let pendingSessionLaunch = null;
       let launchSessionCard = null;
@@ -4163,6 +4264,7 @@
         selectedSessionId = null;
         filesystemState = null;
         filesystemLoading = false;
+        resetFilesystemSearch();
         creatingSession = false;
         settingsModalEl.hidden = true;
         closeMjConfig();
@@ -4241,6 +4343,10 @@
         fsParentButtonEl.disabled = busy || !filesystemState?.parent || creatingSession;
         newSessionStartEl.disabled = busy || !filesystemState?.current || creatingSession;
         newSessionWorktreeEl.disabled = busy || creatingSession;
+        // The search field stays live while a listing loads — only session
+        // creation, which is about to close the picker, locks it.
+        fsSearchInputEl.disabled = creatingSession;
+        fsSearchClearEl.disabled = creatingSession;
         fsRootsEl.querySelectorAll("button").forEach((button) => {
           button.disabled = busy || creatingSession;
         });
@@ -4257,6 +4363,7 @@
         newSessionWorktreeEl.checked = false;
         setSessionCreationUi(false);
         setNewSessionStatus("");
+        resetFilesystemSearch();
         void loadFilesystem();
       }
 
@@ -4280,6 +4387,9 @@
         fsListEl.replaceChildren();
         const current = filesystemState?.current || null;
         fsCurrentPathEl.textContent = current?.display_path || "";
+        fsSearchInputEl.placeholder = current
+          ? `Search below ${current.name || current.display_path}`
+          : "Search folders";
 
         for (const root of filesystemState?.roots || []) {
           const button = directoryButton(root, "fs-root-button", () => {
@@ -4297,14 +4407,27 @@
           }
         };
 
-        const entries = filesystemState?.entries || [];
+        const searching = filesystemSearchResults !== null;
+        const entries = searching ? filesystemSearchResults : filesystemState?.entries || [];
         if (!entries.length) {
-          fsListEl.appendChild(emptyNote("No folders"));
+          fsListEl.appendChild(
+            emptyNote(
+              searching
+                ? filesystemSearchLoading
+                  ? "Searching…"
+                  : `No folders match “${filesystemSearchQuery}”`
+                : "No folders",
+            ),
+          );
         } else {
-          for (const entry of entries) {
+          if (searching) {
+            filesystemActiveIndex = Math.min(Math.max(filesystemActiveIndex, 0), entries.length - 1);
+          }
+          entries.forEach((entry, index) => {
             const button = directoryButton(entry, "fs-row", () => {
               void loadFilesystem(entry.path);
             });
+            button.classList.toggle("is-active", searching && index === filesystemActiveIndex);
             const icon = document.createElement("span");
             icon.className = "fs-row-icon";
             icon.textContent = ">";
@@ -4315,11 +4438,15 @@
             name.textContent = entry.name || entry.path;
             const path = document.createElement("span");
             path.className = "fs-row-path";
-            path.textContent = entry.display_path || entry.path;
+            // Under a search every hit shares the current folder's prefix, so
+            // the path below it is the part that tells them apart.
+            path.textContent = searching
+              ? entry.relative_path || entry.display_path || entry.path
+              : entry.display_path || entry.path;
             text.append(name, path);
             button.append(icon, text);
             fsListEl.appendChild(button);
-          }
+          });
         }
 
         setFilesystemBusy(filesystemLoading);
@@ -4329,6 +4456,7 @@
         if (filesystemLoading || creatingSession) {
           return;
         }
+        resetFilesystemSearch();
         setFilesystemBusy(true);
         setNewSessionStatus("Loading folders…");
         try {
@@ -4348,6 +4476,177 @@
           }
         } finally {
           setFilesystemBusy(false);
+        }
+      }
+
+      /* ---- folder search ---- */
+
+      const FS_SEARCH_DEBOUNCE_MS = 180;
+
+      // Mirrors directory_match_score() in remote.rs: exact, prefix, substring
+      // at a word boundary, substring, then a scattered subsequence ("mjw"
+      // finds "mjolnir-worktrees"). 0 means no match. Both arguments must
+      // already be lowercased.
+      function directoryMatchScore(haystack, needle) {
+        if (haystack === needle) {
+          return 500;
+        }
+        if (haystack.startsWith(needle)) {
+          return 400;
+        }
+        const index = haystack.indexOf(needle);
+        if (index > 0) {
+          return "-_./ ".includes(haystack[index - 1]) ? 300 : 200;
+        }
+        return isSubsequence(haystack, needle) ? 100 : 0;
+      }
+
+      function isSubsequence(haystack, needle) {
+        let cursor = 0;
+        for (const wanted of needle) {
+          cursor = haystack.indexOf(wanted, cursor);
+          if (cursor < 0) {
+            return false;
+          }
+          cursor += 1;
+        }
+        return true;
+      }
+
+      // Immediate matches from the listing already in hand, so the list reacts
+      // to the first keystroke instead of waiting on the recursive search.
+      function localSearchMatches(needle) {
+        const scored = [];
+        for (const entry of filesystemState?.entries || []) {
+          const name = entry.name || entry.path;
+          const score = directoryMatchScore(name.toLowerCase(), needle);
+          if (score) {
+            scored.push({ score, entry: { ...entry, relative_path: name } });
+          }
+        }
+        scored.sort(
+          (a, b) => b.score - a.score || a.entry.relative_path.localeCompare(b.entry.relative_path),
+        );
+        return scored.map((match) => match.entry);
+      }
+
+      function resetFilesystemSearch() {
+        window.clearTimeout(filesystemSearchTimer);
+        filesystemSearchTimer = null;
+        filesystemSearchSeq += 1;
+        filesystemSearchQuery = "";
+        filesystemSearchResults = null;
+        filesystemSearchLoading = false;
+        filesystemSearchTruncated = false;
+        filesystemActiveIndex = 0;
+        fsSearchInputEl.value = "";
+        fsSearchClearEl.hidden = true;
+      }
+
+      function clearFilesystemSearch() {
+        resetFilesystemSearch();
+        setNewSessionStatus("");
+        renderFilesystemPicker();
+      }
+
+      function onFilesystemSearchInput() {
+        const raw = fsSearchInputEl.value;
+        fsSearchClearEl.hidden = raw.length === 0;
+        filesystemSearchQuery = raw.trim();
+        window.clearTimeout(filesystemSearchTimer);
+        filesystemSearchTimer = null;
+        filesystemSearchSeq += 1;
+        filesystemActiveIndex = 0;
+        if (!filesystemSearchQuery) {
+          filesystemSearchResults = null;
+          filesystemSearchLoading = false;
+          filesystemSearchTruncated = false;
+          setNewSessionStatus("");
+          renderFilesystemPicker();
+          return;
+        }
+        filesystemSearchResults = localSearchMatches(filesystemSearchQuery.toLowerCase());
+        filesystemSearchLoading = true;
+        filesystemSearchTruncated = false;
+        setNewSessionStatus("Searching…");
+        renderFilesystemPicker();
+        filesystemSearchTimer = window.setTimeout(() => {
+          void runFilesystemSearch(filesystemSearchQuery);
+        }, FS_SEARCH_DEBOUNCE_MS);
+      }
+
+      async function runFilesystemSearch(query) {
+        const current = filesystemState?.current;
+        if (!current || query !== filesystemSearchQuery) {
+          return;
+        }
+        const seq = (filesystemSearchSeq += 1);
+        try {
+          const url =
+            `/api/filesystem/search?path=${encodeURIComponent(current.path)}` +
+            `&query=${encodeURIComponent(query)}`;
+          const response = await apiFetch(url, { cache: "no-store" });
+          if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || `HTTP ${response.status}`);
+          }
+          const payload = await response.json();
+          if (seq !== filesystemSearchSeq) {
+            return;
+          }
+          filesystemSearchResults = payload.matches || [];
+          filesystemSearchTruncated = Boolean(payload.truncated);
+          filesystemSearchLoading = false;
+          setNewSessionStatus(
+            filesystemSearchTruncated
+              ? `Partial results (${filesystemSearchResults.length}) — refine the search or open a subfolder.`
+              : "",
+          );
+          renderFilesystemPicker();
+        } catch (error) {
+          if (seq !== filesystemSearchSeq) {
+            return;
+          }
+          filesystemSearchLoading = false;
+          if (error.message !== "HTTP 401") {
+            setNewSessionStatus(`Folder search failed: ${error.message}`, true);
+          }
+          renderFilesystemPicker();
+        }
+      }
+
+      function moveFilesystemSelection(delta) {
+        const entries = filesystemSearchResults;
+        if (!entries?.length) {
+          return;
+        }
+        const count = entries.length;
+        filesystemActiveIndex = (filesystemActiveIndex + delta + count) % count;
+        renderFilesystemPicker();
+        fsListEl.querySelector(".fs-row.is-active")?.scrollIntoView({ block: "nearest" });
+      }
+
+      function onFilesystemSearchKeydown(event) {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          moveFilesystemSelection(event.key === "ArrowDown" ? 1 : -1);
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          const entry = filesystemSearchResults?.[filesystemActiveIndex];
+          if (entry) {
+            void loadFilesystem(entry.path);
+          }
+          return;
+        }
+        // Escape clears the query first; an already-empty field falls through
+        // to the window handler that closes the picker.
+        if (event.key === "Escape" && fsSearchInputEl.value) {
+          event.preventDefault();
+          event.stopPropagation();
+          clearFilesystemSearch();
+          fsSearchInputEl.focus();
         }
       }
 
@@ -7430,6 +7729,12 @@
       newSessionButtonEl.addEventListener("click", openNewSessionPicker);
       newSessionCloseEl.addEventListener("click", closeNewSessionPicker);
       newSessionStartEl.addEventListener("click", startNewSession);
+      fsSearchInputEl.addEventListener("input", onFilesystemSearchInput);
+      fsSearchInputEl.addEventListener("keydown", onFilesystemSearchKeydown);
+      fsSearchClearEl.addEventListener("click", () => {
+        clearFilesystemSearch();
+        fsSearchInputEl.focus();
+      });
       newSessionModalEl.addEventListener("click", (event) => {
         if (event.target === newSessionModalEl) {
           closeNewSessionPicker();
