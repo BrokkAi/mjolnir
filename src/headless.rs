@@ -494,52 +494,21 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             UiEvent::SessionConfigOptions { .. } => {}
             UiEvent::RosterUpdate { .. } => {}
             UiEvent::PermissionRequest(prompt) => {
-                let decision =
-                    permission_decision(cfg.permission_mode, &prompt.tool_call, &prompt.options);
-                let decision_label = match &decision {
-                    Some(_) => "selected",
-                    None => "cancelled",
-                };
-                if matches!(cfg.output_format, OutputFormat::StreamJson) {
-                    emit_json(&StreamRecord::Permission {
-                        actor: "primary",
-                        tool_call_id: &prompt.tool_call.tool_call_id.to_string(),
-                        decision: decision_label,
-                    })?;
-                }
-                let _ = prompt.responder.send(match decision {
-                    Some(option_id) => PermissionDecision::Selected(option_id),
-                    None => PermissionDecision::Cancelled,
-                });
+                answer_permission(cfg.output_format, cfg.permission_mode, "primary", prompt)?;
             }
             UiEvent::PromptDone {
                 stop_reason: reason,
                 usage: prompt_usage,
             } => {
-                stop_reason = Some(reason);
-                usage = prompt_usage;
-                // Under the push model a completed turn is not the end of the
-                // run: every subagent still owes a report, and the orchestrator
-                // injects each one as a fresh turn. `pending()` is incremented
-                // synchronously inside `create_subagent`, so any subagent this
-                // turn launched is already counted here; keep draining until
-                // every report has been injected and answered.
-                //
-                // The counter spans admission -> injection: `open()` runs
-                // synchronously in `create_subagent`/`resume`, every terminal
-                // worker path delivers exactly one report for the admitted turn,
-                // and the orchestrator only `close()`s when it injects the batch
-                // (or when it drops a cancelled report, whose story already went
-                // back through the `subagent_cancel` tool result). The window
-                // between a worker finishing and its report being injected is
-                // therefore covered. Discrete-review lanes never touch the bus,
-                // so they cannot hold the drain open; a review instead withholds
-                // this very `PromptDone` inside the orchestrator until its
-                // verdict lands.
-                if subagent_reports.pending() > 0 {
-                    // The answer the user sees is the last turn's, so drop the
-                    // text collected before the injection.
-                    prepare_headless_followup(&mut state, &mut collecting_turn_output);
+                if record_prompt_done(
+                    &mut state,
+                    &mut collecting_turn_output,
+                    &mut stop_reason,
+                    &mut usage,
+                    reason,
+                    prompt_usage,
+                    subagent_reports.pending(),
+                ) {
                     continue;
                 }
                 saw_terminal_event = true;
@@ -547,32 +516,19 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 break;
             }
             UiEvent::PromptFailed { message } => {
-                if matches!(cfg.output_format, OutputFormat::StreamJson) {
-                    emit_json(&StreamRecord::Error { message: &message })?;
-                }
-                terminal_error = Some(message);
+                record_terminal_error(cfg.output_format, &mut terminal_error, message)?;
                 saw_terminal_event = true;
                 let _ = cmd_tx.send(UiCommand::Shutdown);
                 break;
             }
             UiEvent::SessionForkFailed { message } | UiEvent::Fatal(message) => {
-                if matches!(cfg.output_format, OutputFormat::StreamJson) {
-                    emit_json(&StreamRecord::Error { message: &message })?;
-                }
-                terminal_error = Some(message);
+                record_terminal_error(cfg.output_format, &mut terminal_error, message)?;
                 saw_terminal_event = true;
                 let _ = cmd_tx.send(UiCommand::Shutdown);
                 break;
             }
             UiEvent::Warning(message) => {
-                if matches!(cfg.output_format, OutputFormat::StreamJson) {
-                    emit_json(&StreamRecord::Warning {
-                        actor: None,
-                        message: &message,
-                    })?;
-                } else {
-                    eprintln!("warning: {message}");
-                }
+                emit_warning(cfg.output_format, None, &message)?;
             }
             UiEvent::Info(_) => {}
             UiEvent::CancelPendingPermissions => {}
@@ -582,154 +538,22 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             // Headless runs never receive remote decisions (no UI event
             // channel is registered with the tracker).
             UiEvent::RemotePermissionDecision { .. } => {}
-            UiEvent::Subagent(event) => match event {
-                SubagentEvent::Started {
-                    subagent_id,
-                    resumed,
-                    label,
-                    objective,
-                    ..
-                } => {
-                    let role = workflow_role_for_subagent(&state.workflows, subagent_id);
-                    state.subagents.insert(
-                        subagent_id,
-                        SubagentTrace {
-                            label: label.clone(),
-                            role: role.clone(),
-                            started: std::time::Instant::now(),
-                        },
-                    );
-                    emit_nested_session(
-                        cfg.output_format,
-                        subagent_id,
-                        role.as_ref(),
-                        &label,
-                        if resumed {
-                            SUBAGENT_KIND_RESUMED
-                        } else {
-                            SUBAGENT_KIND_STARTED
-                        },
-                        &objective,
-                        None,
-                    )?;
-                }
-                SubagentEvent::Activity {
-                    subagent_id,
-                    activity,
-                } => {
-                    let label = state.subagent_label(subagent_id);
-                    let role = state.subagent_role(subagent_id);
-                    emit_nested_session(
-                        cfg.output_format,
-                        subagent_id,
-                        role.as_ref(),
-                        &label,
-                        SUBAGENT_KIND_ACTIVITY,
-                        &activity,
-                        None,
-                    )?;
-                }
-                SubagentEvent::Finished {
-                    subagent_id,
-                    outcome,
-                } => {
-                    let trace = state.subagents.remove(&subagent_id);
-                    let label = trace
-                        .as_ref()
-                        .map_or_else(|| SUBAGENT_UNKNOWN_LABEL.to_string(), |t| t.label.clone());
-                    let role = trace.as_ref().and_then(|trace| trace.role.clone());
-                    let elapsed = trace.as_ref().map(|trace| trace.started.elapsed());
-                    emit_nested_session(
-                        cfg.output_format,
-                        subagent_id,
-                        role.as_ref(),
-                        &label,
-                        SUBAGENT_KIND_FINISHED,
-                        &subagent_outcome_text(&outcome),
-                        elapsed,
-                    )?;
-                }
-                SubagentEvent::SessionUpdate {
-                    subagent_id,
-                    update,
-                } => {
-                    if matches!(cfg.output_format, OutputFormat::StreamJson) {
-                        let role = state.subagent_role(subagent_id);
-                        let actor = nested_actor(subagent_id, role.as_ref());
-                        emit_stream_update(&update, &state, &actor)?;
-                    }
-                }
-                SubagentEvent::PermissionRequest {
-                    subagent_id,
-                    prompt,
-                } => {
-                    let decision = permission_decision(
-                        cfg.permission_mode,
-                        &prompt.tool_call,
-                        &prompt.options,
-                    );
-                    if matches!(cfg.output_format, OutputFormat::StreamJson) {
-                        let role = state.subagent_role(subagent_id);
-                        let actor = nested_actor(subagent_id, role.as_ref());
-                        emit_json(&StreamRecord::Permission {
-                            actor: &actor,
-                            tool_call_id: &prompt.tool_call.tool_call_id.to_string(),
-                            decision: if decision.is_some() {
-                                "selected"
-                            } else {
-                                "cancelled"
-                            },
-                        })?;
-                    }
-                    let _ = prompt.responder.send(match decision {
-                        Some(option_id) => PermissionDecision::Selected(option_id),
-                        None => PermissionDecision::Cancelled,
-                    });
-                }
-                SubagentEvent::ElicitationRequest { prompt, .. } => {
-                    let _ = prompt.responder.send(ElicitationOutcome::Decline);
-                }
-                SubagentEvent::SessionStarted { .. }
-                | SubagentEvent::TerminalOutput { .. }
-                | SubagentEvent::CancelPendingPermissions { .. }
-                | SubagentEvent::Status { .. } => {}
-            },
+            UiEvent::Subagent(event) => {
+                handle_subagent_event(cfg.output_format, cfg.permission_mode, &mut state, event)?
+            }
             UiEvent::Workflow(event) => {
-                if let Err(error) = state.workflows.apply(&event) {
-                    tracing::warn!(
-                        event = "workflow_transition_rejected_by_headless",
-                        error = %error,
-                        "ignoring an invalid workflow transition"
-                    );
-                    continue;
-                }
-                if matches!(cfg.output_format, OutputFormat::StreamJson) {
-                    emit_workflow(&event, &state.workflows)?;
-                }
+                handle_workflow_event(cfg.output_format, &mut state.workflows, event)?;
             }
             UiEvent::InternalMessage(message) => {
-                reset_superseded_headless_answer(&mut state, &mut collecting_turn_output, &message);
-                if matches!(cfg.output_format, OutputFormat::StreamJson) {
-                    let kind = match message.kind {
-                        crate::event::InternalMessageKind::Delegation => "delegation",
-                        crate::event::InternalMessageKind::DiscreteReview => "discrete_review",
-                        crate::event::InternalMessageKind::ReviewLane => "review_lane",
-                        crate::event::InternalMessageKind::ReviewProgress => "review_progress",
-                        crate::event::InternalMessageKind::ReviewSynthesis => "review_synthesis",
-                    };
-                    emit_json(&StreamRecord::Review {
-                        actor: &message.source.to_ascii_lowercase(),
-                        target: &message.target.to_ascii_lowercase(),
-                        kind,
-                        text: &message.text,
-                    })?;
-                }
+                handle_internal_message(
+                    cfg.output_format,
+                    &mut state,
+                    &mut collecting_turn_output,
+                    message,
+                )?;
             }
             UiEvent::ElicitationRequest(prompt) => {
-                // Headless runs have no interactive modal to render a form or
-                // URL, so we cannot collect the user's answer. Decline so the
-                // agent gets a valid response instead of blocking on input.
-                let _ = prompt.responder.send(ElicitationOutcome::Decline);
+                decline_elicitation(prompt);
             }
         }
     }
@@ -799,6 +623,225 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     } else {
         Err(anyhow!("prompt stopped with {}", stop_reason_label))
     }
+}
+
+fn answer_permission(
+    format: OutputFormat,
+    mode: PermissionMode,
+    actor: &str,
+    prompt: crate::event::PermissionPrompt,
+) -> Result<()> {
+    let decision = permission_decision(mode, &prompt.tool_call, &prompt.options);
+    if matches!(format, OutputFormat::StreamJson) {
+        emit_json(&StreamRecord::Permission {
+            actor,
+            tool_call_id: &prompt.tool_call.tool_call_id.to_string(),
+            decision: if decision.is_some() {
+                "selected"
+            } else {
+                "cancelled"
+            },
+        })?;
+    }
+    let _ = prompt.responder.send(match decision {
+        Some(option_id) => PermissionDecision::Selected(option_id),
+        None => PermissionDecision::Cancelled,
+    });
+    Ok(())
+}
+
+/// Record one primary completion. A pending nested report means the completed
+/// answer is provisional and the run must keep draining orchestrated turns.
+/// The report bus opens synchronously at admission and closes only after
+/// injection, so it also covers workers that finished but are not injected yet.
+fn record_prompt_done(
+    state: &mut HeadlessState,
+    collecting_turn_output: &mut bool,
+    stop_reason: &mut Option<StopReason>,
+    usage: &mut Option<Usage>,
+    reason: StopReason,
+    prompt_usage: Option<Usage>,
+    pending_reports: usize,
+) -> bool {
+    *stop_reason = Some(reason);
+    *usage = prompt_usage;
+    if pending_reports == 0 {
+        return false;
+    }
+    prepare_headless_followup(state, collecting_turn_output);
+    true
+}
+
+fn record_terminal_error(
+    format: OutputFormat,
+    terminal_error: &mut Option<String>,
+    message: String,
+) -> Result<()> {
+    if matches!(format, OutputFormat::StreamJson) {
+        emit_json(&StreamRecord::Error { message: &message })?;
+    }
+    *terminal_error = Some(message);
+    Ok(())
+}
+
+fn emit_warning(format: OutputFormat, actor: Option<&str>, message: &str) -> Result<()> {
+    if matches!(format, OutputFormat::StreamJson) {
+        emit_json(&StreamRecord::Warning { actor, message })?;
+    } else {
+        eprintln!("warning: {message}");
+    }
+    Ok(())
+}
+
+fn handle_subagent_event(
+    format: OutputFormat,
+    permission_mode: PermissionMode,
+    state: &mut HeadlessState,
+    event: SubagentEvent,
+) -> Result<()> {
+    match event {
+        SubagentEvent::Started {
+            subagent_id,
+            resumed,
+            label,
+            objective,
+            ..
+        } => {
+            let role = workflow_role_for_subagent(&state.workflows, subagent_id);
+            state.subagents.insert(
+                subagent_id,
+                SubagentTrace {
+                    label: label.clone(),
+                    role: role.clone(),
+                    started: std::time::Instant::now(),
+                },
+            );
+            emit_nested_session(
+                format,
+                subagent_id,
+                role.as_ref(),
+                &label,
+                if resumed {
+                    SUBAGENT_KIND_RESUMED
+                } else {
+                    SUBAGENT_KIND_STARTED
+                },
+                &objective,
+                None,
+            )?;
+        }
+        SubagentEvent::Activity {
+            subagent_id,
+            activity,
+        } => {
+            let label = state.subagent_label(subagent_id);
+            let role = state.subagent_role(subagent_id);
+            emit_nested_session(
+                format,
+                subagent_id,
+                role.as_ref(),
+                &label,
+                SUBAGENT_KIND_ACTIVITY,
+                &activity,
+                None,
+            )?;
+        }
+        SubagentEvent::Finished {
+            subagent_id,
+            outcome,
+        } => {
+            let trace = state.subagents.remove(&subagent_id);
+            let label = trace.as_ref().map_or_else(
+                || SUBAGENT_UNKNOWN_LABEL.to_string(),
+                |trace| trace.label.clone(),
+            );
+            let role = trace.as_ref().and_then(|trace| trace.role.clone());
+            let elapsed = trace.as_ref().map(|trace| trace.started.elapsed());
+            emit_nested_session(
+                format,
+                subagent_id,
+                role.as_ref(),
+                &label,
+                SUBAGENT_KIND_FINISHED,
+                &subagent_outcome_text(&outcome),
+                elapsed,
+            )?;
+        }
+        SubagentEvent::SessionUpdate {
+            subagent_id,
+            update,
+        } => {
+            if matches!(format, OutputFormat::StreamJson) {
+                let role = state.subagent_role(subagent_id);
+                let actor = nested_actor(subagent_id, role.as_ref());
+                emit_stream_update(&update, state, &actor)?;
+            }
+        }
+        SubagentEvent::PermissionRequest {
+            subagent_id,
+            prompt,
+        } => {
+            let role = state.subagent_role(subagent_id);
+            let actor = nested_actor(subagent_id, role.as_ref());
+            answer_permission(format, permission_mode, &actor, prompt)?;
+        }
+        SubagentEvent::ElicitationRequest { prompt, .. } => decline_elicitation(prompt),
+        SubagentEvent::SessionStarted { .. }
+        | SubagentEvent::TerminalOutput { .. }
+        | SubagentEvent::CancelPendingPermissions { .. }
+        | SubagentEvent::Status { .. } => {}
+    }
+    Ok(())
+}
+
+fn handle_workflow_event(
+    format: OutputFormat,
+    workflows: &mut crate::workflow::WorkflowStore,
+    event: crate::workflow::WorkflowEvent,
+) -> Result<()> {
+    if let Err(error) = workflows.apply(&event) {
+        tracing::warn!(
+            event = "workflow_transition_rejected_by_headless",
+            error = %error,
+            "ignoring an invalid workflow transition"
+        );
+        return Ok(());
+    }
+    if matches!(format, OutputFormat::StreamJson) {
+        emit_workflow(&event, workflows)?;
+    }
+    Ok(())
+}
+
+fn handle_internal_message(
+    format: OutputFormat,
+    state: &mut HeadlessState,
+    collecting_turn_output: &mut bool,
+    message: crate::event::InternalMessage,
+) -> Result<()> {
+    reset_superseded_headless_answer(state, collecting_turn_output, &message);
+    if matches!(format, OutputFormat::StreamJson) {
+        let kind = match message.kind {
+            crate::event::InternalMessageKind::Delegation => "delegation",
+            crate::event::InternalMessageKind::DiscreteReview => "discrete_review",
+            crate::event::InternalMessageKind::ReviewLane => "review_lane",
+            crate::event::InternalMessageKind::ReviewProgress => "review_progress",
+            crate::event::InternalMessageKind::ReviewSynthesis => "review_synthesis",
+        };
+        emit_json(&StreamRecord::Review {
+            actor: &message.source.to_ascii_lowercase(),
+            target: &message.target.to_ascii_lowercase(),
+            kind,
+            text: &message.text,
+        })?;
+    }
+    Ok(())
+}
+
+fn decline_elicitation(prompt: crate::event::ElicitationPrompt) {
+    // Headless runs have no interactive modal to render a form or URL, so the
+    // agent gets an explicit response instead of blocking on user input.
+    let _ = prompt.responder.send(ElicitationOutcome::Decline);
 }
 
 fn reset_superseded_headless_answer(
@@ -1797,5 +1840,610 @@ mod tests {
             ),
             "review supervisor #4 · review · supervisor · started · review · supervisor"
         );
+    }
+
+    #[tokio::test]
+    async fn empty_prompt_fails_before_loading_configuration() {
+        let error = run(RunConfig {
+            prompt: "  \n".to_string(),
+            cwd: PathBuf::from("unused"),
+            additional_directories: Vec::new(),
+            resume_session: None,
+            agent_stderr: None,
+            snapshot_exclusions: Vec::new(),
+            fs_max_text_bytes: 1024,
+            output_format: OutputFormat::Json,
+            permission_mode: PermissionMode::Manual,
+            permission_config_mode: None,
+            role_overrides: config::ModelOverrides::default(),
+            termination: CancellationToken::new(),
+        })
+        .await
+        .expect_err("empty prompt must fail before configuration lookup");
+        assert_eq!(error.to_string(), "empty prompt");
+    }
+
+    #[test]
+    fn permission_modes_map_and_select_only_allowed_options() {
+        use agent_client_protocol::schema::v1::{PermissionOption, ToolCallUpdateFields, ToolKind};
+
+        assert!(matches!(
+            config::PermissionPreset::from(PermissionMode::Manual),
+            config::PermissionPreset::Manual
+        ));
+        assert!(matches!(
+            config::PermissionPreset::from(PermissionMode::Auto),
+            config::PermissionPreset::Auto
+        ));
+        assert!(matches!(
+            config::PermissionPreset::from(PermissionMode::Yolo),
+            config::PermissionPreset::Yolo
+        ));
+
+        let options = vec![
+            PermissionOption::new("deny", "Deny", PermissionOptionKind::RejectOnce),
+            PermissionOption::new("once", "Allow once", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("always", "Allow always", PermissionOptionKind::AllowAlways),
+        ];
+        let edit = ToolCallUpdate::new("edit", ToolCallUpdateFields::new().kind(ToolKind::Edit));
+        let execute = ToolCallUpdate::new(
+            "execute",
+            ToolCallUpdateFields::new().kind(ToolKind::Execute),
+        );
+
+        assert_eq!(
+            permission_decision(PermissionMode::Auto, &edit, &options).as_deref(),
+            Some("always")
+        );
+        assert_eq!(
+            permission_decision(PermissionMode::Yolo, &execute, &options).as_deref(),
+            Some("always")
+        );
+        assert!(permission_decision(PermissionMode::Manual, &edit, &options).is_none());
+        assert!(permission_decision(PermissionMode::Auto, &execute, &options).is_none());
+        assert!(choose_allow_option(&options[..1]).is_none());
+        assert_eq!(choose_allow_option(&options[1..2]).as_deref(), Some("once"));
+    }
+
+    #[tokio::test]
+    async fn permission_handler_answers_selected_and_cancelled() {
+        use agent_client_protocol::schema::v1::{PermissionOption, ToolCallUpdateFields, ToolKind};
+
+        let prompt = |id: &str| {
+            let (responder, response) = tokio::sync::oneshot::channel();
+            (
+                crate::event::PermissionPrompt {
+                    tool_call: ToolCallUpdate::new(
+                        id.to_string(),
+                        ToolCallUpdateFields::new().kind(ToolKind::Edit),
+                    ),
+                    options: vec![PermissionOption::new(
+                        "allow",
+                        "Allow",
+                        PermissionOptionKind::AllowOnce,
+                    )],
+                    responder,
+                },
+                response,
+            )
+        };
+
+        let (allowed, allowed_response) = prompt("allowed");
+        answer_permission(
+            OutputFormat::StreamJson,
+            PermissionMode::Yolo,
+            "primary",
+            allowed,
+        )
+        .expect("answer allowed permission");
+        assert!(matches!(
+            allowed_response.await.expect("allowed response"),
+            PermissionDecision::Selected(option) if option == "allow"
+        ));
+
+        let (cancelled, cancelled_response) = prompt("cancelled");
+        answer_permission(
+            OutputFormat::Json,
+            PermissionMode::Manual,
+            "subagent-7",
+            cancelled,
+        )
+        .expect("answer cancelled permission");
+        assert!(matches!(
+            cancelled_response.await.expect("cancelled response"),
+            PermissionDecision::Cancelled
+        ));
+    }
+
+    #[test]
+    fn prompt_completion_retains_only_the_final_orchestrated_turn() {
+        let mut state = HeadlessState {
+            final_text: "provisional answer".to_string(),
+            ..HeadlessState::default()
+        };
+        let mut collecting = true;
+        let mut reason = None;
+        let mut usage = None;
+
+        assert!(record_prompt_done(
+            &mut state,
+            &mut collecting,
+            &mut reason,
+            &mut usage,
+            StopReason::EndTurn,
+            Some(Usage::new(8, 5, 3)),
+            1,
+        ));
+        assert!(state.final_text.is_empty());
+        assert!(!collecting);
+        assert!(matches!(reason, Some(StopReason::EndTurn)));
+        assert_eq!(usage.as_ref().map(|usage| usage.total_tokens), Some(8));
+
+        state.final_text = "final answer".to_string();
+        collecting = true;
+        assert!(!record_prompt_done(
+            &mut state,
+            &mut collecting,
+            &mut reason,
+            &mut usage,
+            StopReason::MaxTokens,
+            Some(Usage::new(13, 9, 4)),
+            0,
+        ));
+        assert_eq!(state.final_text, "final answer");
+        assert!(collecting);
+        assert!(matches!(reason, Some(StopReason::MaxTokens)));
+        assert_eq!(usage.as_ref().map(|usage| usage.total_tokens), Some(13));
+    }
+
+    #[test]
+    fn terminal_errors_and_warnings_follow_each_output_contract() {
+        let mut terminal_error = None;
+        record_terminal_error(
+            OutputFormat::StreamJson,
+            &mut terminal_error,
+            "adapter stopped".to_string(),
+        )
+        .expect("stream terminal error");
+        assert_eq!(terminal_error.as_deref(), Some("adapter stopped"));
+
+        record_terminal_error(
+            OutputFormat::Json,
+            &mut terminal_error,
+            "replacement error".to_string(),
+        )
+        .expect("json terminal error");
+        assert_eq!(terminal_error.as_deref(), Some("replacement error"));
+        emit_warning(OutputFormat::StreamJson, Some("subagent-3"), "retrying")
+            .expect("stream warning");
+        emit_warning(OutputFormat::Text, None, "plain warning").expect("text warning");
+        emit_warning(OutputFormat::Json, None, "silent warning").expect("json warning");
+    }
+
+    #[tokio::test]
+    async fn subagent_handler_tracks_lifecycle_streams_and_responses() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+        use agent_client_protocol::schema::v1::{
+            ContentBlock, ContentChunk, ElicitationId, ElicitationSessionScope, ElicitationUrlMode,
+            PermissionOption, TextContent, ToolCallUpdateFields, ToolKind,
+        };
+
+        let mut state = HeadlessState::default();
+        let workflow_id = WorkflowId::review(80);
+        for event in [
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::Started {
+                    kind: WorkflowKind::Review,
+                    stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+                },
+            ),
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorStarted {
+                    actor_id: WorkflowActorId::Subagent(7),
+                    role: WorkflowActorRole::ReviewSupervisor,
+                },
+            ),
+        ] {
+            handle_workflow_event(OutputFormat::Json, &mut state.workflows, event)
+                .expect("prepare workflow role");
+        }
+
+        handle_subagent_event(
+            OutputFormat::StreamJson,
+            PermissionMode::Yolo,
+            &mut state,
+            SubagentEvent::Started {
+                subagent_id: 7,
+                resumed: true,
+                label: "review · supervisor".to_string(),
+                model: Some("review-model".to_string()),
+                agent: "review-agent".to_string(),
+                objective: "synthesize findings".to_string(),
+            },
+        )
+        .expect("start retained review supervisor");
+        assert_eq!(state.subagent_label(7), "review · supervisor");
+        assert!(matches!(
+            state.subagent_role(7),
+            Some(WorkflowActorRole::ReviewSupervisor)
+        ));
+
+        handle_subagent_event(
+            OutputFormat::Text,
+            PermissionMode::Yolo,
+            &mut state,
+            SubagentEvent::Activity {
+                subagent_id: 7,
+                activity: "checking evidence".to_string(),
+            },
+        )
+        .expect("emit activity");
+        handle_subagent_event(
+            OutputFormat::StreamJson,
+            PermissionMode::Yolo,
+            &mut state,
+            SubagentEvent::SessionUpdate {
+                subagent_id: 7,
+                update: SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new("review result"),
+                ))),
+            },
+        )
+        .expect("emit nested session update");
+
+        let (permission_tx, permission_rx) = tokio::sync::oneshot::channel();
+        handle_subagent_event(
+            OutputFormat::StreamJson,
+            PermissionMode::Yolo,
+            &mut state,
+            SubagentEvent::PermissionRequest {
+                subagent_id: 7,
+                prompt: crate::event::PermissionPrompt {
+                    tool_call: ToolCallUpdate::new(
+                        "review-edit",
+                        ToolCallUpdateFields::new().kind(ToolKind::Edit),
+                    ),
+                    options: vec![PermissionOption::new(
+                        "allow",
+                        "Allow",
+                        PermissionOptionKind::AllowOnce,
+                    )],
+                    responder: permission_tx,
+                },
+            },
+        )
+        .expect("answer nested permission");
+        assert!(matches!(
+            permission_rx.await.expect("nested permission response"),
+            PermissionDecision::Selected(option) if option == "allow"
+        ));
+
+        let (elicitation_tx, elicitation_rx) = tokio::sync::oneshot::channel();
+        handle_subagent_event(
+            OutputFormat::Json,
+            PermissionMode::Manual,
+            &mut state,
+            SubagentEvent::ElicitationRequest {
+                subagent_id: 7,
+                prompt: crate::event::ElicitationPrompt {
+                    message: "sign in".to_string(),
+                    mode: ElicitationUrlMode::new(
+                        ElicitationSessionScope::new("review"),
+                        ElicitationId::new("login"),
+                        "https://example.com/login",
+                    )
+                    .into(),
+                    responder: elicitation_tx,
+                },
+            },
+        )
+        .expect("decline nested elicitation");
+        assert!(matches!(
+            elicitation_rx.await.expect("nested elicitation response"),
+            ElicitationOutcome::Decline
+        ));
+
+        handle_subagent_event(
+            OutputFormat::StreamJson,
+            PermissionMode::Yolo,
+            &mut state,
+            SubagentEvent::Finished {
+                subagent_id: 7,
+                outcome: SubagentOutcome::Completed,
+            },
+        )
+        .expect("finish retained review supervisor");
+        assert!(!state.subagents.contains_key(&7));
+        handle_subagent_event(
+            OutputFormat::Json,
+            PermissionMode::Manual,
+            &mut state,
+            SubagentEvent::Finished {
+                subagent_id: 99,
+                outcome: SubagentOutcome::Cancelled,
+            },
+        )
+        .expect("finish late-attached subagent");
+    }
+
+    #[test]
+    fn workflow_handler_serializes_all_transition_families_and_ignores_invalid_state() {
+        use crate::workflow::{
+            ReviewIssueStatus, WorkflowActorId, WorkflowActorRole, WorkflowCoverage, WorkflowEvent,
+            WorkflowId, WorkflowKind, WorkflowOutcome, WorkflowPhase, WorkflowStage, WorkflowStore,
+            WorkflowTransition,
+        };
+
+        let workflow_id = WorkflowId::review(81);
+        let mut workflows = WorkflowStore::default();
+        handle_workflow_event(
+            OutputFormat::StreamJson,
+            &mut workflows,
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::PhaseChanged {
+                    stage: WorkflowStage::new(0, WorkflowPhase::Synthesis),
+                },
+            ),
+        )
+        .expect("invalid transition is ignored");
+        assert!(workflows.get(workflow_id).is_none());
+
+        let started = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+            },
+        );
+        handle_workflow_event(OutputFormat::StreamJson, &mut workflows, started.clone())
+            .expect("start workflow");
+        assert_eq!(
+            record_json(&workflow_stream_record(&started, &workflows).unwrap())["transition"],
+            "started"
+        );
+
+        let actor_id = WorkflowActorId::Named("primary-correction".to_string());
+        let actor_started = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: actor_id.clone(),
+                role: WorkflowActorRole::PrimaryCorrection,
+            },
+        );
+        handle_workflow_event(
+            OutputFormat::StreamJson,
+            &mut workflows,
+            actor_started.clone(),
+        )
+        .expect("start named actor");
+        let actor_record =
+            record_json(&workflow_stream_record(&actor_started, &workflows).unwrap());
+        assert_eq!(actor_record["actor_id"], "primary-correction");
+        assert_eq!(actor_record["transition"], "actor_started");
+
+        let transitions = [
+            (
+                WorkflowTransition::PhaseChanged {
+                    stage: WorkflowStage::new(0, WorkflowPhase::Correction),
+                },
+                "phase_changed",
+            ),
+            (
+                WorkflowTransition::ActorSessionBound {
+                    actor_id: actor_id.clone(),
+                    retained_session_id: "correction-session".to_string(),
+                },
+                "actor_session_bound",
+            ),
+            (
+                WorkflowTransition::CoverageChanged {
+                    coverage: WorkflowCoverage::Complete,
+                },
+                "coverage_changed",
+            ),
+            (
+                WorkflowTransition::IssuesValidated {
+                    pass: 0,
+                    summaries: vec!["finding".to_string()],
+                },
+                "issues_validated",
+            ),
+            (
+                WorkflowTransition::IssuesResolved {
+                    pass: 0,
+                    status: ReviewIssueStatus::Invalidated,
+                },
+                "invalidated",
+            ),
+            (
+                WorkflowTransition::Terminal {
+                    outcome: WorkflowOutcome::Completed,
+                    coverage: WorkflowCoverage::Complete,
+                },
+                "terminal",
+            ),
+        ];
+        for (transition, expected) in transitions {
+            let event = WorkflowEvent::new(workflow_id, transition);
+            let record = record_json(&workflow_stream_record(&event, &workflows).unwrap());
+            assert_eq!(record["transition"], expected);
+        }
+    }
+
+    #[test]
+    fn internal_message_handler_streams_every_kind_and_resets_only_corrections() {
+        use crate::event::{InternalMessage, InternalMessageKind};
+
+        let mut state = HeadlessState {
+            final_text: "candidate".to_string(),
+            ..HeadlessState::default()
+        };
+        let mut collecting = true;
+        for kind in [
+            InternalMessageKind::Delegation,
+            InternalMessageKind::ReviewLane,
+            InternalMessageKind::ReviewProgress,
+            InternalMessageKind::ReviewSynthesis,
+        ] {
+            handle_internal_message(
+                OutputFormat::StreamJson,
+                &mut state,
+                &mut collecting,
+                InternalMessage {
+                    source: "Týr".to_string(),
+                    target: "Supervisor".to_string(),
+                    kind,
+                    text: "evidence".to_string(),
+                    owner_subagent_id: Some(7),
+                },
+            )
+            .expect("stream internal message");
+        }
+        assert_eq!(state.final_text, "candidate");
+        assert!(collecting);
+
+        handle_internal_message(
+            OutputFormat::StreamJson,
+            &mut state,
+            &mut collecting,
+            InternalMessage {
+                source: "PRIMARY".to_string(),
+                target: "Primary".to_string(),
+                kind: InternalMessageKind::DiscreteReview,
+                text: "correct findings".to_string(),
+                owner_subagent_id: None,
+            },
+        )
+        .expect("stream corrective review message");
+        assert!(state.final_text.is_empty());
+        assert!(!collecting);
+    }
+
+    #[tokio::test]
+    async fn primary_elicitation_is_explicitly_declined() {
+        use agent_client_protocol::schema::v1::{
+            ElicitationId, ElicitationSessionScope, ElicitationUrlMode,
+        };
+
+        let (responder, response) = tokio::sync::oneshot::channel();
+        decline_elicitation(crate::event::ElicitationPrompt {
+            message: "authenticate".to_string(),
+            mode: ElicitationUrlMode::new(
+                ElicitationSessionScope::new("primary"),
+                ElicitationId::new("auth"),
+                "https://example.com/auth",
+            )
+            .into(),
+            responder,
+        });
+        assert!(matches!(
+            response.await.expect("elicitation response"),
+            ElicitationOutcome::Decline
+        ));
+    }
+
+    #[test]
+    fn stream_emitters_cover_messages_tools_updates_and_nested_formats() {
+        use crate::workflow::WorkflowActorRole;
+        use agent_client_protocol::schema::v1::{
+            ContentBlock, ContentChunk, TextContent, ToolCallStatus, ToolCallUpdateFields, ToolKind,
+        };
+
+        let mut state = HeadlessState::default();
+        let message = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent::new("answer"),
+        )));
+        let thought = SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent::new("reasoning"),
+        )));
+        emit_stream_event(&UiEvent::SessionUpdate(message.clone()), &state)
+            .expect("emit primary message event");
+        emit_stream_update(&thought, &state, "subagent-2").expect("emit thought");
+
+        let normal_call = ToolCall::new("normal", "read file")
+            .kind(ToolKind::Read)
+            .status(ToolCallStatus::InProgress);
+        emit_stream_update(
+            &SessionUpdate::ToolCall(normal_call.clone()),
+            &state,
+            "primary",
+        )
+        .expect("emit tool call");
+        state.tool_calls.insert("normal".to_string(), normal_call);
+        emit_stream_update(
+            &SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "normal",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            )),
+            &state,
+            "primary",
+        )
+        .expect("emit tool update with existing title");
+        emit_stream_update(
+            &SessionUpdate::ToolCall(ToolCall::new(
+                "transport",
+                "mcp.mj-subagents.create_subagent",
+            )),
+            &state,
+            "primary",
+        )
+        .expect("suppress primary subagent transport call");
+        emit_stream_update(
+            &SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "transport",
+                ToolCallUpdateFields::new().title("mcp.mj-subagents.subagent_cancel"),
+            )),
+            &state,
+            "primary",
+        )
+        .expect("suppress primary subagent transport update");
+
+        let role = WorkflowActorRole::IntentAnalyst;
+        emit_nested_session(
+            OutputFormat::StreamJson,
+            2,
+            Some(&role),
+            "review · intent",
+            SUBAGENT_KIND_FINISHED,
+            "completed",
+            Some(std::time::Duration::from_millis(25)),
+        )
+        .expect("emit review-session JSON");
+        emit_nested_session(
+            OutputFormat::StreamJson,
+            3,
+            None,
+            "worker",
+            SUBAGENT_KIND_STARTED,
+            "inspect code",
+            None,
+        )
+        .expect("emit subagent JSON");
+        emit_nested_session(
+            OutputFormat::Text,
+            3,
+            None,
+            "worker",
+            SUBAGENT_KIND_ACTIVITY,
+            "testing",
+            None,
+        )
+        .expect("emit subagent text");
+        emit_nested_session(
+            OutputFormat::Json,
+            3,
+            None,
+            "worker",
+            SUBAGENT_KIND_ACTIVITY,
+            "silent",
+            None,
+        )
+        .expect("keep single-object JSON silent");
     }
 }
