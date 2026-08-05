@@ -265,8 +265,8 @@ pub struct PullRequestRecord {
 pub struct TrackerStatusSeed {
     pub model_source: Option<String>,
     pub reasoning_effort: Option<String>,
-    /// Working directory to probe for the current branch's open pull
-    /// request. `None` disables the probe.
+    /// Working directory published as session provenance and probed for the
+    /// current branch's open pull request. `None` disables both.
     pub cwd: Option<PathBuf>,
 }
 
@@ -991,13 +991,16 @@ fn record_remote_action_error(
     claimed_session_id: &str,
     message: String,
 ) {
-    let forwarded =
-        ui_event_tx.is_some_and(|sender| sender.send(UiEvent::Warning(message.clone())).is_ok());
+    if let Some(sender) = ui_event_tx {
+        let _ = sender.send(UiEvent::Warning(message.clone()));
+    }
     if let Ok(mut guard) = state.lock() {
         guard.release_remote_prompt_slot_for(claimed_session_id);
-        if !forwarded {
-            guard.record_status_notice(StatusKind::Warning, &message);
-        }
+        // Attached TUI warning events are sent after the tracker's event
+        // bridge, while server-owned events pass through it. Record the same
+        // rendered warning here so both paths publish it; the status deduper
+        // collapses the server-owned repeat.
+        guard.record_status_notice(StatusKind::Warning, &message);
     }
 }
 
@@ -11470,16 +11473,32 @@ mod tests {
 
     #[test]
     fn session_action_acknowledgement_does_not_release_new_session_prompt() {
-        let mut state = TrackerState::new("project".to_string(), "agent".to_string());
-        state.session_id = Some("old-session".to_string());
-        state.prompt_in_flight = true;
+        let state = Arc::new(Mutex::new(TrackerState::new(
+            "project".to_string(),
+            "agent".to_string(),
+        )));
+        {
+            let mut guard = state.lock().expect("state");
+            guard.session_id = Some("new-session".to_string());
+            guard.prompt_in_flight = true;
+        }
 
-        state.session_id = Some("new-session".to_string());
-        state.release_remote_prompt_slot_for("old-session");
+        record_remote_action_error(
+            &state,
+            None,
+            "old-session",
+            "load failed: unavailable".to_string(),
+        );
 
-        assert!(state.prompt_in_flight);
-        state.release_remote_prompt_slot_for("new-session");
-        assert!(!state.prompt_in_flight);
+        let mut guard = state.lock().expect("state");
+        assert!(guard.prompt_in_flight);
+        assert_eq!(
+            guard.transcript.last().map(|entry| entry.text.as_str()),
+            Some("warning: load failed: unavailable")
+        );
+
+        guard.release_remote_prompt_slot_for("new-session");
+        assert!(!guard.prompt_in_flight);
     }
 
     #[test]
