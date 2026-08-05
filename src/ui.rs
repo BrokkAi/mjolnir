@@ -543,73 +543,28 @@ struct TranscriptCache {
 #[derive(Debug, Default)]
 struct TranscriptSink {
     emitted_entries: usize,
-    /// A tool call was flushed while it was the last transcript entry, so its
-    /// trailing separator blank is held back until we know what follows. The
-    /// tool *content* still flushes immediately (streaming promptness); only
-    /// the one blank row waits, so a following tool call can abut instead of
-    /// being pushed off by a separator that scrollback can never retract.
-    deferred_tool_separator: bool,
 }
 
 impl TranscriptSink {
     fn pending_lines(&mut self, state: &AppState, width: u16) -> Vec<Line<'static>> {
-        let mut out = Vec::new();
-
-        // Resolve a separator held back from an earlier flush now that we can
-        // see (or wait for) what follows the trailing tool call.
-        if self.deferred_tool_separator {
-            let successor = state.transcript.get(self.emitted_entries);
-            let successor_is_tool_call = successor.is_some_and(
-                |entry| matches!(entry, Entry::ToolCall(id) if state.tool_calls.contains_key(id)),
-            );
-            if successor_is_tool_call {
-                // The next entry is a tool call: let the rails abut.
-                self.deferred_tool_separator = false;
-            } else if successor.is_some() || !state.is_streaming() {
-                // A non-tool entry follows, or the turn ended with nothing
-                // after the tool call — the separator is owed now.
-                out.push(Line::from(""));
-                self.deferred_tool_separator = false;
-            }
-            // Otherwise still streaming with nothing new yet: keep holding it.
-        }
         let stable_entries = stable_transcript_entry_count(state);
-        if stable_entries > self.emitted_entries {
-            let mut lines = render_transcript_entry_range(
-                state,
-                width,
-                self.emitted_entries..stable_entries,
-                transcript_collapse_limit(state),
-                state.theme,
-                false,
-            );
-            // If the batch ends on a tool call that is (for now) the last
-            // transcript entry, its successor is unknown, so hold its trailing
-            // blank back rather than commit a separator we can't take back.
-            if state.is_streaming()
-                && stable_entries == state.transcript.len()
-                && matches!(state.transcript.last(), Some(Entry::ToolCall(_)))
-                && lines.last().is_some_and(is_blank_line)
-            {
-                lines.pop();
-                self.deferred_tool_separator = true;
-            }
-            out.append(&mut lines);
-            self.emitted_entries = stable_entries;
+        if stable_entries <= self.emitted_entries {
+            return Vec::new();
         }
-
-        out
+        let lines = render_transcript_entry_range(
+            state,
+            width,
+            self.emitted_entries..stable_entries,
+            transcript_collapse_limit(state),
+            state.theme,
+            false,
+        );
+        self.emitted_entries = stable_entries;
+        lines
     }
 
     fn pending_lines_for_exit(&mut self, state: &AppState, width: u16) -> Vec<Line<'static>> {
         let mut out = self.pending_lines(state, width);
-        // A completed trailing tool call may already have emitted all of its
-        // content while holding back only its separator. There will never be a
-        // successor once we exit, so commit the separator now.
-        if self.deferred_tool_separator {
-            out.push(Line::from(""));
-            self.deferred_tool_separator = false;
-        }
         if self.emitted_entries < state.transcript.len() {
             out.extend(render_transcript_entry_range(
                 state,
@@ -620,21 +575,13 @@ impl TranscriptSink {
                 false,
             ));
             self.emitted_entries = state.transcript.len();
-            self.deferred_tool_separator = false;
         }
         out
     }
 
     fn mark_emitted(&mut self, entries: usize) {
         self.emitted_entries = entries;
-        // The resize rebuild re-renders the whole stable range in one pass,
-        // trailing blank included, so nothing is owed afterward.
-        self.deferred_tool_separator = false;
     }
-}
-
-fn is_blank_line(line: &Line<'static>) -> bool {
-    line.spans.iter().all(|span| span.content.trim().is_empty())
 }
 
 #[derive(Debug, Default)]
@@ -8756,20 +8703,7 @@ fn render_transcript_entry_range_with_turns(
                             out.push(with_tool_gutter(row, color));
                         }
                     }
-                    // Consecutive tool calls read as one activity run: let
-                    // their rails abut instead of separating every call with
-                    // a blank row.
-                    let next_is_tool_call =
-                        state.transcript.get(entry_index + 1).is_some_and(|next| {
-                            matches!(
-                                next,
-                                Entry::ToolCall(next_id) | Entry::SubagentToolCall(next_id)
-                                    if state.tool_calls.contains_key(next_id)
-                            )
-                        });
-                    if !next_is_tool_call {
-                        out.push(Line::from(""));
-                    }
+                    out.push(Line::from(""));
                 }
             }
             Entry::System(text) => {
@@ -19246,11 +19180,10 @@ mod tests {
     }
 
     #[test]
-    fn transcript_sink_abuts_sequential_tool_calls_like_full_render() {
-        // Regression: the streaming scrollback used to commit a trailing blank
-        // after a completed tool call before the next one existed, so two
-        // sequentially-run tool calls got a permanent blank between their rails
-        // — the opposite of the abutment the full render produces.
+    fn transcript_sink_separates_sequential_tool_calls_like_full_render() {
+        // Sequential tool calls each get their own trailing blank row, in the
+        // streaming scrollback and the full render alike, so calls never stack
+        // directly on top of each other.
         fn push_completed_tool_call(state: &mut AppState, id: &str, title: &str) {
             state.tool_calls.insert(
                 id.to_string(),
@@ -19271,26 +19204,22 @@ mod tests {
         let mut emitted: Vec<String> = Vec::new();
 
         // First tool call completes while it is still the last entry: its
-        // content flushes right away (promptness), but its trailing separator
-        // is held back until we know a following tool call could abut it.
+        // content and trailing separator flush right away.
         push_completed_tool_call(&mut state, "call-1", "first");
         emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
         assert!(
             emitted.iter().any(|l| l.contains("first")),
             "tool output must flush promptly, not wait for the next entry: {emitted:?}"
         );
-        assert_ne!(
+        assert_eq!(
             emitted.last().map(String::as_str),
             Some(""),
-            "the trailing separator must be held back: {emitted:?}"
+            "the trailing separator flushes with the call: {emitted:?}"
         );
 
-        // Second tool call arrives; now call-1's held separator is dropped so
-        // the rails abut.
         push_completed_tool_call(&mut state, "call-2", "second");
         emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
 
-        // Turn ends; the final held separator is emitted.
         state.set_connection_state(ConnectionState::Ready);
         emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
 
@@ -19314,9 +19243,10 @@ mod tests {
             .expect("second tool row");
         assert_eq!(
             second,
-            first + 1,
-            "sequential tool calls must abut in scrollback: {emitted:?}"
+            first + 2,
+            "sequential tool calls must have a blank row between them: {emitted:?}"
         );
+        assert_eq!(emitted[first + 1], "", "separator row must be blank");
     }
 
     #[test]
@@ -19503,7 +19433,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_sink_exit_commits_deferred_trailing_tool_separator() {
+    fn transcript_sink_exit_owes_nothing_after_trailing_tool_call() {
         let mut state = AppState::new();
         let mut sink = TranscriptSink::default();
 
@@ -19525,24 +19455,19 @@ mod tests {
         state.transcript.push(Entry::ToolCall("call-1".to_string()));
 
         emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
-        assert!(sink.deferred_tool_separator);
-        assert_ne!(emitted.last().map(String::as_str), Some(""));
+        assert_eq!(
+            emitted.last().map(String::as_str),
+            Some(""),
+            "the trailing separator flushes with the call: {emitted:?}"
+        );
 
-        let on_exit: Vec<String> = sink
-            .pending_lines_for_exit(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(on_exit, vec![""]);
-        emitted.extend(on_exit);
+        assert!(sink.pending_lines_for_exit(&state, 80).is_empty());
 
         let full: Vec<String> = render_transcript_lines(&state, 80)
             .iter()
             .map(line_text)
             .collect();
         assert_eq!(emitted, full);
-        assert!(!sink.deferred_tool_separator);
-        assert!(sink.pending_lines_for_exit(&state, 80).is_empty());
     }
 
     #[test]
@@ -20355,26 +20280,19 @@ mod tests {
         view.status = ToolCallStatus::Completed;
         view.body = vec![ToolCallOutput::Text("ok".to_string())];
 
-        // The tool content flushes immediately (streaming promptness); its
-        // trailing separator is held back until the successor is known so a
-        // following tool call could abut it.
+        // The tool content flushes immediately (streaming promptness),
+        // trailing separator included.
         let rendered: Vec<String> = sink
             .pending_lines(&state, 80)
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(rendered, vec!["│ tool exec cargo test", "│   ok"]);
+        assert_eq!(rendered, vec!["│ tool exec cargo test", "│   ok", ""]);
         assert!(sink.pending_lines(&state, 80).is_empty());
 
-        // When the turn ends with nothing after the tool call, the held
-        // separator is finally emitted.
+        // Nothing further is owed once the turn ends.
         state.set_connection_state(ConnectionState::Ready);
-        let separator: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(separator, vec![""]);
+        assert!(sink.pending_lines(&state, 80).is_empty());
     }
 
     #[test]
@@ -20417,14 +20335,16 @@ mod tests {
             exit_status: Some(TerminalExitStatus::new().exit_code(0)),
         }));
 
-        // Content flushes on the exit snapshot; the trailing separator is
-        // held back (streaming) until the successor is known.
+        // Content flushes on the exit snapshot, trailing separator included.
         let rendered: Vec<String> = sink
             .pending_lines(&state, 80)
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(rendered, vec!["│ tool exec cargo test · exit 0", "│   ok"]);
+        assert_eq!(
+            rendered,
+            vec!["│ tool exec cargo test · exit 0", "│   ok", ""]
+        );
     }
 
     #[test]
@@ -23691,7 +23611,7 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_tool_calls_render_without_blank_row_between() {
+    fn consecutive_tool_calls_render_with_blank_row_between() {
         let mut state = AppState::new();
         for (id, title) in [("call-1", "first"), ("call-2", "second")] {
             state.tool_calls.insert(
@@ -23721,9 +23641,10 @@ mod tests {
             .expect("second tool row");
         assert_eq!(
             second,
-            first + 1,
-            "consecutive tool rails should abut, got {rendered:?}"
+            first + 2,
+            "consecutive tool calls must be separated by a blank row, got {rendered:?}"
         );
+        assert_eq!(rendered[first + 1], "", "separator row must be blank");
         // The run still ends with a separator row before whatever follows.
         assert_eq!(rendered.last().map(String::as_str), Some(""));
     }
