@@ -18,7 +18,7 @@ pub const CONFIG_VERSION: u32 = 3;
 /// Version of the product-model explanation accepted by the user. This is
 /// intentionally independent from the storage schema version.
 pub const ONBOARDING_CONTENT_VERSION: u32 = 2;
-pub const DEFAULT_ACP_PRIORITY: [&str; 4] = ["codex-acp", "claude-acp", "kimi", "anvil"];
+pub const DEFAULT_ACP_PRIORITY: [&str; 3] = ["codex-acp", "claude-acp", "kimi"];
 /// Schema version this build can migrate forward from.
 const MIGRATABLE_VERSION: u32 = 2;
 
@@ -485,8 +485,52 @@ impl Config {
         }
     }
 
+    /// Forget settings that named an ACP source this build no longer ships, so
+    /// an older config keeps launching instead of failing on a dangling pin.
+    /// A seat pinned to a retired source, or to a model whose provider no
+    /// built-in adapter serves, falls back to automatic selection.
+    fn drop_retired_sources(&mut self) {
+        let known = DEFAULT_ACP_PRIORITY
+            .iter()
+            .map(|id| (*id).to_string())
+            .chain(self.acp.servers.iter().map(|server| server.id.clone()))
+            .collect::<std::collections::HashSet<_>>();
+        let retired_model = |model: &str| {
+            !matches!(model, "auto" | DISABLED_MODEL | "none")
+                && !model.starts_with("custom/")
+                && !crate::roster::model_has_builtin_adapter(model)
+        };
+
+        self.acp.policies.retain(|id, _| known.contains(id));
+        for (source, priority, model) in [
+            (
+                &mut self.agent.acp_source,
+                &mut self.agent.acp_priority,
+                &mut self.agent.model,
+            ),
+            (
+                &mut self.review.acp_source,
+                &mut self.review.acp_priority,
+                &mut self.review.model,
+            ),
+            (
+                &mut self.subagents.acp_source,
+                &mut self.subagents.acp_priority,
+                &mut self.subagents.model,
+            ),
+        ] {
+            priority.retain(|id| known.contains(id));
+            if source.as_deref().is_some_and(|id| !known.contains(id)) {
+                *source = None;
+            }
+            if retired_model(model.as_str()) {
+                "auto".clone_into(model);
+            }
+        }
+    }
+
     pub fn set_acp_server_policy(&mut self, id: &str, policy: AcpServerPolicy) -> bool {
-        if matches!(id, "codex-acp" | "claude-acp" | "kimi" | "anvil") {
+        if matches!(id, "codex-acp" | "claude-acp" | "kimi") {
             if policy == AcpServerPolicy::Auto {
                 self.acp.policies.remove(id);
             } else {
@@ -574,6 +618,7 @@ impl Config {
         if self.subagents.model.eq_ignore_ascii_case("none") {
             self.subagents.model = DISABLED_MODEL.to_string();
         }
+        self.drop_retired_sources();
         for (seat, priority) in [
             ("agent", &self.agent.acp_priority),
             ("review", &self.review.acp_priority),
@@ -1083,16 +1128,89 @@ mod tests {
     }
 
     #[test]
+    fn loading_forgets_settings_that_named_a_retired_acp_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        // A config written before Anvil was removed. `save` cannot produce
+        // this any more, so write the TOML directly.
+        std::fs::write(
+            &path,
+            format!(
+                r#"version = {CONFIG_VERSION}
+
+[agent]
+model = "glm-5-2"
+acp_source = "anvil"
+acp_priority = ["anvil", "codex-acp"]
+
+[review]
+model = "auto"
+acp_priority = ["codex-acp", "anvil"]
+
+[subagents]
+model = "gpt-5-6-sol"
+acp_source = "codex-acp"
+
+[acp.policies]
+anvil = "enabled"
+kimi = "disabled"
+"#
+            ),
+        )
+        .expect("write legacy config");
+
+        let loaded = Config::load(&path).expect("load");
+
+        assert_eq!(loaded.agent.acp_source, None);
+        assert_eq!(loaded.agent.acp_priority, vec!["codex-acp".to_string()]);
+        assert_eq!(loaded.review.acp_priority, vec!["codex-acp".to_string()]);
+        assert!(!loaded.acp.policies.contains_key("anvil"));
+        assert_eq!(
+            loaded.acp.policies.get("kimi"),
+            Some(&AcpServerPolicy::Disabled)
+        );
+        // The pinned model's provider has no built-in adapter left either.
+        assert_eq!(loaded.agent.model, "auto");
+        // Still-served pins are untouched.
+        assert_eq!(loaded.subagents.model, "gpt-5-6-sol");
+        assert_eq!(loaded.subagents.acp_source.as_deref(), Some("codex-acp"));
+    }
+
+    #[test]
+    fn loading_keeps_models_served_by_a_configured_custom_server() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.acp.servers.push(ConfiguredAcpServer {
+            id: "custom:bridge".to_string(),
+            label: "bridge".to_string(),
+            command: PathBuf::from("bridge"),
+            args: Vec::new(),
+            env: HashMap::new(),
+            origin: AcpServerOrigin::Custom,
+            policy: AcpServerPolicy::Enabled,
+        });
+        cfg.agent.model = "custom/bridge/bedrock::zai.glm-5".to_string();
+        cfg.agent.acp_source = Some("custom:bridge".to_string());
+        cfg.save(&path).expect("save");
+
+        let loaded = Config::load(&path).expect("load");
+
+        assert_eq!(loaded.agent.model, "custom/bridge/bedrock::zai.glm-5");
+        assert_eq!(loaded.agent.acp_source.as_deref(), Some("custom:bridge"));
+    }
+
+    #[test]
     fn independent_acp_priorities_roundtrip() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut cfg = Config::default();
         cfg.agent.acp_source = Some("codex-acp".into());
         cfg.review.acp_source = Some("claude-acp".into());
-        cfg.subagents.acp_source = Some("anvil".into());
-        cfg.agent.acp_priority = vec!["claude-acp".into(), "anvil".into()];
+        cfg.subagents.acp_source = Some("kimi".into());
+        cfg.agent.acp_priority = vec!["claude-acp".into(), "kimi".into()];
         cfg.review.acp_priority = vec!["kimi".into(), "codex-acp".into()];
-        cfg.subagents.acp_priority = vec!["anvil".into(), "codex-acp".into()];
+        cfg.subagents.acp_priority = vec!["kimi".into(), "codex-acp".into()];
 
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");

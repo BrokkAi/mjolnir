@@ -25,8 +25,8 @@ impl AuthVendor {
 
     pub fn enables(self) -> &'static str {
         match self {
-            Self::OpenAi => "Codex, Anvil",
-            Self::Kimi => "Kimi Code, Anvil",
+            Self::OpenAi => "Codex",
+            Self::Kimi => "Kimi Code",
         }
     }
 
@@ -318,9 +318,9 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
         );
     }
     // Credentials can change the models advertised by both the vendor-native
-    // bridge and shared routes such as Anvil. Clear every composite launch key
-    // plus the process-local OnceCells instead of trying to remove simple
-    // source IDs that do not match the persisted cache keys.
+    // bridge and any configured custom ACP servers. Clear every composite
+    // launch key plus the process-local OnceCells instead of trying to remove
+    // simple source IDs that do not match the persisted cache keys.
     crate::roster::invalidate_model_cache()
         .context("signed in, but failed to clear the model capability cache")?;
     Ok(LoginOutcome::SignedIn(format!(
@@ -337,13 +337,13 @@ mod tests {
     fn vendors_report_labels_capabilities_and_install_hints() {
         assert_eq!(AuthVendor::ALL, [AuthVendor::OpenAi, AuthVendor::Kimi]);
         assert_eq!(AuthVendor::OpenAi.label(), "OpenAI / ChatGPT");
-        assert_eq!(AuthVendor::OpenAi.enables(), "Codex, Anvil");
+        assert_eq!(AuthVendor::OpenAi.enables(), "Codex");
         assert_eq!(
             install_hint(AuthVendor::OpenAi),
             "npm install -g @openai/codex"
         );
         assert_eq!(AuthVendor::Kimi.label(), "Kimi");
-        assert_eq!(AuthVendor::Kimi.enables(), "Kimi Code, Anvil");
+        assert_eq!(AuthVendor::Kimi.enables(), "Kimi Code");
         assert_eq!(
             install_hint(AuthVendor::Kimi),
             "install Kimi Code from the ACP registry"

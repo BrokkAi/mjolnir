@@ -49,7 +49,6 @@ A normal lifecycle can contact:
 - the public ACP registry and agent archives;
 - npm for Codex and Claude ACP bridges;
 - provider model APIs through the selected adapter;
-- Anvil release assets for a managed runtime; and
 - model hosts for the optional voice model on first use.
 
 First launch may therefore take longer and use more bandwidth than subsequent

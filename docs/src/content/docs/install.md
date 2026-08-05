@@ -5,16 +5,15 @@ description: Install Mjolnir, connect Codex, and launch the recommended first se
 
 The recommended setup needs an authenticated Codex CLI and a launchable Codex
 ACP bridge. Codex use may incur cost. The first launch can also download an ACP
-bridge, the managed Anvil runtime, registry metadata, model rankings, or voice
-assets. Review [Data and trust boundaries](/data-boundaries/) before using a
+bridge, registry metadata, model rankings, or voice assets. Review [Data and trust boundaries](/data-boundaries/) before using a
 private repository.
 
 ## Choose an installation
 
 | Method | Platforms | Installs |
 | --- | --- | --- |
-| npm / npx | macOS universal; Linux x86-64 or ARM64 glibc; Windows x86-64; Android ARM64 | `mj`, bundled Anvil, and on desktop `mj-voice-worker`; no first-run Mjolnir download |
-| Homebrew | macOS on Apple Silicon or Intel; Linux on x86-64 or ARM64 glibc | `mj` on `PATH`, with `mj-voice-worker` and a bundled Anvil in the formula's `libexec`; not Bifrost |
+| npm / npx | macOS universal; Linux x86-64 or ARM64 glibc; Windows x86-64; Android ARM64 | `mj` and, on desktop, `mj-voice-worker`; no first-run Mjolnir download |
+| Homebrew | macOS on Apple Silicon or Intel; Linux on x86-64 or ARM64 glibc | `mj` on `PATH`, with `mj-voice-worker` in the formula's `libexec`; not Bifrost |
 | Release installer | macOS/Linux on x86-64 or ARM64; Android ARM64 | `mj`, Bifrost, and on desktop `mj-voice-worker` |
 | crates.io | Platforms supported by the Rust crates | `mj` and whichever crates you name; it does not install Bifrost |
 | Release archive | Linux, macOS, Windows, Android release targets | The binaries and legal files packaged for that target |
@@ -37,8 +36,7 @@ npx -y @brokkai/mjolnir --version
 
 The package contains the native Mjolnir release bundle for your platform. It
 does not download a product binary on first run. On macOS, Linux, and Windows,
-the bundle keeps `anvil` and `mj-voice-worker` beside `mj`; Android omits voice
-support. Linux npm packages require glibc.
+the bundle keeps `mj-voice-worker` beside `mj`; Android omits voice support. Linux npm packages require glibc.
 
 Upgrade or remove a global install with:
 
@@ -60,8 +58,8 @@ mj --version
 
 The formula in [BrokkAi/homebrew-tap](https://github.com/BrokkAi/homebrew-tap)
 installs the release archive for your platform and verifies its published
-SHA-256 checksum. `mj` lands on `PATH`; `mj-voice-worker` and a bundled Anvil
-stay in the formula's `libexec` next to `mj`. Bifrost is packaged separately:
+SHA-256 checksum. `mj` lands on `PATH`; `mj-voice-worker` stays in the
+formula's `libexec` next to `mj`. Bifrost is packaged separately:
 
 ```bash
 brew install brokkai/tap/bifrost
@@ -155,7 +153,7 @@ during discovery. Launch still requires Node.js/npm, `npx`, and the
 PATH-visible `codex` CLI. Mjolnir uses that CLI for its Codex sign-in action as
 well.
 
-Claude, Kimi, Anvil, and custom ACP servers are optional. Configure them after
+Claude, Kimi, and custom ACP servers are optional. Configure them after
 the Codex path works if you want alternative primary, subagent, or review
 routes. Mjolnir can install Kimi and supported binary agents from the ACP
 registry.

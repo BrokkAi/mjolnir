@@ -10,7 +10,7 @@
 //! Agents name models in wildly different ways, and the identifying detail isn't
 //! always in the id:
 //!
-//! - **Anvil** embeds a backend + provider path + AWS suffix:
+//! - **Bedrock-style** servers embed a backend + provider path + AWS suffix:
 //!   `bedrock::us.anthropic.claude-opus-4-8` → `anthropic` / `claude-opus-4-8`.
 //! - **claude-acp** uses bare aliases whose version lives in the *description*:
 //!   value `opus`, name `Opus`, description `Opus 4.8 with 1M context · …`.
@@ -279,7 +279,7 @@ fn dedup_ranked_preserving(
 /// Split a model id into (provider, model-name), stripping any `backend::`
 /// prefix and detecting an embedded provider among `.`-separated segments.
 fn parse_id(agent_id: &str, option_id: &str) -> (Option<String>, String) {
-    // Strip a `backend::` prefix (Anvil: `bedrock::…`, `codex::…`, `ollama::…`).
+    // Strip a `backend::` prefix (`bedrock::…`, `codex::…`, `ollama::…`).
     let after_backend = option_id.rsplit("::").next().unwrap_or(option_id);
 
     // Slash-separated namespace (aggregators: `provider/model`, or a router
@@ -356,7 +356,7 @@ pub fn agent_keys(
 
     let mut out = Vec::new();
 
-    // 2. The option id and display name — either may carry the model id (Anvil)
+    // 2. The option id and display name — either may carry the full model id
     //    or a bare alias (claude-acp).
     for raw in [value, name] {
         if raw.is_empty() {
@@ -508,12 +508,12 @@ mod tests {
         ));
     }
 
-    // ---- Anvil bedrock/codex ids ----
+    // ---- backend-prefixed bedrock/codex ids ----
 
     #[test]
-    fn anvil_bedrock_and_codex_ids_join() {
+    fn backend_prefixed_bedrock_and_codex_ids_join() {
         assert!(joins(
-            "anvil",
+            "custom:bridge",
             "bedrock::us.anthropic.claude-opus-4-8",
             "bedrock::us.anthropic.claude-opus-4-8",
             "",
@@ -521,7 +521,7 @@ mod tests {
             "anthropic",
         ));
         assert!(joins(
-            "anvil",
+            "custom:bridge",
             "bedrock::us.anthropic.claude-opus-4-5-20251101-v1:0",
             "bedrock::us.anthropic.claude-opus-4-5-20251101-v1:0",
             "",
@@ -529,7 +529,7 @@ mod tests {
             "anthropic",
         ));
         assert!(joins(
-            "anvil",
+            "custom:bridge",
             "codex::gpt-5.5",
             "codex::gpt-5.5",
             "",
@@ -537,7 +537,7 @@ mod tests {
             "openai"
         ));
         assert!(joins(
-            "anvil",
+            "custom:bridge",
             "bedrock::zai.glm-5",
             "bedrock::zai.glm-5",
             "",
@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn unknown_and_closed_models_yield_no_score() {
         assert!(!joins(
-            "anvil",
+            "custom:bridge",
             "bedrock::xai.grok-4.3",
             "bedrock::xai.grok-4.3",
             "",

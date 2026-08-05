@@ -7,16 +7,13 @@
 mod acp;
 mod agent_instructions;
 mod agent_usage;
-mod anvil;
 mod app;
 mod archive;
 mod auth;
-mod bedrock_credits;
 mod claude_usage;
 mod clipboard;
 mod codex_usage;
 mod config;
-mod deepseek_balance;
 mod deepswe;
 mod discrete_review;
 mod event;
@@ -28,7 +25,6 @@ mod menu;
 mod model_resolve;
 mod notifications;
 mod onboarding;
-mod openrouter_balance;
 mod orchestrator;
 mod palette;
 mod paths;
@@ -109,7 +105,7 @@ struct Cli {
     ///
     /// Accepts an optional trailing `+<effort>` (off, none, minimal, low,
     /// medium, high, xhigh, max) to set this seat's ACP reasoning effort
-    /// independent of the shared Anvil server default, e.g.
+    /// independent of the adapter's own default, e.g.
     /// `custom/bpr-agent/bedrock::openai.gpt-5.6-sol+high`.
     #[arg(long, value_name = "MODEL[+EFFORT]", requires = "print", value_parser = parse_model_override)]
     model: Option<(String, Option<String>)>,
@@ -200,10 +196,6 @@ struct Cli {
     /// Skip the startup check for a newer mj release.
     #[arg(long, global = true, env = "MJOLNIR_NO_UPDATE_CHECK")]
     no_update_check: bool,
-
-    /// Use this Anvil development binary instead of bundled or managed Anvil.
-    #[arg(long, global = true, value_name = "PATH")]
-    anvil_path: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -270,9 +262,8 @@ fn parse_fs_max_text_bytes(value: &str) -> std::result::Result<u64, String> {
 
 /// Reasoning-effort tokens accepted as a trailing `+<effort>` suffix on a
 /// role-override model selector, e.g. `custom/bpr-agent/...::model+high`.
-/// Case-insensitive; `none` canonicalizes to `off` (matches Anvil's
-/// `REASONING_EFFORT_OFF_VALUE`, which explicitly turns reasoning off
-/// rather than leaving the adapter's default effort untouched).
+/// Case-insensitive; `none` canonicalizes to `off`, which explicitly turns
+/// reasoning off rather than leaving the adapter's default effort untouched.
 const KNOWN_REASONING_EFFORTS: &[&str] = &[
     "off", "none", "minimal", "low", "medium", "high", "xhigh", "max",
 ];
@@ -487,7 +478,6 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    anvil::configure_cli_override(cli.anvil_path.clone());
     init_logging(cli.log_file.as_deref())?;
     let debug_file = cli.log_file.clone();
     let snapshot_exclusions =
@@ -1451,7 +1441,6 @@ async fn run_app(
     mode: UiMode,
 ) -> Result<Option<String>> {
     let termination = runtime_options.termination.clone();
-    anvil::start_background_install();
     let config_path = config::default_config_path();
     let config_exists = config::Config::path_has_current_version(&config_path);
     let mut cfg = Config::load(&config_path)?;

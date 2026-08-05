@@ -1323,7 +1323,7 @@ mod tests {
 
     fn roster() -> Roster {
         let primary = role("gpt-test", "codex-acp");
-        let worker = role("worker-test", "anvil");
+        let worker = role("worker-test", "kimi");
         Roster {
             primary: primary.clone(),
             review_supervisor: Some(primary.clone()),

@@ -23,7 +23,7 @@ environment around it:
 - each finished subagent's report, activity log, and diff are pushed back into
   the primary session as a new user message — nothing polls.
 
-Mjolnir is Codex-first, not Codex-only. You can add Claude, Kimi, Anvil, or a
+Mjolnir is Codex-first, not Codex-only. You can add Claude, Kimi, or a
 custom Agent Client Protocol (ACP) server as an alternative primary or as a
 specialist subagent or reviewer. The terminal, permissions, sessions, tools,
 and remote workflow stay consistent across those routes.
@@ -41,7 +41,7 @@ and remote workflow stay consistent across those routes.
 - **Integrated adversarial review:** challenge workspace changes with a
   separate review supervisor and targeted specialist lanes before a delegated
   turn completes.
-- **Optional agent routes:** add Claude, Kimi, Anvil, or a custom ACP server
+- **Optional agent routes:** add Claude, Kimi, or a custom ACP server
   without replacing the Codex-first workflow.
 
 Mjolnir itself, its remote-control server, transcripts, and workspace tools run
@@ -54,8 +54,8 @@ The recommended path needs an authenticated, PATH-visible Codex CLI plus
 Node.js/npm for the Codex ACP bridge. Provider use may incur cost.
 
 Other agents are optional. Mjolnir can also use existing Claude or Kimi
-credentials, install supported binary ACP agents, and manage Anvil as a bundled
-or downloaded route. Read [Start with Codex](https://mjolnir.brokk.ai/codex/),
+credentials and install supported binary ACP agents. Read
+[Start with Codex](https://mjolnir.brokk.ai/codex/),
 [installation](https://mjolnir.brokk.ai/install/), and the
 [data and trust boundaries](https://mjolnir.brokk.ai/data-boundaries/)
 before connecting a private repository.
@@ -72,9 +72,8 @@ mj --version
 npx -y @brokkai/mjolnir --version
 ```
 
-The npm package includes the native `mj` bundle for your platform—plus bundled
-Anvil and, on desktop, `mj-voice-worker`—so it does not download Mjolnir on
-first run. Upgrade with `npm update -g @brokkai/mjolnir` and remove it with
+The npm package includes the native `mj` bundle for your platform—plus, on
+desktop, `mj-voice-worker`—so it does not download Mjolnir on first run. Upgrade with `npm update -g @brokkai/mjolnir` and remove it with
 `npm uninstall -g @brokkai/mjolnir`.
 
 On macOS (Apple Silicon and Intel) and Linux (x86-64 or ARM64 glibc), install
@@ -84,8 +83,8 @@ from the Homebrew tap:
 brew install brokkai/tap/mjolnir
 ```
 
-The formula puts `mj` on `PATH` and keeps `mj-voice-worker` and a bundled
-Anvil in its private `libexec`; it does not install Bifrost, which has its own
+The formula puts `mj` on `PATH` and keeps `mj-voice-worker` in its private
+`libexec`; it does not install Bifrost, which has its own
 formula in the same tap (`brew install brokkai/tap/bifrost`). Upgrade with
 `brew upgrade mjolnir`.
 
@@ -161,6 +160,6 @@ Repository-specific agent guidance lives in [AGENTS.md](AGENTS.md).
 
 Mjolnir and its voice worker are licensed under `GPL-3.0-only`. See
 [LICENSE](LICENSE). Official release archives include the corresponding source
-offer, dependency reports, supplemental notices, and the legal bundle for the
-shipped Anvil binary. See [License and use cases](https://mjolnir.brokk.ai/license-use-cases/)
+offer, dependency reports, and supplemental notices.
+See [License and use cases](https://mjolnir.brokk.ai/license-use-cases/)
 and [Third-party notices](https://mjolnir.brokk.ai/third-party-notices/).

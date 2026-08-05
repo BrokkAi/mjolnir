@@ -3944,7 +3944,7 @@ mod tests {
     fn select_does_not_apply_adapter_specific_penalties() {
         let pool = sorted(vec![
             candidate(
-                "anvil",
+                "kimi",
                 "bedrock::us.anthropic.claude-opus-4-8",
                 1500,
                 "anthropic/opus48",
@@ -3953,7 +3953,7 @@ mod tests {
         ]);
         let picked = select_fighters_with_picker(&pool, 1, |_| 0);
 
-        assert_eq!(picked[0].card.agent_source_id, "anvil");
+        assert_eq!(picked[0].card.agent_source_id, "kimi");
         assert_eq!(
             picked[0].card.model_name,
             "bedrock::us.anthropic.claude-opus-4-8"
@@ -3999,7 +3999,7 @@ mod tests {
         let pool = sorted(vec![
             candidate("claude-acp", "opus", 1456, "anthropic/opus48"),
             candidate(
-                "anvil",
+                "kimi",
                 "bedrock::us.anthropic.claude-opus-4-8",
                 1456,
                 "anthropic/opus48",

@@ -247,42 +247,6 @@ async function embeddedFontsNotice() {
   };
 }
 
-async function bundledAnvilNotice() {
-  const version = "0.24.0";
-  const workflow = await readFile(
-    path.join(repositoryRoot, ".github", "workflows", "release.yml"),
-    "utf8",
-  );
-  const pinnedVersion = workflow.match(/^  ANVIL_VERSION: "([^"]+)"$/m)?.[1];
-  if (pinnedVersion !== version) {
-    throw new Error(
-      `Anvil release pin changed from ${version} to ${pinnedVersion ?? "<missing>"}; regenerate and review its legal bundle`,
-    );
-  }
-  const directory = `licenses/anvil-v${version}`;
-  const legalFiles = [
-    "LICENSE",
-    "GPL-3.0.md",
-    "SOURCE.md",
-    "THIRD_PARTY_LICENSES.html",
-    "SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt",
-  ];
-  await Promise.all(
-    legalFiles.map((filename) =>
-      checkedInLegalFile(path.join(directory, filename)),
-    ),
-  );
-  return {
-    component: `Bundled Anvil ${version}`,
-    source: `https://github.com/BrokkAi/anvil/releases/tag/v${version}`,
-    scope: "separately built binary aggregated into every official Mjolnir archive",
-    text: [
-      `Anvil's complete legal bundle is shipped as anvil-licenses/ and maintained in ${directory}/.`,
-      "Its SOURCE.md identifies the exact corresponding source tag. The bundle includes Anvil's LGPLv3 and incorporated GPLv3 texts, the generated locked Rust dependency report, and supplemental native notices.",
-    ].join("\n"),
-  };
-}
-
 function render(sections) {
   const lines = [
     "MJOLNIR SUPPLEMENTAL THIRD-PARTY NOTICES",
@@ -337,7 +301,6 @@ async function main() {
     await sqliteNotice(metadata),
     await sherpaNativePayload(metadata),
     await embeddedFontsNotice(),
-    await bundledAnvilNotice(),
   ];
   await writeFile(outputPath, render(sections), "utf8");
   process.stdout.write(`Wrote supplemental notices to ${outputPath}\n`);

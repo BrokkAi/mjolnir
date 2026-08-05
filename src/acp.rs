@@ -125,7 +125,6 @@ pub struct RuntimeRoleConfig {
 enum NativeReadOnlyPolicy {
     Codex,
     Claude,
-    Anvil,
 }
 
 const CLAUDE_READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebFetch", "WebSearch"];
@@ -166,7 +165,6 @@ fn native_read_only_policy(
     let policy = match crate::roster::AdapterKind::from_source_id(&role.adapter_source_id) {
         Some(crate::roster::AdapterKind::Codex) => NativeReadOnlyPolicy::Codex,
         Some(crate::roster::AdapterKind::Claude) => NativeReadOnlyPolicy::Claude,
-        Some(crate::roster::AdapterKind::Anvil) => NativeReadOnlyPolicy::Anvil,
         Some(crate::roster::AdapterKind::Kimi | crate::roster::AdapterKind::Custom) | None => {
             anyhow::bail!(
                 "native read-only enforcement is unavailable for adapter '{}'; review lane disabled",
@@ -2174,7 +2172,7 @@ async fn drive_session(
         }
     }
     // Do not require the primary agent to eagerly list the injected subagent MCP
-    // tools before the first prompt. Some ACP agents, including Anvil, accept
+    // tools before the first prompt. Some ACP agents accept
     // lifecycle `mcpServers` during `session/new` but intentionally construct
     // their tool registry lazily when handling `session/prompt`. Waiting here
     // deadlocks those agents: Mjolnir waits for `tools/list` while the agent
@@ -2482,10 +2480,7 @@ async fn drive_session(
                     vec![ContentBlock::Text(TextContent::new(format!("/{name}")))],
                 );
                 let outcome = match conn.send_request(request).block_task().await {
-                    Ok(response) => match anvil_turn_failure_message(response.meta.as_ref()) {
-                        Some(message) => AgentCommandOutcome::Failed(message),
-                        None => AgentCommandOutcome::Completed,
-                    },
+                    Ok(_) => AgentCommandOutcome::Completed,
                     Err(error) => AgentCommandOutcome::Failed(error.to_string()),
                 };
                 control_in_flight.store(false, Ordering::Release);
@@ -4422,7 +4417,6 @@ pub(crate) fn session_config_option_contains_value(
 fn native_read_only_config_id(policy: NativeReadOnlyPolicy) -> Option<&'static str> {
     match policy {
         NativeReadOnlyPolicy::Codex => Some("mode"),
-        NativeReadOnlyPolicy::Anvil => Some("permission_mode"),
         NativeReadOnlyPolicy::Claude => None,
     }
 }
@@ -4430,7 +4424,6 @@ fn native_read_only_config_id(policy: NativeReadOnlyPolicy) -> Option<&'static s
 fn native_read_only_config_value(policy: NativeReadOnlyPolicy) -> Option<&'static str> {
     match policy {
         NativeReadOnlyPolicy::Codex => Some("read-only"),
-        NativeReadOnlyPolicy::Anvil => Some("readOnly"),
         NativeReadOnlyPolicy::Claude => None,
     }
 }
@@ -4667,23 +4660,20 @@ fn select_role_model(
     }
 }
 
-/// Wire id for the ACP reasoning-effort config option. Mirrors Anvil's
-/// `REASONING_EFFORT_CONFIG_ID` (anvil/src/acp.rs) and its always-present
-/// "off" sentinel (anvil's `REASONING_EFFORT_OFF_VALUE`, session.rs), which
-/// explicitly disables reasoning rather than falling back to the model's
-/// default.
+/// Wire id for the ACP reasoning-effort config option, alongside its
+/// always-present "off" sentinel, which explicitly disables reasoning rather
+/// than falling back to the model's default.
 pub(crate) const REASONING_EFFORT_CONFIG_ID: &str = "reasoning_effort";
 
 /// Locates the session's reasoning-effort selector, if the adapter
 /// advertises one.
 ///
 /// ACP defines `SessionConfigOptionCategory::ThoughtLevel` for exactly this
-/// purpose, so that's tried first. In practice Anvil (the only adapter this
-/// ships against today) tags its reasoning-effort option `Model` instead —
-/// the same category as the model selector itself, since which efforts are
-/// valid depends on the chosen model — so category matching alone would
-/// never find it there. The fallback matches the well-known
-/// `reasoning_effort` config id, which is stable across adapters.
+/// purpose, so that's tried first. Some adapters tag their reasoning-effort
+/// option `Model` instead — the same category as the model selector itself,
+/// since which efforts are valid depends on the chosen model — so category
+/// matching alone would never find it there. The fallback matches the
+/// well-known `reasoning_effort` config id, which is stable across adapters.
 fn find_reasoning_effort_option(session_config: &SessionConfigCache) -> Option<usize> {
     session_config
         .options
@@ -5031,22 +5021,6 @@ struct PromptTurnDiffConfig<'a> {
     turn_id: u64,
 }
 
-fn anvil_turn_failure_message(
-    meta: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> Option<String> {
-    let failure = meta?.get("anvil")?.get("turnFailure")?.as_object()?;
-    let message = failure.get("message")?.as_str()?.trim();
-    if message.is_empty() {
-        return None;
-    }
-    let retryable = failure
-        .get("retryable")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let class = if retryable { "retryable" } else { "fatal" };
-    Some(format!("agent turn failed ({class}): {message}"))
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn drive_prompt_turn(
     conn: &ConnectionTo<Agent>,
@@ -5075,14 +5049,10 @@ async fn drive_prompt_turn(
                         turn_diff_tracker
                             .emit_if_changed(ui_tx, diff_config.turn_id)
                             .await;
-                        if let Some(message) = anvil_turn_failure_message(resp.meta.as_ref()) {
-                            let _ = ui_tx.send(UiEvent::PromptFailed { message });
-                        } else {
-                            let _ = ui_tx.send(UiEvent::PromptDone {
-                                stop_reason: resp.stop_reason,
-                                usage: resp.usage,
-                            });
-                        }
+                        let _ = ui_tx.send(UiEvent::PromptDone {
+                            stop_reason: resp.stop_reason,
+                            usage: resp.usage,
+                        });
                     }
                     Err(e) => {
                         turn_diff_tracker
@@ -5462,24 +5432,6 @@ mod tests {
     #[cfg(windows)]
     use tokio::io::AsyncWriteExt as _;
     use tokio::io::split;
-
-    #[test]
-    fn anvil_failure_metadata_becomes_prompt_error() {
-        let meta = serde_json::json!({
-            "anvil": {
-                "turnFailure": {
-                    "message": "stream read error",
-                    "retryable": true
-                }
-            }
-        });
-        let meta = meta.as_object().expect("metadata object");
-
-        assert_eq!(
-            anvil_turn_failure_message(Some(meta)).as_deref(),
-            Some("agent turn failed (retryable): stream read error")
-        );
-    }
 
     #[test]
     fn exact_command_discovery_does_not_guess_aliases_or_case() {
@@ -6942,7 +6894,7 @@ mod tests {
 
     #[test]
     fn reasoning_effort_option_falls_back_to_well_known_id_when_category_is_model() {
-        // Mirrors Anvil, which tags its reasoning-effort selector `Model`
+        // Mirrors adapters that tag the reasoning-effort selector `Model`
         // (the same category as the model selector) rather than
         // `ThoughtLevel`, since which efforts are valid depends on the
         // chosen model. Category matching alone would never find it there,
@@ -7468,12 +7420,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn codex_native_read_only_is_confirmed_before_review_prompt() {
         assert_native_read_only_is_confirmed_before_prompt("codex-acp", "mode", "read-only").await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn anvil_native_read_only_is_confirmed_before_review_prompt() {
-        assert_native_read_only_is_confirmed_before_prompt("anvil", "permission_mode", "readOnly")
-            .await;
     }
 
     async fn run_mock_agent_with_additional_directories(
@@ -10962,10 +10908,10 @@ mod tests {
         // do not just see "acp: ..." with no remediation.
         let cases = [
             LaunchError::CommandNotFound {
-                command: "anvil".into(),
+                command: "bridge".into(),
             },
             LaunchError::SpawnFailed {
-                command: "anvil".into(),
+                command: "bridge".into(),
                 source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             },
             LaunchError::StderrFileOpen {

@@ -11834,10 +11834,6 @@ fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    let wraps = matches!(
-        state.anvil_quota_source,
-        Some(crate::app::AnvilQuotaSource::DeepSeek)
-    );
     let paragraph = if let Some(quota_items) = attributed_usage_quota_items(state) {
         let lines = quota_items
             .into_iter()
@@ -11845,7 +11841,6 @@ fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
                 let color = match owner {
                     UsageQuotaOwner::Primary => state.theme.primary,
                     UsageQuotaOwner::Subagents => state.theme.secondary,
-                    UsageQuotaOwner::Anvil => state.theme.warning,
                 };
                 Line::from(vec![
                     Span::styled(
@@ -11857,16 +11852,7 @@ fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
                 ])
             })
             .collect::<Vec<_>>();
-        let paragraph = Paragraph::new(lines);
-        if wraps {
-            paragraph.wrap(Wrap { trim: false })
-        } else {
-            paragraph
-        }
-    } else if wraps {
-        Paragraph::new(label)
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(state.theme.warning))
+        Paragraph::new(lines)
     } else {
         Paragraph::new(truncate_text_to_width(label, area.width))
             .style(Style::default().fg(state.theme.warning))
@@ -11875,39 +11861,10 @@ fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
 }
 
 fn usage_quota_row_count(state: &AppState, width: u16) -> usize {
-    let Some(label) = usage_quota_label(state) else {
-        return 0;
-    };
-    if width == 0 {
+    if usage_quota_label(state).is_none() || width == 0 {
         return 0;
     }
-    if let Some(quota_items) = attributed_usage_quota_items(state) {
-        if !matches!(
-            state.anvil_quota_source,
-            Some(crate::app::AnvilQuotaSource::DeepSeek)
-        ) {
-            return quota_items.len();
-        }
-        return quota_items
-            .into_iter()
-            .map(|(owner, quota)| {
-                Paragraph::new(format!("[{}] {quota}", owner.display_label()))
-                    .wrap(Wrap { trim: false })
-                    .line_count(width)
-                    .max(1)
-            })
-            .sum();
-    }
-    if !matches!(
-        state.anvil_quota_source,
-        Some(crate::app::AnvilQuotaSource::DeepSeek)
-    ) {
-        return 1;
-    }
-    Paragraph::new(label)
-        .wrap(Wrap { trim: false })
-        .line_count(width)
-        .max(1)
+    attributed_usage_quota_items(state).map_or(1, |quota_items| quota_items.len())
 }
 
 fn usage_quota_label(state: &AppState) -> Option<String> {
@@ -11921,8 +11878,7 @@ fn usage_quota_label(state: &AppState) -> Option<String> {
         );
     }
 
-    usage_quota_source_label(state, "anvil")
-        .or_else(|| usage_quota_source_label(state, "codex-acp"))
+    usage_quota_source_label(state, "codex-acp")
         .or_else(|| usage_quota_source_label(state, "claude-acp"))
 }
 
@@ -11930,7 +11886,6 @@ fn usage_quota_label(state: &AppState) -> Option<String> {
 enum UsageQuotaOwner {
     Primary,
     Subagents,
-    Anvil,
 }
 
 impl UsageQuotaOwner {
@@ -11938,7 +11893,6 @@ impl UsageQuotaOwner {
         match self {
             Self::Primary => "PRIMARY",
             Self::Subagents => "SUBAGENTS",
-            Self::Anvil => "ANVIL",
         }
     }
 
@@ -11946,7 +11900,6 @@ impl UsageQuotaOwner {
         match self {
             Self::Primary => "primary",
             Self::Subagents => "subagents",
-            Self::Anvil => "anvil",
         }
     }
 }
@@ -11964,35 +11917,14 @@ fn attributed_usage_quota_items(state: &AppState) -> Option<Vec<(UsageQuotaOwner
     {
         labels.push((UsageQuotaOwner::Subagents, label));
     }
-    if primary_source != "anvil"
-        && subagent_source != Some("anvil")
-        && let Some(label) = usage_quota_source_label(state, "anvil")
-    {
-        labels.push((UsageQuotaOwner::Anvil, label));
-    }
-    // No seat resolved to a quota provider (e.g. an `anvil` primary with no
-    // configured anvil balance source). Fall through to the priority chain so a
-    // still-live poller keeps the row populated instead of blanking it.
+    // No seat resolved to a quota provider (e.g. a custom ACP server primary).
+    // Fall through to the priority chain so a still-live poller keeps the row
+    // populated instead of blanking it.
     (!labels.is_empty()).then_some(labels)
 }
 
 fn usage_quota_source_label(state: &AppState, source: &str) -> Option<String> {
     match source {
-        "anvil" => match state.anvil_quota_source {
-            Some(crate::app::AnvilQuotaSource::Bedrock) => state
-                .bedrock_credits
-                .as_ref()
-                .map(crate::bedrock_credits::BedrockCreditsStatus::compact_label),
-            Some(crate::app::AnvilQuotaSource::OpenRouter) => state
-                .openrouter_balance
-                .as_ref()
-                .map(crate::openrouter_balance::OpenRouterBalanceStatus::compact_label),
-            Some(crate::app::AnvilQuotaSource::DeepSeek) => state
-                .deepseek_balance
-                .as_ref()
-                .map(crate::deepseek_balance::DeepSeekBalanceStatus::compact_label),
-            None => None,
-        },
         "codex-acp" => state
             .codex_usage
             .as_ref()
@@ -16177,7 +16109,7 @@ mod tests {
     #[test]
     fn inline_chat_replaces_content_with_elicitation_view() {
         let mut state = AppState::new();
-        state.agent_label = "anvil".to_string();
+        state.agent_label = "kimi".to_string();
         state.record_user_prompt("hello".to_string());
         state.apply_event(UiEvent::ElicitationRequest(
             single_select_elicitation_prompt(),
@@ -16194,7 +16126,7 @@ mod tests {
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("setup request"), "rendered:\n{rendered}");
         assert!(
-            !rendered.contains("agent anvil"),
+            !rendered.contains("agent kimi"),
             "elicitation view must replace the chat header; rendered:\n{rendered}"
         );
     }
@@ -18408,7 +18340,7 @@ mod tests {
             subagent: "gpt-5.5".to_string(),
             primary_source: Some("claude-acp".to_string()),
             review_source: Some("codex-acp".to_string()),
-            subagent_source: Some("anvil".to_string()),
+            subagent_source: Some("kimi".to_string()),
         };
         state.input = "/agents".to_string();
         state.input_cursor = 2;
@@ -18430,7 +18362,7 @@ mod tests {
             state.transcript.last(),
             Some(Entry::System(text))
                 if text
-                    == "Active models\nprimary    claude-opus via claude-acp\nreview     gpt-5.6 via codex-acp\nsubagents  gpt-5.5 via anvil\n\nUsage\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
+                    == "Active models\nprimary    claude-opus via claude-acp\nreview     gpt-5.6 via codex-acp\nsubagents  gpt-5.5 via kimi\n\nUsage\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
         ));
     }
 
@@ -22297,7 +22229,7 @@ mod tests {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
         let mut state = AppState::new();
-        state.agent_label = "anvil".to_string();
+        state.agent_label = "kimi".to_string();
         state.record_user_prompt("hello".to_string());
         state.apply_event(UiEvent::PermissionRequest(pending.prompt));
         let backend = TestBackend::new(100, INLINE_CHAT_HEIGHT);
@@ -22320,7 +22252,7 @@ mod tests {
         );
         assert!(rendered.contains("Allow once"), "rendered:\n{rendered}");
         assert!(
-            !rendered.contains("agent anvil"),
+            !rendered.contains("agent kimi"),
             "permission view must replace the chat header; rendered:\n{rendered}"
         );
         assert!(
@@ -23044,7 +22976,7 @@ mod tests {
                 kind: ToolKind::Read,
                 status: ToolCallStatus::Completed,
                 body: vec![ToolCallOutput::Text(
-                    "_Auto permissions **approved** this tool call._\n\nReason: `read/search/fetch`\n\n- visible from anvil"
+                    "_Auto permissions **approved** this tool call._\n\nReason: `read/search/fetch`\n\n- visible from the agent"
                         .to_string(),
                 )],
             },
@@ -23071,7 +23003,7 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|line| line == "│   - visible from anvil"),
+                .any(|line| line == "│   - visible from the agent"),
             "rendered lines: {rendered:?}"
         );
     }
@@ -24188,168 +24120,9 @@ mod tests {
     }
 
     #[test]
-    fn usage_quota_row_renders_bedrock_available_and_unavailable() {
-        let mut state = AppState::new();
-        state.set_bedrock_credits(crate::bedrock_credits::BedrockCreditsStatus::Available(
-            crate::bedrock_credits::BedrockCreditsReport {
-                amounts: vec![crate::bedrock_credits::CreditAmount {
-                    currency: "USD".to_string(),
-                    amount: 12.5,
-                }],
-                earliest_expiration: Some("2026-12-31".to_string()),
-                as_of: "2026-07-15".to_string(),
-            },
-        ));
-        assert_eq!(
-            usage_quota_label(&state).as_deref(),
-            Some("Bedrock credits: USD 12.50 · expires 2026-12-31 · as of 2026-07-15")
-        );
-        let backend = TestBackend::new(100, 1);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
-            .expect("draw");
-        assert!(
-            buffer_lines(terminal.backend().buffer())[0].contains("Bedrock credits: USD 12.50")
-        );
-
-        state.set_bedrock_credits(crate::bedrock_credits::BedrockCreditsStatus::Unavailable(
-            "request timed out".to_string(),
-        ));
-        assert_eq!(
-            usage_quota_label(&state).as_deref(),
-            Some("Bedrock credits unavailable: request timed out")
-        );
-        terminal
-            .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
-            .expect("draw");
-        assert!(
-            buffer_lines(terminal.backend().buffer())[0]
-                .contains("Bedrock credits unavailable: request timed out")
-        );
-    }
-
-    #[test]
-    fn usage_quota_row_renders_openrouter_available_zero_and_unavailable() {
-        let mut state = AppState::new();
-        state.set_openrouter_balance(
-            crate::openrouter_balance::OpenRouterBalanceStatus::Available(
-                crate::openrouter_balance::OpenRouterBalanceReport {
-                    remaining_usd: 12.5,
-                    total_credits_usd: 20.0,
-                    total_usage_usd: 7.5,
-                    as_of: "2026-07-15T18:42:00Z".to_string(),
-                },
-            ),
-        );
-        assert_eq!(
-            usage_quota_label(&state).as_deref(),
-            Some("OpenRouter balance: USD 12.50 remaining · as of 2026-07-15T18:42:00Z")
-        );
-
-        state.set_openrouter_balance(
-            crate::openrouter_balance::OpenRouterBalanceStatus::Available(
-                crate::openrouter_balance::OpenRouterBalanceReport {
-                    remaining_usd: 0.0,
-                    total_credits_usd: 20.0,
-                    total_usage_usd: 20.0,
-                    as_of: "2026-07-15T18:43:00Z".to_string(),
-                },
-            ),
-        );
-        assert_eq!(
-            usage_quota_label(&state).as_deref(),
-            Some("OpenRouter balance: USD 0.00 remaining · as of 2026-07-15T18:43:00Z")
-        );
-
-        state.set_openrouter_balance(
-            crate::openrouter_balance::OpenRouterBalanceStatus::Unavailable(
-                "billing credentials are unavailable".to_string(),
-            ),
-        );
-        let backend = TestBackend::new(100, 1);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
-            .expect("draw");
-        assert!(
-            buffer_lines(terminal.backend().buffer())[0]
-                .contains("OpenRouter balance unavailable: billing credentials are unavailable")
-        );
-    }
-
-    #[test]
-    fn usage_quota_row_renders_all_deepseek_balance_records() {
-        let mut state = AppState::new();
-        state.set_deepseek_balance(crate::deepseek_balance::DeepSeekBalanceStatus::Available(
-            crate::deepseek_balance::DeepSeekBalanceReport {
-                balances: vec![
-                    crate::deepseek_balance::DeepSeekBalance {
-                        currency: "CNY".to_string(),
-                        total_balance: "123.4500".to_string(),
-                        granted_balance: "23.0000".to_string(),
-                        topped_up_balance: "100.4500".to_string(),
-                    },
-                    crate::deepseek_balance::DeepSeekBalance {
-                        currency: "USD".to_string(),
-                        total_balance: "0.010".to_string(),
-                        granted_balance: "0.000".to_string(),
-                        topped_up_balance: "0.010".to_string(),
-                    },
-                ],
-                as_of: "2026-07-15T18:42:00Z".to_string(),
-            },
-        ));
-        assert_eq!(
-            usage_quota_label(&state).as_deref(),
-            Some(
-                "DeepSeek balance: CNY total 123.4500 · granted 23.0000 · topped up 100.4500 · USD total 0.010 · granted 0.000 · topped up 0.010 · as of 2026-07-15T18:42:00Z"
-            )
-        );
-
-        let backend = TestBackend::new(50, 5);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
-            .expect("draw");
-        let rendered = buffer_lines(terminal.backend().buffer());
-        for expected in [
-            "CNY total",
-            "123.4500",
-            "granted",
-            "23.0000",
-            "topped up",
-            "100.4500",
-            "USD total",
-            "0.010",
-            "0.000",
-            "2026-07-15T18:42:00Z",
-        ] {
-            assert!(
-                rendered.iter().any(|line| line.contains(expected)),
-                "missing intact {expected}: {rendered:?}"
-            );
-        }
-        assert!(usage_quota_row_count(&state, 50) > 1);
-
-        state.set_deepseek_balance(crate::deepseek_balance::DeepSeekBalanceStatus::Unavailable(
-            crate::deepseek_balance::DeepSeekBalanceUnavailable {
-                reason: "billing credentials are unavailable".to_string(),
-                as_of: "2026-07-15T18:43:00Z".to_string(),
-            },
-        ));
-        assert_eq!(
-            usage_quota_label(&state).as_deref(),
-            Some(
-                "DeepSeek balance unavailable: billing credentials are unavailable · as of 2026-07-15T18:43:00Z"
-            )
-        );
-    }
-
-    #[test]
     fn peer_quota_rows_remain_single_line_and_truncated() {
         let mut state = AppState::new();
-        state.set_bedrock_credits(crate::bedrock_credits::BedrockCreditsStatus::Unavailable(
+        state.set_claude_usage(ClaudeUsageStatus::Unavailable(
             "request timed out".to_string(),
         ));
         assert_eq!(usage_quota_row_count(&state, 12), 1);
@@ -24362,58 +24135,15 @@ mod tests {
         assert_eq!(
             buffer_lines(terminal.backend().buffer())[0],
             truncate_text_to_width(
-                "Bedrock credits unavailable: request timed out".to_string(),
+                "Claude usage unavailable: request timed out".to_string(),
                 12
             )
         );
 
-        state.set_openrouter_balance(
-            crate::openrouter_balance::OpenRouterBalanceStatus::Unavailable(
-                "request timed out".to_string(),
-            ),
-        );
-        assert_eq!(usage_quota_row_count(&state, 12), 1);
-    }
-
-    #[test]
-    fn usage_quota_label_prefers_selected_anvil_provider_over_background_pollers() {
-        let mut state = AppState::new();
-        state.set_bedrock_credits(crate::bedrock_credits::BedrockCreditsStatus::Unavailable(
-            "bedrock unavailable".to_string(),
-        ));
-        assert_eq!(
-            usage_quota_label(&state).as_deref(),
-            Some("Bedrock credits unavailable: bedrock unavailable")
-        );
-
-        state.set_openrouter_balance(
-            crate::openrouter_balance::OpenRouterBalanceStatus::Unavailable(
-                "openrouter unavailable".to_string(),
-            ),
-        );
-        assert_eq!(
-            usage_quota_label(&state).as_deref(),
-            Some("OpenRouter balance unavailable: openrouter unavailable")
-        );
-
-        state.set_bedrock_credits(crate::bedrock_credits::BedrockCreditsStatus::Unavailable(
-            "newer bedrock unavailable".to_string(),
-        ));
-        assert_eq!(
-            usage_quota_label(&state).as_deref(),
-            Some("Bedrock credits unavailable: newer bedrock unavailable")
-        );
-
         state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
-            "codex unavailable".to_string(),
+            "request timed out".to_string(),
         ));
-        state.set_claude_usage(ClaudeUsageStatus::Unavailable(
-            "claude unavailable".to_string(),
-        ));
-        assert_eq!(
-            usage_quota_label(&state).as_deref(),
-            Some("Bedrock credits unavailable: newer bedrock unavailable")
-        );
+        assert_eq!(usage_quota_row_count(&state, 12), 1);
     }
 
     #[test]
@@ -24488,84 +24218,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_quota_rows_include_background_anvil_balance() {
-        let mut state = AppState::new();
-        state.active_models.primary_source = Some("claude-acp".to_string());
-        state.active_models.subagent_source = Some("codex-acp".to_string());
-        state.set_claude_usage(ClaudeUsageStatus::Unavailable(
-            "claude unavailable".to_string(),
-        ));
-        state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
-            "codex unavailable".to_string(),
-        ));
-        state.set_bedrock_credits(crate::bedrock_credits::BedrockCreditsStatus::Unavailable(
-            "bedrock unavailable".to_string(),
-        ));
-
-        assert_eq!(usage_quota_row_count(&state, 160), 3);
-
-        let backend = TestBackend::new(160, 3);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
-            .expect("draw");
-        let rendered = buffer_lines(terminal.backend().buffer());
-        assert!(rendered[0].starts_with("[PRIMARY] Claude usage unavailable"));
-        assert!(rendered[1].starts_with("[SUBAGENTS] Codex usage unavailable"));
-        assert!(rendered[2].starts_with("[ANVIL] Bedrock credits unavailable"));
-    }
-
-    #[test]
-    fn usage_quota_rows_match_rendered_lines_when_deepseek_wraps() {
-        let mut state = AppState::new();
-        state.active_models.primary_source = Some("claude-acp".to_string());
-        state.active_models.subagent_source = Some("codex-acp".to_string());
-        state.set_claude_usage(ClaudeUsageStatus::Unavailable(
-            "claude quota request timed out after thirty seconds".to_string(),
-        ));
-        state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
-            "codex quota request timed out after thirty seconds".to_string(),
-        ));
-        state.set_deepseek_balance(crate::deepseek_balance::DeepSeekBalanceStatus::Unavailable(
-            crate::deepseek_balance::DeepSeekBalanceUnavailable {
-                reason: "billing credentials are unavailable".to_string(),
-                as_of: "2026-07-15T18:43:00Z".to_string(),
-            },
-        ));
-
-        for width in [40u16, 60, 80] {
-            let count = usage_quota_row_count(&state, width) as u16;
-            let backend = TestBackend::new(width, count.max(1) + 6);
-            let mut terminal = Terminal::new(backend).expect("terminal");
-            terminal
-                .draw(|frame| draw_usage_quota_row(frame, frame.area(), &state))
-                .expect("draw");
-            let rendered = buffer_lines(terminal.backend().buffer());
-            let non_blank = rendered.iter().filter(|l| !l.trim().is_empty()).count();
-            assert_eq!(
-                count as usize, non_blank,
-                "width {width} row count mismatch"
-            );
-        }
-    }
-
-    #[test]
-    fn usage_quota_label_reports_shared_anvil_seats_once_as_primary() {
-        let mut state = AppState::new();
-        state.active_models.primary_source = Some("anvil".to_string());
-        state.active_models.subagent_source = Some("anvil".to_string());
-        state.set_bedrock_credits(crate::bedrock_credits::BedrockCreditsStatus::Unavailable(
-            "bedrock unavailable".to_string(),
-        ));
-
-        assert_eq!(
-            usage_quota_label(&state).as_deref(),
-            Some("primary Bedrock credits unavailable: bedrock unavailable")
-        );
-        assert_eq!(usage_quota_row_count(&state, 160), 1);
-    }
-
-    #[test]
     fn usage_quota_label_skips_primary_seat_without_a_quota_source() {
         let mut state = AppState::new();
         state.active_models.primary_source = Some("kimi".to_string());
@@ -24584,7 +24236,7 @@ mod tests {
     #[test]
     fn usage_quota_label_falls_back_when_no_seat_resolves_a_quota_source() {
         let mut state = AppState::new();
-        state.active_models.primary_source = Some("anvil".to_string());
+        state.active_models.primary_source = Some("custom:bridge".to_string());
         state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
             "codex unavailable".to_string(),
         ));
@@ -25985,11 +25637,11 @@ mod tests {
     #[test]
     fn active_thor_host_uses_current_agent_and_model_config() {
         let mut state = AppState::new();
-        state.agent_source_id = "anvil".to_string();
+        state.agent_source_id = "custom:bridge".to_string();
         state.active_agent_launch = Some(ragnarok::Launch {
-            program: PathBuf::from("anvil"),
+            program: PathBuf::from("bridge"),
             args: vec!["--max-turns".to_string(), "7".to_string()],
-            env: HashMap::from([("ANVIL_TEST".to_string(), "1".to_string())]),
+            env: HashMap::from([("BRIDGE_TEST".to_string(), "1".to_string())]),
         });
         state.session_config_options = vec![
             SessionConfigOption::select(
@@ -26013,11 +25665,11 @@ mod tests {
 
         let host = active_thor_host(&state).expect("host");
 
-        assert_eq!(host.agent_source_id, "anvil");
-        assert_eq!(host.launch.program, PathBuf::from("anvil"));
+        assert_eq!(host.agent_source_id, "custom:bridge");
+        assert_eq!(host.launch.program, PathBuf::from("bridge"));
         assert_eq!(host.launch.args, vec!["--max-turns", "7"]);
         assert_eq!(
-            host.launch.env.get("ANVIL_TEST").map(String::as_str),
+            host.launch.env.get("BRIDGE_TEST").map(String::as_str),
             Some("1")
         );
         assert_eq!(host.model_value.as_deref(), Some("codex::gpt-5-codex"));

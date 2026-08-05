@@ -10,12 +10,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::bedrock_credits::BedrockCreditsStatus;
 use crate::claude_usage::ClaudeUsageStatus;
 use crate::clipboard::ClipboardLease;
 use crate::codex_usage::CodexUsageStatus;
-use crate::deepseek_balance::DeepSeekBalanceStatus;
-use crate::openrouter_balance::OpenRouterBalanceStatus;
 use agent_client_protocol::schema::v1::{
     AvailableCommand, Diff, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
     EnumOption, MultiSelectItems, Plan, PlanEntry, SessionConfigKind, SessionConfigOption,
@@ -204,13 +201,6 @@ fn nested_actor_reference(role: Option<&crate::workflow::WorkflowActorRole>, id:
 struct WorkflowClock {
     started_at: Instant,
     finished_at: Option<Instant>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnvilQuotaSource {
-    Bedrock,
-    OpenRouter,
-    DeepSeek,
 }
 
 const BUILTIN_NEW_COMMAND: &str = "new";
@@ -982,7 +972,7 @@ pub struct AppState {
     /// Claude Code. Kept separate from the role/model label in the header.
     primary_acp_name: String,
     /// Registry `source_id` of the launched agent (e.g. `claude-acp`,
-    /// `opencode`, `custom:foo`, `anvil`). Distinct from `agent_label`,
+    /// `opencode`, `custom:foo`, `kimi`). Distinct from `agent_label`,
     /// which is a *display* string; this is the stable id the model-score
     /// resolver keys on. Empty until the launch site fills it in.
     pub agent_source_id: String,
@@ -1181,14 +1171,6 @@ pub struct AppState {
     pub claude_usage: Option<ClaudeUsageStatus>,
     /// Last Codex app-server quota query, including explicit unavailable states.
     pub codex_usage: Option<CodexUsageStatus>,
-    /// AWS promotional/account credits applicable to the active Bedrock route.
-    pub bedrock_credits: Option<BedrockCreditsStatus>,
-    /// OpenRouter balance supplied by Anvil for the active OpenRouter route.
-    pub openrouter_balance: Option<OpenRouterBalanceStatus>,
-    /// DeepSeek balances supplied by Anvil for the active DeepSeek route.
-    pub deepseek_balance: Option<DeepSeekBalanceStatus>,
-    /// The active provider reported in Anvil metadata.
-    pub anvil_quota_source: Option<AnvilQuotaSource>,
     /// Slash-command autocomplete state, recomputed on every input edit.
     pub autocomplete: Autocomplete,
     /// True while the keyboard help overlay is visible.
@@ -1743,10 +1725,6 @@ impl AppState {
             subagent_token_usage: TokenUsage::default(),
             claude_usage: None,
             codex_usage: None,
-            bedrock_credits: None,
-            openrouter_balance: None,
-            deepseek_balance: None,
-            anvil_quota_source: None,
             autocomplete: Autocomplete::default(),
             help_overlay: false,
             help_scroll: 0,
@@ -1804,40 +1782,6 @@ impl AppState {
 
     pub(crate) fn agent_open_message_index(&self) -> Option<usize> {
         self.agent_open_message_index
-    }
-
-    /// Select the Anvil provider reported by valid metadata and clear its stale peer.
-    fn select_anvil_quota_source(&mut self, source: AnvilQuotaSource) {
-        match source {
-            AnvilQuotaSource::Bedrock => {
-                self.openrouter_balance = None;
-                self.deepseek_balance = None;
-            }
-            AnvilQuotaSource::OpenRouter => {
-                self.bedrock_credits = None;
-                self.deepseek_balance = None;
-            }
-            AnvilQuotaSource::DeepSeek => {
-                self.bedrock_credits = None;
-                self.openrouter_balance = None;
-            }
-        }
-        self.anvil_quota_source = Some(source);
-    }
-
-    pub(crate) fn set_bedrock_credits(&mut self, status: BedrockCreditsStatus) {
-        self.select_anvil_quota_source(AnvilQuotaSource::Bedrock);
-        self.bedrock_credits = Some(status);
-    }
-
-    pub(crate) fn set_openrouter_balance(&mut self, status: OpenRouterBalanceStatus) {
-        self.select_anvil_quota_source(AnvilQuotaSource::OpenRouter);
-        self.openrouter_balance = Some(status);
-    }
-
-    pub(crate) fn set_deepseek_balance(&mut self, status: DeepSeekBalanceStatus) {
-        self.select_anvil_quota_source(AnvilQuotaSource::DeepSeek);
-        self.deepseek_balance = Some(status);
     }
 
     pub(crate) fn set_codex_usage(&mut self, status: CodexUsageStatus) {
@@ -4740,15 +4684,6 @@ impl AppState {
                 }
             }
             SessionUpdate::UsageUpdate(u) => {
-                if let Some(status) = crate::bedrock_credits::from_usage_meta(u.meta.as_ref()) {
-                    self.set_bedrock_credits(status);
-                }
-                if let Some(status) = crate::openrouter_balance::from_usage_meta(u.meta.as_ref()) {
-                    self.set_openrouter_balance(status);
-                }
-                if let Some(status) = crate::deepseek_balance::from_usage_meta(u.meta.as_ref()) {
-                    self.set_deepseek_balance(status);
-                }
                 if let Some(rate_limit) = self.token_usage.apply_usage_update(u) {
                     // The line is self-describing ("Current session: …"), so
                     // surface it verbatim rather than wrapping it.
@@ -6740,19 +6675,19 @@ mod tests {
 
         state.apply_event(UiEvent::RosterUpdate {
             choices: vec![crate::roster::ModelChoice {
-                model: "glm-5-2".to_string(),
+                model: "kimi-k2-7-code".to_string(),
                 pass_at_1: 0.5,
                 mean_cost_usd: 1.0,
                 available: true,
                 disabled_reason: None,
-                adapter: Some("anvil".to_string()),
+                adapter: Some("kimi".to_string()),
                 ranked: true,
             }],
             inventory: crate::roster::AcpInventory::default(),
         });
 
         assert_eq!(state.model_choices.len(), 1);
-        assert_eq!(state.model_choices[0].model, "glm-5-2");
+        assert_eq!(state.model_choices[0].model, "kimi-k2-7-code");
         assert!(state.transcript.is_empty(), "catalog refreshes are silent");
     }
 
@@ -8089,7 +8024,7 @@ mod tests {
         assert_eq!(s.connection_state, ConnectionState::Launching);
 
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("anvil".into()),
+            agent_name: Some("kimi".into()),
             agent_version: Some("0.1".into()),
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -8179,7 +8114,7 @@ mod tests {
     fn prompt_failed_returns_to_ready_with_warning_status() {
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("anvil".into()),
+            agent_name: Some("kimi".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -8216,7 +8151,7 @@ mod tests {
         // before the user saw the failure.
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("anvil".into()),
+            agent_name: Some("kimi".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -8257,7 +8192,7 @@ mod tests {
         // what callers send verbatim with no spurious drop suffix.
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("anvil".into()),
+            agent_name: Some("kimi".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -8282,7 +8217,7 @@ mod tests {
     fn prompt_done_records_elapsed_and_token_usage() {
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("anvil".into()),
+            agent_name: Some("kimi".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -8536,184 +8471,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_update_bedrock_credits_replaces_available_with_unavailable() {
-        let mut state = AppState::new();
-        let available = serde_json::json!({"anvil":{"bedrockCredits":{"status":"available","amounts":[{"currency":"USD","amount":12.5}],"earliestExpiration":"2026-12-31","asOf":"2026-07-15T18:42:00Z"}}});
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(12_000, 128_000).meta(available.as_object().unwrap().clone()),
-        )));
-        assert!(matches!(
-            state.bedrock_credits,
-            Some(BedrockCreditsStatus::Available(_))
-        ));
-
-        let unavailable = serde_json::json!({"anvil":{"bedrockCredits":{"status":"unavailable","reason":"billing credentials are unavailable","asOf":"2026-07-15T18:42:00Z"}}});
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(12_000, 128_000).meta(unavailable.as_object().unwrap().clone()),
-        )));
-        assert_eq!(
-            state.bedrock_credits,
-            Some(BedrockCreditsStatus::Unavailable(
-                "billing credentials are unavailable".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn usage_update_openrouter_balance_replaces_available_with_unavailable() {
-        let mut state = AppState::new();
-        let available = serde_json::json!({"anvil":{"openrouterBalance":{"status":"available","remainingUsd":12.5,"totalCreditsUsd":20.0,"totalUsageUsd":7.5,"asOf":"2026-07-15T18:42:00Z"}}});
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(12_000, 128_000).meta(available.as_object().unwrap().clone()),
-        )));
-        assert!(matches!(
-            state.openrouter_balance,
-            Some(OpenRouterBalanceStatus::Available(_))
-        ));
-
-        let unavailable = serde_json::json!({"anvil":{"openrouterBalance":{"status":"unavailable","reason":"billing credentials are unavailable","asOf":"2026-07-15T18:42:00Z"}}});
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(12_000, 128_000).meta(unavailable.as_object().unwrap().clone()),
-        )));
-        assert_eq!(
-            state.openrouter_balance,
-            Some(OpenRouterBalanceStatus::Unavailable(
-                "billing credentials are unavailable".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn usage_update_deepseek_balance_extracts_metadata_and_preserves_malformed_status() {
-        let mut state = AppState::new();
-        let available = serde_json::json!({"anvil":{"deepseekBalance":{"status":"available","balances":[{"currency":"CNY","totalBalance":"123.4500","grantedBalance":"23.0000","toppedUpBalance":"100.4500"},{"currency":"USD","totalBalance":"0.010","grantedBalance":"0.000","toppedUpBalance":"0.010"}],"asOf":"2026-07-15T18:42:00Z"}}});
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(12_000, 128_000).meta(available.as_object().unwrap().clone()),
-        )));
-
-        assert_eq!(state.anvil_quota_source, Some(AnvilQuotaSource::DeepSeek));
-        assert!(matches!(
-            state.deepseek_balance,
-            Some(DeepSeekBalanceStatus::Available(_))
-        ));
-
-        let invalid = serde_json::json!({"anvil":{"deepseekBalance":{"status":"available","balances":[{"currency":"CNY","totalBalance":123.45,"grantedBalance":"23.0000","toppedUpBalance":"100.4500"}],"asOf":"2026-07-15T18:42:00Z"}}});
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(12_000, 128_000).meta(invalid.as_object().unwrap().clone()),
-        )));
-
-        assert_eq!(state.anvil_quota_source, Some(AnvilQuotaSource::DeepSeek));
-        assert_eq!(
-            state.deepseek_balance,
-            crate::deepseek_balance::from_usage_meta(available.as_object())
-        );
-    }
-
-    #[test]
-    fn valid_deepseek_and_peer_updates_clear_each_other() {
-        let mut state = AppState::new();
-        state.set_bedrock_credits(BedrockCreditsStatus::Unavailable(
-            "bedrock unavailable".into(),
-        ));
-
-        state.set_deepseek_balance(DeepSeekBalanceStatus::Unavailable(
-            crate::deepseek_balance::DeepSeekBalanceUnavailable {
-                reason: "deepseek unavailable".into(),
-                as_of: "2026-07-15T18:42:00Z".into(),
-            },
-        ));
-        assert_eq!(state.anvil_quota_source, Some(AnvilQuotaSource::DeepSeek));
-        assert!(state.bedrock_credits.is_none());
-        assert!(state.openrouter_balance.is_none());
-
-        state.set_openrouter_balance(OpenRouterBalanceStatus::Unavailable(
-            "openrouter unavailable".into(),
-        ));
-        assert_eq!(state.anvil_quota_source, Some(AnvilQuotaSource::OpenRouter));
-        assert!(state.deepseek_balance.is_none());
-        assert!(state.bedrock_credits.is_none());
-    }
-
-    #[test]
-    fn malformed_openrouter_metadata_preserves_last_known_status() {
-        let mut state = AppState::new();
-        state.set_openrouter_balance(OpenRouterBalanceStatus::Unavailable(
-            "request timed out".into(),
-        ));
-        let invalid = serde_json::json!({"anvil":{"openrouterBalance":{"status":"future"}}});
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(1, 2).meta(invalid.as_object().unwrap().clone()),
-        )));
-
-        assert_eq!(
-            state.openrouter_balance,
-            Some(OpenRouterBalanceStatus::Unavailable(
-                "request timed out".into()
-            ))
-        );
-        assert_eq!(state.anvil_quota_source, Some(AnvilQuotaSource::OpenRouter));
-    }
-
-    #[test]
-    fn valid_anvil_provider_observations_clear_only_their_stale_peer() {
-        let mut state = AppState::new();
-        let bedrock = serde_json::json!({"anvil":{"bedrockCredits":{"status":"available","amounts":[],"asOf":"2026-07-15T18:42:00Z"}}});
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(1, 2).meta(bedrock.as_object().unwrap().clone()),
-        )));
-        assert_eq!(state.anvil_quota_source, Some(AnvilQuotaSource::Bedrock));
-        assert!(state.openrouter_balance.is_none());
-
-        let openrouter = serde_json::json!({"anvil":{"openrouterBalance":{"status":"available","remainingUsd":0.0,"totalCreditsUsd":20.0,"totalUsageUsd":20.0,"asOf":"2026-07-15T18:42:00Z"}}});
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(1, 2).meta(openrouter.as_object().unwrap().clone()),
-        )));
-        assert_eq!(state.anvil_quota_source, Some(AnvilQuotaSource::OpenRouter));
-        assert!(state.bedrock_credits.is_none());
-
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(1, 2).meta(bedrock.as_object().unwrap().clone()),
-        )));
-        assert_eq!(state.anvil_quota_source, Some(AnvilQuotaSource::Bedrock));
-        assert!(state.openrouter_balance.is_none());
-
-        state.apply_event(UiEvent::CodexUsage(CodexUsageStatus::Unavailable(
-            "not signed in".to_string(),
-        )));
-        assert_eq!(state.anvil_quota_source, Some(AnvilQuotaSource::Bedrock));
-        assert!(state.bedrock_credits.is_some());
-        assert!(state.codex_usage.is_some());
-
-        state.apply_event(UiEvent::ClaudeUsage(ClaudeUsageStatus::Unavailable(
-            "not signed in".to_string(),
-        )));
-        assert_eq!(state.anvil_quota_source, Some(AnvilQuotaSource::Bedrock));
-        assert!(state.bedrock_credits.is_some());
-        assert!(state.codex_usage.is_some());
-        assert!(state.claude_usage.is_some());
-    }
-
-    #[test]
-    fn malformed_bedrock_credit_metadata_preserves_last_known_status() {
-        let mut state = AppState::new();
-        state.set_bedrock_credits(BedrockCreditsStatus::Unavailable(
-            "request timed out".into(),
-        ));
-        let invalid =
-            serde_json::json!({"anvil":{"bedrockCredits":{"status":"future","amounts":[]}}});
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(1, 2).meta(invalid.as_object().unwrap().clone()),
-        )));
-        assert_eq!(
-            state.bedrock_credits,
-            Some(BedrockCreditsStatus::Unavailable(
-                "request timed out".into()
-            ))
-        );
-        assert_eq!(state.anvil_quota_source, Some(AnvilQuotaSource::Bedrock));
-    }
-
-    #[test]
     fn usage_update_dedups_each_rate_limit_window_independently() {
         let mut s = AppState::new();
         let event = |kind: &str, utilization: u64| {
@@ -8760,7 +8517,7 @@ mod tests {
         // Ready, a stray Ctrl-C must not lie about the connection state.
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("anvil".into()),
+            agent_name: Some("kimi".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -9664,7 +9421,7 @@ mod tests {
     #[test]
     fn elicitation_request_and_response_round_trip() {
         // Pins the `#[serde(flatten)]` + `tag = "mode"` / `tag = "action"`
-        // wire framing that mjolnir and anvil must agree on.
+        // wire framing that mjolnir and its ACP agents must agree on.
         let form_req = CreateElicitationRequest::new(
             ElicitationMode::from(ElicitationFormMode::new(
                 ElicitationSessionScope::new("s".to_string()),
@@ -9754,7 +9511,7 @@ mod tests {
     fn autocomplete_advertises_fork_after_agent_capability() {
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("anvil".into()),
+            agent_name: Some("kimi".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: true,
@@ -9794,7 +9551,7 @@ mod tests {
     fn available_command_updates_keep_builtin_commands_first() {
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("anvil".into()),
+            agent_name: Some("kimi".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: true,
@@ -10059,7 +9816,7 @@ mod tests {
         assert!(!s.is_streaming(), "Launching must not count as streaming");
         assert!(!s.is_busy(), "Launching must not count as busy");
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("anvil".into()),
+            agent_name: Some("kimi".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,

@@ -15,7 +15,7 @@ and operating environment around that session.
 | Worktree-first workflow | Start Codex in a linked Git worktree so agent changes stay separate from your current checkout and easy to inspect |
 | Cross-platform voice | Add locally transcribed prompts with Ctrl-R on supported desktop platforms |
 | Integrated adversarial review | Hold a delegated, workspace-changing turn while a separate supervisor challenges the diff and vets targeted specialist findings |
-| Optional agent routes | Add Claude, Kimi, Anvil, or a custom ACP server without replacing the Codex-first workflow |
+| Optional agent routes | Add Claude, Kimi, or a custom ACP server without replacing the Codex-first workflow |
 
 Mjolnir, its transcript storage, remote server, and Mjolnir-hosted tools run on
 infrastructure you control. Codex model requests still go to OpenAI under the
@@ -81,7 +81,7 @@ Continue with [Remote control](/remote/), [Voice dictation](/voice/), or
 
 ## Add other agents when useful
 
-Codex is the recommended primary, not a lock-in boundary. Claude, Kimi, Anvil,
+Codex is the recommended primary, not a lock-in boundary. Claude, Kimi,
 and custom ACP servers can be added as alternative primaries or specialist
 subagent and review routes. See [Other agents and models](/adapters/) after the
 Codex path is working.

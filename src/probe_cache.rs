@@ -200,8 +200,8 @@ mod tests {
         let command = dir.path().join("agent");
         std::fs::write(&command, b"binary").expect("command");
 
-        store(&cache, "anvil", &command, &capabilities("m1"));
-        assert!(load(&cache, "anvil", &command, Duration::ZERO).is_none());
+        store(&cache, "kimi", &command, &capabilities("m1"));
+        assert!(load(&cache, "kimi", &command, Duration::ZERO).is_none());
     }
 
     #[test]
@@ -233,9 +233,9 @@ mod tests {
         let command = dir.path().join("agent");
         std::fs::write(&command, b"binary").expect("command");
 
-        store(&cache, "anvil", &command, &capabilities("m1"));
+        store(&cache, "kimi", &command, &capabilities("m1"));
         std::fs::write(&command, b"binary-upgraded").expect("replace command");
-        assert!(load(&cache, "anvil", &command, CACHE_TTL).is_none());
+        assert!(load(&cache, "kimi", &command, CACHE_TTL).is_none());
     }
 
     #[test]
@@ -256,11 +256,11 @@ mod tests {
         std::fs::write(&command, b"binary").expect("command");
 
         store(&cache, "codex-acp", &command, &capabilities("gpt"));
-        store(&cache, "anvil", &command, &capabilities("kimi"));
+        store(&cache, "kimi", &command, &capabilities("kimi"));
 
         assert!(clear(&cache).expect("clear populated cache"));
         assert!(load(&cache, "codex-acp", &command, CACHE_TTL).is_none());
-        assert!(load(&cache, "anvil", &command, CACHE_TTL).is_none());
+        assert!(load(&cache, "kimi", &command, CACHE_TTL).is_none());
         assert!(!clear(&cache).expect("clear missing cache"));
     }
 }

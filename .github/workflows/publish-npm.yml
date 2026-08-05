@@ -85,7 +85,6 @@ jobs:
             "npm/dist/brokkai-mjolnir-$version.tgz" \
             "npm/dist/brokkai-mjolnir-linux-x64-gnu-$version.tgz"
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj
-          test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/anvil
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj-voice-worker
           npm-smoke/node_modules/.bin/mj --version
 
