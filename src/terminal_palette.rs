@@ -212,6 +212,7 @@ pub fn best_color_for_level(target: (u8, u8, u8), level: StdoutColorLevel) -> Op
 ///
 /// `code` is 10 for foreground, 11 for background. Components may be 1-4 hex
 /// digits wide depending on the terminal, and are scaled to 8 bits.
+#[cfg(any(unix, test))]
 fn parse_osc_color(buffer: &[u8], code: u8) -> Option<(u8, u8, u8)> {
     let text = String::from_utf8_lossy(buffer);
     let marker = format!("]{code};");
