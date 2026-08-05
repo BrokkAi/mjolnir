@@ -1071,12 +1071,16 @@ fn read_headless_prompt(prompt_arg: String) -> Result<String> {
     if prompt_arg != "-" {
         return Ok(prompt_arg);
     }
-    use std::io::Read;
     let mut prompt = String::new();
-    std::io::stdin()
-        .read_to_string(&mut prompt)
-        .context("read prompt from stdin")?;
+    read_headless_prompt_from(&mut std::io::stdin(), &mut prompt)?;
     Ok(prompt)
+}
+
+fn read_headless_prompt_from(reader: &mut impl std::io::Read, prompt: &mut String) -> Result<()> {
+    reader
+        .read_to_string(prompt)
+        .context("read prompt from stdin")?;
+    Ok(())
 }
 
 fn prepare_worktree_for_arg(
@@ -2789,7 +2793,7 @@ async fn run_session(
 }
 
 fn isolated_subagent_role(
-    mut role: roster::ResolvedAgent,
+    role: roster::ResolvedAgent,
     label: &str,
 ) -> Result<(roster::ResolvedAgent, Option<tempfile::TempDir>)> {
     if role.launch.kind != roster::AdapterKind::Codex {
@@ -2799,6 +2803,14 @@ fn isolated_subagent_role(
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
         .ok_or_else(|| anyhow::anyhow!("could not locate CODEX_HOME for {label}"))?;
+    isolated_subagent_role_from_home(role, label, &source)
+}
+
+fn isolated_subagent_role_from_home(
+    mut role: roster::ResolvedAgent,
+    label: &str,
+    source: &Path,
+) -> Result<(roster::ResolvedAgent, Option<tempfile::TempDir>)> {
     let isolated = tempfile::Builder::new()
         .prefix(&format!("mj-{label}-codex-"))
         .tempdir()
@@ -3001,6 +3013,23 @@ async fn request_inline_session_load(
     cwd: PathBuf,
     title: Option<String>,
 ) -> LoadSessionResult {
+    request_inline_session_load_with_timeout(
+        cmd_tx,
+        session_id,
+        cwd,
+        title,
+        Duration::from_secs(15),
+    )
+    .await
+}
+
+async fn request_inline_session_load_with_timeout(
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    session_id: String,
+    cwd: PathBuf,
+    title: Option<String>,
+    timeout: Duration,
+) -> LoadSessionResult {
     let (responder, response) = tokio::sync::oneshot::channel();
     if cmd_tx
         .send(UiCommand::LoadSession {
@@ -3015,7 +3044,7 @@ async fn request_inline_session_load(
             message: "ACP runtime command channel closed".to_string(),
         };
     }
-    match tokio::time::timeout(Duration::from_secs(15), response).await {
+    match tokio::time::timeout(timeout, response).await {
         Ok(Ok(result)) => result,
         Ok(Err(_closed)) => LoadSessionResult::Fallback {
             message: "ACP runtime closed before session switch completed".to_string(),
@@ -3027,8 +3056,16 @@ async fn request_inline_session_load(
 }
 
 async fn wait_for_task(label: &str, handle: tokio::task::JoinHandle<()>) {
+    wait_for_task_with_timeout(label, handle, Duration::from_secs(2)).await;
+}
+
+async fn wait_for_task_with_timeout(
+    label: &str,
+    handle: tokio::task::JoinHandle<()>,
+    timeout: Duration,
+) {
     let abort_handle = handle.abort_handle();
-    match tokio::time::timeout(Duration::from_secs(2), handle).await {
+    match tokio::time::timeout(timeout, handle).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::warn!("{label} join failed: {error}");
@@ -3129,6 +3166,11 @@ fn should_refresh_claude_usage(trigger: UsageRefreshTrigger, completed_turns: u6
 
 #[cfg(test)]
 mod tests {
+    // Keep the remaining orchestration boundaries explicit: `main`, `run_resume`,
+    // `run_app`, and `run_session` own real process-wide configuration, agent
+    // subprocesses, and terminal state. Their deterministic decisions are tested
+    // here, ACP protocol behavior is tested with mock transports in `acp`, and
+    // real terminal restoration is covered by `tests/termination_pty.rs`.
     use super::*;
     use clap::{CommandFactory, Parser};
     use std::{
@@ -3308,6 +3350,23 @@ mod tests {
         }
     }
 
+    fn test_roster(
+        primary: roster::ResolvedAgent,
+        available: Vec<roster::ResolvedAgent>,
+    ) -> roster::Roster {
+        roster::Roster {
+            primary,
+            review_supervisor: None,
+            subagent_default: None,
+            available,
+            choices: Vec::new(),
+            warnings: Vec::new(),
+            inventory: roster::AcpInventory::default(),
+            subagent_acp_priority: Vec::new(),
+            subagent_acp_source: None,
+        }
+    }
+
     #[test]
     fn clear_boundary_reports_each_reloaded_seat() {
         let codex = test_roster_agent("gpt-test", "codex-acp");
@@ -3327,6 +3386,90 @@ mod tests {
         assert_eq!(
             models_reload_message(&roster),
             "Models reloaded after /clear: primary gpt-test via codex-acp; subagents claude-test via claude-acp"
+        );
+    }
+
+    #[test]
+    fn clear_boundary_reports_disabled_subagents() {
+        let primary = test_roster_agent("gpt-test", "codex-acp");
+        let roster = test_roster(primary.clone(), vec![primary]);
+
+        assert_eq!(
+            models_reload_message(&roster),
+            "Models reloaded after /clear: primary gpt-test via codex-acp; subagents off"
+        );
+    }
+
+    #[test]
+    fn primary_session_routes_are_ranked_unique_and_primary_first() {
+        let primary = test_roster_agent("primary", "codex-acp");
+        let duplicate = test_roster_agent("duplicate", "codex-acp");
+        let alternate = test_roster_agent("alternate", "claude-acp");
+        let mut unranked = test_roster_agent("unranked", "kimi");
+        unranked.ranked = false;
+        let roster = test_roster(
+            primary.clone(),
+            vec![duplicate, unranked, alternate.clone()],
+        );
+
+        let routes = primary_session_routes(&roster);
+        let route_models = routes
+            .iter()
+            .map(|role| role.model.model.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(route_models, vec!["primary", "alternate"]);
+        assert_eq!(routes[1].launch.source_id, alternate.launch.source_id);
+    }
+
+    #[test]
+    fn session_entry_route_prefers_exact_model_then_ranked_adapter_fallback() {
+        let primary = test_roster_agent("primary", "codex-acp");
+        let exact = test_roster_agent("exact", "claude-acp");
+        let fallback = test_roster_agent("fallback", "claude-acp");
+        let roster = test_roster(
+            primary.clone(),
+            vec![primary, fallback.clone(), exact.clone()],
+        );
+        let entry = |adapter: Option<&str>, model: Option<&str>| session::SessionEntry {
+            session_id: "session".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            title: None,
+            updated_at: None,
+            adapter_source_id: adapter.map(str::to_string),
+            model: model.map(str::to_string),
+            delete_supported: false,
+        };
+
+        assert_eq!(
+            role_for_session_entry(&roster, &entry(Some("claude-acp"), Some("exact")))
+                .map(|role| role.model.model.as_str()),
+            Some("exact")
+        );
+        assert_eq!(
+            role_for_session_entry(&roster, &entry(Some("claude-acp"), Some("missing")))
+                .map(|role| role.model.model.as_str()),
+            Some("fallback")
+        );
+        assert!(role_for_session_entry(&roster, &entry(None, Some("exact"))).is_none());
+        assert!(role_for_session_entry(&roster, &entry(Some("missing"), None)).is_none());
+    }
+
+    #[test]
+    fn selected_agent_preserves_resolved_launch() {
+        let mut role = test_roster_agent("model", "custom-source");
+        role.launch.command = PathBuf::from("/opt/custom agent");
+        role.launch.args = vec!["--flag".to_string()];
+        role.launch
+            .env
+            .insert("TOKEN".to_string(), "secret".to_string());
+
+        let selected = selected_agent_for_role(&role);
+        assert_eq!(selected.source_id, "roster:model");
+        assert_eq!(selected.program, PathBuf::from("/opt/custom agent"));
+        assert_eq!(selected.args, vec!["--flag"]);
+        assert_eq!(
+            selected.env.get("TOKEN").map(String::as_str),
+            Some("secret")
         );
     }
 
@@ -3477,6 +3620,23 @@ mod tests {
     }
 
     #[test]
+    fn ui_result_conversion_preserves_session_outcome() {
+        let result = RunSessionResult::from(ui::UiRunResult {
+            reason: UiExitReason::SwitchSession,
+            session_id: Some("session-2".to_string()),
+            session_title: Some("Selected".to_string()),
+            theme_kind: theme::TerminalThemeKind::Light,
+            spinner_style: spinner::SpinnerStyle::Globe,
+        });
+
+        assert_eq!(result.reason, UiExitReason::SwitchSession);
+        assert_eq!(result.session_id.as_deref(), Some("session-2"));
+        assert_eq!(result.session_title.as_deref(), Some("Selected"));
+        assert_eq!(result.theme_kind, theme::TerminalThemeKind::Light);
+        assert_eq!(result.spinner_style, spinner::SpinnerStyle::Globe);
+    }
+
+    #[test]
     fn cancelled_new_session_picker_resumes_current_session() {
         let agent = SelectedAgent {
             source_id: "claude-acp".to_string(),
@@ -3604,6 +3764,18 @@ mod tests {
     }
 
     #[test]
+    fn role_override_parsers_reject_empty_models() {
+        for value in ["", "  ", "+high", "  +high"] {
+            assert!(parse_model_override(value).is_err(), "accepted {value:?}");
+            assert!(
+                parse_optional_role_override(value).is_err(),
+                "accepted {value:?}"
+            );
+        }
+        assert!(parse_optional_role_override("auto").is_err());
+    }
+
+    #[test]
     fn parse_optional_role_override_splits_trailing_effort() {
         assert_eq!(
             parse_optional_role_override("custom/bpr-agent/bedrock::openai.gpt-5.6-terra+medium"),
@@ -3725,6 +3897,57 @@ mod tests {
             err.to_string()
                 .contains("filesystem text byte limit must be between 1")
         );
+
+        let err = Cli::try_parse_from(["mj", "--fs-max-text-bytes", "many"])
+            .expect_err("reject non-number");
+        assert!(
+            err.to_string()
+                .contains("invalid filesystem text byte limit")
+        );
+    }
+
+    #[test]
+    fn command_line_modes_convert_to_runtime_modes() {
+        assert!(matches!(
+            headless::OutputFormat::from(HeadlessOutputFormat::Text),
+            headless::OutputFormat::Text
+        ));
+        assert!(matches!(
+            headless::OutputFormat::from(HeadlessOutputFormat::Json),
+            headless::OutputFormat::Json
+        ));
+        assert!(matches!(
+            headless::OutputFormat::from(HeadlessOutputFormat::StreamJson),
+            headless::OutputFormat::StreamJson
+        ));
+
+        for (input, expected_headless, expected_config) in [
+            (
+                HeadlessPermissionMode::Manual,
+                headless::PermissionMode::Manual,
+                config::PermissionPreset::Manual,
+            ),
+            (
+                HeadlessPermissionMode::Auto,
+                headless::PermissionMode::Auto,
+                config::PermissionPreset::Auto,
+            ),
+            (
+                HeadlessPermissionMode::Yolo,
+                headless::PermissionMode::Yolo,
+                config::PermissionPreset::Yolo,
+            ),
+        ] {
+            let headless = headless::PermissionMode::from(input);
+            assert_eq!(
+                std::mem::discriminant(&headless),
+                std::mem::discriminant(&expected_headless)
+            );
+            assert_eq!(config::PermissionPreset::from(input), expected_config);
+        }
+
+        assert_eq!(ui_mode(false), UiMode::InlineChat);
+        assert_eq!(ui_mode(true), UiMode::FullscreenTui);
     }
 
     #[test]
@@ -4084,6 +4307,78 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_exclusions_are_sorted_and_deduplicated() {
+        assert!(configured_snapshot_exclusions(None, None).is_empty());
+        assert_eq!(
+            configured_snapshot_exclusions(
+                Some(Path::new("/tmp/z-debug.log")),
+                Some(Path::new("/tmp/a-agent.log")),
+            ),
+            vec![
+                PathBuf::from("/tmp/a-agent.log"),
+                PathBuf::from("/tmp/z-debug.log"),
+            ]
+        );
+        assert_eq!(
+            configured_snapshot_exclusions(
+                Some(Path::new("/tmp/shared.log")),
+                Some(Path::new("/tmp/shared.log")),
+            ),
+            vec![PathBuf::from("/tmp/shared.log")]
+        );
+    }
+
+    #[test]
+    fn literal_and_streamed_headless_prompts_are_preserved() {
+        assert_eq!(
+            read_headless_prompt("literal prompt".to_string()).expect("literal"),
+            "literal prompt"
+        );
+
+        let mut input = &b"prompt from stdin\nwith a second line"[..];
+        let mut prompt = String::new();
+        read_headless_prompt_from(&mut input, &mut prompt).expect("stream prompt");
+        assert_eq!(prompt, "prompt from stdin\nwith a second line");
+    }
+
+    #[test]
+    fn streamed_headless_prompt_reports_read_errors() {
+        struct BrokenReader;
+
+        impl std::io::Read for BrokenReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("broken input"))
+            }
+        }
+
+        let error = read_headless_prompt_from(&mut BrokenReader, &mut String::new())
+            .expect_err("read must fail");
+        assert!(error.to_string().contains("read prompt from stdin"));
+    }
+
+    #[test]
+    fn worktree_helpers_preserve_plain_cwd_and_label_opened_worktree() {
+        let cwd = PathBuf::from("/tmp/project");
+        assert_eq!(
+            prepare_worktree_for_arg(cwd.clone(), None).expect("plain cwd"),
+            (cwd, None)
+        );
+        assert!(handle_worktree_after_tui(None, Some(UiMode::InlineChat)));
+
+        let worktree = CreatedWorktree {
+            project_root: PathBuf::from("/tmp/project"),
+            worktree_root: PathBuf::from("/tmp/project/.mjolnir/worktrees/test-tree"),
+            session_cwd: PathBuf::from("/tmp/project/.mjolnir/worktrees/test-tree/src"),
+            was_created: false,
+        };
+        assert_eq!(
+            worktree_label(Some(&worktree)),
+            Some(paths::folder_label(&worktree.worktree_root))
+        );
+        assert_eq!(worktree_label(None), None);
+    }
+
+    #[test]
     fn resume_hint_includes_worktree_and_shell_quoted_additional_roots() {
         let command = resume_hint_command(
             "sess-123",
@@ -4306,6 +4601,184 @@ mod tests {
         let help = cmd.render_long_help().to_string();
         assert!(help.contains("resume"));
         assert!(help.contains("Resume an existing ACP session"));
+    }
+
+    #[test]
+    fn codex_side_role_uses_an_isolated_copy_of_login_state() {
+        let source = tempfile::tempdir().expect("source home");
+        std::fs::write(source.path().join("auth.json"), "auth").expect("auth");
+        std::fs::write(source.path().join("config.toml"), "config").expect("config");
+        let mut role = test_roster_agent("codex-model", "codex-acp");
+        role.launch.kind = roster::AdapterKind::Codex;
+
+        let (prepared, guard) =
+            isolated_subagent_role_from_home(role, "review", source.path()).expect("isolate");
+        let guard = guard.expect("isolated home guard");
+        let isolated_home =
+            PathBuf::from(prepared.launch.env.get("CODEX_HOME").expect("CODEX_HOME"));
+        assert_eq!(isolated_home, guard.path());
+        assert_eq!(
+            std::fs::read_to_string(isolated_home.join("auth.json")).expect("copied auth"),
+            "auth"
+        );
+        assert_eq!(
+            std::fs::read_to_string(isolated_home.join("config.toml")).expect("copied config"),
+            "config"
+        );
+    }
+
+    #[test]
+    fn codex_side_role_requires_login_but_other_adapters_need_no_isolation() {
+        let source = tempfile::tempdir().expect("source home");
+        let mut codex = test_roster_agent("codex-model", "codex-acp");
+        codex.launch.kind = roster::AdapterKind::Codex;
+        let error = isolated_subagent_role_from_home(codex, "review", source.path())
+            .expect_err("missing auth must fail");
+        assert!(error.to_string().contains("has no auth.json"));
+
+        let custom = test_roster_agent("custom-model", "custom");
+        let (prepared, guard) = isolated_subagent_role(custom.clone(), "review").expect("custom");
+        assert_eq!(prepared.model.model, custom.model.model);
+        assert!(guard.is_none());
+
+        let (roles, guard) = isolated_subagent_roles(vec![custom], "review").expect("custom roles");
+        assert_eq!(roles.len(), 1);
+        assert!(guard.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_helpers_complete_their_future_and_accept_no_loading_task() {
+        stop_new_session_loading(None).await;
+        let value = with_startup_spinner(async { Ok::<_, anyhow::Error>(42) })
+            .await
+            .expect("future result");
+        assert_eq!(value, 42);
+    }
+
+    #[tokio::test]
+    async fn inline_session_load_reports_closed_command_channel() {
+        let (commands, receiver) = mpsc::unbounded_channel();
+        drop(receiver);
+
+        assert_eq!(
+            request_inline_session_load(
+                &commands,
+                "session".to_string(),
+                PathBuf::from("/tmp/project"),
+                None,
+            )
+            .await,
+            LoadSessionResult::Fallback {
+                message: "ACP runtime command channel closed".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_session_load_forwards_request_and_response() {
+        let (commands, mut receiver) = mpsc::unbounded_channel();
+        let request = tokio::spawn(async move {
+            request_inline_session_load(
+                &commands,
+                "session".to_string(),
+                PathBuf::from("/tmp/project"),
+                Some("Title".to_string()),
+            )
+            .await
+        });
+
+        let command = receiver.recv().await.expect("load command");
+        match command {
+            UiCommand::LoadSession {
+                session_id,
+                cwd,
+                title,
+                responder,
+            } => {
+                assert_eq!(session_id, "session");
+                assert_eq!(cwd, PathBuf::from("/tmp/project"));
+                assert_eq!(title.as_deref(), Some("Title"));
+                responder
+                    .send(LoadSessionResult::Switched)
+                    .expect("response accepted");
+            }
+            _ => panic!("expected load session command"),
+        }
+
+        assert_eq!(
+            request.await.expect("request task"),
+            LoadSessionResult::Switched
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_session_load_handles_dropped_response_and_timeout() {
+        let (commands, mut receiver) = mpsc::unbounded_channel();
+        let closed = tokio::spawn(async move {
+            request_inline_session_load(
+                &commands,
+                "closed".to_string(),
+                PathBuf::from("/tmp/project"),
+                None,
+            )
+            .await
+        });
+        drop(receiver.recv().await.expect("closed command"));
+        assert_eq!(
+            closed.await.expect("closed task"),
+            LoadSessionResult::Fallback {
+                message: "ACP runtime closed before session switch completed".to_string(),
+            }
+        );
+
+        let (commands, mut receiver) = mpsc::unbounded_channel();
+        let timed_out = tokio::spawn(async move {
+            request_inline_session_load_with_timeout(
+                &commands,
+                "slow".to_string(),
+                PathBuf::from("/tmp/project"),
+                None,
+                Duration::from_millis(10),
+            )
+            .await
+        });
+        let pending_command = receiver.recv().await.expect("slow command");
+        assert_eq!(
+            timed_out.await.expect("timeout task"),
+            LoadSessionResult::Fallback {
+                message: "ACP runtime did not complete session switch within 15s".to_string(),
+            }
+        );
+        drop(pending_command);
+    }
+
+    #[tokio::test]
+    async fn task_waiter_handles_success_failure_and_timeout() {
+        wait_for_task("success", tokio::spawn(async {})).await;
+        wait_for_task_with_timeout(
+            "panic",
+            tokio::spawn(async { panic!("task panic") }),
+            Duration::from_millis(50),
+        )
+        .await;
+        wait_for_task_with_timeout(
+            "slow",
+            tokio::spawn(std::future::pending()),
+            Duration::from_millis(10),
+        )
+        .await;
+    }
+
+    #[test]
+    fn logging_without_a_path_is_disabled_and_bad_parent_is_reported() {
+        init_logging(None).expect("disabled logging");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let file_parent = temp.path().join("not-a-directory");
+        std::fs::write(&file_parent, "file").expect("parent file");
+        let error = init_logging(Some(&file_parent.join("debug.log")))
+            .expect_err("file parent cannot become directory");
+        assert!(error.to_string().contains("create log dir"));
     }
 
     #[test]
