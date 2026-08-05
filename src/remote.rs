@@ -8322,6 +8322,22 @@ mod tests {
         assert!(matches!(outcome, Some(ElicitationOutcome::Accept(_))));
     }
 
+    /// A launch that fails must stay on screen carrying its error until the
+    /// user dismisses it. It used to be deleted by a timer with no message at
+    /// all, which is indistinguishable from a session that never existed
+    /// (#612).
+    #[test]
+    fn embedded_viewer_surfaces_failed_session_launches() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("function failSessionLaunch"));
+        assert!(viewer.contains("SESSION_LAUNCH_TIMEOUT_MS"));
+        assert!(viewer.contains("Session failed to start"));
+        assert!(viewer.contains("launch-card-dismiss"));
+        assert!(viewer.contains("is-failed"));
+        // The old behaviour: a timer that silently dropped the card.
+        assert!(!viewer.contains("SESSION_LAUNCH_INDICATOR_TTL_MS"));
+    }
+
     #[test]
     fn embedded_viewer_contains_elicitation_controls() {
         let viewer = include_str!("remote_viewer.html");
