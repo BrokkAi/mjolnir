@@ -47,8 +47,8 @@ use crate::app::{
     CurrentBranchPullRequest, ElicitationFormFieldKind, ElicitationView, Entry,
     PRIMARY_EFFORT_OPTIONS, PastedAttachment, PastedImageAttachment, PendingElicitation,
     PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus,
-    RagnarokFighterUi, RagnarokUi, StatusKind, StatusMessage, SubagentStatus, ToolCallOutput,
-    TranscriptSearch, UiExitReason, classify_elicitation, config_option_choices,
+    RagnarokFighterUi, RagnarokObservation, RagnarokUi, StatusKind, StatusMessage, SubagentStatus,
+    ToolCallOutput, TranscriptSearch, UiExitReason, classify_elicitation, config_option_choices,
     config_option_current_value_label, primary_effort_value,
 };
 use crate::clipboard::{
@@ -1138,6 +1138,7 @@ pub struct UiRunOptions<'a> {
     pub active_models: crate::config::ModelsConfig,
     pub review_enabled: bool,
     pub ragnarok_models: Vec<crate::roster::ResolvedAgent>,
+    pub ragnarok_observer: Option<mpsc::UnboundedSender<Option<RagnarokObservation>>>,
     pub primary_acp_name: String,
     pub primary_reasoning_effort: Option<String>,
     pub termination: CancellationToken,
@@ -1170,6 +1171,7 @@ struct UiInitialState {
     active_models: crate::config::ModelsConfig,
     review_enabled: bool,
     ragnarok_models: Vec<crate::roster::ResolvedAgent>,
+    ragnarok_observer: Option<mpsc::UnboundedSender<Option<RagnarokObservation>>>,
     primary_acp_name: String,
     primary_reasoning_effort: Option<String>,
 }
@@ -1232,6 +1234,7 @@ pub async fn run(
             active_models: options.active_models,
             review_enabled: options.review_enabled,
             ragnarok_models: options.ragnarok_models,
+            ragnarok_observer: options.ragnarok_observer,
             primary_acp_name: options.primary_acp_name,
             primary_reasoning_effort: options.primary_reasoning_effort,
         },
@@ -1481,6 +1484,8 @@ async fn ui_loop(
     state.active_models = initial.active_models;
     state.review_enabled = initial.review_enabled;
     state.ragnarok_models = initial.ragnarok_models;
+    let ragnarok_observer = initial.ragnarok_observer;
+    let mut last_ragnarok_observation = None;
     state.set_primary_acp_name(initial.primary_acp_name);
     state.primary_reasoning_effort = initial.primary_reasoning_effort;
     state.transcript_export_dir = initial.transcript_export_dir;
@@ -1544,6 +1549,7 @@ async fn ui_loop(
             maybe_ct = crossterm_events.next() => {
                 match maybe_ct {
                     Some(Ok(ev)) => {
+                        let ragnarok_was_active = state.ragnarok.is_some();
                         if mode == UiMode::InlineChat
                             && let CtEvent::Resize(width, height) = &ev
                         {
@@ -1594,6 +1600,13 @@ async fn ui_loop(
                             force_soft_inline_repair = mode == UiMode::InlineChat;
                         }
                         drain_ragnarok_draft_pr_publish(&mut state, &ragnarok_tx);
+                        if ragnarok_was_active || state.ragnarok.is_some() {
+                            publish_ragnarok_observation(
+                                &state,
+                                ragnarok_observer.as_ref(),
+                                &mut last_ragnarok_observation,
+                            );
+                        }
                     }
                     Some(Err(e)) => {
                         state.record_status_message(
@@ -1639,6 +1652,11 @@ async fn ui_loop(
                     };
                     state.apply_ragnarok_event(ev);
                     drain_ragnarok_draft_pr_publish(&mut state, &ragnarok_tx);
+                    publish_ragnarok_observation(
+                        &state,
+                        ragnarok_observer.as_ref(),
+                        &mut last_ragnarok_observation,
+                    );
                     pending_redraw.mark(cause);
                 }
             }
@@ -13768,6 +13786,23 @@ const RAGNAROK_FEED_MIN_HEIGHT: u16 = 3;
 /// owned `String` and a `u16` width.
 fn fit_width(text: impl Into<String>, width: usize) -> String {
     truncate_text_to_width(text.into(), width.min(u16::MAX as usize) as u16)
+}
+
+fn publish_ragnarok_observation(
+    state: &AppState,
+    observer: Option<&mpsc::UnboundedSender<Option<RagnarokObservation>>>,
+    last_observation: &mut Option<Option<RagnarokObservation>>,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    let observation = state.ragnarok.as_ref().map(RagnarokUi::observation);
+    if last_observation.as_ref() == Some(&observation) {
+        return;
+    }
+    if observer.send(observation.clone()).is_ok() {
+        *last_observation = Some(observation);
+    }
 }
 
 /// Spawn the battle task for a validated `/ragnarok` request.
@@ -26067,6 +26102,36 @@ mod tests {
             state.transcript.last(),
             Some(Entry::System(text)) if text.contains("Ragnarok summoned")
         ));
+    }
+
+    #[test]
+    fn ragnarok_observer_tracks_arena_open_and_close() {
+        let mut state = AppState::new();
+        let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
+        let mut last_observation = None;
+
+        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
+        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
+        state.ragnarok = Some(RagnarokUi::new(
+            "forge me a hammer".into(),
+            abort_tx,
+            proceed_tx,
+        ));
+        publish_ragnarok_observation(&state, Some(&observer_tx), &mut last_observation);
+        let open = observer_rx
+            .try_recv()
+            .expect("open observation")
+            .expect("active arena");
+        assert_eq!(open.task, "forge me a hammer");
+        publish_ragnarok_observation(&state, Some(&observer_tx), &mut last_observation);
+        assert!(
+            observer_rx.try_recv().is_err(),
+            "unchanged arena snapshots must be coalesced"
+        );
+
+        state.ragnarok = None;
+        publish_ragnarok_observation(&state, Some(&observer_tx), &mut last_observation);
+        assert_eq!(observer_rx.try_recv(), Ok(None));
     }
 
     #[test]

@@ -5183,6 +5183,40 @@ pub enum RagnarokDraftPrStatus {
     },
 }
 
+/// Compact arena state shared with read-only observers such as the remote
+/// viewer. This is derived from the TUI reducer after every battle update, so
+/// observers cannot drift from the state the operator sees locally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RagnarokObservation {
+    pub task: String,
+    pub phase: ragnarok::Phase,
+    pub awaiting_approval: bool,
+    pub fighters: Vec<RagnarokFighterObservation>,
+    pub verdict: Option<RagnarokVerdictObservation>,
+    pub chosen_finalist: Option<ragnarok::FighterId>,
+    pub draft_pr_status: Option<RagnarokDraftPrStatus>,
+    pub failed: Option<String>,
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RagnarokFighterObservation {
+    pub id: ragnarok::FighterId,
+    pub agent_source_id: String,
+    pub model_name: String,
+    pub state: ragnarok::FighterState,
+    pub worktree_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RagnarokVerdictObservation {
+    pub clear_winner: Option<ragnarok::FighterId>,
+    pub finalists: Option<(ragnarok::FighterId, ragnarok::FighterId)>,
+    pub ranking: Vec<ragnarok::FighterId>,
+    pub reasoning: String,
+    pub thor_fallback: bool,
+}
+
 /// All render state for one `/ragnarok` battle.
 #[derive(Debug)]
 pub struct RagnarokUi {
@@ -5325,6 +5359,39 @@ impl RagnarokUi {
         self.fighter(id)
             .map(|f| f.card.model_name.clone())
             .unwrap_or_else(|| format!("champion {id}"))
+    }
+
+    pub fn observation(&self) -> RagnarokObservation {
+        RagnarokObservation {
+            task: self.task.clone(),
+            phase: self.phase,
+            awaiting_approval: self.awaiting_approval(),
+            fighters: self
+                .fighters
+                .iter()
+                .map(|fighter| RagnarokFighterObservation {
+                    id: fighter.card.id,
+                    agent_source_id: fighter.card.agent_source_id.clone(),
+                    model_name: fighter.card.model_name.clone(),
+                    state: fighter.state.clone(),
+                    worktree_name: fighter.worktree_name.clone(),
+                })
+                .collect(),
+            verdict: self
+                .verdict
+                .as_ref()
+                .map(|verdict| RagnarokVerdictObservation {
+                    clear_winner: verdict.clear_winner,
+                    finalists: verdict.finalists,
+                    ranking: verdict.ranking.clone(),
+                    reasoning: verdict.reasoning.clone(),
+                    thor_fallback: verdict.thor_fallback,
+                }),
+            chosen_finalist: self.chosen_finalist,
+            draft_pr_status: self.draft_pr_status.clone(),
+            failed: self.failed.clone(),
+            done: self.done,
+        }
     }
 
     fn push_feed(&mut self, fighter: Option<ragnarok::FighterId>, text: String) {
@@ -10324,6 +10391,38 @@ mod tests {
         s.request_ragnarok("forge a hammer".into());
         assert_eq!(s.take_ragnarok_launch().as_deref(), Some("forge a hammer"));
         assert!(s.take_ragnarok_launch().is_none(), "request is one-shot");
+    }
+
+    #[test]
+    fn ragnarok_observation_mirrors_the_reduced_arena() {
+        use crate::ragnarok::{FighterState, Phase, RagnarokEvent};
+
+        let mut s = arena_state();
+        s.apply_ragnarok_event(RagnarokEvent::Roster(vec![ragnarok_card(0, "Opus")]));
+        s.apply_ragnarok_event(RagnarokEvent::Phase(Phase::Approval));
+        s.apply_ragnarok_event(RagnarokEvent::FighterState {
+            id: 0,
+            state: FighterState::Fighting,
+        });
+        s.apply_ragnarok_event(RagnarokEvent::FighterWorktree {
+            id: 0,
+            name: "ragnarok-opus".into(),
+            path: PathBuf::from("/tmp/ragnarok-opus"),
+            base_sha: "base-opus".into(),
+        });
+
+        let observation = s.ragnarok.as_ref().expect("arena").observation();
+        assert_eq!(observation.task, "build a thing");
+        assert_eq!(observation.phase, Phase::Approval);
+        assert!(observation.awaiting_approval);
+        assert_eq!(observation.fighters.len(), 1);
+        assert_eq!(observation.fighters[0].agent_source_id, "agent-0");
+        assert_eq!(observation.fighters[0].model_name, "Opus");
+        assert_eq!(observation.fighters[0].state, FighterState::Fighting);
+        assert_eq!(
+            observation.fighters[0].worktree_name.as_deref(),
+            Some("ragnarok-opus")
+        );
     }
 
     #[test]

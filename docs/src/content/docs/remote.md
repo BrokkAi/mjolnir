@@ -56,6 +56,14 @@ seats bind adapters independently, so a single session-wide figure would
 silently cover just the seats that happen to report. `/agents` in the terminal
 breaks cost down per seat and per model, where the unpriced seats are visible.
 
+## Ragnarok in the viewer
+
+While a local `/ragnarok` arena is active, the browser shows its task and
+phase, each fighter's model source, status, and vigor, plus the final verdict
+and adoption guidance when available. This view is read-only: summoning the
+arena, approving `UNLEASH`, choosing between finalists, and publishing a draft
+pull request remain local TUI actions.
+
 ## Tailscale
 
 ```bash

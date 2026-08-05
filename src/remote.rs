@@ -211,11 +211,185 @@ pub struct SessionRecord {
     /// actually changed on disk, including edits the agent never reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_diff: Option<WorkspaceDiffRecord>,
+    /// Active `/ragnarok` arena projected from the TUI's authoritative
+    /// reducer. The web view is deliberately observational only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ragnarok: Option<RagnarokRecord>,
     /// Status-line data mirroring the TUI's bottom status row and usage
     /// displays: model, adapter, effort, per-seat token totals, quota lines
     /// and the current branch's open pull request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<SessionStatusRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagnarokRecord {
+    pub task: String,
+    pub phase: String,
+    pub awaiting_approval: bool,
+    pub fighters: Vec<RagnarokFighterRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<RagnarokVerdictRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adoption_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<String>,
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagnarokFighterRecord {
+    pub id: usize,
+    pub source: String,
+    pub model: String,
+    pub status: String,
+    /// Categorical projection of the TUI's animated vigor bar.
+    pub vigor: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagnarokVerdictRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clear_winner: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalists: Option<(usize, usize)>,
+    #[serde(default)]
+    pub ranking: Vec<usize>,
+    pub reasoning: String,
+    pub thor_fallback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_finalist: Option<usize>,
+}
+
+impl RagnarokRecord {
+    fn from_observation(observation: crate::app::RagnarokObservation) -> Self {
+        let adoption_hint = ragnarok_adoption_hint(&observation);
+        let fighters = observation
+            .fighters
+            .into_iter()
+            .map(|fighter| {
+                let (status, vigor) = ragnarok_fighter_status(&fighter.state);
+                RagnarokFighterRecord {
+                    id: fighter.id,
+                    source: fighter.agent_source_id,
+                    model: fighter.model_name,
+                    status,
+                    vigor,
+                }
+            })
+            .collect();
+        let verdict = observation.verdict.map(|verdict| RagnarokVerdictRecord {
+            clear_winner: verdict.clear_winner,
+            finalists: verdict.finalists,
+            ranking: verdict.ranking,
+            reasoning: verdict.reasoning,
+            thor_fallback: verdict.thor_fallback,
+            chosen_finalist: observation.chosen_finalist,
+        });
+        Self {
+            task: observation.task,
+            phase: ragnarok_phase_id(observation.phase).to_string(),
+            awaiting_approval: observation.awaiting_approval,
+            fighters,
+            verdict,
+            adoption_hint,
+            failed: observation.failed,
+            done: observation.done,
+        }
+    }
+}
+
+fn ragnarok_phase_id(phase: crate::ragnarok::Phase) -> &'static str {
+    match phase {
+        crate::ragnarok::Phase::Mustering => "mustering",
+        crate::ragnarok::Phase::Routing => "routing",
+        crate::ragnarok::Phase::Approval => "approval",
+        crate::ragnarok::Phase::Combat => "combat",
+        crate::ragnarok::Phase::Review => "review",
+        crate::ragnarok::Phase::Judgment => "judgment",
+        crate::ragnarok::Phase::Verdict => "verdict",
+    }
+}
+
+fn ragnarok_fighter_status(state: &crate::ragnarok::FighterState) -> (String, String) {
+    match state {
+        crate::ragnarok::FighterState::Summoned => ("summoned".into(), "waiting".into()),
+        crate::ragnarok::FighterState::Forging => ("forging camp".into(), "waiting".into()),
+        crate::ragnarok::FighterState::Connecting => ("approaching".into(), "waiting".into()),
+        crate::ragnarok::FighterState::Fighting => ("fighting".into(), "active".into()),
+        crate::ragnarok::FighterState::Capturing => ("tallying".into(), "active".into()),
+        crate::ragnarok::FighterState::Standing => ("standing".into(), "full".into()),
+        crate::ragnarok::FighterState::Slain(reason) => {
+            (format!("slain: {reason}"), "empty".into())
+        }
+    }
+}
+
+fn ragnarok_adoption_hint(observation: &crate::app::RagnarokObservation) -> Option<String> {
+    use crate::app::RagnarokDraftPrStatus;
+
+    if let Some(status) = observation.draft_pr_status.as_ref() {
+        return Some(match status {
+            RagnarokDraftPrStatus::Publishing { winner } => {
+                format!(
+                    "Publishing a draft PR for {}.",
+                    ragnarok_fighter_name(observation, *winner)
+                )
+            }
+            RagnarokDraftPrStatus::Published { winner, url } => format!(
+                "Draft PR for {}: {url}",
+                ragnarok_fighter_name(observation, *winner)
+            ),
+            RagnarokDraftPrStatus::Failed { winner, message } => format!(
+                "Draft PR for {} failed: {message}",
+                ragnarok_fighter_name(observation, *winner)
+            ),
+        });
+    }
+
+    let recommended = observation.chosen_finalist.or_else(|| {
+        observation
+            .verdict
+            .as_ref()
+            .and_then(|verdict| verdict.clear_winner)
+    });
+    if let Some(winner) = recommended {
+        let fighter = observation
+            .fighters
+            .iter()
+            .find(|fighter| fighter.id == winner)?;
+        return Some(fighter.worktree_name.as_ref().map_or_else(
+            || {
+                format!(
+                    "{} is selected; its worktree is not ready yet.",
+                    fighter.model_name
+                )
+            },
+            |worktree| {
+                format!(
+                    "Adopt {} with `mj --worktree {worktree}`.",
+                    fighter.model_name
+                )
+            },
+        ));
+    }
+    observation
+        .verdict
+        .as_ref()
+        .and_then(|verdict| verdict.finalists)
+        .map(|_| "Choose a finalist in the local TUI before adopting a worktree.".to_string())
+}
+
+fn ragnarok_fighter_name(
+    observation: &crate::app::RagnarokObservation,
+    id: crate::ragnarok::FighterId,
+) -> String {
+    observation
+        .fighters
+        .iter()
+        .find(|fighter| fighter.id == id)
+        .map(|fighter| fighter.model_name.clone())
+        .unwrap_or_else(|| format!("champion {id}"))
 }
 
 /// The TUI status line projected for the remote viewer. Everything here is
@@ -1352,6 +1526,7 @@ struct TrackerState {
     workflows: crate::workflow::WorkflowStore,
     /// Latest published workspace diff, mirroring the TUI's Ctrl-G viewer.
     workspace_diff: Option<WorkspaceDiffRecord>,
+    ragnarok: Option<RagnarokRecord>,
     pending_permissions: Vec<PendingPermissionRecord>,
     session_config: Vec<SessionConfigOptionRecord>,
     native_mode: Option<NativeModeRecord>,
@@ -1744,6 +1919,7 @@ impl TrackerState {
             nested_roles: HashMap::new(),
             workflows: crate::workflow::WorkflowStore::default(),
             workspace_diff: None,
+            ragnarok: None,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             native_mode: None,
@@ -1822,6 +1998,7 @@ impl TrackerState {
         self.subagents.clear();
         // The diff described the previous session's workspace turn.
         self.workspace_diff = None;
+        self.ragnarok = None;
         self.pending_permissions.clear();
         self.session_config.clear();
         self.native_mode = None;
@@ -2760,6 +2937,7 @@ impl TrackerState {
             available_commands: self.available_commands.clone(),
             subagents: self.subagents.values().cloned().collect(),
             workspace_diff: self.workspace_diff.clone(),
+            ragnarok: self.ragnarok.clone(),
             status: Some(self.status_record()),
         })
     }
@@ -3187,6 +3365,17 @@ impl RemoteSessionTracker {
         }
         if let Ok(mut state) = self.state.lock() {
             state.observe_event(event);
+        }
+        self.request_flush();
+    }
+
+    pub fn observe_ragnarok(&self, observation: Option<crate::app::RagnarokObservation>) {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.ragnarok = observation.map(RagnarokRecord::from_observation);
+            state.touch();
         }
         self.request_flush();
     }
@@ -7599,6 +7788,7 @@ fn init_db(db_path: &Path) -> Result<()> {
     ensure_sessions_column(&conn, "subagents_json", "text not null default '[]'")?;
     ensure_sessions_column(&conn, "status_json", "text")?;
     ensure_sessions_column(&conn, "workspace_diff_json", "text")?;
+    ensure_sessions_column(&conn, "ragnarok_json", "text")?;
     ensure_table_column(
         &conn,
         "queued_prompts",
@@ -7671,6 +7861,12 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
         .map(serde_json::to_string)
         .transpose()
         .context("serialize remote-control workspace diff")?;
+    let ragnarok_json = session
+        .ragnarok
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("serialize remote-control Ragnarok arena")?;
     let last_prompt_at = session_last_prompt_at(session);
     let prompt_in_flight = if session.prompt_in_flight { 1_i64 } else { 0 };
     let prompt_images_supported = if session.prompt_images_supported {
@@ -7702,8 +7898,9 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             subagents_json,
             status_json,
             workspace_diff_json,
+            ragnarok_json,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -7727,6 +7924,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             subagents_json = excluded.subagents_json,
             status_json = excluded.status_json,
             workspace_diff_json = excluded.workspace_diff_json,
+            ragnarok_json = excluded.ragnarok_json,
             connected = 1
         where excluded.last_update >= sessions.last_update",
         params![
@@ -7748,6 +7946,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             subagents_json,
             status_json,
             workspace_diff_json,
+            ragnarok_json,
         ],
     )
     .context("upsert remote-control session")?;
@@ -7758,7 +7957,7 @@ fn disconnect_session_record(db_path: &Path, session_id: &str) -> Result<()> {
     init_db(db_path)?;
     let conn = open_db(db_path)?;
     conn.execute(
-        "update sessions set connected = 0 where session_id = ?1",
+        "update sessions set connected = 0, ragnarok_json = null where session_id = ?1",
         params![session_id],
     )
     .context("disconnect remote-control session")?;
@@ -7928,7 +8127,8 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                 worktree,
                 subagents_json,
                 status_json,
-                workspace_diff_json
+                workspace_diff_json,
+                ragnarok_json
             from sessions
             order by session_id asc",
         )
@@ -7972,7 +8172,8 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                 worktree,
                 subagents_json,
                 status_json,
-                workspace_diff_json
+                workspace_diff_json,
+                ragnarok_json
             from sessions
             where connected = 1 and last_update >= ?1
             order by session_id asc",
@@ -8001,6 +8202,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let subagents_json: String = row.get(16)?;
     let status_json: Option<String> = row.get(17)?;
     let workspace_diff_json: Option<String> = row.get(18)?;
+    let ragnarok_json: Option<String> = row.get(19)?;
     let transcript: Vec<TranscriptEntry> =
         serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
@@ -8031,6 +8233,9 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         available_commands,
         subagents,
         workspace_diff: workspace_diff_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok()),
+        ragnarok: ragnarok_json
             .as_deref()
             .and_then(|json| serde_json::from_str(json).ok()),
         status: status_json
@@ -9567,6 +9772,21 @@ mod tests {
     }
 
     #[test]
+    fn embedded_viewer_contains_read_only_ragnarok_observability() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("id=\"ragnarok-panel\""));
+        assert!(viewer.contains("function renderRagnarok"));
+        assert!(viewer.contains("session?.ragnarok"));
+        assert!(viewer.contains("arena.awaiting_approval"));
+        assert!(viewer.contains("awaiting local unleash"));
+        assert!(viewer.contains("fighter.vigor"));
+        assert!(viewer.contains("arena.adoption_hint"));
+        assert!(viewer.contains("read only"));
+        assert!(viewer.contains("renderRagnarok(session)"));
+        assert!(!viewer.contains("queueSessionAction(\"/ragnarok"));
+    }
+
+    #[test]
     fn embedded_viewer_contains_read_only_session_history() {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("id=\"history-toggle\""));
@@ -11053,6 +11273,100 @@ mod tests {
     }
 
     #[test]
+    fn tracker_projects_and_clears_ragnarok_observations() {
+        let observation = || crate::app::RagnarokObservation {
+            task: "forge the feature".to_string(),
+            phase: crate::ragnarok::Phase::Verdict,
+            awaiting_approval: false,
+            fighters: vec![
+                crate::app::RagnarokFighterObservation {
+                    id: 0,
+                    agent_source_id: "claude".to_string(),
+                    model_name: "Opus".to_string(),
+                    state: crate::ragnarok::FighterState::Slain("tests failed".to_string()),
+                    worktree_name: None,
+                },
+                crate::app::RagnarokFighterObservation {
+                    id: 1,
+                    agent_source_id: "codex".to_string(),
+                    model_name: "GPT".to_string(),
+                    state: crate::ragnarok::FighterState::Standing,
+                    worktree_name: Some("ragnarok-gpt".to_string()),
+                },
+            ],
+            verdict: Some(crate::app::RagnarokVerdictObservation {
+                clear_winner: Some(1),
+                finalists: None,
+                ranking: vec![1, 0],
+                reasoning: "GPT passed the full gate.".to_string(),
+                thor_fallback: false,
+            }),
+            chosen_finalist: None,
+            draft_pr_status: None,
+            failed: None,
+            done: true,
+        };
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        tracker.observe_ragnarok(Some(observation()));
+
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        let arena = snapshot.ragnarok.expect("arena");
+        assert_eq!(arena.phase, "verdict");
+        assert_eq!(arena.fighters[0].status, "slain: tests failed");
+        assert_eq!(arena.fighters[0].vigor, "empty");
+        assert_eq!(arena.fighters[1].source, "codex");
+        assert_eq!(arena.fighters[1].vigor, "full");
+        assert_eq!(
+            arena.adoption_hint.as_deref(),
+            Some("Adopt GPT with `mj --worktree ragnarok-gpt`.")
+        );
+        assert_eq!(arena.verdict.as_ref().expect("verdict").ranking, vec![1, 0]);
+        let wire = serde_json::to_value(&arena).expect("arena JSON");
+        assert!(wire["fighters"][0].get("worktree").is_none());
+        assert!(wire["fighters"][0].get("diffstat").is_none());
+        assert!(wire["fighters"][0].get("transcript").is_none());
+
+        tracker.observe_ragnarok(None);
+        assert!(
+            tracker
+                .state
+                .lock()
+                .expect("state")
+                .snapshot()
+                .expect("snapshot")
+                .ragnarok
+                .is_none()
+        );
+
+        tracker.observe_ragnarok(Some(observation()));
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-2".to_string(),
+            resumed: false,
+        });
+        assert!(
+            tracker
+                .state
+                .lock()
+                .expect("state")
+                .snapshot()
+                .expect("snapshot")
+                .ragnarok
+                .is_none(),
+            "arena state belongs only to the session that started it"
+        );
+    }
+
+    #[test]
     fn tracker_updates_terminal_tool_output_snapshots() {
         let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
         state.observe_event(&UiEvent::SessionStarted {
@@ -11476,6 +11790,7 @@ mod tests {
                 outcome: None,
             }],
             workspace_diff: None,
+            ragnarok: None,
             status: Some(SessionStatusRecord {
                 model: "gpt-5.6".to_string(),
                 model_source: Some("codex-acp".to_string()),
@@ -11823,6 +12138,7 @@ mod tests {
             subagents: Vec::new(),
             native_mode: None,
             workspace_diff: None,
+            ragnarok: None,
             status: None,
         };
         let disconnected = SessionRecord {
@@ -12791,8 +13107,43 @@ mod tests {
             subagents: Vec::new(),
             native_mode: None,
             workspace_diff: None,
+            ragnarok: None,
             status: None,
         }
+    }
+
+    #[test]
+    fn active_ragnarok_arena_round_trips_through_sqlite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let arena = RagnarokRecord {
+            task: "forge the feature".to_string(),
+            phase: "combat".to_string(),
+            awaiting_approval: false,
+            fighters: vec![RagnarokFighterRecord {
+                id: 0,
+                source: "codex".to_string(),
+                model: "GPT".to_string(),
+                status: "fighting".to_string(),
+                vigor: "active".to_string(),
+            }],
+            verdict: None,
+            adoption_hint: None,
+            failed: None,
+            done: false,
+        };
+        let session = SessionRecord {
+            ragnarok: Some(arena.clone()),
+            ..session_named("sess-ragnarok", "2026-06-10T10:00:00Z")
+        };
+
+        upsert_session_record(&db_path, &session).expect("insert arena");
+        let loaded = load_session_records(&db_path).expect("load arena");
+        assert_eq!(loaded[0].ragnarok.as_ref(), Some(&arena));
+
+        disconnect_session_record(&db_path, "sess-ragnarok").expect("disconnect");
+        let loaded = load_session_records(&db_path).expect("reload disconnected session");
+        assert!(loaded[0].ragnarok.is_none());
     }
 
     #[test]
@@ -13481,6 +13832,7 @@ mod tests {
             subagents: Vec::new(),
             native_mode: None,
             workspace_diff: None,
+            ragnarok: None,
             status: None,
         };
 
@@ -14532,6 +14884,7 @@ mod tests {
             subagents: Vec::new(),
             native_mode: None,
             workspace_diff: None,
+            ragnarok: None,
             status: None,
         };
 
