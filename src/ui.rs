@@ -10906,10 +10906,17 @@ fn prompt_activity_ornament(state: &AppState) -> &'static crate::spinner::Spinne
 /// The ornament as styled spans, one per same-ink run. The surrounding title
 /// text stays unstyled so only the spinner carries color into the border.
 fn prompt_title_spans(state: &AppState) -> Vec<Span<'static>> {
+    // `runs()` borrows from the process-lifetime frame set, so the spans hold
+    // `&'static str` and a redraw allocates nothing for the ornament.
     let mut spans: Vec<Span<'static>> = prompt_activity_ornament(state)
         .runs()
-        .into_iter()
-        .map(|(text, ink)| Span::styled(text, Style::default().fg(state.theme.spinner_ink(ink))))
+        .iter()
+        .map(|(text, ink)| {
+            Span::styled(
+                text.as_str(),
+                Style::default().fg(state.theme.spinner_ink(*ink)),
+            )
+        })
         .collect();
     if let Some(elapsed) = turn_elapsed_value_label(state) {
         spans.push(Span::raw(format!(" {elapsed}")));
@@ -21418,10 +21425,10 @@ mod tests {
             state.set_spinner_style(style);
 
             state.set_connection_state(ConnectionState::Ready);
-            let idle: Vec<_> = prompt_activity_ornament(&state).runs();
+            let idle = prompt_activity_ornament(&state).runs();
 
             state.set_connection_state(ConnectionState::Streaming);
-            let busy: Vec<_> = prompt_activity_ornament(&state).runs();
+            let busy = prompt_activity_ornament(&state).runs();
 
             assert_eq!(idle.len(), 1, "{style} idle should be one flat run");
             assert_ne!(idle, busy, "{style} busy ornament matches its idle one");

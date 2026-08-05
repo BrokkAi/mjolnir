@@ -2096,13 +2096,10 @@ fn spinner_preview_line(
     theme: TerminalTheme,
 ) -> Line<'static> {
     let mut line = selected_line(selected, format!("Spinner     < {style} >  "), theme);
-    line.spans.extend(
-        style
-            .current_frame()
-            .runs()
-            .into_iter()
-            .map(|(text, ink)| Span::styled(text, Style::default().fg(theme.spinner_ink(ink)))),
-    );
+    line.spans
+        .extend(style.current_frame().runs().iter().map(|(text, ink)| {
+            Span::styled(text.as_str(), Style::default().fg(theme.spinner_ink(*ink)))
+        }));
     line
 }
 

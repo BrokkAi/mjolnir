@@ -60,10 +60,13 @@ pub enum SpinnerInk {
 /// One rendered frame: the glyph row together with the ink each glyph takes.
 /// Built as a unit from a single `(char, ink)` sequence, so a style cannot ship
 /// colors that disagree with the glyphs they are meant to shade.
+///
+/// Both representations are computed once, at construction: like the frames
+/// themselves they never change, and they are read on every redraw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpinnerFrame {
     text: String,
-    inks: Vec<SpinnerInk>,
+    runs: Vec<(String, SpinnerInk)>,
 }
 
 impl SpinnerFrame {
@@ -73,18 +76,11 @@ impl SpinnerFrame {
         &self.text
     }
 
-    /// The frame split into maximal same-ink runs, ready to become one styled
-    /// span each. Merging runs keeps a twelve-cell strip down to a handful of
-    /// spans instead of twelve.
-    pub fn runs(&self) -> Vec<(String, SpinnerInk)> {
-        let mut runs: Vec<(String, SpinnerInk)> = Vec::new();
-        for (glyph, ink) in self.text.chars().zip(self.inks.iter().copied()) {
-            match runs.last_mut() {
-                Some((text, run_ink)) if *run_ink == ink => text.push(glyph),
-                _ => runs.push((glyph.to_string(), ink)),
-            }
-        }
-        runs
+    /// The frame split into maximal same-ink runs, one styled span each.
+    /// Merging keeps a twelve-cell strip down to a handful of spans, and
+    /// borrowing the run text keeps a redraw from allocating per span.
+    pub fn runs(&self) -> &[(String, SpinnerInk)] {
+        &self.runs
     }
 }
 
@@ -243,10 +239,14 @@ fn row(cells: Vec<(char, SpinnerInk)>) -> SpinnerFrame {
         SPINNER_WIDTH,
         "spinner frame {text:?} must be {SPINNER_WIDTH} columns wide"
     );
-    SpinnerFrame {
-        inks: cells.into_iter().map(|(_, ink)| ink).collect(),
-        text,
+    let mut runs: Vec<(String, SpinnerInk)> = Vec::new();
+    for (glyph, ink) in cells {
+        match runs.last_mut() {
+            Some((run, run_ink)) if *run_ink == ink => run.push(glyph),
+            _ => runs.push((glyph.to_string(), ink)),
+        }
     }
+    SpinnerFrame { text, runs }
 }
 
 /// The rule every style rests on. Faint on purpose: the resting ornament
@@ -392,10 +392,9 @@ fn build_globe() -> FrameSet {
             // and the rule has to absorb exactly whatever they occupy for the
             // frame to stay SPINNER_WIDTH columns.
             let rail = w.saturating_sub(unicode_width::UnicodeWidthChar::width(phase).unwrap_or(1));
-            let left = rail / 2;
-            let mut cells = vec![rail_cell; left];
+            let mut cells = vec![rail_cell; rail / 2];
             cells.push((phase, SpinnerInk::Bright));
-            cells.resize(left + 1 + (rail - left), rail_cell);
+            cells.resize(rail + 1, rail_cell);
             row(cells)
         })
         .collect();
@@ -460,7 +459,7 @@ mod tests {
             // A single muted run: the resting ornament must never look active.
             assert_eq!(
                 style.idle_frame().runs(),
-                vec![(expected.clone(), SpinnerInk::Faint)],
+                [(expected.clone(), SpinnerInk::Faint)],
                 "{style} idle ink"
             );
         }
@@ -527,7 +526,8 @@ mod tests {
         // cell was left uncolored is to confirm the runs reassemble the frame.
         for style in SpinnerStyle::ALL {
             for frame in style.frames().iter().chain([style.idle_frame()]) {
-                let reassembled: String = frame.runs().into_iter().map(|(text, _)| text).collect();
+                let reassembled: String =
+                    frame.runs().iter().map(|(text, _)| text.as_str()).collect();
                 assert_eq!(reassembled, frame.text(), "{style} frame {frame:?}");
             }
         }
@@ -542,8 +542,8 @@ mod tests {
                 style
                     .frames()
                     .iter()
-                    .flat_map(|frame| frame.inks.iter())
-                    .any(|ink| *ink != SpinnerInk::Faint),
+                    .flat_map(|frame| frame.runs())
+                    .any(|(_, ink)| *ink != SpinnerInk::Faint),
                 "{style} never brightens past its idle rail"
             );
         }
@@ -567,9 +567,12 @@ mod tests {
         // mid-height bar ever went Hot the ramp would look like an error.
         let tallest = '█';
         for frame in SpinnerStyle::Bars.frames() {
-            for (glyph, ink) in frame.text.chars().zip(frame.inks.iter().copied()) {
-                if ink == SpinnerInk::Hot {
-                    assert_eq!(glyph, tallest, "{frame:?} inked a short bar Hot");
+            for (run, ink) in frame.runs() {
+                if *ink == SpinnerInk::Hot {
+                    assert!(
+                        run.chars().all(|glyph| glyph == tallest),
+                        "{frame:?} inked a short bar Hot"
+                    );
                 }
             }
         }
@@ -577,8 +580,8 @@ mod tests {
             SpinnerStyle::Bars
                 .frames()
                 .iter()
-                .flat_map(|frame| frame.inks.iter())
-                .any(|ink| *ink == SpinnerInk::Hot),
+                .flat_map(|frame| frame.runs())
+                .any(|(_, ink)| *ink == SpinnerInk::Hot),
             "bars never peaks"
         );
     }
