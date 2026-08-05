@@ -2408,6 +2408,141 @@ fn bound_tail(text: &str, limit: usize, label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deepswe::Row;
+    use crate::quota::Gate;
+    use crate::roster::{AdapterKind, AdapterLaunch};
+    use crate::workflow::{WorkflowKind, WorkflowPhase, WorkflowStage, WorkflowTransition};
+
+    fn init_repo(root: &Path) {
+        for args in [
+            ["init", "-q"].as_slice(),
+            ["config", "user.email", "mjolnir@example.test"].as_slice(),
+            ["config", "user.name", "Mjolnir Tests"].as_slice(),
+            ["commit", "--allow-empty", "-qm", "baseline"].as_slice(),
+        ] {
+            let output = std::process::Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    fn test_agent(command: PathBuf, args: Vec<String>) -> ResolvedAgent {
+        ResolvedAgent {
+            model: Row {
+                model: "review-test".to_string(),
+                reasoning_effort: None,
+                pass_at_1: 0.5,
+                mean_cost_usd: 0.0,
+            },
+            model_value: "review-test".to_string(),
+            launch: AdapterLaunch {
+                kind: AdapterKind::Custom,
+                source_id: "review-test".to_string(),
+                command,
+                args,
+                env: HashMap::new(),
+            },
+            ranked: false,
+            reasoning_effort: None,
+        }
+    }
+
+    fn test_fanout(cwd: PathBuf) -> FanoutConfig {
+        let (events, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let role = test_agent(PathBuf::from("unused-review-agent"), Vec::new());
+        FanoutConfig {
+            workers: quota::RolePool::new(
+                vec![role.clone()],
+                Gate::new(cwd.clone(), events.clone()),
+                false,
+                "review tests",
+                events,
+            ),
+            supervisor: role,
+            cwd,
+            additional_directories: Vec::new(),
+            session_tag: Some("review-test".to_string()),
+            agent_stderr: None,
+            snapshot_exclusions: Vec::new(),
+            fs_max_text_bytes: 1_000_000,
+            id_allocator: SubagentIdAllocator::default(),
+        }
+    }
+
+    async fn test_programmatic_pool(
+        cwd: PathBuf,
+    ) -> (
+        ProgrammaticPool,
+        SubagentReportBus,
+        tokio::sync::mpsc::UnboundedReceiver<SubagentReport>,
+        UnboundedSender<UiEvent>,
+    ) {
+        let (reports, report_rx) = SubagentReportBus::channel();
+        let config = SubagentConfig::for_resolved_agent(
+            test_agent(PathBuf::from("missing-review-test-adapter"), Vec::new()),
+            None,
+        )
+        .with_reports(reports.clone())
+        .with_max_parallel(MAX_PARALLEL_LANES)
+        .with_retain_after_completion(false)
+        .with_debrief(false);
+        let context = RunContext {
+            cwd,
+            additional_directories: Vec::new(),
+            snapshot_exclusions: Vec::new(),
+            fs_max_text_bytes: 1_000_000,
+            access_mode: RuntimeAccessMode::ReadOnly,
+        };
+        let (events, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pool = ProgrammaticPool::start(config, context, events.clone()).await;
+        (pool, reports, report_rx, events)
+    }
+
+    fn start_workflow(
+        epoch: u64,
+    ) -> (
+        crate::workflow::WorkflowId,
+        crate::workflow::WorkflowEmitter,
+    ) {
+        let (workflow_id, workflow) = workflow(epoch);
+        workflow
+            .emit(crate::workflow::WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::Started {
+                    kind: WorkflowKind::Review,
+                    stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+                },
+            ))
+            .expect("start review workflow");
+        (workflow_id, workflow)
+    }
+
+    fn report(
+        subagent_id: u64,
+        label: &str,
+        outcome: SubagentOutcome,
+        text: &str,
+    ) -> SubagentReport {
+        SubagentReport {
+            subagent_id,
+            label: label.to_string(),
+            agent: "review-test".to_string(),
+            model: "review-test".to_string(),
+            outcome,
+            final_message: text.to_string(),
+            slim_activity: String::new(),
+            workspace_diff: None,
+            debrief: None,
+            elapsed: Duration::ZERO,
+        }
+    }
 
     fn workflow(
         epoch: u64,
@@ -2455,6 +2590,542 @@ mod tests {
             end_line: 20,
             change_reason: "body_changed".to_string(),
         }
+    }
+
+    #[test]
+    fn review_agent_catalog_maps_every_wire_id_to_its_lane() {
+        let expected = [
+            (ReviewAgentId::Mimir, "mimir"),
+            (ReviewAgentId::Volundr, "volundr"),
+            (ReviewAgentId::Tyr, "tyr"),
+            (ReviewAgentId::Hel, "hel"),
+            (ReviewAgentId::Heimdall, "heimdall"),
+            (ReviewAgentId::Bragi, "bragi"),
+        ];
+        for (agent, id) in expected {
+            assert_eq!(agent.id(), id);
+            assert_eq!(agent.lane().id, id);
+        }
+    }
+
+    #[tokio::test]
+    async fn report_transport_distinguishes_completion_failure_and_cancellation() {
+        let (bus, mut reports) = SubagentReportBus::channel();
+        bus.open(7);
+        bus.deliver(report(
+            7,
+            "review · tyr",
+            SubagentOutcome::Completed,
+            "confirmed",
+        ));
+        let received = receive_report(&mut reports, &bus, &CancellationToken::new(), "test lane")
+            .await
+            .expect("receive completed report");
+        assert_eq!(bus.pending(), 0);
+        assert_eq!(report_text(received, "test lane").unwrap(), "confirmed");
+
+        let empty = report_text(
+            report(8, "empty", SubagentOutcome::Completed, "  \n"),
+            "empty lane",
+        )
+        .expect_err("empty completed report must fail");
+        assert!(empty.contains("returned an empty report"));
+        assert_eq!(
+            report_text(
+                report(9, "cancelled", SubagentOutcome::Cancelled, "stopped"),
+                "cancelled lane"
+            )
+            .unwrap_err(),
+            "cancelled lane was cancelled"
+        );
+        assert_eq!(
+            report_text(
+                report(
+                    10,
+                    "failed",
+                    SubagentOutcome::Failed("adapter exited".to_string()),
+                    ""
+                ),
+                "failed lane"
+            )
+            .unwrap_err(),
+            "failed lane failed: adapter exited"
+        );
+
+        let (open_bus, mut open_reports) = SubagentReportBus::channel();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(
+            receive_report(&mut open_reports, &open_bus, &cancel, "waiting lane")
+                .await
+                .unwrap_err(),
+            "waiting lane was cancelled"
+        );
+
+        let (closed_bus, mut closed_reports) = SubagentReportBus::channel();
+        closed_reports.close();
+        assert_eq!(
+            receive_report(
+                &mut closed_reports,
+                &closed_bus,
+                &CancellationToken::new(),
+                "closed lane"
+            )
+            .await
+            .unwrap_err(),
+            "closed lane report channel closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_async_rejects_invalid_repository_and_snapshot_boundaries() {
+        let outside_repo = tempfile::tempdir().expect("outside repo");
+        let config = test_fanout(outside_repo.path().to_path_buf());
+        let (events, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let verdict = run_async(&config, job(), &events, CancellationToken::new()).await;
+        let ReviewVerdict::Failed { reason } = verdict else {
+            panic!("non-repository cwd must fail");
+        };
+        assert!(reason.contains("cwd Git repository could not be resolved"));
+
+        let repository = tempfile::tempdir().expect("repository");
+        init_repo(repository.path());
+        let root = std::fs::canonicalize(repository.path()).expect("canonical repository");
+        let config = test_fanout(root.clone());
+
+        let verdict = run_async(&config, job(), &events, CancellationToken::new()).await;
+        let ReviewVerdict::Failed { reason } = verdict else {
+            panic!("missing snapshot must fail");
+        };
+        assert!(reason.contains("no immutable Git review snapshot"));
+
+        let other = tempfile::tempdir().expect("other root");
+        let mut wrong_snapshot = job();
+        wrong_snapshot.snapshot = Some(ReviewSnapshot::for_test(
+            other.path().to_path_buf(),
+            "base",
+            "target",
+            "diff",
+        ));
+        let verdict = run_async(&config, wrong_snapshot, &events, CancellationToken::new()).await;
+        let ReviewVerdict::Failed { reason } = verdict else {
+            panic!("mismatched snapshot root must fail");
+        };
+        assert!(reason.contains("captured review root"));
+
+        let mut wrong_focus = job();
+        wrong_focus.snapshot = Some(ReviewSnapshot::for_test(
+            root.clone(),
+            "base",
+            "target",
+            "diff",
+        ));
+        wrong_focus.focus_snapshot = Some(ReviewSnapshot::for_test(
+            other.path().to_path_buf(),
+            "target",
+            "corrected",
+            "delta",
+        ));
+        let verdict = run_async(&config, wrong_focus, &events, CancellationToken::new()).await;
+        let ReviewVerdict::Failed { reason } = verdict else {
+            panic!("mismatched focus root must fail");
+        };
+        assert!(reason.contains("captured review focus root"));
+    }
+
+    #[tokio::test]
+    async fn live_spawner_sends_one_epoch_tagged_failure() {
+        let outside_repo = tempfile::tempdir().expect("outside repo");
+        let spawner = Spawner::live(test_fanout(outside_repo.path().to_path_buf()));
+        assert_eq!(format!("{spawner:?}"), "Spawner");
+        let (events, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (outcomes, mut outcome_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawner.spawn(job(), events, CancellationToken::new(), outcomes);
+        task.await.expect("spawner task");
+        let outcome = outcome_rx.recv().await.expect("one review outcome");
+        assert_eq!(outcome.epoch, 7);
+        let ReviewVerdict::Failed { reason } = outcome.verdict else {
+            panic!("invalid repository must reach the outcome channel");
+        };
+        assert!(reason.contains("cwd Git repository could not be resolved"));
+        assert!(outcome_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn review_dispatch_launches_once_reuses_selection_and_closes_at_synthesis() {
+        let repository = tempfile::tempdir().expect("repository");
+        init_repo(repository.path());
+        let root = std::fs::canonicalize(repository.path()).expect("canonical repository");
+        let (pool, _reports, mut report_rx, _events) = test_programmatic_pool(root.clone()).await;
+        let (workflow_id, workflow) = start_workflow(20);
+        let dispatch = ReviewDispatch {
+            pool: pool.clone(),
+            shared_context: Arc::new("review context".to_string()),
+            bifrost: std::env::current_exe().expect("current executable"),
+            repository_root: root,
+            started: Arc::new(Mutex::new(HashMap::new())),
+            launch_failures: Arc::new(Mutex::new(HashMap::new())),
+            workflow_id,
+            review_pass: 0,
+            workflow: workflow.clone(),
+        };
+        let request = || ReviewSubagentRequest {
+            agent_type: ReviewAgentId::Tyr,
+            hypothesis: "the fallback may swallow cancellation".to_string(),
+        };
+
+        let first = dispatch
+            .launch(vec![request()])
+            .await
+            .expect("launch first reviewer");
+        let ReviewLaunch::Started {
+            subagent_id,
+            is_new: true,
+        } = first[0].1
+        else {
+            panic!("first request must launch a new reviewer");
+        };
+
+        let repeated = dispatch
+            .launch(vec![request()])
+            .await
+            .expect("reuse reviewer");
+        assert!(matches!(
+            repeated[0].1,
+            ReviewLaunch::Started {
+                subagent_id: repeated_id,
+                is_new: false,
+            } if repeated_id == subagent_id
+        ));
+
+        let handler = ReviewMcpHandler::new(dispatch.clone());
+        let result = handler
+            .call_review_subagents(Parameters(CallReviewSubagentsArgs {
+                reviewers: vec![request()],
+            }))
+            .await
+            .expect("call dispatch tool");
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["reviewers"][0]["status"],
+            "already_selected"
+        );
+        let info = serde_json::to_string(&handler.get_info()).expect("serialize server info");
+        assert!(info.contains(REVIEW_MCP_SERVER_NAME));
+        assert!(info.contains("call_review_subagents"));
+        assert!(handler.get_tool("call_review_subagents").is_some());
+        assert!(handler.get_tool("missing").is_none());
+
+        let unavailable = ReviewDispatch {
+            workflow_id: crate::workflow::WorkflowId::review(999),
+            ..dispatch.clone()
+        };
+        let error = match unavailable.launch(vec![request()]).await {
+            Err(error) => error,
+            Ok(_) => panic!("missing workflow must reject dispatch"),
+        };
+        assert_eq!(error, "the review workflow is no longer available");
+
+        workflow
+            .emit(crate::workflow::WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::PhaseChanged {
+                    stage: WorkflowStage::new(0, WorkflowPhase::Synthesis),
+                },
+            ))
+            .expect("enter synthesis");
+        let error = match dispatch
+            .launch(vec![ReviewSubagentRequest {
+                agent_type: ReviewAgentId::Hel,
+                hypothesis: "the new helper may be unused".to_string(),
+            }])
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("synthesis must close dispatch"),
+        };
+        assert!(error.contains("synthesis has already started"));
+
+        let _ = pool.cancel_and_wait().await;
+        while report_rx.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn review_http_server_enforces_its_private_bearer_and_shuts_down() {
+        let repository = tempfile::tempdir().expect("repository");
+        init_repo(repository.path());
+        let root = std::fs::canonicalize(repository.path()).expect("canonical repository");
+        let (pool, _reports, _report_rx, _events) = test_programmatic_pool(root.clone()).await;
+        let (workflow_id, workflow) = start_workflow(21);
+        let dispatch = ReviewDispatch {
+            pool: pool.clone(),
+            shared_context: Arc::new("review context".to_string()),
+            bifrost: std::env::current_exe().expect("current executable"),
+            repository_root: root,
+            started: Arc::new(Mutex::new(HashMap::new())),
+            launch_failures: Arc::new(Mutex::new(HashMap::new())),
+            workflow_id,
+            review_pass: 0,
+            workflow,
+        };
+        let server = ReviewHttpServer::start(dispatch)
+            .await
+            .expect("start review MCP server");
+        let McpServer::Http(advertised) = &server.advertised else {
+            panic!("review dispatch must be advertised over HTTP");
+        };
+        assert_eq!(advertised.name, REVIEW_MCP_SERVER_NAME);
+        let authorization = advertised
+            .headers
+            .iter()
+            .find(|header| header.name.eq_ignore_ascii_case("authorization"))
+            .expect("authorization header")
+            .value
+            .clone();
+        assert!(authorization.starts_with("Bearer "));
+        assert!(authorization.len() > "Bearer ".len() + 20);
+
+        let client = reqwest::Client::new();
+        let unauthorized = client
+            .get(&advertised.url)
+            .send()
+            .await
+            .expect("unauthorized request");
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unauthorized.text().await.expect("unauthorized body"),
+            "unauthorized"
+        );
+        let authorized = client
+            .get(&advertised.url)
+            .header("Authorization", authorization)
+            .send()
+            .await
+            .expect("authorized request");
+        assert_ne!(authorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        server.shutdown().await;
+
+        let (drop_workflow_id, drop_workflow) = start_workflow(22);
+        let drop_server = ReviewHttpServer::start(ReviewDispatch {
+            pool: pool.clone(),
+            shared_context: Arc::new("review context".to_string()),
+            bifrost: std::env::current_exe().expect("current executable"),
+            repository_root: repository.path().to_path_buf(),
+            started: Arc::new(Mutex::new(HashMap::new())),
+            launch_failures: Arc::new(Mutex::new(HashMap::new())),
+            workflow_id: drop_workflow_id,
+            review_pass: 0,
+            workflow: drop_workflow,
+        })
+        .await
+        .expect("start disposable server");
+        let cancellation = drop_server.cancellation.clone();
+        drop(drop_server);
+        assert!(cancellation.is_cancelled());
+        let _ = pool.shutdown_and_wait().await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_driver_returns_synthesis_with_sorted_failure_evidence() {
+        let repository = tempfile::tempdir().expect("repository");
+        init_repo(repository.path());
+        let root = std::fs::canonicalize(repository.path()).expect("canonical repository");
+        let (pool, _pool_reports, _pool_report_rx, events) = test_programmatic_pool(root).await;
+        let (supervisor_bus, supervisor_reports) = SubagentReportBus::channel();
+        supervisor_bus.open(42);
+        supervisor_bus.deliver(report(
+            42,
+            "review · supervisor",
+            SubagentOutcome::Completed,
+            "  No material findings.  ",
+        ));
+        let (reviewer_bus, reviewer_reports) = SubagentReportBus::channel();
+        let failures = HashMap::from([
+            (ReviewAgentId::Tyr, "adapter exited".to_string()),
+            (ReviewAgentId::Bragi, "binary unavailable".to_string()),
+        ]);
+        let (workflow_id, workflow) = start_workflow(30);
+        let result = drive_supervisor(SupervisorDriver {
+            supervisor_pool: &pool,
+            supervisor_id: 42,
+            supervisor_reports,
+            supervisor_bus: &supervisor_bus,
+            reviewer_reports,
+            reviewer_bus: &reviewer_bus,
+            reviewer_launch_failures: Arc::new(Mutex::new(failures)),
+            cancel: &CancellationToken::new(),
+            events: &events,
+            workflow_id,
+            review_pass: 0,
+            workflow: workflow.clone(),
+        })
+        .await
+        .expect("supervisor synthesis");
+        assert_eq!(result.text, CLEAN_SENTINEL);
+        assert_eq!(
+            result
+                .lanes
+                .iter()
+                .map(|lane| lane.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bragi", "tyr"]
+        );
+        assert!(
+            result
+                .lanes
+                .iter()
+                .all(|lane| matches!(lane.outcome, SubagentOutcome::Failed(_)))
+        );
+        assert_eq!(
+            workflow.state(workflow_id).unwrap().stage,
+            WorkflowStage::new(0, WorkflowPhase::Synthesis)
+        );
+        let _ = pool.shutdown_and_wait().await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_driver_queues_reviewer_evidence_before_resuming() {
+        let repository = tempfile::tempdir().expect("repository");
+        init_repo(repository.path());
+        let root = std::fs::canonicalize(repository.path()).expect("canonical repository");
+        let (pool, _pool_reports, _pool_report_rx, events) = test_programmatic_pool(root).await;
+        let (supervisor_bus, supervisor_reports) = SubagentReportBus::channel();
+        supervisor_bus.open(42);
+        supervisor_bus.deliver(report(
+            42,
+            "review · supervisor",
+            SubagentOutcome::Completed,
+            "intermediate turn",
+        ));
+        let (reviewer_bus, reviewer_reports) = SubagentReportBus::channel();
+        reviewer_bus.open(7);
+        reviewer_bus.deliver(report(
+            7,
+            "review · tyr",
+            SubagentOutcome::Completed,
+            "[P1] src/lib.rs:10 -- swallowed cancellation",
+        ));
+        let (workflow_id, workflow) = start_workflow(31);
+        let error = match drive_supervisor(SupervisorDriver {
+            supervisor_pool: &pool,
+            supervisor_id: 42,
+            supervisor_reports,
+            supervisor_bus: &supervisor_bus,
+            reviewer_reports,
+            reviewer_bus: &reviewer_bus,
+            reviewer_launch_failures: Arc::new(Mutex::new(HashMap::new())),
+            cancel: &CancellationToken::new(),
+            events: &events,
+            workflow_id,
+            review_pass: 0,
+            workflow,
+        })
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("an unknown retained supervisor cannot resume"),
+        };
+        assert!(error.contains("could not resume review supervisor"));
+        assert_eq!(reviewer_bus.pending(), 0);
+        let _ = pool.shutdown_and_wait().await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_driver_waits_for_pending_reviewers_and_honors_cancel() {
+        let repository = tempfile::tempdir().expect("repository");
+        init_repo(repository.path());
+        let root = std::fs::canonicalize(repository.path()).expect("canonical repository");
+        let (pool, _pool_reports, _pool_report_rx, events) = test_programmatic_pool(root).await;
+        let (supervisor_bus, supervisor_reports) = SubagentReportBus::channel();
+        supervisor_bus.open(42);
+        supervisor_bus.deliver(report(
+            42,
+            "review · supervisor",
+            SubagentOutcome::Completed,
+            "intermediate turn",
+        ));
+        let (reviewer_bus, reviewer_reports) = SubagentReportBus::channel();
+        reviewer_bus.open(7);
+        let (workflow_id, workflow) = start_workflow(32);
+        workflow
+            .emit(crate::workflow::WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorStarted {
+                    actor_id: crate::workflow::WorkflowActorId::Subagent(42),
+                    role: crate::workflow::WorkflowActorRole::ReviewSupervisor,
+                },
+            ))
+            .expect("start supervisor actor");
+        let cancel = CancellationToken::new();
+        let delayed_cancel = cancel.clone();
+        let cancel_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            delayed_cancel.cancel();
+        });
+        let error = match drive_supervisor(SupervisorDriver {
+            supervisor_pool: &pool,
+            supervisor_id: 42,
+            supervisor_reports,
+            supervisor_bus: &supervisor_bus,
+            reviewer_reports,
+            reviewer_bus: &reviewer_bus,
+            reviewer_launch_failures: Arc::new(Mutex::new(HashMap::new())),
+            cancel: &cancel,
+            events: &events,
+            workflow_id,
+            review_pass: 0,
+            workflow: workflow.clone(),
+        })
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("cancellation must end the wait"),
+        };
+        cancel_task.await.expect("cancel task");
+        assert_eq!(error, "the review was cancelled");
+        let state = workflow.state(workflow_id).expect("workflow state");
+        assert_eq!(state.waiting.unwrap().remaining, Some(1));
+        reviewer_bus.close(7);
+        let _ = pool.shutdown_and_wait().await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_driver_rejects_an_unexpected_report_id() {
+        let repository = tempfile::tempdir().expect("repository");
+        init_repo(repository.path());
+        let root = std::fs::canonicalize(repository.path()).expect("canonical repository");
+        let (pool, _pool_reports, _pool_report_rx, events) = test_programmatic_pool(root).await;
+        let (supervisor_bus, supervisor_reports) = SubagentReportBus::channel();
+        supervisor_bus.open(99);
+        supervisor_bus.deliver(report(
+            99,
+            "review · supervisor",
+            SubagentOutcome::Completed,
+            "wrong session",
+        ));
+        let (reviewer_bus, reviewer_reports) = SubagentReportBus::channel();
+        let (workflow_id, workflow) = start_workflow(33);
+        let error = match drive_supervisor(SupervisorDriver {
+            supervisor_pool: &pool,
+            supervisor_id: 42,
+            supervisor_reports,
+            supervisor_bus: &supervisor_bus,
+            reviewer_reports,
+            reviewer_bus: &reviewer_bus,
+            reviewer_launch_failures: Arc::new(Mutex::new(HashMap::new())),
+            cancel: &CancellationToken::new(),
+            events: &events,
+            workflow_id,
+            review_pass: 0,
+            workflow,
+        })
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("unexpected supervisor id must fail"),
+        };
+        assert!(error.contains("unexpected agent #99"));
+        let _ = pool.shutdown_and_wait().await;
     }
 
     #[test]
@@ -2935,6 +3606,203 @@ mod tests {
         assert!(patches["/repo/two"].contains("@@ -10 +10 @@"));
     }
 
+    #[test]
+    fn review_helpers_cover_fallback_scope_metadata_and_safe_bounding() {
+        let unavailable = SupplementalContext::unavailable("analysis failed".to_string());
+        assert!(unavailable.unavailable);
+        assert_eq!(unavailable.body, "Unavailable: analysis failed");
+
+        let mut corrective = job();
+        corrective.prior_review = Some(PriorReviewContext {
+            synthesis: "prior result".to_string(),
+            evidence: ReviewPassEvidence {
+                intent_brief: "intent".to_string(),
+                intent_available: false,
+                lanes: vec![ReviewLaneEvidence {
+                    id: "mimir".to_string(),
+                    outcome: SubagentOutcome::Cancelled,
+                }],
+            },
+            exact_delta: false,
+        });
+        assert_eq!(
+            review_diff_scope(&corrective),
+            "same-user-turn; cumulative-corrective-fallback"
+        );
+        let context = review_pass_context(&corrective, "src/lib.rs | 2 changed");
+        assert!(context.contains("deliberately using the cumulative turn patch"));
+        assert!(context.contains("`mimir`: cancelled"));
+
+        corrective
+            .prior_review
+            .as_mut()
+            .unwrap()
+            .evidence
+            .lanes
+            .clear();
+        let empty_context = review_pass_context(&corrective, "no changes");
+        assert!(empty_context.contains("No prior specialist lanes completed"));
+
+        let intent = SupplementalContext::unavailable("intent adapter failed".to_string());
+        let prompt = supervisor_prompt(
+            &corrective,
+            &intent,
+            &SupplementalContext::available("not invoked".to_string()),
+            "delta",
+            "cumulative",
+            true,
+            1,
+            Path::new("/repo"),
+        );
+        assert!(prompt.contains("intent_brief status=\"unavailable\""));
+
+        let unicode = "αβγδεζηθ";
+        let bounded = bound_review_section(unicode, 10, "unicode");
+        assert!(bounded.is_char_boundary(bounded.len()));
+        assert!(bounded.contains("unicode omitted"));
+        assert_eq!(
+            bound_complete_lines("one\ntwo\n", 128, "lines"),
+            "one\ntwo\n"
+        );
+        let lines = bound_complete_lines("one\ntwo\nthree\n", 10, "lines");
+        assert!(lines.ends_with("…[lines truncated]…"));
+        assert!(!lines.contains("three"));
+        assert_eq!(bound_tail("short", 100, "tail"), "short");
+        let tail = bound_tail("αβγδεζηθ", 10, "tail");
+        assert!(tail.ends_with("…[tail truncated]…"));
+        assert!(tail.is_char_boundary(tail.len()));
+    }
+
+    #[test]
+    fn diffstat_and_symbol_rendering_cover_singular_unknown_and_saturation_edges() {
+        let singular = AnalyzeDiffResult {
+            file_changes: vec![FileChange {
+                old_path: None,
+                path: Some("src/one.rs".to_string()),
+                insertions: 1,
+                deletions: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(singular.changed_line_count(), 2);
+        let rendered = singular.diffstat();
+        assert!(rendered.contains("1 file changed, 1 insertion(+), 1 deletion(-)"));
+        assert!(rendered.contains("1 insertion, 1 deletion"));
+
+        let saturated = AnalyzeDiffResult {
+            file_changes: vec![
+                FileChange {
+                    old_path: Some("src/old.rs".to_string()),
+                    path: None,
+                    insertions: usize::MAX,
+                    ..Default::default()
+                },
+                FileChange {
+                    insertions: 1,
+                    deletions: usize::MAX,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(saturated.changed_line_count(), usize::MAX);
+        let rendered = saturated.diffstat();
+        assert!(rendered.contains("src/old.rs"));
+        assert!(rendered.contains("<unknown path>"));
+
+        let renamed_binary = format_file_change(&FileChange {
+            old_path: Some("assets/old.bin".to_string()),
+            path: Some("assets/new.bin".to_string()),
+            is_binary: true,
+            ..Default::default()
+        });
+        assert_eq!(renamed_binary, " assets/old.bin => assets/new.bin | binary");
+
+        let mut signature = patch_symbol("src/api.rs", "fallback", "Method");
+        signature.signature.clear();
+        signature.fqn = "api::fallback".to_string();
+        signature.change_reason.clear();
+        let mut name_only = patch_symbol("src/api.rs", "closure", "Closure");
+        name_only.signature.clear();
+        name_only.fqn.clear();
+        let analysis = AnalyzeDiffResult {
+            patch_symbols: PatchSymbols {
+                signature_changes: vec![SymbolPair {
+                    before: signature,
+                    after: name_only,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let changed = format_changed_functions(&analysis);
+        assert!(changed.contains("signature changed"));
+        assert!(changed.contains("api::fallback"));
+        assert!(changed.contains("`closure`"));
+        assert_eq!(
+            format_changed_functions(&AnalyzeDiffResult::default()),
+            "No callable symbols changed between the captured turn trees."
+        );
+        for callable in ["Function", "method", "Constructor", "PROCEDURE", "closure"] {
+            assert!(is_callable(callable));
+        }
+        assert!(!is_callable("Struct"));
+    }
+
+    #[tokio::test]
+    async fn repository_root_and_snapshot_endpoint_checks_use_exact_identity() {
+        let outside = tempfile::tempdir().expect("outside repo");
+        assert!(reviewed_repository_root(outside.path()).await.is_none());
+
+        let repository = tempfile::tempdir().expect("repository");
+        init_repo(repository.path());
+        let root = std::fs::canonicalize(repository.path()).expect("canonical repository");
+        assert_eq!(reviewed_repository_root(&root).await, Some(root.clone()));
+
+        let first = ReviewSnapshot::for_test(root.clone(), "base", "target", "diff");
+        assert!(same_snapshot_endpoints(&first, &first));
+        let different_lease = ReviewSnapshot::for_test(root.clone(), "base", "target", "same diff");
+        assert!(!same_snapshot_endpoints(&first, &different_lease));
+        let different_target = ReviewSnapshot::for_test(root, "base", "other-target", "other diff");
+        assert!(!same_snapshot_endpoints(&first, &different_target));
+    }
+
+    #[test]
+    fn patch_section_parser_ignores_preamble_and_keeps_empty_repositories() {
+        let patches = repository_patch_sections(
+            "preamble outside any repository\n\
+             Repository: /repo/empty\n\
+             Repository: /repo/work\n\
+             diff --git a/a b/a\n\
+             +line\n",
+        );
+        assert_eq!(patches["/repo/empty"], "");
+        assert!(patches["/repo/work"].contains("+line"));
+        assert_eq!(repository_patch_sections("only preamble"), HashMap::new());
+    }
+
+    #[test]
+    fn internal_review_messages_preserve_routing_and_owner() {
+        let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        emit_internal(
+            &events,
+            "Týr",
+            "supervisor",
+            InternalMessageKind::ReviewLane,
+            "verified evidence",
+            Some(42),
+        );
+        let UiEvent::InternalMessage(message) = event_rx.try_recv().expect("internal message")
+        else {
+            panic!("expected internal message event");
+        };
+        assert_eq!(message.source, "Týr");
+        assert_eq!(message.target, "supervisor");
+        assert_eq!(message.text, "verified evidence");
+        assert_eq!(message.owner_subagent_id, Some(42));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn analyze_diff_cli_uses_exact_snapshot_endpoints() {
@@ -2973,6 +3841,64 @@ mod tests {
         assert!(args.contains("base-tree"));
         assert!(args.contains("target-tree"));
         assert!(args.contains("--diff-snapshot-object-dir"));
+    }
+
+    #[tokio::test]
+    async fn analyze_diff_reports_process_launch_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let snapshot = ReviewSnapshot::for_test(
+            temp.path().to_path_buf(),
+            "base-tree",
+            "target-tree",
+            "diff",
+        );
+        let error =
+            match analyze_diff_at_root(&temp.path().join("missing-bifrost"), &snapshot).await {
+                Err(error) => error,
+                Ok(_) => panic!("missing executable must fail"),
+            };
+        assert!(error.contains("could not launch bifrost"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn analyze_diff_reports_nonzero_exit_and_invalid_json() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let snapshot = ReviewSnapshot::for_test(
+            temp.path().to_path_buf(),
+            "base-tree",
+            "target-tree",
+            "diff",
+        );
+        let write_executable = |name: &str, body: &str| {
+            let path = temp.path().join(name);
+            std::fs::write(&path, body).expect("write fake bifrost");
+            let mut permissions = std::fs::metadata(&path)
+                .expect("fake bifrost metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).expect("make fake bifrost executable");
+            path
+        };
+        let failed = write_executable(
+            "failed-bifrost",
+            "#!/bin/sh\nprintf 'analysis rejected' >&2\nexit 9\n",
+        );
+        let error = match analyze_diff_at_root(&failed, &snapshot).await {
+            Err(error) => error,
+            Ok(_) => panic!("nonzero exit must fail"),
+        };
+        assert!(error.contains("bifrost exited with"));
+        assert!(error.contains("analysis rejected"));
+
+        let invalid = write_executable("invalid-bifrost", "#!/bin/sh\nprintf 'not json\\n'\n");
+        let error = match analyze_diff_at_root(&invalid, &snapshot).await {
+            Err(error) => error,
+            Ok(_) => panic!("invalid JSON must fail"),
+        };
+        assert!(error.contains("invalid analyze_diff JSON"));
     }
 
     #[test]
@@ -3169,6 +4095,41 @@ mod tests {
             None,
             "an override that points at nothing must disable analyzers, not fall back to PATH"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_detection_rejects_directories_and_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        assert!(!is_executable_file(temp.path()));
+        let file = temp.path().join("bifrost");
+        std::fs::write(&file, "binary").expect("write candidate");
+        assert!(!is_executable_file(&file));
+        let mut permissions = std::fs::metadata(&file)
+            .expect("candidate metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&file, permissions).expect("make executable");
+        assert!(is_executable_file(&file));
+    }
+
+    #[test]
+    fn review_run_context_is_always_read_only_and_preserves_roots() {
+        let mut config = test_fanout(PathBuf::from("/repo"));
+        config.additional_directories = vec![PathBuf::from("/other")];
+        config.snapshot_exclusions = vec![PathBuf::from("target")];
+        config.fs_max_text_bytes = 4096;
+        let context = review_run_context(&config);
+        assert_eq!(context.cwd, PathBuf::from("/repo"));
+        assert_eq!(
+            context.additional_directories,
+            vec![PathBuf::from("/other")]
+        );
+        assert_eq!(context.snapshot_exclusions, vec![PathBuf::from("target")]);
+        assert_eq!(context.fs_max_text_bytes, 4096);
+        assert_eq!(context.access_mode, RuntimeAccessMode::ReadOnly);
     }
 
     #[test]
