@@ -3058,8 +3058,21 @@ mod tests {
             .expect("start supervisor actor");
         let cancel = CancellationToken::new();
         let delayed_cancel = cancel.clone();
+        let waiting_workflow = workflow.clone();
         let cancel_task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if waiting_workflow
+                        .state(workflow_id)
+                        .is_some_and(|state| state.waiting.is_some())
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("supervisor entered reviewer wait");
             delayed_cancel.cancel();
         });
         let error = match drive_supervisor(SupervisorDriver {
