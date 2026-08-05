@@ -690,6 +690,30 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    struct WriteFailure;
+
+    impl std::io::Write for WriteFailure {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("write blocked"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FlushFailure;
+
+    impl std::io::Write for FlushFailure {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("flush blocked"))
+        }
+    }
+
     fn remote_environment() -> CopyEnvironment {
         CopyEnvironment {
             ssh_session: true,
@@ -789,6 +813,94 @@ mod tests {
     }
 
     #[test]
+    fn prompt_image_dimensions_reject_zero_width_and_height() {
+        assert_eq!(
+            validate_prompt_image_dimensions(0, 10, "test image"),
+            Err("image test image has invalid dimensions 0x10".to_string())
+        );
+        assert_eq!(
+            validate_prompt_image_dimensions(10, 0, "test image"),
+            Err("image test image has invalid dimensions 10x0".to_string())
+        );
+    }
+
+    #[test]
+    fn clipboard_image_from_png_populates_attachment_metadata() {
+        let image = clipboard_image_from_png(vec![0, 1, 2], 2, 1, "test image")
+            .expect("small image should be accepted");
+
+        assert_eq!(image.data_base64, "AAEC");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.width, 2);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.byte_len, 3);
+    }
+
+    #[test]
+    fn clipboard_image_from_png_rejects_oversized_encoding() {
+        let png = vec![0; PROMPT_IMAGE_MAX_PNG_BYTES + 1];
+
+        let err = clipboard_image_from_png(png, 1, 1, "test image")
+            .expect_err("oversized PNG should be rejected");
+
+        assert!(err.contains("encoded image test image is too large"));
+        assert!(err.contains(&PROMPT_IMAGE_MAX_PNG_BYTES.to_string()));
+    }
+
+    #[test]
+    fn load_image_path_reports_missing_file_before_decode() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("missing.png");
+
+        let err = load_image_path_as_png(&path).expect_err("missing file should be rejected");
+
+        assert!(err.contains("could not read image metadata"));
+        assert!(err.contains("missing.png"));
+    }
+
+    #[test]
+    fn load_image_path_reports_invalid_image_data() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("invalid.png");
+        std::fs::write(&path, b"not an image").expect("write invalid image");
+
+        let err = load_image_path_as_png(&path).expect_err("invalid image should be rejected");
+
+        assert!(
+            err.contains("could not inspect image"),
+            "unexpected error: {err}"
+        );
+        assert!(err.contains("invalid.png"));
+    }
+
+    #[test]
+    fn load_image_path_converts_supported_image_to_png() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("source.png");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([10, 20, 30, 255]))
+            .save(&path)
+            .expect("save source image");
+
+        let attachment = load_image_path_as_png(&path).expect("convert image");
+        let png = BASE64_STANDARD
+            .decode(&attachment.data_base64)
+            .expect("decode PNG");
+
+        assert_eq!(attachment.mime_type, "image/png");
+        assert_eq!((attachment.width, attachment.height), (2, 1));
+        assert_eq!(attachment.byte_len, png.len());
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn clipboard_lease_debug_output_hides_backend_details() {
+        let debug = format!("{:?}", ClipboardLease::test());
+
+        assert!(debug.starts_with("ClipboardLease"));
+        assert!(!debug.contains("clipboard:"));
+    }
+
+    #[test]
     fn osc52_wraps_tmux_passthrough() {
         assert_eq!(
             osc52_sequence("hello", true),
@@ -802,6 +914,22 @@ mod tests {
         let mut output = Vec::new();
         assert_eq!(write_osc52_to_writer(&mut output, sequence), Ok(()));
         assert_eq!(output, sequence.as_bytes());
+    }
+
+    #[test]
+    fn write_osc52_to_writer_reports_write_failure() {
+        assert_eq!(
+            write_osc52_to_writer(WriteFailure, "sequence"),
+            Err("failed to write OSC 52: write blocked".to_string())
+        );
+    }
+
+    #[test]
+    fn write_osc52_to_writer_reports_flush_failure() {
+        assert_eq!(
+            write_osc52_to_writer(FlushFailure, "sequence"),
+            Err("failed to flush OSC 52: flush blocked".to_string())
+        );
     }
 
     #[test]
@@ -997,6 +1125,26 @@ mod tests {
             result,
             Err("tmux clipboard forwarding is unavailable: missing Ms capability".to_string())
         );
+    }
+
+    #[test]
+    fn tmux_clipboard_copy_ready_propagates_option_query_failure() {
+        let result = tmux_clipboard_copy_ready(
+            || Err("options unavailable".to_string()),
+            || panic!("tmux info should not be queried after an options failure"),
+        );
+
+        assert_eq!(result, Err("options unavailable".to_string()));
+    }
+
+    #[test]
+    fn tmux_clipboard_copy_ready_propagates_info_query_failure() {
+        let result = tmux_clipboard_copy_ready(
+            || Ok("external\n".to_string()),
+            || Err("info unavailable".to_string()),
+        );
+
+        assert_eq!(result, Err("info unavailable".to_string()));
     }
 
     #[test]
@@ -1217,5 +1365,56 @@ mod tests {
         assert_eq!(osc_calls.get(), 1);
         assert_eq!(native_calls.get(), 1);
         assert_eq!(wsl_calls.get(), 1);
+    }
+
+    #[test]
+    fn local_tmux_reports_native_tmux_and_osc52_errors_when_all_fail() {
+        let result = copy_to_clipboard_with(
+            "hello",
+            local_tmux_environment(),
+            |_| Err("tmux unavailable".into()),
+            |_| Err("osc blocked".into()),
+            |_| Err("native unavailable".into()),
+            |_| Ok(()),
+        );
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some(
+                "native clipboard: native unavailable; terminal fallback: tmux clipboard: tmux unavailable; OSC 52 fallback: osc blocked"
+            )
+        );
+    }
+
+    #[test]
+    fn local_wsl_tmux_reports_every_fallback_error() {
+        let result = copy_to_clipboard_with(
+            "hello",
+            CopyEnvironment {
+                tmux_session: true,
+                ..local_wsl_environment()
+            },
+            |_| Err("tmux unavailable".into()),
+            |_| Err("osc blocked".into()),
+            |_| Err("native unavailable".into()),
+            |_| Err("powershell unavailable".into()),
+        );
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some(
+                "native clipboard: native unavailable; WSL fallback: powershell unavailable; terminal fallback: tmux clipboard: tmux unavailable; OSC 52 fallback: osc blocked"
+            )
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_wsl_fallback_is_explicitly_unavailable() {
+        assert_eq!(
+            wsl_clipboard_copy("hello"),
+            Err("WSL clipboard fallback unavailable on this platform".to_string())
+        );
+        assert!(!is_wsl_session());
     }
 }
