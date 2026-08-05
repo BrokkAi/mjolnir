@@ -412,6 +412,35 @@ fn window_label(minutes: Option<i64>) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn fake_codex_env(
+        temp: &tempfile::TempDir,
+        script: &str,
+    ) -> (HashMap<String, String>, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable = temp.path().join("codex");
+        std::fs::write(&executable, script).expect("write fake codex");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("fake codex metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("make fake codex executable");
+
+        let log = temp.path().join("requests.jsonl");
+        let env = HashMap::from([
+            (
+                "PATH".to_string(),
+                temp.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "CODEX_USAGE_TEST_LOG".to_string(),
+                log.to_string_lossy().into_owned(),
+            ),
+        ]);
+        (env, log)
+    }
+
     #[test]
     fn parses_codex_bucket_and_formats_remaining_windows() {
         let report = parse_report(&json!({
@@ -458,6 +487,26 @@ mod tests {
     }
 
     #[test]
+    fn clamps_negative_percentages_and_ignores_invalid_window_fields() {
+        let report = parse_report(&json!({
+            "rateLimits": {
+                "primary": {
+                    "usedPercent": -5,
+                    "windowDurationMins": 1440,
+                    "resetsAt": "later"
+                },
+                "secondary": { "usedPercent": "unknown" }
+            }
+        }))
+        .expect("report");
+        let primary = report.primary.expect("primary");
+        assert_eq!(primary.remaining_percent, 100);
+        assert_eq!(primary.label, "1d");
+        assert_eq!(primary.resets_at, None);
+        assert!(report.secondary.is_none());
+    }
+
+    #[test]
     fn empty_limits_are_unavailable() {
         assert!(matches!(
             parse_report(&json!({ "rateLimits": {} })),
@@ -476,6 +525,24 @@ mod tests {
             classify_account(&json!({ "account": { "type": "apiKey" } })),
             Err(QueryError::UnsupportedAccount)
         ));
+        assert!(matches!(
+            classify_account(&json!({})),
+            Err(QueryError::NotSignedIn)
+        ));
+        assert!(matches!(
+            classify_account(&json!({ "account": {} })),
+            Err(QueryError::UnsupportedAccount)
+        ));
+    }
+
+    #[test]
+    fn labels_arbitrary_window_durations() {
+        assert_eq!(window_label(Some(15)), "15m");
+        assert_eq!(window_label(Some(120)), "2H");
+        assert_eq!(window_label(Some(2_880)), "2d");
+        assert_eq!(window_label(Some(61)), "limit");
+        assert_eq!(window_label(Some(0)), "limit");
+        assert_eq!(window_label(None), "limit");
     }
 
     #[test]
@@ -542,6 +609,76 @@ mod tests {
             ),
             Err(QueryError::Protocol(ProtocolError::RemoteError))
         ));
+        assert!(matches!(
+            parse_response(&json!({ "id": 4, "error": {} }), 4),
+            Err(QueryError::Protocol(ProtocolError::RemoteError))
+        ));
+        assert!(matches!(
+            parse_response(&json!({ "id": 4 }), 4),
+            Err(QueryError::Protocol(ProtocolError::InvalidResponse))
+        ));
+        assert_eq!(
+            parse_response(&json!({ "id": "4", "result": {} }), 4).expect("string id"),
+            None
+        );
+    }
+
+    #[test]
+    fn query_errors_have_stable_user_reasons_and_diagnostics() {
+        let cases = [
+            (QueryError::NotInstalled, "Codex CLI is not installed"),
+            (
+                QueryError::Launch("permission denied".to_string()),
+                "could not start Codex CLI",
+            ),
+            (QueryError::NotSignedIn, "not signed in with ChatGPT"),
+            (
+                QueryError::UnsupportedAccount,
+                "ChatGPT subscription quota is not available for this account",
+            ),
+            (
+                QueryError::Unsupported,
+                "installed Codex does not support quota queries",
+            ),
+            (QueryError::NoData, "no rate-limit data returned"),
+            (
+                QueryError::Protocol(ProtocolError::Io),
+                "Codex quota request failed",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.user_reason(), expected);
+        }
+
+        assert_eq!(
+            QueryError::Launch("permission denied".to_string()).to_string(),
+            "could not start Codex CLI: permission denied"
+        );
+        assert_eq!(
+            QueryError::Protocol(ProtocolError::Closed).to_string(),
+            "Codex app-server protocol error (Closed)"
+        );
+        assert_eq!(
+            QueryError::Unsupported.to_string(),
+            "installed Codex does not support quota queries"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_frame_reads_complete_frames_and_clean_eof() {
+        let mut reader = BufReader::new(&b"first\nsecond\n"[..]);
+        assert_eq!(
+            read_bounded_frame(&mut reader).await.expect("first frame"),
+            Some(b"first\n".to_vec())
+        );
+        assert_eq!(
+            read_bounded_frame(&mut reader).await.expect("second frame"),
+            Some(b"second\n".to_vec())
+        );
+        assert_eq!(
+            read_bounded_frame(&mut reader).await.expect("clean eof"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -568,5 +705,114 @@ mod tests {
             read_bounded_frame(&mut reader).await,
             Err(QueryError::Protocol(ProtocolError::Closed))
         ));
+    }
+
+    #[tokio::test]
+    async fn refresh_reports_missing_codex_without_retaining_a_client() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env = HashMap::from([(
+            "PATH".to_string(),
+            temp.path().to_string_lossy().into_owned(),
+        )]);
+        let mut client = None;
+
+        let status = refresh(&mut client, temp.path().to_path_buf(), env).await;
+
+        assert_eq!(
+            status,
+            CodexUsageStatus::Unavailable("Codex CLI is not installed".to_string())
+        );
+        assert!(client.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_uses_one_initialized_client_for_repeated_queries() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (env, log) = fake_codex_env(
+            &temp,
+            r#"#!/bin/sh
+read_and_log() {
+    IFS= read -r line || exit 1
+    printf '%s\n' "$line" >> "$CODEX_USAGE_TEST_LOG"
+}
+read_and_log
+printf '%s\n' '{"method":"account/rateLimits/updated"}' '{"id":1,"result":{}}'
+read_and_log
+read_and_log
+printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+read_and_log
+printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+read_and_log
+printf '%s\n' '{"id":4,"result":{"account":{"type":"chatgpt"}}}'
+read_and_log
+printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"windowDurationMins":300}}}}'
+"#,
+        );
+        let mut client = None;
+
+        let first = refresh(&mut client, temp.path().to_path_buf(), env.clone()).await;
+        let second = refresh(&mut client, temp.path().to_path_buf(), env).await;
+
+        assert!(matches!(
+            first,
+            CodexUsageStatus::Available(CodexUsageReport {
+                primary: Some(CodexUsageWindow {
+                    remaining_percent: 75,
+                    ..
+                }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            second,
+            CodexUsageStatus::Available(CodexUsageReport {
+                primary: Some(CodexUsageWindow {
+                    remaining_percent: 50,
+                    ..
+                }),
+                ..
+            })
+        ));
+
+        let requests = std::fs::read_to_string(log).expect("request log");
+        let messages = requests
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("request json"))
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 6);
+        assert_eq!(messages[0]["method"], "initialize");
+        assert_eq!(messages[0]["id"], 1);
+        assert_eq!(messages[1]["method"], "initialized");
+        assert_eq!(messages[2]["method"], "account/read");
+        assert_eq!(messages[3]["method"], "account/rateLimits/read");
+        assert_eq!(messages[4]["id"], 4);
+        assert_eq!(messages[5]["id"], 5);
+
+        client.take().expect("client").shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_discards_client_when_app_server_is_unsupported() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (env, _log) = fake_codex_env(
+            &temp,
+            r#"#!/bin/sh
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":1,"error":{"code":-32601,"message":"unknown method"}}'
+"#,
+        );
+        let mut client = None;
+
+        let status = refresh(&mut client, temp.path().to_path_buf(), env).await;
+
+        assert_eq!(
+            status,
+            CodexUsageStatus::Unavailable(
+                "installed Codex does not support quota queries".to_string()
+            )
+        );
+        assert!(client.is_none());
     }
 }
