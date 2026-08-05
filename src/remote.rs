@@ -4801,8 +4801,14 @@ fn handle_server_side_event(
         event => event,
     };
     if let UiEvent::ElicitationRequest(prompt) = event {
-        if let Some((request_id, prompt)) = tracker.track_elicitation_prompt(prompt, Some("side")) {
-            pending_permissions.insert(request_id, RemotePendingApproval::Elicitation(prompt));
+        match tracker.track_elicitation_prompt(prompt, Some("side")) {
+            (Some(request_id), prompt) => {
+                pending_permissions.insert(request_id, RemotePendingApproval::Elicitation(prompt));
+            }
+            // No TUI is attached to render an unsupported shape.
+            (None, prompt) => {
+                let _ = prompt.responder.send(ElicitationOutcome::Decline);
+            }
         }
         return;
     }
