@@ -513,6 +513,10 @@ struct TranscriptScrollState {
     /// it out when nothing visible changed (e.g. while the user is
     /// typing in the input box or navigating modals).
     cache: Option<TranscriptCache>,
+    /// Same cache for the Ctrl-T full-history reader. It renders every entry
+    /// expanded, so it cannot share `cache` with the collapsed chat pane even
+    /// though both are keyed the same way.
+    viewer_cache: Option<TranscriptCache>,
 }
 
 #[derive(Debug)]
@@ -523,6 +527,10 @@ struct TranscriptCache {
     lines: Vec<Line<'static>>,
     line_count: usize,
     entry_row_starts: Vec<Option<usize>>,
+    /// Wrapped row offset of each entry in `lines`. Lets a frame slice out
+    /// just the visible window instead of handing the whole transcript to
+    /// `Paragraph`, whose wrapping cost is O(total lines) per render.
+    row_starts: Vec<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -6148,7 +6156,7 @@ fn draw(
 ) {
     ensure_transcript_search_matches(state);
     if mode == UiMode::InlineChat {
-        draw_inline_chat(f, state);
+        draw_inline_chat(f, state, transcript_scroll);
         return;
     }
 
@@ -6333,7 +6341,11 @@ fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 7] {
     std::array::from_fn(|index| chunks[index])
 }
 
-fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
+fn draw_inline_chat(
+    f: &mut ratatui::Frame,
+    state: &mut AppState,
+    transcript_scroll: &mut TranscriptScrollState,
+) {
     ensure_transcript_search_matches(state);
     if let Some(pending) = state.pending_permission() {
         draw_inline_permission_view(
@@ -6383,9 +6395,13 @@ fn draw_inline_chat(f: &mut ratatui::Frame, state: &mut AppState) {
     }
 
     if state.transcript_viewer {
-        draw_inline_transcript_viewer(f, f.area(), state);
+        draw_inline_transcript_viewer(f, f.area(), state, transcript_scroll);
         return;
     }
+    // The reader's fully expanded render is the larger of the two caches and
+    // is dead once it closes; reopening pays one rebuild instead of holding
+    // it for the rest of the session.
+    transcript_scroll.viewer_cache = None;
 
     if state.review_issue_viewer {
         draw_review_issue_viewer(f, f.area(), state);
@@ -6731,7 +6747,12 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
 /// Full-screen inline reader for the entire transcript with all details
 /// expanded. `scroll_offset` is the index of the top visible line and is
 /// clamped here so End / PageDown can never scroll past the final screen.
-fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
+fn draw_inline_transcript_viewer(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    state: &mut AppState,
+    transcript_scroll: &mut TranscriptScrollState,
+) {
     ensure_transcript_search_matches(state);
     f.render_widget(Clear, area);
     let layout = Layout::default()
@@ -6752,20 +6773,32 @@ fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut
             .as_ref()
             .filter(|search| !search.query.is_empty())
             .map(|search| search.query.clone());
-        let (lines, total, entry_row_starts) = if let Some(query) = search_query.as_deref() {
-            let rendered = render_search_transcript_lines(state, inner.width, query);
-            (
-                rendered.lines,
-                rendered.line_count,
-                rendered.entry_row_starts,
-            )
-        } else {
-            let lines = render_full_transcript_lines(state, inner.width);
-            let total = Paragraph::new(lines.clone())
-                .wrap(Wrap { trim: false })
-                .line_count(inner.width);
-            (lines, total, Vec::new())
-        };
+        // Re-rendering and re-measuring the entire expanded history on every
+        // frame is what made scrolling this reader crawl on long sessions.
+        // Cache it against the transcript revision, width, and search query,
+        // then hand `Paragraph` only the rows the viewport can show.
+        let revision = state.transcript_revision();
+        let cache_hit = matches!(
+            transcript_scroll.viewer_cache.as_ref(),
+            Some(cache)
+                if cache.revision == revision
+                    && cache.width == inner.width
+                    && cache.search_query == search_query
+        );
+        if !cache_hit {
+            transcript_scroll.viewer_cache = Some(build_transcript_cache(
+                state,
+                inner.width,
+                revision,
+                search_query.clone(),
+                true,
+            ));
+        }
+        let cache = transcript_scroll
+            .viewer_cache
+            .as_ref()
+            .expect("cache populated above");
+        let total = cache.line_count;
         let max_offset = total.saturating_sub(usize::from(inner.height));
         state.scroll_offset = state.scroll_offset.min(max_offset);
         if state
@@ -6774,7 +6807,10 @@ fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut
             .is_some_and(|search| search.jump_pending)
         {
             if let Some(entry_index) = selected_transcript_search_entry(state)
-                && let Some(Some(target_row)) = entry_row_starts.get(entry_index)
+                && let Some(Some(target_row)) = transcript_scroll
+                    .viewer_cache
+                    .as_ref()
+                    .and_then(|cache| cache.entry_row_starts.get(entry_index))
             {
                 state.scroll_offset = target_row
                     .saturating_sub(usize::from(inner.height) / 3)
@@ -6784,11 +6820,20 @@ fn draw_inline_transcript_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut
                 search.jump_pending = false;
             }
         }
-        let top = state.scroll_offset.min(u16::MAX as usize) as u16;
+        let cache = transcript_scroll
+            .viewer_cache
+            .as_ref()
+            .expect("cache populated above");
+        let (window, inner_scroll) = wrapped_visible_window(
+            &cache.lines,
+            &cache.row_starts,
+            state.scroll_offset,
+            inner.height,
+        );
         f.render_widget(
-            Paragraph::new(lines)
+            Paragraph::new(window)
                 .wrap(Wrap { trim: false })
-                .scroll((top, 0)),
+                .scroll((inner_scroll, 0)),
             inner,
         );
     }
@@ -7782,39 +7827,19 @@ fn draw_transcript(
                 && c.search_query == search_query
     );
     if !cache_hit {
-        let (lines, line_count, entry_row_starts) = if let Some(query) = search_query.as_deref() {
-            let rendered = render_search_transcript_lines(state, inner.width, query);
-            (
-                rendered.lines,
-                rendered.line_count,
-                rendered.entry_row_starts,
-            )
-        } else {
-            let lines = render_transcript_lines(state, inner.width);
-            let line_count = Paragraph::new(lines.clone())
-                .wrap(Wrap { trim: false })
-                .line_count(inner.width);
-            (lines, line_count, Vec::new())
-        };
-        transcript_scroll.cache = Some(TranscriptCache {
+        transcript_scroll.cache = Some(build_transcript_cache(
+            state,
+            inner.width,
             revision,
-            width: inner.width,
-            search_query: search_query.clone(),
-            lines,
-            line_count,
-            entry_row_starts,
-        });
+            search_query.clone(),
+            false,
+        ));
     }
-    let cache = transcript_scroll
+    let total = transcript_scroll
         .cache
         .as_ref()
-        .expect("cache populated above");
-    let total = cache.line_count;
-    // Clone the cached lines because `Paragraph::new` consumes the
-    // `Vec<Line>`. This still avoids the dominant cost (word-wrap +
-    // unicode tables) which only runs inside `render_widget`.
-    let lines = cache.lines.clone();
-    let entry_row_starts = cache.entry_row_starts.clone();
+        .expect("cache populated above")
+        .line_count;
 
     transcript_scroll.reconcile(&mut state.scroll_offset, total, inner.height);
     if state
@@ -7823,7 +7848,10 @@ fn draw_transcript(
         .is_some_and(|search| search.jump_pending)
     {
         if let Some(entry_index) = selected_transcript_search_entry(state)
-            && let Some(Some(target_row)) = entry_row_starts.get(entry_index)
+            && let Some(Some(target_row)) = transcript_scroll
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.entry_row_starts.get(entry_index))
         {
             let max_top = total.saturating_sub(usize::from(inner.height));
             let desired_top = target_row
@@ -7837,12 +7865,58 @@ fn draw_transcript(
     }
     let top = total
         .saturating_sub(inner.height as usize)
-        .saturating_sub(state.scroll_offset)
-        .min(u16::MAX as usize) as u16;
-    let paragraph = Paragraph::new(lines)
+        .saturating_sub(state.scroll_offset);
+    // Clone only the lines that intersect the viewport: `Paragraph` re-wraps
+    // everything it is handed, so passing the whole transcript would make
+    // every frame O(transcript) even on a cache hit.
+    let cache = transcript_scroll
+        .cache
+        .as_ref()
+        .expect("cache populated above");
+    let (window, inner_scroll) =
+        wrapped_visible_window(&cache.lines, &cache.row_starts, top, inner.height);
+    let paragraph = Paragraph::new(window)
         .wrap(Wrap { trim: false })
-        .scroll((top, 0));
+        .scroll((inner_scroll, 0));
     f.render_widget(paragraph, inner);
+}
+
+/// Render the transcript once and measure it, for either the chat pane
+/// (`expanded == false`) or the Ctrl-T full-history reader.
+fn build_transcript_cache(
+    state: &AppState,
+    width: u16,
+    revision: u64,
+    search_query: Option<String>,
+    expanded: bool,
+) -> TranscriptCache {
+    let (lines, line_count, entry_row_starts, row_starts) =
+        if let Some(query) = search_query.as_deref() {
+            let rendered = render_search_transcript_lines(state, width, query);
+            (
+                rendered.lines,
+                rendered.line_count,
+                rendered.entry_row_starts,
+                rendered.row_starts,
+            )
+        } else {
+            let lines = if expanded {
+                render_full_transcript_lines(state, width)
+            } else {
+                render_transcript_lines(state, width)
+            };
+            let (row_starts, line_count) = wrapped_row_starts(&lines, width);
+            (lines, line_count, Vec::new(), row_starts)
+        };
+    TranscriptCache {
+        revision,
+        width,
+        search_query,
+        lines,
+        line_count,
+        entry_row_starts,
+        row_starts,
+    }
 }
 
 /// Block title for the transcript pane. Adds a scroll indicator when
@@ -7912,6 +7986,61 @@ struct SearchTranscriptRender {
     lines: Vec<Line<'static>>,
     line_count: usize,
     entry_row_starts: Vec<Option<usize>>,
+    row_starts: Vec<usize>,
+}
+
+/// Height of one rendered line after word wrapping to `width`.
+fn wrapped_line_height(line: &Line<'static>, width: u16) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    Paragraph::new(line.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .max(1)
+}
+
+/// Wrapped row offset of every line plus the total wrapped height.
+/// `Paragraph` wraps each `Line` independently, so per-line heights are
+/// additive and prefix-sum into row offsets usable for slicing.
+fn wrapped_row_starts(lines: &[Line<'static>], width: u16) -> (Vec<usize>, usize) {
+    let mut starts = Vec::with_capacity(lines.len());
+    let mut total = 0usize;
+    for line in lines {
+        starts.push(total);
+        total += wrapped_line_height(line, width);
+    }
+    (starts, total)
+}
+
+/// Lines covering wrapped rows `top .. top + height`, plus the scroll offset
+/// to apply inside the first one (its earlier wrapped rows may be above the
+/// viewport). Rendering this window instead of the whole transcript keeps a
+/// frame O(visible rows) rather than O(transcript).
+fn wrapped_visible_window(
+    lines: &[Line<'static>],
+    row_starts: &[usize],
+    top: usize,
+    height: u16,
+) -> (Vec<Line<'static>>, u16) {
+    if height == 0 {
+        // A zero-height viewport shows nothing; cloning the transcript to
+        // render it would reintroduce the very cost this window avoids.
+        return (Vec::new(), 0);
+    }
+    if lines.is_empty() || row_starts.len() != lines.len() {
+        return (lines.to_vec(), top.min(u16::MAX as usize) as u16);
+    }
+    let first = row_starts
+        .partition_point(|start| *start <= top)
+        .saturating_sub(1);
+    let end_row = top.saturating_add(usize::from(height));
+    let last = row_starts
+        .partition_point(|start| *start < end_row)
+        .max(first + 1)
+        .min(lines.len());
+    let inner_scroll = top.saturating_sub(row_starts[first]).min(u16::MAX as usize) as u16;
+    (lines[first..last].to_vec(), inner_scroll)
 }
 
 fn line_search_match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
@@ -8036,6 +8165,7 @@ fn render_search_transcript_lines(
         .collect::<BTreeSet<_>>();
     let turns = transcript_turns(state);
     let mut lines = Vec::new();
+    let mut row_starts = Vec::new();
     let mut line_count = 0;
     let mut entry_row_starts = vec![None; state.transcript.len()];
     for (entry_index, entry_row_start) in entry_row_starts.iter_mut().enumerate() {
@@ -8058,15 +8188,17 @@ fn render_search_transcript_lines(
                 .collect();
         }
         *entry_row_start = Some(line_count);
-        line_count += Paragraph::new(entry_lines.clone())
-            .wrap(Wrap { trim: false })
-            .line_count(width);
+        for line in &entry_lines {
+            row_starts.push(line_count);
+            line_count += wrapped_line_height(line, width);
+        }
         lines.extend(entry_lines);
     }
     SearchTranscriptRender {
         lines,
         line_count,
         entry_row_starts,
+        row_starts,
     }
 }
 
@@ -15636,7 +15768,7 @@ mod tests {
             let backend = TestBackend::new(80, 14);
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
-                .draw(|frame| draw_inline_chat(frame, state))
+                .draw(|frame| draw_inline_chat(frame, state, &mut TranscriptScrollState::default()))
                 .expect("draw");
             buffer_lines(terminal.backend().buffer()).join("\n")
         };
@@ -15696,7 +15828,9 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -15769,7 +15903,9 @@ mod tests {
         let backend = TestBackend::new(terminal_size.width, desired);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -16961,7 +17097,9 @@ mod tests {
         let backend = TestBackend::new(100, desired);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -17044,7 +17182,9 @@ mod tests {
         let backend = TestBackend::new(100, overlay_height);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -19321,7 +19461,9 @@ mod tests {
         let mut terminal =
             Terminal::new(TestBackend::new(terminal_size.width, baseline)).expect("terminal");
         terminal
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("draw empty tail");
         let baseline_header_row = buffer_lines(terminal.backend().buffer())
             .iter()
@@ -19349,7 +19491,9 @@ mod tests {
         }
 
         terminal
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("draw streamed tail");
         let streamed_header_row = buffer_lines(terminal.backend().buffer())
             .iter()
@@ -20169,7 +20313,9 @@ mod tests {
         );
         let mut inline = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
         inline
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("inline draw");
         assert!(
             buffer_lines(inline.backend().buffer())
@@ -20223,7 +20369,9 @@ mod tests {
 
         let mut inline = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
         inline
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("inline draw");
         assert!(
             buffer_lines(inline.backend().buffer())
@@ -20589,6 +20737,142 @@ mod tests {
         assert_eq!(rendered.entry_row_starts, vec![Some(0)]);
     }
 
+    fn long_transcript_state() -> AppState {
+        let mut state = AppState::new();
+        for index in 0..30 {
+            state
+                .transcript
+                .push(Entry::UserPrompt(format!("prompt number {index}")));
+            state.transcript.push(Entry::AgentMessage(format!(
+                "Answer {index}. {}\n\n- bullet one\n- bullet two\n",
+                "lorem ipsum dolor sit amet consectetur ".repeat(3)
+            )));
+            // Tool output renders with a gutter and long unbroken tokens, the
+            // shape most likely to wrap differently than plain prose.
+            let id = format!("call-{index}");
+            state.tool_calls.insert(
+                id.clone(),
+                crate::app::ToolCallView {
+                    title: format!("run command {index}"),
+                    kind: ToolKind::Execute,
+                    status: ToolCallStatus::Completed,
+                    body: vec![ToolCallOutput::Terminal {
+                        terminal_id: format!("term-{index}"),
+                        output: format!("{}\n{}", "y".repeat(90), "output line ".repeat(9)),
+                        truncated: false,
+                        exit_status: None,
+                    }],
+                },
+            );
+            state.transcript.push(Entry::ToolCall(id));
+        }
+        state
+    }
+
+    #[test]
+    fn wrapped_row_starts_match_whole_paragraph_line_count() {
+        // The viewport slice is only correct while per-line heights sum to
+        // the height `Paragraph` reports for the whole document.
+        let state = long_transcript_state();
+        for width in [24u16, 40, 80] {
+            let lines = render_full_transcript_lines(&state, width);
+            let (row_starts, total) = wrapped_row_starts(&lines, width);
+            assert_eq!(row_starts.len(), lines.len());
+            assert_eq!(
+                total,
+                Paragraph::new(lines.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(width),
+                "row offsets disagree with Paragraph at width {width}"
+            );
+            assert!(row_starts.windows(2).all(|pair| pair[0] <= pair[1]));
+        }
+    }
+
+    #[test]
+    fn transcript_viewport_window_renders_like_the_whole_transcript() {
+        let state = long_transcript_state();
+        let (width, height) = (40u16, 12u16);
+        let lines = render_full_transcript_lines(&state, width);
+        let (row_starts, total) = wrapped_row_starts(&lines, width);
+
+        let render = |lines: Vec<Line<'static>>, scroll: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new(lines)
+                            .wrap(Wrap { trim: false })
+                            .scroll((scroll, 0)),
+                        frame.area(),
+                    )
+                })
+                .expect("draw");
+            buffer_lines(terminal.backend().buffer())
+        };
+
+        let past_end = total.saturating_add(5);
+        for top in [
+            0usize,
+            1,
+            7,
+            33,
+            total.saturating_sub(usize::from(height)),
+            past_end,
+        ] {
+            let (window, inner_scroll) = wrapped_visible_window(&lines, &row_starts, top, height);
+            assert_eq!(
+                render(window, inner_scroll),
+                render(lines.clone(), top as u16),
+                "windowed render differs from the full render at row {top}"
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_viewer_reuses_its_render_until_the_revision_changes() {
+        let mut state = long_transcript_state();
+        state.transcript_viewer = true;
+        let mut scroll = TranscriptScrollState::default();
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
+        let draw_once = |terminal: &mut Terminal<TestBackend>,
+                         state: &mut AppState,
+                         scroll: &mut TranscriptScrollState| {
+            terminal
+                .draw(|frame| draw(frame, state, scroll, UiMode::InlineChat))
+                .expect("draw");
+            buffer_lines(terminal.backend().buffer()).join("\n")
+        };
+
+        let first = draw_once(&mut terminal, &mut state, &mut scroll);
+        let cached_rows = scroll
+            .viewer_cache
+            .as_ref()
+            .expect("viewer must populate a cache")
+            .line_count;
+
+        // Mutating the transcript without bumping the revision must not be
+        // picked up: that proves the second frame reused the cached render
+        // instead of rebuilding it.
+        state
+            .transcript
+            .push(Entry::AgentMessage("uncached addition".to_string()));
+        assert_eq!(draw_once(&mut terminal, &mut state, &mut scroll), first);
+        assert_eq!(
+            scroll.viewer_cache.as_ref().expect("cache").line_count,
+            cached_rows,
+            "an unchanged revision must not rebuild the cached render"
+        );
+
+        // A real mutation bumps the revision and invalidates the cache.
+        state.record_status_message(StatusKind::Info, "invalidating entry");
+        draw_once(&mut terminal, &mut state, &mut scroll);
+        assert!(
+            scroll.viewer_cache.as_ref().expect("cache").line_count > cached_rows,
+            "a revision bump must rebuild the cached render"
+        );
+    }
+
     #[test]
     fn transcript_search_highlights_visible_matches() {
         let mut state = AppState::new();
@@ -20780,7 +21064,9 @@ mod tests {
         let backend = TestBackend::new(100, 40);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -21421,7 +21707,9 @@ mod tests {
         let backend = TestBackend::new(100, desired);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -21445,7 +21733,9 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -23781,7 +24071,9 @@ mod tests {
         let backend = TestBackend::new(100, INLINE_CHAT_HEIGHT);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|frame| draw_inline_chat(frame, &mut state))
+            .draw(|frame| {
+                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
+            })
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
