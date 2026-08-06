@@ -30,9 +30,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
-#[cfg(unix)]
-use tokio::io::AsyncWriteExt;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -73,10 +71,9 @@ pub struct AcpRuntimeConfig {
     /// Environment variables to inject into the spawned agent process.
     /// Used for agents that require knobs like `AUGMENT_DISABLE_AUTO_UPDATE=1`.
     pub env: HashMap<String, String>,
-    /// Where the agent's stderr should go. `None` discards it (via
-    /// `Stdio::null()`, which maps to /dev/null on Unix and NUL on
-    /// Windows) so the agent's logs don't bleed into the TUI. Pass a
-    /// path to capture for debugging.
+    /// Optional full-fidelity stderr log. The runtime always retains a small,
+    /// redacted in-memory tail for launch diagnostics; this path receives the
+    /// original unredacted stream when explicit debugging capture is wanted.
     pub agent_stderr: Option<PathBuf>,
     /// Maximum text bytes returned by ACP filesystem reads or accepted by
     /// ACP filesystem writes.
@@ -622,6 +619,148 @@ fn emit_fatal(
     }
 }
 
+const AGENT_STDERR_TAIL_BYTES: usize = 8 * 1024;
+const AGENT_STDERR_TAIL_HEADER: &str = "agent stderr tail (redacted, last 8192 bytes):";
+
+#[derive(Debug, Default)]
+struct AgentStderrTailInner {
+    bytes: std::sync::Mutex<Vec<u8>>,
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AgentStderrTail {
+    inner: Arc<AgentStderrTailInner>,
+}
+
+impl AgentStderrTail {
+    fn push(&self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        let Ok(mut bytes) = self.inner.bytes.lock() else {
+            return;
+        };
+        if chunk.len() >= AGENT_STDERR_TAIL_BYTES {
+            bytes.clear();
+            bytes.extend_from_slice(&chunk[chunk.len() - AGENT_STDERR_TAIL_BYTES..]);
+        } else {
+            let overflow = bytes
+                .len()
+                .saturating_add(chunk.len())
+                .saturating_sub(AGENT_STDERR_TAIL_BYTES);
+            if overflow > 0 {
+                bytes.drain(..overflow);
+            }
+            bytes.extend_from_slice(chunk);
+        }
+        drop(bytes);
+        self.inner.changed.notify_waiters();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner
+            .bytes
+            .lock()
+            .map_or(true, |bytes| bytes.is_empty())
+    }
+
+    fn rendered(&self) -> Option<String> {
+        let bytes = self.inner.bytes.lock().ok()?.clone();
+        if bytes.is_empty() {
+            return None;
+        }
+        let mut terminal = crate::terminal_output::TerminalText::new(AGENT_STDERR_TAIL_BYTES);
+        terminal.push(&bytes);
+        terminal.finish();
+        let text = redact_agent_stderr(&terminal.render());
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    async fn rendered_for_error(&self) -> Option<String> {
+        let changed = self.inner.changed.notified();
+        if self.is_empty() {
+            let _ = tokio::time::timeout(Duration::from_millis(25), changed).await;
+        }
+        tokio::task::yield_now().await;
+        self.rendered()
+    }
+
+    #[cfg(test)]
+    fn raw_len(&self) -> usize {
+        self.inner.bytes.lock().map_or(0, |bytes| bytes.len())
+    }
+}
+
+fn redact_agent_stderr(text: &str) -> String {
+    const SENSITIVE_MARKERS: &[&str] = &[
+        "authorization:",
+        "authorization=",
+        "bearer ",
+        "cookie:",
+        "set-cookie:",
+        "x-api-key",
+        "api_key",
+        "api-key",
+        "apikey",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "private_key",
+        "private-key",
+        "credential:",
+        "credential=",
+        "password:",
+        "password=",
+        "secret:",
+        "secret=",
+        "token:",
+        "token=",
+    ];
+
+    text.lines()
+        .map(|line| {
+            let lowercase = line.to_ascii_lowercase();
+            if SENSITIVE_MARKERS
+                .iter()
+                .any(|marker| lowercase.contains(marker))
+            {
+                "[redacted sensitive stderr line]"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn attach_agent_stderr_tail(
+    message: String,
+    stderr_tail: Option<&AgentStderrTail>,
+) -> String {
+    if message.contains(AGENT_STDERR_TAIL_HEADER) {
+        return message;
+    }
+    let Some(stderr_tail) = stderr_tail else {
+        return message;
+    };
+    let Some(stderr) = stderr_tail.rendered_for_error().await else {
+        return message;
+    };
+    format!("{message}\n{AGENT_STDERR_TAIL_HEADER}\n{stderr}")
+}
+
+async fn emit_fatal_with_stderr(
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+    fatal_emitted: &Arc<AtomicBool>,
+    message: String,
+    stderr_tail: Option<&AgentStderrTail>,
+) -> String {
+    let message = attach_agent_stderr_tail(message, stderr_tail).await;
+    emit_fatal(ui_tx, fatal_emitted, message.clone());
+    message
+}
+
 /// Classify a spawn-time `io::Error`. `ErrorKind::NotFound` becomes
 /// `CommandNotFound`; everything else falls through to `SpawnFailed`.
 fn classify_spawn_error(command: &std::path::Path, source: std::io::Error) -> LaunchError {
@@ -1075,20 +1214,22 @@ pub async fn run(
         }
     };
 
-    let (mut child, child_stdin, child_stdout) = match spawn_agent(
-        &prepared.command,
-        &cfg.args,
-        &prepared.env,
-        cfg.agent_stderr.as_deref(),
-        SpawnIsolation::ProcessGroup,
-    ) {
-        Ok(spawned) => spawned,
-        Err(launch_err) => {
-            let text = launch_err.to_string();
-            emit_fatal(&ui_tx, &fatal_emitted, text.clone());
-            return Err(anyhow::anyhow!(text));
-        }
-    };
+    let (mut child, child_stdin, child_stdout, stderr_capture) =
+        match spawn_agent_with_stderr_capture(
+            &prepared.command,
+            &cfg.args,
+            &prepared.env,
+            cfg.agent_stderr.as_deref(),
+            SpawnIsolation::ProcessGroup,
+        ) {
+            Ok(spawned) => spawned,
+            Err(launch_err) => {
+                let text = launch_err.to_string();
+                emit_fatal(&ui_tx, &fatal_emitted, text.clone());
+                return Err(anyhow::anyhow!(text));
+            }
+        };
+    let stderr_tail = stderr_capture.tail.clone();
     // Snapshot the agent PID up front. It doubles as the process-group
     // id (Unix) / Windows process-group root, so we can still target
     // the entire descendant tree later even if `child.wait()` or
@@ -1108,7 +1249,7 @@ pub async fn run(
     // poll (because it noticed EOF on stdin), we want the clean-shutdown
     // outcome, not a spurious "agent exited unexpectedly" Fatal. The wait
     // branch only wins when drive is still pending.
-    let result: Result<()> = {
+    let mut result: Result<()> = {
         let termination = cfg.termination.clone().unwrap_or_default();
         let drive = drive_client_with_fs_limit(
             transport,
@@ -1128,6 +1269,7 @@ pub async fn run(
             cfg.role_config.clone(),
             cfg.subagents.clone(),
             cfg.side_prompt_policy,
+            Some(stderr_tail.clone()),
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -1150,8 +1292,13 @@ pub async fn run(
                         Ok(status) => status.to_string(),
                         Err(e) => format!("wait failed: {e}"),
                     };
-                    let msg = agent_exited_unexpectedly_msg(detail);
-                    emit_fatal(&ui_tx, &fatal_emitted, msg.clone());
+                    let msg = emit_fatal_with_stderr(
+                        &ui_tx,
+                        &fatal_emitted,
+                        agent_exited_unexpectedly_msg(detail),
+                        Some(&stderr_tail),
+                    )
+                    .await;
                     Err(anyhow::anyhow!(msg))
                 }
             }
@@ -1168,12 +1315,14 @@ pub async fn run(
     // grandchild; killing only the wrapper PID orphans the grandchild
     // and leaks the actual agent across mjolnir sessions.
     let teardown = kill_agent_tree(&mut child, agent_pid).await;
+    stderr_capture.finish().await;
     // Generic catch-all: anything that escaped the launch-phase classifier
     // (e.g. a transport error after initialize succeeded) gets a plain
     // fatal so the user sees *something*. Launch-phase failures and the
     // child-wait branch above will already have called `emit_fatal` with
     // action text, and the guard suppresses a second emission.
     if let Err(e) = &result {
+        let fatal_already_emitted = fatal_emitted.load(Ordering::SeqCst);
         // Race-condition handling: drive_client can return with a raw
         // `Broken pipe` before the `child.wait()` arm fires, leaving the
         // user with no action text. If the child *had* already exited at
@@ -1183,7 +1332,10 @@ pub async fn run(
         } else {
             format!("acp: {e}")
         };
-        emit_fatal(&ui_tx, &fatal_emitted, msg);
+        let msg = emit_fatal_with_stderr(&ui_tx, &fatal_emitted, msg, Some(&stderr_tail)).await;
+        if !fatal_already_emitted {
+            result = Err(anyhow::anyhow!(msg));
+        }
     }
     if let Err(error) = &teardown {
         let message = format!("acp agent teardown failed: {error:#}");
@@ -1686,6 +1838,7 @@ where
         None,
         None,
         false,
+        None,
     )
     .await
 }
@@ -1720,6 +1873,7 @@ where
         None,
         None,
         false,
+        None,
     )
     .await
 }
@@ -1755,6 +1909,7 @@ where
         None,
         None,
         false,
+        None,
     )
     .await
 }
@@ -1778,6 +1933,7 @@ async fn drive_client_with_fs_limit<T>(
     role_config: Option<RuntimeRoleConfig>,
     subagents: Option<subagent::Config>,
     side_prompt_policy: bool,
+    stderr_tail: Option<AgentStderrTail>,
 ) -> Result<()>
 where
     T: ConnectTo<Client>,
@@ -2050,6 +2206,7 @@ where
                 advertised_commands,
                 control_in_flight,
                 manual_compact_suppression,
+                stderr_tail,
             )
             .await
             {
@@ -2096,12 +2253,18 @@ async fn drive_session(
     advertised_commands: Arc<std::sync::Mutex<HashMap<String, HashSet<String>>>>,
     control_in_flight: Arc<AtomicBool>,
     manual_compact_suppression: Arc<AtomicBool>,
+    stderr_tail: Option<AgentStderrTail>,
 ) -> Result<()> {
     let native_read_only = match native_read_only_policy(role_config.as_ref()) {
         Ok(policy) => policy,
         Err(error) => {
-            let text = error.to_string();
-            emit_fatal(ui_tx, &fatal_emitted, text.clone());
+            let text = emit_fatal_with_stderr(
+                ui_tx,
+                &fatal_emitted,
+                error.to_string(),
+                stderr_tail.as_ref(),
+            )
+            .await;
             return Err(anyhow::anyhow!(text));
         }
     };
@@ -2130,28 +2293,48 @@ async fn drive_session(
         Ok(r) => r,
         Err(source) => {
             let launch_err = classify_initialize_error(source);
-            let text = launch_err.to_string();
-            emit_fatal(ui_tx, &fatal_emitted, text.clone());
+            let text = emit_fatal_with_stderr(
+                ui_tx,
+                &fatal_emitted,
+                launch_err.to_string(),
+                stderr_tail.as_ref(),
+            )
+            .await;
             return Err(anyhow::anyhow!(text));
         }
     };
     if let Err(launch_err) = validate_protocol_version(init_resp.protocol_version) {
-        let text = launch_err.to_string();
-        emit_fatal(ui_tx, &fatal_emitted, text.clone());
+        let text = emit_fatal_with_stderr(
+            ui_tx,
+            &fatal_emitted,
+            launch_err.to_string(),
+            stderr_tail.as_ref(),
+        )
+        .await;
         return Err(anyhow::anyhow!(text));
     }
     if let Err(launch_err) =
         require_additional_directories(&init_resp.agent_capabilities, &additional_directories)
     {
-        let text = launch_err.to_string();
-        emit_fatal(ui_tx, &fatal_emitted, text.clone());
+        let text = emit_fatal_with_stderr(
+            ui_tx,
+            &fatal_emitted,
+            launch_err.to_string(),
+            stderr_tail.as_ref(),
+        )
+        .await;
         return Err(anyhow::anyhow!(text));
     }
     let subagent_http = if let Some(config) = subagents {
         if !init_resp.agent_capabilities.mcp_capabilities.http {
             let launch_err = LaunchError::SubagentHttpUnsupported;
-            let text = launch_err.to_string();
-            emit_fatal(ui_tx, &fatal_emitted, text.clone());
+            let text = emit_fatal_with_stderr(
+                ui_tx,
+                &fatal_emitted,
+                launch_err.to_string(),
+                stderr_tail.as_ref(),
+            )
+            .await;
             return Err(anyhow::anyhow!(text));
         }
         let context = subagent::RunContext {
@@ -2171,8 +2354,13 @@ async fn drive_session(
         {
             Ok(server) => Some(server),
             Err(error) => {
-                let text = format!("could not start subagent HTTP MCP server: {error:#}");
-                emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                let text = emit_fatal_with_stderr(
+                    ui_tx,
+                    &fatal_emitted,
+                    format!("could not start subagent HTTP MCP server: {error:#}"),
+                    stderr_tail.as_ref(),
+                )
+                .await;
                 return Err(anyhow::anyhow!(text));
             }
         }
@@ -2247,8 +2435,13 @@ async fn drive_session(
             let initial_config = match restore {
                 Ok(initial_config) => initial_config,
                 Err(launch_err) => {
-                    let text = launch_err.to_string();
-                    emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                    let text = emit_fatal_with_stderr(
+                        ui_tx,
+                        &fatal_emitted,
+                        launch_err.to_string(),
+                        stderr_tail.as_ref(),
+                    )
+                    .await;
                     return Err(anyhow::anyhow!(text));
                 }
             };
@@ -2278,8 +2471,13 @@ async fn drive_session(
                 (s.session_id, config, false)
             }
             Err(launch_err) => {
-                let text = launch_err.to_string();
-                emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                let text = emit_fatal_with_stderr(
+                    ui_tx,
+                    &fatal_emitted,
+                    launch_err.to_string(),
+                    stderr_tail.as_ref(),
+                )
+                .await;
                 return Err(anyhow::anyhow!(text));
             }
         },
@@ -2307,8 +2505,13 @@ async fn drive_session(
                 }
             }
             Err(error) => {
-                let text = format!("{} configuration failed: {error}", role.label);
-                emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                let text = emit_fatal_with_stderr(
+                    ui_tx,
+                    &fatal_emitted,
+                    format!("{} configuration failed: {error}", role.label),
+                    stderr_tail.as_ref(),
+                )
+                .await;
                 return Err(anyhow::anyhow!(text));
             }
         }
@@ -2340,8 +2543,13 @@ async fn drive_session(
         && let Err(error) =
             enforce_native_read_only(&conn, &session_id, &mut session_config, policy, resumed).await
     {
-        let text = format!("native read-only policy failed: {error}; review lane disabled");
-        emit_fatal(ui_tx, &fatal_emitted, text.clone());
+        let text = emit_fatal_with_stderr(
+            ui_tx,
+            &fatal_emitted,
+            format!("native read-only policy failed: {error}; review lane disabled"),
+            stderr_tail.as_ref(),
+        )
+        .await;
         return Err(anyhow::anyhow!(text));
     }
     let _ = ui_tx.send(UiEvent::SessionStarted {
@@ -3155,12 +3363,25 @@ pub(crate) fn configure_isolated_child(cmd: &mut Command, isolation: SpawnIsolat
     }
 }
 
-pub(crate) fn spawn_agent(
+fn configured_agent_command(
     command: &Path,
     args: &[String],
     env: &HashMap<String, String>,
-    stderr_path: Option<&std::path::Path>,
     isolation: SpawnIsolation,
+) -> (PathBuf, Command) {
+    let command = normalize_spawn_program(command.to_path_buf());
+    let mut cmd = Command::new(&command);
+    cmd.args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    configure_isolated_child(&mut cmd, isolation);
+    (command, cmd)
+}
+
+fn take_agent_transport(
+    command: &Path,
+    mut child: Child,
 ) -> std::result::Result<
     (
         Child,
@@ -3169,30 +3390,6 @@ pub(crate) fn spawn_agent(
     ),
     LaunchError,
 > {
-    let command = normalize_spawn_program(command.to_path_buf());
-    let mut cmd = Command::new(&command);
-    cmd.args(args);
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    configure_isolated_child(&mut cmd, isolation);
-    match stderr_path {
-        Some(path) => {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(|source| LaunchError::StderrFileOpen {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-            cmd.stderr(std::process::Stdio::from(file));
-        }
-        None => {
-            cmd.stderr(std::process::Stdio::null());
-        }
-    }
-    let mut child = cmd.spawn().map_err(|e| classify_spawn_error(&command, e))?;
     // `stdin` / `stdout` are always Some here because we requested
     // `piped()` above; the `?` is just defensive.
     let stdin = child.stdin.take().ok_or_else(|| LaunchError::SpawnFailed {
@@ -3207,6 +3404,123 @@ pub(crate) fn spawn_agent(
             source: std::io::Error::other("child stdout not piped"),
         })?;
     Ok((child, stdin, stdout))
+}
+
+fn open_agent_stderr_file(
+    stderr_path: Option<&Path>,
+) -> std::result::Result<Option<std::fs::File>, LaunchError> {
+    stderr_path
+        .map(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|source| LaunchError::StderrFileOpen {
+                    path: path.to_path_buf(),
+                    source,
+                })
+        })
+        .transpose()
+}
+
+#[derive(Debug)]
+struct AgentStderrCapture {
+    tail: AgentStderrTail,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl AgentStderrCapture {
+    async fn finish(mut self) {
+        if tokio::time::timeout(Duration::from_secs(1), &mut self.task)
+            .await
+            .is_err()
+        {
+            self.task.abort();
+        }
+    }
+}
+
+fn spawn_agent_with_stderr_capture(
+    command: &Path,
+    args: &[String],
+    env: &HashMap<String, String>,
+    stderr_path: Option<&Path>,
+    isolation: SpawnIsolation,
+) -> std::result::Result<
+    (
+        Child,
+        tokio::process::ChildStdin,
+        tokio::process::ChildStdout,
+        AgentStderrCapture,
+    ),
+    LaunchError,
+> {
+    let stderr_file = open_agent_stderr_file(stderr_path)?;
+    let (command, mut cmd) = configured_agent_command(command, args, env, isolation);
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| classify_spawn_error(&command, e))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| LaunchError::SpawnFailed {
+            command: command.display().to_string(),
+            source: std::io::Error::other("child stderr not piped"),
+        })?;
+    let (child, stdin, stdout) = take_agent_transport(&command, child)?;
+    let tail = AgentStderrTail::default();
+    let capture_tail = tail.clone();
+    let task = tokio::spawn(async move {
+        let mut stderr = stderr;
+        let mut stderr_file = stderr_file.map(tokio::fs::File::from_std);
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let read = match stderr.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) => {
+                    tracing::debug!(%error, "agent stderr capture stopped");
+                    break;
+                }
+            };
+            capture_tail.push(&chunk[..read]);
+            if let Some(file) = stderr_file.as_mut()
+                && let Err(error) = file.write_all(&chunk[..read]).await
+            {
+                tracing::warn!(%error, "could not continue writing --agent-stderr capture");
+                stderr_file = None;
+            }
+        }
+        if let Some(file) = stderr_file.as_mut()
+            && let Err(error) = file.flush().await
+        {
+            tracing::warn!(%error, "could not flush --agent-stderr capture");
+        }
+    });
+    Ok((child, stdin, stdout, AgentStderrCapture { tail, task }))
+}
+
+pub(crate) fn spawn_agent(
+    command: &Path,
+    args: &[String],
+    env: &HashMap<String, String>,
+    stderr_path: Option<&std::path::Path>,
+    isolation: SpawnIsolation,
+) -> std::result::Result<
+    (
+        Child,
+        tokio::process::ChildStdin,
+        tokio::process::ChildStdout,
+    ),
+    LaunchError,
+> {
+    let stderr_file = open_agent_stderr_file(stderr_path)?;
+    let (command, mut cmd) = configured_agent_command(command, args, env, isolation);
+    match stderr_file {
+        Some(file) => cmd.stderr(std::process::Stdio::from(file)),
+        None => cmd.stderr(std::process::Stdio::null()),
+    };
+    let child = cmd.spawn().map_err(|e| classify_spawn_error(&command, e))?;
+    take_agent_transport(&command, child)
 }
 
 /// Kill the agent process and every descendant it spawned, then reap.
@@ -7861,6 +8175,7 @@ mod tests {
             }),
             None,
             false,
+            None,
         ));
 
         loop {
@@ -9464,6 +9779,7 @@ mod tests {
             Some(role_config),
             None,
             false,
+            None,
         ));
 
         let mut saw_warning = false;
@@ -10949,6 +11265,7 @@ mod tests {
             }),
             None,
             false,
+            None,
         ));
 
         while !matches!(
@@ -11332,6 +11649,102 @@ mod tests {
             .await
             .expect("run task did not finish");
         assert!(result.expect("run task panicked").is_err());
+    }
+
+    #[test]
+    fn agent_stderr_tail_is_bounded_control_safe_and_redacted() {
+        let tail = AgentStderrTail::default();
+        tail.push(&vec![b'x'; AGENT_STDERR_TAIL_BYTES]);
+        tail.push(
+            b"\nadapter path: /opt/tools/agent\n\x1b[31mvisible error\x1b[0m\nOPENAI_API_KEY=topsecret\n",
+        );
+
+        assert_eq!(tail.raw_len(), AGENT_STDERR_TAIL_BYTES);
+        let rendered = tail.rendered().expect("stderr tail");
+        assert!(rendered.contains("adapter path: /opt/tools/agent"));
+        assert!(rendered.contains("visible error"));
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(rendered.contains("[redacted sensitive stderr line]"));
+        assert!(!rendered.contains("topsecret"));
+    }
+
+    /// Build a portable subprocess that writes actionable and sensitive
+    /// stderr before exiting without speaking ACP.
+    fn stderr_then_exit_command() -> (PathBuf, Vec<String>) {
+        if cfg!(windows) {
+            (
+                PathBuf::from("cmd"),
+                vec![
+                    "/C".into(),
+                    "echo adapter path marker: C:\\tools\\agent.exe 1>&2 & echo API_KEY=topsecret 1>&2 & exit /B 1"
+                        .into(),
+                ],
+            )
+        } else {
+            (
+                PathBuf::from("/bin/sh"),
+                vec![
+                    "-c".into(),
+                    "printf 'adapter path marker: /opt/tools/agent\\nAPI_KEY=topsecret\\n' >&2; exit 1"
+                        .into(),
+                ],
+            )
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_includes_redacted_stderr_tail_and_keeps_full_file_capture() {
+        let (command, args) = stderr_then_exit_command();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let stderr_path = temp.path().join("agent.err");
+        let cfg = AcpRuntimeConfig {
+            command,
+            args,
+            cwd: std::env::temp_dir(),
+            additional_directories: Vec::new(),
+            mcp_servers: Vec::new(),
+            resume_session: None,
+            session_restore_mode: SessionRestoreMode::Continue,
+            env: HashMap::new(),
+            agent_stderr: Some(stderr_path.clone()),
+            fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
+            access_mode: RuntimeAccessMode::Full,
+            agent_source_id: None,
+            config_path: None,
+            saved_session_config: HashMap::new(),
+            role_config: None,
+            subagents: None,
+            side_prompt_policy: false,
+            termination: None,
+        };
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), run(cfg, ui_tx, cmd_rx))
+            .await
+            .expect("runtime timeout")
+            .expect_err("stderr helper must fail");
+        let mut fatal = None;
+        while let Ok(event) = ui_rx.try_recv() {
+            if let UiEvent::Fatal(message) = event {
+                fatal = Some(message);
+            }
+        }
+        let fatal = fatal.expect("missing fatal");
+        let returned = format!("{error:#}");
+        for message in [&fatal, &returned] {
+            assert!(message.contains(AGENT_STDERR_TAIL_HEADER), "{message}");
+            assert!(message.contains("adapter path marker"), "{message}");
+            assert!(
+                message.contains("[redacted sensitive stderr line]"),
+                "{message}"
+            );
+            assert!(!message.contains("topsecret"), "{message}");
+        }
+
+        let full_capture = std::fs::read_to_string(stderr_path).expect("full stderr capture");
+        assert!(full_capture.contains("adapter path marker"));
+        assert!(full_capture.contains("API_KEY=topsecret"));
     }
 
     /// Build a subprocess command that starts and exits successfully
@@ -11983,13 +12396,27 @@ mod tests {
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
         let fatal_emitted = Arc::new(AtomicBool::new(false));
-        let client_task = tokio::spawn(drive_client(
+        let stderr_tail = AgentStderrTail::default();
+        stderr_tail.push(b"failed executable: /opt/tools/workspace-agent\n");
+        let client_task = tokio::spawn(drive_client_with_fs_limit(
             client_transport,
             std::env::temp_dir(),
+            Vec::new(),
+            Vec::new(),
             None,
+            SessionRestoreMode::Continue,
             ui_tx,
             cmd_rx,
             fatal_emitted.clone(),
+            DEFAULT_FS_TEXT_BYTES,
+            RuntimeAccessMode::Full,
+            None,
+            None,
+            HashMap::new(),
+            None,
+            None,
+            false,
+            Some(stderr_tail),
         ));
 
         let mut saw_retry_warning = false;
@@ -12013,11 +12440,21 @@ mod tests {
         }
 
         assert!(saw_retry_warning);
-        assert!(fatal.is_some(), "missing fatal after bounded retry");
+        let fatal = fatal.expect("missing fatal after bounded retry");
+        assert!(fatal.contains(AGENT_STDERR_TAIL_HEADER), "{fatal}");
+        assert!(fatal.contains("/opt/tools/workspace-agent"), "{fatal}");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert!(fatal_emitted.load(Ordering::SeqCst));
 
-        let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        let result = tokio::time::timeout(Duration::from_secs(2), client_task)
+            .await
+            .expect("client timeout")
+            .expect("client panic")
+            .expect_err("persistent session/new failure must fail");
+        assert!(
+            format!("{result:#}").contains("/opt/tools/workspace-agent"),
+            "{result:#}"
+        );
         agent_task.abort();
     }
 
