@@ -6222,8 +6222,6 @@ mod tests {
         atomic::{AtomicBool as StdAtomicBool, AtomicUsize, Ordering},
     };
     use std::time::Duration;
-    #[cfg(windows)]
-    use tokio::io::AsyncWriteExt as _;
     use tokio::io::split;
 
     #[test]
