@@ -7173,9 +7173,10 @@ fn issue_session_cookie(
     } else {
         state.session_ttl
     };
-    let value = sign_session_cookie(&state.cookie_key, validity, now_unix());
+    let now = now_unix();
+    let value = sign_session_cookie(&state.cookie_key, validity, now);
     let max_age = (!ephemeral).then_some(validity.as_secs());
-    let header = session_cookie_header(&value, max_age)?;
+    let header = session_cookie_header(&value, max_age, now)?;
 
     let mut response = status.into_response();
     response.headers_mut().insert(SET_COOKIE, header);
@@ -7196,11 +7197,18 @@ async fn clear_viewer_session() -> Response {
 fn session_cookie_header(
     value: &str,
     max_age: Option<u64>,
+    now_unix: u64,
 ) -> std::result::Result<HeaderValue, (StatusCode, String)> {
     let mut cookie =
         format!("{SESSION_COOKIE_NAME}={value}; Path=/; HttpOnly; Secure; SameSite=Strict");
     if let Some(seconds) = max_age {
         cookie.push_str(&format!("; Max-Age={seconds}"));
+        if let Some(expires) = cookie_expiry(now_unix.saturating_add(seconds)) {
+            // Expires is the compatibility fallback for clients that fail to
+            // persist Max-Age reliably. Max-Age remains authoritative when a
+            // browser supports both attributes.
+            cookie.push_str(&format!("; Expires={expires}"));
+        }
     }
     HeaderValue::from_str(&cookie).map_err(|_| {
         (
@@ -7210,9 +7218,15 @@ fn session_cookie_header(
     })
 }
 
+fn cookie_expiry(unix_timestamp: u64) -> Option<String> {
+    let timestamp = i64::try_from(unix_timestamp).ok()?;
+    let expires = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)?;
+    Some(format!("{} GMT", expires.format("%a, %d %b %Y %H:%M:%S")))
+}
+
 fn clear_session_cookie_header() -> HeaderValue {
     HeaderValue::from_str(&format!(
-        "{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0"
+        "{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
     ))
     .expect("valid cleared session cookie header")
 }
@@ -10447,6 +10461,17 @@ mod tests {
             "mobileNewSessionButtonEl.addEventListener(\"click\", openNewSessionPicker)"
         ));
         assert!(viewer.contains("mobileLogoutButtonEl.addEventListener(\"click\", logout)"));
+    }
+
+    #[test]
+    fn embedded_viewer_retries_transient_session_resume_failures() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("function scheduleSessionResumeRetry"));
+        assert!(viewer.contains("function retryPendingViewerSession"));
+        assert!(viewer.contains("showAuth(`Can't reach Mjolnir."));
+        assert!(viewer.contains("scheduleSessionResumeRetry();"));
+        assert!(viewer.contains("window.addEventListener(\"online\", retryPendingViewerSession)"));
+        assert!(viewer.contains("showAuth(\"Your session expired."));
     }
 
     #[test]
@@ -15783,6 +15808,7 @@ mod tests {
         assert!(set_cookie.contains("Secure"));
         assert!(set_cookie.contains("SameSite=Strict"));
         assert!(set_cookie.contains(&format!("Max-Age={}", DEFAULT_SESSION_TTL.as_secs())));
+        assert!(set_cookie.contains("Expires="));
 
         let value = cookie_value(Some(set_cookie), SESSION_COOKIE_NAME).expect("cookie value");
         // The issued cookie validates now, and a key rotation invalidates it.
@@ -15805,8 +15831,18 @@ mod tests {
         // No Max-Age: the browser drops it on close, restoring the old ephemeral
         // behavior, while the value is still a valid signed cookie meanwhile.
         assert!(!set_cookie.contains("Max-Age"));
+        assert!(!set_cookie.contains("Expires"));
         let value = cookie_value(Some(set_cookie), SESSION_COOKIE_NAME).expect("cookie value");
         assert!(session_cookie_valid(&state.cookie_key, value, now_unix()));
+    }
+
+    #[test]
+    fn persistent_cookie_expiry_uses_http_date_format() {
+        assert_eq!(
+            cookie_expiry(0).as_deref(),
+            Some("Thu, 01 Jan 1970 00:00:00 GMT")
+        );
+        assert_eq!(cookie_expiry(u64::MAX), None);
     }
 
     #[test]
@@ -15814,6 +15850,7 @@ mod tests {
         let header = clear_session_cookie_header();
         let value = header.to_str().expect("header str");
         assert!(value.contains("Max-Age=0"));
+        assert!(value.contains("Expires=Thu, 01 Jan 1970 00:00:00 GMT"));
         assert!(value.contains("HttpOnly"));
         assert!(value.contains("Secure"));
         assert!(value.contains("SameSite=Strict"));

@@ -3712,6 +3712,7 @@
       let queuedPrompts = [];
       let selectedSessionId = null;
       let refreshTimer = null;
+      let sessionResumeRetryTimer = null;
       let authenticated = false;
       let shouldStickToBottom = true;
       let forceScrollToBottom = false;
@@ -4804,9 +4805,17 @@
         return div;
       }
 
-      function showAuth(message = "") {
+      function clearSessionResumeRetry() {
+        if (sessionResumeRetryTimer) {
+          clearTimeout(sessionResumeRetryTimer);
+          sessionResumeRetryTimer = null;
+        }
+      }
+
+      function showAuth(message = "", reconnecting = false) {
         authenticated = false;
         authErrorEl.textContent = message;
+        authFormEl.hidden = reconnecting;
         authScreenEl.hidden = false;
         appEl.hidden = true;
         sessions = [];
@@ -4852,16 +4861,37 @@
           clearInterval(refreshTimer);
           refreshTimer = null;
         }
+        clearSessionResumeRetry();
       }
 
       function showApp() {
         authenticated = true;
         authErrorEl.textContent = "";
+        authFormEl.hidden = false;
         authScreenEl.hidden = true;
         appEl.hidden = false;
+        clearSessionResumeRetry();
         if (!refreshTimer) {
           refreshTimer = setInterval(refreshSessions, POLL_MS);
         }
+      }
+
+      function scheduleSessionResumeRetry() {
+        if (authenticated || sessionResumeRetryTimer) {
+          return;
+        }
+        sessionResumeRetryTimer = setTimeout(() => {
+          sessionResumeRetryTimer = null;
+          void tryResumeViewerSession();
+        }, POLL_MS);
+      }
+
+      function retryPendingViewerSession() {
+        if (authenticated || !sessionResumeRetryTimer) {
+          return;
+        }
+        clearSessionResumeRetry();
+        void tryResumeViewerSession();
       }
 
       async function apiFetch(url, options = {}) {
@@ -8690,8 +8720,12 @@
           applyRoute();
           await refreshQueuedPrompts();
         } catch (error) {
-          showAuth(`Sign-in check failed: ${error.message}`);
-          authTokenEl.focus();
+          // A suspended iOS PWA can wake before Wi-Fi or its VPN tunnel. A
+          // transport failure says nothing about the cookie, so keep retrying
+          // instead of making the user sign in again. Only the explicit 401
+          // branch above exposes the viewer-code form.
+          showAuth(`Can't reach Mjolnir. Reconnecting automatically…`, true);
+          scheduleSessionResumeRetry();
         }
       }
 
@@ -9031,6 +9065,12 @@
         void stopActiveTurn();
       });
       window.addEventListener("hashchange", applyRoute);
+      window.addEventListener("online", retryPendingViewerSession);
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) {
+          retryPendingViewerSession();
+        }
+      });
       narrowScreen.addEventListener("change", () => {
         if (authenticated) {
           renderAll();
