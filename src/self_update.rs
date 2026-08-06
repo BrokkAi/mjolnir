@@ -165,9 +165,9 @@ async fn download_apply_and_restart(update: &UpdateInfo) -> Result<()> {
     let new_binary =
         extract_mj_binary(&update.asset.name, &archive).context("extract mj binary")?;
     let current_exe = std::env::current_exe().context("resolve current executable")?;
-    if !cfg!(target_os = "android") {
-        let worker = extract_voice_worker_binary(&update.asset.name, &archive)
-            .context("extract voice worker")?;
+    if !cfg!(target_os = "android")
+        && let Some(worker) = extract_optional_voice_worker(&update.asset.name, &archive)
+    {
         install_voice_worker(&current_exe, &worker).context("install voice worker")?;
     }
     let replacement =
@@ -239,6 +239,19 @@ fn extract_voice_worker_binary(archive_name: &str, archive_bytes: &[u8]) -> Resu
         VOICE_WORKER_NAME,
         WINDOWS_VOICE_WORKER_NAME,
     )
+}
+
+/// Sidecar binaries are optional in release archives: a future release that
+/// retires the voice worker must not strand older updaters the way removing
+/// the bundled Anvil stranded mj <= 1.5.x. Only `mj` itself is mandatory.
+fn extract_optional_voice_worker(archive_name: &str, archive_bytes: &[u8]) -> Option<Vec<u8>> {
+    match extract_voice_worker_binary(archive_name, archive_bytes) {
+        Ok(worker) => Some(worker),
+        Err(e) => {
+            eprintln!("mj: skipping voice worker update: {e:#}");
+            None
+        }
+    }
 }
 
 fn extract_named_binary(
@@ -829,6 +842,31 @@ mod tests {
         .expect("extract voice worker");
 
         assert_eq!(binary, b"windows voice worker bytes");
+    }
+
+    #[test]
+    fn optional_voice_worker_extracts_when_bundled() {
+        let archive = make_tar_gz("brokk-mjolnir/mj-voice-worker", b"voice worker bytes");
+
+        let binary = extract_optional_voice_worker(
+            "brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
+            &archive,
+        )
+        .expect("bundled voice worker");
+
+        assert_eq!(binary, b"voice worker bytes");
+    }
+
+    #[test]
+    fn optional_voice_worker_tolerates_archives_without_one() {
+        let archive = make_tar_gz("brokk-mjolnir/mj", b"binary bytes");
+
+        let binary = extract_optional_voice_worker(
+            "brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
+            &archive,
+        );
+
+        assert!(binary.is_none());
     }
 
     #[cfg(unix)]
