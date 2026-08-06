@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
 
 OWNER="${MJOLNIR_GITHUB_OWNER:-BrokkAi}"
 INSTALL_DIR="${MJOLNIR_INSTALL_DIR:-${INSTALL_DIR:-$HOME/.local/bin}}"
@@ -26,7 +26,7 @@ die() {
 
 usage() {
   cat <<EOF
-Install the latest mjolnir and bifrost binaries.
+Install the latest Mjolnir binaries.
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash
@@ -36,7 +36,6 @@ Environment:
   MJOLNIR_INSTALL_DIR      Same as INSTALL_DIR, with higher precedence.
   MJOLNIR_GITHUB_OWNER     GitHub owner to download from. Defaults to BrokkAi.
   MJOLNIR_VERSION          Optional mjolnir tag to install, for example v0.3.4.
-  BIFROST_VERSION          Optional bifrost tag to install.
   GITHUB_TOKEN             Optional token for GitHub API rate limits.
   PROFILE                  Optional shell profile to update when INSTALL_DIR is not on PATH.
 EOF
@@ -516,17 +515,6 @@ install_from_asset() {
   esac
 }
 
-install_bifrost() {
-  local -a patterns=()
-
-  if [[ "$OS_FAMILY" == "macos" ]]; then
-    patterns+=("^bifrost-.*-universal-apple-darwin[.]tar[.]gz$")
-  fi
-  patterns+=("^bifrost-.*-${RUST_TARGET}[.]tar[.]gz$")
-
-  install_from_asset "bifrost" "bifrost" "bifrost" "${BIFROST_VERSION:-}" "" "${patterns[@]}"
-}
-
 install_mjolnir() {
   local -a patterns=()
 
@@ -563,7 +551,6 @@ main() {
   trap cleanup EXIT
 
   log "installing for ${OS_FAMILY}/${ARCH} into ${INSTALL_DIR} (script ${SCRIPT_VERSION})"
-  install_bifrost
   install_mjolnir
 
   ensure_install_dir_on_path

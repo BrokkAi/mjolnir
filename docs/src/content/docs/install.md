@@ -4,20 +4,27 @@ description: Install Mjolnir, connect Codex, and launch the recommended first se
 ---
 
 The recommended setup needs an authenticated Codex CLI and a launchable Codex
-ACP bridge. Codex use may incur cost. The first launch can also download an ACP
-bridge, registry metadata, model rankings, or voice assets. Review [Data and trust boundaries](/data-boundaries/) before using a
-private repository.
+ACP bridge. Codex use may incur cost. The first launch can also download a
+managed runtime, ACP bridge, Bifrost package, registry metadata, model rankings,
+or voice assets. Review [Data and trust boundaries](/data-boundaries/) before
+using a private repository.
 
 ## Choose an installation
 
 | Method | Platforms | Installs |
 | --- | --- | --- |
 | npm / npx | macOS universal; Linux x86-64 or ARM64 glibc; Windows x86-64; Android ARM64 | `mj` and, on desktop, `mj-voice-worker`; no first-run Mjolnir download |
-| Homebrew | macOS on Apple Silicon or Intel; Linux on x86-64 or ARM64 glibc | `mj` on `PATH`, with `mj-voice-worker` in the formula's `libexec`; not Bifrost |
-| Release installer | macOS/Linux on x86-64 or ARM64; Android ARM64 | `mj`, Bifrost, and on desktop `mj-voice-worker` |
-| crates.io | Platforms supported by the Rust crates | `mj` and whichever crates you name; it does not install Bifrost |
+| Homebrew | macOS on Apple Silicon or Intel; Linux on x86-64 or ARM64 glibc | `mj` on `PATH`, with `mj-voice-worker` in the formula's `libexec` |
+| Release installer | macOS/Linux on x86-64 or ARM64; Android ARM64 | `mj` and, on desktop, `mj-voice-worker` |
+| crates.io | Platforms supported by the Rust crates | `mj` and whichever crates you name |
 | Release archive | Linux, macOS, Windows, Android release targets | The binaries and legal files packaged for that target |
 | Build from source | Rust-supported development hosts | The workspace members you build |
+
+Discrete review runs Bifrost through `npx -y @brokkai/bifrost`. On Linux,
+macOS, and Windows, Mjolnir uses `npx` from `PATH` when available and otherwise
+installs an embedded Node.js 24 runtime automatically. Android users already
+need Node.js/npm for the built-in ACP bridges; the npm installation route
+provides that prerequisite by construction.
 
 ### npm and npx
 
@@ -46,8 +53,8 @@ npm uninstall -g @brokkai/mjolnir
 ```
 
 The npm route requires Node.js 18 or later. Use Homebrew, the release installer,
-Cargo, or a release archive if you do not want Node.js. npm does not install
-Bifrost; the release installer does.
+Cargo, or a release archive if you do not want Node.js as a system dependency;
+Mjolnir can manage its own Node.js runtime for `npx` commands.
 
 ### Homebrew
 
@@ -59,11 +66,7 @@ mj --version
 The formula in [BrokkAi/homebrew-tap](https://github.com/BrokkAi/homebrew-tap)
 installs the release archive for your platform and verifies its published
 SHA-256 checksum. `mj` lands on `PATH`; `mj-voice-worker` stays in the
-formula's `libexec` next to `mj`. Bifrost is packaged separately:
-
-```bash
-brew install brokkai/tap/bifrost
-```
+formula's `libexec` next to `mj`.
 
 Upgrade and uninstall through Homebrew:
 
@@ -82,15 +85,13 @@ curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh |
 ```
 
 The script installs into `~/.local/bin` by default and can offer to update a
-shell profile when that directory is not on `PATH`. It selects the latest
-Mjolnir and Bifrost releases separately.
+shell profile when that directory is not on `PATH`.
 
 Useful environment variables:
 
 ```bash
 MJOLNIR_INSTALL_DIR=/opt/bin \
 MJOLNIR_VERSION=v1.0.2 \
-BIFROST_VERSION=v0.8.5 \
 bash install.sh
 ```
 
@@ -111,8 +112,7 @@ cargo install --locked brokk-mjolnir brokk-mj-voice-worker
 ```
 
 Installing only `brokk-mjolnir` is supported but disables Ctrl-R dictation.
-Android users should omit the voice worker. The Cargo route does not install
-Bifrost.
+Android users should omit the voice worker.
 
 ### Build from source
 
@@ -149,9 +149,10 @@ Run `mj`. First launch opens Mjolnir's configuration screen:
 Return to the same settings later with `/mjconfig`.
 
 Existing Codex credentials can be detected without launching the ACP bridge
-during discovery. Launch still requires Node.js/npm, `npx`, and the
-PATH-visible `codex` CLI. Mjolnir uses that CLI for its Codex sign-in action as
-well.
+during discovery. Launch requires the PATH-visible `codex` CLI. For `npx` ACP
+bridges and Bifrost, Mjolnir uses a PATH-visible `npx` or, on Linux, macOS, and
+Windows, installs embedded Node.js 24 automatically. Mjolnir uses the `codex`
+CLI for its Codex sign-in action as well.
 
 Claude and custom ACP servers are optional. Configure them after
 the Codex path works if you want alternative primary, subagent, or review
@@ -178,7 +179,7 @@ Interactive startup checks GitHub for a newer Mjolnir release unless
 `MJOLNIR_NO_UPDATE_CHECK=1` or `--no-update-check` is set. The in-app updater
 requires the matching checksum asset.
 
-To uninstall a release-installer deployment, remove `mj`, `bifrost`, and
+To uninstall a release-installer deployment, remove `mj` and
 `mj-voice-worker` from the selected install directory. Review [Storage and
 network activity](/storage-network/) before removing configuration, sessions,
 managed agents, worktrees, or caches.

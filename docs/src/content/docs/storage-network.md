@@ -19,6 +19,7 @@ equivalents.
 | ACP probe cache | Adapter model/capability results, invalidated by age or binary change |
 | ACP registry cache | Public registry metadata used for installable agents |
 | Managed agents | Downloaded ACP registry agents |
+| Managed runners | Embedded Node.js and uv installations used for `npx` and `uvx` commands |
 | Voice cache | Speech-recognition model data downloaded on first dictation use |
 | Remote-control state | SQLite session/transcript data, login/cookie material, and certificates |
 | `.mjolnir/worktrees/` | Linked Git worktrees created inside a project |
@@ -34,7 +35,8 @@ a worktree does not delete remote or provider session records.
 | GitHub | Release installation and update checks |
 | DeepSWE/DataCurve | Model ranking refresh |
 | ACP registry CDN | Adapter catalog and supported binary downloads |
-| npm registry | `npx`-launched Codex and Claude ACP bridges |
+| npm registry | `npx`-launched ACP bridges and Bifrost discrete-review tooling |
+| Node.js / Astral | First-use installation of managed Node.js or uv runners |
 | Model providers | Active primary, subagent, and review sessions |
 | Voice model hosts | First-use speech model download |
 | Tailscale/Let's Encrypt | Optional trusted remote-server certificate issuance |

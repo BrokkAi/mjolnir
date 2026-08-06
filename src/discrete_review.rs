@@ -20,13 +20,14 @@
 //! finding.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::ffi::OsString;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{HttpHeader, McpServer, McpServerHttp, McpServerStdio};
+use agent_client_protocol::schema::v1::{
+    EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio,
+};
 use anyhow::{Context, anyhow};
 use axum::extract::{Request as HttpRequest, State};
 use axum::http::{StatusCode, header::AUTHORIZATION};
@@ -55,7 +56,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    acp::RuntimeAccessMode,
+    acp::{PreparedAgentCommand, RuntimeAccessMode},
     agent_usage::Seat,
     event::{InternalMessage, InternalMessageKind, PromptImage, SubagentOutcome, UiEvent},
     quota,
@@ -127,7 +128,7 @@ const SUPERVISOR_BIFROST_TOOLSET: &str = "core";
 /// analyzer is a token-heavy lead generator whose payoff is a specialist lane
 /// chasing it, which is exactly what this tier trades away.
 const QUICK_BIFROST_TOOLSET: &str = "core";
-const BIFROST_PATH_ENV: &str = "MJ_BIFROST_PATH";
+const BIFROST_NPX_PACKAGE: &str = "@brokkai/bifrost";
 
 /// Every analyzer the `slopcop` toolset exposes (bifrost 0.7.5). The lane
 /// roster is validated against this at test time so a typo cannot silently
@@ -381,7 +382,7 @@ struct CallReviewSubagentsArgs {
 struct ReviewDispatch {
     pool: ProgrammaticPool,
     shared_context: Arc<String>,
-    bifrost: PathBuf,
+    bifrost: BifrostCommand,
     repository_root: PathBuf,
     started: Arc<Mutex<HashMap<ReviewAgentId, u64>>>,
     launch_failures: Arc<Mutex<HashMap<ReviewAgentId, String>>>,
@@ -883,58 +884,75 @@ impl SupplementalContext {
     }
 }
 
-/// Locate the bifrost analyzer binary. `MJ_BIFROST_PATH` wins outright (an
-/// override that points at nothing disables analyzers rather than silently
-/// falling back to PATH, so the degradation is the one the operator asked
-/// for).
-pub(crate) fn detect_bifrost() -> Option<PathBuf> {
-    detect_bifrost_with_override(std::env::var_os(BIFROST_PATH_ENV))
+/// Managed npm launch shared by Bifrost's one-shot CLI and MCP server modes.
+/// Keeping both on the same package prevents an ambient binary from drifting.
+#[derive(Clone, Debug)]
+struct BifrostCommand {
+    command: PathBuf,
+    prefix_args: Vec<String>,
+    env: HashMap<String, String>,
 }
 
-fn detect_bifrost_with_override(override_path: Option<OsString>) -> Option<PathBuf> {
-    if let Some(path) = override_path {
-        let path = PathBuf::from(path);
-        return is_executable_file(&path).then_some(path);
+impl BifrostCommand {
+    async fn prepare(events: &UnboundedSender<UiEvent>) -> Result<Self, String> {
+        let prepared =
+            crate::acp::prepare_agent_command_for_spawn(Path::new("npx"), &HashMap::new(), events)
+                .await
+                .map_err(|error| format!("could not prepare npx for Bifrost: {error}"))?;
+        Ok(Self::from_prepared(prepared))
     }
-    let path_var = std::env::var_os("PATH")?;
-    let names: &[&str] = if cfg!(windows) {
-        &["bifrost.exe", "bifrost"]
-    } else {
-        &["bifrost"]
-    };
-    std::env::split_paths(&path_var).find_map(|dir| {
-        names
-            .iter()
-            .map(|name| dir.join(name))
-            .find(|candidate| is_executable_file(candidate))
-    })
-}
 
-fn is_executable_file(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
+    fn from_prepared(prepared: PreparedAgentCommand) -> Self {
+        Self {
+            command: prepared.command,
+            prefix_args: vec!["-y".to_string(), BIFROST_NPX_PACKAGE.to_string()],
+            env: prepared.env,
+        }
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
+
+    #[cfg(test)]
+    fn direct(command: PathBuf) -> Self {
+        Self {
+            command,
+            prefix_args: Vec::new(),
+            env: HashMap::new(),
+        }
     }
-    #[cfg(not(unix))]
-    {
-        true
+
+    fn process(&self) -> Command {
+        let mut command = Command::new(&self.command);
+        command.args(&self.prefix_args).envs(&self.env);
+        command
     }
 }
 
 /// One Bifrost MCP process rooted at the reviewed workspace and speaking MCP
 /// over stdio. Specialist lanes receive analyzers plus navigation; the
 /// supervisor receives the narrower core navigation surface.
-pub(crate) fn bifrost_mcp_server(name: &str, bin: &Path, root: &Path, toolset: &str) -> McpServer {
-    McpServer::Stdio(McpServerStdio::new(name, bin).args(vec![
+fn bifrost_mcp_server(
+    name: &str,
+    bifrost: &BifrostCommand,
+    root: &Path,
+    toolset: &str,
+) -> McpServer {
+    let mut args = bifrost.prefix_args.clone();
+    args.extend([
         "--root".to_string(),
         root.display().to_string(),
         "--mcp".to_string(),
         toolset.to_string(),
-    ]))
+    ]);
+    let mut env = bifrost
+        .env
+        .iter()
+        .map(|(name, value)| EnvVariable::new(name, value))
+        .collect::<Vec<_>>();
+    env.sort_by(|left, right| left.name.cmp(&right.name));
+    McpServer::Stdio(
+        McpServerStdio::new(name, &bifrost.command)
+            .args(args)
+            .env(env),
+    )
 }
 
 fn review_run_context(config: &FanoutConfig) -> RunContext {
@@ -1046,10 +1064,9 @@ async fn run_async(
         Ok(diff) => diff,
         Err(reason) => return ReviewVerdict::Failed { reason },
     };
-    let Some(bifrost) = detect_bifrost() else {
-        return ReviewVerdict::Failed {
-            reason: "bifrost is unavailable, so the supervisor cannot receive its required core MCP tools".to_string(),
-        };
+    let bifrost = match BifrostCommand::prepare(events).await {
+        Ok(bifrost) => bifrost,
+        Err(reason) => return ReviewVerdict::Failed { reason },
     };
 
     let mut focus_analysis_task = {
@@ -1457,7 +1474,7 @@ struct QuickReview<'a> {
     job: &'a ReviewJob,
     events: &'a UnboundedSender<UiEvent>,
     cancel: &'a CancellationToken,
-    bifrost: &'a Path,
+    bifrost: &'a BifrostCommand,
     repository_root: &'a Path,
     changed_functions: &'a SupplementalContext,
     diffstat: &'a str,
@@ -2478,12 +2495,12 @@ fn same_snapshot_endpoints(left: &ReviewSnapshot, right: &ReviewSnapshot) -> boo
 }
 
 async fn analyze_diff_at_root(
-    bifrost: &Path,
+    bifrost: &BifrostCommand,
     snapshot: &ReviewSnapshot,
 ) -> Result<AnalyzeDiffResult, String> {
     tracing::info!(
         event = "review_analyze_diff_started",
-        bifrost = %bifrost.display(),
+        bifrost = %bifrost.command.display(),
         root = %snapshot.repo_root().display(),
         base_tree = snapshot.base_tree(),
         target_tree = snapshot.target_tree(),
@@ -2494,7 +2511,7 @@ async fn analyze_diff_at_root(
         "target": snapshot.target_tree(),
     })
     .to_string();
-    let mut command = Command::new(bifrost);
+    let mut command = bifrost.process();
     command
         .current_dir(snapshot.repo_root())
         .kill_on_drop(true)
@@ -3260,7 +3277,7 @@ mod tests {
         let dispatch = ReviewDispatch {
             pool: pool.clone(),
             shared_context: Arc::new("review context".to_string()),
-            bifrost: std::env::current_exe().expect("current executable"),
+            bifrost: BifrostCommand::direct(std::env::current_exe().expect("current executable")),
             repository_root: root,
             started: Arc::new(Mutex::new(HashMap::new())),
             launch_failures: Arc::new(Mutex::new(HashMap::new())),
@@ -3358,7 +3375,7 @@ mod tests {
         let dispatch = ReviewDispatch {
             pool: pool.clone(),
             shared_context: Arc::new("review context".to_string()),
-            bifrost: std::env::current_exe().expect("current executable"),
+            bifrost: BifrostCommand::direct(std::env::current_exe().expect("current executable")),
             repository_root: root,
             started: Arc::new(Mutex::new(HashMap::new())),
             launch_failures: Arc::new(Mutex::new(HashMap::new())),
@@ -3408,7 +3425,7 @@ mod tests {
         let drop_server = ReviewHttpServer::start(ReviewDispatch {
             pool: pool.clone(),
             shared_context: Arc::new("review context".to_string()),
-            bifrost: std::env::current_exe().expect("current executable"),
+            bifrost: BifrostCommand::direct(std::env::current_exe().expect("current executable")),
             repository_root: repository.path().to_path_buf(),
             started: Arc::new(Mutex::new(HashMap::new())),
             launch_failures: Arc::new(Mutex::new(HashMap::new())),
@@ -4324,7 +4341,7 @@ mod tests {
         let executable = temp.path().join("fake-bifrost");
         let invocation = temp.path().join("invocation.txt");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf '%s\\n' '{}'\n",
+            "#!/bin/sh\nprintf 'managed=%s\\nargs=%s\\n' \"$MJ_TEST_MANAGED_NODE\" \"$*\" > '{}'\nprintf '%s\\n' '{}'\n",
             invocation.display(),
             r#"{"structuredContent":{"file_changes":[{"path":"src/work.rs","status":"modified","insertions":3,"deletions":1,"is_binary":false,"is_test":false,"is_parseable":true}],"patch_symbols":{"edited":[],"introduced":[{"after":{"fqn":"work","name":"work","kind":"Function","signature":"fn work()","path":"src/work.rs","start_line":1,"end_line":3,"change_reason":"introduced"},"touched_new_lines":[1,2,3]}],"deleted":[],"moved":[],"signature_changes":[]}},"isError":false}"#
         );
@@ -4341,12 +4358,18 @@ mod tests {
             "target-tree",
             "diff",
         );
-        let output = analyze_diff_at_root(&executable, &snapshot)
+        let bifrost = BifrostCommand::from_prepared(PreparedAgentCommand {
+            command: executable,
+            env: HashMap::from([("MJ_TEST_MANAGED_NODE".to_string(), "enabled".to_string())]),
+        });
+        let output = analyze_diff_at_root(&bifrost, &snapshot)
             .await
             .expect("analyze diff");
         assert_eq!(output.changed_line_count(), 4);
         assert!(format_changed_functions(&output).contains("introduced: src/work.rs:1-3"));
         let args = std::fs::read_to_string(invocation).expect("read invocation");
+        assert!(args.contains("managed=enabled"));
+        assert!(args.contains(&format!("-y {BIFROST_NPX_PACKAGE}")));
         assert!(args.contains("--tool analyze_diff"));
         assert!(args.contains("--root"));
         assert!(args.contains("--args"));
@@ -4364,11 +4387,15 @@ mod tests {
             "target-tree",
             "diff",
         );
-        let error =
-            match analyze_diff_at_root(&temp.path().join("missing-bifrost"), &snapshot).await {
-                Err(error) => error,
-                Ok(_) => panic!("missing executable must fail"),
-            };
+        let error = match analyze_diff_at_root(
+            &BifrostCommand::direct(temp.path().join("missing-bifrost")),
+            &snapshot,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("missing executable must fail"),
+        };
         assert!(error.contains("could not launch bifrost"));
     }
 
@@ -4398,7 +4425,7 @@ mod tests {
             "failed-bifrost",
             "#!/bin/sh\nprintf 'analysis rejected' >&2\nexit 9\n",
         );
-        let error = match analyze_diff_at_root(&failed, &snapshot).await {
+        let error = match analyze_diff_at_root(&BifrostCommand::direct(failed), &snapshot).await {
             Err(error) => error,
             Ok(_) => panic!("nonzero exit must fail"),
         };
@@ -4406,7 +4433,7 @@ mod tests {
         assert!(error.contains("analysis rejected"));
 
         let invalid = write_executable("invalid-bifrost", "#!/bin/sh\nprintf 'not json\\n'\n");
-        let error = match analyze_diff_at_root(&invalid, &snapshot).await {
+        let error = match analyze_diff_at_root(&BifrostCommand::direct(invalid), &snapshot).await {
             Err(error) => error,
             Ok(_) => panic!("invalid JSON must fail"),
         };
@@ -4866,42 +4893,6 @@ mod tests {
         assert_eq!(bound_review_section("short", 128, "diff"), "short");
     }
 
-    /// Exercises the override seam directly rather than mutating the process
-    /// environment: `std::env::set_var` is unsound under a multi-threaded
-    /// test harness in edition 2024, and `detect_bifrost` is a one-line
-    /// wrapper over this function.
-    #[test]
-    fn detect_bifrost_honors_env_override() {
-        let existing = std::env::current_exe().expect("test binary path");
-        assert_eq!(
-            detect_bifrost_with_override(Some(existing.clone().into_os_string())),
-            Some(existing)
-        );
-        assert_eq!(
-            detect_bifrost_with_override(Some(OsString::from("/nonexistent/mjolnir-test/bifrost"))),
-            None,
-            "an override that points at nothing must disable analyzers, not fall back to PATH"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn executable_detection_rejects_directories_and_non_executable_files() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        assert!(!is_executable_file(temp.path()));
-        let file = temp.path().join("bifrost");
-        std::fs::write(&file, "binary").expect("write candidate");
-        assert!(!is_executable_file(&file));
-        let mut permissions = std::fs::metadata(&file)
-            .expect("candidate metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&file, permissions).expect("make executable");
-        assert!(is_executable_file(&file));
-    }
-
     #[test]
     fn review_run_context_is_always_read_only_and_preserves_roots() {
         let mut config = test_fanout(PathBuf::from("/repo"));
@@ -4920,25 +4911,40 @@ mod tests {
     }
 
     #[test]
-    fn bifrost_mcp_server_targets_the_reviewed_root() {
+    fn bifrost_mcp_server_uses_managed_npx_and_targets_the_reviewed_root() {
+        let bifrost = BifrostCommand::from_prepared(PreparedAgentCommand {
+            command: PathBuf::from("/usr/bin/npx"),
+            env: HashMap::from([("PATH".to_string(), "/managed/node/bin:/usr/bin".to_string())]),
+        });
         let McpServer::Stdio(server) = bifrost_mcp_server(
             "bifrost",
-            Path::new("/usr/bin/bifrost"),
+            &bifrost,
             Path::new("/repo"),
             SUPERVISOR_BIFROST_TOOLSET,
         ) else {
             panic!("bifrost must be attached over stdio");
         };
         assert_eq!(server.name, "bifrost");
-        assert_eq!(server.command, PathBuf::from("/usr/bin/bifrost"));
+        assert_eq!(server.command, PathBuf::from("/usr/bin/npx"));
         assert_eq!(
             server.args,
-            vec!["--root", "/repo", "--mcp", SUPERVISOR_BIFROST_TOOLSET]
+            vec![
+                "-y",
+                BIFROST_NPX_PACKAGE,
+                "--root",
+                "/repo",
+                "--mcp",
+                SUPERVISOR_BIFROST_TOOLSET,
+            ]
+        );
+        assert_eq!(
+            server.env,
+            vec![EnvVariable::new("PATH", "/managed/node/bin:/usr/bin")]
         );
 
         let McpServer::Stdio(lane) = bifrost_mcp_server(
             "bifrost",
-            Path::new("/usr/bin/bifrost"),
+            &bifrost,
             Path::new("/repo"),
             LANE_BIFROST_TOOLSET,
         ) else {
@@ -4946,7 +4952,14 @@ mod tests {
         };
         assert_eq!(
             lane.args,
-            vec!["--root", "/repo", "--mcp", LANE_BIFROST_TOOLSET]
+            vec![
+                "-y",
+                BIFROST_NPX_PACKAGE,
+                "--root",
+                "/repo",
+                "--mcp",
+                LANE_BIFROST_TOOLSET,
+            ]
         );
     }
 }

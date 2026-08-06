@@ -84,9 +84,7 @@ brew install brokkai/tap/mjolnir
 ```
 
 The formula puts `mj` on `PATH` and keeps `mj-voice-worker` in its private
-`libexec`; it does not install Bifrost, which has its own
-formula in the same tap (`brew install brokkai/tap/bifrost`). Upgrade with
-`brew upgrade mjolnir`.
+`libexec`. Upgrade with `brew upgrade mjolnir`.
 
 The release installer supports macOS and Linux on x86-64 or ARM64, plus Android ARM64:
 
@@ -94,8 +92,13 @@ The release installer supports macOS and Linux on x86-64 or ARM64, plus Android 
 curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash
 ```
 
-It installs `mj` and Bifrost; desktop installs also include
-`mj-voice-worker`. Windows users should use a release archive or Cargo.
+It installs `mj`; desktop installs also include `mj-voice-worker`. Windows
+users should use a release archive or Cargo.
+
+Discrete review runs Bifrost through `npx -y @brokkai/bifrost`. On Linux,
+macOS, and Windows, Mjolnir uses `npx` from `PATH` when available and otherwise
+installs an embedded Node.js 24 runtime automatically. Android users already
+need Node.js/npm for Mjolnir's built-in ACP bridges.
 
 Desktop users can install Mjolnir and its optional voice worker from crates.io:
 

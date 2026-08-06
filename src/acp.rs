@@ -598,7 +598,7 @@ impl std::fmt::Display for LaunchError {
             ),
             LaunchError::NodeInstallFailed { source } => write!(
                 f,
-                "npx is required for this agent, but mj could not install embedded Node 24 automatically: {source}\n\
+                "npx is required, but mj could not install embedded Node 24 automatically: {source}\n\
                  hint: install Node.js 24 from https://nodejs.org/en/download and relaunch mj"
             ),
         }
@@ -1505,7 +1505,7 @@ async fn prepare_npx_command(
     }
 
     let _ = ui_tx.send(UiEvent::Info(
-        "npx not found; installing embedded Node 24 for npx-based agents".to_string(),
+        "npx not found; installing embedded Node 24 for npx-based commands".to_string(),
     ));
     install_node24().await?;
     let Some(npx_path) = embedded_npx_path() else {
@@ -1517,7 +1517,7 @@ async fn prepare_npx_command(
         });
     };
     let _ = ui_tx.send(UiEvent::Info(
-        "embedded Node 24 installed; launching agent".to_string(),
+        "embedded Node 24 installed; launching command".to_string(),
     ));
     Ok(PreparedAgentCommand {
         command: npx_path,
