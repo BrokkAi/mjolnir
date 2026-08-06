@@ -844,6 +844,42 @@ async fn create_new_session(
     }
 }
 
+async fn create_initial_session_with_retry(
+    conn: &ConnectionTo<Agent>,
+    cwd: PathBuf,
+    additional_directories: &[PathBuf],
+    mcp_servers: &[McpServer],
+    native_read_only: Option<NativeReadOnlyPolicy>,
+    auth_methods: &[AuthMethod],
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) -> std::result::Result<NewSessionResponse, LaunchError> {
+    let first_attempt = create_new_session(
+        conn,
+        cwd.clone(),
+        additional_directories,
+        mcp_servers,
+        native_read_only,
+        auth_methods,
+    )
+    .await;
+    let Err(first_error @ LaunchError::SessionCreateFailed { .. }) = first_attempt else {
+        return first_attempt;
+    };
+
+    let _ = ui_tx.send(UiEvent::Warning(format!(
+        "session/new failed; retrying once on the existing agent connection: {first_error}"
+    )));
+    create_new_session(
+        conn,
+        cwd,
+        additional_directories,
+        mcp_servers,
+        native_read_only,
+        auth_methods,
+    )
+    .await
+}
+
 fn resume_session_request(
     session_id: SessionId,
     cwd: PathBuf,
@@ -2218,13 +2254,14 @@ async fn drive_session(
             };
             (session_id, initial_config, true)
         }
-        None => match create_new_session(
+        None => match create_initial_session_with_retry(
             &conn,
             cwd.clone(),
             &additional_directories,
             &mcp_servers,
             native_read_only,
             &init_resp.auth_methods,
+            ui_tx,
         )
         .await
         {
@@ -8506,6 +8543,49 @@ mod tests {
             .await;
     }
 
+    async fn run_mock_agent_session_new_failure(
+        stream: tokio::io::DuplexStream,
+        attempts: Arc<AtomicUsize>,
+        succeed_on_second_attempt: bool,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let session_attempts = attempts.clone();
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(InitializeResponse::new(ProtocolVersion::V1))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: NewSessionRequest, responder, _cx| {
+                    let attempt = session_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    if succeed_on_second_attempt && attempt == 2 {
+                        responder
+                            .respond(NewSessionResponse::new(SessionId::new("retried-session")))
+                    } else {
+                        responder.respond_with_error(
+                            agent_client_protocol::Error::internal_error().data(
+                                serde_json::json!({
+                                    "details": "spawn Unknown system error -88"
+                                }),
+                            ),
+                        )
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
     async fn run_mock_agent_auth_required_then_authenticates(stream: tokio::io::DuplexStream) {
         let authenticated = Arc::new(StdAtomicBool::new(false));
         let new_session_attempts = Arc::new(AtomicUsize::new(0));
@@ -11832,6 +11912,111 @@ mod tests {
         wait_for_session_started(&mut ui_rx, "selected-session").await;
         assert!(resume_seen.load(Ordering::SeqCst));
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_client_retries_initial_session_new_on_the_existing_connection() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let agent_task = tokio::spawn(run_mock_agent_session_new_failure(
+            agent_side,
+            attempts.clone(),
+            true,
+        ));
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let fatal_emitted = Arc::new(AtomicBool::new(false));
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            fatal_emitted.clone(),
+        ));
+
+        let mut retry_warning = None;
+        let mut started = None;
+        for _ in 0..8 {
+            let event = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for retried session")
+                .expect("event channel closed");
+            match event {
+                UiEvent::Warning(message) => retry_warning = Some(message),
+                UiEvent::SessionStarted { session_id, .. } => {
+                    started = Some(session_id);
+                    break;
+                }
+                UiEvent::Fatal(message) => panic!("retry emitted a fatal error: {message}"),
+                _ => {}
+            }
+        }
+
+        let warning = retry_warning.expect("missing in-place retry warning");
+        assert!(warning.contains("retrying once"), "{warning}");
+        assert!(warning.contains("existing agent connection"), "{warning}");
+        assert_eq!(started.as_deref(), Some("retried-session"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(!fatal_emitted.load(Ordering::SeqCst));
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_client_stops_after_one_initial_session_new_retry() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let agent_task = tokio::spawn(run_mock_agent_session_new_failure(
+            agent_side,
+            attempts.clone(),
+            false,
+        ));
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let fatal_emitted = Arc::new(AtomicBool::new(false));
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            fatal_emitted.clone(),
+        ));
+
+        let mut saw_retry_warning = false;
+        let mut fatal = None;
+        for _ in 0..8 {
+            let event = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+                .await
+                .expect("timeout waiting for bounded retry failure")
+                .expect("event channel closed");
+            match event {
+                UiEvent::Warning(message) if message.contains("retrying once") => {
+                    saw_retry_warning = true;
+                }
+                UiEvent::Fatal(message) => {
+                    fatal = Some(message);
+                    break;
+                }
+                UiEvent::SessionStarted { .. } => panic!("persistent failure started a session"),
+                _ => {}
+            }
+        }
+
+        assert!(saw_retry_warning);
+        assert!(fatal.is_some(), "missing fatal after bounded retry");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(fatal_emitted.load(Ordering::SeqCst));
+
         let _ = tokio::time::timeout(Duration::from_secs(2), client_task).await;
         agent_task.abort();
     }
