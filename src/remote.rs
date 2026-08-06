@@ -4171,7 +4171,9 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
     // must survive the host idling even when no turn is in flight. Released
     // when this guard drops on any return path below.
     let _keep_awake = crate::keep_awake::KeepAwake::hold(cfg.keep_awake);
-    let resolved = roster::resolve(&cfg, &cwd).await?;
+    let resolution = roster::resolve_streaming(&cfg, &cwd).await?;
+    let resolved = resolution.roster;
+    let roster_updates = resolution.updates;
 
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
     let tailscale_tls = if tailscale {
@@ -4199,6 +4201,17 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
         Some(models_config_from_roster(&resolved)),
         resolved.inventory.clone(),
     ));
+    if let Some(mut updates) = roster_updates {
+        mjconfig.probing.store(true, Ordering::Relaxed);
+        let mjconfig_updates = Arc::clone(&mjconfig);
+        tokio::spawn(async move {
+            while updates.changed().await.is_ok() {
+                let snapshot = updates.borrow_and_update().clone();
+                mjconfig_updates.update_discovery(&snapshot);
+            }
+            mjconfig_updates.probing.store(false, Ordering::Relaxed);
+        });
+    }
     let session_manager = Arc::new(ServerSessionManager::new_roster(
         resolved,
         config_file_hash(&config_path),
@@ -5474,6 +5487,7 @@ struct MjConfigRuntime {
     /// agent-advertised session options; rebuilding inventory from config
     /// alone would lose them (`discover_inventory` starts them empty).
     inventory: Mutex<roster::AcpInventory>,
+    probing: AtomicBool,
     login: Mutex<Option<MjLoginJob>>,
     install: Mutex<Option<MjInstallJob>>,
     registry: tokio::sync::Mutex<Option<crate::registry::Registry>>,
@@ -5491,6 +5505,7 @@ impl MjConfigRuntime {
             choices: Mutex::new(choices),
             active_models: Mutex::new(active_models),
             inventory: Mutex::new(inventory),
+            probing: AtomicBool::new(false),
             login: Mutex::new(None),
             install: Mutex::new(None),
             registry: tokio::sync::Mutex::new(None),
@@ -5503,6 +5518,14 @@ impl MjConfigRuntime {
         *self.choices.lock().expect("mjconfig choices lock") = roster.choices.clone();
         *self.active_models.lock().expect("mjconfig models lock") =
             Some(models_config_from_roster(roster));
+        *self.inventory.lock().expect("mjconfig inventory lock") = roster.inventory.clone();
+    }
+
+    /// Apply a background probe snapshot without rebinding the seats that the
+    /// running server session already owns. This is the same distinction the
+    /// TUI makes for `UiEvent::RosterUpdate`.
+    fn update_discovery(&self, roster: &roster::Roster) {
+        *self.choices.lock().expect("mjconfig choices lock") = roster.choices.clone();
         *self.inventory.lock().expect("mjconfig inventory lock") = roster.inventory.clone();
     }
 }
@@ -5548,6 +5571,9 @@ struct MjConfigSnapshot {
     appearance: MjAppearancePanel,
     login: Option<MjLoginStatus>,
     install: Option<MjInstallStatus>,
+    /// True while adapters are still being probed for model and session-option
+    /// capabilities. The browser polls until the final inventory is available.
+    probing: bool,
     /// One-shot message produced while folding finished background jobs into
     /// the config (e.g. "installed X" or an install failure).
     notice: Option<String>,
@@ -6137,6 +6163,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         appearance,
         login: mjconfig_login_status(state),
         install: mjconfig_install_status(state),
+        probing: state.mjconfig.probing.load(Ordering::Relaxed),
         notice: notice.or(install_notice),
     }
 }
@@ -9759,6 +9786,23 @@ mod tests {
         );
         assert!(snapshot["login"].is_null());
         assert!(snapshot["install"].is_null());
+        assert_eq!(snapshot["probing"], false);
+    }
+
+    #[tokio::test]
+    async fn mjconfig_snapshot_reports_background_acp_discovery() {
+        let runtime = test_mjconfig_runtime();
+        runtime.probing.store(true, Ordering::Relaxed);
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+
+        let response = app
+            .oneshot(mjconfig_request("GET", Some(token), None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = json_body(response).await;
+        assert_eq!(snapshot["probing"], true);
     }
 
     #[tokio::test]
@@ -10246,6 +10290,8 @@ mod tests {
         assert!(viewer.contains("is unavailable on ${group.server_id}"));
         assert!(viewer.contains("edits.primary_session_defaults[activeSource]"));
         assert!(!viewer.contains("Object.values(edits.primary_session_defaults)"));
+        assert!(viewer.contains("snapshot.probing"));
+        assert!(viewer.contains("Discovering ACP session options"));
         assert!(viewer.contains("openMjConfig(\"agents\")"));
     }
 
