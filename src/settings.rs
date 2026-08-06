@@ -1556,24 +1556,36 @@ fn session_options_heading(
     )
 }
 
-fn model_line(
+fn model_lines(
     selected: bool,
     label: &str,
     model: &str,
     role: usize,
     editor: &SettingsEditor,
     theme: TerminalTheme,
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
+    let warning = editor.staged_model_warning(model);
     let active = editor
         .active_model(role)
         .filter(|active| *active != model)
         .map(|_| format!("active: {}", editor.active_model_detail(role)));
-    selected_line_with_detail(
+    let (detail, trailing_active) = match (warning, active) {
+        (Some(warning), Some(active)) => (Some(warning), Some(active)),
+        (warning, active) => (warning.or(active), None),
+    };
+    let mut lines = vec![selected_line_with_detail(
         selected,
         format!("{label} < {model} >"),
-        editor.staged_model_warning(model).or(active),
+        detail,
         theme,
-    )
+    )];
+    if let Some(active) = trailing_active {
+        lines.push(Line::styled(
+            format!("  {active}"),
+            Style::default().ink(theme.muted),
+        ));
+    }
+    lines
 }
 
 fn draw_agents(
@@ -1601,7 +1613,7 @@ fn draw_agents(
         match row {
             SettingsRow::PrimaryModel => {
                 let model = &editor.config.agent.model;
-                lines.push(model_line(
+                lines.extend(model_lines(
                     selected,
                     "Primary model",
                     model,
@@ -1677,7 +1689,7 @@ fn draw_reviewer(
         match row {
             SettingsRow::ReviewModel => {
                 let model = &editor.config.review.model;
-                lines.push(model_line(
+                lines.extend(model_lines(
                     selected,
                     "Review model",
                     model,
@@ -1775,7 +1787,7 @@ fn draw_subagents(
         match row {
             SettingsRow::SubagentModel => {
                 let model = &editor.config.subagents.model;
-                lines.push(model_line(
+                lines.extend(model_lines(
                     selected,
                     "Subagent model",
                     model,
@@ -3174,6 +3186,7 @@ mod tests {
             ),
         ];
         editor.config.review.acp_source = Some(server_id.clone());
+        editor.config.review.model = "missing-review-model".to_string();
         editor.active_models = Some(ModelsConfig {
             review: "active-review-model".to_string(),
             review_source: Some(server_id),
@@ -3194,6 +3207,10 @@ mod tests {
         );
         assert!(
             reviewer.contains("active: active-review-model via"),
+            "rendered:\n{reviewer}"
+        );
+        assert!(
+            reviewer.contains("not reported this session"),
             "rendered:\n{reviewer}"
         );
         for noise in [
