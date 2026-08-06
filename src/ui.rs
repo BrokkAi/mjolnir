@@ -8640,14 +8640,10 @@ fn render_transcript_entry_range_with_turns(
         }
         match entry {
             Entry::UserPrompt(text) => {
+                // The user's own words are as durable as the answers they
+                // produce: never abbreviate them behind a collapse hint.
                 push_role_plain_message(
-                    &mut out,
-                    USER_GLYPH,
-                    theme.user,
-                    text,
-                    collapse_message,
-                    width,
-                    theme,
+                    &mut out, USER_GLYPH, theme.user, text, false, width, theme,
                 );
                 if let Some(turn) = compact_turn {
                     push_turn_header(&mut out, turn.elapsed, theme);
@@ -22258,7 +22254,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_agent_answers_never_collapse() {
+    fn stable_prompts_and_agent_answers_never_collapse() {
         let mut state = AppState::new();
         let long = (1..=7)
             .map(|line| format!("line {line}"))
@@ -22280,16 +22276,16 @@ mod tests {
                 .iter()
                 .filter(|line| line.trim().starts_with("… details hidden · Ctrl-T"))
                 .count(),
-            2,
-            "rendered: {rendered:?}"
+            1,
+            "only the system message may collapse: {rendered:?}"
         );
         assert_eq!(
             rendered
                 .iter()
                 .filter(|line| line.trim() == "line 7")
                 .count(),
-            2,
-            "primary and subagent answer tails must remain visible: {rendered:?}"
+            3,
+            "user prompt, primary, and subagent answer tails must remain visible: {rendered:?}"
         );
     }
 
