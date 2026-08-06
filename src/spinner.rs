@@ -98,15 +98,18 @@ pub enum SpinnerStyle {
     Shimmer,
     /// A lit sphere rotates in place, carrying its dark side into view.
     Globe,
+    /// A lit head sweeps to one wall and back, trailing a fading tail.
+    Scan,
 }
 
 impl SpinnerStyle {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Pulse,
         Self::Wave,
         Self::Bars,
         Self::Shimmer,
         Self::Globe,
+        Self::Scan,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -116,6 +119,7 @@ impl SpinnerStyle {
             Self::Bars => "bars",
             Self::Shimmer => "shimmer",
             Self::Globe => "globe",
+            Self::Scan => "scan",
         }
     }
 
@@ -169,6 +173,10 @@ impl SpinnerStyle {
             // filled half is the lit half, so this tracks GLOBE_PHASES' sweep:
             // dark → lit on the right → full → lit on the left.
             Self::Globe => &["○", "◑", "●", "◐"],
+            // One column can't sweep sideways, so the compact slot keeps the
+            // style's identity — a light bouncing between two walls — by
+            // ping-ponging a braille dot vertically instead.
+            Self::Scan => &["⠁", "⠂", "⠄", "⡀", "⠄", "⠂"],
         }
     }
 }
@@ -197,6 +205,7 @@ impl FromStr for SpinnerStyle {
             "bars" => Ok(Self::Bars),
             "shimmer" => Ok(Self::Shimmer),
             "globe" => Ok(Self::Globe),
+            "scan" => Ok(Self::Scan),
             _ => Err(format!(
                 "unknown spinner {value:?}; expected one of: {}",
                 Self::ALL
@@ -221,6 +230,7 @@ fn frame_set_for(style: SpinnerStyle) -> FrameSet {
         SpinnerStyle::Bars => build_bars(),
         SpinnerStyle::Shimmer => build_shimmer(),
         SpinnerStyle::Globe => build_globe(),
+        SpinnerStyle::Scan => build_scan(),
     }
 }
 
@@ -228,7 +238,7 @@ fn frame_set_for(style: SpinnerStyle) -> FrameSet {
 /// by mapping over [`SpinnerStyle::ALL`], so `FRAME_SETS[style.index()]` is
 /// always `style`'s frames — the array length and the exhaustive match in
 /// `frame_set_for` force this to stay correct when a variant is added.
-static FRAME_SETS: LazyLock<[FrameSet; 5]> = LazyLock::new(|| SpinnerStyle::ALL.map(frame_set_for));
+static FRAME_SETS: LazyLock<[FrameSet; 6]> = LazyLock::new(|| SpinnerStyle::ALL.map(frame_set_for));
 
 /// Assemble one frame from its `(glyph, ink)` cells, checking the width
 /// contract at the single point where every style's frames are born.
@@ -404,6 +414,51 @@ fn build_globe() -> FrameSet {
     }
 }
 
+/// Head positions for one full bounce of the scan light. The head moves two
+/// cells per frame so a round trip fits the calm loop budget, and the return
+/// leg visits the cells the outbound leg skipped, so the light touches both
+/// walls and every column over a cycle.
+fn scan_heads() -> Vec<i64> {
+    let w = SPINNER_WIDTH as i64;
+    let mut heads: Vec<i64> = (0..w).step_by(2).collect();
+    let back: Vec<i64> = (1..w).step_by(2).collect();
+    heads.extend(back.into_iter().rev());
+    heads
+}
+
+/// A lit head sweeps to one wall, reverses, and sweeps back, dragging a short
+/// fading tail. The tail always trails the direction of travel — it swaps
+/// sides on the frame after each bounce — which is what makes the light read
+/// as bouncing between the walls rather than wrapping around like `Pulse`.
+/// Unlit cells keep the idle rule, so the light runs along the resting rail.
+fn build_scan() -> FrameSet {
+    let heads = scan_heads();
+    let count = heads.len();
+    let animated = (0..count)
+        .map(|i| {
+            let head = heads[i];
+            let prev = heads[(i + count - 1) % count];
+            let dir = if head >= prev { 1 } else { -1 };
+            row((0..SPINNER_WIDTH as i64)
+                .map(|x| {
+                    // Signed distance behind the head; cells ahead go negative
+                    // and fall through to the rail.
+                    match (head - x) * dir {
+                        0 => ('●', SpinnerInk::Vivid),
+                        1 => ('•', SpinnerInk::Bright),
+                        2 => ('∙', SpinnerInk::Cool),
+                        _ => (IDLE_GLYPH, SpinnerInk::Faint),
+                    }
+                })
+                .collect())
+        })
+        .collect();
+    FrameSet {
+        animated,
+        idle: idle_row(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,6 +573,63 @@ mod tests {
                 && SpinnerStyle::Globe.compact_frames().contains(&"●"),
             "compact globe never reaches both extremes"
         );
+    }
+
+    #[test]
+    fn scan_bounces_off_both_walls_without_wrapping() {
+        let frames = SpinnerStyle::Scan.frames();
+        let heads: Vec<usize> = frames
+            .iter()
+            .map(|frame| {
+                let mut heads = frame.text().chars().enumerate().filter(|(_, c)| *c == '●');
+                let (x, _) = heads.next().expect("each frame has a head");
+                assert!(heads.next().is_none(), "{frame:?} has more than one head");
+                x
+            })
+            .collect();
+        // The light must actually reach both walls before turning around…
+        assert!(heads.contains(&0), "scan never reaches the left wall");
+        assert!(
+            heads.contains(&(SPINNER_WIDTH - 1)),
+            "scan never reaches the right wall"
+        );
+        // …and travel there smoothly: a wrap like Pulse's would show up as a
+        // near-full-width jump between consecutive frames.
+        for (i, head) in heads.iter().enumerate() {
+            let next = heads[(i + 1) % heads.len()];
+            assert!(
+                head.abs_diff(next) <= 2,
+                "scan head jumps from {head} to {next}"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_tail_trails_the_head_and_rides_the_idle_rail() {
+        for frame in SpinnerStyle::Scan.frames() {
+            let cells: Vec<char> = frame.text().chars().collect();
+            let head = cells.iter().position(|c| *c == '●').expect("head");
+            let tail: Vec<usize> = cells
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c == '•' || **c == '∙')
+                .map(|(x, _)| x)
+                .collect();
+            // The comet is contiguous and entirely on one side of the head,
+            // so the tail reads as dragged behind rather than haloing it.
+            assert!(
+                tail.iter().all(|x| x.abs_diff(head) <= 2)
+                    && (tail.iter().all(|x| *x < head) || tail.iter().all(|x| *x > head)),
+                "{frame:?} tail {tail:?} should trail one side of head {head}"
+            );
+            assert!(
+                cells
+                    .iter()
+                    .filter(|c| !['●', '•', '∙'].contains(c))
+                    .all(|c| *c == IDLE_GLYPH),
+                "{frame:?} unlit cells should keep the idle rule"
+            );
+        }
     }
 
     #[test]
