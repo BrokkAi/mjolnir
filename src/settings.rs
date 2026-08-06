@@ -266,7 +266,7 @@ impl SettingsEditor {
             SettingsTab::Agents | SettingsTab::Subagents => self.settings_rows(self.tab).len(),
             SettingsTab::AcpPriority => 3,
             SettingsTab::AcpServers => self.inventory.servers.len() + SERVER_ROW_OFFSET,
-            SettingsTab::Appearance => 3,
+            SettingsTab::Appearance => 4,
         }
     }
 
@@ -361,6 +361,9 @@ impl SettingsEditor {
             }
             SettingsTab::Appearance if self.selected == 2 => {
                 self.config.feature_hints = !self.config.feature_hints;
+            }
+            SettingsTab::Appearance if self.selected == 3 => {
+                self.config.keep_awake = !self.config.keep_awake;
             }
             _ => return SettingsAction::None,
         }
@@ -2075,6 +2078,18 @@ fn draw_appearance(
             ),
             theme,
         ),
+        selected_line(
+            editor.selected == 3,
+            format!(
+                "Keep awake  < {} >",
+                if editor.config.keep_awake { "on" } else { "off" }
+            ),
+            theme,
+        ),
+        Line::styled(
+            "            Prevent system sleep while the server runs or a turn is in flight.",
+            Style::default().ink(theme.muted),
+        ),
     ];
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -2806,6 +2821,18 @@ mod tests {
     }
 
     #[test]
+    fn appearance_tab_toggles_keep_awake() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Appearance;
+        editor.selected = 3;
+
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert!(!editor.config.keep_awake);
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert!(editor.config.keep_awake);
+    }
+
+    #[test]
     fn standard_tabs_render_their_saved_controls() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
@@ -2841,6 +2868,10 @@ mod tests {
         assert!(appearance.contains("Spinner"), "rendered:\n{appearance}");
         assert!(
             appearance.contains("Feature tips"),
+            "rendered:\n{appearance}"
+        );
+        assert!(
+            appearance.contains("Keep awake"),
             "rendered:\n{appearance}"
         );
 

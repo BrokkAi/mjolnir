@@ -20,6 +20,7 @@ mod event;
 mod headless;
 mod ink;
 mod install;
+mod keep_awake;
 mod kimi;
 mod labels;
 mod menu;
@@ -2428,6 +2429,9 @@ async fn run_session(
                 spinner_style,
                 feature_hints_enabled: config::Config::load(&config_path)
                     .map(|config| config.feature_hints)
+                    .unwrap_or(true),
+                keep_awake_enabled: config::Config::load(&config_path)
+                    .map(|config| config.keep_awake)
                     .unwrap_or(true),
                 active_agent_launch: Some(ragnarok::Launch {
                     program: agent.program.clone(),

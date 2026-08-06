@@ -4149,6 +4149,10 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
     let config_path = config::default_config_path();
     let cfg = config::Config::load(&config_path)
         .with_context(|| format!("load {}", config_path.display()))?;
+    // The server counts as "working" for its whole lifetime: remote sessions
+    // must survive the host idling even when no turn is in flight. Released
+    // when this guard drops on any return path below.
+    let _keep_awake = crate::keep_awake::KeepAwake::hold(cfg.keep_awake);
     let resolved = roster::resolve(&cfg, &cwd).await?;
 
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
@@ -5627,6 +5631,7 @@ struct MjAppearancePanel {
     spinner: String,
     spinners: Vec<MjSpinnerEntry>,
     feature_hints: bool,
+    keep_awake: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -5667,6 +5672,7 @@ struct MjConfigApplyRequest {
     theme: Option<String>,
     spinner: Option<String>,
     feature_hints: Option<bool>,
+    keep_awake: Option<bool>,
     /// Server id → `auto` | `enabled` | `disabled`.
     server_policies: Option<BTreeMap<String, String>>,
     /// Server id → option key → value written to the primary seat's
@@ -6060,6 +6066,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
             })
             .collect(),
         feature_hints: config.feature_hints,
+        keep_awake: config.keep_awake,
     };
 
     MjConfigSnapshot {
@@ -6129,6 +6136,9 @@ fn mjconfig_apply_edits(
     }
     if let Some(enabled) = request.feature_hints {
         config.feature_hints = enabled;
+    }
+    if let Some(enabled) = request.keep_awake {
+        config.keep_awake = enabled;
     }
     if let Some(policies) = request.server_policies {
         for (id, policy) in policies {

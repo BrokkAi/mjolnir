@@ -55,6 +55,10 @@ pub struct Config {
     /// Show occasional capability-aware tips between completed turns.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub feature_hints: bool,
+    /// Keep the system awake while mj is working: the whole time `mj server`
+    /// runs, and while a terminal session has a turn in flight.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub keep_awake: bool,
     /// The primary agent's model and review behavior.
     #[serde(default, skip_serializing_if = "AgentConfig::is_default")]
     pub agent: AgentConfig,
@@ -93,6 +97,7 @@ impl Default for Config {
             theme: TerminalThemeKind::default(),
             spinner: SpinnerStyle::default(),
             feature_hints: true,
+            keep_awake: true,
             agent: AgentConfig::default(),
             review: ReviewConfig::default(),
             subagents: SubagentsConfig::default(),
@@ -806,6 +811,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
         theme: old.theme,
         spinner: old.spinner,
         feature_hints: true,
+        keep_awake: true,
         agent: AgentConfig {
             model: old.thor.model,
             acp_source: None,
@@ -1937,5 +1943,24 @@ mode = "ask"
         let body = std::fs::read_to_string(&path).expect("read");
         assert!(body.contains("feature_hints = false"));
         assert!(!Config::load(&path).expect("load disabled").feature_hints);
+    }
+
+    #[test]
+    fn keep_awake_default_on_and_disabled_roundtrips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        Config::default().save(&path).expect("save default");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(!body.contains("keep_awake"));
+        assert!(Config::load(&path).expect("load default").keep_awake);
+
+        let config = Config {
+            keep_awake: false,
+            ..Config::default()
+        };
+        config.save(&path).expect("save disabled");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(body.contains("keep_awake = false"));
+        assert!(!Config::load(&path).expect("load disabled").keep_awake);
     }
 }

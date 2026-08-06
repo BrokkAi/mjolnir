@@ -231,6 +231,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let mut app_config = config::Config::load(&config_path)
         .with_context(|| format!("load {}", config_path.display()))?;
     app_config.apply_model_overrides(&cfg.role_overrides);
+    // A headless run is one long turn, so hold the sleep assertion for the
+    // whole run; the guard drops on every return path.
+    let _keep_awake = crate::keep_awake::KeepAwake::hold(app_config.keep_awake);
     let mut resolved = roster::resolve(&app_config, &cfg.cwd).await?;
     if let Some(session_id) = cfg.resume_session.as_deref()
         && let Some(record) = crate::session_provenance::find(session_id, &cfg.cwd)

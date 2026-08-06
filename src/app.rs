@@ -1009,6 +1009,10 @@ pub struct AppState {
     pub transcript: Vec<Entry>,
     /// Whether periodic local feature-discovery hints are enabled.
     pub feature_hints_enabled: bool,
+    /// Holds an OS sleep assertion while a turn is in flight (and the config
+    /// switch is on). Driven from `set_connection_state` so it cannot drift
+    /// from the lifecycle enum.
+    pub keep_awake: crate::keep_awake::KeepAwake,
     completed_turns_since_hint: usize,
     feature_hint_cursor: usize,
     /// Actor-owned streaming message blocks.  Unlike thoughts, a message can
@@ -1668,6 +1672,7 @@ impl AppState {
             side_main_notice: None,
             transcript: Vec::new(),
             feature_hints_enabled: true,
+            keep_awake: crate::keep_awake::KeepAwake::new(),
             completed_turns_since_hint: 0,
             feature_hint_cursor: 0,
             agent_open_message_index: None,
@@ -1765,6 +1770,7 @@ impl AppState {
         side.theme = self.theme;
         side.spinner_style = self.spinner_style;
         side.feature_hints_enabled = self.feature_hints_enabled;
+        side.keep_awake.set_enabled(self.keep_awake.enabled());
         side.project_label = self.project_label.clone();
         side.worktree_label = self.worktree_label.clone();
         side.additional_roots = self.additional_roots;
@@ -2698,6 +2704,7 @@ impl AppState {
         if self.connection_state != state {
             self.connection_state = state;
             self.connection_state_started_at = Instant::now();
+            self.keep_awake.set_active(self.is_busy());
         }
     }
 
@@ -10735,5 +10742,29 @@ mod tests {
             Some(Entry::FeatureHint(_))
         ));
         assert!(state.prompt_history().is_empty());
+    }
+
+    #[test]
+    fn keep_awake_follows_busy_connection_states() {
+        let mut state = AppState::new();
+        state.keep_awake.set_enabled(true);
+        assert!(!state.keep_awake.wants_hold());
+
+        state.set_connection_state(ConnectionState::Streaming);
+        assert!(state.keep_awake.wants_hold());
+        state.set_connection_state(ConnectionState::Cancelling);
+        assert!(state.keep_awake.wants_hold());
+        state.set_connection_state(ConnectionState::Ready);
+        assert!(!state.keep_awake.wants_hold());
+
+        state.set_connection_state(ConnectionState::Forking);
+        assert!(state.keep_awake.wants_hold());
+        state.set_connection_state(ConnectionState::Closed);
+        assert!(!state.keep_awake.wants_hold());
+
+        // The config switch gates the assertion even while streaming.
+        state.set_connection_state(ConnectionState::Streaming);
+        state.keep_awake.set_enabled(false);
+        assert!(!state.keep_awake.wants_hold());
     }
 }

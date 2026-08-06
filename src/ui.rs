@@ -1129,6 +1129,7 @@ pub struct UiRunOptions<'a> {
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
     pub feature_hints_enabled: bool,
+    pub keep_awake_enabled: bool,
     pub active_agent_launch: Option<ragnarok::Launch>,
     pub session_boundary: Option<String>,
     /// The ACP session cwd; `/ragnarok` battles are rooted here.
@@ -1164,6 +1165,7 @@ struct UiInitialState {
     theme_kind: TerminalThemeKind,
     spinner_style: SpinnerStyle,
     feature_hints_enabled: bool,
+    keep_awake_enabled: bool,
     session_boundary: Option<String>,
     session_cwd: PathBuf,
     model_choices: Vec<crate::roster::ModelChoice>,
@@ -1227,6 +1229,7 @@ pub async fn run(
             theme_kind: options.theme_kind,
             spinner_style: options.spinner_style,
             feature_hints_enabled: options.feature_hints_enabled,
+            keep_awake_enabled: options.keep_awake_enabled,
             session_boundary: options.session_boundary,
             session_cwd: options.session_cwd,
             model_choices: options.model_choices,
@@ -1494,6 +1497,7 @@ async fn ui_loop(
     state.set_theme(initial.theme_kind);
     state.set_spinner_style(initial.spinner_style);
     state.feature_hints_enabled = initial.feature_hints_enabled;
+    state.keep_awake.set_enabled(initial.keep_awake_enabled);
     state.config_path = initial.config_path;
     if let Some(boundary) = initial.session_boundary {
         state.push_session_boundary(boundary);
@@ -5127,6 +5131,7 @@ fn persist_mjconfig_selection(
     let style = config.spinner;
     let review_changed = state.review_enabled != config.agent.discrete_review;
     let feature_hints_enabled = config.feature_hints;
+    let keep_awake_enabled = config.keep_awake;
     let live_session_updates = live_primary_session_config_updates(state, &config);
     // A policy edit in this save may have disabled the only route of a pinned
     // seat model; flip such seats to auto and tell the user, instead of
@@ -5141,6 +5146,7 @@ fn persist_mjconfig_selection(
                     crate::roster::rediscover_inventory(&config, &state.acp_inventory);
                 state.review_enabled = config.agent.discrete_review;
                 state.feature_hints_enabled = feature_hints_enabled;
+                state.keep_awake.set_enabled(keep_awake_enabled);
                 if review_changed {
                     let _ = cmd_tx.send(UiCommand::SetReviewPolicy {
                         enabled: config.agent.discrete_review,
