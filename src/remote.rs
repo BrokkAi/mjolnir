@@ -6129,6 +6129,7 @@ async fn mjconfig_snapshot(State(state): State<ServerState>) -> Json<MjConfigSna
 fn mjconfig_apply_edits(
     config: &mut config::Config,
     request: MjConfigApplyRequest,
+    inventory: &roster::AcpInventory,
 ) -> std::result::Result<(), (StatusCode, String)> {
     let bad_request = |message: String| (StatusCode::UNPROCESSABLE_ENTITY, message);
     if let Some(model) = request.primary_model {
@@ -6180,7 +6181,6 @@ fn mjconfig_apply_edits(
             config.set_acp_server_policy(&id, policy);
         }
     }
-    let reasoning_effort_key = format!("config:{}", acp::REASONING_EFFORT_CONFIG_ID);
     for (defaults, seat) in [
         (
             request.primary_session_defaults,
@@ -6200,7 +6200,7 @@ fn mjconfig_apply_edits(
             for (option_key, value) in options {
                 // Mirror the TUI's role panels: a thought-level
                 // option also updates the seat's reasoning-effort default.
-                if option_key == reasoning_effort_key {
+                if mjconfig_option_controls_reasoning_effort(inventory, &server_id, &option_key) {
                     match seat {
                         crate::settings::SessionDefaultsSeat::Primary => {
                             config.agent.reasoning_effort = Some(value.clone());
@@ -6291,12 +6291,38 @@ fn mjconfig_apply_edits(
     Ok(())
 }
 
+fn mjconfig_option_controls_reasoning_effort(
+    inventory: &roster::AcpInventory,
+    server_id: &str,
+    option_key: &str,
+) -> bool {
+    if option_key == format!("config:{}", acp::REASONING_EFFORT_CONFIG_ID) {
+        return true;
+    }
+    inventory
+        .servers
+        .iter()
+        .find(|server| server.id == server_id)
+        .is_some_and(|server| {
+            server.session_config.iter().any(|option| {
+                acp::session_config_option_key(&option.id) == option_key
+                    && crate::settings::session_option_controls_reasoning_effort(option)
+            })
+        })
+}
+
 async fn mjconfig_apply(
     State(state): State<ServerState>,
     Json(request): Json<MjConfigApplyRequest>,
 ) -> std::result::Result<Json<MjConfigSnapshot>, (StatusCode, String)> {
     let mut config = mjconfig_load(&state);
-    mjconfig_apply_edits(&mut config, request)?;
+    let inventory = state
+        .mjconfig
+        .inventory
+        .lock()
+        .expect("mjconfig inventory lock")
+        .clone();
+    mjconfig_apply_edits(&mut config, request, &inventory)?;
     // Same guard as the TUI's save: a policy edit that strands a pinned seat
     // model flips that seat to auto, with a notice instead of a later failure.
     let choices = state
@@ -9569,6 +9595,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mjconfig_apply_syncs_custom_thought_level_with_reviewer_effort() {
+        let runtime = test_mjconfig_runtime();
+        let config_path = runtime.config_path.clone();
+        let config = roster::config_with_a_visible_builtin();
+        config.save(&config_path).expect("seed config");
+        let mut inventory = roster::discover_inventory(&config);
+        let server = inventory.servers.first_mut().expect("visible ACP server");
+        let server_id = server.id.clone();
+        server.session_config = vec![
+            SessionConfigOption::select(
+                "thinking",
+                "Thinking",
+                "medium",
+                vec![
+                    SessionConfigSelectOption::new("medium", "Medium"),
+                    SessionConfigSelectOption::new("high", "High"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        *runtime.inventory.lock().expect("inventory lock") = inventory;
+
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+        let response = app
+            .oneshot(mjconfig_request(
+                "POST",
+                Some(token),
+                Some(serde_json::json!({
+                    "review_session_defaults": {
+                        (server_id.clone()): { "config:thinking": "high" }
+                    }
+                })),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let saved = config::Config::load(&config_path).expect("reload saved config");
+        assert_eq!(saved.review.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            saved.review.session_defaults[&server_id]["config:thinking"],
+            "high"
+        );
+    }
+
+    #[tokio::test]
     async fn mjconfig_apply_persists_edits_and_round_trips() {
         let runtime = test_mjconfig_runtime();
         let config_path = runtime.config_path.clone();
@@ -9959,6 +10032,9 @@ mod tests {
         assert!(viewer.contains("snapshot.subagent_options"));
         assert!(viewer.contains("review_session_defaults"));
         assert!(viewer.contains("saved default · active: ${activeLabel}"));
+        assert!(viewer.contains("is unavailable on ${group.server_id}"));
+        assert!(viewer.contains("edits.primary_session_defaults[activeSource]"));
+        assert!(!viewer.contains("Object.values(edits.primary_session_defaults)"));
         assert!(viewer.contains("openMjConfig(\"agents\")"));
     }
 

@@ -688,11 +688,7 @@ impl SettingsEditor {
                 crate::acp::session_config_option_key(&option.id),
                 value.clone(),
             );
-        if matches!(
-            option.category,
-            Some(agent_client_protocol::schema::v1::SessionConfigOptionCategory::ThoughtLevel)
-        ) || option.id.to_string() == crate::acp::REASONING_EFFORT_CONFIG_ID
-        {
+        if session_option_controls_reasoning_effort(&option) {
             match seat {
                 SessionDefaultsSeat::Primary => {
                     self.config.agent.reasoning_effort = Some(value);
@@ -1482,6 +1478,13 @@ pub(crate) fn session_option_current_value(option: &SessionConfigOption) -> Stri
     }
 }
 
+pub(crate) fn session_option_controls_reasoning_effort(option: &SessionConfigOption) -> bool {
+    matches!(
+        option.category,
+        Some(agent_client_protocol::schema::v1::SessionConfigOptionCategory::ThoughtLevel)
+    ) || option.id.to_string() == crate::acp::REASONING_EFFORT_CONFIG_ID
+}
+
 fn draw_tabs(
     frame: &mut ratatui::Frame,
     area: Rect,
@@ -1643,7 +1646,7 @@ fn draw_reviewer(
                 ));
                 lines.push(Line::styled(
                     format!(
-                        "  saved: {} · active pool: {}",
+                        "  saved: {} · active: {}",
                         editor.staged_model_detail(model),
                         editor.active_model_detail(1)
                     ),

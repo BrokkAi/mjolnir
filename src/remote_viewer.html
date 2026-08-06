@@ -2789,6 +2789,10 @@
         color: var(--dim);
         font: 400 10.5px/1.5 var(--font-mono);
         word-break: break-word;
+
+        &.is-error {
+          color: var(--red-hot);
+        }
       }
 
       .mjconfig-toggle {
@@ -4027,6 +4031,7 @@
         const stagedGroup = staged[group.server_id] || {};
         for (const option of group.options) {
           const value = Object.hasOwn(stagedGroup, option.key) ? stagedGroup[option.key] : option.value;
+          const compatible = option.choices.some((choice) => choice.value === value);
           const row = mjRow(option.name);
           row.appendChild(
             mjCombo(
@@ -4041,7 +4046,11 @@
               },
             ),
           );
-          if (seat === "primary") {
+          if (!compatible) {
+            const detail = mjDetail(`Saved value "${value}" is unavailable on ${group.server_id}.`);
+            detail.classList.add("is-error");
+            row.appendChild(detail);
+          } else if (seat === "primary") {
             const session = selectedSession();
             const live = session?.status?.model_source === group.server_id
               ? sessionConfigOptions(session).find(
@@ -4591,7 +4600,12 @@
           const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
           if (session && edits.primary_session_defaults) {
             const liveOptions = sessionConfigOptions(session);
-            for (const options of Object.values(edits.primary_session_defaults)) {
+            const activeSource = session.status?.model_source;
+            const activeDefaults = activeSource
+              ? edits.primary_session_defaults[activeSource]
+              : null;
+            if (activeDefaults) {
+              const options = activeDefaults;
               for (const [key, value] of Object.entries(options)) {
                 const live = liveOptions.find(
                   (option) => option.config_id && `config:${option.config_id}` === key,
