@@ -1,6 +1,6 @@
 [package]
 name = "brokk-mj-voice-worker"
-version = "1.6.0"
+version = "1.6.1"
 edition = "2024"
 description = "Native local speech-recognition sidecar for brokk-mjolnir"
 license = "GPL-3.0-only"

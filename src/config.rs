@@ -1131,8 +1131,9 @@ mod tests {
     fn loading_forgets_settings_that_named_a_retired_acp_source() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        // A config written before Anvil was removed. `save` cannot produce
-        // this any more, so write the TOML directly.
+        // A config written by an older release that named an ACP source we
+        // have since retired. `save` cannot produce this any more, so write
+        // the TOML directly.
         std::fs::write(
             &path,
             format!(
@@ -1140,19 +1141,19 @@ mod tests {
 
 [agent]
 model = "glm-5-2"
-acp_source = "anvil"
-acp_priority = ["anvil", "codex-acp"]
+acp_source = "retired-acp"
+acp_priority = ["retired-acp", "codex-acp"]
 
 [review]
 model = "auto"
-acp_priority = ["codex-acp", "anvil"]
+acp_priority = ["codex-acp", "retired-acp"]
 
 [subagents]
 model = "gpt-5-6-sol"
 acp_source = "codex-acp"
 
 [acp.policies]
-anvil = "enabled"
+retired-acp = "enabled"
 kimi = "disabled"
 "#
             ),
@@ -1164,7 +1165,7 @@ kimi = "disabled"
         assert_eq!(loaded.agent.acp_source, None);
         assert_eq!(loaded.agent.acp_priority, vec!["codex-acp".to_string()]);
         assert_eq!(loaded.review.acp_priority, vec!["codex-acp".to_string()]);
-        assert!(!loaded.acp.policies.contains_key("anvil"));
+        assert!(!loaded.acp.policies.contains_key("retired-acp"));
         assert_eq!(
             loaded.acp.policies.get("kimi"),
             Some(&AcpServerPolicy::Disabled)

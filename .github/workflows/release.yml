@@ -48,6 +48,12 @@ jobs:
           mkdir "$name"
           cp "target/x86_64-unknown-linux-gnu/release/mj" "$name/"
           cp "target/x86_64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
+          # mj <= 1.5.x self-updaters abort on archives without an `anvil`
+          # entry. Anvil is retired and never executed by mj >= 1.6.0; this
+          # inert placeholder only keeps old installs able to self-update.
+          # Drop it once 1.5.x installs no longer matter.
+          printf '#!/bin/sh\necho "anvil is no longer part of mjolnir" >&2\nexit 1\n' > "$name/anvil"
+          chmod +x "$name/anvil"
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
@@ -101,6 +107,12 @@ jobs:
           mkdir "$name"
           cp "target/aarch64-unknown-linux-gnu/release/mj" "$name/"
           cp "target/aarch64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
+          # mj <= 1.5.x self-updaters abort on archives without an `anvil`
+          # entry. Anvil is retired and never executed by mj >= 1.6.0; this
+          # inert placeholder only keeps old installs able to self-update.
+          # Drop it once 1.5.x installs no longer matter.
+          printf '#!/bin/sh\necho "anvil is no longer part of mjolnir" >&2\nexit 1\n' > "$name/anvil"
+          chmod +x "$name/anvil"
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
@@ -154,6 +166,13 @@ jobs:
           name="brokk-mjolnir-${GITHUB_REF_NAME}-aarch64-linux-android"
           mkdir "$name"
           cp "target/aarch64-linux-android/release/mj" "$name/"
+          # mj <= 1.5.x self-updaters abort on archives without an `anvil`
+          # entry (the check runs before the Android voice-worker gate).
+          # Anvil is retired and never executed by mj >= 1.6.0; this inert
+          # placeholder only keeps old installs able to self-update.
+          # Drop it once 1.5.x installs no longer matter.
+          printf '#!/bin/sh\necho "anvil is no longer part of mjolnir" >&2\nexit 1\n' > "$name/anvil"
+          chmod +x "$name/anvil"
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
@@ -195,6 +214,11 @@ jobs:
           New-Item -ItemType Directory -Path $name | Out-Null
           Copy-Item "target\x86_64-pc-windows-msvc\release\mj.exe" -Destination $name
           Copy-Item "target\x86_64-pc-windows-msvc\release\mj-voice-worker.exe" -Destination $name
+          # mj <= 1.5.x self-updaters abort on archives without an anvil.exe
+          # entry. Anvil is retired and never executed by mj >= 1.6.0; this
+          # inert placeholder only keeps old installs able to self-update.
+          # Drop it once 1.5.x installs no longer matter.
+          Set-Content -Path "$name\anvil.exe" -Value "anvil is no longer part of mjolnir"
           Copy-Item "README.md" -Destination $name
           Copy-Item "LICENSE" -Destination $name
           New-Item -ItemType Directory -Path "$name\licenses" | Out-Null
@@ -258,6 +282,12 @@ jobs:
           mkdir "$name"
           cp target/universal-apple-darwin/release/mj "$name/"
           cp target/universal-apple-darwin/release/mj-voice-worker "$name/"
+          # mj <= 1.5.x self-updaters abort on archives without an `anvil`
+          # entry. Anvil is retired and never executed by mj >= 1.6.0; this
+          # inert placeholder only keeps old installs able to self-update.
+          # Drop it once 1.5.x installs no longer matter.
+          printf '#!/bin/sh\necho "anvil is no longer part of mjolnir" >&2\nexit 1\n' > "$name/anvil"
+          chmod +x "$name/anvil"
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"

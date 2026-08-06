@@ -3750,7 +3750,7 @@ pub fn first_line(text: &str, max: usize) -> String {
 pub fn battle_cry(fighter: &str, action: ActionKind, detail: &str, roll: usize) -> String {
     let pool: &[&str] = match action {
         ActionKind::Forge => &[
-            "🔨 {f} hammers white-hot code upon the anvil: {d}",
+            "🔨 {f} hammers white-hot code in the forge: {d}",
             "🔥 {f} quenches a fresh blade in coolant: {d}",
             "⚒ {f} reforges the very bones of the repo: {d}",
             "🧲 {f} bends molten syntax to their will: {d}",
