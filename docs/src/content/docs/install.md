@@ -5,8 +5,8 @@ description: Install Mjolnir, connect Codex, and launch the recommended first se
 
 The recommended setup needs an authenticated Codex CLI and a launchable Codex
 ACP bridge. Codex use may incur cost. The first launch can also download a
-managed runtime, ACP bridge, Bifrost package, registry metadata, model rankings,
-or voice assets. Review [Data and trust boundaries](/data-boundaries/) before
+managed runtime, ACP bridge, Bifrost package, model rankings, or voice assets.
+Review [Data and trust boundaries](/data-boundaries/) before
 using a private repository.
 
 ## Choose an installation
@@ -137,14 +137,11 @@ npm install -g @openai/codex
 codex login
 ```
 
-Run `mj`. First launch opens Mjolnir's configuration screen:
-
-1. In **Accounts**, verify that OpenAI / ChatGPT reports you are signed in.
-2. In **ACP Servers**, confirm that Codex is detected and enabled.
-3. In **Agent**, keep the primary model on Auto or select a Codex model.
-4. Keep discrete review enabled if you want delegated workspace changes
-   challenged before completion.
-5. Start a new session after changing models or adapters.
+Run `mj`. First launch asks you to choose one of four team presets: Codex,
+Claude, Codex code with Claude review, or Claude code with Codex review. The
+coding provider backs both the primary and builder seats; the review provider
+backs the reviewer seat. Use **Customize every route** for model, review,
+parallelism, and appearance controls.
 
 Return to the same settings later with `/mjconfig`.
 
@@ -154,10 +151,9 @@ bridges and Bifrost, Mjolnir uses a PATH-visible `npx` or, on Linux, macOS, and
 Windows, installs embedded Node.js 24 automatically. Mjolnir uses the `codex`
 CLI for its Codex sign-in action as well.
 
-Claude and custom ACP servers are optional. Configure them after
-the Codex path works if you want alternative primary, subagent, or review
-routes. Mjolnir can install supported binary agents from the ACP
-registry.
+Claude and custom ACP servers are optional. The ACP Servers panel configures
+only the built-in Codex and Claude routes. Custom ACP commands can still be
+declared directly in `config.toml` for advanced deployments.
 
 Adapters must advertise ACP Streamable HTTP MCP support; Mjolnir uses that
 capability to expose its authenticated `mj-subagents` tools to the primary
@@ -182,4 +178,4 @@ requires the matching checksum asset.
 To uninstall a release-installer deployment, remove `mj` and
 `mj-voice-worker` from the selected install directory. Review [Storage and
 network activity](/storage-network/) before removing configuration, sessions,
-managed agents, worktrees, or caches.
+worktrees, or caches.

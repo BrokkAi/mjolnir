@@ -71,10 +71,11 @@ Explicit model IDs can be selected in `/mjconfig`; availability is checked
 when the next session starts. A `max_parallel` above 16 is a configuration
 error, not a silently clamped value.
 
-The recommended onboarding sets each seat's `acp_source` to `codex-acp`. This
-retains automatic model selection without letting another installed adapter
-take that seat. In `/mjconfig`, use Left/Right on the ACP Priority tab to change
-or clear a seat's source constraint.
+Onboarding offers Codex, Claude, Codex code with Claude review, and Claude code
+with Codex review. Each preset keeps model selection automatic while pinning
+the primary and subagent seats to its coding source and the reviewer seat to
+its review source. In `/mjconfig`, use Left/Right on the ACP Priority tab to
+change or clear a seat's source constraint.
 
 ACP priority lists default to `codex-acp`, then `claude-acp`,
 preserving the automatic behavior of earlier configurations. When a source is
@@ -94,8 +95,8 @@ acp_priority = ["codex-acp", "claude-acp"]
 
 The ACP Servers tab still controls eligibility. Priority only decides which
 enabled adapter supplies a selected model when more than one advertises it.
-Sources absent from a saved list are appended in discovery order, so installing
-a new adapter does not unexpectedly move it ahead of an explicit preference.
+Sources absent from a saved list are appended in discovery order, so adding a
+custom adapter does not unexpectedly move it ahead of an explicit preference.
 
 ## Migrating from version 2
 
@@ -117,8 +118,10 @@ values in memory.
 
 ## ACP policy
 
-Built-in adapters can stay on Auto or be explicitly enabled or disabled. Custom
-servers accept a command, arguments, environment values, origin, and policy.
+The ACP Servers tab exposes only the built-in Codex and Claude adapters, which
+can stay on Auto or be explicitly enabled or disabled. Advanced deployments
+can still declare a custom command, arguments, environment values, origin, and
+policy directly in the config file.
 
 ```toml
 [acp.policies]

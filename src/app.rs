@@ -2193,12 +2193,6 @@ impl AppState {
         action
     }
 
-    pub fn poll_mjconfig_background(&mut self) {
-        if let Some(menu) = self.mjconfig_menu.as_mut() {
-            menu.editor.poll_background();
-        }
-    }
-
     pub fn open_review_picker(&mut self) {
         self.review_picker = Some(ReviewPicker::default());
     }
@@ -2227,8 +2221,7 @@ impl AppState {
     /// Close the menu and restore the theme and spinner that were active when
     /// it opened, discarding the live preview.
     pub fn mjconfig_menu_cancel(&mut self) {
-        if let Some(mut menu) = self.mjconfig_menu.take() {
-            menu.editor.cancel_background();
+        if let Some(menu) = self.mjconfig_menu.take() {
             self.set_theme(menu.orig_theme);
             self.set_spinner_style(menu.orig_spinner);
         }

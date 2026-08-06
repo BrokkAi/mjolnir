@@ -17,7 +17,7 @@ pub const DISABLED_MODEL: &str = "disabled";
 pub const CONFIG_VERSION: u32 = 3;
 /// Version of the product-model explanation accepted by the user. This is
 /// intentionally independent from the storage schema version.
-pub const ONBOARDING_CONTENT_VERSION: u32 = 2;
+pub const ONBOARDING_CONTENT_VERSION: u32 = 3;
 pub const DEFAULT_ACP_PRIORITY: [&str; 2] = ["codex-acp", "claude-acp"];
 /// Schema version this build can migrate forward from.
 const MIGRATABLE_VERSION: u32 = 2;
@@ -472,7 +472,7 @@ impl std::fmt::Display for AcpServerPolicy {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpServerOrigin {
-    Registry,
+    #[serde(alias = "registry")]
     Custom,
 }
 

@@ -238,7 +238,6 @@ pub struct AcpServerInfo {
     pub launch: AdapterLaunch,
     pub model_count: usize,
     pub error: Option<String>,
-    pub installing: bool,
     pub origin: Option<AcpServerOrigin>,
     pub session_config: Vec<agent_client_protocol::schema::v1::SessionConfigOption>,
     /// Subscription tier behind this server's account, when it has one.
@@ -415,13 +414,8 @@ pub(crate) fn model_has_builtin_adapter(model: &str) -> bool {
     adapter_kind(model).is_some()
 }
 
-/// A config that discovery is guaranteed to surface at least one built-in
-/// server for.
-///
-/// `inventory_server_is_visible` hides an undetected built-in left on `Auto`,
-/// so a test that just needs a server row would otherwise depend on whichever
-/// credentials the host running it happens to have — passing on a developer
-/// machine and failing in CI. An explicit policy is visible either way.
+/// A config that explicitly enables one built-in server for tests that need a
+/// selected route regardless of the host's credentials.
 #[cfg(test)]
 pub(crate) fn config_with_a_visible_builtin() -> Config {
     let mut config = Config::default();
@@ -497,7 +491,6 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
                 launch,
                 model_count: 0,
                 error: None,
-                installing: false,
                 origin: None,
                 session_config: Vec::new(),
                 subscription: availability
@@ -522,10 +515,7 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
             policy: server.policy,
             detected: true,
             selected,
-            evidence: match server.origin {
-                AcpServerOrigin::Registry => "installed from ACP registry".to_string(),
-                AcpServerOrigin::Custom => "custom command".to_string(),
-            },
+            evidence: "custom command".to_string(),
             launch: AdapterLaunch {
                 kind: AdapterKind::Custom,
                 source_id: server.id.clone(),
@@ -535,7 +525,6 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
             },
             model_count: 0,
             error: None,
-            installing: false,
             origin: Some(server.origin),
             session_config: Vec::new(),
             subscription: None,
@@ -564,8 +553,8 @@ pub fn rediscover_inventory(config: &Config, previous: &AcpInventory) -> AcpInve
 }
 
 fn inventory_server_is_visible(server: &AcpServerInfo) -> bool {
-    server.detected
-        || server.installing
+    AdapterKind::from_source_id(&server.id).is_some()
+        || server.detected
         || server.error.is_some()
         || server.origin.is_some()
         || server.policy != AcpServerPolicy::Auto
@@ -2089,7 +2078,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_policy_keeps_undetected_builtin_visible() {
+    fn builtins_remain_visible_without_detection() {
         let launch = launch_for(AdapterKind::Codex);
         let mut server = AcpServerInfo {
             id: launch.source_id.clone(),
@@ -2101,7 +2090,6 @@ mod tests {
             launch,
             model_count: 0,
             error: None,
-            installing: false,
             origin: None,
             session_config: Vec::new(),
             subscription: None,
@@ -2111,7 +2099,7 @@ mod tests {
         server.policy = AcpServerPolicy::Disabled;
         assert!(inventory_server_is_visible(&server));
         server.policy = AcpServerPolicy::Auto;
-        assert!(!inventory_server_is_visible(&server));
+        assert!(inventory_server_is_visible(&server));
     }
 
     #[test]

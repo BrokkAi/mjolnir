@@ -2993,69 +2993,6 @@
         word-break: break-all;
       }
 
-      .mjconfig-catalog-filter {
-        width: 100%;
-        border: 1px solid var(--line-control);
-        background: var(--bg);
-        color: var(--text);
-        caret-color: var(--red);
-        padding: 7px 9px;
-        font: 400 12px/1.4 var(--font-mono);
-
-        &:focus-visible {
-          outline: none;
-          border-color: rgb(235 63 51 / 0.6);
-        }
-      }
-
-      .mjconfig-catalog-item {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: baseline;
-        gap: 4px 10px;
-        padding: 6px 8px;
-        border-left: 2px solid transparent;
-        cursor: pointer;
-
-        &:hover {
-          background: rgb(235 63 51 / 0.08);
-          border-left-color: var(--red);
-        }
-
-        & .mjconfig-catalog-name {
-          color: var(--text-control);
-          font: 700 12px/1.4 var(--font-mono);
-        }
-
-        & .mjconfig-catalog-kind {
-          color: var(--dim);
-          font: 400 10.5px/1.4 var(--font-mono);
-          text-transform: uppercase;
-        }
-
-        & .mjconfig-catalog-desc {
-          flex-basis: 100%;
-          color: var(--dim);
-          font: 400 10.5px/1.5 var(--font-mono);
-        }
-      }
-
-      .mjconfig-text-input {
-        border: 1px solid var(--line-control);
-        background: var(--bg);
-        color: var(--text);
-        caret-color: var(--red);
-        padding: 7px 9px;
-        font: 400 12px/1.4 var(--font-mono);
-        flex: 1;
-        min-width: 160px;
-
-        &:focus-visible {
-          outline: none;
-          border-color: rgb(235 63 51 / 0.6);
-        }
-      }
-
       .mjconfig-foot {
         display: flex;
         align-items: center;
@@ -3858,10 +3795,6 @@
         snapshot: null,
         edits: {},
         tab: "agents",
-        serversView: "list", // list | catalog | custom
-        catalogFilter: "",
-        registry: null,
-        registryError: null,
         pollTimer: null,
         spinnerTimer: null,
         comboSeq: 0,
@@ -3884,8 +3817,6 @@
       async function openMjConfig(tab = "agents") {
         mjcfg.edits = {};
         mjcfg.tab = tab;
-        mjcfg.serversView = "list";
-        mjcfg.catalogFilter = "";
         mjconfigModalEl.hidden = false;
         mjconfigNoticeEl.textContent = "";
         mjSetStatus("Loading…");
@@ -3923,8 +3854,8 @@
         }
       }
 
-      /// Poll while a background job (sign-in, install) runs so its output and
-      /// progress stream into the panel. Structural re-render happens when a
+      /// Poll while sign-in or ACP discovery runs so updates stream into the
+      /// panel. Structural re-render happens when a
       /// job completes or ACP discovery publishes new choices and options.
       function mjSchedulePoll() {
         if (mjcfg.pollTimer) {
@@ -3935,7 +3866,6 @@
         const backgroundRunning =
           snapshot && (
             (snapshot.login && snapshot.login.running)
-            || (snapshot.install && snapshot.install.running)
             || snapshot.probing
           );
         if (!backgroundRunning || mjconfigModalEl.hidden) {
@@ -3953,11 +3883,9 @@
               mjcfg.snapshot = await response.json();
               const wasRunning =
                 (previous.login && previous.login.running)
-                || (previous.install && previous.install.running)
                 || previous.probing;
               const stillRunning =
                 (mjcfg.snapshot.login && mjcfg.snapshot.login.running)
-                || (mjcfg.snapshot.install && mjcfg.snapshot.install.running)
                 || mjcfg.snapshot.probing;
               const discoveryChanged =
                 previous.discovery_revision !== mjcfg.snapshot.discovery_revision;
@@ -3991,27 +3919,11 @@
             }
           }
         }
-        const install = mjcfg.snapshot?.install;
-        const installEl = mjconfigBodyEl.querySelector("[data-mj-install-status]");
-        if (installEl && install) {
-          installEl.textContent = mjInstallLabel(install);
-        }
       }
 
       function mjExtractUrl(text) {
         const match = text.match(/https?:\/\/\S+/);
         return match ? match[0].replace(/[).,]$/, "") : null;
-      }
-
-      function mjInstallLabel(install) {
-        if (install.extracting) {
-          return `Installing ${install.agent_name}: extracting…`;
-        }
-        if (install.total_bytes) {
-          const percent = Math.floor((install.downloaded_bytes * 100) / Math.max(1, install.total_bytes));
-          return `Installing ${install.agent_name}: downloading ${percent}%`;
-        }
-        return `Installing ${install.agent_name}: downloading ${install.downloaded_bytes} bytes`;
       }
 
       function renderMjTabs() {
@@ -4310,14 +4222,6 @@
       }
 
       function renderMjServers() {
-        if (mjcfg.serversView === "catalog") {
-          renderMjCatalog();
-          return;
-        }
-        if (mjcfg.serversView === "custom") {
-          renderMjCustomServer();
-          return;
-        }
         const panel = mjcfg.snapshot.acp_servers;
         mjconfigBodyEl.appendChild(mjSectionTitle("Accounts"));
         const login = mjcfg.snapshot.login;
@@ -4360,35 +4264,7 @@
           }
         }
 
-        const addRow = mjRow("");
-        addRow.appendChild(
-          mjButton("+ Add server", () => {
-            mjcfg.serversView = "catalog";
-            mjLoadRegistry();
-            renderMjConfig();
-          }),
-        );
-        mjconfigBodyEl.appendChild(addRow);
-
-        const install = mjcfg.snapshot.install;
-        if (install) {
-          const installRow = mjRow("");
-          const status = document.createElement("span");
-          status.className = "mjconfig-row-detail";
-          status.dataset.mjInstallStatus = "true";
-          status.textContent = mjInstallLabel(install);
-          installRow.appendChild(status);
-          if (install.running) {
-            installRow.appendChild(
-              mjButton("Cancel install", async () => {
-                await mjJobRequest("/api/mjconfig/install", "DELETE");
-              }),
-            );
-          }
-          mjconfigBodyEl.appendChild(installRow);
-        }
-
-        mjconfigBodyEl.appendChild(mjSectionTitle("Servers"));
+        mjconfigBodyEl.appendChild(mjSectionTitle("Supported servers"));
         const staged = mjcfg.edits.server_policies || {};
         for (const server of panel.servers) {
           const row = mjRow(server.label);
@@ -4427,171 +4303,6 @@
         } catch (error) {
           mjSetStatus(`Request failed: ${error.message}`, true);
         }
-      }
-
-      async function mjLoadRegistry() {
-        mjcfg.registry = null;
-        mjcfg.registryError = null;
-        try {
-          const response = await apiFetch("/api/mjconfig/registry");
-          if (!response.ok) {
-            throw new Error((await response.text()) || `HTTP ${response.status}`);
-          }
-          mjcfg.registry = await response.json();
-        } catch (error) {
-          mjcfg.registryError = error.message;
-        }
-        if (mjcfg.serversView === "catalog" && !mjconfigModalEl.hidden) {
-          renderMjConfig();
-        }
-      }
-
-      function renderMjCatalog() {
-        const backRow = mjRow("");
-        backRow.appendChild(
-          mjButton("← Back", () => {
-            mjcfg.serversView = "list";
-            renderMjConfig();
-          }),
-        );
-        backRow.appendChild(
-          mjButton("Custom command…", () => {
-            mjcfg.serversView = "custom";
-            renderMjConfig();
-          }),
-        );
-        mjconfigBodyEl.appendChild(backRow);
-        mjconfigBodyEl.appendChild(mjSectionTitle("ACP registry"));
-
-        const filter = document.createElement("input");
-        filter.type = "text";
-        filter.className = "mjconfig-catalog-filter";
-        filter.placeholder = "Filter agents…";
-        filter.value = mjcfg.catalogFilter;
-        filter.addEventListener("input", () => {
-          mjcfg.catalogFilter = filter.value;
-          renderMjCatalogList();
-        });
-        mjconfigBodyEl.appendChild(filter);
-
-        const list = document.createElement("div");
-        list.dataset.mjCatalogList = "true";
-        mjconfigBodyEl.appendChild(list);
-        renderMjCatalogList();
-        filter.focus();
-      }
-
-      function renderMjCatalogList() {
-        const list = mjconfigBodyEl.querySelector("[data-mj-catalog-list]");
-        if (!list) {
-          return;
-        }
-        list.replaceChildren();
-        if (mjcfg.registryError) {
-          list.appendChild(mjNote(`Registry unavailable: ${mjcfg.registryError}`));
-          return;
-        }
-        if (!mjcfg.registry) {
-          list.appendChild(mjNote("Loading registry…"));
-          return;
-        }
-        const filter = mjcfg.catalogFilter.trim().toLowerCase();
-        const agents = mjcfg.registry.filter(
-          (agent) =>
-            !filter
-            || agent.name.toLowerCase().includes(filter)
-            || agent.id.toLowerCase().includes(filter),
-        );
-        if (!agents.length) {
-          list.appendChild(mjNote("No matching agents."));
-          return;
-        }
-        for (const agent of agents) {
-          const item = document.createElement("div");
-          item.className = "mjconfig-catalog-item";
-          item.setAttribute("role", "button");
-          item.tabIndex = 0;
-          const name = document.createElement("span");
-          name.className = "mjconfig-catalog-name";
-          name.textContent = agent.name;
-          const kind = document.createElement("span");
-          kind.className = "mjconfig-catalog-kind";
-          kind.textContent = `${agent.kind}${agent.version ? ` · v${agent.version}` : ""}`;
-          const desc = document.createElement("span");
-          desc.className = "mjconfig-catalog-desc";
-          desc.textContent = agent.description || "";
-          item.append(name, kind, desc);
-          const install = async () => {
-            mjcfg.serversView = "list";
-            await mjJobRequest("/api/mjconfig/install", "POST", { id: agent.id });
-          };
-          item.addEventListener("click", install);
-          item.addEventListener("keydown", (event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              void install();
-            }
-          });
-          list.appendChild(item);
-        }
-      }
-
-      function renderMjCustomServer() {
-        const backRow = mjRow("");
-        backRow.appendChild(
-          mjButton("← Back", () => {
-            mjcfg.serversView = "catalog";
-            renderMjConfig();
-          }),
-        );
-        mjconfigBodyEl.appendChild(backRow);
-        mjconfigBodyEl.appendChild(mjSectionTitle("Add a custom ACP server command"));
-
-        const nameRow = mjRow("Name");
-        const nameInput = document.createElement("input");
-        nameInput.type = "text";
-        nameInput.className = "mjconfig-text-input";
-        nameInput.placeholder = "my-agent";
-        nameRow.appendChild(nameInput);
-        mjconfigBodyEl.appendChild(nameRow);
-
-        const commandRow = mjRow("Command");
-        const commandInput = document.createElement("input");
-        commandInput.type = "text";
-        commandInput.className = "mjconfig-text-input";
-        commandInput.placeholder = "npx -y my-acp-agent";
-        commandRow.appendChild(commandInput);
-        mjconfigBodyEl.appendChild(commandRow);
-
-        const addRow = mjRow("");
-        addRow.appendChild(
-          mjButton(
-            "Add server",
-            async () => {
-              try {
-                const response = await apiFetch("/api/mjconfig", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    add_custom_server: { name: nameInput.value, command: commandInput.value },
-                  }),
-                });
-                if (!response.ok) {
-                  mjSetStatus((await response.text()) || `HTTP ${response.status}`, true);
-                  return;
-                }
-                mjcfg.snapshot = await response.json();
-                mjcfg.serversView = "list";
-                renderMjConfig();
-              } catch (error) {
-                mjSetStatus(`Request failed: ${error.message}`, true);
-              }
-            },
-            true,
-          ),
-        );
-        mjconfigBodyEl.appendChild(addRow);
-        nameInput.focus();
       }
 
       function renderMjPriority() {

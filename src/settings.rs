@@ -1,8 +1,6 @@
 //! Shared first-startup and in-session settings editor.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
     SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,
@@ -13,18 +11,20 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::config::{AcpServerOrigin, AcpServerPolicy, Config, ConfiguredAcpServer, ModelsConfig};
+use crate::config::{AcpServerPolicy, Config, ModelsConfig};
 use crate::ink::InkStyle;
-use crate::install::Progress;
 use crate::palette::TerminalTheme;
-use crate::registry::{Agent, DistributionKind, Registry};
 use crate::roster::{AcpInventory, ModelChoice};
 use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
 
 const ACCOUNT_COUNT: usize = crate::auth::AuthVendor::ALL.len();
-const ADD_SERVER_INDEX: usize = ACCOUNT_COUNT;
-pub(crate) const SERVER_ROW_OFFSET: usize = ACCOUNT_COUNT + 1;
+pub(crate) const SERVER_ROW_OFFSET: usize = ACCOUNT_COUNT;
+pub(crate) const CONFIGURABLE_ACP_SERVERS: [&str; 2] = ["codex-acp", "claude-acp"];
+
+pub(crate) fn is_configurable_acp_server(id: &str) -> bool {
+    CONFIGURABLE_ACP_SERVERS.contains(&id)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -67,42 +67,6 @@ pub enum SettingsAction {
     Cancel,
 }
 
-#[derive(Debug, Clone)]
-enum AcpView {
-    Servers,
-    Catalog {
-        filter: String,
-    },
-    Custom {
-        name: String,
-        command: String,
-        field: usize,
-    },
-}
-
-#[derive(Debug, Clone)]
-enum RegistryState {
-    NotLoaded,
-    Loading(Arc<Mutex<Option<Result<Registry, String>>>>),
-    Ready(Registry),
-    Error(String),
-}
-
-#[derive(Debug, Clone, Default)]
-struct InstallSnapshot {
-    total_bytes: Option<u64>,
-    downloaded_bytes: u64,
-    extracting: bool,
-    result: Option<Result<(PathBuf, Vec<String>), String>>,
-}
-
-#[derive(Debug, Clone)]
-struct InstallingServer {
-    agent: Agent,
-    snapshot: Arc<Mutex<InstallSnapshot>>,
-    abort: tokio::task::AbortHandle,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PrioritySeat {
     Primary,
@@ -143,9 +107,6 @@ pub struct SettingsEditor {
     active_models: Option<ModelsConfig>,
     active_session_config: Vec<SessionConfigOption>,
     inventory: AcpInventory,
-    acp_view: AcpView,
-    registry: RegistryState,
-    installing: Option<InstallingServer>,
     priority_editor: Option<PrioritySeat>,
     priority_selected: usize,
 }
@@ -162,9 +123,6 @@ impl SettingsEditor {
             active_models: None,
             active_session_config: Vec::new(),
             inventory,
-            acp_view: AcpView::Servers,
-            registry: RegistryState::NotLoaded,
-            installing: None,
             priority_editor: None,
             priority_selected: 0,
         }
@@ -195,16 +153,8 @@ impl SettingsEditor {
     }
 
     pub fn handle_key(&mut self, code: KeyCode) -> SettingsAction {
-        self.poll_background();
         if self.priority_editor.is_some() {
             return self.handle_priority_key(code);
-        }
-        if self.tab == SettingsTab::AcpServers {
-            match self.acp_view {
-                AcpView::Catalog { .. } => return self.handle_catalog_key(code),
-                AcpView::Custom { .. } => return self.handle_custom_key(code),
-                AcpView::Servers => {}
-            }
         }
         match code {
             KeyCode::Esc => SettingsAction::Cancel,
@@ -212,12 +162,6 @@ impl SettingsEditor {
                 if self.tab == SettingsTab::AcpServers && self.selected < ACCOUNT_COUNT =>
             {
                 SettingsAction::Authenticate(crate::auth::AuthVendor::ALL[self.selected])
-            }
-            KeyCode::Enter
-                if self.tab == SettingsTab::AcpServers && self.selected == ADD_SERVER_INDEX =>
-            {
-                self.open_catalog();
-                SettingsAction::None
             }
             KeyCode::Enter if self.tab == SettingsTab::AcpPriority && self.selected == 0 => {
                 self.open_priority_editor(PrioritySeat::Primary);
@@ -272,7 +216,7 @@ impl SettingsEditor {
                 self.settings_rows(self.tab).len()
             }
             SettingsTab::AcpPriority => 3,
-            SettingsTab::AcpServers => self.inventory.servers.len() + SERVER_ROW_OFFSET,
+            SettingsTab::AcpServers => self.configurable_servers().count() + SERVER_ROW_OFFSET,
             SettingsTab::Appearance => 4,
         }
     }
@@ -331,7 +275,7 @@ impl SettingsEditor {
                 let Some(index) = self.selected.checked_sub(SERVER_ROW_OFFSET) else {
                     return SettingsAction::None;
                 };
-                let Some(server) = self.inventory.servers.get(index) else {
+                let Some(server) = self.configurable_servers().nth(index) else {
                     return SettingsAction::None;
                 };
                 let id = server.id.clone();
@@ -411,7 +355,7 @@ impl SettingsEditor {
                 let Some(index) = self.selected.checked_sub(SERVER_ROW_OFFSET) else {
                     return SettingsAction::None;
                 };
-                let Some(server) = self.inventory.servers.get(index) else {
+                let Some(server) = self.configurable_servers().nth(index) else {
                     return SettingsAction::None;
                 };
                 let id = server.id.clone();
@@ -985,78 +929,6 @@ impl SettingsEditor {
         adapter.map_or_else(|| model.clone(), |adapter| format!("{model} via {adapter}"))
     }
 
-    fn open_catalog(&mut self) {
-        self.acp_view = AcpView::Catalog {
-            filter: String::new(),
-        };
-        self.selected = 0;
-        if !matches!(
-            self.registry,
-            RegistryState::NotLoaded | RegistryState::Error(_)
-        ) {
-            return;
-        }
-        let shared = Arc::new(Mutex::new(None));
-        let output = Arc::clone(&shared);
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    let result = crate::registry::load()
-                        .await
-                        .map_err(|error| format!("{error:#}"));
-                    if let Ok(mut slot) = output.lock() {
-                        *slot = Some(result);
-                    }
-                });
-                self.registry = RegistryState::Loading(shared);
-            }
-            Err(error) => self.registry = RegistryState::Error(error.to_string()),
-        }
-    }
-
-    pub(crate) fn poll_background(&mut self) {
-        if let RegistryState::Loading(shared) = &self.registry {
-            let completed = shared.lock().ok().and_then(|mut slot| slot.take());
-            if let Some(result) = completed {
-                self.registry = match result {
-                    Ok(registry) => RegistryState::Ready(registry),
-                    Err(error) => RegistryState::Error(error),
-                };
-                self.selected = 0;
-            }
-        }
-        let completed = self.installing.as_ref().and_then(|installing| {
-            installing
-                .snapshot
-                .lock()
-                .ok()
-                .and_then(|mut snapshot| snapshot.result.take())
-                .map(|result| (installing.agent.clone(), result))
-        });
-        if let Some((agent, result)) = completed {
-            self.installing = None;
-            match result {
-                Ok((command, args)) => self.add_server(ConfiguredAcpServer {
-                    env: agent
-                        .distribution
-                        .binary
-                        .as_ref()
-                        .and_then(|targets| targets.get(&crate::registry::current_platform()))
-                        .map(|target| target.env.clone())
-                        .unwrap_or_default(),
-                    id: agent.id,
-                    label: agent.name,
-                    command,
-                    args,
-                    origin: AcpServerOrigin::Registry,
-                    policy: AcpServerPolicy::Enabled,
-                }),
-                Err(error) => self.notice = Some(format!("Install failed: {error}")),
-            }
-        }
-        self.refresh_inventory();
-    }
-
     pub(crate) fn refresh_after_auth(&mut self, notice: String) {
         self.refresh_inventory();
         self.notice = Some(notice);
@@ -1067,270 +939,11 @@ impl SettingsEditor {
         self.selected = self.selected.min(self.row_count().saturating_sub(1));
     }
 
-    fn filtered_agents(&self) -> Vec<&Agent> {
-        let RegistryState::Ready(registry) = &self.registry else {
-            return Vec::new();
-        };
-        let filter = match &self.acp_view {
-            AcpView::Catalog { filter } => filter.to_ascii_lowercase(),
-            _ => String::new(),
-        };
-        let configured = self
-            .inventory
+    fn configurable_servers(&self) -> impl Iterator<Item = &crate::roster::AcpServerInfo> {
+        self.inventory
             .servers
             .iter()
-            .map(|server| server.id.as_str())
-            .collect::<HashSet<_>>();
-        let platform = crate::registry::current_platform();
-        let mut agents = registry
-            .agents
-            .iter()
-            .filter(|agent| !configured.contains(agent.id.as_str()))
-            .filter(|agent| agent.preferred_kind(&platform).is_some())
-            .filter(|agent| {
-                filter.is_empty()
-                    || agent.name.to_ascii_lowercase().contains(&filter)
-                    || agent.id.to_ascii_lowercase().contains(&filter)
-            })
-            .collect::<Vec<_>>();
-        agents.sort_by_key(|agent| agent.name.to_ascii_lowercase());
-        agents
-    }
-
-    fn handle_catalog_key(&mut self, code: KeyCode) -> SettingsAction {
-        if self.installing.is_some() {
-            if code == KeyCode::Esc {
-                if let Some(installing) = &self.installing {
-                    installing.abort.abort();
-                }
-                self.installing = None;
-            }
-            return SettingsAction::None;
-        }
-        match code {
-            KeyCode::Esc => {
-                self.acp_view = AcpView::Servers;
-                self.selected = 0;
-            }
-            KeyCode::Up => {
-                let count = self.filtered_agents().len() + 1;
-                self.selected = self
-                    .selected
-                    .checked_sub(1)
-                    .unwrap_or(count.saturating_sub(1));
-            }
-            KeyCode::Down => {
-                let count = self.filtered_agents().len() + 1;
-                self.selected = (self.selected + 1) % count.max(1);
-            }
-            KeyCode::Backspace => {
-                if let AcpView::Catalog { filter } = &mut self.acp_view {
-                    filter.pop();
-                }
-                self.selected = 0;
-            }
-            KeyCode::Char(c) => {
-                if let AcpView::Catalog { filter } = &mut self.acp_view {
-                    filter.push(c);
-                }
-                self.selected = 0;
-            }
-            KeyCode::Enter => {
-                let agents = self.filtered_agents();
-                if self.selected == 0 {
-                    self.acp_view = AcpView::Custom {
-                        name: String::new(),
-                        command: String::new(),
-                        field: 0,
-                    };
-                    self.selected = 0;
-                } else if let Some(agent) = agents.get(self.selected - 1).cloned().cloned() {
-                    self.select_registry_agent(agent);
-                }
-            }
-            _ => {}
-        }
-        SettingsAction::None
-    }
-
-    fn select_registry_agent(&mut self, agent: Agent) {
-        let platform = crate::registry::current_platform();
-        match agent.preferred_kind(&platform) {
-            Some(DistributionKind::Binary) => {
-                let Some(target) = agent
-                    .distribution
-                    .binary
-                    .as_ref()
-                    .and_then(|targets| targets.get(&platform))
-                    .cloned()
-                else {
-                    return;
-                };
-                let snapshot = Arc::new(Mutex::new(InstallSnapshot::default()));
-                let output = Arc::clone(&snapshot);
-                let id = agent.id.clone();
-                let version = agent.version.clone();
-                let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-                let progress_output = Arc::clone(&snapshot);
-                tokio::spawn(async move {
-                    while let Some(progress) = progress_rx.recv().await {
-                        let Ok(mut state) = progress_output.lock() else {
-                            break;
-                        };
-                        match progress {
-                            Progress::Started { total_bytes } => state.total_bytes = total_bytes,
-                            Progress::Downloaded { downloaded_bytes } => {
-                                state.downloaded_bytes = downloaded_bytes;
-                            }
-                            Progress::Extracting => state.extracting = true,
-                            Progress::Done => {}
-                        }
-                    }
-                });
-                let task = tokio::spawn(async move {
-                    let result =
-                        crate::install::install_or_resolve(&id, &version, &target, progress_tx)
-                            .await
-                            .map_err(|error| format!("{error:#}"));
-                    if let Ok(mut state) = output.lock() {
-                        state.result = Some(result);
-                    }
-                });
-                self.installing = Some(InstallingServer {
-                    agent,
-                    snapshot,
-                    abort: task.abort_handle(),
-                });
-            }
-            Some(DistributionKind::Npx) => {
-                let package = agent.distribution.npx.as_ref().expect("npx selected");
-                let mut args = vec!["-y".to_string(), package.package.clone()];
-                args.extend(package.args.clone());
-                self.add_server(ConfiguredAcpServer {
-                    id: agent.id,
-                    label: agent.name,
-                    command: PathBuf::from("npx"),
-                    args,
-                    env: package.env.clone(),
-                    origin: AcpServerOrigin::Registry,
-                    policy: AcpServerPolicy::Enabled,
-                });
-            }
-            Some(DistributionKind::Uvx) => {
-                let package = agent.distribution.uvx.as_ref().expect("uvx selected");
-                let mut args = vec![package.package.clone()];
-                args.extend(package.args.clone());
-                self.add_server(ConfiguredAcpServer {
-                    id: agent.id,
-                    label: agent.name,
-                    command: PathBuf::from("uvx"),
-                    args,
-                    env: package.env.clone(),
-                    origin: AcpServerOrigin::Registry,
-                    policy: AcpServerPolicy::Enabled,
-                });
-            }
-            None => self.notice = Some("No supported distribution for this platform".to_string()),
-        }
-    }
-
-    fn add_server(&mut self, server: ConfiguredAcpServer) {
-        self.config
-            .acp
-            .servers
-            .retain(|existing| existing.id != server.id);
-        self.config.acp.policies.remove(&server.id);
-        self.config.acp.servers.push(server);
-        self.refresh_inventory();
-        self.acp_view = AcpView::Servers;
-        self.selected = self.inventory.servers.len().saturating_sub(1) + SERVER_ROW_OFFSET;
-        self.notice = None;
-    }
-
-    fn handle_custom_key(&mut self, code: KeyCode) -> SettingsAction {
-        match code {
-            KeyCode::Esc => {
-                self.acp_view = AcpView::Catalog {
-                    filter: String::new(),
-                }
-            }
-            KeyCode::Tab | KeyCode::Down | KeyCode::Up => {
-                if let AcpView::Custom { field, .. } = &mut self.acp_view {
-                    *field = (*field + 1) % 2;
-                }
-            }
-            KeyCode::Backspace => {
-                if let AcpView::Custom {
-                    name,
-                    command,
-                    field,
-                } = &mut self.acp_view
-                {
-                    if *field == 0 {
-                        name.pop();
-                    } else {
-                        command.pop();
-                    }
-                }
-            }
-            KeyCode::Char(c) => {
-                if let AcpView::Custom {
-                    name,
-                    command,
-                    field,
-                } = &mut self.acp_view
-                {
-                    if *field == 0 {
-                        name.push(c);
-                    } else {
-                        command.push(c);
-                    }
-                }
-            }
-            KeyCode::Enter => {
-                let AcpView::Custom { name, command, .. } = &self.acp_view else {
-                    return SettingsAction::None;
-                };
-                let name = name.trim();
-                let parts = match shell_words::split(command) {
-                    Ok(parts) if !parts.is_empty() => parts,
-                    Ok(_) => {
-                        self.notice = Some("Command is required".to_string());
-                        return SettingsAction::None;
-                    }
-                    Err(error) => {
-                        self.notice = Some(format!("Invalid command: {error}"));
-                        return SettingsAction::None;
-                    }
-                };
-                if name.is_empty()
-                    || !name
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-                {
-                    self.notice =
-                        Some("Name must contain only letters, digits, '-' or '_'".to_string());
-                    return SettingsAction::None;
-                }
-                self.add_server(ConfiguredAcpServer {
-                    id: format!("custom:{name}"),
-                    label: name.to_string(),
-                    command: PathBuf::from(&parts[0]),
-                    args: parts[1..].to_vec(),
-                    env: Default::default(),
-                    origin: AcpServerOrigin::Custom,
-                    policy: AcpServerPolicy::Enabled,
-                });
-            }
-            _ => {}
-        }
-        SettingsAction::None
-    }
-
-    pub(crate) fn cancel_background(&mut self) {
-        if let Some(installing) = self.installing.take() {
-            installing.abort.abort();
-        }
+            .filter(|server| is_configurable_acp_server(&server.id))
     }
 }
 
@@ -1382,23 +995,10 @@ pub fn draw_settings_panel(
     let footer = if editor.priority_editor.is_some() {
         "↑/↓ select · ←/→ move · r reset default · Enter done · Esc back"
     } else {
-        match editor.acp_view {
-            AcpView::Catalog { .. } if editor.installing.is_some() => "Esc cancel install view",
-            AcpView::Catalog { .. } => "Type filter · ↑/↓ select · Enter add · Esc back",
-            AcpView::Custom { .. } => "Tab field · Enter add · Esc back",
-            AcpView::Servers
-                if editor.tab == SettingsTab::AcpServers && editor.selected < ACCOUNT_COUNT =>
-            {
-                "Enter sign in · ↑/↓ select · Tab view · Esc cancel"
-            }
-            AcpView::Servers
-                if editor.tab == SettingsTab::AcpServers && editor.selected == ADD_SERVER_INDEX =>
-            {
-                "Enter add server · ↑/↓ select · Tab view · Esc cancel"
-            }
-            AcpView::Servers => {
-                "Tab view · ↑/↓ select · ←/→ change · Space toggle · Enter save · Esc cancel"
-            }
+        if editor.tab == SettingsTab::AcpServers && editor.selected < ACCOUNT_COUNT {
+            "Enter sign in · ↑/↓ select · Tab view · Esc cancel"
+        } else {
+            "Tab view · ↑/↓ select · ←/→ change · Space toggle · Enter save · Esc cancel"
         }
     };
     frame.render_widget(
@@ -1962,30 +1562,6 @@ fn draw_servers(
     editor: &SettingsEditor,
     theme: TerminalTheme,
 ) {
-    match &editor.acp_view {
-        AcpView::Catalog { filter } => {
-            draw_catalog(frame, area, editor, filter, theme);
-            return;
-        }
-        AcpView::Custom {
-            name,
-            command,
-            field,
-        } => {
-            let lines = vec![
-                Line::styled(
-                    "Add a custom ACP server command.",
-                    Style::default().ink(theme.muted),
-                ),
-                Line::raw(""),
-                selected_line(*field == 0, format!("Name     {name}"), theme),
-                selected_line(*field == 1, format!("Command  {command}"), theme),
-            ];
-            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-            return;
-        }
-        AcpView::Servers => {}
-    }
     let mut lines = vec![Line::styled(
         "Accounts",
         Style::default()
@@ -2006,14 +1582,8 @@ fn draw_servers(
         ));
     }
     lines.push(Line::raw(""));
-    lines.push(selected_line(
-        editor.selected == ADD_SERVER_INDEX,
-        "+ Add server".to_string(),
-        theme,
-    ));
-    lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "Servers",
+        "Supported servers",
         Style::default()
             .ink(theme.muted)
             .add_modifier(Modifier::BOLD),
@@ -2022,16 +1592,12 @@ fn draw_servers(
     let selected_server = editor.selected.saturating_sub(SERVER_ROW_OFFSET);
     let start = selected_server.saturating_sub(rows_available.saturating_sub(1));
     for (index, server) in editor
-        .inventory
-        .servers
-        .iter()
+        .configurable_servers()
         .enumerate()
         .skip(start)
         .take(rows_available)
     {
-        let status = if server.installing {
-            "installing".to_string()
-        } else if server.policy == AcpServerPolicy::Disabled {
+        let status = if server.policy == AcpServerPolicy::Disabled {
             "disabled".to_string()
         } else if let Some(error) = &server.error {
             format!("error: {error}")
@@ -2052,15 +1618,7 @@ fn draw_servers(
         };
         lines.push(selected_line(
             editor.selected == index + SERVER_ROW_OFFSET,
-            format!(
-                "[{}] {:<16} {status}",
-                if server.installing {
-                    "installing".to_string()
-                } else {
-                    server.policy.to_string()
-                },
-                server.label
-            ),
+            format!("[{}] {:<16} {status}", server.policy, server.label),
             theme,
         ));
         let detail = {
@@ -2076,146 +1634,6 @@ fn draw_servers(
             format!("      {detail}"),
             Style::default().ink(theme.muted),
         ));
-    }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
-fn draw_catalog(
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    editor: &SettingsEditor,
-    filter: &str,
-    theme: TerminalTheme,
-) {
-    if let Some(installing) = &editor.installing {
-        let snapshot = installing.snapshot.lock().ok();
-        let status = snapshot.as_ref().map_or_else(
-            || "installing".to_string(),
-            |snapshot| {
-                if snapshot.extracting {
-                    "extracting".to_string()
-                } else if let Some(total) = snapshot.total_bytes {
-                    let percent = snapshot.downloaded_bytes.saturating_mul(100) / total.max(1);
-                    format!("downloading {percent}%")
-                } else {
-                    format!("downloading {} bytes", snapshot.downloaded_bytes)
-                }
-            },
-        );
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::styled(
-                    format!("Installing {}", installing.agent.name),
-                    Style::default()
-                        .ink(theme.text)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Line::raw(""),
-                Line::raw(status),
-                Line::raw(""),
-                Line::styled("Esc cancels this view", Style::default().ink(theme.muted)),
-            ]),
-            area,
-        );
-        return;
-    }
-
-    let mut lines = vec![
-        Line::styled(
-            format!("ACP registry · filter: {filter}"),
-            Style::default().ink(theme.muted),
-        ),
-        Line::raw(""),
-    ];
-    match &editor.registry {
-        RegistryState::NotLoaded | RegistryState::Loading(_) => {
-            lines.push(Line::raw("Loading registry..."));
-            lines.push(selected_line(
-                editor.selected == 0,
-                "Custom command...".to_string(),
-                theme,
-            ));
-        }
-        RegistryState::Error(error) => {
-            lines.push(Line::styled(
-                format!("Registry unavailable: {error}"),
-                Style::default().ink(theme.error),
-            ));
-            lines.push(selected_line(
-                editor.selected == 0,
-                "Custom command...".to_string(),
-                theme,
-            ));
-        }
-        RegistryState::Ready(_) => {
-            let agents = editor.filtered_agents();
-            if let Some(agent) = editor.selected.checked_sub(1).and_then(|i| agents.get(i)) {
-                let platform = crate::registry::current_platform();
-                let kind = agent.preferred_kind(&platform);
-                let (command, download) = match kind {
-                    Some(DistributionKind::Binary) => {
-                        let command = agent
-                            .distribution
-                            .binary
-                            .as_ref()
-                            .and_then(|targets| targets.get(&platform))
-                            .map(|target| target.cmd.as_str())
-                            .unwrap_or("binary");
-                        (command.to_string(), "downloads into Mjolnir data")
-                    }
-                    Some(DistributionKind::Npx) => {
-                        let package = agent
-                            .distribution
-                            .npx
-                            .as_ref()
-                            .map(|package| package.package.as_str())
-                            .unwrap_or("package");
-                        (format!("npx -y {package}"), "downloads on first launch")
-                    }
-                    Some(DistributionKind::Uvx) => {
-                        let package = agent
-                            .distribution
-                            .uvx
-                            .as_ref()
-                            .map(|package| package.package.as_str())
-                            .unwrap_or("package");
-                        (format!("uvx {package}"), "downloads on first launch")
-                    }
-                    None => ("unsupported".to_string(), "not installable"),
-                };
-                lines.push(Line::styled(
-                    format!("{} · v{} · {download}", agent.name, agent.version),
-                    Style::default()
-                        .ink(theme.text)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                lines.push(Line::styled(command, Style::default().ink(theme.muted)));
-                lines.push(Line::raw(""));
-            }
-            lines.push(selected_line(
-                editor.selected == 0,
-                "Custom command...".to_string(),
-                theme,
-            ));
-            let visible = area.height.saturating_sub(lines.len() as u16) as usize;
-            let start = editor.selected.saturating_sub(visible.saturating_sub(1));
-            for (index, agent) in agents
-                .iter()
-                .enumerate()
-                .skip(start.saturating_sub(1))
-                .take(visible)
-            {
-                let kind = agent
-                    .preferred_kind(&crate::registry::current_platform())
-                    .map(DistributionKind::label)
-                    .unwrap_or("unsupported");
-                lines.push(selected_line(
-                    editor.selected == index + 1,
-                    format!("{:<24} {kind} · {}", agent.name, agent.description),
-                    theme,
-                ));
-            }
-        }
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
@@ -3039,35 +2457,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_npx_selection_adds_an_explicit_server() {
-        let registry = Registry::from_json(
-            r#"{"agents":[{"id":"gemini","name":"Gemini","version":"1","distribution":{"npx":{"package":"@google/gemini-cli","args":["--acp"]}}}]}"#,
-        )
-        .expect("registry");
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        editor.tab = SettingsTab::AcpServers;
-        editor.acp_view = AcpView::Catalog {
-            filter: String::new(),
-        };
-        editor.registry = RegistryState::Ready(registry);
-        editor.selected = 1;
-
-        editor.handle_key(KeyCode::Enter);
-
-        let server = editor
-            .config
-            .acp
-            .servers
-            .iter()
-            .find(|server| server.id == "gemini")
-            .expect("configured registry server");
-        assert_eq!(server.command, PathBuf::from("npx"));
-        assert_eq!(server.args, vec!["-y", "@google/gemini-cli", "--acp"]);
-        assert_eq!(server.policy, AcpServerPolicy::Enabled);
-    }
-
-    #[test]
-    fn accounts_and_add_server_are_direct_actions() {
+    fn account_rows_are_direct_actions() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::AcpServers;
 
@@ -3076,10 +2466,6 @@ mod tests {
             editor.handle_key(KeyCode::Enter),
             SettingsAction::Authenticate(crate::auth::AuthVendor::OpenAi)
         );
-
-        editor.selected = ADD_SERVER_INDEX;
-        assert_eq!(editor.handle_key(KeyCode::Enter), SettingsAction::None);
-        assert!(matches!(editor.acp_view, AcpView::Catalog { .. }));
     }
 
     #[test]
@@ -3142,8 +2528,11 @@ mod tests {
         editor.tab = SettingsTab::AcpServers;
         let servers = render(&editor, 100, 30);
         assert!(servers.contains("Accounts"), "rendered:\n{servers}");
-        assert!(servers.contains("+ Add server"), "rendered:\n{servers}");
-        assert!(servers.contains("Servers"), "rendered:\n{servers}");
+        assert!(
+            servers.contains("Supported servers"),
+            "rendered:\n{servers}"
+        );
+        assert!(!servers.contains("+ Add server"), "rendered:\n{servers}");
 
         editor.tab = SettingsTab::Appearance;
         let appearance = render(&editor, 100, 30);
@@ -3224,47 +2613,30 @@ mod tests {
     }
 
     #[test]
-    fn server_catalog_and_custom_views_render_recovery_details() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+    fn acp_server_panel_hides_custom_configured_servers() {
+        let mut config = crate::roster::config_with_a_visible_builtin();
+        config.acp.servers.push(crate::config::ConfiguredAcpServer {
+            id: "custom:local".to_string(),
+            label: "Local custom server".to_string(),
+            command: "local-acp".into(),
+            args: Vec::new(),
+            env: Default::default(),
+            origin: crate::config::AcpServerOrigin::Custom,
+            policy: AcpServerPolicy::Enabled,
+        });
+        let mut editor = SettingsEditor::new(config, Vec::new(), None);
         editor.tab = SettingsTab::AcpServers;
-        editor.acp_view = AcpView::Catalog {
-            filter: "gem".to_string(),
-        };
-        editor.registry = RegistryState::Error("offline".to_string());
-        let unavailable = render(&editor, 100, 30);
-        assert!(
-            unavailable.contains("Registry unavailable: offline"),
-            "rendered:\n{unavailable}"
-        );
-        assert!(
-            unavailable.contains("Custom command"),
-            "rendered:\n{unavailable}"
-        );
 
-        editor.registry = RegistryState::Ready(
-            Registry::from_json(
-                r#"{"agents":[{"id":"gemini","name":"Gemini","version":"1","description":"Google agent","distribution":{"npx":{"package":"@google/gemini-cli","args":["--acp"]}}}]}"#,
-            )
-            .expect("registry"),
-        );
-        editor.selected = 1;
-        let catalog = render(&editor, 100, 30);
-        assert!(catalog.contains("Gemini · v1"), "rendered:\n{catalog}");
-        assert!(
-            catalog.contains("npx -y @google/gemini-cli"),
-            "rendered:\n{catalog}"
-        );
+        let servers = render(&editor, 100, 30);
 
-        editor.acp_view = AcpView::Custom {
-            name: "Local".to_string(),
-            command: "adapter --stdio".to_string(),
-            field: 1,
-        };
-        let custom = render(&editor, 100, 30);
-        assert!(custom.contains("Name     Local"), "rendered:\n{custom}");
+        assert!(servers.contains("Codex"), "rendered:\n{servers}");
         assert!(
-            custom.contains("Command  adapter --stdio"),
-            "rendered:\n{custom}"
+            !servers.contains("Local custom server"),
+            "rendered:\n{servers}"
+        );
+        assert_eq!(
+            editor.row_count(),
+            ACCOUNT_COUNT + editor.configurable_servers().count()
         );
     }
 

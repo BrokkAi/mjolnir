@@ -53,8 +53,8 @@ terms and data boundaries of your Codex account.
 The recommended path needs an authenticated, PATH-visible Codex CLI plus
 Node.js/npm for the Codex ACP bridge. Provider use may incur cost.
 
-Other agents are optional. Mjolnir can also use existing Claude
-credentials and install supported binary ACP agents. Read
+Other agents are optional. Mjolnir can also use existing Claude credentials
+or a custom ACP server configured directly in `config.toml`. Read
 [Start with Codex](https://mjolnir.brokk.ai/codex/),
 [installation](https://mjolnir.brokk.ai/install/), and the
 [data and trust boundaries](https://mjolnir.brokk.ai/data-boundaries/)

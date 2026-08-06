@@ -65,6 +65,9 @@ Codex in `/mjconfig` to retain Auto model selection within Codex, and use
 
 ## Custom ACP servers
 
+The ACP Servers panel intentionally contains only Codex and Claude. Add custom
+servers directly to `config.toml` when an advanced deployment requires one.
+
 ```toml
 version = 3
 

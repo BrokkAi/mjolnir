@@ -46,7 +46,6 @@ A normal lifecycle can contact:
 
 - GitHub release APIs and assets for install and update checks;
 - the DeepSWE ranking endpoint;
-- the public ACP registry and agent archives;
 - npm for Codex and Claude ACP bridges;
 - provider model APIs through the selected adapter;
 - model hosts for the optional voice model on first use.
@@ -69,7 +68,7 @@ session metadata. Read [Remote control](/remote/) before leaving loopback.
 4. Review every permission request and avoid unattended `yolo` mode.
 5. Inspect custom ACP commands and inherited environment values.
 6. Decide whether remote control and voice downloads are acceptable.
-7. Protect or periodically clear local transcripts, provenance, caches, managed agents, and worktrees according to your policy.
+7. Protect or periodically clear local transcripts, provenance, caches, and worktrees according to your policy.
 
 For exact local categories, continue with [Storage and network
 activity](/storage-network/).

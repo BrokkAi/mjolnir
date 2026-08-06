@@ -1884,7 +1884,6 @@ async fn ui_loop(
                 }
             }
             _ = redraw_tick.tick() => {
-                state.poll_mjconfig_background();
                 if flush_input_paste_burst_if_due(&mut state, Instant::now(), false) {
                     pending_redraw.mark_interactive();
                 }
@@ -1893,7 +1892,6 @@ async fn ui_loop(
                 }
             }
             _ = animation_tick.tick() => {
-                state.poll_mjconfig_background();
                 if timer_driven_live_redraw(mode, &state) {
                     pending_redraw.mark_animation();
                 }

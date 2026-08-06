@@ -96,13 +96,11 @@ configuration can run, or whether tools may bypass prompts.
 
 ## Compatibility Impact
 
-Mjolnir discovers agents through the live ACP registry. On 2026-06-25 that
-registry listed 37 agents, including `claude-acp`, `codex-acp`, `gemini`,
-`opencode`, `goose`, `cursor`, `github-copilot-cli`, `qwen-code`, `kilo`, and
-many others.
+Mjolnir configures Codex and Claude as built-in ACP routes. Advanced users can
+still declare custom ACP commands directly in `config.toml`.
 
-A Mjolnir-local trust database would create inconsistent behavior across that
-set:
+A Mjolnir-local trust database would create inconsistent behavior across those
+routes:
 
 - agents that implement their own trust model might ignore Mjolnir's decision;
 - agents without folder trust would receive a misleading UI promise;

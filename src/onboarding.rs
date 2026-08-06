@@ -2,7 +2,6 @@
 
 use std::io::Stdout;
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers};
@@ -50,9 +49,44 @@ enum Action {
     Cancel,
     Resolve,
     Authenticate(crate::auth::AuthVendor),
-    UseRecommended,
+    UsePreset(SetupPreset),
     Skip,
     Finish,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupPreset {
+    Codex,
+    Claude,
+    CodexWithClaudeReview,
+    ClaudeWithCodexReview,
+}
+
+impl SetupPreset {
+    const ALL: [Self; 4] = [
+        Self::Codex,
+        Self::Claude,
+        Self::CodexWithClaudeReview,
+        Self::ClaudeWithCodexReview,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+            Self::CodexWithClaudeReview => "Codex code + Claude review",
+            Self::ClaudeWithCodexReview => "Claude code + Codex review",
+        }
+    }
+
+    fn sources(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Codex => ("codex-acp", "codex-acp"),
+            Self::Claude => ("claude-acp", "claude-acp"),
+            Self::CodexWithClaudeReview => ("codex-acp", "claude-acp"),
+            Self::ClaudeWithCodexReview => ("claude-acp", "codex-acp"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,18 +181,21 @@ impl State {
         &self.editor.config
     }
 
-    fn apply_recommended_setup(&mut self) {
+    fn apply_setup_preset(&mut self, preset: SetupPreset) {
+        let (code_source, review_source) = preset.sources();
         self.editor.config.agent.model = "auto".to_string();
-        self.editor.config.agent.acp_source = Some("codex-acp".to_string());
+        self.editor.config.agent.acp_source = Some(code_source.to_string());
         self.editor.config.agent.discrete_review = true;
         self.editor.config.review.model = "auto".to_string();
-        self.editor.config.review.acp_source = Some("codex-acp".to_string());
+        self.editor.config.review.acp_source = Some(review_source.to_string());
         self.editor.config.subagents.model = "auto".to_string();
-        self.editor.config.subagents.acp_source = Some("codex-acp".to_string());
+        self.editor.config.subagents.acp_source = Some(code_source.to_string());
         self.editor.config.subagents.auto_failover = true;
-        self.editor
-            .config
-            .set_acp_server_policy("codex-acp", crate::config::AcpServerPolicy::Enabled);
+        for source in [code_source, review_source] {
+            self.editor
+                .config
+                .set_acp_server_policy(source, crate::config::AcpServerPolicy::Enabled);
+        }
     }
 
     fn visited_config(&self) -> Config {
@@ -187,15 +224,19 @@ impl State {
     }
 
     fn connection_item_count(&self) -> usize {
-        crate::auth::AuthVendor::ALL.len() + 2
+        crate::auth::AuthVendor::ALL.len() + SetupPreset::ALL.len() + 1
     }
 
-    fn recommended_index() -> usize {
+    fn preset_index(preset: SetupPreset) -> usize {
         crate::auth::AuthVendor::ALL.len()
+            + SetupPreset::ALL
+                .iter()
+                .position(|candidate| *candidate == preset)
+                .unwrap_or(0)
     }
 
     fn customize_index() -> usize {
-        crate::auth::AuthVendor::ALL.len() + 1
+        crate::auth::AuthVendor::ALL.len() + SetupPreset::ALL.len()
     }
 
     fn default_connection_selection() -> usize {
@@ -206,7 +247,7 @@ impl State {
 
     fn connection_selection_for_openai(available: bool) -> usize {
         if available {
-            Self::recommended_index()
+            Self::preset_index(SetupPreset::Codex)
         } else {
             crate::auth::AuthVendor::ALL
                 .iter()
@@ -312,14 +353,17 @@ impl State {
                 KeyCode::Enter if self.selected < crate::auth::AuthVendor::ALL.len() => {
                     Action::Authenticate(crate::auth::AuthVendor::ALL[self.selected])
                 }
-                KeyCode::Enter if self.selected == Self::recommended_index() => {
-                    Action::UseRecommended
+                KeyCode::Enter if self.selected < Self::customize_index() => {
+                    let preset = SetupPreset::ALL[self
+                        .selected
+                        .saturating_sub(crate::auth::AuthVendor::ALL.len())];
+                    Action::UsePreset(preset)
                 }
-                KeyCode::Enter => {
+                KeyCode::Enter if self.selected == Self::customize_index() => {
                     self.open_customize(Screen::Connections);
                     Action::None
                 }
-                KeyCode::Right | KeyCode::Char('n') => Action::UseRecommended,
+                KeyCode::Right | KeyCode::Char('n') => Action::UsePreset(SetupPreset::Codex),
                 KeyCode::Char('r' | 'R') => Action::Resolve,
                 KeyCode::Char('c' | 'C') => {
                     self.open_customize(Screen::Connections);
@@ -342,8 +386,7 @@ impl State {
                 }
                 SettingsAction::Cancel => {
                     if let Some(editor) = self.customize_snapshot.take() {
-                        let mut changed = std::mem::replace(&mut self.editor, editor);
-                        changed.cancel_background();
+                        self.editor = editor;
                     }
                     self.change_screen(self.customize_return);
                     Action::None
@@ -407,7 +450,6 @@ impl State {
                         .map(|role| role.launch.source_id.clone()),
                 });
         std::mem::swap(&mut self.editor, &mut editor);
-        editor.cancel_background();
         self.roster = Some(roster);
         self.change_screen(Screen::Readiness);
     }
@@ -441,13 +483,11 @@ pub async fn run(
 ) -> Result<Outcome> {
     let mut state = State::new(kind, config, roster, notice);
     let mut events = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_millis(100));
     terminal.draw(|frame| draw(frame, &mut state))?;
     loop {
         tokio::select! {
             biased;
             _ = termination.cancelled() => {
-                state.editor.cancel_background();
                 return Ok(Outcome::Cancel);
             },
             event = events.next() => {
@@ -466,17 +506,14 @@ pub async fn run(
                     continue;
                 }
                 if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
-                    state.editor.cancel_background();
                     return Ok(Outcome::Cancel);
                 }
                 match state.handle_key(key.code) {
                     Action::None => {}
                     Action::Cancel => {
-                        state.editor.cancel_background();
                         return Ok(Outcome::Cancel);
                     }
                     Action::Skip => {
-                        state.editor.cancel_background();
                         return Ok(Outcome::Skip(Box::new(state.skipped_config())));
                     }
                     Action::Finish => {
@@ -523,14 +560,14 @@ pub async fn run(
                                 NoticeTone::Warning
                             };
                             if signed_in && vendor == crate::auth::AuthVendor::OpenAi {
-                                state.selected = State::recommended_index();
+                                state.selected = State::preset_index(SetupPreset::Codex);
                                 state.reveal_selection = true;
                             }
                         }
                     }
-                    action @ (Action::Resolve | Action::UseRecommended) => {
-                        if action == Action::UseRecommended {
-                            state.apply_recommended_setup();
+                    action @ (Action::Resolve | Action::UsePreset(_)) => {
+                        if let Action::UsePreset(preset) = action {
+                            state.apply_setup_preset(preset);
                         }
                         state.notice = Some("Checking provider routes and role readiness…".to_string());
                         state.notice_tone = NoticeTone::Info;
@@ -542,7 +579,6 @@ pub async fn run(
                     }
                 }
             }
-            _ = tick.tick() => state.editor.poll_background(),
         }
         terminal.draw(|frame| draw(frame, &mut state))?;
     }
@@ -924,8 +960,8 @@ fn welcome_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
 
 fn whats_new_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     let mut lines = hero(
-        "CODEX-FIRST, END TO END",
-        "New setups now use Codex for every role by default.",
+        "CODEX AND CLAUDE, YOUR WAY",
+        "New setup presets can keep one provider throughout or split code and review.",
         theme,
     );
     lines.push(
@@ -998,8 +1034,8 @@ fn whats_new_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
 
 fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     let mut lines = hero(
-        "START WITH CODEX",
-        "Use your existing ChatGPT or Codex sign-in. Other providers are optional.",
+        "CHOOSE YOUR CODING TEAM",
+        "Use Codex, Claude, or split coding and review across both.",
         theme,
     );
     lines.push(section_heading("ACCOUNTS", theme.muted));
@@ -1032,20 +1068,37 @@ fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
         ));
     }
     lines.push(Line::raw(""));
-    lines.push(section_heading("START", theme.muted));
-    lines.push(choice_line(
-        state.selected == State::recommended_index(),
-        "Use Codex defaults",
-        "RECOMMENDED",
-        theme,
-    ));
-    lines.push(detail_line(
-        format!(
-            "Automatic primary, builders, and review  ·  up to {} parallel",
-            state.config().subagents.max_parallel
-        ),
-        theme,
-    ));
+    lines.push(section_heading("TEAM", theme.muted));
+    for preset in SetupPreset::ALL {
+        let (code_source, review_source) = preset.sources();
+        lines.push(choice_line(
+            state.selected == State::preset_index(preset),
+            preset.label(),
+            if preset == SetupPreset::Codex {
+                "RECOMMENDED"
+            } else {
+                ""
+            },
+            theme,
+        ));
+        lines.push(detail_line(
+            format!(
+                "Code: {}  ·  Review: {}  ·  up to {} builders",
+                if code_source == "codex-acp" {
+                    "Codex"
+                } else {
+                    "Claude"
+                },
+                if review_source == "codex-acp" {
+                    "Codex"
+                } else {
+                    "Claude"
+                },
+                state.config().subagents.max_parallel
+            ),
+            theme,
+        ));
+    }
     lines.push(choice_line(
         state.selected == State::customize_index(),
         "Customize every route",
@@ -1053,7 +1106,7 @@ fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
         theme,
     ));
     lines.push(detail_line(
-        "Models, providers, review, parallelism, and appearance",
+        "Models, Codex and Claude routes, review, parallelism, and appearance",
         theme,
     ));
     lines.push(Line::raw(""));
@@ -1085,9 +1138,7 @@ fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
             ));
         }
         for server in &state.inventory.servers {
-            let issue = if server.installing {
-                Some("installing".to_string())
-            } else if let Some(error) = &server.error {
+            let issue = if let Some(error) = &server.error {
                 Some(format!("needs repair: {error}"))
             } else if server.selected && !server.detected {
                 Some(format!("not detected: {}", server.evidence))
@@ -1343,28 +1394,49 @@ mod tests {
     }
 
     #[test]
-    fn fresh_recommended_path_constrains_every_seat_to_codex() {
+    fn fresh_setup_offers_codex_claude_and_mixed_presets() {
         let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
         assert_eq!(state.screen, Screen::Welcome);
         assert_eq!(state.handle_key(KeyCode::Enter), Action::None);
         assert_eq!(state.screen, Screen::Connections);
-        state.selected = State::recommended_index();
-        assert_eq!(state.handle_key(KeyCode::Enter), Action::UseRecommended);
-        state.apply_recommended_setup();
-        assert_eq!(
-            state.config().agent.acp_source.as_deref(),
-            Some("codex-acp")
-        );
-        assert_eq!(
-            state.config().review.acp_source.as_deref(),
-            Some("codex-acp")
-        );
-        assert_eq!(
-            state.config().subagents.acp_source.as_deref(),
-            Some("codex-acp")
-        );
-        assert!(state.config().agent.discrete_review);
-        assert!(state.config().subagents.auto_failover);
+        for (preset, code_source, review_source) in [
+            (SetupPreset::Codex, "codex-acp", "codex-acp"),
+            (SetupPreset::Claude, "claude-acp", "claude-acp"),
+            (
+                SetupPreset::CodexWithClaudeReview,
+                "codex-acp",
+                "claude-acp",
+            ),
+            (
+                SetupPreset::ClaudeWithCodexReview,
+                "claude-acp",
+                "codex-acp",
+            ),
+        ] {
+            state.selected = State::preset_index(preset);
+            assert_eq!(state.handle_key(KeyCode::Enter), Action::UsePreset(preset));
+            state.apply_setup_preset(preset);
+            assert_eq!(
+                state.config().agent.acp_source.as_deref(),
+                Some(code_source)
+            );
+            assert_eq!(
+                state.config().review.acp_source.as_deref(),
+                Some(review_source)
+            );
+            assert_eq!(
+                state.config().subagents.acp_source.as_deref(),
+                Some(code_source)
+            );
+            assert_eq!(
+                state.config().acp.policy(code_source),
+                crate::config::AcpServerPolicy::Enabled
+            );
+            assert_eq!(
+                state.config().acp.policy(review_source),
+                crate::config::AcpServerPolicy::Enabled
+            );
+        }
         state.resolution_succeeded(roster());
         assert_eq!(state.screen, Screen::Readiness);
         assert_eq!(state.handle_key(KeyCode::Enter), Action::Finish);
@@ -1425,7 +1497,7 @@ mod tests {
         assert_eq!(State::connection_selection_for_openai(false), 0);
         assert_eq!(
             State::connection_selection_for_openai(true),
-            State::recommended_index()
+            State::preset_index(SetupPreset::Codex)
         );
     }
 
@@ -1548,7 +1620,7 @@ mod tests {
     fn narrow_connection_keeps_the_selected_action_and_scroll_help_visible() {
         let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
         state.change_screen(Screen::Connections);
-        state.selected = State::recommended_index();
+        state.selected = State::preset_index(SetupPreset::Codex);
         state.reveal_selection = true;
         let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -1557,10 +1629,7 @@ mod tests {
             .draw(|frame| draw(frame, &mut state))
             .expect("draw");
         let rendered = terminal.backend().to_string();
-        assert!(
-            rendered.contains("Use Codex defaults"),
-            "rendered:\n{rendered}"
-        );
+        assert!(rendered.contains("Codex"), "rendered:\n{rendered}");
         assert!(rendered.contains("PgUp/PgDn"), "rendered:\n{rendered}");
         assert!(rendered.contains("Select"), "rendered:\n{rendered}");
 
@@ -1569,17 +1638,14 @@ mod tests {
             .draw(|frame| draw(frame, &mut state))
             .expect("redraw");
         let rendered = terminal.backend().to_string();
-        assert!(
-            rendered.contains("Customize every route"),
-            "rendered:\n{rendered}"
-        );
+        assert!(rendered.contains("Claude"), "rendered:\n{rendered}");
     }
 
     #[test]
     fn resize_reveals_the_selected_connection_action_again() {
         let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
         state.change_screen(Screen::Connections);
-        state.selected = State::recommended_index();
+        state.selected = State::preset_index(SetupPreset::Codex);
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
@@ -1594,10 +1660,7 @@ mod tests {
             .expect("narrow redraw");
 
         let rendered = terminal.backend().to_string();
-        assert!(
-            rendered.contains("Use Codex defaults"),
-            "rendered:\n{rendered}"
-        );
+        assert!(rendered.contains("Codex"), "rendered:\n{rendered}");
     }
 
     #[test]
@@ -1680,7 +1743,6 @@ mod tests {
             launch,
             model_count: 0,
             error: None,
-            installing: false,
             origin: None,
             session_config: Vec::new(),
             subscription: None,
@@ -1733,7 +1795,11 @@ mod tests {
     fn standard_layout_keeps_each_primary_action_visible() {
         for (kind, screen, expected) in [
             (Kind::Fresh, Screen::Welcome, "Set up Mjolnir"),
-            (Kind::Fresh, Screen::Connections, "Use Codex defaults"),
+            (
+                Kind::Fresh,
+                Screen::Connections,
+                "Codex code + Claude review",
+            ),
             (Kind::Fresh, Screen::Readiness, "Start session"),
             (Kind::Upgrade, Screen::WhatsNew, "Continue"),
         ] {
