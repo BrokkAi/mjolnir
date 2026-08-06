@@ -939,6 +939,32 @@ impl SettingsEditor {
         }
     }
 
+    pub(crate) fn staged_model_warning(&self, model: &str) -> Option<String> {
+        if model == "auto" || model == crate::config::DISABLED_MODEL {
+            return None;
+        }
+        match self.choices.iter().find(|choice| choice.model == model) {
+            Some(choice) if !choice.available => Some(format!(
+                "unavailable: {}",
+                choice
+                    .disabled_reason
+                    .as_deref()
+                    .unwrap_or("no launchable ACP route")
+            )),
+            None => Some("not reported this session".to_string()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn active_model(&self, role: usize) -> Option<&str> {
+        let models = self.active_models.as_ref()?;
+        Some(match role {
+            0 => models.primary.as_str(),
+            1 => models.review.as_str(),
+            _ => models.subagent.as_str(),
+        })
+    }
+
     pub(crate) fn active_model_detail(&self, role: usize) -> String {
         let Some(models) = self.active_models.as_ref() else {
             return "not running".to_string();
@@ -1509,6 +1535,59 @@ fn draw_tabs(
     frame.render_widget(Paragraph::new(Line::from(tabs.collect::<Vec<_>>())), area);
 }
 
+fn session_options_heading(
+    editor: &SettingsEditor,
+    source: Option<&str>,
+    theme: TerminalTheme,
+) -> Line<'static> {
+    let label = source.map_or("ACP".to_string(), |source| {
+        editor
+            .inventory
+            .servers
+            .iter()
+            .find(|server| server.id == source)
+            .map_or_else(|| source.to_string(), |server| server.label.clone())
+    });
+    Line::styled(
+        format!("Session options · {label}"),
+        Style::default()
+            .ink(theme.muted)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn model_lines(
+    selected: bool,
+    label: &str,
+    model: &str,
+    role: usize,
+    editor: &SettingsEditor,
+    theme: TerminalTheme,
+) -> Vec<Line<'static>> {
+    let warning = editor.staged_model_warning(model);
+    let active = editor
+        .active_model(role)
+        .filter(|active| *active != model)
+        .map(|_| format!("active: {}", editor.active_model_detail(role)));
+    let (detail, trailing_active) = match (warning, active) {
+        (Some(warning), Some(active)) => (Some(warning), Some(active)),
+        (warning, active) => (warning.or(active), None),
+    };
+    let mut lines = vec![selected_line_with_detail(
+        selected,
+        format!("{label} < {model} >"),
+        detail,
+        theme,
+    )];
+    if let Some(active) = trailing_active {
+        lines.push(Line::styled(
+            format!("  {active}"),
+            Style::default().ink(theme.muted),
+        ));
+    }
+    lines
+}
+
 fn draw_agents(
     frame: &mut ratatui::Frame,
     area: Rect,
@@ -1520,25 +1599,13 @@ fn draw_agents(
     let has_options = rows
         .iter()
         .any(|row| matches!(row, SettingsRow::SessionOption { .. }));
-    let mut lines = vec![Line::styled(
-        match source.as_deref() {
-            Some(source) => format!(
-                "Saved primary defaults via {source}. Compatible options update the active primary on save; models apply on /new or /clear."
-            ),
-            None => "No primary ACP route is resolved; choose a model or source to discover its session options."
-                .to_string(),
-        },
-        Style::default().ink(theme.muted),
-    )];
-    if !has_options {
-        lines.push(Line::styled(
-            "No additional selectable session options were reported for this primary route.",
-            Style::default().ink(theme.muted),
-        ));
-    }
-    lines.push(Line::raw(""));
+    let mut lines = Vec::new();
     let mut selected_line_index = 0;
     for (row_index, row) in rows.into_iter().enumerate() {
+        if row_index == 1 && has_options {
+            lines.push(Line::raw(""));
+            lines.push(session_options_heading(editor, source.as_deref(), theme));
+        }
         let selected = editor.selected == row_index;
         if selected {
             selected_line_index = lines.len();
@@ -1546,18 +1613,13 @@ fn draw_agents(
         match row {
             SettingsRow::PrimaryModel => {
                 let model = &editor.config.agent.model;
-                lines.push(selected_line(
+                lines.extend(model_lines(
                     selected,
-                    format!("Primary model < {model} >"),
+                    "Primary model",
+                    model,
+                    0,
+                    editor,
                     theme,
-                ));
-                lines.push(Line::styled(
-                    format!(
-                        "  saved: {} · active: {}",
-                        editor.staged_model_detail(model),
-                        editor.active_model_detail(0)
-                    ),
-                    Style::default().ink(theme.muted),
                 ));
             }
             SettingsRow::SessionOption {
@@ -1573,23 +1635,20 @@ fn draw_agents(
                 let active = editor
                     .active_primary_session_value(option)
                     .map(|value| session_option_value_label(option, &value).0)
-                    .unwrap_or_else(|| "next session only".to_string());
-                lines.push(selected_line(
+                    .filter(|active| active != &saved_label)
+                    .map(|active| format!("active: {active}"));
+                lines.push(selected_line_with_detail(
                     selected,
                     format!("{} < {saved_label} >", option.name),
+                    active,
                     theme,
                 ));
-                lines.push(Line::styled(
-                    if compatible {
-                        format!("  saved default · active: {active}")
-                    } else {
-                        format!(
-                            "  saved value is unavailable on {server_id}",
-                            server_id = server.id
-                        )
-                    },
-                    Style::default().ink(if compatible { theme.muted } else { theme.error }),
-                ));
+                if !compatible {
+                    lines.push(Line::styled(
+                        format!("  unavailable on {}", server.id),
+                        Style::default().ink(theme.error),
+                    ));
+                }
             }
             SettingsRow::ReviewModel
             | SettingsRow::SubagentModel
@@ -1613,25 +1672,16 @@ fn draw_reviewer(
     let has_options = rows
         .iter()
         .any(|row| matches!(row, SettingsRow::SessionOption { .. }));
-    let mut lines = vec![Line::styled(
-        match source.as_deref() {
-            Some(source) => format!(
-                "Saved review-session defaults via {source}. Changes apply to review sessions started after save."
-            ),
-            None => "No reviewer ACP route is resolved; choose a model or source to discover its session options."
-                .to_string(),
-        },
-        Style::default().ink(theme.muted),
-    )];
-    if !has_options {
-        lines.push(Line::styled(
-            "No additional selectable session options were reported for this reviewer route.",
-            Style::default().ink(theme.muted),
-        ));
-    }
-    lines.push(Line::raw(""));
+    let mut lines = Vec::new();
     let mut selected_line_index = 0;
     for (row_index, row) in rows.into_iter().enumerate() {
+        if row_index == 1 && has_options {
+            lines.push(Line::raw(""));
+            lines.push(session_options_heading(editor, source.as_deref(), theme));
+        }
+        if has_options && matches!(row, SettingsRow::DiscreteReview) {
+            lines.push(Line::raw(""));
+        }
         let selected = editor.selected == row_index;
         if selected {
             selected_line_index = lines.len();
@@ -1639,18 +1689,13 @@ fn draw_reviewer(
         match row {
             SettingsRow::ReviewModel => {
                 let model = &editor.config.review.model;
-                lines.push(selected_line(
+                lines.extend(model_lines(
                     selected,
-                    format!("Review model < {model} >"),
+                    "Review model",
+                    model,
+                    1,
+                    editor,
                     theme,
-                ));
-                lines.push(Line::styled(
-                    format!(
-                        "  saved: {} · active: {}",
-                        editor.staged_model_detail(model),
-                        editor.active_model_detail(1)
-                    ),
-                    Style::default().ink(theme.muted),
                 ));
             }
             SettingsRow::SessionOption {
@@ -1668,17 +1713,12 @@ fn draw_reviewer(
                     format!("{} < {saved_label} >", option.name),
                     theme,
                 ));
-                lines.push(Line::styled(
-                    if compatible {
-                        "  saved default · already-running reviews are unchanged".to_string()
-                    } else {
-                        format!(
-                            "  saved value is unavailable on {server_id}",
-                            server_id = server.id
-                        )
-                    },
-                    Style::default().ink(if compatible { theme.muted } else { theme.error }),
-                ));
+                if !compatible {
+                    lines.push(Line::styled(
+                        format!("  unavailable on {}", server.id),
+                        Style::default().ink(theme.error),
+                    ));
+                }
             }
             SettingsRow::DiscreteReview => lines.push(selected_line(
                 selected,
@@ -1730,25 +1770,16 @@ fn draw_subagents(
     let has_options = rows
         .iter()
         .any(|row| matches!(row, SettingsRow::SessionOption { .. }));
-    let mut lines = vec![Line::styled(
-        match source.as_deref() {
-            Some(source) => format!(
-                "Saved delegated-session defaults via {source}. Changes apply only to subagents started later."
-            ),
-            None => "No subagent ACP route is resolved; choose a model or source to discover its session options."
-                .to_string(),
-        },
-        Style::default().ink(theme.muted),
-    )];
-    if !has_options && editor.config.subagents.model != crate::config::DISABLED_MODEL {
-        lines.push(Line::styled(
-            "No additional selectable session options were reported for this subagent route.",
-            Style::default().ink(theme.muted),
-        ));
-    }
-    lines.push(Line::raw(""));
+    let mut lines = Vec::new();
     let mut selected_line_index = 0;
     for (row_index, row) in rows.into_iter().enumerate() {
+        if row_index == 1 && has_options {
+            lines.push(Line::raw(""));
+            lines.push(session_options_heading(editor, source.as_deref(), theme));
+        }
+        if has_options && matches!(row, SettingsRow::MaxParallelSubagents) {
+            lines.push(Line::raw(""));
+        }
         let selected = editor.selected == row_index;
         if selected {
             selected_line_index = lines.len();
@@ -1756,18 +1787,13 @@ fn draw_subagents(
         match row {
             SettingsRow::SubagentModel => {
                 let model = &editor.config.subagents.model;
-                lines.push(selected_line(
+                lines.extend(model_lines(
                     selected,
-                    format!("Subagent model < {model} >"),
+                    "Subagent model",
+                    model,
+                    2,
+                    editor,
                     theme,
-                ));
-                lines.push(Line::styled(
-                    format!(
-                        "  saved: {} · active pool: {}",
-                        editor.staged_model_detail(model),
-                        editor.active_model_detail(2)
-                    ),
-                    Style::default().ink(theme.muted),
                 ));
             }
             SettingsRow::SessionOption {
@@ -1785,17 +1811,12 @@ fn draw_subagents(
                     format!("{} < {saved_label} >", option.name),
                     theme,
                 ));
-                lines.push(Line::styled(
-                    if compatible {
-                        "  saved default · already-running subagents are unchanged".to_string()
-                    } else {
-                        format!(
-                            "  saved value is unavailable on {server_id}",
-                            server_id = server.id
-                        )
-                    },
-                    Style::default().ink(if compatible { theme.muted } else { theme.error }),
-                ));
+                if !compatible {
+                    lines.push(Line::styled(
+                        format!("  unavailable on {}", server.id),
+                        Style::default().ink(theme.error),
+                    ));
+                }
             }
             SettingsRow::MaxParallelSubagents => lines.push(selected_line(
                 selected,
@@ -2312,6 +2333,22 @@ fn selected_line(selected: bool, text: String, theme: TerminalTheme) -> Line<'st
     ))
 }
 
+fn selected_line_with_detail(
+    selected: bool,
+    text: String,
+    detail: Option<String>,
+    theme: TerminalTheme,
+) -> Line<'static> {
+    let mut line = selected_line(selected, text, theme);
+    if let Some(detail) = detail {
+        line.spans.push(Span::styled(
+            format!("  {detail}"),
+            Style::default().ink(theme.muted),
+        ));
+    }
+    line
+}
+
 fn on_off(enabled: bool) -> &'static str {
     if enabled { "on" } else { "off" }
 }
@@ -2386,6 +2423,34 @@ mod tests {
             notices[0]
         );
     }
+
+    #[test]
+    fn staged_model_warning_only_reports_missing_or_unavailable_models() {
+        let editor = SettingsEditor::new(
+            Config::default(),
+            vec![ModelChoice {
+                model: "unavailable-model".to_string(),
+                pass_at_1: 0.0,
+                mean_cost_usd: 0.0,
+                available: false,
+                disabled_reason: Some("sign-in required".to_string()),
+                adapter: Some("codex-acp".to_string()),
+                ranked: false,
+            }],
+            None,
+        );
+
+        assert_eq!(editor.staged_model_warning("auto"), None);
+        assert_eq!(
+            editor.staged_model_warning("missing-model").as_deref(),
+            Some("not reported this session")
+        );
+        assert_eq!(
+            editor.staged_model_warning("unavailable-model").as_deref(),
+            Some("unavailable: sign-in required")
+        );
+    }
+
     use agent_client_protocol::schema::v1::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     };
@@ -3042,7 +3107,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_tabs_render_their_saved_controls() {
+    fn standard_tabs_render_their_controls() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
             Vec::new(),
@@ -3091,6 +3156,71 @@ mod tests {
         assert!(appearance.contains("Keep awake"), "rendered:\n{appearance}");
 
         assert!(!render(&editor, 27, 11).contains("mj config"));
+    }
+
+    #[test]
+    fn reviewer_panel_keeps_persistence_details_out_of_the_control_list() {
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
+        let server = editor
+            .inventory
+            .servers
+            .first_mut()
+            .expect("visible ACP server");
+        let server_id = server.id.clone();
+        server.session_config = vec![
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "agent",
+                vec![SessionConfigSelectOption::new("agent", "Agent")],
+            ),
+            SessionConfigOption::select(
+                "reasoning_effort",
+                "Reasoning effort",
+                "high",
+                vec![SessionConfigSelectOption::new("high", "High")],
+            ),
+        ];
+        editor.config.review.acp_source = Some(server_id.clone());
+        editor.config.review.model = "missing-review-model".to_string();
+        editor.active_models = Some(ModelsConfig {
+            review: "active-review-model".to_string(),
+            review_source: Some(server_id),
+            ..ModelsConfig::default()
+        });
+        editor.tab = SettingsTab::Reviewer;
+
+        let reviewer = render(&editor, 100, 30);
+
+        assert!(
+            reviewer.contains("Session options ·"),
+            "rendered:\n{reviewer}"
+        );
+        assert!(reviewer.contains("Mode < Agent >"), "rendered:\n{reviewer}");
+        assert!(
+            reviewer.contains("Reasoning effort < High >"),
+            "rendered:\n{reviewer}"
+        );
+        assert!(
+            reviewer.contains("active: active-review-model via"),
+            "rendered:\n{reviewer}"
+        );
+        assert!(
+            reviewer.contains("not reported this session"),
+            "rendered:\n{reviewer}"
+        );
+        for noise in [
+            "Saved review-session defaults",
+            "saved:",
+            "saved default",
+            "already-running reviews are unchanged",
+        ] {
+            assert!(!reviewer.contains(noise), "rendered:\n{reviewer}");
+        }
     }
 
     #[test]
