@@ -10211,7 +10211,7 @@ mod tests {
 
     #[test]
     fn embedded_viewer_keeps_session_actions_in_wrapping_mobile_header() {
-        let viewer = include_str!("remote_viewer.html");
+        let viewer = include_str!("remote_viewer.html").replace("\r\n", "\n");
         assert!(viewer.contains("id=\"mobile-new-session-button\""));
         assert!(viewer.contains("id=\"mobile-logout-button\""));
         let phone_layout = viewer
