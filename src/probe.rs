@@ -102,8 +102,6 @@ pub struct AdapterCapabilities {
     pub http_mcp: bool,
     pub models: Vec<ModelOption>,
     pub session_config: Vec<SessionConfigOption>,
-    /// True when `session_config` came from an actual `session/new` response.
-    pub session_config_known: bool,
 }
 
 /// Launch an ACP adapter once and capture both its initialize capabilities and
@@ -199,7 +197,6 @@ where
                 http_mcp: init_resp.agent_capabilities.mcp_capabilities.http,
                 models,
                 session_config,
-                session_config_known: true,
             }))
         })
         .await;
@@ -363,7 +360,6 @@ mod tests {
         .expect("probe succeeds");
 
         assert!(capabilities.http_mcp);
-        assert!(capabilities.session_config_known);
         assert_eq!(capabilities.session_config.len(), 2);
         assert_eq!(capabilities.models.len(), 2);
         assert_eq!(capabilities.models[0].value, "sonnet");

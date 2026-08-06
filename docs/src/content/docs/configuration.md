@@ -5,8 +5,9 @@ description: Configure the primary agent, subagents, ACP servers, review, and ap
 
 Open `/mjconfig` to edit settings from the TUI. Model and ACP-server changes
 apply to the next session. The former `/models` command has been removed; use
-the Agent tab in `/mjconfig` instead. When credentials or adapter capabilities
-change, run `mj models refresh` before starting Mjolnir again.
+the Agent tab in `/mjconfig` instead. Credentials and adapter capabilities are
+probed again whenever a new session roster is resolved; `mj models refresh`
+runs that probe as a standalone diagnostic.
 
 The config schema is versioned. The current schema is `version = 3`; a
 `version = 2` file is migrated in place on load. Any other version starts from

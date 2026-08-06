@@ -4054,11 +4054,7 @@ impl AppState {
                 hidden_config_ids,
             } => {
                 self.hidden_session_config_ids.extend(hidden_config_ids);
-                self.apply_session_config_options(options, targets);
-            }
-            UiEvent::RosterUpdate { choices, inventory } => {
-                self.model_choices = choices;
-                self.acp_inventory = inventory;
+                self.apply_connected_session_config_options(options, targets);
             }
             UiEvent::InternalMessage(message) => {
                 // An internal message starts a fresh orchestrator-initiated
@@ -5260,7 +5256,7 @@ impl AppState {
             }
             SessionUpdate::ConfigOptionUpdate(u) => {
                 let targets = config_option_targets(&u.config_options);
-                self.apply_session_config_options(u.config_options, targets);
+                self.apply_connected_session_config_options(u.config_options, targets);
             }
             SessionUpdate::SessionInfoUpdate(info) => {
                 if let Some(title) = info.title.value()
@@ -5377,6 +5373,48 @@ impl AppState {
         }) && let Some(value) = config_option_current_value_id(mode_option)
         {
             self.current_mode = Some(value.to_string());
+        }
+    }
+
+    fn apply_connected_session_config_options(
+        &mut self,
+        options: Vec<SessionConfigOption>,
+        targets: Vec<SessionConfigTarget>,
+    ) {
+        if !self.agent_source_id.is_empty() {
+            let visible_options: Vec<SessionConfigOption> = options
+                .iter()
+                .filter(|option| {
+                    !self
+                        .hidden_session_config_ids
+                        .contains(&option.id.to_string())
+                })
+                .cloned()
+                .collect();
+            Self::overlay_session_config(
+                &mut self.acp_inventory,
+                &self.agent_source_id,
+                &visible_options,
+            );
+            if let Some(menu) = self.mjconfig_menu.as_mut() {
+                menu.editor
+                    .update_catalog(self.model_choices.clone(), self.acp_inventory.clone());
+            }
+        }
+        self.apply_session_config_options(options, targets);
+    }
+
+    fn overlay_session_config(
+        inventory: &mut crate::roster::AcpInventory,
+        source_id: &str,
+        options: &[SessionConfigOption],
+    ) {
+        if let Some(server) = inventory
+            .servers
+            .iter_mut()
+            .find(|server| server.id == source_id)
+        {
+            server.session_config = options.to_vec();
         }
     }
 }
@@ -7363,29 +7401,6 @@ mod tests {
     }
 
     #[test]
-    fn roster_update_refreshes_choices_and_inventory() {
-        let mut state = AppState::new();
-        assert!(state.model_choices.is_empty());
-
-        state.apply_event(UiEvent::RosterUpdate {
-            choices: vec![crate::roster::ModelChoice {
-                model: "glm-5-2".to_string(),
-                pass_at_1: 0.5,
-                mean_cost_usd: 1.0,
-                available: true,
-                disabled_reason: None,
-                adapter: Some("custom:bridge".to_string()),
-                ranked: true,
-            }],
-            inventory: crate::roster::AcpInventory::default(),
-        });
-
-        assert_eq!(state.model_choices.len(), 1);
-        assert_eq!(state.model_choices[0].model, "glm-5-2");
-        assert!(state.transcript.is_empty(), "catalog refreshes are silent");
-    }
-
-    #[test]
     fn discrete_review_reenters_streaming_so_submissions_queue() {
         let mut state = AppState::new();
         state.set_connection_state(ConnectionState::Ready);
@@ -8478,6 +8493,69 @@ mod tests {
             ConfigOptionUpdate::new(vec![option]),
         )));
         assert!(s.session_config_options.is_empty());
+    }
+
+    #[test]
+    fn connected_session_config_replaces_probe_inventory_and_updates_open_menu() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = crate::roster::config_with_a_visible_builtin();
+        let mut inventory = crate::roster::discover_inventory(&config);
+        let server = inventory.servers.first_mut().expect("visible ACP server");
+        let source_id = server.id.clone();
+        config.agent.acp_source = Some(source_id.clone());
+        config.save(&path).expect("save config");
+
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.agent_source_id = source_id;
+        state.acp_inventory = inventory;
+        state.open_mjconfig_menu();
+
+        let option = SessionConfigOption::select(
+            "service_tier",
+            "Service tier",
+            "priority",
+            vec![SessionConfigSelectOption::new("priority", "Priority")],
+        );
+        state.apply_event(UiEvent::SessionConfigOptions {
+            options: vec![option],
+            targets: vec![SessionConfigTarget::ConfigOption {
+                config_id: "service_tier".into(),
+            }],
+            hidden_config_ids: Vec::new(),
+        });
+
+        let server = state
+            .acp_inventory
+            .servers
+            .iter()
+            .find(|server| server.id == state.agent_source_id)
+            .expect("connected server");
+        assert_eq!(server.session_config[0].id.to_string(), "service_tier");
+        assert_eq!(
+            state
+                .mjconfig_menu
+                .as_ref()
+                .expect("open menu")
+                .editor
+                .session_option_rows(crate::settings::SessionDefaultsSeat::Primary)
+                .len(),
+            1
+        );
+
+        state.apply_event(UiEvent::SessionConfigOptions {
+            options: Vec::new(),
+            targets: Vec::new(),
+            hidden_config_ids: Vec::new(),
+        });
+        let server = state
+            .acp_inventory
+            .servers
+            .iter()
+            .find(|server| server.id == state.agent_source_id)
+            .expect("connected server");
+        assert!(server.session_config.is_empty());
     }
 
     #[test]

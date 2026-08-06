@@ -23,23 +23,25 @@ qualifying adapter no model is launchable.
 | Claude | Existing Anthropic/Claude credentials | Runs the Claude ACP bridge through `npx`; sign-in actions require the official `claude` CLI |
 
 Credential discovery checks supported local credential files and environment
-variables without logging secret values or launching the npm bridges. First
-launch can still require Node.js, npm, network access, and provider
-authentication.
+variables without logging secret values. Roster resolution launches every
+selected adapter, including the npm bridges, before the roster is used. First
+launch can require Node.js, npm, network access, and provider authentication.
 
-## Probing and caching
+## Probing
 
-Native routes with fresh capability cache entries can bind immediately. Other
-routes are probed in the background and appear on the role tabs or ACP Servers
-tab in `/mjconfig` when their catalog is ready. A wedged probe does not block
-an otherwise launchable session.
+Selected routes are probed concurrently, and roster resolution waits for all
+of them before returning. Each probe opens an ACP connection and creates a
+disposable session to collect models, HTTP-MCP support, and session options.
+Mjolnir does not persist or reuse ACP capability results between resolutions.
 
-Probe results and the live DeepSWE ranking are cached for 24 hours. A bundled
-snapshot is available when the ranking endpoint cannot be refreshed. Read
-[Storage and network activity](/storage-network/) for paths and endpoints.
+The live DeepSWE ranking is separate from adapter capabilities and remains
+cached for 24 hours. A bundled snapshot is available when the ranking endpoint
+cannot be refreshed. Read [Storage and network activity](/storage-network/)
+for paths and endpoints.
 
-`mj models refresh` clears the persisted ACP capability cache. Run it before
-starting Mjolnir again to resolve models and reprobe every enabled adapter.
+`mj models refresh` performs an immediate roster resolution, probes every
+enabled adapter, and reports the available model count. Normal startup and
+`/new` or `/clear` resolutions perform the same adapter probes automatically.
 
 ## Auto selection and Codex priority
 
@@ -55,12 +57,12 @@ starting Mjolnir again to resolve models and reprobe every enabled adapter.
 - Unranked custom models are selectable explicitly but do not participate in
   Auto or Ragnarok.
 
-Availability, credentials, cached capabilities, and the current ranking can
-change the result. Auto chooses across launchable ranked models; adapter
+Availability, credentials, advertised capabilities, and the current ranking
+can change the result. Auto chooses across launchable ranked models; adapter
 priority decides between adapters that provide the selected model. Therefore,
-adding another detected provider can change an unconstrained Auto-resolved seat
-even though Codex is first in adapter priority. Set the seat's ACP source to
-Codex in `/mjconfig` to retain Auto model selection within Codex, and use
+adding another detected provider can change an unconstrained Auto-resolved
+seat even though Codex is first in adapter priority. Set the seat's ACP source
+to Codex in `/mjconfig` to retain Auto model selection within Codex, and use
 `/agents` to record what actually launched.
 
 ## Custom ACP servers

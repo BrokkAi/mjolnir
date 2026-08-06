@@ -1413,7 +1413,6 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
         | UiEvent::Info(_)
         | UiEvent::InternalMessage(_)
         | UiEvent::Fatal(_)
-        | UiEvent::RosterUpdate { .. }
         | UiEvent::Workflow(_)
         | UiEvent::Subagent(_) => RedrawCause::Interactive,
     }

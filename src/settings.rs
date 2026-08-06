@@ -145,6 +145,28 @@ impl SettingsEditor {
         self
     }
 
+    /// Replace the model and ACP catalog without discarding staged settings.
+    /// Keep the same logical row selected when session options change.
+    pub fn update_catalog(&mut self, choices: Vec<ModelChoice>, inventory: AcpInventory) {
+        let selected_row = matches!(
+            self.tab,
+            SettingsTab::Agents | SettingsTab::Reviewer | SettingsTab::Subagents
+        )
+        .then(|| self.settings_rows(self.tab).get(self.selected).copied())
+        .flatten();
+        self.choices = choices;
+        if !inventory.servers.is_empty() {
+            self.inventory = inventory;
+        }
+        self.selected = selected_row
+            .and_then(|row| {
+                self.settings_rows(self.tab)
+                    .iter()
+                    .position(|candidate| *candidate == row)
+            })
+            .unwrap_or_else(|| self.selected.min(self.row_count().saturating_sub(1)));
+    }
+
     /// Discovered ACP inventory backing the editor's server and session rows.
     /// The remote-control server projects it into the web `/mjconfig` panel so
     /// both UIs describe the same servers with the same status strings.

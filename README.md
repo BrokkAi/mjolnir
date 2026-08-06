@@ -115,8 +115,9 @@ mj
 First launch opens Mjolnir's configuration screen. Confirm the Codex account
 and route, keep the primary model on Auto, and start the session. Return later
 with `/mjconfig`. Model and adapter changes apply to the next session. If Codex
-credentials or capabilities change, run `mj models refresh` before starting
-Mjolnir again.
+credentials or capabilities change, start a new session so the configured
+adapters are probed again. `mj models refresh` runs the same probe as a
+standalone diagnostic.
 
 ## Try it
 

@@ -2596,13 +2596,13 @@ async fn drive_session(
             "ACP session started"
         );
     }
-    if !session_config.options.is_empty() {
-        let _ = ui_tx.send(UiEvent::SessionConfigOptions {
-            options: session_config.options.clone(),
-            targets: session_config.targets.clone(),
-            hidden_config_ids: hidden_config_ids.clone(),
-        });
-    }
+    // An empty list is still authoritative: it lets settings distinguish a
+    // connected adapter with no options from one whose discovery is pending.
+    let _ = ui_tx.send(UiEvent::SessionConfigOptions {
+        options: session_config.options.clone(),
+        targets: session_config.targets.clone(),
+        hidden_config_ids: hidden_config_ids.clone(),
+    });
 
     let mut workspace_roots = Vec::with_capacity(1 + additional_directories.len());
     workspace_roots.push(cwd.clone());
@@ -6630,6 +6630,25 @@ mod tests {
         }
     }
 
+    async fn expect_empty_session_config(ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>) {
+        let ev = tokio::time::timeout(Duration::from_secs(2), ui_rx.recv())
+            .await
+            .expect("session config event")
+            .expect("session config event");
+        match ev {
+            UiEvent::SessionConfigOptions {
+                options,
+                targets,
+                hidden_config_ids,
+            } => {
+                assert!(options.is_empty());
+                assert!(targets.is_empty());
+                assert!(hidden_config_ids.is_empty());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
     async fn next_session_update(ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>) -> SessionUpdate {
         let ev = tokio::time::timeout(Duration::from_secs(2), ui_rx.recv())
             .await
@@ -10537,6 +10556,7 @@ mod tests {
         ));
 
         wait_for_session_started(&mut ui_rx, "test-session").await;
+        expect_empty_session_config(&mut ui_rx).await;
         allow_next_permission(&mut ui_rx).await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -10660,6 +10680,8 @@ mod tests {
                 _ => {}
             }
         }
+
+        expect_empty_session_config(&mut ui_rx).await;
 
         cmd_tx.send(UiCommand::ForkSession).expect("send fork");
 

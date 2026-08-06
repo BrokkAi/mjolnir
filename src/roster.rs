@@ -4,10 +4,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use futures::{StreamExt, stream};
 
 use crate::config::{AcpServerOrigin, AcpServerPolicy, Config, PermissionPreset};
@@ -561,120 +561,21 @@ fn inventory_server_is_visible(server: &AcpServerInfo) -> bool {
 }
 
 type ProbeResult = std::result::Result<probe::AdapterCapabilities, String>;
-type ProbeCell = Arc<tokio::sync::OnceCell<ProbeResult>>;
-
-#[derive(Default)]
-struct ProbeCacheState {
-    generation: u64,
-    entries: HashMap<String, ProbeCell>,
-}
-
-impl ProbeCacheState {
-    fn invalidate(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        self.entries.clear();
-    }
-}
-
-static PROBE_CACHE: LazyLock<Mutex<ProbeCacheState>> =
-    LazyLock::new(|| Mutex::new(ProbeCacheState::default()));
 static WARNED_ADAPTERS: LazyLock<std::sync::Mutex<HashSet<String>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
-
-fn probe_cache_state() -> MutexGuard<'static, ProbeCacheState> {
-    PROBE_CACHE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-}
-
-/// Clear both layers of ACP capability caching.
-///
-/// Existing sessions keep their bound models. The next roster resolution has
-/// no completed `OnceCell` or disk entry to reuse, so every enabled adapter is
-/// probed again. The generation also prevents an older in-flight probe from
-/// repopulating the disk cache after this function returns.
-pub fn invalidate_model_cache() -> Result<()> {
-    invalidate_model_cache_at(&crate::probe_cache::default_cache_path())
-}
-
-fn invalidate_model_cache_at(path: &Path) -> Result<()> {
-    // Keep the lock through the disk removal. Successful probe writers take
-    // the same lock, so an older in-flight result cannot race the clear and
-    // restore stale capabilities afterward.
-    let mut state = probe_cache_state();
-    state.invalidate();
-    crate::probe_cache::clear(path)
-        .with_context(|| format!("clear ACP probe cache {}", path.display()))?;
-    Ok(())
-}
-
-fn probe_key(launch: &AdapterLaunch) -> String {
-    format!(
-        "{}\u{0}{}\u{0}{}",
-        launch.source_id,
-        launch.command.display(),
-        launch.args.join("\u{0}")
-    )
-}
 
 async fn probe_launch(
     launch: &AdapterLaunch,
     cwd: &Path,
 ) -> std::result::Result<probe::AdapterCapabilities, String> {
-    let key = probe_key(launch);
-    let (cell, generation) = {
-        let mut state = probe_cache_state();
-        let generation = state.generation;
-        let cell = state.entries.entry(key.clone()).or_default().clone();
-        (cell, generation)
-    };
-    cell.get_or_init(|| async {
-        let result = probe::adapter_capabilities(
-            launch.command.clone(),
-            launch.args.clone(),
-            launch.env.clone(),
-            cwd.to_path_buf(),
-            PROBE_TIMEOUT,
-        )
-        .await;
-        if let Ok(capabilities) = &result {
-            let state = probe_cache_state();
-            if state.generation == generation {
-                crate::probe_cache::store(
-                    &crate::probe_cache::default_cache_path(),
-                    &key,
-                    &launch.command,
-                    capabilities,
-                );
-            }
-        }
-        result
-    })
+    probe::adapter_capabilities(
+        launch.command.clone(),
+        launch.args.clone(),
+        launch.env.clone(),
+        cwd.to_path_buf(),
+        PROBE_TIMEOUT,
+    )
     .await
-    .clone()
-}
-
-/// Capabilities available without launching the adapter: an already-completed
-/// in-process probe, or a fresh disk cache entry (which then seeds the
-/// in-process cache so this resolution and later ones agree).
-async fn cached_probe_result(launch: &AdapterLaunch) -> Option<ProbeResult> {
-    let key = probe_key(launch);
-    let cell = {
-        let mut state = probe_cache_state();
-        state.entries.entry(key.clone()).or_default().clone()
-    };
-    if let Some(result) = cell.get() {
-        return Some(result.clone());
-    }
-    let cached = crate::probe_cache::load(
-        &crate::probe_cache::default_cache_path(),
-        &key,
-        &launch.command,
-        crate::probe_cache::CACHE_TTL,
-    )?;
-    let result: ProbeResult = Ok(cached);
-    let _ = cell.set(result.clone());
-    Some(result)
 }
 
 fn row_keys(row: &Row) -> HashSet<String> {
@@ -706,28 +607,10 @@ struct Discovery {
 
 fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResult)>) -> Discovery {
     probes.sort_by_key(|(priority, _, _)| *priority);
-    let mut merged: Vec<(usize, AdapterLaunch, ProbeResult)> = Vec::new();
-    for (priority, launch, result) in probes {
-        let Some((_, _, existing)) = merged
-            .iter_mut()
-            .find(|(_, prior, _)| prior.source_id == launch.source_id)
-        else {
-            merged.push((priority, launch, result));
-            continue;
-        };
-        match (existing.as_mut(), result) {
-            (Ok(base), Ok(enrichment)) if enrichment.session_config_known => {
-                base.session_config = enrichment.session_config;
-                base.session_config_known = true;
-            }
-            (Err(_), replacement) => *existing = replacement,
-            _ => {}
-        }
-    }
     let mut resolved = Vec::new();
     let mut adapter_errors = HashMap::new();
     let mut session_config = HashMap::new();
-    for (_, launch, capabilities) in merged {
+    for (_, launch, capabilities) in probes {
         let capabilities = match capabilities {
             Ok(capabilities) => capabilities,
             Err(reason) => {
@@ -828,44 +711,12 @@ fn custom_model_id(source_id: &str, model_value: &str) -> String {
     format!("custom/{name}/{model_value}")
 }
 
-fn credentialed_provider_capabilities(
-    launch: &AdapterLaunch,
-    rows: &[Row],
-) -> Option<probe::AdapterCapabilities> {
-    matches!(launch.kind, AdapterKind::Codex | AdapterKind::Claude).then(|| {
-        probe::AdapterCapabilities {
-            http_mcp: true,
-            models: rows
-                .iter()
-                .filter(|row| adapter_accepts_model(launch.kind, &row.model))
-                .map(|row| probe::ModelOption {
-                    value: row.model.clone(),
-                    name: row.model.clone(),
-                    description: None,
-                })
-                .collect(),
-            session_config: Vec::new(),
-            session_config_known: false,
-        }
-    })
-}
-
 async fn discover_available(rows: &[Row], inventory: &AcpInventory, cwd: &Path) -> Discovery {
     let launches = configured_launches(inventory);
     let probes = stream::iter(launches.into_iter().enumerate().map(|(priority, launch)| {
         let cwd = cwd.to_path_buf();
-        let credentialed = credentialed_provider_capabilities(&launch, rows);
         async move {
-            // Built-in Codex and Claude discovery is intentionally only a
-            // credential check. Launching their npx bridges here can download
-            // npm packages before the UI has rendered anything.
-            let capabilities = match credentialed {
-                Some(capabilities) => Ok(capabilities),
-                None => match cached_probe_result(&launch).await {
-                    Some(result) => result,
-                    None => probe_launch(&launch, &cwd).await,
-                },
-            };
+            let capabilities = probe_launch(&launch, &cwd).await;
             (priority, launch, capabilities)
         }
     }))
@@ -1094,153 +945,6 @@ pub async fn resolve(config: &Config, cwd: &Path) -> Result<Roster> {
     resolve_inner(config, cwd).await
 }
 
-/// A roster bound from instantly-known adapters, plus a stream of refreshed
-/// rosters as the remaining adapters finish probing in the background.
-pub struct StreamingResolution {
-    pub roster: Roster,
-    /// New roster snapshots as background probes land. `None` when every
-    /// adapter resolved instantly. Snapshots never rebind the running
-    /// session's seats; they refresh choices, inventory, and warnings.
-    pub updates: Option<tokio::sync::watch::Receiver<Roster>>,
-    /// Adapters still probing when the initial roster was returned.
-    pub pending_servers: Vec<String>,
-}
-
-/// Resolve the roster without waiting on adapter launches when possible.
-///
-/// Adapters whose capabilities are known instantly (credentialed built-ins,
-/// completed in-process probes, fresh disk cache entries) bind immediately;
-/// the rest are probed in the background and delivered as update snapshots.
-/// Only when the initial set cannot bind the configured roster does this
-/// wait, and then only until the earliest set of probe results that can.
-pub async fn resolve_streaming(config: &Config, cwd: &Path) -> Result<StreamingResolution> {
-    let leaderboard = deepswe::load(
-        &deepswe::default_cache_path(),
-        deepswe::CACHE_TTL,
-        deepswe::DEFAULT_URL,
-    )
-    .await;
-    let rows = natively_served(deepswe::eligible_high(&leaderboard.rows));
-    let availability = Availability::detect();
-    let inventory = discover_inventory(config);
-
-    let mut results: Vec<(usize, AdapterLaunch, ProbeResult)> = Vec::new();
-    let mut pending: Vec<(usize, AdapterLaunch)> = Vec::new();
-    for (priority, launch) in configured_launches(&inventory).into_iter().enumerate() {
-        let cached = cached_probe_result(&launch).await;
-        let instant = match credentialed_provider_capabilities(&launch, &rows) {
-            Some(mut base) => {
-                if let Some(Ok(cached)) = cached.as_ref()
-                    && cached.session_config_known
-                {
-                    base.session_config.clone_from(&cached.session_config);
-                    base.session_config_known = true;
-                }
-                Some(Ok(base))
-            }
-            None => cached,
-        };
-        match instant {
-            Some(result) => {
-                let needs_session_config = result
-                    .as_ref()
-                    .is_ok_and(|capabilities| !capabilities.session_config_known);
-                results.push((priority, launch.clone(), result));
-                if needs_session_config {
-                    pending.push((priority, launch));
-                }
-            }
-            None => pending.push((priority, launch)),
-        }
-    }
-
-    let assemble = |results: Vec<(usize, AdapterLaunch, ProbeResult)>,
-                    config: &Config,
-                    rows: &[Row],
-                    availability: &Availability,
-                    inventory: &AcpInventory| {
-        let discovery = resolve_probes(rows, results);
-        assemble_roster(config, rows, availability, inventory.clone(), discovery)
-    };
-
-    if pending.is_empty() {
-        let roster = assemble(results, config, &rows, &availability, &inventory)?;
-        return Ok(StreamingResolution {
-            roster,
-            updates: None,
-            pending_servers: Vec::new(),
-        });
-    }
-
-    let pending_servers = pending
-        .iter()
-        .map(|(_, launch)| launch.source_id.clone())
-        .collect::<Vec<_>>();
-    let (probe_tx, mut probe_rx) = tokio::sync::mpsc::unbounded_channel();
-    {
-        let cwd = cwd.to_path_buf();
-        let jobs = pending
-            .into_iter()
-            .map(|(priority, launch)| {
-                let cwd = cwd.clone();
-                async move {
-                    let result = probe_launch(&launch, &cwd).await;
-                    (priority, launch, result)
-                }
-            })
-            .collect::<Vec<_>>();
-        tokio::spawn(async move {
-            let mut probes = stream::iter(jobs).buffer_unordered(probe::PROBE_CONCURRENCY);
-            while let Some(item) = probes.next().await {
-                if probe_tx.send(item).is_err() {
-                    break;
-                }
-            }
-        });
-    }
-
-    // Wait only while the instantly-known adapters cannot bind the roster.
-    let mut roster = assemble(results.clone(), config, &rows, &availability, &inventory);
-    while roster.is_err() {
-        let Some(item) = probe_rx.recv().await else {
-            return roster.map(|roster| StreamingResolution {
-                roster,
-                updates: None,
-                pending_servers: Vec::new(),
-            });
-        };
-        results.push(item);
-        roster = assemble(results.clone(), config, &rows, &availability, &inventory);
-    }
-    let roster = roster.expect("roster bound");
-
-    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(roster.clone());
-    {
-        let config = config.clone();
-        let inventory = inventory.clone();
-        let availability = availability.clone();
-        let rows = rows.clone();
-        let mut results = results;
-        tokio::spawn(async move {
-            while let Some(item) = probe_rx.recv().await {
-                results.push(item);
-                let discovery = resolve_probes(&rows, results.clone());
-                if let Ok(snapshot) =
-                    assemble_roster(&config, &rows, &availability, inventory.clone(), discovery)
-                    && snapshot_tx.send(snapshot).is_err()
-                {
-                    break;
-                }
-            }
-        });
-    }
-    Ok(StreamingResolution {
-        roster,
-        updates: Some(snapshot_rx),
-        pending_servers,
-    })
-}
-
 async fn resolve_inner(config: &Config, cwd: &Path) -> Result<Roster> {
     let leaderboard = deepswe::load(
         &deepswe::default_cache_path(),
@@ -1256,8 +960,7 @@ async fn resolve_inner(config: &Config, cwd: &Path) -> Result<Roster> {
 }
 
 /// Bind the primary agent and the default subagent model plus the model
-/// catalog from one set of probe results. Pure with respect to probing:
-/// callable repeatedly as additional adapters finish probing in the background.
+/// catalog from the completed adapter probes.
 fn assemble_roster(
     config: &Config,
     rows: &[Row],
@@ -1435,56 +1138,6 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
 
-    fn synthetic_capabilities() -> probe::AdapterCapabilities {
-        probe::AdapterCapabilities {
-            http_mcp: true,
-            models: Vec::new(),
-            session_config: Vec::new(),
-            session_config_known: false,
-        }
-    }
-
-    #[test]
-    fn fresh_probe_enriches_session_config_without_replacing_base_capabilities() {
-        let launch = launch_for(AdapterKind::Codex);
-        let mut enrichment = synthetic_capabilities();
-        enrichment.session_config_known = true;
-        enrichment.session_config = vec![SessionConfigOption::select(
-            "service_tier",
-            "Service tier",
-            "default",
-            vec![SessionConfigSelectOption::new("default", "Default")],
-        )];
-
-        let discovery = resolve_probes(
-            &[],
-            vec![
-                (0, launch.clone(), Ok(synthetic_capabilities())),
-                (0, launch, Ok(enrichment)),
-            ],
-        );
-
-        assert!(discovery.adapter_errors.is_empty());
-        assert_eq!(
-            discovery.session_config["codex-acp"][0].id.to_string(),
-            "service_tier"
-        );
-    }
-
-    #[test]
-    fn failed_enrichment_does_not_demote_a_working_adapter() {
-        let launch = launch_for(AdapterKind::Codex);
-        let discovery = resolve_probes(
-            &[],
-            vec![
-                (0, launch.clone(), Ok(synthetic_capabilities())),
-                (0, launch, Err("transient failure".to_string())),
-            ],
-        );
-
-        assert!(discovery.adapter_errors.is_empty());
-    }
-
     #[test]
     fn rediscovery_preserves_probe_only_inventory_fields() {
         let config = config_with_a_visible_builtin();
@@ -1507,50 +1160,6 @@ mod tests {
             .expect("same server");
         assert_eq!(server.model_count, 3);
         assert_eq!(server.session_config[0].id.to_string(), "service_tier");
-    }
-
-    #[test]
-    fn invalidation_clears_process_and_disk_probe_caches() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let cache = dir.path().join("probes.json");
-        let command = dir.path().join("agent");
-        std::fs::write(&command, b"binary").expect("command");
-        let capabilities = probe::AdapterCapabilities {
-            http_mcp: true,
-            models: vec![probe::ModelOption {
-                value: "model-before-refresh".to_string(),
-                name: "model-before-refresh".to_string(),
-                description: None,
-            }],
-            session_config: Vec::new(),
-            session_config_known: true,
-        };
-        crate::probe_cache::store(&cache, "launch-key", &command, &capabilities);
-
-        let generation = {
-            let mut state = probe_cache_state();
-            state.entries.insert(
-                "launch-key".to_string(),
-                Arc::new(tokio::sync::OnceCell::new()),
-            );
-            state.generation
-        };
-
-        invalidate_model_cache_at(&cache).expect("invalidate both cache layers");
-
-        let state = probe_cache_state();
-        assert!(state.entries.is_empty());
-        assert_eq!(state.generation, generation.wrapping_add(1));
-        drop(state);
-        assert!(
-            crate::probe_cache::load(
-                &cache,
-                "launch-key",
-                &command,
-                crate::probe_cache::CACHE_TTL,
-            )
-            .is_none()
-        );
     }
 
     #[test]
@@ -1624,7 +1233,6 @@ mod tests {
             http_mcp,
             models: values.iter().map(|value| option(value)).collect(),
             session_config: Vec::new(),
-            session_config_known: true,
         })
     }
 
@@ -1957,26 +1565,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["gpt-5-6-sol", "claude-sonnet-5"]
         );
-    }
-
-    #[test]
-    fn credentialed_codex_and_claude_use_catalog_without_startup_probe() {
-        let rows = vec![
-            role_at("gpt-5-6-sol", 0.7, 1.0).model,
-            role_at("claude-sonnet-5", 0.6, 1.0).model,
-        ];
-
-        let codex = credentialed_provider_capabilities(&launch_for(AdapterKind::Codex), &rows)
-            .expect("Codex credential discovery");
-        assert_eq!(codex.models.len(), 1);
-        assert_eq!(codex.models[0].value, "gpt-5-6-sol");
-
-        let claude = credentialed_provider_capabilities(&launch_for(AdapterKind::Claude), &rows)
-            .expect("Claude credential discovery");
-        assert_eq!(claude.models.len(), 1);
-        assert_eq!(claude.models[0].value, "claude-sonnet-5");
-
-        assert!(credentialed_provider_capabilities(&custom_launch("bridge"), &rows).is_none());
     }
 
     #[test]

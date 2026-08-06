@@ -2298,8 +2298,7 @@ impl TrackerState {
             // owns the pending-record lifecycle. Nothing to fold in here.
             UiEvent::PermissionRequest(_)
             | UiEvent::ElicitationRequest(_)
-            | UiEvent::RemotePermissionDecision { .. }
-            | UiEvent::RosterUpdate { .. } => {}
+            | UiEvent::RemotePermissionDecision { .. } => {}
             UiEvent::Subagent(subagent_event) => self.observe_subagent_event(subagent_event),
             UiEvent::Workflow(event) => self.observe_workflow_event(event),
             UiEvent::Info(message) => {
@@ -2376,7 +2375,6 @@ impl TrackerState {
             | UiEvent::RemoteSideExitRequested
             | UiEvent::Connected { .. }
             | UiEvent::SessionConfigOptions { .. }
-            | UiEvent::RosterUpdate { .. }
             | UiEvent::InternalMessage(_)
             | UiEvent::AgentUsage(_)
             | UiEvent::SubagentPoolModelChanged { .. }
@@ -4213,9 +4211,7 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
     // must survive the host idling even when no turn is in flight. Released
     // when this guard drops on any return path below.
     let _keep_awake = crate::keep_awake::KeepAwake::hold(cfg.keep_awake);
-    let resolution = roster::resolve_streaming(&cfg, &cwd).await?;
-    let resolved = resolution.roster;
-    let roster_updates = resolution.updates;
+    let resolved = roster::resolve(&cfg, &cwd).await?;
 
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
     let tailscale_tls = if tailscale {
@@ -4243,19 +4239,6 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
         Some(models_config_from_roster(&resolved)),
         resolved.inventory.clone(),
     ));
-    if let Some(mut updates) = roster_updates {
-        let generation = mjconfig.begin_discovery();
-        let mjconfig_updates = Arc::clone(&mjconfig);
-        tokio::spawn(async move {
-            while updates.changed().await.is_ok() {
-                let snapshot = updates.borrow_and_update().clone();
-                if !mjconfig_updates.update_discovery(generation, &snapshot) {
-                    return;
-                }
-            }
-            mjconfig_updates.finish_discovery(generation);
-        });
-    }
     let session_manager = Arc::new(ServerSessionManager::new_roster(
         resolved,
         config_file_hash(&config_path),
@@ -5583,13 +5566,6 @@ impl MjConfigRuntime {
         discovery.revision = discovery.revision.wrapping_add(1);
     }
 
-    fn begin_discovery(&self) -> u64 {
-        let mut discovery = self.discovery.lock().expect("mjconfig discovery lock");
-        discovery.generation = discovery.generation.wrapping_add(1);
-        discovery.probing = true;
-        discovery.generation
-    }
-
     /// Start another roster pass when local account or adapter inputs changed
     /// since the last published inventory. The panel keeps the current choices
     /// visible while the replacement catalog is assembled.
@@ -5619,9 +5595,8 @@ impl MjConfigRuntime {
             .refresh_requested = true;
     }
 
-    /// Apply a background probe snapshot without rebinding the seats that the
-    /// running server session already owns. This is the same distinction the
-    /// TUI makes for `UiEvent::RosterUpdate`.
+    /// Apply completed discovery without rebinding the seats that the running
+    /// server session already owns.
     fn update_discovery(&self, generation: u64, roster: &roster::Roster) -> bool {
         let mut discovery = self.discovery.lock().expect("mjconfig discovery lock");
         if discovery.generation != generation {
@@ -6192,24 +6167,16 @@ fn refresh_mjconfig_discovery_if_needed(state: &ServerState) {
     state.session_manager.request_roster_refresh();
     let runtime = Arc::clone(&state.mjconfig);
     tokio::spawn(async move {
-        let resolution = match roster::resolve_streaming(&config, &cwd).await {
-            Ok(resolution) => resolution,
+        let resolved = match roster::resolve(&config, &cwd).await {
+            Ok(resolved) => resolved,
             Err(error) => {
                 warn!("refresh /mjconfig model discovery: {error:#}");
                 runtime.finish_discovery(generation);
                 return;
             }
         };
-        if !runtime.update_discovery(generation, &resolution.roster) {
+        if !runtime.update_discovery(generation, &resolved) {
             return;
-        }
-        if let Some(mut updates) = resolution.updates {
-            while updates.changed().await.is_ok() {
-                let snapshot = updates.borrow_and_update().clone();
-                if !runtime.update_discovery(generation, &snapshot) {
-                    return;
-                }
-            }
         }
         runtime.finish_discovery(generation);
     });
@@ -6513,8 +6480,6 @@ async fn mjconfig_run_login(
             vendor.label()
         );
     }
-    crate::roster::invalidate_model_cache()
-        .context("signed in, but failed to clear the model capability cache")?;
     Ok(format!(
         "Signed in to {}; refreshing models for new sessions",
         vendor.label()
@@ -9644,7 +9609,10 @@ mod tests {
     #[test]
     fn config_reresolve_invalidates_older_discovery_updates() {
         let runtime = test_mjconfig_runtime();
-        let startup_generation = runtime.begin_discovery();
+        runtime.request_discovery();
+        let startup_generation = runtime
+            .begin_discovery_if_needed(&config::Config::default())
+            .expect("start discovery");
         runtime.update_from_roster(&test_roster("fresh-model"));
 
         assert!(!runtime.update_discovery(startup_generation, &test_roster("stale-model")));
@@ -9652,7 +9620,7 @@ mod tests {
 
         let discovery = runtime.discovery.lock().expect("discovery lock");
         assert!(!discovery.probing);
-        assert_eq!(discovery.revision, 1);
+        assert_eq!(discovery.revision, 2);
         assert_eq!(discovery.choices[0].model, "fresh-model");
         assert_eq!(
             discovery

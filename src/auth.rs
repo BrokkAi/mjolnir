@@ -276,14 +276,8 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
             vendor.label()
         );
     }
-    // Credentials can change the models advertised by both the vendor-native
-    // bridge and any configured custom ACP servers. Clear every composite
-    // launch key plus the process-local OnceCells instead of trying to remove
-    // simple source IDs that do not match the persisted cache keys.
-    crate::roster::invalidate_model_cache()
-        .context("signed in, but failed to clear the model capability cache")?;
     Ok(LoginOutcome::SignedIn(format!(
-        "Signed in to {}; models refresh on /new or /clear",
+        "Signed in to {}; adapters reprobe on /new or /clear",
         vendor.label()
     )))
 }

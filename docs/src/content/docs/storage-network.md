@@ -16,7 +16,6 @@ equivalents.
 | Session provenance | Maps resumable session IDs to their original adapter/model route |
 | Transcript exports | User-requested Markdown exports |
 | DeepSWE cache | Live model-ranking snapshot, refreshed on a time-to-live |
-| ACP probe cache | Adapter model/capability results, invalidated by age or binary change |
 | Managed runners | Embedded Node.js and uv installations used for `npx` and `uvx` commands |
 | Voice cache | Speech-recognition model data downloaded on first dictation use |
 | Remote-control state | SQLite session/transcript data, login/cookie material, and certificates |
@@ -38,9 +37,9 @@ a worktree does not delete remote or provider session records.
 | Voice model hosts | First-use speech model download |
 | Tailscale/Let's Encrypt | Optional trusted remote-server certificate issuance |
 
-Network failures normally degrade one route or refresh rather than making every
-cached route unavailable. An initial setup with no cached or installed route
-can still require network access before any model is launchable.
+Selected ACP adapters are probed during every roster resolution, so an adapter
+network or launch failure makes that route unavailable for the resolution.
+Initial setup can require network access before any model is launchable.
 
 ## Logs
 

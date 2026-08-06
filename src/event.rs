@@ -155,13 +155,6 @@ pub enum UiEvent {
         /// user-configurable ACP session defaults.
         hidden_config_ids: Vec<String>,
     },
-    /// A background ACP adapter probe finished after startup: refreshed model
-    /// choices and server inventory for the /mjconfig editor.
-    /// Never rebinds the running session's bound seats.
-    RosterUpdate {
-        choices: Vec<crate::roster::ModelChoice>,
-        inventory: crate::roster::AcpInventory,
-    },
     /// Hidden orchestration made inspectable in the shared transcript.
     InternalMessage(InternalMessage),
     /// Completed prompt usage attributed to one agent seat.

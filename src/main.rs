@@ -29,7 +29,6 @@ mod orchestrator;
 mod palette;
 mod paths;
 mod probe;
-mod probe_cache;
 mod pull_request;
 mod qr;
 mod quota;
@@ -244,7 +243,7 @@ struct ModelsArgs {
 
 #[derive(Debug, clap::Subcommand)]
 enum ModelsCommand {
-    /// Clear cached ACP capabilities so enabled adapters are probed again.
+    /// Probe enabled ACP adapters and report the available model count.
     Refresh,
 }
 
@@ -512,9 +511,11 @@ async fn main() -> Result<()> {
             },
             Commands::Models(args) => match args.command {
                 ModelsCommand::Refresh => {
-                    roster::invalidate_model_cache()?;
+                    let cfg = Config::load(&config::default_config_path())?;
+                    let roster = roster::resolve(&cfg, &cwd).await?;
                     println!(
-                        "Model cache cleared; the next model resolution will reprobe enabled ACP adapters."
+                        "Probed enabled ACP adapters; {} models available.",
+                        roster.available.len()
                     );
                     Ok(())
                 }
@@ -1298,16 +1299,6 @@ async fn resolve_roster_for_tui(cfg: &Config, cwd: &Path) -> Result<roster::Rost
     with_startup_spinner(roster::resolve(cfg, cwd)).await
 }
 
-/// Resolve the roster for interactive startup without blocking on adapter
-/// probes; the spinner only appears in the rare case where the instantly
-/// known adapters cannot bind the configured roles.
-async fn resolve_roster_streaming_for_tui(
-    cfg: &Config,
-    cwd: &Path,
-) -> Result<roster::StreamingResolution> {
-    with_startup_spinner(roster::resolve_streaming(cfg, cwd)).await
-}
-
 async fn with_startup_spinner<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
     let mut stdout = std::io::stdout();
     if !stdout.is_terminal() {
@@ -1381,11 +1372,7 @@ async fn run_app(
         resume_target.as_ref(),
         initial_agent.as_ref(),
     );
-    let mut roster_updates = None;
-    let mut pending_probe_servers = Vec::new();
     let mut roster = if let Some(kind) = onboarding_kind {
-        // Onboarding wants a fully settled catalog to preview, so first
-        // startup and versioned education keep the blocking resolution.
         let initial_resolution = resolve_roster_for_tui(&cfg, &cwd).await;
         let Some((accepted_config, accepted_roster)) = run_startup_onboarding(
             kind,
@@ -1402,10 +1389,7 @@ async fn run_app(
         cfg = accepted_config;
         accepted_roster
     } else {
-        let resolution = resolve_roster_streaming_for_tui(&cfg, &cwd).await?;
-        roster_updates = resolution.updates;
-        pending_probe_servers = resolution.pending_servers;
-        resolution.roster
+        resolve_roster_for_tui(&cfg, &cwd).await?
     };
     if let Some(agent) = initial_agent.as_ref()
         && let Some(pinned) = roster.available.iter().find(|role| {
@@ -1456,8 +1440,6 @@ async fn run_app(
             roster.clone(),
             cfg.agent.clone(),
             cfg.subagents.clone(),
-            roster_updates.take(),
-            std::mem::take(&mut pending_probe_servers),
             termination.clone(),
         )
         .await?;
@@ -1467,10 +1449,7 @@ async fn run_app(
             UiExitReason::NewSession | UiExitReason::ClearSession => {
                 let show_new_session_boundary = session_result.reason == UiExitReason::NewSession;
                 cfg = Config::load(&config_path)?;
-                let resolution = resolve_roster_streaming_for_tui(&cfg, &cwd).await?;
-                roster = resolution.roster;
-                roster_updates = resolution.updates;
-                pending_probe_servers = resolution.pending_servers;
+                roster = resolve_roster_for_tui(&cfg, &cwd).await?;
                 primary_agent = selected_agent_for_role(&roster.primary);
                 initial_agent = Some(primary_agent.clone());
                 pending_new_session_boundary = show_new_session_boundary;
@@ -1859,6 +1838,10 @@ fn selected_agent_for_role(role: &roster::ResolvedAgent) -> SelectedAgent {
     }
 }
 
+fn adapter_source_id_for_ui(role: &roster::ResolvedAgent) -> String {
+    role.launch.source_id.clone()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
     agent: &SelectedAgent,
@@ -1873,8 +1856,6 @@ async fn run_session(
     roster: roster::Roster,
     agent_config: config::AgentConfig,
     subagents_config: config::SubagentsConfig,
-    roster_updates: Option<tokio::sync::watch::Receiver<roster::Roster>>,
-    pending_probe_servers: Vec<String>,
     termination: CancellationToken,
 ) -> Result<RunSessionResult> {
     let mut terminal = SessionTerminal::fresh(mode)?;
@@ -1953,35 +1934,6 @@ async fn run_session(
     for warning in &roster.warnings {
         let _ = ui_event_tx.send(crate::event::UiEvent::Warning(warning.clone()));
     }
-    let _ = pending_probe_servers;
-    let roster_update_task = roster_updates.map(|mut updates| {
-        let tx = ui_event_tx.clone();
-        let mut surfaced: std::collections::HashSet<String> =
-            roster.warnings.iter().cloned().collect();
-        tokio::spawn(async move {
-            while updates.changed().await.is_ok() {
-                let snapshot = updates.borrow_and_update().clone();
-                for warning in &snapshot.warnings {
-                    if surfaced.insert(warning.clone())
-                        && tx
-                            .send(crate::event::UiEvent::Warning(warning.clone()))
-                            .is_err()
-                    {
-                        return;
-                    }
-                }
-                if tx
-                    .send(crate::event::UiEvent::RosterUpdate {
-                        choices: snapshot.choices,
-                        inventory: snapshot.inventory,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        })
-    });
     let usage_roles = std::iter::once(&roster.primary).chain(subagent_roles.iter());
     let mut claude_usage_env = None;
     let mut codex_usage_env = None;
@@ -2141,8 +2093,9 @@ async fn run_session(
         "{} via {}",
         roster.primary.model.model, roster.primary.launch.source_id
     ));
-    // Stable runtime route identifier used by remote session state.
-    let agent_source_id = Some(agent.source_id.clone());
+    // Registry source id for the active adapter. `agent.source_id` identifies
+    // the selected roster model instead and cannot address ACP inventory.
+    let agent_source_id = Some(adapter_source_id_for_ui(&roster.primary));
     let tracker_project_label = header_labels.project.clone();
     // `-w` sessions carry the worktree name in the header; sessions launched
     // directly inside a worktree derive it from cwd so remote viewers badge
@@ -2638,10 +2591,6 @@ async fn run_session(
     } else {
         tokio::join!(event_proxy_wait, side_event_proxy_wait, cmd_proxy_wait);
     }
-    if let Some(task) = roster_update_task {
-        task.abort();
-    }
-
     // Restore the terminal only now, after the runtime has finished tearing
     // down, so the session UI stays on screen through shutdown. `/new` restores
     // earlier to show its standalone loading line, and LoadSession restores
@@ -3305,6 +3254,7 @@ mod tests {
 
         let selected = selected_agent_for_role(&role);
         assert_eq!(selected.source_id, "roster:model");
+        assert_eq!(adapter_source_id_for_ui(&role), "custom-source");
         assert_eq!(selected.program, PathBuf::from("/opt/custom agent"));
         assert_eq!(selected.args, vec!["--flag"]);
         assert_eq!(

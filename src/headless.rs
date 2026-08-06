@@ -522,7 +522,6 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             UiEvent::WorkspaceDiff(_) | UiEvent::WorkspaceHeadDiff(_) => {}
             UiEvent::TerminalOutput(snapshot) => apply_terminal_output(&mut state, &snapshot),
             UiEvent::SessionConfigOptions { .. } => {}
-            UiEvent::RosterUpdate { .. } => {}
             UiEvent::PermissionRequest(prompt) => {
                 answer_permission(cfg.output_format, cfg.permission_mode, "primary", prompt)?;
             }

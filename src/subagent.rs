@@ -2957,7 +2957,6 @@ async fn run(
                         }
                         UiEvent::SessionStarted { .. }
                         | UiEvent::SessionConfigOptions { .. }
-                        | UiEvent::RosterUpdate { .. }
                         | UiEvent::Workflow(_)
                         | UiEvent::WorkspaceDiff(_)
                         | UiEvent::WorkspaceHeadDiff(_) => {}
