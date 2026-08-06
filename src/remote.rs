@@ -11301,6 +11301,27 @@ mod tests {
     }
 
     #[test]
+    fn tracker_retains_initial_session_retry_warning_for_viewer() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        let warning = "session/new failed; retrying once on the existing agent connection";
+
+        state.observe_event(&UiEvent::Warning(warning.to_string()));
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "retried-session".to_string(),
+            resumed: false,
+        });
+
+        let snapshot = state.snapshot().expect("retried session snapshot");
+        assert!(
+            snapshot
+                .transcript
+                .iter()
+                .any(|entry| entry.text == format!("warning: {warning}")),
+            "startup retry warning was not retained for the viewer"
+        );
+    }
+
+    #[test]
     fn tracker_collapses_repeated_status_notices() {
         let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
         state.observe_event(&UiEvent::SessionStarted {
