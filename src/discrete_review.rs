@@ -1584,6 +1584,111 @@ async fn run_quick(review: QuickReview<'_>) -> ReviewVerdict {
         Err(reason) => return ReviewVerdict::Failed { reason },
     };
 
+    quick_verdict(job, events, findings, outcome, |findings| async move {
+        let (validator_bus, mut validator_reports) = SubagentReportBus::channel();
+        let validator_pool = ProgrammaticPool::start(
+            configure_review_pool(
+                SubagentConfig::for_resolved_agent(
+                    config.supervisor.clone(),
+                    config.agent_stderr.clone(),
+                ),
+                config,
+                validator_bus.clone(),
+                1,
+                // The validator answers in one turn, so it is never resumed and
+                // never retained; its job below carries `VALIDATOR_PREAMBLE`.
+                false,
+            ),
+            review_run_context(config),
+            events.clone(),
+        )
+        .await;
+        let started = match validator_pool
+            .launch(ProgrammaticJob {
+                prompt: quick_validation_prompt(
+                    job,
+                    &findings,
+                    &supervisor_change_packet(
+                        job,
+                        changed_functions,
+                        diffstat,
+                        include_full_diff,
+                        changed_line_count,
+                    ),
+                    cumulative_diffstat,
+                    repository_root,
+                ),
+                images: job.images.clone(),
+                label: "review · validator".to_string(),
+                preamble: VALIDATOR_PREAMBLE.to_string(),
+                mcp_servers: vec![bifrost_mcp_server(
+                    "bifrost",
+                    bifrost,
+                    repository_root,
+                    SUPERVISOR_BIFROST_TOOLSET,
+                )],
+                retain_after_completion: false,
+                workflow: Some(crate::workflow::WorkflowActorContext {
+                    emitter: job.workflow.clone(),
+                    workflow_id: job.workflow_id,
+                    role: crate::workflow::WorkflowActorRole::ReviewSupervisor,
+                }),
+            })
+            .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                let reason = format!("could not launch the quick review validator: {error:#}");
+                emit_actor_failure(
+                    job,
+                    crate::workflow::WorkflowActorRole::ReviewSupervisor,
+                    format!("review-validator-pass-{}", job.review_pass),
+                    &reason,
+                );
+                close_review_pool(&validator_pool, cancel).await;
+                return Err(reason);
+            }
+        };
+
+        let synthesis = receive_report(
+            &mut validator_reports,
+            &validator_bus,
+            cancel,
+            "quick review validator",
+        )
+        .await
+        .and_then(|report| report_text(report, "quick review validator"));
+        close_review_pool(&validator_pool, cancel).await;
+        let synthesis = synthesis?;
+        emit_internal(
+            events,
+            "review validator",
+            "primary",
+            InternalMessageKind::ReviewSynthesis,
+            &synthesis,
+            Some(started.subagent_id),
+        );
+        Ok(synthesis)
+    })
+    .await
+}
+
+/// Turn the quick tier's sole reviewer report into the pass verdict, spending
+/// `validate` only when there is something to validate.
+///
+/// Split out of [`run_quick`] so the branch that releases a turn with no
+/// validation at all is reachable without spawning agent processes.
+async fn quick_verdict<F, Fut>(
+    job: &ReviewJob,
+    events: &UnboundedSender<UiEvent>,
+    findings: String,
+    outcome: SubagentOutcome,
+    validate: F,
+) -> ReviewVerdict
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<String, String>>,
+{
     let evidence = ReviewPassEvidence {
         intent_brief: QUICK_INTENT_CONTEXT.to_string(),
         // No model turn produced this brief, so a later extended pass must
@@ -1621,97 +1726,10 @@ async fn run_quick(review: QuickReview<'_>) -> ReviewVerdict {
         return ReviewVerdict::Clean;
     }
 
-    let (validator_bus, mut validator_reports) = SubagentReportBus::channel();
-    let validator_pool = ProgrammaticPool::start(
-        configure_review_pool(
-            SubagentConfig::for_resolved_agent(
-                config.supervisor.clone(),
-                config.agent_stderr.clone(),
-            ),
-            config,
-            validator_bus.clone(),
-            1,
-            // The validator answers in one turn, so it is never resumed and
-            // never retained; its job below carries `VALIDATOR_PREAMBLE`.
-            false,
-        ),
-        review_run_context(config),
-        events.clone(),
-    )
-    .await;
-    let started = match validator_pool
-        .launch(ProgrammaticJob {
-            prompt: quick_validation_prompt(
-                job,
-                &findings,
-                &supervisor_change_packet(
-                    job,
-                    changed_functions,
-                    diffstat,
-                    include_full_diff,
-                    changed_line_count,
-                ),
-                cumulative_diffstat,
-                repository_root,
-            ),
-            images: job.images.clone(),
-            label: "review · validator".to_string(),
-            preamble: VALIDATOR_PREAMBLE.to_string(),
-            mcp_servers: vec![bifrost_mcp_server(
-                "bifrost",
-                bifrost,
-                repository_root,
-                SUPERVISOR_BIFROST_TOOLSET,
-            )],
-            retain_after_completion: false,
-            workflow: Some(crate::workflow::WorkflowActorContext {
-                emitter: job.workflow.clone(),
-                workflow_id: job.workflow_id,
-                role: crate::workflow::WorkflowActorRole::ReviewSupervisor,
-            }),
-        })
-        .await
-    {
-        Ok(started) => started,
-        Err(error) => {
-            let reason = format!("could not launch the quick review validator: {error:#}");
-            emit_actor_failure(
-                job,
-                crate::workflow::WorkflowActorRole::ReviewSupervisor,
-                format!("review-validator-pass-{}", job.review_pass),
-                &reason,
-            );
-            close_review_pool(&validator_pool, cancel).await;
-            return ReviewVerdict::Failed { reason };
-        }
+    let synthesis = match validate(findings).await {
+        Ok(text) => bound_tail(text.trim(), SYNTHESIS_LIMIT, "synthesis"),
+        Err(reason) => return ReviewVerdict::Failed { reason },
     };
-
-    let synthesis = match receive_report(
-        &mut validator_reports,
-        &validator_bus,
-        cancel,
-        "quick review validator",
-    )
-    .await
-    .and_then(|report| report_text(report, "quick review validator"))
-    {
-        Ok(text) => {
-            emit_internal(
-                events,
-                "review validator",
-                "primary",
-                InternalMessageKind::ReviewSynthesis,
-                &text,
-                Some(started.subagent_id),
-            );
-            bound_tail(text.trim(), SYNTHESIS_LIMIT, "synthesis")
-        }
-        Err(reason) => {
-            close_review_pool(&validator_pool, cancel).await;
-            return ReviewVerdict::Failed { reason };
-        }
-    };
-    close_review_pool(&validator_pool, cancel).await;
 
     match synthesis_verdict(&synthesis) {
         ReviewVerdict::Findings { synthesis, .. } => ReviewVerdict::Findings {
@@ -4558,6 +4576,175 @@ mod tests {
         assert!(prompt.contains("treat it as done rather than repeating it"));
         assert!(prompt.contains(&format!("`{}`: completed", QUICK_LANE.id)));
         assert!(!prompt.contains("Do not mechanically restart the roster"));
+    }
+
+    fn quick_job() -> ReviewJob {
+        let mut job = job();
+        job.tier = crate::config::ReviewTier::Quick;
+        job
+    }
+
+    #[tokio::test]
+    async fn quick_clean_report_releases_the_turn_without_spending_a_validator() {
+        let job = quick_job();
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (validations, mut validations_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        let verdict = quick_verdict(
+            &job,
+            &events,
+            LANE_CLEAN_SENTINEL.to_string(),
+            SubagentOutcome::Completed,
+            move |findings| async move {
+                let _ = validations.send(findings);
+                Ok("[P0] unreachable -- the validator must not run".to_string())
+            },
+        )
+        .await;
+
+        assert_eq!(verdict, ReviewVerdict::Clean);
+        assert!(
+            validations_rx.try_recv().is_err(),
+            "a clean reviewer report must not spend a validation pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn quick_findings_reach_the_validator_verbatim_and_carry_lane_evidence() {
+        let job = quick_job();
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (validations, mut validations_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let reported = "[P1] src/upload.rs:12 -- retry swallows cancellation (evidence: lead)";
+
+        let verdict = quick_verdict(
+            &job,
+            &events,
+            reported.to_string(),
+            SubagentOutcome::Completed,
+            move |findings| async move {
+                let _ = validations.send(findings);
+                Ok(
+                    "[P1] src/upload.rs:12 -- retry swallows cancellation (evidence: source-reviewed)"
+                        .to_string(),
+                )
+            },
+        )
+        .await;
+
+        assert_eq!(
+            validations_rx.try_recv().expect("the validator ran"),
+            reported,
+            "the validator must see exactly what the reviewer reported"
+        );
+        let ReviewVerdict::Findings {
+            synthesis,
+            evidence,
+        } = verdict
+        else {
+            panic!("a surviving P1 must require a correction, got {verdict:?}");
+        };
+        // The verdict is the validator's synthesis, not the reviewer's claim.
+        assert!(synthesis.contains("evidence: source-reviewed"));
+        assert_eq!(
+            evidence.lanes,
+            vec![ReviewLaneEvidence {
+                id: QUICK_LANE.id.to_string(),
+                outcome: SubagentOutcome::Completed,
+            }]
+        );
+        assert_eq!(evidence.intent_brief, QUICK_INTENT_CONTEXT);
+        assert!(
+            !evidence.intent_available,
+            "no model turn produced this brief, so a later extended pass must re-extract it"
+        );
+    }
+
+    #[tokio::test]
+    async fn quick_verdict_follows_the_validator_not_the_reviewer() {
+        let job = quick_job();
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let reported = "[P0] src/upload.rs:12 -- swallowed error (evidence: lead)";
+
+        // The validator vetting every reported finding away releases the turn.
+        let verdict = quick_verdict(
+            &job,
+            &events,
+            reported.to_string(),
+            SubagentOutcome::Completed,
+            |_| async { Ok(CLEAN_SENTINEL.to_string()) },
+        )
+        .await;
+        assert_eq!(verdict, ReviewVerdict::Clean);
+
+        // A validator that downgrades a P0 to advisory costs no correction round.
+        let verdict = quick_verdict(
+            &job,
+            &events,
+            reported.to_string(),
+            SubagentOutcome::Completed,
+            |_| async { Ok("[P3] src/upload.rs:12 -- comment is stale".to_string()) },
+        )
+        .await;
+        assert!(
+            matches!(verdict, ReviewVerdict::Advisory { .. }),
+            "advisory-only output must not re-arm the review, got {verdict:?}"
+        );
+
+        // A validator that never reports is a coverage failure, never a clean turn.
+        let verdict = quick_verdict(
+            &job,
+            &events,
+            reported.to_string(),
+            SubagentOutcome::Completed,
+            |_| async { Err("quick review validator was cancelled".to_string()) },
+        )
+        .await;
+        assert_eq!(
+            verdict,
+            ReviewVerdict::Failed {
+                reason: "quick review validator was cancelled".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn quick_corrective_pass_accumulates_lane_coverage() {
+        let mut job = quick_job();
+        job.prior_review = Some(PriorReviewContext {
+            synthesis: "[P1] src/upload.rs:12 -- swallowed error".to_string(),
+            evidence: ReviewPassEvidence {
+                intent_brief: QUICK_INTENT_CONTEXT.to_string(),
+                intent_available: false,
+                lanes: vec![ReviewLaneEvidence {
+                    id: QUICK_LANE.id.to_string(),
+                    outcome: SubagentOutcome::Completed,
+                }],
+            },
+            exact_delta: true,
+        });
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let verdict = quick_verdict(
+            &job,
+            &events,
+            "[P1] src/upload.rs:12 -- still swallowed (evidence: source-reviewed)".to_string(),
+            SubagentOutcome::Completed,
+            |_| async { Ok("[P1] src/upload.rs:12 -- still swallowed".to_string()) },
+        )
+        .await;
+
+        let ReviewVerdict::Findings { evidence, .. } = verdict else {
+            panic!("a surviving P1 must require a correction");
+        };
+        // The same reviewer ran twice; coverage records it once rather than
+        // reporting a lane that ran on this pass as two separate runs.
+        assert_eq!(
+            evidence.lanes,
+            vec![ReviewLaneEvidence {
+                id: QUICK_LANE.id.to_string(),
+                outcome: SubagentOutcome::Completed,
+            }]
+        );
     }
 
     #[test]
