@@ -2082,7 +2082,11 @@ fn draw_appearance(
             editor.selected == 3,
             format!(
                 "Keep awake  < {} >",
-                if editor.config.keep_awake { "on" } else { "off" }
+                if editor.config.keep_awake {
+                    "on"
+                } else {
+                    "off"
+                }
             ),
             theme,
         ),
@@ -2870,10 +2874,7 @@ mod tests {
             appearance.contains("Feature tips"),
             "rendered:\n{appearance}"
         );
-        assert!(
-            appearance.contains("Keep awake"),
-            "rendered:\n{appearance}"
-        );
+        assert!(appearance.contains("Keep awake"), "rendered:\n{appearance}");
 
         assert!(!render(&editor, 27, 11).contains("mj config"));
     }

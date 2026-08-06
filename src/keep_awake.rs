@@ -4,7 +4,8 @@
 //! `mj server` runs, for the duration of a headless (`mj -p`) run, and while
 //! an interactive turn is in flight. macOS uses a native IOKit power
 //! assertion (no `caffeinate` child), Linux shells out to `systemd-inhibit`
-//! or `gnome-session-inhibit`, Windows pins `SetThreadExecutionState` on a
+//! plus `gnome-session-inhibit` under GNOME (whose power manager ignores
+//! logind idle inhibitors), Windows pins `SetThreadExecutionState` on a
 //! dedicated thread, and other targets are a no-op. Every backend prevents
 //! idle *system* sleep only — the display may still turn off — and every
 //! assertion is released on drop, or by the OS when the process exits.
@@ -165,46 +166,89 @@ mod backend {
 mod backend {
     use std::process::{Child, Command, Stdio};
 
-    /// `i32::MAX` seconds (~68 years): the helper never exits on its own; it
-    /// is killed on release and dies with mj via `PDEATHSIG` on a crash.
+    /// `i32::MAX` seconds (~68 years): the helpers never exit on their own;
+    /// they are killed on release and die with mj via `PDEATHSIG` on a crash.
     const FOREVER: &str = "2147483647";
 
+    /// One assertion can hold several inhibitor helpers. A logind idle lock
+    /// alone does not stop GNOME's automatic suspend — gsd-power consults
+    /// only gnome-session inhibitors before arming its sleep timeout — and a
+    /// session lock alone does not cover logind `IdleAction=` setups, so
+    /// inside a GNOME session both are held.
     #[derive(Debug)]
     pub(super) struct Assertion {
-        child: Child,
+        children: Vec<Child>,
     }
 
     impl Assertion {
         pub(super) fn acquire(reason: &str) -> Option<Self> {
-            let attempts: [(&str, &[&str]); 2] = [
-                (
-                    "systemd-inhibit",
+            let mut children = Vec::new();
+            match spawn_inhibitor(
+                "systemd-inhibit",
+                &[
+                    "--what=idle",
+                    "--mode=block",
+                    "--who=mj",
+                    "--why",
+                    reason,
+                    "--",
+                    "sleep",
+                    FOREVER,
+                ],
+            ) {
+                Ok(child) => children.push(child),
+                Err(error) => {
+                    tracing::debug!("keep-awake helper systemd-inhibit unavailable: {error}");
+                }
+            }
+            // `idle` stops gsd-power's idle machinery while the screen is
+            // unlocked; `suspend` blocks the sleep action once the
+            // screensaver is active (idle inhibition is bypassed then), e.g.
+            // when the user locks the screen and walks away mid-turn.
+            if in_gnome_session() || children.is_empty() {
+                match spawn_inhibitor(
+                    "gnome-session-inhibit",
                     &[
-                        "--what=idle",
-                        "--mode=block",
-                        "--who=mj",
-                        "--why",
+                        "--inhibit",
+                        "idle",
+                        "--inhibit",
+                        "suspend",
+                        "--reason",
                         reason,
-                        "--",
                         "sleep",
                         FOREVER,
                     ],
-                ),
-                (
-                    "gnome-session-inhibit",
-                    &["--inhibit", "idle", "--reason", reason, "sleep", FOREVER],
-                ),
-            ];
-            for (program, args) in attempts {
-                match spawn_inhibitor(program, args) {
-                    Ok(child) => return Some(Self { child }),
+                ) {
+                    Ok(child) => children.push(child),
                     Err(error) => {
-                        tracing::debug!("keep-awake helper {program} unavailable: {error}");
+                        tracing::debug!(
+                            "keep-awake helper gnome-session-inhibit unavailable: {error}"
+                        );
                     }
                 }
             }
-            None
+            if children.is_empty() {
+                None
+            } else {
+                Some(Self { children })
+            }
         }
+    }
+
+    fn in_gnome_session() -> bool {
+        std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktops| desktop_list_has_gnome(&desktops))
+            || std::env::var_os("GNOME_DESKTOP_SESSION_ID").is_some()
+    }
+
+    /// `XDG_CURRENT_DESKTOP` is a colon-separated list such as
+    /// `ubuntu:GNOME` or `GNOME-Classic:GNOME`. Cinnamon and other forks run
+    /// their own session managers, so only real GNOME entries count.
+    fn desktop_list_has_gnome(desktops: &str) -> bool {
+        desktops.split(':').any(|desktop| {
+            let desktop = desktop.trim();
+            desktop.eq_ignore_ascii_case("gnome")
+                || desktop.to_ascii_lowercase().starts_with("gnome-")
+        })
     }
 
     fn spawn_inhibitor(program: &str, args: &[&str]) -> std::io::Result<Child> {
@@ -232,8 +276,26 @@ mod backend {
 
     impl Drop for Assertion {
         fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            for child in &mut self.children {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::desktop_list_has_gnome;
+
+        #[test]
+        fn gnome_detection_reads_the_desktop_list() {
+            assert!(desktop_list_has_gnome("GNOME"));
+            assert!(desktop_list_has_gnome("gnome"));
+            assert!(desktop_list_has_gnome("ubuntu:GNOME"));
+            assert!(desktop_list_has_gnome("GNOME-Classic:GNOME"));
+            assert!(!desktop_list_has_gnome("KDE"));
+            assert!(!desktop_list_has_gnome("X-Cinnamon"));
+            assert!(!desktop_list_has_gnome(""));
         }
     }
 }

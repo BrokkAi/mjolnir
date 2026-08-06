@@ -2411,6 +2411,9 @@ async fn run_session(
 
     let mut header_labels = header_labels;
     let ui_result = loop {
+        // Reloaded each session so `/settings` edits apply on /new; the
+        // default config has every switch below in its enabled state.
+        let ui_config = config::Config::load(&config_path).unwrap_or_default();
         let ui_result = ui::run(
             terminal.terminal_mut(),
             &cmd_tx,
@@ -2427,12 +2430,8 @@ async fn run_session(
                 mode,
                 theme_kind,
                 spinner_style,
-                feature_hints_enabled: config::Config::load(&config_path)
-                    .map(|config| config.feature_hints)
-                    .unwrap_or(true),
-                keep_awake_enabled: config::Config::load(&config_path)
-                    .map(|config| config.keep_awake)
-                    .unwrap_or(true),
+                feature_hints_enabled: ui_config.feature_hints,
+                keep_awake_enabled: ui_config.keep_awake,
                 active_agent_launch: Some(ragnarok::Launch {
                     program: agent.program.clone(),
                     args: agent.args.clone(),
