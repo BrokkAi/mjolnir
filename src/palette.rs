@@ -7,17 +7,14 @@
 //! spend one of the ANSI 16, which every terminal theme remaps to something
 //! that contrasts with its own background.
 //!
-//! Backgrounds are the one place RGB appears, and even there it is derived
-//! rather than chosen: a diff row is a small blend from the terminal's
-//! *measured* background toward green or red, so it reads as a tint of the
-//! user's own theme on black, on white, and on solarized alike. When the
-//! terminal will not say what its background is, or cannot render the result,
-//! the fill is dropped and the diff falls back to foreground-only styling.
+//! Rich colors are always derived rather than assumed: diff backgrounds and
+//! the scan-light intensity ramp blend from the terminal's measured background
+//! toward a hue. When that is unavailable, both fall back to ANSI-safe roles.
 
 use ratatui::style::Color;
 
 use crate::ink::Ink;
-use crate::spinner::SpinnerInk;
+use crate::spinner::{SCAN_RED_LEVELS, SpinnerInk};
 use crate::terminal_palette::{self, DefaultColors, StdoutColorLevel};
 use crate::theme::TerminalThemeKind;
 
@@ -26,6 +23,8 @@ use crate::theme::TerminalThemeKind;
 /// for hue rather than for legibility on any particular backdrop.
 const ADDED_TINT: (u8, u8, u8) = (46, 160, 67);
 const REMOVED_TINT: (u8, u8, u8) = (248, 81, 73);
+/// Keeps the resting rail visible while leaving enough range for the peak.
+const SCAN_RED_MIN_ALPHA: f32 = 0.32;
 /// Whole-row fill: present enough to band the row, faint enough to read text through.
 const ROW_ALPHA: f32 = 0.16;
 /// Changed-token fill, which must be distinguishable from the row it sits in.
@@ -68,6 +67,7 @@ pub struct TerminalTheme {
     pub diff_added_emph_bg: Option<Color>,
     pub diff_removed_emph_bg: Option<Color>,
     pub permission: Ink,
+    scan_red: [Ink; SCAN_RED_LEVELS],
 }
 
 impl TerminalThemeKind {
@@ -97,6 +97,7 @@ impl TerminalThemeKind {
             let bg = measured?.bg;
             terminal_palette::best_color_for_level(terminal_palette::blend(hue, bg, alpha), level)
         };
+        let scan_red = scan_red_ramp(measured, level);
 
         TerminalTheme {
             kind: self,
@@ -131,6 +132,7 @@ impl TerminalThemeKind {
             diff_added_emph_bg: tint(ADDED_TINT, EMPH_ALPHA),
             diff_removed_emph_bg: tint(REMOVED_TINT, EMPH_ALPHA),
             permission: Ink::ansi(Color::Yellow),
+            scan_red,
         }
     }
 }
@@ -191,8 +193,34 @@ impl TerminalTheme {
             SpinnerInk::Calm => self.success,
             SpinnerInk::Warm => self.warning,
             SpinnerInk::Hot => self.error,
+            SpinnerInk::Red(level) => self.scan_red[usize::from(level).min(SCAN_RED_LEVELS - 1)],
         }
     }
+}
+
+fn scan_red_ramp(
+    terminal: Option<DefaultColors>,
+    level: StdoutColorLevel,
+) -> [Ink; SCAN_RED_LEVELS] {
+    std::array::from_fn(|index| {
+        let fallback = match index {
+            0..=5 => Ink::ansi(Color::Red),
+            6..=8 => Ink::ansi(Color::Red).with_bold(),
+            9..=10 => Ink::ansi(Color::LightRed),
+            _ => Ink::ansi(Color::LightRed).with_bold(),
+        };
+        let Some(background) = terminal.map(|colors| colors.bg) else {
+            return fallback;
+        };
+        let progress = index as f32 / (SCAN_RED_LEVELS - 1) as f32;
+        let alpha = SCAN_RED_MIN_ALPHA + progress * (1.0 - SCAN_RED_MIN_ALPHA);
+        terminal_palette::best_color_for_level(
+            terminal_palette::blend(REMOVED_TINT, background, alpha),
+            level,
+        )
+        .map(Ink::ansi)
+        .unwrap_or(fallback)
+    })
 }
 
 #[cfg(test)]
@@ -356,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn spinner_inks_are_drawn_from_the_active_palette() {
+    fn semantic_spinner_inks_are_drawn_from_the_active_palette() {
         for kind in TerminalThemeKind::ALL {
             let palette = kind.palette_with(DARK, StdoutColorLevel::TrueColor);
             let declared = [
@@ -383,6 +411,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn adaptive_scan_ramp_has_a_distinct_color_for_every_level() {
+        let palette = TerminalThemeKind::Adaptive.palette_with(DARK, StdoutColorLevel::TrueColor);
+        let colors: Vec<(u8, u8, u8)> = (0..SCAN_RED_LEVELS)
+            .map(|level| {
+                match palette
+                    .spinner_ink(SpinnerInk::Red(level as u8))
+                    .explicit_color()
+                    .expect("adaptive scan level should have an explicit color")
+                {
+                    Color::Rgb(r, g, b) => (r, g, b),
+                    color => panic!("adaptive scan level used {color:?} instead of RGB"),
+                }
+            })
+            .collect();
+
+        assert!(colors.windows(2).all(|pair| pair[0] != pair[1]));
+        let background = DARK.expect("test background").bg;
+        let distances: Vec<f32> = colors
+            .iter()
+            .map(|color| terminal_palette::perceptual_distance(*color, background))
+            .collect();
+        assert!(
+            distances.windows(2).all(|pair| pair[0] < pair[1]),
+            "scan ramp should brighten monotonically: {distances:?}"
+        );
+    }
+
+    #[test]
+    fn ansi_scan_ramp_stays_within_the_terminal_red_slots() {
+        let palette = TerminalThemeKind::Ansi.palette_with(DARK, StdoutColorLevel::TrueColor);
+        for level in 0..SCAN_RED_LEVELS {
+            assert!(matches!(
+                palette
+                    .spinner_ink(SpinnerInk::Red(level as u8))
+                    .explicit_color(),
+                Some(Color::Red | Color::LightRed)
+            ));
+        }
+        assert!(
+            !palette.spinner_ink(SpinnerInk::Red(0)).is_dim(),
+            "the resting rail should remain visibly red"
+        );
     }
 
     #[test]

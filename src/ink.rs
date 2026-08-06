@@ -7,14 +7,14 @@
 //! roles carry no color at all and lean on `Color::Reset` plus `DIM`/`BOLD`, so
 //! the terminal supplies the actual pixels and stays internally consistent.
 //!
-//! Colors that survive are restricted to the ANSI 16, which every terminal
-//! theme remaps to something that contrasts with its own background. RGB is
-//! reserved for backgrounds blended against the *measured* terminal background
-//! (see [`crate::terminal_palette`]), never for foregrounds.
+//! Colors that survive are normally restricted to the ANSI 16, which every
+//! terminal theme remaps against its own background. Richer visual ramps are
+//! derived from the *measured* terminal background and retain an ANSI fallback
+//! (see [`crate::terminal_palette`]).
 
 use ratatui::style::{Color, Modifier, Style};
 
-/// A foreground intent: an optional ANSI color plus text modifiers.
+/// A foreground intent: an optional explicit color plus text modifiers.
 ///
 /// `color: None` is the important case — it renders as `Color::Reset`, which
 /// emits SGR 39 and hands the decision back to the terminal.
@@ -53,11 +53,11 @@ impl Ink {
         }
     }
 
-    /// An explicit ANSI color, for roles that must be told apart at a glance.
+    /// An explicit color, for roles that must be told apart at a glance.
     ///
-    /// Callers are expected to pass one of the ANSI 16; nothing enforces that
-    /// here, but `clippy.toml` bans the RGB and indexed constructors so an
-    /// off-palette color cannot reach this function by accident.
+    /// Callers normally pass one of the ANSI 16. Richer colors must come from
+    /// the measured-background helpers; `clippy.toml` bans direct RGB and
+    /// indexed constructors so fixed off-palette colors cannot enter here.
     pub const fn ansi(color: Color) -> Self {
         Self {
             color: Some(color),
@@ -70,6 +70,14 @@ impl Ink {
         Self {
             color: Some(color),
             modifier: Modifier::DIM,
+        }
+    }
+
+    /// Add `DIM` to an existing ink without changing its color.
+    pub const fn with_dim(self) -> Self {
+        Self {
+            color: self.color,
+            modifier: self.modifier.union(Modifier::DIM),
         }
     }
 
@@ -166,6 +174,13 @@ mod tests {
     fn dim_ink_keeps_the_terminal_color_and_only_lowers_intensity() {
         let ink = Ink::dim();
         assert_eq!(ink.color(), Color::Reset);
+        assert!(ink.is_dim());
+    }
+
+    #[test]
+    fn colored_ink_can_be_dimmed_without_losing_its_hue() {
+        let ink = Ink::ansi(Color::Red).with_dim();
+        assert_eq!(ink.explicit_color(), Some(Color::Red));
         assert!(ink.is_dim());
     }
 

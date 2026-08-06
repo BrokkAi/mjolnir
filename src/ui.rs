@@ -1296,10 +1296,10 @@ const STREAMING_FRAME_BUDGET: Duration = STREAM_COMMIT_INTERVAL;
 /// animation has its own cadence, so queued-prompt typing can stay responsive.
 const INLINE_STREAMING_FRAME_BUDGET: Duration = STREAM_COMMIT_INTERVAL;
 
-/// Spinner-only redraw cadence. Tied to `SPINNER_FRAME_INTERVAL_MS` so the
-/// wall-clock frame selection and idle animation wakeups cannot drift.
+/// Spinner-only redraw cadence. Tied to the fastest spinner so wall-clock
+/// frame selection and animation wakeups cannot drift.
 const SPINNER_FRAME_BUDGET: Duration =
-    Duration::from_millis(crate::spinner::SPINNER_FRAME_INTERVAL_MS as u64);
+    Duration::from_millis(crate::spinner::SPINNER_REDRAW_INTERVAL_MS as u64);
 
 /// Redraw cadence while the `/mjconfig` overlay is idly previewing spinners.
 /// Keypresses in the menu are still rendered with the interactive budget.
@@ -16862,7 +16862,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_streaming_uses_slow_spinner_timer_without_repair_heartbeat() {
+    fn inline_streaming_uses_spinner_timer_without_repair_heartbeat() {
         let mut state = AppState::new();
         state.set_connection_state(ConnectionState::Streaming);
 
@@ -16886,7 +16886,10 @@ mod tests {
             .budget(UiMode::InlineChat),
             FRAME_BUDGET
         );
-        assert_eq!(SPINNER_FRAME_BUDGET, Duration::from_millis(250));
+        assert_eq!(
+            SPINNER_FRAME_BUDGET,
+            Duration::from_millis(crate::spinner::SPINNER_REDRAW_INTERVAL_MS as u64)
+        );
     }
 
     #[test]

@@ -8,10 +8,8 @@
 //! (including its idle frame) so the prompt title never reflows when a turn
 //! starts, ends, or the style changes. Frames are generated once on first use.
 //!
-//! Frames carry color as [`SpinnerInk`] slots rather than concrete colors. Two
-//! of the four themes are 16-color ANSI palettes that cannot express an RGB
-//! ramp, so the palette resolves each slot to a color it already defines and
-//! every style stays legible everywhere.
+//! Frames carry color as [`SpinnerInk`] slots rather than concrete colors, so
+//! the palette can adapt gradients to the active terminal capabilities.
 
 use std::fmt;
 use std::str::FromStr;
@@ -23,6 +21,10 @@ use serde::{Deserialize, Serialize};
 /// Display width (terminal columns) of every spinner frame, for every style.
 pub const SPINNER_WIDTH: usize = 12;
 
+/// Number of intensity levels in the scan-light gradient.
+pub(crate) const SCAN_RED_LEVELS: usize = SPINNER_WIDTH;
+const SCAN_RED_MAX: u8 = (SCAN_RED_LEVELS - 1) as u8;
+
 /// Resting ornament shown when no turn is in flight.
 const IDLE_GLYPH: char = '─';
 
@@ -31,14 +33,22 @@ const IDLE_GLYPH: char = '─';
 /// queued prompt typing feel visually noisy.
 pub const SPINNER_FRAME_INTERVAL_MS: u128 = 250;
 
+/// Fastest frame interval any spinner uses. The UI redraw timer follows this
+/// value while individual styles retain their own wall-clock cadence.
+pub const SPINNER_REDRAW_INTERVAL_MS: u128 = SCAN_FRAME_INTERVAL_MS;
+
+/// Dwell between adjacent scan-light positions. Across the full-width rail,
+/// this produces an edge-to-edge sweep of roughly one second.
+const SCAN_FRAME_INTERVAL_MS: u128 = 90;
+
 /// Color slot for one spinner cell, resolved against the active palette by
 /// [`crate::palette::TerminalTheme::spinner_ink`]. Styles emit slots rather
 /// than colors so one frame set serves both the truecolor and the 16-color
 /// ANSI themes.
 ///
-/// The first four are a cold-to-hot energy ramp used by the motion styles; the
-/// last three are the metered green/amber/red ramp `Bars` reads as an audio
-/// meter.
+/// The first four are a cold-to-hot energy ramp used by the motion styles.
+/// `Calm`, `Warm`, and `Hot` form the metered ramp used by `Bars`; `Red` carries
+/// one level of the scan-light gradient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpinnerInk {
     /// Resting rail and the coldest cells; recedes toward the border.
@@ -55,6 +65,8 @@ pub enum SpinnerInk {
     Warm,
     /// Peak of a metered ramp.
     Hot,
+    /// Red gradient level, from the dim rail at zero to the bright head.
+    Red(u8),
 }
 
 /// One rendered frame: the glyph row together with the ink each glyph takes.
@@ -136,7 +148,7 @@ impl SpinnerStyle {
     }
 
     /// Animated frames for this style. Always non-empty; index with the
-    /// wall-clock tick (`now / SPINNER_FRAME_INTERVAL_MS % frames.len()`).
+    /// wall-clock tick and this style's frame interval.
     pub fn frames(self) -> &'static [SpinnerFrame] {
         &FRAME_SETS[self.index()].animated
     }
@@ -151,7 +163,7 @@ impl SpinnerStyle {
     /// and stays in sync across every place it is shown.
     pub fn current_frame(self) -> &'static SpinnerFrame {
         let frames = self.frames();
-        &frames[current_frame_index(frames.len())]
+        &frames[current_frame_index(frames.len(), self.frame_interval_ms())]
     }
 
     /// Single-column animation frame for compact progress surfaces. This is a
@@ -159,7 +171,14 @@ impl SpinnerStyle {
     /// need to infer a usable glyph from the internals of a wide frame.
     pub fn compact_frame(self) -> &'static str {
         let frames = self.compact_frames();
-        frames[current_frame_index(frames.len())]
+        frames[current_frame_index(frames.len(), SPINNER_FRAME_INTERVAL_MS)]
+    }
+
+    fn frame_interval_ms(self) -> u128 {
+        match self {
+            Self::Scan => SCAN_FRAME_INTERVAL_MS,
+            _ => SPINNER_FRAME_INTERVAL_MS,
+        }
     }
 
     fn compact_frames(self) -> &'static [&'static str] {
@@ -181,10 +200,10 @@ impl SpinnerStyle {
     }
 }
 
-fn current_frame_index(frame_count: usize) -> usize {
+fn current_frame_index(frame_count: usize, frame_interval_ms: u128) -> usize {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|elapsed| (elapsed.as_millis() / SPINNER_FRAME_INTERVAL_MS) as usize)
+        .map(|elapsed| (elapsed.as_millis() / frame_interval_ms) as usize)
         .unwrap_or(0)
         % frame_count
 }
@@ -387,24 +406,31 @@ fn build_shimmer() -> FrameSet {
 /// then shrinking off the left edge. Reading them in order is what makes the
 /// ball look like it is spinning rather than fading in and out.
 const GLOBE_PHASES: [char; 8] = ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'];
+const GLOBE_CLEARANCE: usize = 2;
 
-/// A single sphere spins in place at the centre of the idle rule, so the strip
-/// keeps its resting shape and only the ball moves. The sphere is inked
-/// `Bright` for terminals that render the moons as monochrome text; those that
-/// use emoji presentation supply their own color and ignore it.
+/// A single sphere spins at the centre of the idle rule with a small gap around
+/// it. The sphere is inked `Bright` for terminals that render the moons as
+/// monochrome text; those that use emoji presentation supply their own color
+/// and ignore it.
 fn build_globe() -> FrameSet {
     let w = SPINNER_WIDTH;
     let rail_cell = (IDLE_GLYPH, SpinnerInk::Faint);
+    let empty_cell = (' ', SpinnerInk::Faint);
     let animated = GLOBE_PHASES
         .iter()
         .map(|&phase| {
-            // Measured rather than assumed: the moon glyphs are double-width,
-            // and the rule has to absorb exactly whatever they occupy for the
-            // frame to stay SPINNER_WIDTH columns.
-            let rail = w.saturating_sub(unicode_width::UnicodeWidthChar::width(phase).unwrap_or(1));
-            let mut cells = vec![rail_cell; rail / 2];
+            let available =
+                w.saturating_sub(unicode_width::UnicodeWidthChar::width(phase).unwrap_or(1));
+            let clearance = GLOBE_CLEARANCE.min(available / 2);
+            let rail = available.saturating_sub(clearance * 2);
+            let left_rail = rail / 2;
+            let right_rail = rail - left_rail;
+
+            let mut cells = vec![rail_cell; left_rail];
+            cells.extend(std::iter::repeat_n(empty_cell, clearance));
             cells.push((phase, SpinnerInk::Bright));
-            cells.resize(rail + 1, rail_cell);
+            cells.extend(std::iter::repeat_n(empty_cell, clearance));
+            cells.extend(std::iter::repeat_n(rail_cell, right_rail));
             row(cells)
         })
         .collect();
@@ -414,41 +440,54 @@ fn build_globe() -> FrameSet {
     }
 }
 
-/// Head positions for one full bounce of the scan light. The head moves two
-/// cells per frame so a round trip fits the calm loop budget, and the return
-/// leg visits the cells the outbound leg skipped, so the light touches both
-/// walls and every column over a cycle.
+/// Head positions for two complete one-way sweeps. Each movement advances one
+/// adjacent cell, and both journeys include their destination wall.
 fn scan_heads() -> Vec<i64> {
     let w = SPINNER_WIDTH as i64;
-    let mut heads: Vec<i64> = (0..w).step_by(2).collect();
-    let back: Vec<i64> = (1..w).step_by(2).collect();
-    heads.extend(back.into_iter().rev());
+    let mut heads: Vec<i64> = (0..w).collect();
+    heads.extend((0..w - 1).rev());
     heads
+}
+
+fn scan_cell(distance: i64) -> (char, SpinnerInk) {
+    if !(0..SPINNER_WIDTH as i64).contains(&distance) {
+        return ('·', SpinnerInk::Red(0));
+    }
+
+    let level = SCAN_RED_MAX - distance as u8;
+    let glyph = match distance {
+        0 => '●',
+        1..=4 => '•',
+        5..=8 => '∙',
+        _ => '·',
+    };
+    (glyph, SpinnerInk::Red(level))
 }
 
 /// A lit head sweeps to one wall, reverses, and sweeps back, dragging a short
 /// fading tail. The tail always trails the direction of travel — it swaps
 /// sides on the frame after each bounce — which is what makes the light read
 /// as bouncing between the walls rather than wrapping around like `Pulse`.
-/// Unlit cells keep the idle rule, so the light runs along the resting rail.
+/// Every active cell keeps a low red glow so motion comes from the brighter
+/// peak and afterglow rather than cells switching fully off.
 fn build_scan() -> FrameSet {
     let heads = scan_heads();
     let count = heads.len();
-    let animated = (0..count)
+    // One full bounce supplies two uninterrupted one-way sweeps. The dim rail
+    // then holds for one one-way sweep before the next bounce begins.
+    let animated = (0..count + SPINNER_WIDTH)
         .map(|i| {
+            if i >= count {
+                return row(vec![('·', SpinnerInk::Red(0)); SPINNER_WIDTH]);
+            }
             let head = heads[i];
             let prev = heads[(i + count - 1) % count];
             let dir = if head >= prev { 1 } else { -1 };
             row((0..SPINNER_WIDTH as i64)
                 .map(|x| {
                     // Signed distance behind the head; cells ahead go negative
-                    // and fall through to the rail.
-                    match (head - x) * dir {
-                        0 => ('●', SpinnerInk::Vivid),
-                        1 => ('•', SpinnerInk::Bright),
-                        2 => ('∙', SpinnerInk::Cool),
-                        _ => (IDLE_GLYPH, SpinnerInk::Faint),
-                    }
+                    // and fall through to the low, always-on glow.
+                    scan_cell((head - x) * dir)
                 })
                 .collect())
         })
@@ -521,15 +560,24 @@ mod tests {
     }
 
     #[test]
-    fn loops_are_calm_progress_indicators() {
-        // Each style should keep moving without reading as frantic activity.
+    fn animation_loops_stay_within_their_intended_cadence() {
         for style in SpinnerStyle::ALL {
-            let loop_ms = style.frames().len() as u128 * SPINNER_FRAME_INTERVAL_MS;
+            let loop_ms = style.frames().len() as u128 * style.frame_interval_ms();
             assert!(
-                (1_500..=3_500).contains(&loop_ms),
+                (1_000..=4_250).contains(&loop_ms),
                 "{style} loop_ms = {loop_ms}"
             );
         }
+    }
+
+    #[test]
+    fn scan_crosses_the_rail_in_about_one_second() {
+        let crossing_ms = (SPINNER_WIDTH as u128 - 1) * SpinnerStyle::Scan.frame_interval_ms();
+        assert!(
+            (900..=1_100).contains(&crossing_ms),
+            "crossing_ms = {crossing_ms}"
+        );
+        assert_eq!(SPINNER_REDRAW_INTERVAL_MS, SCAN_FRAME_INTERVAL_MS);
     }
 
     #[test]
@@ -537,7 +585,7 @@ mod tests {
         let frames = SpinnerStyle::Globe.frames();
         assert_eq!(frames.len(), GLOBE_PHASES.len());
         for (frame, phase) in frames.iter().zip(GLOBE_PHASES) {
-            // Exactly one sphere per frame, centred, riding the idle rule.
+            // Exactly one sphere per frame, centred with a small clear gap.
             let (left, rest) = frame
                 .text()
                 .split_once(phase)
@@ -546,12 +594,22 @@ mod tests {
                 !rest.contains(phase),
                 "{frame:?} shows more than one sphere"
             );
+            let left: Vec<char> = left.chars().collect();
+            let right: Vec<char> = rest.chars().collect();
             assert!(
-                left.chars().all(|c| c == IDLE_GLYPH) && rest.chars().all(|c| c == IDLE_GLYPH),
-                "{frame:?} should be a sphere on the idle rule"
+                left.ends_with(&[' '; GLOBE_CLEARANCE])
+                    && right.starts_with(&[' '; GLOBE_CLEARANCE]),
+                "{frame:?} should leave two spaces around the sphere"
             );
             assert!(
-                left.chars().count().abs_diff(rest.chars().count()) <= 1,
+                left[..left.len() - GLOBE_CLEARANCE]
+                    .iter()
+                    .chain(&right[GLOBE_CLEARANCE..])
+                    .all(|c| *c == IDLE_GLYPH),
+                "{frame:?} should retain the idle rule outside the gap"
+            );
+            assert!(
+                left.len().abs_diff(right.len()) <= 1,
                 "{frame:?} sphere is off-centre"
             );
         }
@@ -577,16 +635,7 @@ mod tests {
 
     #[test]
     fn scan_bounces_off_both_walls_without_wrapping() {
-        let frames = SpinnerStyle::Scan.frames();
-        let heads: Vec<usize> = frames
-            .iter()
-            .map(|frame| {
-                let mut heads = frame.text().chars().enumerate().filter(|(_, c)| *c == '●');
-                let (x, _) = heads.next().expect("each frame has a head");
-                assert!(heads.next().is_none(), "{frame:?} has more than one head");
-                x
-            })
-            .collect();
+        let heads: Vec<usize> = scan_heads().into_iter().map(|head| head as usize).collect();
         // The light must actually reach both walls before turning around…
         assert!(heads.contains(&0), "scan never reaches the left wall");
         assert!(
@@ -595,41 +644,112 @@ mod tests {
         );
         // …and travel there smoothly: a wrap like Pulse's would show up as a
         // near-full-width jump between consecutive frames.
-        for (i, head) in heads.iter().enumerate() {
-            let next = heads[(i + 1) % heads.len()];
+        assert_eq!(heads.first(), Some(&0));
+        assert_eq!(heads.last(), Some(&0));
+        for pair in heads.windows(2) {
+            let [head, next] = pair else {
+                unreachable!("windows of two always contain two positions")
+            };
             assert!(
-                head.abs_diff(next) <= 2,
+                head.abs_diff(*next) == 1,
                 "scan head jumps from {head} to {next}"
             );
         }
     }
 
     #[test]
-    fn scan_tail_trails_the_head_and_rides_the_idle_rail() {
-        for frame in SpinnerStyle::Scan.frames() {
+    fn scan_sweeps_twice_then_holds_the_dim_rail_for_one_pass() {
+        let frames = SpinnerStyle::Scan.frames();
+        let sweep_ticks = scan_heads().len();
+        assert_eq!(frames.len(), sweep_ticks + SPINNER_WIDTH);
+        assert!(
+            frames[..sweep_ticks]
+                .iter()
+                .all(|frame| frame.text().contains('●')),
+            "both sweeps should stay continuously lit"
+        );
+        assert!(
+            frames[sweep_ticks..].len() == SPINNER_WIDTH
+                && frames[sweep_ticks..].iter().all(|frame| frame
+                    .text()
+                    .chars()
+                    .all(|glyph| glyph == '·')
+                    && frame
+                        .runs()
+                        .iter()
+                        .all(|(_, ink)| *ink == SpinnerInk::Red(0))),
+            "the quiet pass should hold only the dim red rail"
+        );
+    }
+
+    #[test]
+    fn scan_trail_drops_one_red_level_per_cell() {
+        let trail: Vec<(char, SpinnerInk)> = (0..SPINNER_WIDTH as i64).map(scan_cell).collect();
+        let levels: Vec<u8> = trail
+            .iter()
+            .map(|(_, ink)| match ink {
+                SpinnerInk::Red(level) => *level,
+                _ => panic!("scan cell is not red"),
+            })
+            .collect();
+
+        assert_eq!(levels, (0..=SCAN_RED_MAX).rev().collect::<Vec<_>>());
+        assert!(trail[1..=4].iter().all(|(glyph, _)| *glyph == '•'));
+        assert_eq!(levels.iter().filter(|level| **level > 0).count(), 11);
+    }
+
+    #[test]
+    fn scan_brightness_peak_trails_the_head_over_an_always_lit_rail() {
+        let mut longest_tail = 0;
+        for frame in SpinnerStyle::Scan
+            .frames()
+            .iter()
+            .filter(|frame| frame.text().contains('●'))
+        {
             let cells: Vec<char> = frame.text().chars().collect();
             let head = cells.iter().position(|c| *c == '●').expect("head");
             let tail: Vec<usize> = cells
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| **c == '•' || **c == '∙')
+                .filter(|(_, c)| ['•', '∙'].contains(c))
                 .map(|(x, _)| x)
                 .collect();
+            longest_tail = longest_tail.max(tail.len());
             // The comet is contiguous and entirely on one side of the head,
             // so the tail reads as dragged behind rather than haloing it.
             assert!(
-                tail.iter().all(|x| x.abs_diff(head) <= 2)
+                tail.iter().all(|x| x.abs_diff(head) <= 8)
                     && (tail.iter().all(|x| *x < head) || tail.iter().all(|x| *x > head)),
                 "{frame:?} tail {tail:?} should trail one side of head {head}"
             );
             assert!(
-                cells
-                    .iter()
-                    .filter(|c| !['●', '•', '∙'].contains(c))
-                    .all(|c| *c == IDLE_GLYPH),
-                "{frame:?} unlit cells should keep the idle rule"
+                cells.iter().all(|c| ['●', '•', '∙', '·'].contains(c)),
+                "{frame:?} should keep every active cell visibly lit"
             );
         }
+        assert_eq!(longest_tail, 8, "scan should show eight shaped tail cells");
+    }
+
+    #[test]
+    fn scan_uses_red_ink_for_every_lit_cell() {
+        let mut seen_inks = Vec::new();
+        for frame in SpinnerStyle::Scan.frames() {
+            for (run, ink) in frame.runs() {
+                assert!(
+                    matches!(ink, SpinnerInk::Red(0..=SCAN_RED_MAX)),
+                    "scan run {run:?} in {frame:?} is not red"
+                );
+                seen_inks.push(*ink);
+            }
+        }
+        assert!(
+            seen_inks.contains(&SpinnerInk::Red(0)),
+            "scan has no dim glow"
+        );
+        assert!(
+            seen_inks.contains(&SpinnerInk::Red(SCAN_RED_MAX)),
+            "scan has no bright peak"
+        );
     }
 
     #[test]

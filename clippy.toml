@@ -7,18 +7,18 @@
 # is the single most common way a TUI ends up unreadable on solarized, gruvbox,
 # or a light terminal.
 #
-# Backgrounds are the sanctioned exception, and only when *derived*: see
+# Derived colors are the sanctioned exception: see
 # `terminal_palette::best_color_for_level`, which blends against the terminal's
-# measured background and degrades to no fill at all when it cannot. Modules
-# that legitimately emit RGB carry a scoped `#[allow(clippy::disallowed_methods)]`
+# measured background and supplies a capability-aware fallback. Modules that
+# legitimately construct RGB carry a scoped `#[allow(clippy::disallowed_methods)]`
 # with a comment saying why:
 #
 #   * `terminal_palette` — constructs the derived colors themselves.
 #   * `ragnarok_sprites` — pixel art, where the RGB *is* the artwork; remapping
 #     a skin tone onto the ANSI 16 would destroy it rather than adapt it.
 disallowed-methods = [
-    { path = "ratatui::style::Color::Rgb", reason = "Use an Ink from the palette. Terminal themes remap ANSI colors to contrast with their own background; RGB cannot adapt. For a derived background, go through terminal_palette::best_color_for_level." },
-    { path = "ratatui::style::Color::Indexed", reason = "Use an Ink from the palette, or terminal_palette::best_color_for_level for a derived background." },
+    { path = "ratatui::style::Color::Rgb", reason = "Use an Ink from the palette. Terminal themes remap ANSI colors to contrast with their own background; RGB cannot adapt. For a color derived from the measured terminal background, go through terminal_palette::best_color_for_level." },
+    { path = "ratatui::style::Color::Indexed", reason = "Use an Ink from the palette, or terminal_palette::best_color_for_level for a color derived from the measured terminal background." },
     { path = "ratatui::style::Stylize::white", reason = "Use Ink::terminal() (the terminal's own foreground) or Ink::bold(). Hardcoded white is invisible on a light terminal." },
     { path = "ratatui::style::Stylize::black", reason = "Use Ink::terminal() or Ink::dim(). Hardcoded black is invisible on a dark terminal. The exception is text over a background we painted ourselves, e.g. the selection fill." },
 ]
