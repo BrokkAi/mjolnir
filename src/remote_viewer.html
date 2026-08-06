@@ -3923,17 +3923,21 @@
       }
 
       /// Poll while a background job (sign-in, install) runs so its output and
-      /// progress stream into the panel. Structural re-render only happens on
-      /// job completion, so open dropdowns and focused inputs stay alive.
+      /// progress stream into the panel. Structural re-render happens when a
+      /// job completes or ACP discovery publishes new choices and options.
       function mjSchedulePoll() {
         if (mjcfg.pollTimer) {
           clearTimeout(mjcfg.pollTimer);
           mjcfg.pollTimer = null;
         }
         const snapshot = mjcfg.snapshot;
-        const jobRunning =
-          snapshot && ((snapshot.login && snapshot.login.running) || (snapshot.install && snapshot.install.running));
-        if (!jobRunning || mjconfigModalEl.hidden) {
+        const backgroundRunning =
+          snapshot && (
+            (snapshot.login && snapshot.login.running)
+            || (snapshot.install && snapshot.install.running)
+            || snapshot.probing
+          );
+        if (!backgroundRunning || mjconfigModalEl.hidden) {
           return;
         }
         mjcfg.pollTimer = setTimeout(async () => {
@@ -3947,11 +3951,16 @@
               const previous = mjcfg.snapshot;
               mjcfg.snapshot = await response.json();
               const wasRunning =
-                (previous.login && previous.login.running) || (previous.install && previous.install.running);
+                (previous.login && previous.login.running)
+                || (previous.install && previous.install.running)
+                || previous.probing;
               const stillRunning =
                 (mjcfg.snapshot.login && mjcfg.snapshot.login.running)
-                || (mjcfg.snapshot.install && mjcfg.snapshot.install.running);
-              if (wasRunning && !stillRunning) {
+                || (mjcfg.snapshot.install && mjcfg.snapshot.install.running)
+                || mjcfg.snapshot.probing;
+              const discoveryChanged =
+                previous.discovery_revision !== mjcfg.snapshot.discovery_revision;
+              if (discoveryChanged || (wasRunning && !stillRunning)) {
                 renderMjConfig();
               } else {
                 mjPatchJobUi();
@@ -4156,6 +4165,10 @@
       function mjSeatOptionRows(group, editsField, seat) {
         const rows = [];
         if (!group) {
+          if (mjcfg.snapshot?.probing) {
+            const label = seat === "primary" ? "agent" : (seat === "review" ? "reviewer" : "subagent");
+            rows.push(mjNote(`Discovering ACP session options for the ${label} route…`));
+          }
           return rows;
         }
         rows.push(mjSectionTitle(`${group.server_label} session options`));
