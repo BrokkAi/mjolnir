@@ -1,32 +1,32 @@
 ---
-title: Mjolnir for Codex
-description: The self-hosted power frontend for Codex, with remote control, a worktree-first workflow, cross-platform voice, and integrated adversarial review.
+title: Mjolnir for Codex and Claude
+description: Choose Codex or Claude to code and review, with self-hosted remote control, worktrees, voice, and adversarial review.
 template: splash
 hero:
-  title: The power frontend for Codex.
-  tagline: Keep the workspace and control plane on your machine. Control Codex remotely, isolate work in worktrees, speak your prompts, and challenge changes before they land.
+  title: Mjolnir
+  tagline: Choose who codes. Choose who reviews. Switch between Codex, Claude, and mixed teams while the workspace and control plane stay on your machine.
   actions:
-    - text: Start with Codex
-      link: codex/
-      icon: right-arrow
-      variant: primary
     - text: Install mj
       link: install/
+      icon: right-arrow
+      variant: primary
+    - text: Configure a team
+      link: configuration/
       icon: right-arrow
       variant: secondary
 ---
 
 <section class="home-section">
-  <p class="section-label">Codex, with an operating environment</p>
-  <h2>More control around the agent you already use.</h2>
-  <p>Codex still plans, edits, runs tools, delegates, and answers. Mjolnir wraps that session in self-hosted remote control, a worktree-first workflow, cross-platform voice, and integrated adversarial review.</p>
+  <p class="section-label">One operating environment</p>
+  <h2>Put Codex or Claude in charge of the turn.</h2>
+  <p>The selected coder plans, edits, runs tools, delegates, and answers. Mjolnir wraps that session in self-hosted remote control, a worktree-first workflow, cross-platform voice, and integrated adversarial review.</p>
   <div class="role-grid">
     <div class="role-grid__inner">
       <article>
         <small>01 / RUN</small>
-        <h3>Codex owns the turn</h3>
-        <p>Your Codex account, models, tools, and reasoning stay at the center of the coding session.</p>
-        <code>agent://codex</code>
+        <h3>The coder owns the turn</h3>
+        <p>Choose Codex or Claude for the primary and subagent seats, with automatic model selection inside that provider.</p>
+        <code>agent://coder</code>
       </article>
       <article>
         <small>02 / CONTROL</small>
@@ -46,7 +46,7 @@ hero:
 
 <section class="home-section">
   <p class="section-label">Why Mjolnir</p>
-  <h2>Codex where you are, with stronger controls.</h2>
+  <h2>Your coding team where you are, with stronger controls.</h2>
   <p>The repository and Mjolnir server stay on your machine. Work from the terminal or a remote browser, dictate prompts locally on desktop, and keep every permission and nested agent attributable.</p>
   <div class="capability-grid">
     <div class="capability-grid__inner">
@@ -54,10 +54,10 @@ hero:
         <span>01 / REMOTE</span><h3>Self-hosted remote control</h3><p>Drive the same live session from another browser or device while the repository stays on your machine.</p>
       </a>
       <a href="sessions-worktrees/">
-        <span>02 / ISOLATE</span><h3>Worktrees first</h3><p>Run Codex in a linked Git worktree so agent changes stay separate and easy to inspect.</p>
+        <span>02 / ISOLATE</span><h3>Worktrees first</h3><p>Run the coder in a linked Git worktree so agent changes stay separate and easy to inspect.</p>
       </a>
       <a href="voice/">
-        <span>03 / SPEAK</span><h3>Local voice input</h3><p>Dictate and edit prompts on macOS, Linux, and Windows before sending them to Codex.</p>
+        <span>03 / SPEAK</span><h3>Local voice input</h3><p>Dictate and edit prompts on macOS, Linux, and Windows before sending them to the coder.</p>
       </a>
       <a href="delegation-review/">
         <span>04 / CHALLENGE</span><h3>Adversarial review</h3><p>Hold delegated changes for an independent, findings-only review before completion.</p>
@@ -67,17 +67,17 @@ hero:
 </section>
 
 <section class="home-section">
-  <p class="section-label">Codex-first, not Codex-only</p>
-  <h2>Start with Codex. Add specialists when they earn a seat.</h2>
-  <p>Claude and custom ACP servers remain available as alternative primaries, subagents, or reviewers. You do not need to configure any of them to get started.</p>
-  <div class="command-strip" aria-label="Run Mjolnir with Codex"><span>❯</span><code>mj</code><small>CODEX READY</small></div>
+  <p class="section-label">Four teams, one shortcut</p>
+  <h2>Choose who codes. Choose who reviews.</h2>
+  <p>Run <strong>Codex</strong>, <strong>Claude</strong>, <strong>Codex coder + Claude reviewer</strong>, or <strong>Claude coder + Codex reviewer</strong>. Press <strong>Ctrl+Tab</strong> in a session to switch and start the new team.</p>
+  <div class="command-strip" aria-label="Switch the Mjolnir coding team"><span>⌃</span><code>Ctrl+Tab</code><small>CHOOSE TEAM</small></div>
 </section>
 
 <section class="home-section">
   <div class="docs-callout">
     <div>
       <p class="section-label">Ten minutes, disposable repository</p>
-      <h2>See the complete Codex workflow.</h2>
+      <h2>See the complete coding workflow.</h2>
       <p>Run a checked fixture through delegated implementation, pushed-back reports, adversarial review, session resume, and headless output before using Mjolnir on a private repository.</p>
     </div>
     <a href="evaluate/">Run the evaluation <span aria-hidden="true">→</span></a>

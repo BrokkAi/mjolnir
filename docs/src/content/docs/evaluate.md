@@ -25,10 +25,10 @@ You need:
 - Git.
 - An authenticated, launchable Codex route. Codex use may cost money.
 
-Run `mj`, open `/mjconfig`, and confirm on the Agent tab that the primary
-resolves through Codex. Confirm the subagent and review seats as well if you
-want this run to remain Codex-only. Model or ACP-server changes apply to the
-next session, so exit and relaunch after changing them.
+Run `mj`, open `/mjconfig`, and choose **Codex** on the Team tab. This pins the
+primary, subagent, and review seats to Codex while keeping their models on
+Auto. Team or ACP-server changes apply to a new session, so start one after
+changing them.
 
 ## Prepare the disposable fixture
 

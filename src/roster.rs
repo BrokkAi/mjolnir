@@ -712,11 +712,28 @@ fn custom_model_id(source_id: &str, model_value: &str) -> String {
 }
 
 async fn discover_available(rows: &[Row], inventory: &AcpInventory, cwd: &Path) -> Discovery {
+    discover_available_with_probe(rows, inventory, cwd, |launch, cwd| async move {
+        probe_launch(&launch, &cwd).await
+    })
+    .await
+}
+
+async fn discover_available_with_probe<F, Fut>(
+    rows: &[Row],
+    inventory: &AcpInventory,
+    cwd: &Path,
+    probe: F,
+) -> Discovery
+where
+    F: Fn(AdapterLaunch, PathBuf) -> Fut + Clone,
+    Fut: std::future::Future<Output = ProbeResult>,
+{
     let launches = configured_launches(inventory);
     let probes = stream::iter(launches.into_iter().enumerate().map(|(priority, launch)| {
         let cwd = cwd.to_path_buf();
+        let probe = probe.clone();
         async move {
-            let capabilities = probe_launch(&launch, &cwd).await;
+            let capabilities = probe(launch.clone(), cwd).await;
             (priority, launch, capabilities)
         }
     }))
@@ -1649,6 +1666,45 @@ mod tests {
         assert!(ids.contains(&"custom:enabled".to_string()));
         assert!(!ids.contains(&"custom:disabled".to_string()));
         assert!(!ids.contains(&"codex-acp".to_string()));
+    }
+
+    #[tokio::test]
+    async fn discovery_probes_every_selected_adapter_on_each_resolution() {
+        let mut config = Config::default();
+        for id in ["codex-acp", "claude-acp"] {
+            config.set_acp_server_policy(id, AcpServerPolicy::Enabled);
+        }
+        let inventory = discover_inventory(&config);
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let probe = |launch: AdapterLaunch, _cwd: PathBuf| {
+            let calls = std::sync::Arc::clone(&calls);
+            async move {
+                calls
+                    .lock()
+                    .expect("probe call lock")
+                    .push(launch.source_id);
+                Ok(probe::AdapterCapabilities {
+                    http_mcp: true,
+                    models: Vec::new(),
+                    session_config: Vec::new(),
+                })
+            }
+        };
+
+        discover_available_with_probe(&[], &inventory, Path::new("."), probe).await;
+        discover_available_with_probe(&[], &inventory, Path::new("."), probe).await;
+
+        let mut calls = calls.lock().expect("probe call lock").clone();
+        calls.sort();
+        assert_eq!(
+            calls,
+            vec![
+                "claude-acp".to_string(),
+                "claude-acp".to_string(),
+                "codex-acp".to_string(),
+                "codex-acp".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -515,7 +515,7 @@ async fn main() -> Result<()> {
                     let roster = roster::resolve(&cfg, &cwd).await?;
                     println!(
                         "Probed enabled ACP adapters; {} models available.",
-                        roster.available.len()
+                        available_model_count(&roster)
                     );
                     Ok(())
                 }
@@ -735,6 +735,15 @@ fn primary_session_routes(roster: &roster::Roster) -> Vec<roster::ResolvedAgent>
         }
     }
     routes
+}
+
+fn available_model_count(roster: &roster::Roster) -> usize {
+    roster
+        .available
+        .iter()
+        .map(|role| role.model.model.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
 }
 
 fn models_reload_message(roster: &roster::Roster) -> String {
@@ -3208,6 +3217,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(route_models, vec!["primary", "alternate"]);
         assert_eq!(routes[1].launch.source_id, alternate.launch.source_id);
+    }
+
+    #[test]
+    fn available_model_count_deduplicates_adapter_routes() {
+        let primary = test_roster_agent("primary", "codex-acp");
+        let duplicate_model = test_roster_agent("primary", "claude-acp");
+        let alternate = test_roster_agent("alternate", "claude-acp");
+        let roster = test_roster(primary.clone(), vec![primary, duplicate_model, alternate]);
+
+        assert_eq!(available_model_count(&roster), 2);
     }
 
     #[test]

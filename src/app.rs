@@ -266,7 +266,7 @@ fn builtin_export_command() -> AvailableCommand {
 fn builtin_mjconfig_command() -> AvailableCommand {
     AvailableCommand::new(
         BUILTIN_MJCONFIG_COMMAND,
-        "configure agents, ACP servers, and appearance",
+        "configure the team, agents, ACP servers, and appearance",
     )
 }
 
@@ -451,7 +451,7 @@ struct FeatureHint {
 
 const FEATURE_HINTS: &[FeatureHint] = &[
     FeatureHint {
-        text: "Open /mjconfig to choose agents, subagents, models, ACP routes, and session options.",
+        text: "Press Ctrl+Tab to switch coding teams, or open /mjconfig for models and session options.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -1112,6 +1112,7 @@ pub struct AppState {
     /// `*_pending_elicitation*` helpers.
     elicitation_queue: VecDeque<PendingElicitation>,
     pub agent_picker: Option<AgentPicker>,
+    pub team_picker: Option<TeamPicker>,
     pub config_picker: Option<ConfigPicker>,
     pub review_picker: Option<ReviewPicker>,
     /// Scroll offset measured in rendered lines from the bottom of the
@@ -1631,6 +1632,20 @@ pub struct AgentPicker {
     pub start_new_session: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeamPickerStep {
+    Choose,
+    StartNewSession,
+}
+
+/// Deferred four-configuration team picker opened by Ctrl+Tab.
+#[derive(Debug, Clone)]
+pub struct TeamPicker {
+    pub selected: usize,
+    pub step: TeamPickerStep,
+    pub start_new_session: bool,
+}
+
 /// Config option picker overlay state.
 #[derive(Debug, Clone)]
 pub struct ConfigPicker {
@@ -1941,6 +1956,7 @@ impl AppState {
             permission_queue: VecDeque::new(),
             elicitation_queue: VecDeque::new(),
             agent_picker: None,
+            team_picker: None,
             config_picker: None,
             review_picker: None,
             scroll_offset: 0,
@@ -2101,6 +2117,46 @@ impl AppState {
             start_new_session: true,
         });
         true
+    }
+
+    pub fn open_team_picker(&mut self) {
+        let active = self
+            .config_path
+            .as_deref()
+            .and_then(|path| crate::config::Config::load(path).ok())
+            .as_ref()
+            .and_then(crate::config::TeamPreset::from_config);
+        let selected = active
+            .and_then(|active| {
+                crate::config::TeamPreset::ALL
+                    .iter()
+                    .position(|preset| *preset == active)
+            })
+            .unwrap_or(0);
+        self.team_picker = Some(TeamPicker {
+            selected,
+            step: TeamPickerStep::Choose,
+            start_new_session: true,
+        });
+    }
+
+    pub fn team_picker_move(&mut self, delta: i32) {
+        let Some(picker) = self.team_picker.as_mut() else {
+            return;
+        };
+        let len = crate::config::TeamPreset::ALL.len();
+        picker.selected = (picker.selected as i32 + delta).rem_euclid(len as i32) as usize;
+    }
+
+    pub fn team_picker_selection(&self) -> Option<crate::config::TeamPreset> {
+        let picker = self.team_picker.as_ref()?;
+        crate::config::TeamPreset::ALL.get(picker.selected).copied()
+    }
+
+    pub fn team_picker_toggle_start_new_session(&mut self) {
+        if let Some(picker) = self.team_picker.as_mut() {
+            picker.start_new_session = !picker.start_new_session;
+        }
     }
 
     pub fn agent_picker_move(&mut self, delta: i32) {
@@ -3082,6 +3138,7 @@ impl AppState {
         self.cancel_all_pending_permissions();
         self.cancel_all_pending_elicitations();
         self.agent_picker = None;
+        self.team_picker = None;
         self.config_picker = None;
         self.autocomplete = Autocomplete::default();
         self.clear_queued_prompts();

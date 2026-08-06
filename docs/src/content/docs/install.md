@@ -1,11 +1,12 @@
 ---
 title: Install and run
-description: Install Mjolnir, connect Codex, and launch the recommended first session.
+description: Install Mjolnir, connect Codex or Claude, and launch your first coding team.
 ---
 
-The recommended setup needs an authenticated Codex CLI and a launchable Codex
-ACP bridge. Codex use may incur cost. The first launch can also download a
-managed runtime, ACP bridge, Bifrost package, model rankings, or voice assets.
+The recommended setup needs an authenticated Codex or Claude CLI and its
+launchable ACP bridge. Provider use may incur cost. The first launch can also
+download a managed runtime, ACP bridge, Bifrost package, model rankings, or
+voice assets.
 Review [Data and trust boundaries](/data-boundaries/) before
 using a private repository.
 
@@ -137,13 +138,15 @@ npm install -g @openai/codex
 codex login
 ```
 
-Run `mj`. First launch asks you to choose one of four team presets: Codex,
-Claude, Codex code with Claude review, or Claude code with Codex review. The
-coding provider backs both the primary and builder seats; the review provider
-backs the reviewer seat. Use **Customize every route** for model, review,
-parallelism, and appearance controls.
+Run `mj`. First launch asks you to choose one of four teams: **Codex**,
+**Claude**, **Codex coder + Claude reviewer**, or **Claude coder + Codex
+reviewer**. The coder backs both the primary and subagent seats; the reviewer
+backs the independent review seat. Use **Customize every route** for model,
+review, parallelism, and appearance controls.
 
-Return to the same settings later with `/mjconfig`.
+Press **Ctrl+Tab** during a session to switch between the four teams, or return
+to the same choice on the **Team** tab in `/mjconfig`. Start a new session after
+switching so the new coder owns the complete turn.
 
 Existing Codex credentials can be detected without launching the ACP bridge
 during discovery. Launch requires the PATH-visible `codex` CLI. For `npx` ACP

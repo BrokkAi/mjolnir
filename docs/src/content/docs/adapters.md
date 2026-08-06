@@ -43,7 +43,12 @@ for paths and endpoints.
 enabled adapter, and reports the available model count. Normal startup and
 `/new` or `/clear` resolutions perform the same adapter probes automatically.
 
-## Auto selection and Codex priority
+## Team selection and automatic models
+
+Onboarding, `/mjconfig`, and **Ctrl+Tab** expose four first-class teams: Codex,
+Claude, Codex coder + Claude reviewer, and Claude coder + Codex reviewer. A
+team pins the primary and subagent routes to its coder and the review route to
+its reviewer while leaving model selection on Auto.
 
 - The primary prefers the strongest launchable eligible row.
 - The review supervisor prefers the strongest distinct model after the primary,
@@ -61,9 +66,9 @@ Availability, credentials, advertised capabilities, and the current ranking
 can change the result. Auto chooses across launchable ranked models; adapter
 priority decides between adapters that provide the selected model. Therefore,
 adding another detected provider can change an unconstrained Auto-resolved
-seat even though Codex is first in adapter priority. Set the seat's ACP source
-to Codex in `/mjconfig` to retain Auto model selection within Codex, and use
-`/agents` to record what actually launched.
+seat even though Codex is first in adapter priority. Choose a Team preset to
+retain Auto model selection within its assigned provider, and use `/agents` to
+record what actually launched.
 
 ## Custom ACP servers
 

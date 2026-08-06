@@ -2923,51 +2923,6 @@
         }
       }
 
-      .mjconfig-priority-list {
-        list-style: none;
-        margin: 0;
-        padding: 0;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-
-      .mjconfig-priority-item {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 4px 6px;
-        border-left: 2px solid var(--line-control);
-        color: var(--text-control);
-        font: 400 12px/1.4 var(--font-mono);
-
-        & .mjconfig-priority-id {
-          color: var(--dim);
-          font-size: 10.5px;
-        }
-
-        & button {
-          border: 1px solid var(--line-control);
-          background: transparent;
-          width: 24px;
-          height: 24px;
-          color: var(--text-control);
-          font: 700 12px/1 var(--font-mono);
-          cursor: pointer;
-
-          &:disabled {
-            opacity: 0.35;
-            cursor: default;
-          }
-        }
-      }
-
-      .mjconfig-move-group {
-        margin-left: auto;
-        display: inline-flex;
-        gap: 4px;
-      }
-
       .mjconfig-spinner-preview {
         color: var(--red-hot);
         font: 700 13px/1 var(--font-mono);
@@ -3783,18 +3738,18 @@
       const mjconfigSaveEl = $("mjconfig-save");
 
       const MJ_TABS = [
+        ["team", "Team"],
         ["agents", "Agent"],
         ["reviewer", "Reviewer"],
         ["subagents", "Subagents"],
         ["servers", "ACP Servers"],
-        ["priority", "ACP Priority"],
         ["appearance", "Appearance"],
       ];
 
       const mjcfg = {
         snapshot: null,
         edits: {},
-        tab: "agents",
+        tab: "team",
         pollTimer: null,
         spinnerTimer: null,
         comboSeq: 0,
@@ -3814,7 +3769,7 @@
         return Object.keys(mjcfg.edits).length > 0;
       }
 
-      async function openMjConfig(tab = "agents") {
+      async function openMjConfig(tab = "team") {
         mjcfg.edits = {};
         mjcfg.tab = tab;
         mjconfigModalEl.hidden = false;
@@ -3956,6 +3911,9 @@
           return;
         }
         switch (mjcfg.tab) {
+          case "team":
+            renderMjTeam();
+            break;
           case "agents":
             renderMjAgents();
             break;
@@ -3967,9 +3925,6 @@
             break;
           case "servers":
             renderMjServers();
-            break;
-          case "priority":
-            renderMjPriority();
             break;
           case "appearance":
             renderMjAppearance();
@@ -4308,97 +4263,23 @@
         }
       }
 
-      function renderMjPriority() {
-        const panel = mjcfg.snapshot.acp_priority;
+      function renderMjTeam() {
+        const panel = mjcfg.snapshot.team;
+        const selected = mjEditedValue("team", panel.selected || "");
         mjconfigBodyEl.appendChild(
-          mjNote("Source constrains a seat to one ACP route; the ordered list breaks ties when several routes offer the model. Changes apply to new sessions."),
+          mjNote("The coder owns the primary and implementation subagent seats. The reviewer independently checks changed turns. Changes apply to new sessions."),
         );
-        const staged = mjcfg.edits.priority || {};
-        for (const seat of panel.seats) {
-          const stagedSeat = staged[seat.seat] || {};
-          mjconfigBodyEl.appendChild(mjSectionTitle(seat.label));
-          const sourceRow = mjRow("Source");
-          const sourceValue = Object.hasOwn(stagedSeat, "source")
-            ? stagedSeat.source
-            : seat.source || "";
-          const sourceChoices = [
-            { value: "", label: "any enabled source" },
-            ...seat.priority.map((server) => ({
-              value: server.id,
-              label: `${server.label} only`,
-            })),
-          ];
-          sourceRow.appendChild(
-            mjCombo(sourceChoices, sourceValue, (next) => {
-              mjcfg.edits.priority = {
-                ...staged,
-                [seat.seat]: { ...stagedSeat, source: next },
-              };
-              renderMjConfig();
-            }),
-          );
-          mjconfigBodyEl.appendChild(sourceRow);
-
-          const order = stagedSeat.order || seat.priority.map((server) => server.id);
-          const labelById = new Map(seat.priority.map((server) => [server.id, server.label]));
-          const list = document.createElement("ol");
-          list.className = "mjconfig-priority-list";
-          order.forEach((id, index) => {
-            const item = document.createElement("li");
-            item.className = "mjconfig-priority-item";
-            const rank = document.createElement("span");
-            rank.textContent = `${index + 1}.`;
-            const label = document.createElement("span");
-            label.textContent = labelById.get(id) || id;
-            const idEl = document.createElement("span");
-            idEl.className = "mjconfig-priority-id";
-            idEl.textContent = `(${id})`;
-            const moves = document.createElement("span");
-            moves.className = "mjconfig-move-group";
-            const move = (delta) => {
-              const next = order.slice();
-              const target = index + delta;
-              [next[index], next[target]] = [next[target], next[index]];
-              mjcfg.edits.priority = {
-                ...staged,
-                [seat.seat]: { ...stagedSeat, order: next },
-              };
-              renderMjConfig();
-            };
-            const up = document.createElement("button");
-            up.type = "button";
-            up.textContent = "↑";
-            up.setAttribute("aria-label", `Move ${labelById.get(id) || id} up`);
-            up.disabled = index === 0;
-            up.addEventListener("click", () => move(-1));
-            const down = document.createElement("button");
-            down.type = "button";
-            down.textContent = "↓";
-            down.setAttribute("aria-label", `Move ${labelById.get(id) || id} down`);
-            down.disabled = index === order.length - 1;
-            down.addEventListener("click", () => move(1));
-            moves.append(up, down);
-            item.append(rank, label, idEl, moves);
-            list.appendChild(item);
+        for (const preset of panel.presets) {
+          const row = mjRow(preset.label);
+          const active = selected === preset.id;
+          const button = mjButton(active ? "Selected" : "Choose", () => {
+            mjcfg.edits.team = preset.id;
+            renderMjConfig();
           });
-          mjconfigBodyEl.appendChild(list);
-
-          const resetRow = mjRow("");
-          resetRow.appendChild(
-            mjButton("Reset default order", () => {
-              const known = new Set(seat.priority.map((server) => server.id));
-              const next = [
-                ...panel.default_priority.filter((id) => known.has(id)),
-                ...seat.priority.map((server) => server.id).filter((id) => !panel.default_priority.includes(id)),
-              ];
-              mjcfg.edits.priority = {
-                ...staged,
-                [seat.seat]: { ...stagedSeat, order: next },
-              };
-              renderMjConfig();
-            }),
-          );
-          mjconfigBodyEl.appendChild(resetRow);
+          button.disabled = active;
+          row.appendChild(button);
+          row.appendChild(mjDetail(preset.description));
+          mjconfigBodyEl.appendChild(row);
         }
       }
 
