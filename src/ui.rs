@@ -13125,7 +13125,7 @@ fn help_modal_lines(
         help_blank_line(),
         help_section_line("Config", theme),
         help_binding_line(
-            "/mjconfig → Agents/Subagents",
+            "/mjconfig → Agent/Reviewer/Subagents",
             "edit role-scoped session defaults",
             theme,
         ),
@@ -18595,6 +18595,7 @@ mod tests {
         // ACP Servers tab: toggle Codex off.
         state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
+        state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu.as_mut().expect("menu").editor.selected =
             crate::settings::SERVER_ROW_OFFSET;
         handle_mjconfig_menu_key(
@@ -18614,12 +18615,11 @@ mod tests {
         state.mjconfig_menu_key(KeyCode::Right);
         let previewed = state.spinner_style;
 
-        // Agents tab: toggle discrete review, deepen the review tier, and apply
-        // both to the running session.
+        // Reviewer tab: toggle discrete review, deepen the review tier, and
+        // apply both to the running session.
         state.mjconfig_menu_key(KeyCode::Tab);
-        for _ in 0..2 {
-            state.mjconfig_menu_key(KeyCode::Down);
-        }
+        state.mjconfig_menu_key(KeyCode::Tab);
+        state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Char(' '));
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);
@@ -18737,6 +18737,7 @@ mod tests {
         state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Tab);
+        state.mjconfig_menu_key(KeyCode::Tab);
         state.mjconfig_menu_key(KeyCode::Right);
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);
@@ -18809,7 +18810,8 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("mj config"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Agents"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Agent"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Reviewer"), "rendered:\n{rendered}");
         assert!(rendered.contains("Subagents"), "rendered:\n{rendered}");
         assert!(rendered.contains("ACP Priority"), "rendered:\n{rendered}");
         assert!(rendered.contains("ACP Servers"), "rendered:\n{rendered}");

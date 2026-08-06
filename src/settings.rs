@@ -29,6 +29,7 @@ pub(crate) const SERVER_ROW_OFFSET: usize = ACCOUNT_COUNT + 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     Agents,
+    Reviewer,
     Subagents,
     AcpPriority,
     AcpServers,
@@ -36,8 +37,9 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Agents,
+        Self::Reviewer,
         Self::Subagents,
         Self::AcpServers,
         Self::AcpPriority,
@@ -46,7 +48,8 @@ impl SettingsTab {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Agents => "Agents",
+            Self::Agents => "Agent",
+            Self::Reviewer => "Reviewer",
             Self::Subagents => "Subagents",
             Self::AcpPriority => "ACP Priority",
             Self::AcpServers => "ACP Servers",
@@ -110,6 +113,7 @@ pub(crate) enum PrioritySeat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionDefaultsSeat {
     Primary,
+    Review,
     Subagents,
 }
 
@@ -264,7 +268,9 @@ impl SettingsEditor {
 
     fn row_count(&self) -> usize {
         match self.tab {
-            SettingsTab::Agents | SettingsTab::Subagents => self.settings_rows(self.tab).len(),
+            SettingsTab::Agents | SettingsTab::Reviewer | SettingsTab::Subagents => {
+                self.settings_rows(self.tab).len()
+            }
             SettingsTab::AcpPriority => 3,
             SettingsTab::AcpServers => self.inventory.servers.len() + SERVER_ROW_OFFSET,
             SettingsTab::Appearance => 4,
@@ -279,7 +285,10 @@ impl SettingsEditor {
     }
 
     fn change_selected(&mut self, delta: i32) -> SettingsAction {
-        if matches!(self.tab, SettingsTab::Agents | SettingsTab::Subagents) {
+        if matches!(
+            self.tab,
+            SettingsTab::Agents | SettingsTab::Reviewer | SettingsTab::Subagents
+        ) {
             let Some(row) = self.settings_rows(self.tab).get(self.selected).copied() else {
                 return SettingsAction::None;
             };
@@ -374,7 +383,10 @@ impl SettingsEditor {
     }
 
     fn toggle_selected(&mut self) -> SettingsAction {
-        if matches!(self.tab, SettingsTab::Agents | SettingsTab::Subagents) {
+        if matches!(
+            self.tab,
+            SettingsTab::Agents | SettingsTab::Reviewer | SettingsTab::Subagents
+        ) {
             let Some(row) = self.settings_rows(self.tab).get(self.selected).copied() else {
                 return SettingsAction::None;
             };
@@ -438,7 +450,19 @@ impl SettingsEditor {
                             option_index,
                         }),
                 );
-                rows.push(SettingsRow::ReviewModel);
+                rows
+            }
+            SettingsTab::Reviewer => {
+                let mut rows = vec![SettingsRow::ReviewModel];
+                rows.extend(
+                    self.session_option_rows(SessionDefaultsSeat::Review)
+                        .into_iter()
+                        .map(|(server_index, option_index)| SettingsRow::SessionOption {
+                            seat: SessionDefaultsSeat::Review,
+                            server_index,
+                            option_index,
+                        }),
+                );
                 rows.push(SettingsRow::DiscreteReview);
                 rows.push(SettingsRow::ReviewTier);
                 rows
@@ -474,6 +498,17 @@ impl SettingsEditor {
                 self.active_models
                     .as_ref()
                     .and_then(|models| models.primary_source.as_deref()),
+            ),
+            SessionDefaultsSeat::Review => (
+                self.config.review.model.as_str(),
+                self.config.review.acp_source.as_deref(),
+                self.config.review.acp_priority.as_slice(),
+                self.active_models
+                    .as_ref()
+                    .map(|models| models.review.as_str()),
+                self.active_models
+                    .as_ref()
+                    .and_then(|models| models.review_source.as_deref()),
             ),
             SessionDefaultsSeat::Subagents => (
                 self.config.subagents.model.as_str(),
@@ -585,6 +620,7 @@ impl SettingsEditor {
     ) -> &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
         match seat {
             SessionDefaultsSeat::Primary => &self.config.agent.session_defaults,
+            SessionDefaultsSeat::Review => &self.config.review.session_defaults,
             SessionDefaultsSeat::Subagents => &self.config.subagents.session_defaults,
         }
     }
@@ -595,6 +631,7 @@ impl SettingsEditor {
     ) -> &mut std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
         match seat {
             SessionDefaultsSeat::Primary => &mut self.config.agent.session_defaults,
+            SessionDefaultsSeat::Review => &mut self.config.review.session_defaults,
             SessionDefaultsSeat::Subagents => &mut self.config.subagents.session_defaults,
         }
     }
@@ -659,6 +696,9 @@ impl SettingsEditor {
             match seat {
                 SessionDefaultsSeat::Primary => {
                     self.config.agent.reasoning_effort = Some(value);
+                }
+                SessionDefaultsSeat::Review => {
+                    self.config.review.reasoning_effort = Some(value);
                 }
                 SessionDefaultsSeat::Subagents => {
                     self.config.subagents.reasoning_effort = Some(value);
@@ -1303,6 +1343,7 @@ pub fn draw_settings_panel(
     draw_tabs(frame, rows[0], editor, theme);
     match editor.tab {
         SettingsTab::Agents => draw_agents(frame, rows[1], editor, theme),
+        SettingsTab::Reviewer => draw_reviewer(frame, rows[1], editor, theme),
         SettingsTab::Subagents => draw_subagents(frame, rows[1], editor, theme),
         SettingsTab::AcpPriority => draw_acp_priority(frame, rows[1], editor, theme),
         SettingsTab::AcpServers => draw_servers(frame, rows[1], editor, theme),
@@ -1516,22 +1557,6 @@ fn draw_agents(
                     Style::default().ink(theme.muted),
                 ));
             }
-            SettingsRow::ReviewModel => {
-                let model = &editor.config.review.model;
-                lines.push(selected_line(
-                    selected,
-                    format!("Review model < {model} >"),
-                    theme,
-                ));
-                lines.push(Line::styled(
-                    format!(
-                        "  saved: {} · active: {}",
-                        editor.staged_model_detail(model),
-                        editor.active_model_detail(1)
-                    ),
-                    Style::default().ink(theme.muted),
-                ));
-            }
             SettingsRow::SessionOption {
                 server_index,
                 option_index,
@@ -1554,6 +1579,95 @@ fn draw_agents(
                 lines.push(Line::styled(
                     if compatible {
                         format!("  saved default · active: {active}")
+                    } else {
+                        format!(
+                            "  saved value is unavailable on {server_id}",
+                            server_id = server.id
+                        )
+                    },
+                    Style::default().ink(if compatible { theme.muted } else { theme.error }),
+                ));
+            }
+            SettingsRow::ReviewModel
+            | SettingsRow::SubagentModel
+            | SettingsRow::DiscreteReview
+            | SettingsRow::ReviewTier
+            | SettingsRow::MaxParallelSubagents
+            | SettingsRow::AutomaticQuotaFailover => {}
+        }
+    }
+    draw_scrolling_settings_lines(frame, area, lines, selected_line_index);
+}
+
+fn draw_reviewer(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    editor: &SettingsEditor,
+    theme: TerminalTheme,
+) {
+    let rows = editor.settings_rows(SettingsTab::Reviewer);
+    let source = editor.selected_session_source(SessionDefaultsSeat::Review);
+    let has_options = rows
+        .iter()
+        .any(|row| matches!(row, SettingsRow::SessionOption { .. }));
+    let mut lines = vec![Line::styled(
+        match source.as_deref() {
+            Some(source) => format!(
+                "Saved review-session defaults via {source}. Changes apply to review sessions started after save."
+            ),
+            None => "No reviewer ACP route is resolved; choose a model or source to discover its session options."
+                .to_string(),
+        },
+        Style::default().ink(theme.muted),
+    )];
+    if !has_options {
+        lines.push(Line::styled(
+            "No additional selectable session options were reported for this reviewer route.",
+            Style::default().ink(theme.muted),
+        ));
+    }
+    lines.push(Line::raw(""));
+    let mut selected_line_index = 0;
+    for (row_index, row) in rows.into_iter().enumerate() {
+        let selected = editor.selected == row_index;
+        if selected {
+            selected_line_index = lines.len();
+        }
+        match row {
+            SettingsRow::ReviewModel => {
+                let model = &editor.config.review.model;
+                lines.push(selected_line(
+                    selected,
+                    format!("Review model < {model} >"),
+                    theme,
+                ));
+                lines.push(Line::styled(
+                    format!(
+                        "  saved: {} · active pool: {}",
+                        editor.staged_model_detail(model),
+                        editor.active_model_detail(1)
+                    ),
+                    Style::default().ink(theme.muted),
+                ));
+            }
+            SettingsRow::SessionOption {
+                server_index,
+                option_index,
+                ..
+            } => {
+                let server = &editor.inventory.servers[server_index];
+                let option = &server.session_config[option_index];
+                let saved =
+                    editor.saved_session_value(SessionDefaultsSeat::Review, &server.id, option);
+                let (saved_label, compatible) = session_option_value_label(option, &saved);
+                lines.push(selected_line(
+                    selected,
+                    format!("{} < {saved_label} >", option.name),
+                    theme,
+                ));
+                lines.push(Line::styled(
+                    if compatible {
+                        "  saved default · already-running reviews are unchanged".to_string()
                     } else {
                         format!(
                             "  saved value is unavailable on {server_id}",
@@ -1593,7 +1707,8 @@ fn draw_agents(
                     ));
                 }
             }
-            SettingsRow::SubagentModel
+            SettingsRow::PrimaryModel
+            | SettingsRow::SubagentModel
             | SettingsRow::MaxParallelSubagents
             | SettingsRow::AutomaticQuotaFailover => {}
         }
@@ -2346,7 +2461,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_and_subagent_panels_edit_arbitrary_options_with_separate_scope() {
+    fn role_panels_edit_arbitrary_options_with_separate_scope() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
             Vec::new(),
@@ -2378,6 +2493,7 @@ mod tests {
         server.launch.kind = crate::roster::AdapterKind::Codex;
         server.session_config = vec![model, thought, permission, reasoning, fast, service];
         editor.config.agent.acp_source = Some(server_id.clone());
+        editor.config.review.acp_source = Some(server_id.clone());
         editor.config.subagents.acp_source = Some(server_id.clone());
         editor.tab = SettingsTab::Agents;
 
@@ -2395,6 +2511,17 @@ mod tests {
         assert_eq!(editor.config.agent.session_defaults[&server_id].len(), 5);
         assert_eq!(
             editor.config.agent.reasoning_effort.as_deref(),
+            Some("value")
+        );
+
+        editor.tab = SettingsTab::Reviewer;
+        for selected in 1..=5 {
+            editor.selected = selected;
+            assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        }
+        assert_eq!(editor.config.review.session_defaults[&server_id].len(), 5);
+        assert_eq!(
+            editor.config.review.reasoning_effort.as_deref(),
             Some("value")
         );
 
@@ -2629,8 +2756,9 @@ mod tests {
         let mut config = Config::default();
         config.set_acp_server_policy("codex-acp", AcpServerPolicy::Enabled);
         let mut editor = SettingsEditor::new(config, Vec::new(), None);
+        editor.tab = SettingsTab::Reviewer;
         editor.selected = editor
-            .settings_rows(SettingsTab::Agents)
+            .settings_rows(SettingsTab::Reviewer)
             .iter()
             .position(|row| *row == SettingsRow::DiscreteReview)
             .expect("discrete review row");
@@ -2663,7 +2791,8 @@ mod tests {
     #[test]
     fn review_tier_cycles_next_to_the_discrete_review_switch() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        let rows = editor.settings_rows(SettingsTab::Agents);
+        editor.tab = SettingsTab::Reviewer;
+        let rows = editor.settings_rows(SettingsTab::Reviewer);
         let review = rows
             .iter()
             .position(|row| *row == SettingsRow::DiscreteReview)
@@ -2920,9 +3049,16 @@ mod tests {
         editor.tab = SettingsTab::Agents;
         let agents = render(&editor, 100, 30);
         assert!(agents.contains("Primary model"), "rendered:\n{agents}");
-        assert!(agents.contains("Discrete review"), "rendered:\n{agents}");
-        assert!(agents.contains("Review depth"), "rendered:\n{agents}");
-        assert!(agents.contains("Quick"), "rendered:\n{agents}");
+
+        editor.tab = SettingsTab::Reviewer;
+        let reviewer = render(&editor, 100, 30);
+        assert!(reviewer.contains("Review model"), "rendered:\n{reviewer}");
+        assert!(
+            reviewer.contains("Discrete review"),
+            "rendered:\n{reviewer}"
+        );
+        assert!(reviewer.contains("Review depth"), "rendered:\n{reviewer}");
+        assert!(reviewer.contains("Quick"), "rendered:\n{reviewer}");
 
         editor.tab = SettingsTab::Subagents;
         let subagents = render(&editor, 100, 30);

@@ -30,8 +30,8 @@ authentication.
 ## Probing and caching
 
 Native routes with fresh capability cache entries can bind immediately. Other
-routes are probed in the background and appear on the Agents or ACP Servers
-tabs in `/mjconfig` when their catalog is ready. A wedged probe does not block
+routes are probed in the background and appear on the role tabs or ACP Servers
+tab in `/mjconfig` when their catalog is ready. A wedged probe does not block
 an otherwise launchable session.
 
 Probe results and the live DeepSWE ranking are cached for 24 hours. A bundled

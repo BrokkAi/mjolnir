@@ -3713,7 +3713,8 @@
       const mjconfigSaveEl = $("mjconfig-save");
 
       const MJ_TABS = [
-        ["agents", "Agents"],
+        ["agents", "Agent"],
+        ["reviewer", "Reviewer"],
         ["subagents", "Subagents"],
         ["servers", "ACP Servers"],
         ["priority", "ACP Priority"],
@@ -3904,6 +3905,9 @@
           case "agents":
             renderMjAgents();
             break;
+          case "reviewer":
+            renderMjReviewer();
+            break;
           case "subagents":
             renderMjSubagents();
             break;
@@ -4009,11 +4013,13 @@
         return row;
       }
 
-      // Session options for one seat's bound ACP source, staged into the
-      // seat-scoped defaults edit map (agent/subagents.session_defaults).
-      function mjSeatOptionRows(group, editsField) {
+      // Session options for one seat's bound ACP source, staged into that
+      // role's session_defaults map.
+      function mjSeatOptionRows(group, editsField, seat) {
         const rows = [];
         if (!group) {
+          const label = seat === "primary" ? "agent" : (seat === "review" ? "reviewer" : "subagent");
+          rows.push(mjNote(`No selectable ACP session options were reported for the ${label} route.`));
           return rows;
         }
         rows.push(mjSectionTitle(`${group.server_label} session options`));
@@ -4035,6 +4041,23 @@
               },
             ),
           );
+          if (seat === "primary") {
+            const session = selectedSession();
+            const live = session?.status?.model_source === group.server_id
+              ? sessionConfigOptions(session).find(
+                  (candidate) => candidate.config_id && `config:${candidate.config_id}` === option.key,
+                )
+              : null;
+            const activeLabel = live
+              ? (live.choices || []).find((choice) => choice.value === live.current_value)?.label
+                || live.current_value
+              : "next session only";
+            row.appendChild(mjDetail(`saved default · active: ${activeLabel}`));
+          } else if (seat === "review") {
+            row.appendChild(mjDetail("saved default · applies to review sessions started later"));
+          } else {
+            row.appendChild(mjDetail("saved default · already-running subagents are unchanged"));
+          }
           rows.push(row);
         }
         return rows;
@@ -4043,13 +4066,23 @@
       function renderMjAgents() {
         const panel = mjcfg.snapshot.agents;
         mjconfigBodyEl.appendChild(
-          mjNote("The running session keeps its models until a new session reloads the saved selection. Option defaults apply to new sessions; the selected session updates on save where it exposes the same option."),
+          mjNote("Primary model and ACP session defaults. Compatible option changes update the selected live session on save; model changes apply to new sessions."),
         );
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[0], "primary_model"));
-        for (const row of mjSeatOptionRows(mjcfg.snapshot.primary_options, "primary_session_defaults")) {
+        for (const row of mjSeatOptionRows(mjcfg.snapshot.primary_options, "primary_session_defaults", "primary")) {
           mjconfigBodyEl.appendChild(row);
         }
+      }
+
+      function renderMjReviewer() {
+        const panel = mjcfg.snapshot.agents;
+        mjconfigBodyEl.appendChild(
+          mjNote("Reviewer model and ACP session defaults. Changes apply to review sessions started after save."),
+        );
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[1], "review_model"));
+        for (const row of mjSeatOptionRows(mjcfg.snapshot.review_options, "review_session_defaults", "review")) {
+          mjconfigBodyEl.appendChild(row);
+        }
         const reviewRow = mjRow("Discrete review");
         reviewRow.appendChild(
           mjToggle(mjEditedValue("discrete_review", panel.discrete_review), (next) => {
@@ -4088,7 +4121,7 @@
           mjNote("Subagent defaults apply to newly delegated create_subagent sessions."),
         );
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[2], "subagents_model"));
-        for (const row of mjSeatOptionRows(mjcfg.snapshot.subagent_options, "subagent_session_defaults")) {
+        for (const row of mjSeatOptionRows(mjcfg.snapshot.subagent_options, "subagent_session_defaults", "subagents")) {
           mjconfigBodyEl.appendChild(row);
         }
 
@@ -8081,8 +8114,8 @@
       }
 
       // The strip under the composer stays compact: the native-mode readout
-      // plus one button into the full /mjconfig editor. The session option
-      // combos themselves live in the editor's ACP Sessions tab.
+      // plus one button into the Agent tab, where primary ACP session options
+      // live alongside the primary model.
       function renderConfig(session) {
         const options = sessionConfigOptions(session);
         // Forget sent changes the session has applied (current_value caught

@@ -337,12 +337,13 @@ pub struct ReviewConfig {
         skip_serializing_if = "is_default_acp_priority"
     )]
     pub acp_priority: Vec<String>,
-    /// Per-invocation reasoning-effort override for the review supervisor's
-    /// ACP session (e.g. from `--review-model MODEL+high`). Not meaningful
-    /// outside a single `--print` invocation; never written to the on-disk
-    /// default.
+    /// Reasoning-effort default for review ACP sessions. A one-shot
+    /// `--review-model MODEL+high` override replaces it only for that run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Adapter-owned session defaults selected for future review sessions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_defaults: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Default for ReviewConfig {
@@ -352,6 +353,7 @@ impl Default for ReviewConfig {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: None,
+            session_defaults: BTreeMap::new(),
         }
     }
 }
@@ -912,6 +914,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: old.loki.reasoning_effort,
+            session_defaults: BTreeMap::new(),
         },
         subagents: SubagentsConfig {
             model: old.eitri.model,
@@ -957,7 +960,7 @@ pub fn load_saved_session_config(
             let scoped = match seat {
                 SessionConfigSeat::Primary => config.agent.session_defaults.get(source_id),
                 SessionConfigSeat::Subagent => config.subagents.session_defaults.get(source_id),
-                SessionConfigSeat::Review => None,
+                SessionConfigSeat::Review => config.review.session_defaults.get(source_id),
             };
             if let Some(scoped) = scoped {
                 values.extend(scoped.clone());
@@ -1730,7 +1733,7 @@ origin = "custom"
     }
 
     #[test]
-    fn saved_session_config_keeps_primary_and_subagent_defaults_separate() {
+    fn saved_session_config_keeps_role_defaults_separate() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut cfg = Config::default();
@@ -1744,6 +1747,11 @@ origin = "custom"
             .entry("codex-acp".to_string())
             .or_default()
             .insert("config:mode".to_string(), "subagent".to_string());
+        cfg.review
+            .session_defaults
+            .entry("codex-acp".to_string())
+            .or_default()
+            .insert("config:mode".to_string(), "review".to_string());
         cfg.save(&path).expect("save");
 
         assert_eq!(
@@ -1755,9 +1763,9 @@ origin = "custom"
                 ["config:mode"],
             "subagent"
         );
-        assert!(
-            load_saved_session_config(&path, "codex-acp", "model-a", SessionConfigSeat::Review,)
-                .is_empty()
+        assert_eq!(
+            load_saved_session_config(&path, "codex-acp", "model-a", SessionConfigSeat::Review,)["config:mode"],
+            "review"
         );
     }
 

@@ -141,7 +141,7 @@ Run `mj`. First launch opens Mjolnir's configuration screen:
 
 1. In **Accounts**, verify that OpenAI / ChatGPT reports you are signed in.
 2. In **ACP Servers**, confirm that Codex is detected and enabled.
-3. In **Agents**, keep the primary model on Auto or select a Codex model.
+3. In **Agent**, keep the primary model on Auto or select a Codex model.
 4. Keep discrete review enabled if you want delegated workspace changes
    challenged before completion.
 5. Start a new session after changing models or adapters.

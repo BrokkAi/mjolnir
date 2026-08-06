@@ -92,7 +92,7 @@ reported as an internal `review_session`, while selected specialists remain
 visible as `review · {name}` subagent rows. The normal Stop action cancels the
 supervisor and all of its reviewers and reaps their processes.
 Reviewers cannot delegate further or write to the workspace. Model usage is
-accounted to the review seat. Discrete review is toggled on the Agents tab of
+accounted to the review seat. Discrete review is toggled on the Reviewer tab of
 `/mjconfig`.
 
 ## Review surfaces

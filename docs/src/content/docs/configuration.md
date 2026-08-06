@@ -5,7 +5,7 @@ description: Configure the primary agent, subagents, ACP servers, review, and ap
 
 Open `/mjconfig` to edit settings from the TUI. Model and ACP-server changes
 apply to the next session. The former `/models` command has been removed; use
-the Agents tab in `/mjconfig` instead. When credentials or adapter capabilities
+the Agent tab in `/mjconfig` instead. When credentials or adapter capabilities
 change, run `mj models refresh` before starting Mjolnir again.
 
 The config schema is versioned. The current schema is `version = 3`; a
@@ -57,6 +57,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `review.acp_source` | Optional exact ACP source constraint for the review seat |
 | `review.acp_priority` | ACP source preference for the review supervisor model |
 | `review.reasoning_effort` | Optional per-seat ACP reasoning effort |
+| `review.session_defaults` | Per-ACP saved session-option defaults for new review sessions |
 | `subagents.model` | Default subagent model, `auto`, or `disabled` |
 | `subagents.acp_source` | Optional exact ACP source constraint for default workers and their failover pool |
 | `subagents.acp_priority` | Independent ACP source preference for the default worker model |
@@ -159,20 +160,23 @@ enabled by default and appear occasionally between completed turns; disable
 them under **Appearance** in `/mjconfig` or set `feature_hints = false` in the
 top level of the config file.
 
-The **Agents** and **Subagents** tabs list the selectable session options
-advertised by each role's selected ACP source. Primary defaults and delegated
-subagent defaults are stored separately. Compatible primary changes are also
-sent to the running primary session when `/mjconfig` is saved; the UI reports
-the active value separately from the saved default. Subagent changes apply only
-to subagents started later, never to ones that are already running. A saved
-value that a newly selected adapter no longer advertises stays intact and is
-shown as unavailable until you select a compatible value.
+The **Agent**, **Reviewer**, and **Subagents** tabs list the selectable session
+options advertised by that role's selected ACP source. Each role stores its
+defaults separately. Compatible primary changes are also sent to the running
+primary session when `/mjconfig` is saved; the UI reports the active value
+separately from the saved default. Reviewer and subagent changes apply only to
+sessions started later, never to ones that are already running. A saved value
+that a newly selected adapter no longer advertises stays intact and is shown as
+unavailable until you select a compatible value.
 
 The same role-scoped defaults can be written directly in TOML:
 
 ```toml
 [agent.session_defaults."codex-acp"]
 "config:service_tier" = "priority"
+
+[review.session_defaults."codex-acp"]
+"config:service_tier" = "flex"
 
 [subagents.session_defaults."codex-acp"]
 "config:service_tier" = "default"

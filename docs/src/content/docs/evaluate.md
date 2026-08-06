@@ -25,7 +25,7 @@ You need:
 - Git.
 - An authenticated, launchable Codex route. Codex use may cost money.
 
-Run `mj`, open `/mjconfig`, and confirm on the Agents tab that the primary
+Run `mj`, open `/mjconfig`, and confirm on the Agent tab that the primary
 resolves through Codex. Confirm the subagent and review seats as well if you
 want this run to remain Codex-only. Model or ACP-server changes apply to the
 next session, so exit and relaunch after changing them.

@@ -1750,7 +1750,7 @@ fn selected_agent_for_roster(roster: &roster::Roster) -> SelectedAgent {
     }
 }
 
-/// Display-only seat bindings for the `/mjconfig` Agents panel, mirroring what
+/// Display-only seat bindings for the `/mjconfig` role panels, mirroring what
 /// the roster bound for each seat.
 fn models_config_from_roster(roster: &roster::Roster) -> config::ModelsConfig {
     config::ModelsConfig {
@@ -5519,8 +5519,10 @@ struct MjConfigSnapshot {
     agents: MjAgentsPanel,
     acp_servers: MjServersPanel,
     /// Session options for the primary seat's bound ACP source, mirroring the
-    /// TUI's role-scoped Agents panel rows. `None` when no source has options.
+    /// TUI's role-scoped Agent panel rows. `None` when no source has options.
     primary_options: Option<MjSessionOptionsGroup>,
+    /// Session options for the reviewer seat's bound ACP source.
+    review_options: Option<MjSessionOptionsGroup>,
     /// Session options for the subagent seat, mirroring the Subagents panel.
     subagent_options: Option<MjSessionOptionsGroup>,
     acp_priority: MjPriorityPanel,
@@ -5689,8 +5691,11 @@ struct MjConfigApplyRequest {
     server_policies: Option<BTreeMap<String, String>>,
     /// Server id → option key → value written to the primary seat's
     /// role-scoped defaults (`agent.session_defaults`), like the TUI's
-    /// Agents panel.
+    /// Agent panel.
     primary_session_defaults: Option<BTreeMap<String, BTreeMap<String, String>>>,
+    /// Server id → option key → value for the reviewer seat
+    /// (`review.session_defaults`).
+    review_session_defaults: Option<BTreeMap<String, BTreeMap<String, String>>>,
     /// Server id → option key → value for the subagent seat
     /// (`subagents.session_defaults`).
     subagent_session_defaults: Option<BTreeMap<String, BTreeMap<String, String>>>,
@@ -5932,10 +5937,10 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     let inventory = editor.inventory();
 
     // Mirrors the TUI's seat labels; settings.rs no longer exports them
-    // since #590 split its Agents/Subagents panels.
+    // since #590 split settings into role-scoped panels.
     const ROLE_DESCRIPTIONS: [(&str, &str); 3] = [
         ("Agent", "primary model; plans, implements, and answers"),
-        ("Review", "supervisor model for discrete review"),
+        ("Reviewer", "supervisor model for discrete review"),
         ("Subagents", "default model for create_subagent delegations"),
     ];
     let roles = ROLE_DESCRIPTIONS
@@ -6034,6 +6039,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         })
     };
     let primary_options = seat_options(crate::settings::SessionDefaultsSeat::Primary);
+    let review_options = seat_options(crate::settings::SessionDefaultsSeat::Review);
     let subagent_options = seat_options(crate::settings::SessionDefaultsSeat::Subagents);
 
     let seats = MJ_SEATS
@@ -6100,6 +6106,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         },
         acp_servers: MjServersPanel { accounts, servers },
         primary_options,
+        review_options,
         subagent_options,
         acp_priority: MjPriorityPanel {
             seats,
@@ -6174,26 +6181,48 @@ fn mjconfig_apply_edits(
         }
     }
     let reasoning_effort_key = format!("config:{}", acp::REASONING_EFFORT_CONFIG_ID);
-    for (defaults, seat_is_primary) in [
-        (request.primary_session_defaults, true),
-        (request.subagent_session_defaults, false),
+    for (defaults, seat) in [
+        (
+            request.primary_session_defaults,
+            crate::settings::SessionDefaultsSeat::Primary,
+        ),
+        (
+            request.review_session_defaults,
+            crate::settings::SessionDefaultsSeat::Review,
+        ),
+        (
+            request.subagent_session_defaults,
+            crate::settings::SessionDefaultsSeat::Subagents,
+        ),
     ] {
         let Some(defaults) = defaults else { continue };
         for (server_id, options) in defaults {
             for (option_key, value) in options {
-                // Mirror the TUI's Agents/Subagents panels: a thought-level
+                // Mirror the TUI's role panels: a thought-level
                 // option also updates the seat's reasoning-effort default.
                 if option_key == reasoning_effort_key {
-                    if seat_is_primary {
-                        config.agent.reasoning_effort = Some(value.clone());
-                    } else {
-                        config.subagents.reasoning_effort = Some(value.clone());
+                    match seat {
+                        crate::settings::SessionDefaultsSeat::Primary => {
+                            config.agent.reasoning_effort = Some(value.clone());
+                        }
+                        crate::settings::SessionDefaultsSeat::Review => {
+                            config.review.reasoning_effort = Some(value.clone());
+                        }
+                        crate::settings::SessionDefaultsSeat::Subagents => {
+                            config.subagents.reasoning_effort = Some(value.clone());
+                        }
                     }
                 }
-                let scoped = if seat_is_primary {
-                    &mut config.agent.session_defaults
-                } else {
-                    &mut config.subagents.session_defaults
+                let scoped = match seat {
+                    crate::settings::SessionDefaultsSeat::Primary => {
+                        &mut config.agent.session_defaults
+                    }
+                    crate::settings::SessionDefaultsSeat::Review => {
+                        &mut config.review.session_defaults
+                    }
+                    crate::settings::SessionDefaultsSeat::Subagents => {
+                        &mut config.subagents.session_defaults
+                    }
                 };
                 scoped
                     .entry(server_id.clone())
@@ -9484,6 +9513,10 @@ mod tests {
             "primary_options key present"
         );
         assert!(
+            snapshot.get("review_options").is_some(),
+            "review_options key present"
+        );
+        assert!(
             snapshot.get("subagent_options").is_some(),
             "subagent_options key present"
         );
@@ -9522,9 +9555,9 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
         let snapshot = json_body(response).await;
-        // With the default "auto" models, both seats fall back to the first
+        // With the default "auto" models, every seat falls back to the first
         // priority source advertising options — the server we seeded.
-        for seat in ["primary_options", "subagent_options"] {
+        for seat in ["primary_options", "review_options", "subagent_options"] {
             let group = &snapshot[seat];
             assert_eq!(group["server_id"], server_id.as_str(), "{seat} server");
             let option = &group["options"][0];
@@ -9557,6 +9590,9 @@ mod tests {
                     "feature_hints": false,
                     "primary_session_defaults": {
                         "codex-acp": { "config:collaboration_mode": "yolo" }
+                    },
+                    "review_session_defaults": {
+                        "codex-acp": { "config:reasoning_effort": "high" }
                     },
                     "subagent_session_defaults": {
                         "codex-acp": { "config:reasoning_effort": "low" }
@@ -9597,6 +9633,16 @@ mod tests {
                 .map(String::as_str),
             Some("yolo")
         );
+        assert_eq!(
+            saved
+                .review
+                .session_defaults
+                .get("codex-acp")
+                .and_then(|entry| entry.get("config:reasoning_effort"))
+                .map(String::as_str),
+            Some("high")
+        );
+        assert_eq!(saved.review.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(
             saved
                 .subagents
@@ -9900,6 +9946,20 @@ mod tests {
         assert!(viewer.contains("queueInputEl.addEventListener(\"paste\""));
         assert!(viewer.contains("images,"));
         assert!(viewer.contains("MAX_QUEUE_REQUEST_BYTES"));
+    }
+
+    #[test]
+    fn embedded_viewer_contains_role_scoped_acp_session_controls() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("[\"agents\", \"Agent\"]"));
+        assert!(viewer.contains("[\"reviewer\", \"Reviewer\"]"));
+        assert!(viewer.contains("[\"subagents\", \"Subagents\"]"));
+        assert!(viewer.contains("snapshot.primary_options"));
+        assert!(viewer.contains("snapshot.review_options"));
+        assert!(viewer.contains("snapshot.subagent_options"));
+        assert!(viewer.contains("review_session_defaults"));
+        assert!(viewer.contains("saved default · active: ${activeLabel}"));
+        assert!(viewer.contains("openMjConfig(\"agents\")"));
     }
 
     #[test]
