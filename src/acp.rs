@@ -18,7 +18,7 @@ use agent_client_protocol::schema::v1::{
     KillTerminalResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
     PermissionOption, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
     ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
     ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
     SessionConfigValueId, SessionId, SessionInfoUpdate, SessionModeState, SessionNotification,
@@ -39,9 +39,9 @@ use tokio_util::sync::CancellationToken;
 use crate::archive;
 use crate::event::{
     AgentCommandOutcome, CompactTrigger, ElicitationOutcome, ElicitationPrompt, LoadSessionResult,
-    PermissionDecision, PermissionPrompt, PromptImage, SessionConfigTarget, SideSessionSource,
-    TerminalOutputSnapshot, UiCommand, UiEvent, WorkspaceDiff, WorkspaceDiffEvent,
-    WorkspaceHeadDiffEvent, WorkspaceHeadDiffUnavailable, content_block_text,
+    PermissionDecision, PermissionPrompt, PromptImage, PromptResource, SessionConfigTarget,
+    SideSessionSource, TerminalOutputSnapshot, UiCommand, UiEvent, WorkspaceDiff,
+    WorkspaceDiffEvent, WorkspaceHeadDiffEvent, WorkspaceHeadDiffUnavailable, content_block_text,
 };
 use crate::paths::{WorkspaceRoots, normalize_spawn_program, path_is_under_any_root};
 use crate::subagent;
@@ -2614,7 +2614,8 @@ async fn drive_session(
     // command still sitting in the channel, instead of being dropped: an
     // orchestrator-injected subagent report that loses a microsecond race
     // against a user prompt must still reach the agent.
-    let mut deferred_prompts: VecDeque<(String, Vec<PromptImage>)> = VecDeque::new();
+    let mut deferred_prompts: VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)> =
+        VecDeque::new();
     let mut deferred_config_updates: VecDeque<(SessionConfigTarget, SessionConfigValueId)> =
         VecDeque::new();
 
@@ -2622,7 +2623,11 @@ async fn drive_session(
         let cmd = match deferred_config_updates.pop_front() {
             Some((target, value)) => UiCommand::SetSessionConfigOption { target, value },
             None => match deferred_prompts.pop_front() {
-                Some((text, images)) => UiCommand::SendPrompt { text, images },
+                Some((text, images, resources)) => UiCommand::SendPrompt {
+                    text,
+                    images,
+                    resources,
+                },
                 None => match ui_rx.recv().await {
                     Some(cmd) => cmd,
                     None => break,
@@ -2630,7 +2635,11 @@ async fn drive_session(
             },
         };
         match cmd {
-            UiCommand::SendPrompt { text, images } => {
+            UiCommand::SendPrompt {
+                text,
+                images,
+                resources,
+            } => {
                 // A manual compact that did not reduce reported usage must not
                 // suppress a later, agent-initiated compaction. Any delayed
                 // usage update from the control command has already preceded
@@ -2648,11 +2657,12 @@ async fn drive_session(
                         acp_session = %session_id,
                         prompt = %text,
                         image_count = images.len(),
+                        resource_count = resources.len(),
                         "prompt sent to agent"
                     );
                 }
                 session_state.clear_permissions_cancelled(&session_id).await;
-                let prompt = prompt_content_blocks(text, images, side_prompt_policy);
+                let prompt = prompt_content_blocks(text, images, resources, side_prompt_policy);
                 let req = PromptRequest::new(session_id.clone(), prompt);
                 let keep_running = drive_prompt_turn(
                     &conn,
@@ -3198,7 +3208,7 @@ async fn drive_fork_session(
     hidden_config_ids: &[String],
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
-    deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>)>,
+    deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
 ) -> Result<bool> {
     let source_session_id = session_id.clone();
     let fork = fork_session(
@@ -3252,8 +3262,12 @@ async fn drive_fork_session(
                     Some(UiCommand::Shutdown) | None => {
                         return Ok(false);
                     }
-                    Some(UiCommand::SendPrompt { text, images }) => {
-                        deferred_prompts.push_back((text, images));
+                    Some(UiCommand::SendPrompt {
+                        text,
+                        images,
+                        resources,
+                    }) => {
+                        deferred_prompts.push_back((text, images, resources));
                         let _ = ui_tx.send(UiEvent::Info(
                             "prompt queued; it will be sent when the session fork completes"
                                 .to_string(),
@@ -5486,7 +5500,7 @@ async fn drive_config_update(
     hidden_config_ids: &[String],
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
-    deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>)>,
+    deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
     deferred_config_updates: &mut VecDeque<(SessionConfigTarget, SessionConfigValueId)>,
     config_path: Option<&Path>,
     agent_source_id: Option<&str>,
@@ -5557,8 +5571,12 @@ async fn drive_config_update(
                     Some(UiCommand::Shutdown) | None => {
                         return Ok(false);
                     }
-                    Some(UiCommand::SendPrompt { text, images }) => {
-                        deferred_prompts.push_back((text, images));
+                    Some(UiCommand::SendPrompt {
+                        text,
+                        images,
+                        resources,
+                    }) => {
+                        deferred_prompts.push_back((text, images, resources));
                         let _ = ui_tx.send(UiEvent::Info(
                             "prompt queued; it will be sent when the config update completes"
                                 .to_string(),
@@ -5670,7 +5688,7 @@ async fn drive_prompt_turn(
     diff_config: PromptTurnDiffConfig<'_>,
     subagent_controller: &subagent::Controller,
     side_source_has_history: bool,
-    deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>)>,
+    deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
     deferred_config_updates: &mut VecDeque<(SessionConfigTarget, SessionConfigValueId)>,
 ) -> Result<bool> {
     let turn_diff_tracker =
@@ -5723,12 +5741,16 @@ async fn drive_prompt_turn(
                         subagent_controller.shutdown().await;
                         return Ok(false);
                     }
-                    Some(UiCommand::SendPrompt { text, images }) => {
+                    Some(UiCommand::SendPrompt {
+                        text,
+                        images,
+                        resources,
+                    }) => {
                         // Queue rather than drop. A subagent report injected at
                         // a turn boundary can lose a microsecond race against a
                         // user prompt; dropping it loses the report text for
                         // good, since the report bus is already closed.
-                        deferred_prompts.push_back((text, images));
+                        deferred_prompts.push_back((text, images, resources));
                         let _ = ui_tx.send(UiEvent::Info(
                             "prompt queued; it will be sent when the current turn completes"
                                 .to_string(),
@@ -6204,6 +6226,7 @@ const SIDE_PROMPT_POLICY: &str = "<mj-side-policy>\nThis is an ephemeral side co
 fn prompt_content_blocks(
     text: String,
     images: Vec<PromptImage>,
+    resources: Vec<PromptResource>,
     side_prompt_policy: bool,
 ) -> Vec<ContentBlock> {
     let mut content = Vec::new();
@@ -6217,6 +6240,11 @@ fn prompt_content_blocks(
     } else if !text.is_empty() {
         content.push(ContentBlock::Text(TextContent::new(text)));
     }
+    content.extend(resources.into_iter().map(|resource| {
+        ContentBlock::ResourceLink(
+            ResourceLink::new(resource.name, resource.uri).size(resource.size),
+        )
+    }));
     content.extend(
         images.into_iter().map(|image| {
             ContentBlock::Image(ImageContent::new(image.data_base64, image.mime_type))
@@ -6437,7 +6465,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_content_blocks_include_text_and_images() {
+    fn prompt_content_blocks_include_text_resources_and_images() {
         let blocks = prompt_content_blocks(
             "look".to_string(),
             vec![PromptImage {
@@ -6446,15 +6474,28 @@ mod tests {
                 width: 640,
                 height: 480,
             }],
+            vec![PromptResource {
+                name: "src/acp.rs".to_string(),
+                uri: "file:///workspace/src/acp.rs".to_string(),
+                size: Some(42),
+            }],
             false,
         );
 
-        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks.len(), 3);
         match &blocks[0] {
             ContentBlock::Text(text) => assert_eq!(text.text, "look"),
             other => panic!("unexpected text block: {other:?}"),
         }
         match &blocks[1] {
+            ContentBlock::ResourceLink(resource) => {
+                assert_eq!(resource.name, "src/acp.rs");
+                assert_eq!(resource.uri, "file:///workspace/src/acp.rs");
+                assert_eq!(resource.size, Some(42));
+            }
+            other => panic!("unexpected resource block: {other:?}"),
+        }
+        match &blocks[2] {
             ContentBlock::Image(image) => {
                 assert_eq!(image.data, "aW1hZ2U=");
                 assert_eq!(image.mime_type, "image/png");
@@ -6466,7 +6507,7 @@ mod tests {
     #[test]
     fn first_and_subsequent_text_prompts_preserve_exact_user_text_without_primary_policy() {
         for expected in ["build the thing", "continue normally"] {
-            let blocks = prompt_content_blocks(expected.to_string(), Vec::new(), false);
+            let blocks = prompt_content_blocks(expected.to_string(), Vec::new(), Vec::new(), false);
 
             assert_eq!(blocks.len(), 1);
             let ContentBlock::Text(text) = &blocks[0] else {
@@ -6483,7 +6524,8 @@ mod tests {
         assert!(!usage.observe(20_000));
         assert!(usage.observe(7_000));
 
-        let blocks = prompt_content_blocks("continue work".to_string(), Vec::new(), false);
+        let blocks =
+            prompt_content_blocks("continue work".to_string(), Vec::new(), Vec::new(), false);
         let ContentBlock::Text(text) = &blocks[0] else {
             panic!("expected text block");
         };
@@ -6501,6 +6543,7 @@ mod tests {
                 width: 1,
                 height: 1,
             }],
+            Vec::new(),
             false,
         );
 
@@ -6510,7 +6553,8 @@ mod tests {
 
     #[test]
     fn side_prompt_policy_is_model_visible_without_replacing_user_text() {
-        let blocks = prompt_content_blocks("inspect this".to_string(), Vec::new(), true);
+        let blocks =
+            prompt_content_blocks("inspect this".to_string(), Vec::new(), Vec::new(), true);
         let ContentBlock::Text(text) = &blocks[0] else {
             panic!("expected text block");
         };
@@ -8238,6 +8282,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "review".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("send review prompt");
         loop {
@@ -9747,6 +9792,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("send prompt");
 
@@ -10092,6 +10138,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "edit file".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("send prompt");
 
@@ -10364,6 +10411,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "main remains active".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("main prompt after side source");
 
@@ -10692,6 +10740,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "resume".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("send prompt");
 
@@ -10822,6 +10871,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("send prompt");
 
@@ -10888,6 +10938,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("send prompt");
         cmd_tx.send(UiCommand::CancelPrompt).expect("send cancel");
@@ -10962,6 +11013,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "needs permission".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("send prompt");
 
@@ -11144,6 +11196,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "first".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("send first prompt");
 
@@ -11167,6 +11220,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "second".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("send racing prompt");
 
@@ -11241,6 +11295,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("send prompt");
 
@@ -11414,6 +11469,7 @@ mod tests {
             .send(UiCommand::SendPrompt {
                 text: "hello".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
             })
             .expect("send prompt");
 

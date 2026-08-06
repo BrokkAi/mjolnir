@@ -1699,7 +1699,11 @@ impl AgentHandle {
         let resend_text = text.clone();
         let resend_images = images.clone();
         let mut resends = 0usize;
-        let _ = self.cmd_tx.send(UiCommand::SendPrompt { text, images });
+        let _ = self.cmd_tx.send(UiCommand::SendPrompt {
+            text,
+            images,
+            resources: Vec::new(),
+        });
         let deadline = tokio::time::Instant::now() + budget;
         let mut acc = String::new();
         let mut truncated = false;
@@ -1815,6 +1819,7 @@ impl AgentHandle {
                         let _ = self.cmd_tx.send(UiCommand::SendPrompt {
                             text: resend_text.clone(),
                             images: resend_images.clone(),
+                            resources: Vec::new(),
                         });
                         continue;
                     }
@@ -1835,6 +1840,7 @@ impl AgentHandle {
                             let _ = self.cmd_tx.send(UiCommand::SendPrompt {
                                 text: resend_text.clone(),
                                 images: resend_images.clone(),
+                                resources: Vec::new(),
                             });
                             continue;
                         }

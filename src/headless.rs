@@ -509,6 +509,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     let command = UiCommand::SendPrompt {
                         text: cfg.prompt.clone(),
                         images: Vec::new(),
+                        resources: Vec::new(),
                     };
                     remote_tracker.observe_command(&command);
                     cmd_tx.send(command).context("send prompt to ACP runtime")?;

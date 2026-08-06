@@ -6,7 +6,8 @@
 //! this state.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -23,7 +24,7 @@ use agent_client_protocol::schema::v1::{
 
 use crate::event::{
     ElicitationOutcome, ElicitationPrompt, InternalMessage, PermissionDecision, PermissionPrompt,
-    PromptImage, ReviewTarget, SessionConfigTarget, SubagentEvent, SubagentOutcome,
+    PromptImage, PromptResource, ReviewTarget, SessionConfigTarget, SubagentEvent, SubagentOutcome,
     SubagentStatusKind, TerminalOutputSnapshot, UiEvent, content_block_text,
 };
 use crate::palette::TerminalTheme;
@@ -1081,6 +1082,9 @@ pub struct AppState {
     /// Pasted image attachments shown as compact badges and submitted as
     /// ACP image content blocks.
     pub image_attachments: Vec<PastedImageAttachment>,
+    /// Workspace files selected through `@` completion and submitted as ACP
+    /// resource links.
+    pub file_attachments: Vec<FileAttachment>,
     /// Fast plain-character stream candidate. Terminals can deliver
     /// drag/drop and paste data as key events instead of bracketed paste.
     pub input_paste_burst: InputPasteBurst,
@@ -1184,8 +1188,10 @@ pub struct AppState {
     pub claude_usage: Option<ClaudeUsageStatus>,
     /// Last Codex app-server quota query, including explicit unavailable states.
     pub codex_usage: Option<CodexUsageStatus>,
-    /// Slash-command autocomplete state, recomputed on every input edit.
+    /// Slash-command and workspace-file autocomplete state.
     pub autocomplete: Autocomplete,
+    file_autocomplete_root: Option<PathBuf>,
+    file_autocomplete_candidates: Vec<WorkspaceFile>,
     /// True while the keyboard help overlay is visible.
     pub help_overlay: bool,
     /// Wrapped row offset shown by the keyboard help overlay.
@@ -1236,6 +1242,8 @@ pub struct QueuedPrompt {
     pub text: String,
     /// Image content blocks captured at queue time.
     pub images: Vec<PromptImage>,
+    /// ACP resource links captured at queue time.
+    pub resources: Vec<PromptResource>,
     /// Transcript-ready display text (matches what `submit_prompt` would
     /// have produced if the prompt had fired immediately).
     pub display_text: String,
@@ -1537,6 +1545,16 @@ pub struct PastedImageAttachment {
     pub byte_len: usize,
 }
 
+/// Workspace file shown as an anchored chip in the prompt editor.
+#[derive(Debug, Clone)]
+pub struct FileAttachment {
+    #[allow(dead_code)]
+    pub id: usize,
+    pub position: usize,
+    pub display_path: String,
+    pub resource: PromptResource,
+}
+
 /// Candidate text inserted by a rapid stream of plain character events.
 #[derive(Debug, Clone, Default)]
 pub struct InputPasteBurst {
@@ -1620,16 +1638,154 @@ pub struct ReviewPicker {
     pub selected: usize,
 }
 
-/// Autocomplete popover for slash-commands.
+/// The candidate collection currently shown by the prompt autocomplete.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AutocompleteKind {
+    #[default]
+    Commands,
+    Files {
+        trigger_start: usize,
+        trigger_end: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceFile {
+    display_path: String,
+    absolute_path: PathBuf,
+    size: Option<i64>,
+}
+
+/// Autocomplete popover for slash commands and workspace files.
 ///
-/// `matches` holds indices into `AppState.available_commands` so the
-/// popup keeps pointing at the right command even if the agent pushes a
-/// new `AvailableCommandsUpdate` (we just recompute the list).
+/// `matches` holds indices into either `AppState.available_commands` or the
+/// cached workspace-file index, as identified by `kind`.
 #[derive(Debug, Default)]
 pub struct Autocomplete {
     pub visible: bool,
     pub selected: usize,
     pub matches: Vec<usize>,
+    pub kind: AutocompleteKind,
+}
+
+const MAX_FILE_AUTOCOMPLETE_CANDIDATES: usize = 50_000;
+const MAX_FILE_AUTOCOMPLETE_MATCHES: usize = 200;
+
+fn input_byte_index_at_char(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
+}
+
+fn active_file_autocomplete(input: &str, cursor: usize) -> Option<(usize, usize, String)> {
+    let chars: Vec<char> = input.chars().collect();
+    let cursor = cursor.min(chars.len());
+    for index in (0..cursor).rev() {
+        let ch = chars[index];
+        if ch.is_whitespace() {
+            break;
+        }
+        if ch != '@' {
+            continue;
+        }
+        let at_boundary = index == 0
+            || chars[index - 1].is_whitespace()
+            || matches!(chars[index - 1], '(' | '[' | '{' | ',' | ';' | ':');
+        if !at_boundary {
+            return None;
+        }
+        let query: String = chars[index + 1..cursor].iter().collect();
+        return Some((index, cursor, query));
+    }
+    None
+}
+
+fn workspace_file_candidates(root: &Path) -> Vec<WorkspaceFile> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let git_paths = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+                .map(|path| PathBuf::from(String::from_utf8_lossy(path).into_owned()))
+                .collect::<Vec<_>>()
+        });
+
+    let relative_paths = git_paths.unwrap_or_else(|| fallback_workspace_files(&root));
+    let mut files = Vec::new();
+    for relative_path in relative_paths {
+        if files.len() >= MAX_FILE_AUTOCOMPLETE_CANDIDATES
+            || relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            continue;
+        }
+        let absolute_path = root.join(&relative_path);
+        let Ok(metadata) = std::fs::symlink_metadata(&absolute_path) else {
+            continue;
+        };
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let display_path = relative_path.to_string_lossy().replace('\\', "/");
+        files.push(WorkspaceFile {
+            display_path,
+            absolute_path,
+            size: i64::try_from(metadata.len()).ok(),
+        });
+    }
+    files.sort_by_cached_key(|file| file.display_path.to_lowercase());
+    files
+}
+
+fn fallback_workspace_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if files.len() >= MAX_FILE_AUTOCOMPLETE_CANDIDATES {
+                return files;
+            }
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !matches!(
+                    name.as_ref(),
+                    ".git" | ".hg" | ".mjolnir" | ".svn" | "node_modules" | "target"
+                ) {
+                    pending.push(path);
+                }
+            } else if file_type.is_file()
+                && let Ok(relative) = path.strip_prefix(root)
+            {
+                files.push(relative.to_path_buf());
+            }
+        }
+    }
+    files
 }
 
 impl AppState {
@@ -1692,6 +1848,7 @@ impl AppState {
             input_scroll_offset: 0,
             attachments: Vec::new(),
             image_attachments: Vec::new(),
+            file_attachments: Vec::new(),
             input_paste_burst: InputPasteBurst::default(),
             next_attachment_id: 0,
             prompt_history: Vec::new(),
@@ -1743,6 +1900,8 @@ impl AppState {
             claude_usage: None,
             codex_usage: None,
             autocomplete: Autocomplete::default(),
+            file_autocomplete_root: None,
+            file_autocomplete_candidates: Vec::new(),
             help_overlay: false,
             help_scroll: 0,
             text_selection_mode: false,
@@ -3386,26 +3545,26 @@ impl AppState {
         Some((target, value))
     }
 
-    /// Recompute the slash-command autocomplete popover from the current
-    /// `input` buffer. Call this every time the input is mutated.
-    ///
-    /// The popover is shown when:
-    /// - the input starts with `/`,
-    /// - no permission modal is open (it owns the keyboard),
-    /// - the runtime is still accepting commands,
-    /// - the runtime is still accepting commands.
-    ///
-    /// Filtering: case-insensitive prefix match on the slug after `/`,
-    /// and falls back to substring match if no prefix hits, so a typo
-    /// like `/plan` still surfaces `/create_plan`. The original ordering
-    /// of `available_commands` is preserved (the agent's emit order is
-    /// usually significant, for example when it groups commands by category).
+    /// Recompute slash-command or inline workspace-file completion from the
+    /// current prompt and cursor.
     pub fn update_autocomplete(&mut self) {
-        let trigger_active = self.input.starts_with('/')
-            && !self.has_pending_permission()
-            && self.config_picker.is_none()
-            && !self.runtime_closed;
-        if !trigger_active {
+        if self.has_pending_permission() || self.config_picker.is_some() || self.runtime_closed {
+            self.autocomplete = Autocomplete::default();
+            return;
+        }
+
+        if let Some((trigger_start, trigger_end, query)) =
+            active_file_autocomplete(&self.input, self.input_cursor)
+        {
+            self.update_file_autocomplete(trigger_start, trigger_end, &query);
+            return;
+        }
+
+        self.update_command_autocomplete();
+    }
+
+    fn update_command_autocomplete(&mut self) {
+        if !self.input.starts_with('/') {
             self.autocomplete = Autocomplete::default();
             return;
         }
@@ -3420,12 +3579,15 @@ impl AppState {
         }
         let query = after_slash.to_lowercase();
 
-        let prev_selected_name = self
-            .autocomplete
-            .matches
-            .get(self.autocomplete.selected)
-            .and_then(|&i| self.available_commands.get(i))
-            .map(|c| c.name.clone());
+        let prev_selected_name = (self.autocomplete.kind == AutocompleteKind::Commands)
+            .then(|| {
+                self.autocomplete
+                    .matches
+                    .get(self.autocomplete.selected)
+                    .and_then(|&i| self.available_commands.get(i))
+                    .map(|c| c.name.clone())
+            })
+            .flatten();
 
         let prefix: Vec<usize> = self
             .available_commands
@@ -3459,7 +3621,82 @@ impl AppState {
             visible: !matches.is_empty(),
             selected,
             matches,
+            kind: AutocompleteKind::Commands,
         };
+    }
+
+    fn update_file_autocomplete(&mut self, trigger_start: usize, trigger_end: usize, query: &str) {
+        let root = self
+            .session_cwd
+            .canonicalize()
+            .unwrap_or_else(|_| self.session_cwd.clone());
+        let continuing_file_completion =
+            matches!(self.autocomplete.kind, AutocompleteKind::Files { .. });
+        if self.file_autocomplete_root.as_ref() != Some(&root) || !continuing_file_completion {
+            self.file_autocomplete_candidates = workspace_file_candidates(&root);
+            self.file_autocomplete_root = Some(root);
+        }
+
+        let previous_path = matches!(self.autocomplete.kind, AutocompleteKind::Files { .. })
+            .then(|| {
+                self.autocomplete
+                    .matches
+                    .get(self.autocomplete.selected)
+                    .and_then(|index| self.file_autocomplete_candidates.get(*index))
+                    .map(|file| file.display_path.clone())
+            })
+            .flatten();
+        let query = query
+            .trim_start_matches("./")
+            .replace('\\', "/")
+            .to_lowercase();
+        let mut matches: Vec<usize> = self
+            .file_autocomplete_candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| file.display_path.to_lowercase().contains(&query))
+            .map(|(index, _)| index)
+            .collect();
+        matches.sort_by_key(|index| {
+            let path = self.file_autocomplete_candidates[*index]
+                .display_path
+                .to_lowercase();
+            let file_name = path.rsplit('/').next().unwrap_or(&path);
+            let rank = if file_name == query {
+                0
+            } else if file_name.starts_with(&query) {
+                1
+            } else if path.starts_with(&query) {
+                2
+            } else {
+                3
+            };
+            (rank, path.find(&query).unwrap_or(usize::MAX), path.len())
+        });
+        matches.truncate(MAX_FILE_AUTOCOMPLETE_MATCHES);
+
+        let selected = previous_path
+            .and_then(|path| {
+                matches.iter().position(|index| {
+                    self.file_autocomplete_candidates[*index].display_path == path
+                })
+            })
+            .unwrap_or(0);
+        self.autocomplete = Autocomplete {
+            visible: !matches.is_empty(),
+            selected,
+            matches,
+            kind: AutocompleteKind::Files {
+                trigger_start,
+                trigger_end,
+            },
+        };
+    }
+
+    pub fn autocomplete_file_path(&self, index: usize) -> Option<&str> {
+        self.file_autocomplete_candidates
+            .get(index)
+            .map(|file| file.display_path.as_str())
     }
 
     /// Move the autocomplete cursor by `delta`, wrapping at both ends.
@@ -3472,24 +3709,89 @@ impl AppState {
         move_wrapped(&mut self.autocomplete.selected, delta, len);
     }
 
-    /// Replace the input buffer with the currently-selected command,
-    /// followed by a trailing space so the user can keep typing
-    /// arguments. Returns `true` if a command was actually inserted.
+    /// Accept the selected command or file. File completion replaces only the
+    /// active `@query` range and anchors a resource-link chip at that point.
     pub fn autocomplete_accept(&mut self) -> bool {
         if !self.autocomplete.visible {
             return false;
         }
-        let Some(&idx) = self.autocomplete.matches.get(self.autocomplete.selected) else {
+        let Some(&index) = self.autocomplete.matches.get(self.autocomplete.selected) else {
             return false;
         };
-        let Some(cmd) = self.available_commands.get(idx) else {
-            return false;
-        };
-        self.input = format!("/{} ", cmd.name);
-        self.input_cursor = self.input.chars().count();
+        match self.autocomplete.kind {
+            AutocompleteKind::Commands => {
+                let Some(cmd) = self.available_commands.get(index) else {
+                    return false;
+                };
+                self.input = format!("/{} ", cmd.name);
+                self.input_cursor = self.input.chars().count();
+            }
+            AutocompleteKind::Files {
+                trigger_start,
+                trigger_end,
+            } => {
+                let Some(file) = self.file_autocomplete_candidates.get(index).cloned() else {
+                    return false;
+                };
+                let Some(root) = self.file_autocomplete_root.as_ref() else {
+                    return false;
+                };
+                let Ok(path) = file.absolute_path.canonicalize() else {
+                    return false;
+                };
+                if !path.starts_with(root) {
+                    return false;
+                }
+                let Ok(uri) = url::Url::from_file_path(&path) else {
+                    return false;
+                };
+                self.replace_input_range_for_completion(trigger_start, trigger_end, " ");
+                let id = self.next_attachment_id;
+                self.next_attachment_id += 1;
+                self.file_attachments.push(FileAttachment {
+                    id,
+                    position: trigger_start,
+                    display_path: file.display_path.clone(),
+                    resource: PromptResource {
+                        name: file.display_path,
+                        uri: uri.to_string(),
+                        size: file.size,
+                    },
+                });
+            }
+        }
         self.scroll_input_to_bottom();
         self.autocomplete = Autocomplete::default();
         true
+    }
+
+    fn replace_input_range_for_completion(&mut self, start: usize, end: usize, replacement: &str) {
+        self.reset_history_navigation();
+        let len = self.input.chars().count();
+        let start = start.min(len);
+        let end = end.min(len).max(start);
+        let byte_start = input_byte_index_at_char(&self.input, start);
+        let byte_end = input_byte_index_at_char(&self.input, end);
+        self.input.replace_range(byte_start..byte_end, replacement);
+        let removed = end - start;
+        let inserted = replacement.chars().count();
+        let adjust = |position: &mut usize| {
+            if *position > end {
+                *position = position.saturating_sub(removed).saturating_add(inserted);
+            } else if *position > start {
+                *position = start + inserted;
+            }
+        };
+        for attachment in &mut self.attachments {
+            adjust(&mut attachment.position);
+        }
+        for attachment in &mut self.image_attachments {
+            adjust(&mut attachment.position);
+        }
+        for attachment in &mut self.file_attachments {
+            adjust(&mut attachment.position);
+        }
+        self.input_cursor = start + inserted;
     }
 
     /// Hide the popover without modifying the input buffer.
@@ -8385,6 +8687,7 @@ mod tests {
         s.push_queued_prompt(QueuedPrompt {
             text: "queued body".to_string(),
             images: Vec::new(),
+            resources: Vec::new(),
             display_text: "queued body".to_string(),
         });
 
@@ -8484,6 +8787,7 @@ mod tests {
             s.push_queued_prompt(QueuedPrompt {
                 text: "queued".to_string(),
                 images: Vec::new(),
+                resources: Vec::new(),
                 display_text: "queued".to_string(),
             });
             s.status_line = Some(StatusMessage::info("queued 1: queued"));
@@ -10024,6 +10328,110 @@ mod tests {
         assert!(s.autocomplete_accept());
         assert_eq!(s.input, "/create_plan ");
         assert!(!s.autocomplete.visible, "popover closes after acceptance");
+    }
+
+    #[test]
+    fn file_autocomplete_accepts_inline_query_as_resource_link() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(directory.path().join("src")).expect("create src");
+        let file = directory.path().join("src/acp.rs");
+        std::fs::write(&file, "acp").expect("write source");
+
+        let mut state = AppState::new();
+        state.session_cwd = directory.path().to_path_buf();
+        state.input = "Review @acp".to_string();
+        state.input_cursor = state.input.chars().count();
+        state.update_autocomplete();
+
+        assert!(matches!(
+            state.autocomplete.kind,
+            AutocompleteKind::Files { .. }
+        ));
+        assert!(state.autocomplete.visible);
+        let paths: Vec<&str> = state
+            .autocomplete
+            .matches
+            .iter()
+            .filter_map(|index| state.autocomplete_file_path(*index))
+            .collect();
+        assert_eq!(paths, vec!["src/acp.rs"]);
+
+        assert!(state.autocomplete_accept());
+        assert_eq!(state.input, "Review  ");
+        assert_eq!(state.input_cursor, 8);
+        assert_eq!(state.file_attachments.len(), 1);
+        let attachment = &state.file_attachments[0];
+        assert_eq!(attachment.position, 7);
+        assert_eq!(attachment.display_path, "src/acp.rs");
+        assert_eq!(attachment.resource.name, "src/acp.rs");
+        assert_eq!(attachment.resource.size, Some(3));
+        assert_eq!(
+            attachment.resource.uri,
+            url::Url::from_file_path(file.canonicalize().expect("canonical file"))
+                .expect("file URL")
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn file_autocomplete_uses_the_query_at_the_cursor() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(directory.path().join("src")).expect("create src");
+        std::fs::write(directory.path().join("src/app.rs"), "app").expect("write source");
+
+        let mut state = AppState::new();
+        state.session_cwd = directory.path().to_path_buf();
+        state.input = "Review @app, then continue".to_string();
+        state.input_cursor = "Review @app".chars().count();
+        state.update_autocomplete();
+        assert!(state.autocomplete.visible);
+
+        assert!(state.autocomplete_accept());
+        assert_eq!(state.input, "Review  , then continue");
+        assert_eq!(state.file_attachments[0].display_path, "src/app.rs");
+    }
+
+    #[test]
+    fn file_autocomplete_does_not_trigger_inside_email_address() {
+        let mut state = AppState::new();
+        state.input = "ask dev@example.com".to_string();
+        state.input_cursor = state.input.chars().count();
+
+        state.update_autocomplete();
+
+        assert!(!state.autocomplete.visible);
+        assert!(state.autocomplete.matches.is_empty());
+    }
+
+    #[test]
+    fn file_autocomplete_respects_gitignore() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let status = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
+            .expect("run git init");
+        assert!(status.success());
+        std::fs::write(directory.path().join(".gitignore"), "ignored.txt\n")
+            .expect("write gitignore");
+        std::fs::write(directory.path().join("ignored.txt"), "ignored")
+            .expect("write ignored file");
+        std::fs::write(directory.path().join("visible.txt"), "visible")
+            .expect("write visible file");
+
+        let mut state = AppState::new();
+        state.session_cwd = directory.path().to_path_buf();
+        state.input = "@ignored".to_string();
+        state.input_cursor = state.input.chars().count();
+        state.update_autocomplete();
+        assert!(!state.autocomplete.visible);
+
+        state.input = "@visible".to_string();
+        state.input_cursor = state.input.chars().count();
+        state.update_autocomplete();
+        assert!(state.autocomplete.visible);
+        let path = state.autocomplete.matches[0];
+        assert_eq!(state.autocomplete_file_path(path), Some("visible.txt"));
     }
 
     #[test]

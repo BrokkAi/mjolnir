@@ -22,6 +22,15 @@ pub struct PromptImage {
     pub height: u32,
 }
 
+/// A file selected from the prompt's `@` autocomplete and submitted as an
+/// ACP resource link.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PromptResource {
+    pub name: String,
+    pub uri: String,
+    pub size: Option<i64>,
+}
+
 /// A text-file change between two workspace endpoints. Used both for one
 /// prompt turn's delta and for the uncommitted worktree-versus-`HEAD` diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,6 +417,7 @@ pub enum UiCommand {
     SendPrompt {
         text: String,
         images: Vec<PromptImage>,
+        resources: Vec<PromptResource>,
     },
     /// Set a session configuration option to a new value.
     SetSessionConfigOption {

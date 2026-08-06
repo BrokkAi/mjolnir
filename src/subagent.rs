@@ -2469,6 +2469,7 @@ async fn collect_debrief_turn(
         .send(UiCommand::SendPrompt {
             text: SUBAGENT_DEBRIEF_PROMPT.to_string(),
             images: Vec::new(),
+            resources: Vec::new(),
         })
         .is_err()
     {
@@ -2947,6 +2948,7 @@ async fn run(
                                     .send(UiCommand::SendPrompt {
                                         text: prompt,
                                         images,
+                                        resources: Vec::new(),
                                     })
                                     .is_err()
                             {
@@ -3237,6 +3239,7 @@ async fn run(
                                 .send(UiCommand::SendPrompt {
                                     text: continuation_prompt(&prompt),
                                     images: Vec::new(),
+                                    resources: Vec::new(),
                                 })
                                 .is_err()
                             {
@@ -5333,7 +5336,7 @@ mod tests {
             })
             .expect("turn done");
 
-        let UiCommand::SendPrompt { text, images } =
+        let UiCommand::SendPrompt { text, images, .. } =
             tokio::time::timeout(Duration::from_secs(5), run.nested_commands.recv())
                 .await
                 .expect("debrief prompt sent")

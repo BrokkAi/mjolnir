@@ -546,6 +546,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 let _ = config.runtime_commands.send(UiCommand::SendPrompt {
                     text: prompt,
                     images: Vec::new(),
+                    resources: Vec::new(),
                 });
                 idle_epoch = None;
                 heartbeat_deadline = None;
@@ -803,6 +804,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     let _ = config.runtime_commands.send(UiCommand::SendPrompt {
                         text: prompt,
                         images: Vec::new(),
+                        resources: Vec::new(),
                     });
                     idle_epoch = None;
                     continue;
@@ -917,6 +919,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             let _ = config.runtime_commands.send(UiCommand::SendPrompt {
                                 text: prompt,
                                 images: Vec::new(),
+                                resources: Vec::new(),
                             });
                             correction_review_base =
                                 reviewed_workspace_fingerprint.map(|fingerprint| {
@@ -988,6 +991,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             let _ = config.runtime_commands.send(UiCommand::SendPrompt {
                                 text: prompt,
                                 images: Vec::new(),
+                                resources: Vec::new(),
                             });
                             let _ = completion;
                             trajectory.reset_attempt();
@@ -1039,6 +1043,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             let _ = config.runtime_commands.send(UiCommand::SendPrompt {
                                 text: prompt,
                                 images: Vec::new(),
+                                resources: Vec::new(),
                             });
                             let _ = completion;
                             trajectory.reset_attempt();
@@ -1206,6 +1211,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     let _ = config.runtime_commands.send(UiCommand::SendPrompt {
                         text: prompt,
                         images: Vec::new(),
+                        resources: Vec::new(),
                     });
                     primary_review_prompt_active = true;
                 }
@@ -1519,6 +1525,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 let _ = config.runtime_commands.send(UiCommand::SendPrompt {
                     text: prompt,
                     images: Vec::new(),
+                    resources: Vec::new(),
                 });
                 primary_review_prompt_active = true;
                 continue;
@@ -1549,6 +1556,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 let _ = config.runtime_commands.send(UiCommand::SendPrompt {
                     text: prompt,
                     images: Vec::new(),
+                    resources: Vec::new(),
                 });
                 let _ = event;
                 trajectory.reset_attempt();
@@ -3254,7 +3262,7 @@ mod tests {
                 workflow_clean = true;
             }
             if workflow_clean && !recap_started {
-                let UiCommand::SendPrompt { text, images } = command_rx
+                let UiCommand::SendPrompt { text, images, .. } = command_rx
                     .try_recv()
                     .expect("a clean review must dispatch the final recap")
                 else {
