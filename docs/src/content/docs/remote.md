@@ -22,6 +22,16 @@ The viewer uses a bearer login token or short viewer code, then stores a signed
 session cookie. Treat QR codes, login URLs, tokens, cookies, certificate keys,
 and downloaded transcripts as secrets.
 
+## Starting sessions
+
+The new-session folder picker browses the workspace roots configured on the
+server. It also shows up to six working directories from the most recently used
+retained sessions and can search for nested folders across those roots. Recent
+and search results are canonicalized against the current roots before they are
+shown, so changing the server's workspace configuration does not expose old
+paths. Broad searches are capped; refine the query when the picker reports that
+only the first matches are shown.
+
 ## Subagents in the viewer
 
 The browser keeps an actor-level subagent list: one row per background

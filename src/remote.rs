@@ -1,6 +1,6 @@
 //! Simple remote-control server and local session registration.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::IsTerminal;
 use std::net::{IpAddr, TcpListener};
@@ -80,6 +80,13 @@ const QUEUED_PROMPT_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const PERMISSION_DECISION_TTL: Duration = Duration::from_secs(60 * 60);
 /// How many finished subagent rows the live status list keeps.
 const REMOTE_FINISHED_SUBAGENT_ROWS: usize = 4;
+/// Folder search runs on the server host. Bound both filesystem work and the
+/// response size so a broad query cannot monopolize a blocking worker.
+const FILESYSTEM_SEARCH_SCAN_LIMIT: usize = 5_000;
+const FILESYSTEM_SEARCH_RESULT_LIMIT: usize = 50;
+const FILESYSTEM_SEARCH_QUERY_MAX_CHARS: usize = 128;
+const RECENT_FILESYSTEM_DIRECTORY_LIMIT: usize = 6;
+const RECENT_FILESYSTEM_SESSION_SCAN_LIMIT: usize = 100;
 /// Cadence of the tracker's current-branch pull-request probe. Slower than
 /// the TUI's 5s status-line poll on purpose: remote viewers tolerate a stale
 /// badge, and each probe spawns `git` + `gh` subprocesses.
@@ -1396,6 +1403,7 @@ struct NewServerSessionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct BrowseFilesystemQuery {
     path: Option<String>,
+    query: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1411,7 +1419,13 @@ struct FilesystemBrowseResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<FilesystemDirectoryRecord>,
     roots: Vec<FilesystemDirectoryRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    recent: Vec<FilesystemDirectoryRecord>,
     entries: Vec<FilesystemDirectoryRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    query: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    search_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -7174,9 +7188,19 @@ async fn browse_filesystem(
     Query(query): Query<BrowseFilesystemQuery>,
 ) -> std::result::Result<Json<FilesystemBrowseResponse>, (StatusCode, String)> {
     let roots = Arc::clone(&state.workspace_roots);
+    let db_path = Arc::clone(&state.db_path);
     let requested_path = query.path;
+    let search_query = query.query;
     let response = tokio::task::spawn_blocking(move || {
-        browse_filesystem_under_roots(roots.as_slice(), requested_path.as_deref())
+        let recent =
+            load_recent_filesystem_directories(db_path.as_ref().as_path(), roots.as_slice())
+                .map_err(internal_error)?;
+        browse_filesystem_under_roots(
+            roots.as_slice(),
+            requested_path.as_deref(),
+            search_query.as_deref(),
+            recent,
+        )
     })
     .await
     .map_err(internal_error)??;
@@ -7580,6 +7604,8 @@ async fn claim_config_change(
 fn browse_filesystem_under_roots(
     roots: &[PathBuf],
     requested_path: Option<&str>,
+    search_query: Option<&str>,
+    recent: Vec<FilesystemDirectoryRecord>,
 ) -> std::result::Result<FilesystemBrowseResponse, (StatusCode, String)> {
     if roots.is_empty() {
         return Err((
@@ -7596,13 +7622,44 @@ fn browse_filesystem_under_roots(
         crate::paths::path_is_under_any_root(roots, &parent)
             .then(|| filesystem_directory_record(&parent))
     });
-    let mut entries = Vec::new();
-    let read_dir = std::fs::read_dir(&current).map_err(|error| {
+    let query = search_query
+        .map(str::trim)
+        .filter(|query| !query.is_empty());
+    if query.is_some_and(|query| query.chars().count() > FILESYSTEM_SEARCH_QUERY_MAX_CHARS) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("folder search must be at most {FILESYSTEM_SEARCH_QUERY_MAX_CHARS} characters"),
+        ));
+    }
+    let (entries, search_truncated) = match query {
+        Some(query) => search_filesystem_under_roots(roots, query),
+        None => (list_child_directories(roots, &current)?, false),
+    };
+    Ok(FilesystemBrowseResponse {
+        current: filesystem_directory_record(&current),
+        parent,
+        roots: roots
+            .iter()
+            .map(|root| filesystem_directory_record(root))
+            .collect(),
+        recent,
+        entries,
+        query: query.map(str::to_string),
+        search_truncated,
+    })
+}
+
+fn list_child_directories(
+    roots: &[PathBuf],
+    directory: &Path,
+) -> std::result::Result<Vec<FilesystemDirectoryRecord>, (StatusCode, String)> {
+    let read_dir = std::fs::read_dir(directory).map_err(|error| {
         (
             StatusCode::BAD_REQUEST,
-            format!("read {}: {error}", current.display()),
+            format!("read {}: {error}", directory.display()),
         )
     })?;
+    let mut entries = Vec::new();
     for entry in read_dir {
         let entry = entry.map_err(internal_error)?;
         let file_type = entry.file_type().map_err(internal_error)?;
@@ -7618,21 +7675,103 @@ fn browse_filesystem_under_roots(
         }
         entries.push(filesystem_directory_record(&path));
     }
+    sort_filesystem_directories(&mut entries);
+    Ok(entries)
+}
+
+fn search_filesystem_under_roots(
+    roots: &[PathBuf],
+    query: &str,
+) -> (Vec<FilesystemDirectoryRecord>, bool) {
+    let query = query.to_lowercase();
+    let mut pending = VecDeque::from_iter(roots.iter().cloned());
+    let mut visited = roots.iter().cloned().collect::<HashSet<_>>();
+    let mut matches = Vec::new();
+    let mut truncated = false;
+
+    'search: while let Some(directory) = pending.pop_front() {
+        let Ok(read_dir) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        let mut children = Vec::new();
+        let mut scan_limit_reached = false;
+        for entry in read_dir.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() && !file_type.is_symlink() {
+                continue;
+            }
+            let Ok(path) = std::fs::canonicalize(entry.path()) else {
+                continue;
+            };
+            if !path.is_dir()
+                || !crate::paths::path_is_under_any_root(roots, &path)
+                || visited.contains(&path)
+            {
+                continue;
+            }
+            if visited.len() >= FILESYSTEM_SEARCH_SCAN_LIMIT {
+                truncated = true;
+                scan_limit_reached = true;
+                break;
+            }
+            visited.insert(path.clone());
+            children.push(path);
+        }
+        children.sort_by(|left, right| {
+            crate::paths::folder_label(left)
+                .to_lowercase()
+                .cmp(&crate::paths::folder_label(right).to_lowercase())
+                .then_with(|| left.cmp(right))
+        });
+        for child in children {
+            let record = filesystem_directory_record(&child);
+            if record.name.to_lowercase().contains(&query)
+                || record.display_path.to_lowercase().contains(&query)
+            {
+                matches.push(record);
+                if matches.len() == FILESYSTEM_SEARCH_RESULT_LIMIT {
+                    truncated = true;
+                    break 'search;
+                }
+            }
+            pending.push_back(child);
+        }
+        if scan_limit_reached {
+            break;
+        }
+    }
+
+    matches.sort_by(|left, right| {
+        filesystem_search_rank(left, &query)
+            .cmp(&filesystem_search_rank(right, &query))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    (matches, truncated)
+}
+
+fn filesystem_search_rank(record: &FilesystemDirectoryRecord, query: &str) -> u8 {
+    let name = record.name.to_lowercase();
+    if name == query {
+        0
+    } else if name.starts_with(query) {
+        1
+    } else if name.contains(query) {
+        2
+    } else {
+        3
+    }
+}
+
+fn sort_filesystem_directories(entries: &mut [FilesystemDirectoryRecord]) {
     entries.sort_by(|a, b| {
         a.name
-            .to_ascii_lowercase()
-            .cmp(&b.name.to_ascii_lowercase())
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
             .then_with(|| a.path.cmp(&b.path))
     });
-    Ok(FilesystemBrowseResponse {
-        current: filesystem_directory_record(&current),
-        parent,
-        roots: roots
-            .iter()
-            .map(|root| filesystem_directory_record(root))
-            .collect(),
-        entries,
-    })
 }
 
 fn directory_under_roots(
@@ -8278,6 +8417,51 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
         .context("collect sessions")?;
     sort_session_records(&mut sessions);
     Ok(sessions)
+}
+
+fn load_recent_filesystem_directories(
+    db_path: &Path,
+    roots: &[PathBuf],
+) -> Result<Vec<FilesystemDirectoryRecord>> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "select status_json
+            from sessions
+            where status_json is not null
+            order by coalesce(nullif(last_prompt_at, ''), start_time) desc, session_id asc
+            limit ?1",
+        )
+        .context("prepare recent filesystem directory query")?;
+    let rows = stmt
+        .query_map(
+            params![RECENT_FILESYSTEM_SESSION_SCAN_LIMIT as i64],
+            |row| row.get::<_, String>(0),
+        )
+        .context("query recent filesystem directories")?;
+    let mut seen = HashSet::new();
+    let mut recent = Vec::new();
+    for status_json in rows {
+        let status_json = status_json.context("read recent filesystem directory")?;
+        let Ok(status) = serde_json::from_str::<SessionStatusRecord>(&status_json) else {
+            continue;
+        };
+        let Some(cwd) = status.cwd.filter(|cwd| !cwd.trim().is_empty()) else {
+            continue;
+        };
+        let Ok(path) = directory_under_roots(roots, cwd.trim()) else {
+            continue;
+        };
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        recent.push(filesystem_directory_record(&path));
+        if recent.len() == RECENT_FILESYSTEM_DIRECTORY_LIMIT {
+            break;
+        }
+    }
+    Ok(recent)
 }
 
 fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<SessionRecord>> {
@@ -14730,7 +14914,8 @@ mod tests {
         std::fs::write(dir.path().join("file.txt"), "not a dir").expect("write file");
         let roots = test_workspace_roots(dir.path());
 
-        let root_listing = browse_filesystem_under_roots(&roots, None).expect("browse root");
+        let root_listing =
+            browse_filesystem_under_roots(&roots, None, None, Vec::new()).expect("browse root");
         assert_eq!(root_listing.current.path, roots[0].display().to_string());
         assert_eq!(
             root_listing
@@ -14742,9 +14927,13 @@ mod tests {
         );
         assert!(root_listing.parent.is_none());
 
-        let child_listing =
-            browse_filesystem_under_roots(&roots, Some(&child.display().to_string()))
-                .expect("browse child");
+        let child_listing = browse_filesystem_under_roots(
+            &roots,
+            Some(&child.display().to_string()),
+            None,
+            Vec::new(),
+        )
+        .expect("browse child");
         let root_path = roots[0].display().to_string();
         assert_eq!(
             child_listing
@@ -14760,6 +14949,98 @@ mod tests {
                 .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["nested"]
+        );
+    }
+
+    #[test]
+    fn filesystem_search_finds_nested_directories_case_insensitively() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("alpha-target")).expect("alpha target");
+        std::fs::create_dir_all(dir.path().join("nested").join("TargetBeta"))
+            .expect("nested target");
+        std::fs::create_dir_all(dir.path().join("unrelated")).expect("unrelated");
+        let roots = test_workspace_roots(dir.path());
+
+        let listing = browse_filesystem_under_roots(&roots, None, Some("TARGET"), Vec::new())
+            .expect("search folders");
+
+        assert_eq!(listing.query.as_deref(), Some("TARGET"));
+        assert_eq!(
+            listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["TargetBeta", "alpha-target"]
+        );
+        assert!(!listing.search_truncated);
+        assert_eq!(listing.current.path, roots[0].display().to_string());
+    }
+
+    #[test]
+    fn filesystem_search_caps_results() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for index in 0..=FILESYSTEM_SEARCH_RESULT_LIMIT {
+            std::fs::create_dir(dir.path().join(format!("match-{index:02}")))
+                .expect("create matching directory");
+        }
+        let roots = test_workspace_roots(dir.path());
+
+        let listing = browse_filesystem_under_roots(&roots, None, Some("match"), Vec::new())
+            .expect("search folders");
+
+        assert_eq!(listing.entries.len(), FILESYSTEM_SEARCH_RESULT_LIMIT);
+        assert!(listing.search_truncated);
+    }
+
+    #[test]
+    fn recent_filesystem_directories_are_valid_unique_and_newest_first() {
+        let dir = tempfile::tempdir().expect("root");
+        let older_path = dir.path().join("older");
+        let newer_path = dir.path().join("newer");
+        std::fs::create_dir_all(&older_path).expect("older directory");
+        std::fs::create_dir_all(&newer_path).expect("newer directory");
+        let outside = tempfile::tempdir().expect("outside");
+        let roots = test_workspace_roots(dir.path());
+        let db_path = dir.path().join("sessions.sqlite3");
+
+        let mut older = session_named("older", "2026-06-10T10:00:00Z");
+        older.last_prompt_at = Some("2026-06-10T10:00:00Z".to_string());
+        older.status = Some(SessionStatusRecord {
+            cwd: Some(older_path.display().to_string()),
+            ..SessionStatusRecord::default()
+        });
+        upsert_session_record(&db_path, &older).expect("insert older session");
+
+        let mut newer = session_named("newer", "2026-06-10T10:02:00Z");
+        newer.last_prompt_at = Some("2026-06-10T10:02:00Z".to_string());
+        newer.status = Some(SessionStatusRecord {
+            cwd: Some(newer_path.display().to_string()),
+            ..SessionStatusRecord::default()
+        });
+        upsert_session_record(&db_path, &newer).expect("insert newer session");
+
+        let mut duplicate = session_named("duplicate", "2026-06-10T10:03:00Z");
+        duplicate.last_prompt_at = Some("2026-06-10T10:03:00Z".to_string());
+        duplicate.status = newer.status.clone();
+        upsert_session_record(&db_path, &duplicate).expect("insert duplicate session");
+
+        let mut invalid = session_named("invalid", "2026-06-10T10:04:00Z");
+        invalid.last_prompt_at = Some("2026-06-10T10:04:00Z".to_string());
+        invalid.status = Some(SessionStatusRecord {
+            cwd: Some(outside.path().display().to_string()),
+            ..SessionStatusRecord::default()
+        });
+        upsert_session_record(&db_path, &invalid).expect("insert invalid session");
+
+        let recent =
+            load_recent_filesystem_directories(&db_path, &roots).expect("load recent directories");
+        assert_eq!(
+            recent
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["newer", "older"]
         );
     }
 

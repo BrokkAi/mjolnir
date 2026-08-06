@@ -684,6 +684,7 @@
       .new-session-close,
       .fs-parent-button,
       .fs-root-button,
+      .fs-recent-button,
       .fs-row {
         border: 1px solid var(--line-row);
         background: var(--surface-control);
@@ -718,6 +719,8 @@
 
       .modal-backdrop.is-creating .fs-list,
       .modal-backdrop.is-creating .fs-roots,
+      .modal-backdrop.is-creating .fs-recent,
+      .modal-backdrop.is-creating .fs-search,
       .modal-backdrop.is-creating .fs-current {
         opacity: 0.58;
       }
@@ -823,6 +826,85 @@
           color: var(--red-hot);
           background: rgb(235 63 51 / 0.11);
         }
+      }
+
+      .fs-search {
+        display: flex;
+
+        & input {
+          width: 100%;
+          min-width: 0;
+          height: 38px;
+          padding: 0 12px;
+          border: 1px solid var(--line-row);
+          outline: none;
+          background: var(--surface-terminal);
+          color: var(--text-control);
+          font: 500 13px/1 var(--font-body);
+          letter-spacing: 0;
+
+          &::placeholder {
+            color: var(--dim);
+          }
+
+          &:focus {
+            border-color: rgb(235 63 51 / 0.72);
+            box-shadow: inset 3px 0 0 rgb(235 63 51 / 0.72);
+          }
+
+          &:disabled {
+            cursor: default;
+            opacity: 0.65;
+          }
+        }
+      }
+
+      .fs-shortcuts {
+        display: grid;
+        gap: 7px;
+
+        &[hidden] {
+          display: none;
+        }
+      }
+
+      .fs-recent {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 7px;
+      }
+
+      .fs-recent-button {
+        min-width: 0;
+        min-height: 48px;
+        display: grid;
+        align-content: center;
+        gap: 4px;
+        padding: 7px 9px;
+        text-align: left;
+
+        &.active {
+          border-color: rgb(235 63 51 / 0.6);
+          background: rgb(235 63 51 / 0.11);
+        }
+      }
+
+      .fs-recent-name,
+      .fs-recent-path {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .fs-recent-name {
+        color: var(--text-control);
+        font: 600 12px/1.2 var(--font-body);
+      }
+
+      .fs-recent-path {
+        color: var(--dim);
+        font: 400 9.5px/1.2 var(--font-mono);
       }
 
       .fs-toolbar {
@@ -3098,6 +3180,10 @@
           flex: 1;
         }
 
+        .fs-recent {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
         .fs-toolbar .primary {
           flex: 1 1 160px;
         }
@@ -3374,6 +3460,13 @@
           <span id="fs-current-path" class="fs-path"></span>
         </div>
         <div id="fs-roots" class="fs-roots" aria-label="Workspace roots"></div>
+        <label class="fs-search">
+          <input id="fs-search-input" type="search" placeholder="Search folders" autocomplete="off" spellcheck="false" aria-label="Search folders" />
+        </label>
+        <div id="fs-recent-section" class="fs-shortcuts" hidden>
+          <span class="fs-label">Recent folders</span>
+          <div id="fs-recent" class="fs-recent"></div>
+        </div>
         <div class="fs-toolbar">
           <button id="fs-parent-button" class="fs-parent-button" type="button">Up</button>
           <label class="fs-worktree-toggle">
@@ -3501,6 +3594,9 @@
       const loadSessionStatusEl = $("load-session-status");
       const fsCurrentPathEl = $("fs-current-path");
       const fsRootsEl = $("fs-roots");
+      const fsSearchInputEl = $("fs-search-input");
+      const fsRecentSectionEl = $("fs-recent-section");
+      const fsRecentEl = $("fs-recent");
       const fsParentButtonEl = $("fs-parent-button");
       const fsListEl = $("fs-list");
       const statusEl = $("status");
@@ -3588,6 +3684,8 @@
       let pendingNewEntries = 0;
       let filesystemState = null;
       let filesystemLoading = false;
+      let filesystemRequestSeq = 0;
+      let filesystemSearchTimer = null;
       let creatingSession = false;
       let loadingSessionHistory = false;
       let pendingSessionLaunch = null;
@@ -4635,6 +4733,12 @@
         selectedSessionId = null;
         filesystemState = null;
         filesystemLoading = false;
+        filesystemRequestSeq += 1;
+        if (filesystemSearchTimer) {
+          clearTimeout(filesystemSearchTimer);
+          filesystemSearchTimer = null;
+        }
+        fsSearchInputEl.value = "";
         creatingSession = false;
         loadingSessionHistory = false;
         settingsModalEl.hidden = true;
@@ -4720,7 +4824,11 @@
         fsParentButtonEl.disabled = busy || !filesystemState?.parent || creatingSession;
         newSessionStartEl.disabled = busy || !filesystemState?.current || creatingSession;
         newSessionWorktreeEl.disabled = busy || creatingSession;
+        fsSearchInputEl.disabled = creatingSession;
         fsRootsEl.querySelectorAll("button").forEach((button) => {
+          button.disabled = busy || creatingSession;
+        });
+        fsRecentEl.querySelectorAll("button").forEach((button) => {
           button.disabled = busy || creatingSession;
         });
         fsListEl.querySelectorAll("button").forEach((button) => {
@@ -4734,14 +4842,26 @@
         }
         newSessionModalEl.hidden = false;
         newSessionWorktreeEl.checked = false;
+        fsSearchInputEl.value = "";
+        filesystemState = null;
+        fsCurrentPathEl.textContent = "";
+        fsRootsEl.replaceChildren();
+        fsRecentEl.replaceChildren();
+        fsRecentSectionEl.hidden = true;
+        fsListEl.replaceChildren(emptyNote("Loading folders…"));
         setSessionCreationUi(false);
         setNewSessionStatus("");
-        void loadFilesystem();
+        fsSearchInputEl.focus();
+        void loadFilesystem("", "");
       }
 
       function closeNewSessionPicker() {
         if (creatingSession) {
           return;
+        }
+        if (filesystemSearchTimer) {
+          clearTimeout(filesystemSearchTimer);
+          filesystemSearchTimer = null;
         }
         newSessionModalEl.hidden = true;
       }
@@ -4880,15 +5000,39 @@
         return button;
       }
 
+      function openFilesystemDirectory(path) {
+        if (filesystemSearchTimer) {
+          clearTimeout(filesystemSearchTimer);
+          filesystemSearchTimer = null;
+        }
+        fsSearchInputEl.value = "";
+        void loadFilesystem(path, "");
+      }
+
+      function scheduleFilesystemSearch() {
+        if (filesystemSearchTimer) {
+          clearTimeout(filesystemSearchTimer);
+        }
+        filesystemRequestSeq += 1;
+        const query = fsSearchInputEl.value.trim();
+        setNewSessionStatus(query ? "Searching folders…" : "Loading folders…");
+        filesystemSearchTimer = setTimeout(() => {
+          filesystemSearchTimer = null;
+          void loadFilesystem(filesystemState?.current?.path || "", query);
+        }, 250);
+      }
+
       function renderFilesystemPicker() {
         fsRootsEl.replaceChildren();
+        fsRecentEl.replaceChildren();
         fsListEl.replaceChildren();
         const current = filesystemState?.current || null;
+        const query = filesystemState?.query || "";
         fsCurrentPathEl.textContent = current?.display_path || "";
 
         for (const root of filesystemState?.roots || []) {
           const button = directoryButton(root, "fs-root-button", () => {
-            void loadFilesystem(root.path);
+            openFilesystemDirectory(root.path);
           });
           button.textContent = root.name || root.display_path || root.path;
           button.title = root.display_path || root.path;
@@ -4896,19 +5040,37 @@
           fsRootsEl.appendChild(button);
         }
 
+        const recent = filesystemState?.recent || [];
+        fsRecentSectionEl.hidden = Boolean(query) || !recent.length;
+        for (const entry of recent) {
+          const button = directoryButton(entry, "fs-recent-button", () => {
+            openFilesystemDirectory(entry.path);
+          });
+          button.title = entry.display_path || entry.path;
+          button.classList.toggle("active", current?.path === entry.path);
+          const name = document.createElement("span");
+          name.className = "fs-recent-name";
+          name.textContent = entry.name || entry.path;
+          const path = document.createElement("span");
+          path.className = "fs-recent-path";
+          path.textContent = entry.display_path || entry.path;
+          button.append(name, path);
+          fsRecentEl.appendChild(button);
+        }
+
         fsParentButtonEl.onclick = () => {
           if (filesystemState?.parent) {
-            void loadFilesystem(filesystemState.parent.path);
+            openFilesystemDirectory(filesystemState.parent.path);
           }
         };
 
         const entries = filesystemState?.entries || [];
         if (!entries.length) {
-          fsListEl.appendChild(emptyNote("No folders"));
+          fsListEl.appendChild(emptyNote(query ? "No matching folders" : "No folders"));
         } else {
           for (const entry of entries) {
             const button = directoryButton(entry, "fs-row", () => {
-              void loadFilesystem(entry.path);
+              openFilesystemDirectory(entry.path);
             });
             const icon = document.createElement("span");
             icon.className = "fs-row-icon";
@@ -4930,29 +5092,49 @@
         setFilesystemBusy(filesystemLoading);
       }
 
-      async function loadFilesystem(path = "") {
-        if (filesystemLoading || creatingSession) {
+      async function loadFilesystem(path = "", query = "") {
+        if (creatingSession) {
           return;
         }
+        const requestId = ++filesystemRequestSeq;
         setFilesystemBusy(true);
-        setNewSessionStatus("Loading folders…");
+        setNewSessionStatus(query ? "Searching folders…" : "Loading folders…");
         try {
-          const url = path ? `/api/filesystem?path=${encodeURIComponent(path)}` : "/api/filesystem";
+          const params = new URLSearchParams();
+          if (path) {
+            params.set("path", path);
+          }
+          if (query) {
+            params.set("query", query);
+          }
+          const url = params.size ? `/api/filesystem?${params}` : "/api/filesystem";
           const response = await apiFetch(url, { cache: "no-store" });
           if (!response.ok) {
             const message = await response.text();
             throw new Error(message || `HTTP ${response.status}`);
           }
-          filesystemState = await response.json();
-          setNewSessionStatus("");
+          const nextState = await response.json();
+          if (requestId !== filesystemRequestSeq) {
+            return;
+          }
+          filesystemState = nextState;
           renderFilesystemPicker();
-          newSessionStartEl.focus();
+          if (filesystemState.query) {
+            const count = filesystemState.entries?.length || 0;
+            setNewSessionStatus(filesystemState.search_truncated
+              ? `Showing first ${count} matches. Refine your search.`
+              : `${count} matching folder${count === 1 ? "" : "s"}`);
+          } else {
+            setNewSessionStatus("");
+          }
         } catch (error) {
-          if (error.message !== "HTTP 401") {
+          if (requestId === filesystemRequestSeq && error.message !== "HTTP 401") {
             setNewSessionStatus(`Folder load failed: ${error.message}`, true);
           }
         } finally {
-          setFilesystemBusy(false);
+          if (requestId === filesystemRequestSeq) {
+            setFilesystemBusy(false);
+          }
         }
       }
 
@@ -8714,6 +8896,15 @@
       });
       newSessionCloseEl.addEventListener("click", closeNewSessionPicker);
       newSessionStartEl.addEventListener("click", startNewSession);
+      fsSearchInputEl.addEventListener("input", scheduleFilesystemSearch);
+      fsSearchInputEl.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && fsSearchInputEl.value) {
+          event.preventDefault();
+          event.stopPropagation();
+          fsSearchInputEl.value = "";
+          scheduleFilesystemSearch();
+        }
+      });
       newSessionModalEl.addEventListener("click", (event) => {
         if (event.target === newSessionModalEl) {
           closeNewSessionPicker();
