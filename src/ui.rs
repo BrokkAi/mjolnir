@@ -16014,33 +16014,37 @@ mod tests {
     }
 
     #[test]
-    fn status_line_renders_below_the_chat_surface() {
-        let mut state = AppState::new();
-        state.active_models.primary = "gpt-status-line".to_string();
-        state.project_label = "~/code/mjolnir".to_string();
-        let mut transcript_scroll = TranscriptScrollState::default();
-        let backend = TestBackend::new(160, 20);
-        let mut terminal = Terminal::new(backend).expect("terminal");
+    fn status_line_renders_directly_above_usage_quota() {
+        for mode in [UiMode::FullscreenTui, UiMode::InlineChat] {
+            let mut state = AppState::new();
+            state.active_models.primary = "gpt-status-line".to_string();
+            state.active_models.primary_source = Some("claude-acp".to_string());
+            state.project_label = "~/code/mjolnir".to_string();
+            state.set_claude_usage(ClaudeUsageStatus::Unavailable(
+                "quota-row-marker".to_string(),
+            ));
+            let mut transcript_scroll = TranscriptScrollState::default();
+            let backend = TestBackend::new(160, 20);
+            let mut terminal = Terminal::new(backend).expect("terminal");
 
-        terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    &mut state,
-                    &mut transcript_scroll,
-                    UiMode::FullscreenTui,
-                )
-            })
-            .expect("draw");
+            terminal
+                .draw(|frame| draw(frame, &mut state, &mut transcript_scroll, mode))
+                .expect("draw");
 
-        let lines = buffer_lines(terminal.backend().buffer());
-        assert!(
-            lines
-                .last()
-                .is_some_and(|line| line.contains("gpt-status-line")),
-            "status line must be the terminal's last row:\n{}",
-            lines.join("\n")
-        );
+            let lines = buffer_lines(terminal.backend().buffer());
+            assert!(
+                lines[lines.len() - 2].contains("gpt-status-line"),
+                "{mode:?} status line must sit directly above quota:\n{}",
+                lines.join("\n")
+            );
+            assert!(
+                lines
+                    .last()
+                    .is_some_and(|line| line.contains("quota-row-marker")),
+                "{mode:?} quota must render below the status line:\n{}",
+                lines.join("\n")
+            );
+        }
     }
 
     #[test]
