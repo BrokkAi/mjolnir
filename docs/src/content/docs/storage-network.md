@@ -18,7 +18,7 @@ equivalents.
 | DeepSWE cache | Live model-ranking snapshot, refreshed on a time-to-live |
 | ACP probe cache | Adapter model/capability results, invalidated by age or binary change |
 | ACP registry cache | Public registry metadata used for installable agents |
-| Managed agents | Downloaded Kimi and ACP registry agents |
+| Managed agents | Downloaded ACP registry agents |
 | Voice cache | Speech-recognition model data downloaded on first dictation use |
 | Remote-control state | SQLite session/transcript data, login/cookie material, and certificates |
 | `.mjolnir/worktrees/` | Linked Git worktrees created inside a project |

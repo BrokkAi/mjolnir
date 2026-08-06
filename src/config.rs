@@ -18,7 +18,7 @@ pub const CONFIG_VERSION: u32 = 3;
 /// Version of the product-model explanation accepted by the user. This is
 /// intentionally independent from the storage schema version.
 pub const ONBOARDING_CONTENT_VERSION: u32 = 2;
-pub const DEFAULT_ACP_PRIORITY: [&str; 3] = ["codex-acp", "claude-acp", "kimi"];
+pub const DEFAULT_ACP_PRIORITY: [&str; 2] = ["codex-acp", "claude-acp"];
 /// Schema version this build can migrate forward from.
 const MIGRATABLE_VERSION: u32 = 2;
 
@@ -620,7 +620,7 @@ impl Config {
     }
 
     pub fn set_acp_server_policy(&mut self, id: &str, policy: AcpServerPolicy) -> bool {
-        if matches!(id, "codex-acp" | "claude-acp" | "kimi") {
+        if matches!(id, "codex-acp" | "claude-acp") {
             if policy == AcpServerPolicy::Auto {
                 self.acp.policies.remove(id);
             } else {
@@ -1307,10 +1307,9 @@ kimi = "disabled"
         assert_eq!(loaded.agent.acp_priority, vec!["codex-acp".to_string()]);
         assert_eq!(loaded.review.acp_priority, vec!["codex-acp".to_string()]);
         assert!(!loaded.acp.policies.contains_key("retired-acp"));
-        assert_eq!(
-            loaded.acp.policies.get("kimi"),
-            Some(&AcpServerPolicy::Disabled)
-        );
+        // Kimi Code was removed; its persisted policy is dropped like any
+        // other retired source.
+        assert!(!loaded.acp.policies.contains_key("kimi"));
         // The pinned model's provider has no built-in adapter left either.
         assert_eq!(loaded.agent.model, "auto");
         // Still-served pins are untouched.
@@ -1349,10 +1348,10 @@ kimi = "disabled"
         let mut cfg = Config::default();
         cfg.agent.acp_source = Some("codex-acp".into());
         cfg.review.acp_source = Some("claude-acp".into());
-        cfg.subagents.acp_source = Some("kimi".into());
-        cfg.agent.acp_priority = vec!["claude-acp".into(), "kimi".into()];
-        cfg.review.acp_priority = vec!["kimi".into(), "codex-acp".into()];
-        cfg.subagents.acp_priority = vec!["kimi".into(), "codex-acp".into()];
+        cfg.subagents.acp_source = Some("claude-acp".into());
+        cfg.agent.acp_priority = vec!["claude-acp".into(), "codex-acp".into()];
+        cfg.review.acp_priority = vec!["claude-acp".into(), "codex-acp".into()];
+        cfg.subagents.acp_priority = vec!["codex-acp".into(), "claude-acp".into()];
 
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");

@@ -153,9 +153,9 @@ during discovery. Launch still requires Node.js/npm, `npx`, and the
 PATH-visible `codex` CLI. Mjolnir uses that CLI for its Codex sign-in action as
 well.
 
-Claude, Kimi, and custom ACP servers are optional. Configure them after
+Claude and custom ACP servers are optional. Configure them after
 the Codex path works if you want alternative primary, subagent, or review
-routes. Mjolnir can install Kimi and supported binary agents from the ACP
+routes. Mjolnir can install supported binary agents from the ACP
 registry.
 
 Adapters must advertise ACP Streamable HTTP MCP support; Mjolnir uses that

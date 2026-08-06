@@ -21,7 +21,6 @@ qualifying adapter no model is launchable.
 | --- | --- | --- |
 | Codex | Existing OpenAI/Codex credentials | Runs the Codex ACP bridge through `npx`; sign-in actions require the official `codex` CLI |
 | Claude | Existing Anthropic/Claude credentials | Runs the Claude ACP bridge through `npx`; sign-in actions require the official `claude` CLI |
-| Kimi Code | Existing Kimi credentials or `/mjconfig` sign-in | Mjolnir can install the official binary from the ACP registry |
 
 Credential discovery checks supported local credential files and environment
 variables without logging secret values or launching the npm bridges. First
@@ -52,7 +51,7 @@ starting Mjolnir again to resolve models and reprobe every enabled adapter.
   current quality frontier, but can reuse the primary's model.
 - When several adapters offer the selected model, the primary, review, and
   subagent seats apply their independent ACP priority lists. All lists default
-  to Codex, Claude, then Kimi.
+  to Codex, then Claude.
 - Unranked custom models are selectable explicitly but do not participate in
   Auto or Ragnarok.
 

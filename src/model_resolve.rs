@@ -57,7 +57,6 @@ const SINGLE_VENDOR_MAP: &[(&str, &str)] = &[
     ("codex-acp", "openai"),
     ("gemini", "google"),
     ("qwen-code", "alibaba"),
-    ("kimi", "moonshotai"),
     ("glm-acp-agent", "zhipuai"),
     ("grok-build", "xai"),
     ("mistral-vibe", "mistralai"),

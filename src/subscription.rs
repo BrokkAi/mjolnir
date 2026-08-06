@@ -58,7 +58,7 @@ impl Subscriptions {
         match kind {
             AdapterKind::Claude => self.claude.as_ref(),
             AdapterKind::Codex => self.codex.as_ref(),
-            AdapterKind::Kimi | AdapterKind::Custom => None,
+            AdapterKind::Custom => None,
         }
     }
 
@@ -284,7 +284,7 @@ mod tests {
                 .map(|plan| plan.capacity),
             Some(20.0)
         );
-        assert!(detected.for_adapter(AdapterKind::Kimi).is_none());
+        assert!(detected.for_adapter(AdapterKind::Custom).is_none());
     }
 
     #[test]

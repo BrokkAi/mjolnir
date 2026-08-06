@@ -417,17 +417,10 @@ impl State {
         self.roster = None;
         self.inventory = crate::roster::discover_inventory(&self.editor.config);
         self.screen = Screen::Connections;
-        self.selected = if error.to_ascii_lowercase().contains("kimi") {
-            crate::auth::AuthVendor::ALL
-                .iter()
-                .position(|vendor| *vendor == crate::auth::AuthVendor::Kimi)
-                .unwrap_or(0)
-        } else {
-            crate::auth::AuthVendor::ALL
-                .iter()
-                .position(|vendor| !crate::auth::detect(*vendor).available())
-                .unwrap_or(0)
-        };
+        self.selected = crate::auth::AuthVendor::ALL
+            .iter()
+            .position(|vendor| !crate::auth::detect(*vendor).available())
+            .unwrap_or(0);
         self.scroll = 0;
         self.reveal_selection = true;
         self.notice = Some(format!(
@@ -542,7 +535,7 @@ pub async fn run(
                         state.notice = Some("Checking provider routes and role readiness…".to_string());
                         state.notice_tone = NoticeTone::Info;
                         terminal.draw(|frame| draw(frame, &mut state))?;
-                        match crate::roster::resolve_waiting_for_installs(&state.editor.config, cwd).await {
+                        match crate::roster::resolve(&state.editor.config, cwd).await {
                             Ok(roster) => state.resolution_succeeded(roster),
                             Err(error) => state.resolution_failed(format!("{error:#}")),
                         }
@@ -1327,7 +1320,7 @@ mod tests {
 
     fn roster() -> Roster {
         let primary = role("gpt-test", "codex-acp");
-        let worker = role("worker-test", "kimi");
+        let worker = role("worker-test", "opencode");
         Roster {
             primary: primary.clone(),
             review_supervisor: Some(primary.clone()),

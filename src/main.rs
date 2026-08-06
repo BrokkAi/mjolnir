@@ -21,7 +21,6 @@ mod headless;
 mod ink;
 mod install;
 mod keep_awake;
-mod kimi;
 mod labels;
 mod menu;
 mod model_resolve;
@@ -839,7 +838,7 @@ async fn run_resume(
     let mut resume_roster = if args.list {
         roster::resolve(&cfg, &cwd).await?
     } else {
-        resolve_roster_for_tui(&cfg, &cwd, false).await?
+        resolve_roster_for_tui(&cfg, &cwd).await?
     };
     let mut agent = selected_agent_for_role(&resume_roster.primary);
     if let Some(session_id) = args.session_id.as_deref()
@@ -1297,19 +1296,8 @@ fn apply_session_result_to_config(cfg: &mut Config, result: &RunSessionResult) {
     cfg.spinner = result.spinner_style;
 }
 
-async fn resolve_roster_for_tui(
-    cfg: &Config,
-    cwd: &Path,
-    wait_for_installs: bool,
-) -> Result<roster::Roster> {
-    with_startup_spinner(async {
-        if wait_for_installs {
-            roster::resolve_waiting_for_installs(cfg, cwd).await
-        } else {
-            roster::resolve(cfg, cwd).await
-        }
-    })
-    .await
+async fn resolve_roster_for_tui(cfg: &Config, cwd: &Path) -> Result<roster::Roster> {
+    with_startup_spinner(roster::resolve(cfg, cwd)).await
 }
 
 /// Resolve the roster for interactive startup without blocking on adapter
@@ -1395,18 +1383,12 @@ async fn run_app(
         resume_target.as_ref(),
         initial_agent.as_ref(),
     );
-    if auth::detect(auth::AuthVendor::Kimi).available()
-        && cfg.acp.policy("kimi") != config::AcpServerPolicy::Disabled
-        && !cfg.acp.servers.iter().any(|server| server.id == "kimi")
-    {
-        kimi::start_background_install();
-    }
     let mut roster_updates = None;
     let mut pending_probe_servers = Vec::new();
     let mut roster = if let Some(kind) = onboarding_kind {
         // Onboarding wants a fully settled catalog to preview, so first
         // startup and versioned education keep the blocking resolution.
-        let initial_resolution = resolve_roster_for_tui(&cfg, &cwd, false).await;
+        let initial_resolution = resolve_roster_for_tui(&cfg, &cwd).await;
         let Some((accepted_config, accepted_roster)) = run_startup_onboarding(
             kind,
             cfg,
@@ -1579,7 +1561,7 @@ async fn run_startup_onboarding(
             let next = *next;
             next.save(config_path)
                 .with_context(|| format!("save {}", config_path.display()))?;
-            let resolved = resolve_roster_for_tui(&next, cwd, false).await?;
+            let resolved = resolve_roster_for_tui(&next, cwd).await?;
             Ok(Some((next, resolved)))
         }
         onboarding::Outcome::Cancel => Ok(None),
@@ -3263,7 +3245,7 @@ mod tests {
         let primary = test_roster_agent("primary", "codex-acp");
         let duplicate = test_roster_agent("duplicate", "codex-acp");
         let alternate = test_roster_agent("alternate", "claude-acp");
-        let mut unranked = test_roster_agent("unranked", "kimi");
+        let mut unranked = test_roster_agent("unranked", "opencode");
         unranked.ranked = false;
         let roster = test_roster(
             primary.clone(),

@@ -972,7 +972,7 @@ pub struct AppState {
     /// Claude Code. Kept separate from the role/model label in the header.
     primary_acp_name: String,
     /// Registry `source_id` of the launched agent (e.g. `claude-acp`,
-    /// `opencode`, `custom:foo`, `kimi`). Distinct from `agent_label`,
+    /// `opencode`, `custom:foo`). Distinct from `agent_label`,
     /// which is a *display* string; this is the stable id the model-score
     /// resolver keys on. Empty until the launch site fills it in.
     pub agent_source_id: String,
@@ -6889,19 +6889,19 @@ mod tests {
 
         state.apply_event(UiEvent::RosterUpdate {
             choices: vec![crate::roster::ModelChoice {
-                model: "kimi-k2-7-code".to_string(),
+                model: "glm-5-2".to_string(),
                 pass_at_1: 0.5,
                 mean_cost_usd: 1.0,
                 available: true,
                 disabled_reason: None,
-                adapter: Some("kimi".to_string()),
+                adapter: Some("custom:bridge".to_string()),
                 ranked: true,
             }],
             inventory: crate::roster::AcpInventory::default(),
         });
 
         assert_eq!(state.model_choices.len(), 1);
-        assert_eq!(state.model_choices[0].model, "kimi-k2-7-code");
+        assert_eq!(state.model_choices[0].model, "glm-5-2");
         assert!(state.transcript.is_empty(), "catalog refreshes are silent");
     }
 
@@ -8238,7 +8238,7 @@ mod tests {
         assert_eq!(s.connection_state, ConnectionState::Launching);
 
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("kimi".into()),
+            agent_name: Some("opencode".into()),
             agent_version: Some("0.1".into()),
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -8331,7 +8331,7 @@ mod tests {
     fn prompt_failed_returns_to_ready_with_warning_status() {
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("kimi".into()),
+            agent_name: Some("opencode".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -8369,7 +8369,7 @@ mod tests {
         // before the user saw the failure.
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("kimi".into()),
+            agent_name: Some("opencode".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -8411,7 +8411,7 @@ mod tests {
         // what callers send verbatim with no spurious drop suffix.
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("kimi".into()),
+            agent_name: Some("opencode".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -8437,7 +8437,7 @@ mod tests {
     fn prompt_done_records_elapsed_and_token_usage() {
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("kimi".into()),
+            agent_name: Some("opencode".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -8738,7 +8738,7 @@ mod tests {
         // Ready, a stray Ctrl-C must not lie about the connection state.
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("kimi".into()),
+            agent_name: Some("opencode".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,
@@ -9810,7 +9810,7 @@ mod tests {
     fn autocomplete_advertises_fork_after_agent_capability() {
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("kimi".into()),
+            agent_name: Some("opencode".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: true,
@@ -9851,7 +9851,7 @@ mod tests {
     fn available_command_updates_keep_builtin_commands_first() {
         let mut s = AppState::new();
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("kimi".into()),
+            agent_name: Some("opencode".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: true,
@@ -10117,7 +10117,7 @@ mod tests {
         assert!(!s.is_streaming(), "Launching must not count as streaming");
         assert!(!s.is_busy(), "Launching must not count as busy");
         s.apply_event(UiEvent::Connected {
-            agent_name: Some("kimi".into()),
+            agent_name: Some("opencode".into()),
             agent_version: None,
             prompt_images_supported: false,
             session_fork_supported: false,

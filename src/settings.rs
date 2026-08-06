@@ -1753,7 +1753,7 @@ fn draw_acp_priority(
                 Style::default().ink(theme.muted),
             ),
             Line::styled(
-                "r resets to Codex → Claude → Kimi",
+                "r resets to Codex → Claude",
                 Style::default().ink(theme.muted),
             ),
             Line::raw(""),
@@ -2820,22 +2820,25 @@ mod tests {
         // An explicit policy keeps a built-in visible regardless of whether
         // this host actually has it installed.
         let mut config = Config::default();
-        config.set_acp_server_policy("kimi", AcpServerPolicy::Disabled);
+        config.set_acp_server_policy("claude-acp", AcpServerPolicy::Disabled);
         let mut editor = SettingsEditor::new(config, Vec::new(), None);
         editor.tab = SettingsTab::AcpServers;
         let server_index = editor
             .inventory
             .servers
             .iter()
-            .position(|server| server.id == "kimi")
-            .expect("kimi");
+            .position(|server| server.id == "claude-acp")
+            .expect("claude-acp");
         editor.selected = server_index + SERVER_ROW_OFFSET;
         editor.inventory.servers[server_index].detected = false;
         editor.inventory.servers[server_index].policy = AcpServerPolicy::Auto;
 
         // Exercise the transition without refreshing host-specific discovery.
         assert_eq!(editor.toggle_selected(), SettingsAction::Changed);
-        assert_eq!(editor.config.acp.policy("kimi"), AcpServerPolicy::Enabled);
+        assert_eq!(
+            editor.config.acp.policy("claude-acp"),
+            AcpServerPolicy::Enabled
+        );
     }
 
     #[test]
@@ -2871,10 +2874,10 @@ mod tests {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::AcpServers;
 
-        editor.selected = 1;
+        editor.selected = 0;
         assert_eq!(
             editor.handle_key(KeyCode::Enter),
-            SettingsAction::Authenticate(crate::auth::AuthVendor::Kimi)
+            SettingsAction::Authenticate(crate::auth::AuthVendor::OpenAi)
         );
 
         editor.selected = ADD_SERVER_INDEX;

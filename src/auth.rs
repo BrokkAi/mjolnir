@@ -10,23 +10,20 @@ use anyhow::{Context, Result, bail};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthVendor {
     OpenAi,
-    Kimi,
 }
 
 impl AuthVendor {
-    pub const ALL: [Self; 2] = [Self::OpenAi, Self::Kimi];
+    pub const ALL: [Self; 1] = [Self::OpenAi];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::OpenAi => "OpenAI / ChatGPT",
-            Self::Kimi => "Kimi",
         }
     }
 
     pub fn enables(self) -> &'static str {
         match self {
             Self::OpenAi => "Codex",
-            Self::Kimi => "Kimi Code",
         }
     }
 
@@ -34,7 +31,6 @@ impl AuthVendor {
     pub fn id(self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
-            Self::Kimi => "kimi",
         }
     }
 
@@ -85,14 +81,12 @@ impl CredentialSource {
 pub fn detect(vendor: AuthVendor) -> CredentialSource {
     match vendor {
         AuthVendor::OpenAi => detect_openai(),
-        AuthVendor::Kimi => detect_kimi(),
     }
 }
 
 pub fn executable(vendor: AuthVendor) -> Option<PathBuf> {
     let name = match vendor {
         AuthVendor::OpenAi => "codex",
-        AuthVendor::Kimi => "kimi",
     };
     find_on_path(name)
 }
@@ -100,7 +94,6 @@ pub fn executable(vendor: AuthVendor) -> Option<PathBuf> {
 pub fn install_hint(vendor: AuthVendor) -> &'static str {
     match vendor {
         AuthVendor::OpenAi => "npm install -g @openai/codex",
-        AuthVendor::Kimi => "install Kimi Code from the ACP registry",
     }
 }
 
@@ -133,23 +126,6 @@ fn detect_openai_with(
             "/tokens/access_token",
             "/tokens/refresh_token",
         ],
-    )
-}
-
-fn detect_kimi() -> CredentialSource {
-    let root = std::env::var_os("KIMI_CODE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".kimi-code")));
-    detect_kimi_with(nonempty_env("KIMI_API_KEY"), root)
-}
-
-fn detect_kimi_with(has_api_key: bool, root: Option<PathBuf>) -> CredentialSource {
-    if has_api_key {
-        return CredentialSource::Environment("KIMI_API_KEY");
-    }
-    detect_file(
-        root.map(|root| root.join("credentials").join("kimi-code.json")),
-        &["/access_token", "/refresh_token"],
     )
 }
 
@@ -228,43 +204,27 @@ fn is_executable_file(path: &Path) -> bool {
 /// browser). OpenAI always uses the device-auth flow there: `codex login`
 /// without it wants to open a local browser, which a headless server can't.
 pub async fn headless_login_invocation(vendor: AuthVendor) -> Result<(PathBuf, Vec<String>)> {
-    let command = match vendor {
-        AuthVendor::Kimi => match executable(vendor) {
-            Some(command) => command,
-            None => crate::kimi::wait_until_ready().await?,
-        },
-        _ => executable(vendor).with_context(|| {
-            format!(
-                "{} CLI is not installed; run `{}`",
-                vendor.label(),
-                install_hint(vendor)
-            )
-        })?,
-    };
+    let command = executable(vendor).with_context(|| {
+        format!(
+            "{} CLI is not installed; run `{}`",
+            vendor.label(),
+            install_hint(vendor)
+        )
+    })?;
     let args = match vendor {
         AuthVendor::OpenAi => vec!["login".to_string(), "--device-auth".to_string()],
-        AuthVendor::Kimi => vec!["login".to_string()],
     };
     Ok((command, args))
 }
 
 pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
-    let command = match vendor {
-        AuthVendor::Kimi => match executable(vendor) {
-            Some(command) => command,
-            None => {
-                println!("Preparing the official Kimi Code login helper...");
-                crate::kimi::wait_until_ready().await?
-            }
-        },
-        _ => executable(vendor).with_context(|| {
-            format!(
-                "{} CLI is not installed; run `{}`",
-                vendor.label(),
-                install_hint(vendor)
-            )
-        })?,
-    };
+    let command = executable(vendor).with_context(|| {
+        format!(
+            "{} CLI is not installed; run `{}`",
+            vendor.label(),
+            install_hint(vendor)
+        )
+    })?;
     let args = match vendor {
         AuthVendor::OpenAi => {
             let options = [
@@ -296,7 +256,6 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
                 vec!["login"]
             }
         }
-        AuthVendor::Kimi => vec!["login"],
     };
     println!(
         "Signing in to {}. Mjolnir will return when it finishes.\n",
@@ -335,18 +294,12 @@ mod tests {
 
     #[test]
     fn vendors_report_labels_capabilities_and_install_hints() {
-        assert_eq!(AuthVendor::ALL, [AuthVendor::OpenAi, AuthVendor::Kimi]);
+        assert_eq!(AuthVendor::ALL, [AuthVendor::OpenAi]);
         assert_eq!(AuthVendor::OpenAi.label(), "OpenAI / ChatGPT");
         assert_eq!(AuthVendor::OpenAi.enables(), "Codex");
         assert_eq!(
             install_hint(AuthVendor::OpenAi),
             "npm install -g @openai/codex"
-        );
-        assert_eq!(AuthVendor::Kimi.label(), "Kimi");
-        assert_eq!(AuthVendor::Kimi.enables(), "Kimi Code");
-        assert_eq!(
-            install_hint(AuthVendor::Kimi),
-            "install Kimi Code from the ACP registry"
         );
     }
 
@@ -425,26 +378,6 @@ mod tests {
             detect_openai_with(false, false, None),
             CredentialSource::Missing
         );
-    }
-
-    #[test]
-    fn kimi_detection_prefers_environment_then_falls_back_to_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let credentials = root.join("credentials");
-        std::fs::create_dir(&credentials).unwrap();
-        let path = credentials.join("kimi-code.json");
-        std::fs::write(&path, r#"{"access_token":"access"}"#).unwrap();
-
-        assert_eq!(
-            detect_kimi_with(true, Some(root.clone())),
-            CredentialSource::Environment("KIMI_API_KEY")
-        );
-        assert_eq!(
-            detect_kimi_with(false, Some(root)),
-            CredentialSource::File(path)
-        );
-        assert_eq!(detect_kimi_with(false, None), CredentialSource::Missing);
     }
 
     #[test]

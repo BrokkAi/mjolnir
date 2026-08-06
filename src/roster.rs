@@ -21,7 +21,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 pub enum AdapterKind {
     Codex,
     Claude,
-    Kimi,
     Custom,
 }
 
@@ -30,7 +29,6 @@ impl AdapterKind {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
-            Self::Kimi => "Kimi Code",
             Self::Custom => "Custom",
         }
     }
@@ -39,7 +37,6 @@ impl AdapterKind {
         match source_id {
             "codex-acp" => Some(Self::Codex),
             "claude-acp" => Some(Self::Claude),
-            "kimi" => Some(Self::Kimi),
             _ => None,
         }
     }
@@ -74,7 +71,6 @@ pub fn configure_permissions(
         (AdapterKind::Claude, PermissionPreset::Manual) => ("mode", "default", None),
         (AdapterKind::Claude, PermissionPreset::Auto) => ("mode", "auto", Some("default")),
         (AdapterKind::Claude, PermissionPreset::Yolo) => ("mode", "bypassPermissions", None),
-        (AdapterKind::Kimi, _) => return None,
         (AdapterKind::Custom, PermissionPreset::Manual) => ("permission_mode", "default", None),
         (AdapterKind::Custom, PermissionPreset::Auto) => {
             ("permission_mode", "auto", Some("default"))
@@ -264,8 +260,6 @@ pub struct ModelChoice {
 pub struct Availability {
     pub codex_credentials: bool,
     pub claude_status: ClaudeAuthStatus,
-    pub kimi_credentials: bool,
-    pub kimi: Option<PathBuf>,
     /// Subscription tier behind each vendor-native account, which decides
     /// which provider `auto` routes the primary seat through.
     pub subscriptions: Subscriptions,
@@ -276,8 +270,6 @@ impl Availability {
         Self {
             codex_credentials: codex_credentials_available(),
             claude_status: claude_auth_status(),
-            kimi_credentials: kimi_credentials_available(),
-            kimi: crate::kimi::detect().path,
             subscriptions: Subscriptions::detect(),
         }
     }
@@ -288,8 +280,6 @@ impl Availability {
             AdapterKind::Claude if !self.claude_status.logged_in() => {
                 Some(self.claude_status.unavailable_reason())
             }
-            AdapterKind::Kimi if !self.kimi_credentials => Some("Kimi credentials not found"),
-            AdapterKind::Kimi if self.kimi.is_none() => Some("Kimi Code is not installed"),
             _ => None,
         }
     }
@@ -366,10 +356,6 @@ fn claude_auth_status() -> ClaudeAuthStatus {
     }
 }
 
-fn kimi_credentials_available() -> bool {
-    crate::auth::detect(crate::auth::AuthVendor::Kimi).available()
-}
-
 fn codex_detection() -> Option<String> {
     for name in ["CODEX_API_KEY", "OPENAI_API_KEY"] {
         if nonempty_env(&[name]) {
@@ -403,7 +389,6 @@ fn adapter_kind(model: &str) -> Option<AdapterKind> {
     match deepswe::model_provider(model) {
         "openai" => Some(AdapterKind::Codex),
         "anthropic" => Some(AdapterKind::Claude),
-        "moonshotai" => Some(AdapterKind::Kimi),
         _ => None,
     }
 }
@@ -448,7 +433,6 @@ fn adapter_accepts_model(kind: AdapterKind, model: &str) -> bool {
     match kind {
         AdapterKind::Codex => deepswe::model_provider(model) == "openai",
         AdapterKind::Claude => deepswe::model_provider(model) == "anthropic",
-        AdapterKind::Kimi => deepswe::model_provider(model) == "moonshotai",
         AdapterKind::Custom => true,
     }
 }
@@ -475,23 +459,12 @@ fn launch_for(kind: AdapterKind) -> AdapterLaunch {
             ],
             env: HashMap::new(),
         },
-        AdapterKind::Kimi => {
-            let detection = crate::kimi::detect();
-            AdapterLaunch {
-                kind,
-                source_id: "kimi".to_string(),
-                command: detection.path.unwrap_or_else(|| PathBuf::from("kimi")),
-                args: detection.args,
-                env: detection.env,
-            }
-        }
         AdapterKind::Custom => unreachable!("custom launches come from configuration"),
     }
 }
 
 pub fn discover_inventory(config: &Config) -> AcpInventory {
     let availability = Availability::detect();
-    let kimi = crate::kimi::detect();
     let detections = [
         (
             AdapterKind::Codex,
@@ -505,12 +478,6 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
                 .logged_in()
                 .then(|| "authenticated via `claude auth status`".to_string()),
             availability.claude_status.unavailable_reason().to_string(),
-        ),
-        (
-            AdapterKind::Kimi,
-            (availability.kimi_credentials && availability.kimi.is_some())
-                .then(|| kimi.evidence.clone()),
-            kimi.evidence.clone(),
         ),
     ];
     let mut servers = detections
@@ -530,7 +497,7 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
                 launch,
                 model_count: 0,
                 error: None,
-                installing: kind == AdapterKind::Kimi && kimi.installing,
+                installing: false,
                 origin: None,
                 session_config: Vec::new(),
                 subscription: availability
@@ -574,12 +541,6 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
             subscription: None,
         }
     }));
-    if let Some(server) = servers.iter_mut().find(|server| server.id == "kimi") {
-        server.error = kimi.error;
-        if let Some(path) = availability.kimi {
-            server.launch.command = path;
-        }
-    }
     servers.retain(inventory_server_is_visible);
     AcpInventory { servers }
 }
@@ -882,23 +843,21 @@ fn credentialed_provider_capabilities(
     launch: &AdapterLaunch,
     rows: &[Row],
 ) -> Option<probe::AdapterCapabilities> {
-    matches!(
-        launch.kind,
-        AdapterKind::Codex | AdapterKind::Claude | AdapterKind::Kimi
-    )
-    .then(|| probe::AdapterCapabilities {
-        http_mcp: true,
-        models: rows
-            .iter()
-            .filter(|row| adapter_accepts_model(launch.kind, &row.model))
-            .map(|row| probe::ModelOption {
-                value: row.model.clone(),
-                name: row.model.clone(),
-                description: None,
-            })
-            .collect(),
-        session_config: Vec::new(),
-        session_config_known: false,
+    matches!(launch.kind, AdapterKind::Codex | AdapterKind::Claude).then(|| {
+        probe::AdapterCapabilities {
+            http_mcp: true,
+            models: rows
+                .iter()
+                .filter(|row| adapter_accepts_model(launch.kind, &row.model))
+                .map(|row| probe::ModelOption {
+                    value: row.model.clone(),
+                    name: row.model.clone(),
+                    description: None,
+                })
+                .collect(),
+            session_config: Vec::new(),
+            session_config_known: false,
+        }
     })
 }
 
@@ -1118,16 +1077,11 @@ fn unavailable_reason(
                     availability.claude_status.logged_in()
                         || config.acp.policy("claude-acp") == AcpServerPolicy::Enabled
                 }
-                AdapterKind::Kimi => {
-                    (availability.kimi_credentials && availability.kimi.is_some())
-                        || config.acp.policy("kimi") == AcpServerPolicy::Enabled
-                }
                 AdapterKind::Custom => false,
             };
             let native_enabled = match native {
                 AdapterKind::Codex => config.acp.policy("codex-acp") != AcpServerPolicy::Disabled,
                 AdapterKind::Claude => config.acp.policy("claude-acp") != AcpServerPolicy::Disabled,
-                AdapterKind::Kimi => config.acp.policy("kimi") != AcpServerPolicy::Disabled,
                 AdapterKind::Custom => true,
             };
             if !native_enabled {
@@ -1148,18 +1102,6 @@ fn unavailable_reason(
 }
 
 pub async fn resolve(config: &Config, cwd: &Path) -> Result<Roster> {
-    resolve_inner(config, cwd).await
-}
-
-pub async fn resolve_waiting_for_installs(config: &Config, cwd: &Path) -> Result<Roster> {
-    if config.acp.policy("kimi") != AcpServerPolicy::Disabled
-        && kimi_credentials_available()
-        && crate::kimi::detect().path.is_none()
-    {
-        crate::kimi::wait_until_ready()
-            .await
-            .context("install managed Kimi Code")?;
-    }
     resolve_inner(config, cwd).await
 }
 
@@ -1656,9 +1598,6 @@ mod tests {
         let claude = configure_permissions(AdapterKind::Claude, PermissionPreset::Manual, &mut env)
             .expect("Claude preset");
         assert_eq!(claude.value, "default");
-
-        let kimi = configure_permissions(AdapterKind::Kimi, PermissionPreset::Yolo, &mut env);
-        assert_eq!(kimi, None);
     }
 
     #[test]
@@ -1862,7 +1801,6 @@ mod tests {
             role("gpt-5-6-sol", 0.70),
             role("gpt-5-5", 0.65),
             role("claude-fable-5", 0.64),
-            role("kimi-k2-7-code", 0.60),
         ];
 
         assert_eq!(
@@ -1917,12 +1855,11 @@ mod tests {
         config.review.acp_source = Some("codex-acp".to_string());
         let gpt = role("gpt-5-6-sol", 0.70);
         let claude = role("claude-fable-5", 0.64);
-        let kimi = role("kimi-k2-7-code", 0.60);
         let mut roster = Roster {
             primary: gpt.clone(),
             review_supervisor: Some(claude.clone()),
             subagent_default: None,
-            available: vec![gpt, claude.clone(), kimi],
+            available: vec![gpt, claude.clone()],
             choices: Vec::new(),
             warnings: Vec::new(),
             inventory: AcpInventory::default(),
@@ -1944,12 +1881,11 @@ mod tests {
         config.review.model = "claude-fable-5".to_string();
         let gpt = role("gpt-5-6-sol", 0.70);
         let claude = role("claude-fable-5", 0.64);
-        let kimi = role("kimi-k2-7-code", 0.60);
         let mut roster = Roster {
             primary: gpt.clone(),
             review_supervisor: Some(claude.clone()),
             subagent_default: None,
-            available: vec![gpt, claude.clone(), kimi],
+            available: vec![gpt, claude.clone()],
             choices: Vec::new(),
             warnings: Vec::new(),
             inventory: AcpInventory::default(),
@@ -1999,7 +1935,7 @@ mod tests {
     fn provider_routes_are_model_first() {
         assert_eq!(adapter_kind("gpt-5-6-sol"), Some(AdapterKind::Codex));
         assert_eq!(adapter_kind("claude-sonnet-5"), Some(AdapterKind::Claude));
-        assert_eq!(adapter_kind("kimi-k2-7-code"), Some(AdapterKind::Kimi));
+        assert_eq!(adapter_kind("kimi-k2-7-code"), None);
         assert_eq!(adapter_kind("gemini-3-5-flash"), None);
         assert_eq!(adapter_kind("glm-5-2"), None);
     }
@@ -2009,7 +1945,6 @@ mod tests {
         let rows = vec![
             role_at("gpt-5-6-sol", 0.7, 1.0).model,
             role_at("claude-sonnet-5", 0.6, 1.0).model,
-            role_at("kimi-k2-7-code", 0.5, 1.0).model,
             Row {
                 model: "gemini-3-5-flash".to_string(),
                 reasoning_effort: Some("high".to_string()),
@@ -2031,7 +1966,7 @@ mod tests {
                 .iter()
                 .map(|row| row.model.as_str())
                 .collect::<Vec<_>>(),
-            ["gpt-5-6-sol", "claude-sonnet-5", "kimi-k2-7-code"]
+            ["gpt-5-6-sol", "claude-sonnet-5"]
         );
     }
 
@@ -2040,7 +1975,6 @@ mod tests {
         let rows = vec![
             role_at("gpt-5-6-sol", 0.7, 1.0).model,
             role_at("claude-sonnet-5", 0.6, 1.0).model,
-            role_at("kimi-k2-7-code", 0.5, 1.0).model,
         ];
 
         let codex = credentialed_provider_capabilities(&launch_for(AdapterKind::Codex), &rows)
@@ -2076,7 +2010,6 @@ mod tests {
     fn adapter_display_names_match_the_primary_acp_products() {
         assert_eq!(AdapterKind::Codex.display_name(), "Codex");
         assert_eq!(AdapterKind::Claude.display_name(), "Claude Code");
-        assert_eq!(AdapterKind::Kimi.display_name(), "Kimi Code");
         assert_eq!(AdapterKind::Custom.display_name(), "Custom");
     }
 
@@ -2127,7 +2060,7 @@ mod tests {
         });
         let mut inventory = discover_inventory(&config);
         for server in &mut inventory.servers {
-            if matches!(server.id.as_str(), "claude-acp" | "kimi") {
+            if server.id == "claude-acp" {
                 server.detected = true;
                 server.selected = true;
             }
@@ -2144,15 +2077,15 @@ mod tests {
     #[test]
     fn explicit_policy_selects_a_builtin_without_detection() {
         let mut config = Config::default();
-        config.set_acp_server_policy("kimi", AcpServerPolicy::Enabled);
+        config.set_acp_server_policy("claude-acp", AcpServerPolicy::Enabled);
         let inventory = discover_inventory(&config);
-        let kimi = inventory
+        let claude = inventory
             .servers
             .iter()
-            .find(|server| server.id == "kimi")
-            .expect("kimi");
-        assert!(kimi.selected);
-        assert_eq!(kimi.policy, AcpServerPolicy::Enabled);
+            .find(|server| server.id == "claude-acp")
+            .expect("claude-acp");
+        assert!(claude.selected);
+        assert_eq!(claude.policy, AcpServerPolicy::Enabled);
     }
 
     #[test]
@@ -2184,7 +2117,7 @@ mod tests {
     #[test]
     fn auto_misses_are_inventory_state_not_probe_errors() {
         let mut config = Config::default();
-        for id in ["codex-acp", "claude-acp", "kimi"] {
+        for id in ["codex-acp", "claude-acp"] {
             config.set_acp_server_policy(id, AcpServerPolicy::Disabled);
         }
         let inventory = discover_inventory(&config);
@@ -2201,7 +2134,12 @@ mod tests {
         let rows = vec![
             role_at("gpt-5-5", 0.6, 5.0).model,
             role_at("claude-opus-4-8", 0.5, 4.0).model,
-            role_at("kimi-k2-7-code", 0.1, 9.0).model,
+            Row {
+                model: "glm-5-2".to_string(),
+                reasoning_effort: Some("high".to_string()),
+                pass_at_1: 0.1,
+                mean_cost_usd: 9.0,
+            },
         ];
         let custom = custom_launch("company");
         let discovery = resolve_probes(
@@ -2210,7 +2148,7 @@ mod tests {
                 (
                     0,
                     custom.clone(),
-                    capabilities(true, &["gpt-5-5", "kimi-k2-7-code"]),
+                    capabilities(true, &["gpt-5-5", "glm-5-2"]),
                 ),
                 (
                     1,
@@ -2237,7 +2175,7 @@ mod tests {
         assert_eq!(route("gpt-5-5"), "custom:company");
         assert_eq!(route("claude-opus-4-8"), "claude-acp");
         // Only the custom server advertised this one, so it wins by default.
-        assert_eq!(route("kimi-k2-7-code"), "custom:company");
+        assert_eq!(route("glm-5-2"), "custom:company");
     }
 
     #[test]
@@ -2264,8 +2202,6 @@ mod tests {
         let availability = Availability {
             codex_credentials: true,
             claude_status: ClaudeAuthStatus::NotLoggedIn,
-            kimi_credentials: false,
-            kimi: None,
             subscriptions: Subscriptions::default(),
         };
         let roster = assemble_roster(
@@ -2370,20 +2306,15 @@ mod tests {
         let availability = Availability {
             codex_credentials: false,
             claude_status: ClaudeAuthStatus::NotLoggedIn,
-            kimi_credentials: false,
-            kimi: None,
             subscriptions: Subscriptions::default(),
         };
         assert_eq!(
             availability.missing_reason("gpt-5-6-sol"),
             Some("Codex credentials not found")
         );
-        assert_eq!(
-            availability.missing_reason("kimi-k2-7-code"),
-            Some("Kimi credentials not found")
-        );
-        // No built-in adapter serves this provider at all, so there is no
+        // No built-in adapter serves these providers at all, so there is no
         // per-adapter reason to report.
+        assert_eq!(availability.missing_reason("kimi-k2-7-code"), None);
         assert_eq!(availability.missing_reason("glm-5-2"), None);
     }
 
@@ -2398,8 +2329,6 @@ mod tests {
         let availability = Availability {
             codex_credentials: false,
             claude_status: ClaudeAuthStatus::NotLoggedIn,
-            kimi_credentials: false,
-            kimi: None,
             subscriptions: Subscriptions::default(),
         };
         let error = explicit("Agent", "gpt-5-6-sol", &rows, &[], &[])
@@ -2478,8 +2407,6 @@ mod tests {
         let availability = Availability {
             codex_credentials: false,
             claude_status: ClaudeAuthStatus::NotLoggedIn,
-            kimi_credentials: false,
-            kimi: None,
             subscriptions: Subscriptions::default(),
         };
 

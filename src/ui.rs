@@ -16307,7 +16307,7 @@ mod tests {
     #[test]
     fn inline_chat_replaces_content_with_elicitation_view() {
         let mut state = AppState::new();
-        state.agent_label = "kimi".to_string();
+        state.agent_label = "opencode".to_string();
         state.record_user_prompt("hello".to_string());
         state.apply_event(UiEvent::ElicitationRequest(
             single_select_elicitation_prompt(),
@@ -16324,7 +16324,7 @@ mod tests {
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("setup request"), "rendered:\n{rendered}");
         assert!(
-            !rendered.contains("agent kimi"),
+            !rendered.contains("agent opencode"),
             "elicitation view must replace the chat header; rendered:\n{rendered}"
         );
     }
@@ -18539,7 +18539,7 @@ mod tests {
             subagent: "gpt-5.5".to_string(),
             primary_source: Some("claude-acp".to_string()),
             review_source: Some("codex-acp".to_string()),
-            subagent_source: Some("kimi".to_string()),
+            subagent_source: Some("opencode".to_string()),
         };
         state.input = "/agents".to_string();
         state.input_cursor = 2;
@@ -18561,7 +18561,7 @@ mod tests {
             state.transcript.last(),
             Some(Entry::System(text))
                 if text
-                    == "Active models\nprimary    claude-opus via claude-acp\nreview     gpt-5.6 via codex-acp\nsubagents  gpt-5.5 via kimi\n\nUsage\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
+                    == "Active models\nprimary    claude-opus via claude-acp\nreview     gpt-5.6 via codex-acp\nsubagents  gpt-5.5 via opencode\n\nUsage\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
         ));
     }
 
@@ -22930,7 +22930,7 @@ mod tests {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
         let mut state = AppState::new();
-        state.agent_label = "kimi".to_string();
+        state.agent_label = "opencode".to_string();
         state.record_user_prompt("hello".to_string());
         state.apply_event(UiEvent::PermissionRequest(pending.prompt));
         let backend = TestBackend::new(100, INLINE_CHAT_HEIGHT);
@@ -22953,7 +22953,7 @@ mod tests {
         );
         assert!(rendered.contains("Allow once"), "rendered:\n{rendered}");
         assert!(
-            !rendered.contains("agent kimi"),
+            !rendered.contains("agent opencode"),
             "permission view must replace the chat header; rendered:\n{rendered}"
         );
         assert!(
@@ -24934,7 +24934,7 @@ mod tests {
     #[test]
     fn usage_quota_label_skips_primary_seat_without_a_quota_source() {
         let mut state = AppState::new();
-        state.active_models.primary_source = Some("kimi".to_string());
+        state.active_models.primary_source = Some("opencode".to_string());
         state.active_models.subagent_source = Some("codex-acp".to_string());
         state.set_codex_usage(crate::codex_usage::CodexUsageStatus::Unavailable(
             "codex unavailable".to_string(),

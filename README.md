@@ -23,8 +23,8 @@ environment around it:
 - each finished subagent's report, activity log, and diff are pushed back into
   the primary session as a new user message — nothing polls.
 
-Mjolnir is Codex-first, not Codex-only. You can add Claude, Kimi, or a
-custom Agent Client Protocol (ACP) server as an alternative primary or as a
+Mjolnir is Codex-first, not Codex-only. You can add Claude or a custom
+Agent Client Protocol (ACP) server as an alternative primary or as a
 specialist subagent or reviewer. The terminal, permissions, sessions, tools,
 and remote workflow stay consistent across those routes.
 
@@ -41,7 +41,7 @@ and remote workflow stay consistent across those routes.
 - **Integrated adversarial review:** challenge workspace changes with a
   separate review supervisor and targeted specialist lanes before a delegated
   turn completes.
-- **Optional agent routes:** add Claude, Kimi, or a custom ACP server
+- **Optional agent routes:** add Claude or a custom ACP server
   without replacing the Codex-first workflow.
 
 Mjolnir itself, its remote-control server, transcripts, and workspace tools run
@@ -53,7 +53,7 @@ terms and data boundaries of your Codex account.
 The recommended path needs an authenticated, PATH-visible Codex CLI plus
 Node.js/npm for the Codex ACP bridge. Provider use may incur cost.
 
-Other agents are optional. Mjolnir can also use existing Claude or Kimi
+Other agents are optional. Mjolnir can also use existing Claude
 credentials and install supported binary ACP agents. Read
 [Start with Codex](https://mjolnir.brokk.ai/codex/),
 [installation](https://mjolnir.brokk.ai/install/), and the

@@ -9562,7 +9562,7 @@ mod tests {
                         "codex-acp": { "config:reasoning_effort": "low" }
                     },
                     "priority": {
-                        "review": { "source": "codex-acp", "order": ["codex-acp", "kimi"] }
+                        "review": { "source": "codex-acp", "order": ["codex-acp", "claude-acp"] }
                     },
                     "add_custom_server": { "name": "my-agent", "command": "npx -y my-agent --acp" }
                 })),
@@ -9609,7 +9609,7 @@ mod tests {
         // A thought-level default also updates the seat's reasoning effort.
         assert_eq!(saved.subagents.reasoning_effort.as_deref(), Some("low"));
         assert_eq!(saved.review.acp_source.as_deref(), Some("codex-acp"));
-        assert_eq!(saved.review.acp_priority, vec!["codex-acp", "kimi"]);
+        assert_eq!(saved.review.acp_priority, vec!["codex-acp", "claude-acp"]);
         let custom = saved
             .acp
             .servers
@@ -10767,7 +10767,7 @@ mod tests {
             "last_update": "2026-06-03T10:00:00Z",
             "total_messages": 0,
             "project": "mjolnir",
-            "agent": "kimi",
+            "agent": "opencode",
         });
         let session: SessionRecord = serde_json::from_value(legacy).expect("legacy record");
         assert!(session.subagents.is_empty());
@@ -12005,7 +12005,7 @@ mod tests {
             total_messages: 4,
             project: "mjolnir".to_string(),
             worktree: Some("bold-fox".to_string()),
-            agent: "kimi".to_string(),
+            agent: "opencode".to_string(),
             transcript: vec![
                 TranscriptEntry {
                     kind: "user".to_string(),
@@ -12135,7 +12135,7 @@ mod tests {
             "last_update": "2026-06-03T10:00:20Z",
             "total_messages": 1,
             "project": "mjolnir",
-            "agent": "kimi"
+            "agent": "opencode"
         }"#;
         let record: SessionRecord = serde_json::from_str(json).expect("deserialize");
         assert_eq!(record.worktree, None);
@@ -14285,7 +14285,7 @@ mod tests {
             total_messages: 1,
             project: "mjolnir".to_string(),
             worktree: None,
-            agent: "kimi".to_string(),
+            agent: "opencode".to_string(),
             transcript: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,

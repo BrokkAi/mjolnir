@@ -75,20 +75,20 @@ retains automatic model selection without letting another installed adapter
 take that seat. In `/mjconfig`, use Left/Right on the ACP Priority tab to change
 or clear a seat's source constraint.
 
-ACP priority lists default to `codex-acp`, `claude-acp`, then `kimi`,
+ACP priority lists default to `codex-acp`, then `claude-acp`,
 preserving the automatic behavior of earlier configurations. When a source is
 not constrained, reorder or reset fallback preference independently from the
 ACP Priority tab, or configure stable source IDs directly:
 
 ```toml
 [agent]
-acp_priority = ["codex-acp", "claude-acp", "kimi"]
+acp_priority = ["codex-acp", "claude-acp"]
 
 [review]
-acp_priority = ["claude-acp", "codex-acp", "kimi"]
+acp_priority = ["claude-acp", "codex-acp"]
 
 [subagents]
-acp_priority = ["kimi", "codex-acp", "claude-acp"]
+acp_priority = ["codex-acp", "claude-acp"]
 ```
 
 The ACP Servers tab still controls eligibility. Priority only decides which

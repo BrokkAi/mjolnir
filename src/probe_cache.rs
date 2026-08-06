@@ -200,8 +200,8 @@ mod tests {
         let command = dir.path().join("agent");
         std::fs::write(&command, b"binary").expect("command");
 
-        store(&cache, "kimi", &command, &capabilities("m1"));
-        assert!(load(&cache, "kimi", &command, Duration::ZERO).is_none());
+        store(&cache, "opencode", &command, &capabilities("m1"));
+        assert!(load(&cache, "opencode", &command, Duration::ZERO).is_none());
     }
 
     #[test]
@@ -233,9 +233,9 @@ mod tests {
         let command = dir.path().join("agent");
         std::fs::write(&command, b"binary").expect("command");
 
-        store(&cache, "kimi", &command, &capabilities("m1"));
+        store(&cache, "opencode", &command, &capabilities("m1"));
         std::fs::write(&command, b"binary-upgraded").expect("replace command");
-        assert!(load(&cache, "kimi", &command, CACHE_TTL).is_none());
+        assert!(load(&cache, "opencode", &command, CACHE_TTL).is_none());
     }
 
     #[test]
@@ -256,11 +256,11 @@ mod tests {
         std::fs::write(&command, b"binary").expect("command");
 
         store(&cache, "codex-acp", &command, &capabilities("gpt"));
-        store(&cache, "kimi", &command, &capabilities("kimi"));
+        store(&cache, "opencode", &command, &capabilities("opencode"));
 
         assert!(clear(&cache).expect("clear populated cache"));
         assert!(load(&cache, "codex-acp", &command, CACHE_TTL).is_none());
-        assert!(load(&cache, "kimi", &command, CACHE_TTL).is_none());
+        assert!(load(&cache, "opencode", &command, CACHE_TTL).is_none());
         assert!(!clear(&cache).expect("clear missing cache"));
     }
 }

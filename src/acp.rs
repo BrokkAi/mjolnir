@@ -162,7 +162,7 @@ fn native_read_only_policy(
     let policy = match crate::roster::AdapterKind::from_source_id(&role.adapter_source_id) {
         Some(crate::roster::AdapterKind::Codex) => NativeReadOnlyPolicy::Codex,
         Some(crate::roster::AdapterKind::Claude) => NativeReadOnlyPolicy::Claude,
-        Some(crate::roster::AdapterKind::Kimi | crate::roster::AdapterKind::Custom) | None => {
+        Some(crate::roster::AdapterKind::Custom) | None => {
             anyhow::bail!(
                 "native read-only enforcement is unavailable for adapter '{}'; review lane disabled",
                 role.adapter_source_id
