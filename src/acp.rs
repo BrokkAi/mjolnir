@@ -678,14 +678,29 @@ impl AgentStderrTail {
     }
 
     async fn rendered_for_error(&self) -> Option<String> {
-        let changed = self.inner.changed.notified();
-        if self.is_empty() {
-            let _ = tokio::time::timeout(Duration::from_millis(25), changed).await;
+        const MAX_DRAIN: Duration = Duration::from_millis(25);
+        const QUIET_WINDOW: Duration = Duration::from_millis(5);
+
+        // stderr and the ACP response travel over different pipes. Wait for
+        // the reader to go quiet so a burst split across several reads is not
+        // truncated, while keeping error reporting firmly bounded.
+        let deadline = tokio::time::Instant::now() + MAX_DRAIN;
+        loop {
+            let changed = self.inner.changed.notified();
+            let has_output = !self.is_empty();
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let wait = if has_output {
+                QUIET_WINDOW.min(remaining)
+            } else {
+                remaining
+            };
+            if tokio::time::timeout(wait, changed).await.is_err() {
+                break;
+            }
         }
-        // stderr and the ACP response travel over different pipes. Give the
-        // reader a brief quiet window to collect trailing chunks that were
-        // written before the launch error response.
-        tokio::time::sleep(Duration::from_millis(5)).await;
         self.rendered()
     }
 
@@ -11667,6 +11682,29 @@ mod tests {
         assert!(!rendered.contains('\u{1b}'));
         assert!(rendered.contains("[redacted sensitive stderr line]"));
         assert!(!rendered.contains("topsecret"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_stderr_tail_waits_for_a_bounded_quiet_window() {
+        let tail = AgentStderrTail::default();
+        tail.push(b"first chunk\n");
+        let render_tail = tail.clone();
+        let render = tokio::spawn(async move { render_tail.rendered_for_error().await });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_millis(4)).await;
+        tail.push(b"second chunk\n");
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(4)).await;
+        tail.push(b"final chunk\n");
+        tokio::task::yield_now().await;
+
+        assert!(!render.is_finished());
+        tokio::time::advance(Duration::from_millis(5)).await;
+        let rendered = render.await.expect("join stderr rendering").expect("tail");
+        assert!(rendered.contains("first chunk"), "{rendered}");
+        assert!(rendered.contains("second chunk"), "{rendered}");
+        assert!(rendered.contains("final chunk"), "{rendered}");
     }
 
     /// Build a portable subprocess that writes actionable and sensitive
