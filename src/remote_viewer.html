@@ -551,6 +551,7 @@
         display: flex;
         flex-direction: column;
         min-height: 0;
+        min-width: 0;
         border-right: 1px solid var(--line);
         background: var(--surface-chrome);
 
@@ -564,9 +565,11 @@
         display: flex;
         align-items: center;
         gap: 12px;
+        min-width: 0;
 
         & h1 {
           flex: 1;
+          min-width: 0;
           margin: 0;
           display: flex;
           align-items: center;
@@ -1330,6 +1333,10 @@
         flex: 0 0 auto;
         font-size: 16px;
         letter-spacing: 0;
+      }
+
+      .mobile-chat-actions {
+        display: none;
       }
 
       .chat-heading {
@@ -3137,7 +3144,7 @@
 
       @media (max-width: 800px) {
         .layout {
-          grid-template-columns: 1fr;
+          grid-template-columns: minmax(0, 1fr);
         }
 
         .layout:not(.show-chat) .main {
@@ -3202,8 +3209,25 @@
         }
 
         .chat-header {
+          flex-wrap: wrap;
+          gap: 8px;
           padding-left: 12px;
           padding-right: calc(12px + var(--theme-toggle-reserve) + env(safe-area-inset-right));
+        }
+
+        .mobile-chat-actions {
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          flex: 0 0 auto;
+        }
+
+        .connection-badge,
+        .archive-badge,
+        .side-badge,
+        .approval-badge,
+        .working-badge {
+          order: 1;
         }
 
         .ragnarok-panel {
@@ -3360,6 +3384,10 @@
           <span id="side-badge" class="side-badge" hidden>side</span>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
           <span id="working-badge" class="working-badge" hidden>working</span>
+          <div class="mobile-chat-actions">
+            <button id="mobile-new-session-button" class="primary sidebar-new-button" type="button">New</button>
+            <button id="mobile-logout-button" class="ghost-danger" type="button">Log out</button>
+          </div>
           <button id="workspace-diff-button" class="icon-button" type="button" aria-label="Show uncommitted changes">±</button>
           <button id="settings-button" class="icon-button" type="button" aria-label="Open viewer settings">⚙</button>
         </header>
@@ -3574,6 +3602,8 @@
       const authErrorEl = $("auth-error");
       const logoutButtonEl = $("logout-button");
       const newSessionButtonEl = $("new-session-button");
+      const mobileLogoutButtonEl = $("mobile-logout-button");
+      const mobileNewSessionButtonEl = $("mobile-new-session-button");
       const settingsButtonEl = $("settings-button");
       const workspaceDiffButtonEl = $("workspace-diff-button");
       const workspaceDiffModalEl = $("workspace-diff-modal");
@@ -4110,8 +4140,14 @@
             },
           ),
         );
-        row.appendChild(mjDetail(role.description));
-        row.appendChild(mjDetail(`saved: ${role.saved_detail} · active: ${role.active_detail}`));
+        if (value === role.model && role.model_warning) {
+          const warning = mjDetail(role.model_warning);
+          warning.classList.add("is-error");
+          row.appendChild(warning);
+        }
+        if (role.active_model && value !== role.active_model) {
+          row.appendChild(mjDetail(`active: ${role.active_detail}`));
+        }
         return row;
       }
 
@@ -4120,8 +4156,6 @@
       function mjSeatOptionRows(group, editsField, seat) {
         const rows = [];
         if (!group) {
-          const label = seat === "primary" ? "agent" : (seat === "review" ? "reviewer" : "subagent");
-          rows.push(mjNote(`No selectable ACP session options were reported for the ${label} route.`));
           return rows;
         }
         rows.push(mjSectionTitle(`${group.server_label} session options`));
@@ -4158,12 +4192,13 @@
             const activeLabel = live
               ? (live.choices || []).find((choice) => choice.value === live.current_value)?.label
                 || live.current_value
-              : "next session only";
-            row.appendChild(mjDetail(`saved default · active: ${activeLabel}`));
-          } else if (seat === "review") {
-            row.appendChild(mjDetail("saved default · applies to review sessions started later"));
-          } else {
-            row.appendChild(mjDetail("saved default · already-running subagents are unchanged"));
+              : null;
+            const selectedLabel = option.choices.find(
+              (choice) => choice.value === value,
+            )?.label || value;
+            if (activeLabel && activeLabel !== selectedLabel) {
+              row.appendChild(mjDetail(`active: ${activeLabel}`));
+            }
           }
           rows.push(row);
         }
@@ -4172,9 +4207,6 @@
 
       function renderMjAgents() {
         const panel = mjcfg.snapshot.agents;
-        mjconfigBodyEl.appendChild(
-          mjNote("Primary model and ACP session defaults. Compatible option changes update the selected live session on save; model changes apply to new sessions."),
-        );
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[0], "primary_model"));
         for (const row of mjSeatOptionRows(mjcfg.snapshot.primary_options, "primary_session_defaults", "primary")) {
           mjconfigBodyEl.appendChild(row);
@@ -4183,9 +4215,6 @@
 
       function renderMjReviewer() {
         const panel = mjcfg.snapshot.agents;
-        mjconfigBodyEl.appendChild(
-          mjNote("Reviewer model and ACP session defaults. Changes apply to review sessions started after save."),
-        );
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[1], "review_model"));
         for (const row of mjSeatOptionRows(mjcfg.snapshot.review_options, "review_session_defaults", "review")) {
           mjconfigBodyEl.appendChild(row);
@@ -4224,9 +4253,6 @@
 
       function renderMjSubagents() {
         const panel = mjcfg.snapshot.agents;
-        mjconfigBodyEl.appendChild(
-          mjNote("Subagent defaults apply to newly delegated create_subagent sessions."),
-        );
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[2], "subagents_model"));
         for (const row of mjSeatOptionRows(mjcfg.snapshot.subagent_options, "subagent_session_defaults", "subagents")) {
           mjconfigBodyEl.appendChild(row);
@@ -8939,6 +8965,8 @@
       authFormEl.addEventListener("submit", submitAuth);
       logoutButtonEl.addEventListener("click", logout);
       newSessionButtonEl.addEventListener("click", openNewSessionPicker);
+      mobileLogoutButtonEl.addEventListener("click", logout);
+      mobileNewSessionButtonEl.addEventListener("click", openNewSessionPicker);
       historyToggleEl.addEventListener("click", () => {
         void toggleHistory();
       });

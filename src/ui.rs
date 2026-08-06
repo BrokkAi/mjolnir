@@ -19040,11 +19040,8 @@ mod tests {
         assert!(rendered.contains("ACP Priority"), "rendered:\n{rendered}");
         assert!(rendered.contains("ACP Servers"), "rendered:\n{rendered}");
         assert!(rendered.contains("Appearance"), "rendered:\n{rendered}");
-        assert!(
-            rendered.contains("Saved primary defaults")
-                || rendered.contains("No primary ACP route is resolved"),
-            "rendered:\n{rendered}"
-        );
+        assert!(rendered.contains("Primary model"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Saved primary defaults"));
     }
 
     #[test]

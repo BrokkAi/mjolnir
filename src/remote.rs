@@ -5571,6 +5571,8 @@ struct MjRoleEntry {
     description: String,
     model: String,
     saved_detail: String,
+    model_warning: Option<String>,
+    active_model: Option<String>,
     active_detail: String,
     choices: Vec<MjModelChoiceEntry>,
 }
@@ -5977,6 +5979,8 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                 description: (*description).to_string(),
                 model: model.clone(),
                 saved_detail: editor.staged_model_detail(model),
+                model_warning: editor.staged_model_warning(model),
+                active_model: editor.active_model(index).map(str::to_string),
                 active_detail: editor.active_model_detail(index),
                 choices: editor
                     .model_choices(index)
@@ -9900,6 +9904,11 @@ mod tests {
     async fn mjconfig_apply_persists_edits_and_round_trips() {
         let runtime = test_mjconfig_runtime();
         let config_path = runtime.config_path.clone();
+        *runtime.active_models.lock().expect("active models lock") = Some(config::ModelsConfig {
+            primary: "active-primary-model".to_string(),
+            primary_source: Some("codex-acp".to_string()),
+            ..config::ModelsConfig::default()
+        });
         let token = "mjconfig-token";
         let app = mjconfig_test_router(runtime, token);
 
@@ -9936,6 +9945,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let snapshot = json_body(response).await;
         assert_eq!(snapshot["agents"]["roles"][0]["model"], "gpt-5-6-terra");
+        assert_eq!(
+            snapshot["agents"]["roles"][0]["active_model"],
+            "active-primary-model"
+        );
+        assert_eq!(
+            snapshot["agents"]["roles"][0]["model_warning"],
+            "not reported this session"
+        );
         assert_eq!(snapshot["agents"]["discrete_review"], false);
         assert_eq!(snapshot["agents"]["review_tier"], "extended");
         assert_eq!(snapshot["agents"]["review_tiers"][0]["tier"], "quick");
@@ -10261,6 +10278,27 @@ mod tests {
     }
 
     #[test]
+    fn embedded_viewer_keeps_session_actions_in_wrapping_mobile_header() {
+        let viewer = include_str!("remote_viewer.html").replace("\r\n", "\n");
+        assert!(viewer.contains("id=\"mobile-new-session-button\""));
+        assert!(viewer.contains("id=\"mobile-logout-button\""));
+        let phone_layout = viewer
+            .split_once("@media (max-width: 800px) {")
+            .expect("phone media query")
+            .1
+            .split_once("@media (prefers-reduced-motion: reduce)")
+            .expect("end of phone media query")
+            .0;
+        assert!(phone_layout.contains("grid-template-columns: minmax(0, 1fr)"));
+        assert!(phone_layout.contains(".chat-header {\n          flex-wrap: wrap;"));
+        assert!(phone_layout.contains(".mobile-chat-actions {\n          display: flex;"));
+        assert!(viewer.contains(
+            "mobileNewSessionButtonEl.addEventListener(\"click\", openNewSessionPicker)"
+        ));
+        assert!(viewer.contains("mobileLogoutButtonEl.addEventListener(\"click\", logout)"));
+    }
+
+    #[test]
     fn embedded_viewer_contains_elicitation_controls() {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("renderElicitationControls"));
@@ -10293,8 +10331,12 @@ mod tests {
         assert!(viewer.contains("snapshot.review_options"));
         assert!(viewer.contains("snapshot.subagent_options"));
         assert!(viewer.contains("review_session_defaults"));
-        assert!(viewer.contains("saved default · active: ${activeLabel}"));
+        assert!(viewer.contains("active: ${activeLabel}"));
+        assert!(viewer.contains("value !== role.active_model"));
+        assert!(viewer.contains("role.model_warning"));
         assert!(viewer.contains("is unavailable on ${group.server_id}"));
+        assert!(!viewer.contains("saved default ·"));
+        assert!(!viewer.contains("already-running subagents are unchanged"));
         assert!(viewer.contains("edits.primary_session_defaults[activeSource]"));
         assert!(!viewer.contains("Object.values(edits.primary_session_defaults)"));
         assert!(viewer.contains("openMjConfig(\"agents\")"));

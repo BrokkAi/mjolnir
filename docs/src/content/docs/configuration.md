@@ -163,11 +163,11 @@ top level of the config file.
 The **Agent**, **Reviewer**, and **Subagents** tabs list the selectable session
 options advertised by that role's selected ACP source. Each role stores its
 defaults separately. Compatible primary changes are also sent to the running
-primary session when `/mjconfig` is saved; the UI reports the active value
-separately from the saved default. Reviewer and subagent changes apply only to
-sessions started later, never to ones that are already running. A saved value
-that a newly selected adapter no longer advertises stays intact and is shown as
-unavailable until you select a compatible value.
+primary session when `/mjconfig` is saved; the UI calls out the active value
+when it differs from the selected default. Reviewer and subagent changes apply
+only to sessions started later, never to ones that are already running. A saved
+value that a newly selected adapter no longer advertises stays intact and is
+shown as unavailable until you select a compatible value.
 
 The same role-scoped defaults can be written directly in TOML:
 
