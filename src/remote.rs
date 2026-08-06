@@ -1864,6 +1864,21 @@ impl ServerSessionManager {
         &self,
         config_path: &Path,
     ) -> std::result::Result<Option<roster::Roster>, String> {
+        self.refresh_for_config_with(config_path, |config, cwd| async move {
+            roster::resolve(&config, &cwd).await
+        })
+        .await
+    }
+
+    async fn refresh_for_config_with<F, Fut>(
+        &self,
+        config_path: &Path,
+        resolve: F,
+    ) -> std::result::Result<Option<roster::Roster>, String>
+    where
+        F: FnOnce(config::Config, PathBuf) -> Fut,
+        Fut: std::future::Future<Output = Result<roster::Roster>>,
+    {
         let Some(resolve_cwd) = self.resolve_cwd.clone() else {
             return Ok(None);
         };
@@ -1882,7 +1897,7 @@ impl ServerSessionManager {
             }
             return Ok(None);
         };
-        match roster::resolve(&config, &resolve_cwd).await {
+        match resolve(config, resolve_cwd).await {
             Ok(roster) => {
                 let mut launch = self.launch.write().expect("server launch lock");
                 launch.agent = selected_agent_for_roster(&roster);
@@ -6777,11 +6792,10 @@ async fn mjconfig_login_start(
     let task_output = Arc::clone(&output);
     let task_result = Arc::clone(&result);
     let discovery = Arc::clone(&state.mjconfig);
+    let session_manager = Arc::clone(&state.session_manager);
     let task = tokio::spawn(async move {
         let outcome = mjconfig_run_login(vendor, task_output).await;
-        if outcome.is_ok() {
-            discovery.request_discovery();
-        }
+        let outcome = complete_mjconfig_login(outcome, &discovery, &session_manager);
         *task_result.lock().expect("login result") =
             Some(outcome.map_err(|error| format!("{error:#}")));
     });
@@ -6792,6 +6806,18 @@ async fn mjconfig_login_start(
         abort: task.abort_handle(),
     });
     Ok(Json(mjconfig_snapshot_response(&state, None)))
+}
+
+fn complete_mjconfig_login(
+    outcome: Result<String>,
+    discovery: &MjConfigRuntime,
+    session_manager: &ServerSessionManager,
+) -> Result<String> {
+    if outcome.is_ok() {
+        discovery.request_discovery();
+        session_manager.request_roster_refresh();
+    }
+    outcome
 }
 
 /// Run a vendor login with output captured for the browser. Mirrors
@@ -10038,13 +10064,75 @@ mod tests {
         runtime.finish_discovery(generation);
     }
 
-    #[test]
-    fn model_discovery_forces_the_next_server_session_to_reresolve() {
-        let manager = test_session_manager();
-        assert!(!manager.roster_refresh_requested.load(Ordering::Acquire));
+    #[tokio::test]
+    async fn model_discovery_forces_unchanged_config_through_session_refresh() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        config::Config::default()
+            .save(&config_path)
+            .expect("save config");
+        let manager = ServerSessionManager::new_roster(
+            test_roster("stale-model"),
+            config_file_hash(&config_path),
+            dir.path().to_path_buf(),
+            Vec::new(),
+            Vec::new(),
+            crate::acp::DEFAULT_FS_TEXT_BYTES,
+        );
+
+        let unchanged = manager
+            .refresh_for_config_with(&config_path, |_, _| async {
+                anyhow::bail!("unchanged config must not resolve")
+            })
+            .await;
+        assert!(matches!(unchanged, Ok(None)));
 
         manager.request_roster_refresh();
+        let refreshed = manager
+            .refresh_for_config_with(&config_path, |_, cwd| async move {
+                assert_eq!(cwd, dir.path());
+                Ok(test_roster("fresh-model"))
+            })
+            .await
+            .expect("requested refresh succeeds")
+            .expect("requested refresh publishes roster");
 
+        assert_eq!(refreshed.primary.model.model, "fresh-model");
+        assert_eq!(
+            manager
+                .launch
+                .read()
+                .expect("server launch lock")
+                .roster
+                .as_ref()
+                .expect("fresh roster")
+                .primary
+                .model
+                .model,
+            "fresh-model"
+        );
+        assert!(!manager.roster_refresh_requested.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn completed_login_immediately_requests_session_and_panel_refresh() {
+        let runtime = test_mjconfig_runtime();
+        let manager = test_session_manager();
+
+        let outcome = complete_mjconfig_login(
+            Ok("Signed in".to_string()),
+            runtime.as_ref(),
+            manager.as_ref(),
+        );
+
+        assert_eq!(outcome.expect("successful login"), "Signed in");
+        assert!(
+            runtime
+                .discovery
+                .lock()
+                .expect("discovery lock")
+                .refresh_requested
+        );
         assert!(manager.roster_refresh_requested.load(Ordering::Acquire));
     }
 
