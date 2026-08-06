@@ -57,6 +57,8 @@ installed version.
 - Enter sends a prompt or accepts the selected action.
 - Up/Down navigate autocomplete and permission choices.
 - PageUp/PageDown scroll the transcript.
+- Ctrl+Tab switches between the four Codex and Claude coder/reviewer teams.
+- Shift+Tab changes the current agent's model and effort.
 - F10 toggles help.
 - Esc dismisses autocomplete, clears input, or cancels a permission prompt.
 - Ctrl-C cancels the active turn together with every running subagent; on an

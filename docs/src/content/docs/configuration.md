@@ -1,12 +1,13 @@
 ---
 title: Configuration
-description: Configure the primary agent, subagents, ACP servers, review, and appearance.
+description: Choose a Codex and Claude team, then configure its models, ACP servers, review, and appearance.
 ---
 
-Open `/mjconfig` to edit settings from the TUI. Model and ACP-server changes
-apply to the next session. The former `/models` command has been removed; use
-the Agent tab in `/mjconfig` instead. When credentials or adapter capabilities
-change, run `mj models refresh` before starting Mjolnir again.
+Open `/mjconfig` to edit settings from the TUI. The **Team** tab chooses who
+codes and who reviews; model and ACP-server changes are available in the other
+tabs. Team and adapter changes apply to a new session. When credentials or
+adapter capabilities change, run `mj models refresh` before starting Mjolnir
+again.
 
 The config schema is versioned. The current schema is `version = 3`; a
 `version = 2` file is migrated in place on load. Any other version starts from
@@ -71,16 +72,25 @@ Explicit model IDs can be selected in `/mjconfig`; availability is checked
 when the next session starts. A `max_parallel` above 16 is a configuration
 error, not a silently clamped value.
 
-Onboarding offers Codex, Claude, Codex code with Claude review, and Claude code
-with Codex review. Each preset keeps model selection automatic while pinning
-the primary and subagent seats to its coding source and the reviewer seat to
-its review source. In `/mjconfig`, use Left/Right on the ACP Priority tab to
-change or clear a seat's source constraint.
+Onboarding, the **Team** tab in `/mjconfig`, and **Ctrl+Tab** during a session
+all offer the same four configurations:
+
+| Team | Coder and subagents | Reviewer |
+| --- | --- | --- |
+| **Codex** | Codex | Codex |
+| **Claude** | Claude | Claude |
+| **Codex coder + Claude reviewer** | Codex | Claude |
+| **Claude coder + Codex reviewer** | Claude | Codex |
+
+Choosing a team keeps all three model selections on Auto, pins the primary and
+subagent seats to the coder, pins the review seat to the reviewer, enables
+discrete review and subagent failover, and enables the required built-in ACP
+routes. After saving from **Ctrl+Tab**, start the offered new session to use the
+new team immediately.
 
 ACP priority lists default to `codex-acp`, then `claude-acp`,
 preserving the automatic behavior of earlier configurations. When a source is
-not constrained, reorder or reset fallback preference independently from the
-ACP Priority tab, or configure stable source IDs directly:
+not constrained, advanced deployments can configure stable source IDs directly:
 
 ```toml
 [agent]
@@ -93,8 +103,8 @@ acp_priority = ["claude-acp", "codex-acp"]
 acp_priority = ["codex-acp", "claude-acp"]
 ```
 
-The ACP Servers tab still controls eligibility. Priority only decides which
-enabled adapter supplies a selected model when more than one advertises it.
+The ACP Servers tab controls eligibility. Priority only decides which enabled
+adapter supplies a selected model when more than one advertises it.
 Sources absent from a saved list are appended in discovery order, so adding a
 custom adapter does not unexpectedly move it ahead of an explicit preference.
 
@@ -167,10 +177,10 @@ The **Agent**, **Reviewer**, and **Subagents** tabs list the selectable session
 options advertised by that role's selected ACP source. Each role stores its
 defaults separately. Compatible primary changes are also sent to the running
 primary session when `/mjconfig` is saved; the UI calls out the active value
-when it differs from the selected default. Reviewer and subagent changes apply
-only to sessions started later, never to ones that are already running. A saved
-value that a newly selected adapter no longer advertises stays intact and is
-shown as unavailable until you select a compatible value.
+when it differs from the selected default. Team, reviewer, and subagent changes
+apply only to sessions started later, never to ones that are already running. A
+saved value that a newly selected adapter no longer advertises stays intact and
+is shown as unavailable until you select a compatible value.
 
 The same role-scoped defaults can be written directly in TOML:
 

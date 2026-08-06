@@ -1,16 +1,16 @@
 ---
 title: Architecture and boundaries
-description: What Mjolnir owns around Codex, how subagents fit, and where provider boundaries remain.
+description: What Mjolnir owns around Codex and Claude, how subagents fit, and where provider boundaries remain.
 ---
 
-Mjolnir (`mj`) is a native, self-hosted interface and control plane for Codex.
-It owns the terminal, remote server, local session state, and coordination
-around the agent while the Codex ACP bridge owns the provider-specific model
-session.
+Mjolnir (`mj`) is a native, self-hosted interface and control plane for Codex
+and Claude. It owns the terminal, remote server, local session state, and
+coordination around the agent while its ACP bridge owns the provider-specific
+model session.
 
-The same architecture can host other Agent Client Protocol (ACP) servers, but
-Codex is the recommended primary experience. Other agents are optional routes
-for specialists, review, comparison, or replacement.
+Choose Codex or Claude as both coder and reviewer, or split those roles between
+them. The same architecture can host other Agent Client Protocol (ACP) servers
+as advanced routes for specialists, comparison, or replacement.
 
 ## The boundary
 
@@ -52,9 +52,9 @@ independently from launchable routes; subagents can be turned off entirely.
 
 Mjolnir is not a model provider, a hosted model service, or a guarantee that an
 agent will make a correct change. Its remote-control plane is self-hosted;
-Codex requests still use OpenAI. Provider cost, capability, and data handling
-still apply. Start with [Start with Codex](/codex/) and [Install and
-run](/install/), then use the checked
+provider requests still use OpenAI or Anthropic. Provider cost, capability,
+and data handling still apply. Start with [Install and run](/install/), then
+use the checked
 [10-minute Codex evaluation](/evaluate/) in a disposable repository.
 
 ## Interfaces

@@ -2,20 +2,28 @@
 
 <p align="center">
   <a href="https://mjolnir.brokk.ai/">
-    <img src="docs/public/og.png" alt="Mjolnir — the self-hosted power frontend for Codex" width="720">
+    <img src="docs/public/og.png" alt="Mjolnir — choose Codex or Claude to code and review" width="720">
   </a>
 </p>
 
-Mjolnir (`mj`) is the self-hosted power frontend for **Codex**. It wraps your
-existing Codex account in self-hosted remote control, a worktree-first workflow,
+Mjolnir (`mj`) is the self-hosted power frontend for **Codex and Claude**. It
+wraps either agent in self-hosted remote control, a worktree-first workflow,
 cross-platform voice input, and integrated adversarial review.
 
-Codex remains in charge of the turn while Mjolnir provides the operating
-environment around it:
+Choose one of four teams during onboarding, from `/mjconfig`, or with
+**Ctrl+Tab** in a session:
 
-- Codex owns every user turn — planning, delegating, implementing, and
+- **Codex**
+- **Claude**
+- **Codex coder + Claude reviewer**
+- **Claude coder + Codex reviewer**
+
+The selected coder remains in charge of the turn while Mjolnir provides the
+operating environment around it:
+
+- the coder owns every user turn — planning, delegating, implementing, and
   answering;
-- Codex can launch background subagents (up to 16 in parallel, all
+- the coder can launch background subagents (up to 16 in parallel, all
   write-capable, each in a fresh session) while Mjolnir tracks them;
 - stable workflow progress rows summarize delegation and review phases,
   aggregate actor outcomes, and elapsed time; `/subagents` opens retained
@@ -23,14 +31,13 @@ environment around it:
 - each finished subagent's report, activity log, and diff are pushed back into
   the primary session as a new user message — nothing polls.
 
-Mjolnir is Codex-first, not Codex-only. You can add Claude or a custom
-Agent Client Protocol (ACP) server as an alternative primary or as a
-specialist subagent or reviewer. The terminal, permissions, sessions, tools,
-and remote workflow stay consistent across those routes.
+Each team pins the primary agent and subagents to its coder and the independent
+review seat to its reviewer. The terminal, permissions, sessions, tools, and
+remote workflow stay consistent when you switch teams.
 
-![Mjolnir inline Codex session showing streaming agent output and tool activity](docs/readme-images/default-ui.png)
+![Mjolnir coding session showing streaming agent output and tool activity](docs/readme-images/default-ui.png)
 
-## What Mjolnir adds to Codex
+## What Mjolnir adds to Codex and Claude
 
 - **Self-hosted remote control:** keep the workspace and control plane on your
   machine and drive the session from another browser or device.
@@ -41,17 +48,17 @@ and remote workflow stay consistent across those routes.
 - **Integrated adversarial review:** challenge workspace changes with a
   separate review supervisor and targeted specialist lanes before a delegated
   turn completes.
-- **Optional agent routes:** add Claude or a custom ACP server
-  without replacing the Codex-first workflow.
+- **Four ready-made teams:** run Codex or Claude alone, or assign one to code
+  while the other independently reviews.
 
 Mjolnir itself, its remote-control server, transcripts, and workspace tools run
-on infrastructure you control. Codex model requests still use OpenAI under the
-terms and data boundaries of your Codex account.
+on infrastructure you control. Model requests still use the selected provider
+under its terms and data boundaries.
 
 ## Requirements
 
-The recommended path needs an authenticated, PATH-visible Codex CLI plus
-Node.js/npm for the Codex ACP bridge. Provider use may incur cost.
+The recommended path needs an authenticated, PATH-visible Codex or Claude CLI
+plus Node.js/npm for its ACP bridge. Provider use may incur cost.
 
 Other agents are optional. Mjolnir can also use existing Claude credentials
 or a custom ACP server configured directly in `config.toml`. Read
@@ -112,11 +119,11 @@ Then open a repository and run:
 mj
 ```
 
-First launch opens Mjolnir's configuration screen. Confirm the Codex account
-and route, keep the primary model on Auto, and start the session. Return later
-with `/mjconfig`. Model and adapter changes apply to the next session. If Codex
-credentials or capabilities change, run `mj models refresh` before starting
-Mjolnir again.
+First launch asks which agent codes and which reviews. Choose one of the four
+teams and start the session. Press **Ctrl+Tab** to switch teams later, or open
+the **Team** tab in `/mjconfig`. Team, model, and adapter changes apply to a new
+session. If provider credentials or capabilities change, run
+`mj models refresh` before starting Mjolnir again.
 
 ## Try it
 

@@ -15,7 +15,7 @@ and operating environment around that session.
 | Worktree-first workflow | Start Codex in a linked Git worktree so agent changes stay separate from your current checkout and easy to inspect |
 | Cross-platform voice | Add locally transcribed prompts with Ctrl-R on supported desktop platforms |
 | Integrated adversarial review | Hold a delegated, workspace-changing turn while a separate supervisor challenges the diff and vets targeted specialist findings |
-| Optional agent routes | Add Claude or a custom ACP server without replacing the Codex-first workflow |
+| First-class coding teams | Run Codex, Claude, Codex coder + Claude reviewer, or Claude coder + Codex reviewer |
 
 Mjolnir, its transcript storage, remote server, and Mjolnir-hosted tools run on
 infrastructure you control. Codex model requests still go to OpenAI under the
@@ -37,7 +37,7 @@ Then [install Mjolnir](/install/), open a repository, and run:
 mj
 ```
 
-First launch opens Mjolnir's onboarding. Choose **Use Codex (recommended)** to
+First launch opens Mjolnir's onboarding. Choose **Codex** to
 keep primary, subagent, and review model selection on Auto while constraining
 all three seats to the Codex adapter. Then confirm:
 
@@ -48,7 +48,9 @@ all three seats to the Codex adapter. Then confirm:
 4. **Discrete review** is on if you want delegated workspace changes reviewed
    before the turn is released.
 
-Return to the same settings later with `/mjconfig`.
+Press **Ctrl+Tab** during a session to switch among all four teams, or return to
+the same choice on the **Team** tab in `/mjconfig`. Start a new session after
+switching so the new coder and reviewer routes apply together.
 
 Use `/agents` after launch to record the model and adapter that actually bound
 to each seat. The current session keeps those choices until `/new` or `/clear`.

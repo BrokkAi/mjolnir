@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Config, ONBOARDING_CONTENT_VERSION};
+use crate::config::{Config, ONBOARDING_CONTENT_VERSION, TeamPreset};
 use crate::ink::{Ink, InkStyle};
 use crate::palette::TerminalTheme;
 use crate::roster::{AcpInventory, Roster};
@@ -49,44 +49,9 @@ enum Action {
     Cancel,
     Resolve,
     Authenticate(crate::auth::AuthVendor),
-    UsePreset(SetupPreset),
+    UsePreset(TeamPreset),
     Skip,
     Finish,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SetupPreset {
-    Codex,
-    Claude,
-    CodexWithClaudeReview,
-    ClaudeWithCodexReview,
-}
-
-impl SetupPreset {
-    const ALL: [Self; 4] = [
-        Self::Codex,
-        Self::Claude,
-        Self::CodexWithClaudeReview,
-        Self::ClaudeWithCodexReview,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Codex => "Codex",
-            Self::Claude => "Claude",
-            Self::CodexWithClaudeReview => "Codex code + Claude review",
-            Self::ClaudeWithCodexReview => "Claude code + Codex review",
-        }
-    }
-
-    fn sources(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Codex => ("codex-acp", "codex-acp"),
-            Self::Claude => ("claude-acp", "claude-acp"),
-            Self::CodexWithClaudeReview => ("codex-acp", "claude-acp"),
-            Self::ClaudeWithCodexReview => ("claude-acp", "codex-acp"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,21 +146,8 @@ impl State {
         &self.editor.config
     }
 
-    fn apply_setup_preset(&mut self, preset: SetupPreset) {
-        let (code_source, review_source) = preset.sources();
-        self.editor.config.agent.model = "auto".to_string();
-        self.editor.config.agent.acp_source = Some(code_source.to_string());
-        self.editor.config.agent.discrete_review = true;
-        self.editor.config.review.model = "auto".to_string();
-        self.editor.config.review.acp_source = Some(review_source.to_string());
-        self.editor.config.subagents.model = "auto".to_string();
-        self.editor.config.subagents.acp_source = Some(code_source.to_string());
-        self.editor.config.subagents.auto_failover = true;
-        for source in [code_source, review_source] {
-            self.editor
-                .config
-                .set_acp_server_policy(source, crate::config::AcpServerPolicy::Enabled);
-        }
+    fn apply_setup_preset(&mut self, preset: TeamPreset) {
+        preset.apply(&mut self.editor.config);
     }
 
     fn visited_config(&self) -> Config {
@@ -224,19 +176,19 @@ impl State {
     }
 
     fn connection_item_count(&self) -> usize {
-        crate::auth::AuthVendor::ALL.len() + SetupPreset::ALL.len() + 1
+        crate::auth::AuthVendor::ALL.len() + TeamPreset::ALL.len() + 1
     }
 
-    fn preset_index(preset: SetupPreset) -> usize {
+    fn preset_index(preset: TeamPreset) -> usize {
         crate::auth::AuthVendor::ALL.len()
-            + SetupPreset::ALL
+            + TeamPreset::ALL
                 .iter()
                 .position(|candidate| *candidate == preset)
                 .unwrap_or(0)
     }
 
     fn customize_index() -> usize {
-        crate::auth::AuthVendor::ALL.len() + SetupPreset::ALL.len()
+        crate::auth::AuthVendor::ALL.len() + TeamPreset::ALL.len()
     }
 
     fn default_connection_selection() -> usize {
@@ -247,7 +199,7 @@ impl State {
 
     fn connection_selection_for_openai(available: bool) -> usize {
         if available {
-            Self::preset_index(SetupPreset::Codex)
+            Self::preset_index(TeamPreset::Codex)
         } else {
             crate::auth::AuthVendor::ALL
                 .iter()
@@ -354,7 +306,7 @@ impl State {
                     Action::Authenticate(crate::auth::AuthVendor::ALL[self.selected])
                 }
                 KeyCode::Enter if self.selected < Self::customize_index() => {
-                    let preset = SetupPreset::ALL[self
+                    let preset = TeamPreset::ALL[self
                         .selected
                         .saturating_sub(crate::auth::AuthVendor::ALL.len())];
                     Action::UsePreset(preset)
@@ -363,7 +315,7 @@ impl State {
                     self.open_customize(Screen::Connections);
                     Action::None
                 }
-                KeyCode::Right | KeyCode::Char('n') => Action::UsePreset(SetupPreset::Codex),
+                KeyCode::Right | KeyCode::Char('n') => Action::UsePreset(TeamPreset::Codex),
                 KeyCode::Char('r' | 'R') => Action::Resolve,
                 KeyCode::Char('c' | 'C') => {
                     self.open_customize(Screen::Connections);
@@ -560,7 +512,7 @@ pub async fn run(
                                 NoticeTone::Warning
                             };
                             if signed_in && vendor == crate::auth::AuthVendor::OpenAi {
-                                state.selected = State::preset_index(SetupPreset::Codex);
+                                state.selected = State::preset_index(TeamPreset::Codex);
                                 state.reveal_selection = true;
                             }
                         }
@@ -907,8 +859,8 @@ fn screen_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
 
 fn welcome_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
     let mut lines = hero(
-        "ONE REQUEST. A COORDINATED TEAM.",
-        "Mjolnir gives Codex a team without splitting your conversation.",
+        "CHOOSE WHO CODES. CHOOSE WHO REVIEWS.",
+        "Run Codex, Claude, or pair one coder with the other reviewer.",
         theme,
     );
     lines.push(
@@ -960,8 +912,8 @@ fn welcome_lines(theme: TerminalTheme) -> Vec<Line<'static>> {
 
 fn whats_new_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     let mut lines = hero(
-        "CODEX AND CLAUDE, YOUR WAY",
-        "New setup presets can keep one provider throughout or split code and review.",
+        "FOUR TEAMS. ONE SHORTCUT.",
+        "Use Codex, Claude, or pair one as coder with the other as reviewer.",
         theme,
     );
     lines.push(
@@ -976,8 +928,8 @@ fn whats_new_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     );
     lines.push(Line::raw(""));
     lines.push(role_line(
-        "STILL HERE",
-        "Remote control, worktrees, local voice, and adversarial review",
+        "SWITCH",
+        "Press Ctrl+Tab in a session to choose another team",
         theme.text,
     ));
     lines.push(Line::styled(
@@ -1034,8 +986,8 @@ fn whats_new_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
 
 fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     let mut lines = hero(
-        "CHOOSE YOUR CODING TEAM",
-        "Use Codex, Claude, or split coding and review across both.",
+        "CHOOSE YOUR TEAM",
+        "The coder owns primary work and subagents; the reviewer checks the result.",
         theme,
     );
     lines.push(section_heading("ACCOUNTS", theme.muted));
@@ -1069,12 +1021,12 @@ fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
     }
     lines.push(Line::raw(""));
     lines.push(section_heading("TEAM", theme.muted));
-    for preset in SetupPreset::ALL {
+    for preset in TeamPreset::ALL {
         let (code_source, review_source) = preset.sources();
         lines.push(choice_line(
             state.selected == State::preset_index(preset),
             preset.label(),
-            if preset == SetupPreset::Codex {
+            if preset == TeamPreset::Codex {
                 "RECOMMENDED"
             } else {
                 ""
@@ -1083,7 +1035,7 @@ fn connection_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
         ));
         lines.push(detail_line(
             format!(
-                "Code: {}  ·  Review: {}  ·  up to {} builders",
+                "Coder: {}  ·  Reviewer: {}  ·  up to {} builders",
                 if code_source == "codex-acp" {
                     "Codex"
                 } else {
@@ -1400,15 +1352,15 @@ mod tests {
         assert_eq!(state.handle_key(KeyCode::Enter), Action::None);
         assert_eq!(state.screen, Screen::Connections);
         for (preset, code_source, review_source) in [
-            (SetupPreset::Codex, "codex-acp", "codex-acp"),
-            (SetupPreset::Claude, "claude-acp", "claude-acp"),
+            (TeamPreset::Codex, "codex-acp", "codex-acp"),
+            (TeamPreset::Claude, "claude-acp", "claude-acp"),
             (
-                SetupPreset::CodexWithClaudeReview,
+                TeamPreset::CodexWithClaudeReviewer,
                 "codex-acp",
                 "claude-acp",
             ),
             (
-                SetupPreset::ClaudeWithCodexReview,
+                TeamPreset::ClaudeWithCodexReviewer,
                 "claude-acp",
                 "codex-acp",
             ),
@@ -1497,7 +1449,7 @@ mod tests {
         assert_eq!(State::connection_selection_for_openai(false), 0);
         assert_eq!(
             State::connection_selection_for_openai(true),
-            State::preset_index(SetupPreset::Codex)
+            State::preset_index(TeamPreset::Codex)
         );
     }
 
@@ -1607,7 +1559,10 @@ mod tests {
             .draw(|frame| draw(frame, &mut state))
             .expect("draw");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("ONE REQUEST"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("CHOOSE WHO CODES"),
+            "rendered:\n{rendered}"
+        );
         assert!(rendered.contains("PgUp/PgDn"), "rendered:\n{rendered}");
         assert_eq!(state.handle_key(KeyCode::PageDown), Action::None);
         terminal
@@ -1620,7 +1575,7 @@ mod tests {
     fn narrow_connection_keeps_the_selected_action_and_scroll_help_visible() {
         let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
         state.change_screen(Screen::Connections);
-        state.selected = State::preset_index(SetupPreset::Codex);
+        state.selected = State::preset_index(TeamPreset::Codex);
         state.reveal_selection = true;
         let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -1645,7 +1600,7 @@ mod tests {
     fn resize_reveals_the_selected_connection_action_again() {
         let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
         state.change_screen(Screen::Connections);
-        state.selected = State::preset_index(SetupPreset::Codex);
+        state.selected = State::preset_index(TeamPreset::Codex);
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
@@ -1798,7 +1753,7 @@ mod tests {
             (
                 Kind::Fresh,
                 Screen::Connections,
-                "Codex code + Claude review",
+                "Codex coder + Claude reviewer",
             ),
             (Kind::Fresh, Screen::Readiness, "Start session"),
             (Kind::Upgrade, Screen::WhatsNew, "Continue"),

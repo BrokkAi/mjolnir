@@ -5674,6 +5674,7 @@ struct MjLoginJob {
 
 #[derive(Debug, Serialize)]
 struct MjConfigSnapshot {
+    team: MjTeamPanel,
     agents: MjAgentsPanel,
     acp_servers: MjServersPanel,
     /// Session options for the primary seat's bound ACP source, mirroring the
@@ -5683,7 +5684,6 @@ struct MjConfigSnapshot {
     review_options: Option<MjSessionOptionsGroup>,
     /// Session options for the subagent seat, mirroring the Subagents panel.
     subagent_options: Option<MjSessionOptionsGroup>,
-    acp_priority: MjPriorityPanel,
     appearance: MjAppearancePanel,
     login: Option<MjLoginStatus>,
     /// True while adapters are still being probed for model and session-option
@@ -5693,6 +5693,19 @@ struct MjConfigSnapshot {
     discovery_revision: u64,
     /// One-shot message produced while applying an edit.
     notice: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjTeamPanel {
+    selected: Option<String>,
+    presets: Vec<MjTeamPresetEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjTeamPresetEntry {
+    id: String,
+    label: String,
+    description: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -5779,27 +5792,6 @@ struct MjSessionOptionChoice {
 }
 
 #[derive(Debug, Serialize)]
-struct MjPriorityPanel {
-    seats: Vec<MjPrioritySeatEntry>,
-    default_priority: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct MjPrioritySeatEntry {
-    seat: String,
-    label: String,
-    /// `None` means "any enabled source".
-    source: Option<String>,
-    priority: Vec<MjPriorityServerEntry>,
-}
-
-#[derive(Debug, Serialize)]
-struct MjPriorityServerEntry {
-    id: String,
-    label: String,
-}
-
-#[derive(Debug, Serialize)]
 struct MjAppearancePanel {
     theme: String,
     themes: Vec<String>,
@@ -5828,6 +5820,8 @@ struct MjLoginStatus {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MjConfigApplyRequest {
+    /// One of the four supported coder/reviewer team ids.
+    team: Option<String>,
     primary_model: Option<String>,
     review_model: Option<String>,
     subagents_model: Option<String>,
@@ -5852,15 +5846,6 @@ struct MjConfigApplyRequest {
     /// Server id → option key → value for the subagent seat
     /// (`subagents.session_defaults`).
     subagent_session_defaults: Option<BTreeMap<String, BTreeMap<String, String>>>,
-    /// Seat (`primary` | `review` | `subagents`) → source/order edit.
-    priority: Option<BTreeMap<String, MjSeatPriorityEdit>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MjSeatPriorityEdit {
-    /// `Some("")` clears the constraint back to "any enabled source".
-    source: Option<String>,
-    order: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5947,15 +5932,7 @@ fn policy_from_wire(name: &str) -> Option<config::AcpServerPolicy> {
     }
 }
 
-const MJ_SEATS: [(crate::settings::PrioritySeat, &str, &str); 3] = [
-    (crate::settings::PrioritySeat::Primary, "primary", "Primary"),
-    (crate::settings::PrioritySeat::Review, "review", "Review"),
-    (
-        crate::settings::PrioritySeat::Subagents,
-        "subagents",
-        "Subagents",
-    ),
-];
+const MJ_SEAT_IDS: [&str; 3] = ["primary", "review", "subagents"];
 
 fn mjconfig_login_status(state: &ServerState) -> Option<MjLoginStatus> {
     let mut guard = state.mjconfig.login.lock().expect("mjconfig login lock");
@@ -6008,7 +5985,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                 _ => &config.subagents.model,
             };
             MjRoleEntry {
-                role: MJ_SEATS[index].1.to_string(),
+                role: MJ_SEAT_IDS[index].to_string(),
                 label: (*label).to_string(),
                 description: (*description).to_string(),
                 model: model.clone(),
@@ -6100,27 +6077,6 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     let review_options = seat_options(crate::settings::SessionDefaultsSeat::Review);
     let subagent_options = seat_options(crate::settings::SessionDefaultsSeat::Subagents);
 
-    let seats = MJ_SEATS
-        .into_iter()
-        .map(|(seat, wire, label)| MjPrioritySeatEntry {
-            seat: wire.to_string(),
-            label: label.to_string(),
-            source: editor.source(seat).clone(),
-            priority: editor
-                .effective_priority(seat)
-                .into_iter()
-                .map(|id| MjPriorityServerEntry {
-                    label: inventory
-                        .servers
-                        .iter()
-                        .find(|server| server.id == id)
-                        .map_or_else(|| id.clone(), |server| server.label.clone()),
-                    id,
-                })
-                .collect(),
-        })
-        .collect();
-
     let appearance = MjAppearancePanel {
         theme: config.theme.to_string(),
         themes: crate::theme::TerminalThemeKind::ALL
@@ -6146,6 +6102,17 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     };
 
     MjConfigSnapshot {
+        team: MjTeamPanel {
+            selected: config::TeamPreset::from_config(config).map(|preset| preset.id().to_string()),
+            presets: config::TeamPreset::ALL
+                .into_iter()
+                .map(|preset| MjTeamPresetEntry {
+                    id: preset.id().to_string(),
+                    label: preset.label().to_string(),
+                    description: preset.description().to_string(),
+                })
+                .collect(),
+        },
         agents: MjAgentsPanel {
             roles,
             discrete_review: config.agent.discrete_review,
@@ -6166,13 +6133,6 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         primary_options,
         review_options,
         subagent_options,
-        acp_priority: MjPriorityPanel {
-            seats,
-            default_priority: config::DEFAULT_ACP_PRIORITY
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        },
         appearance,
         login,
         probing,
@@ -6225,6 +6185,11 @@ fn mjconfig_apply_edits(
     inventory: &roster::AcpInventory,
 ) -> std::result::Result<(), (StatusCode, String)> {
     let bad_request = |message: String| (StatusCode::UNPROCESSABLE_ENTITY, message);
+    if let Some(team) = request.team {
+        let preset = config::TeamPreset::from_id(&team)
+            .ok_or_else(|| bad_request(format!("unknown team: {team}")))?;
+        preset.apply(config);
+    }
     if let Some(model) = request.primary_model {
         config.agent.model = model;
     }
@@ -6326,31 +6291,6 @@ fn mjconfig_apply_edits(
                     .entry(server_id.clone())
                     .or_default()
                     .insert(option_key, value);
-            }
-        }
-    }
-    if let Some(priority) = request.priority {
-        for (seat, edit) in priority {
-            let (source_slot, priority_slot) = match seat.as_str() {
-                "primary" => (&mut config.agent.acp_source, &mut config.agent.acp_priority),
-                "review" => (
-                    &mut config.review.acp_source,
-                    &mut config.review.acp_priority,
-                ),
-                "subagents" => (
-                    &mut config.subagents.acp_source,
-                    &mut config.subagents.acp_priority,
-                ),
-                other => return Err(bad_request(format!("unknown seat: {other}"))),
-            };
-            if let Some(source) = edit.source {
-                *source_slot = (!source.is_empty()).then_some(source);
-            }
-            if let Some(order) = edit.order {
-                if order.is_empty() {
-                    return Err(bad_request("priority order cannot be empty".to_string()));
-                }
-                *priority_slot = order;
             }
         }
     }
@@ -9851,14 +9791,12 @@ mod tests {
         assert!(!roles[0]["choices"].as_array().expect("choices").is_empty());
         assert_eq!(snapshot["agents"]["max_parallel_limit"], 16);
 
-        let seats = snapshot["acp_priority"]["seats"].as_array().expect("seats");
-        assert_eq!(seats.len(), 3);
-        assert!(
-            !snapshot["acp_priority"]["default_priority"]
-                .as_array()
-                .expect("default priority")
-                .is_empty()
-        );
+        let presets = snapshot["team"]["presets"]
+            .as_array()
+            .expect("team presets");
+        assert_eq!(presets.len(), config::TeamPreset::ALL.len());
+        assert!(snapshot["team"]["selected"].is_null());
+        assert!(snapshot.get("acp_priority").is_none());
 
         let accounts = snapshot["acp_servers"]["accounts"]
             .as_array()
@@ -10065,6 +10003,7 @@ mod tests {
                 "POST",
                 Some(token),
                 Some(serde_json::json!({
+                    "team": "claude_codex",
                     "primary_model": "gpt-5-6-terra",
                     "discrete_review": false,
                     "review_tier": "extended",
@@ -10080,9 +10019,6 @@ mod tests {
                     },
                     "subagent_session_defaults": {
                         "codex-acp": { "config:reasoning_effort": "low" }
-                    },
-                    "priority": {
-                        "review": { "source": "codex-acp", "order": ["codex-acp", "claude-acp"] }
                     }
                 })),
             ))
@@ -10106,6 +10042,7 @@ mod tests {
         assert_eq!(snapshot["appearance"]["theme"], "ansi");
         assert_eq!(snapshot["appearance"]["spinner"], "wave");
         assert_eq!(snapshot["appearance"]["feature_hints"], false);
+        assert_eq!(snapshot["team"]["selected"], "claude_codex");
 
         let saved = config::Config::load(&config_path).expect("reload saved config");
         assert_eq!(saved.agent.model, "gpt-5-6-terra");
@@ -10146,20 +10083,8 @@ mod tests {
         // A thought-level default also updates the seat's reasoning effort.
         assert_eq!(saved.subagents.reasoning_effort.as_deref(), Some("low"));
         assert_eq!(saved.review.acp_source.as_deref(), Some("codex-acp"));
-        assert_eq!(saved.review.acp_priority, vec!["codex-acp", "claude-acp"]);
-
-        // Clearing the source constraint round-trips back to "any".
-        let response = app
-            .oneshot(mjconfig_request(
-                "POST",
-                Some(token),
-                Some(serde_json::json!({ "priority": { "review": { "source": "" } } })),
-            ))
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let saved = config::Config::load(&config_path).expect("reload saved config");
-        assert_eq!(saved.review.acp_source, None);
+        assert_eq!(saved.agent.acp_source.as_deref(), Some("claude-acp"));
+        assert_eq!(saved.subagents.acp_source.as_deref(), Some("claude-acp"));
     }
 
     #[tokio::test]
@@ -10210,6 +10135,7 @@ mod tests {
             serde_json::json!({ "theme": "solarized" }),
             serde_json::json!({ "spinner": "cube" }),
             serde_json::json!({ "review_tier": "thorough" }),
+            serde_json::json!({ "team": "sidekick" }),
             serde_json::json!({ "priority": { "sidekick": { "source": "x" } } }),
             serde_json::json!({ "server_policies": { "custom:company": "enabled" } }),
             serde_json::json!({ "add_custom_server": { "name": "retired", "command": "x" } }),
@@ -10469,6 +10395,7 @@ mod tests {
     #[test]
     fn embedded_viewer_contains_role_scoped_acp_session_controls() {
         let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("[\"team\", \"Team\"]"));
         assert!(viewer.contains("[\"agents\", \"Agent\"]"));
         assert!(viewer.contains("[\"reviewer\", \"Reviewer\"]"));
         assert!(viewer.contains("[\"subagents\", \"Subagents\"]"));
@@ -10488,6 +10415,9 @@ mod tests {
         assert!(viewer.contains("previous.discovery_revision"));
         assert!(viewer.contains("Discovering ACP session options"));
         assert!(viewer.contains("openMjConfig(\"agents\")"));
+        assert!(viewer.contains("function renderMjTeam()"));
+        assert!(!viewer.contains("ACP Priority"));
+        assert!(!viewer.contains("renderMjPriority"));
     }
 
     #[test]

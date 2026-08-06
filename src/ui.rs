@@ -48,9 +48,9 @@ use crate::app::{
     PRIMARY_EFFORT_OPTIONS, PastedAttachment, PastedImageAttachment, PendingElicitation,
     PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus,
     RagnarokFighterUi, RagnarokObservation, RagnarokUi, StatusKind, StatusMessage, SubagentStatus,
-    ToolCallOutput, TranscriptSearch, UiExitReason, WorkspaceFile, classify_elicitation,
-    config_option_choices, config_option_current_value_label, file_mention_text,
-    primary_effort_value, workspace_file_candidates,
+    TeamPickerStep, ToolCallOutput, TranscriptSearch, UiExitReason, WorkspaceFile,
+    classify_elicitation, config_option_choices, config_option_current_value_label,
+    file_mention_text, primary_effort_value, workspace_file_candidates,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -2837,6 +2837,8 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
         usize::from(INLINE_HELP_HEIGHT)
     } else if state.mjconfig_menu.is_some() {
         usize::from(INLINE_MJCONFIG_HEIGHT)
+    } else if state.team_picker.is_some() {
+        8
     } else if let Some(picker) = state.agent_picker.as_ref() {
         picker.role_indices.len().saturating_add(4)
     } else if state.review_picker.is_some() {
@@ -2892,6 +2894,7 @@ fn handle_crossterm(
                 && !state.help_overlay
                 && state.mjconfig_menu.is_none()
                 && state.agent_picker.is_none()
+                && state.team_picker.is_none()
                 && state.review_picker.is_none()
                 && state.config_picker.is_none()
                 && state.ragnarok.is_none()
@@ -2925,6 +2928,7 @@ fn handle_crossterm(
                 || state.has_pending_permission()
                 || state.has_pending_elicitation()
                 || state.agent_picker.is_some()
+                || state.team_picker.is_some()
                 || state.config_picker.is_some()
                 || state.mjconfig_menu.is_some()
                 || state.ragnarok.is_some()
@@ -3014,6 +3018,7 @@ fn handle_crossterm(
         && !state.has_pending_elicitation()
         && state.ragnarok.is_none()
         && state.agent_picker.is_none()
+        && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers.is_empty()
         && matches!(key.code, KeyCode::F(9))
@@ -3030,6 +3035,7 @@ fn handle_crossterm(
         && !state.has_pending_elicitation()
         && state.ragnarok.is_none()
         && state.agent_picker.is_none()
+        && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers.is_empty()
         && matches!(key.code, KeyCode::F(11))
@@ -3046,6 +3052,7 @@ fn handle_crossterm(
         && !state.has_pending_elicitation()
         && state.ragnarok.is_none()
         && state.agent_picker.is_none()
+        && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers == KeyModifiers::CONTROL
         && matches!(key.code, KeyCode::Char('g' | 'G'))
@@ -3213,6 +3220,10 @@ fn handle_crossterm(
         return handle_agent_picker_key(state, key.modifiers, key.code, mode);
     }
 
+    if state.team_picker.is_some() {
+        return handle_team_picker_key(state, key.modifiers, key.code, mode);
+    }
+
     if state.review_picker.is_some() {
         return handle_review_picker_key(state, cmd_tx, key.modifiers, key.code, mode);
     }
@@ -3237,6 +3248,11 @@ fn handle_crossterm(
             open_transcript_search(state);
             return TerminalRequest::None;
         }
+    }
+
+    if key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Tab) {
+        state.open_team_picker();
+        return TerminalRequest::None;
     }
 
     if matches!(key.code, KeyCode::BackTab) {
@@ -3529,6 +3545,7 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
         || state.has_pending_permission()
         || state.has_pending_elicitation()
         || state.agent_picker.is_some()
+        || state.team_picker.is_some()
         || state.config_picker.is_some()
     {
         return;
@@ -6153,6 +6170,109 @@ fn handle_agent_picker_key(
     }
 }
 
+fn handle_team_picker_key(
+    state: &mut AppState,
+    modifiers: KeyModifiers,
+    code: KeyCode,
+    mode: UiMode,
+) -> TerminalRequest {
+    let Some(step) = state.team_picker.as_ref().map(|picker| picker.step) else {
+        return TerminalRequest::None;
+    };
+    let action =
+        if code == KeyCode::Tab && (modifiers.is_empty() || modifiers == KeyModifiers::CONTROL) {
+            PickerKeyAction::Move(1)
+        } else if code == KeyCode::BackTab {
+            PickerKeyAction::Move(-1)
+        } else {
+            picker_key_action(modifiers, code)
+        };
+    match action {
+        PickerKeyAction::Cancel => {
+            state.team_picker = None;
+            if step == TeamPickerStep::StartNewSession {
+                state.record_status_message(
+                    StatusKind::Info,
+                    "team saved; start /new or /clear when ready",
+                );
+            }
+            inline_repair_request(mode)
+        }
+        PickerKeyAction::Accept => {
+            match step {
+                TeamPickerStep::Choose => {
+                    if let Some(preset) = state.team_picker_selection()
+                        && persist_team_picker_selection(state, preset)
+                        && let Some(picker) = state.team_picker.as_mut()
+                    {
+                        picker.step = TeamPickerStep::StartNewSession;
+                    }
+                }
+                TeamPickerStep::StartNewSession => {
+                    let start_new_session = state
+                        .team_picker
+                        .as_ref()
+                        .is_some_and(|picker| picker.start_new_session);
+                    state.team_picker = None;
+                    if start_new_session {
+                        state.exit_reason = Some(UiExitReason::NewSession);
+                    } else {
+                        state.record_status_message(
+                            StatusKind::Info,
+                            "team saved; start /new or /clear when ready",
+                        );
+                    }
+                }
+            }
+            inline_repair_request(mode)
+        }
+        PickerKeyAction::Move(delta) => {
+            match step {
+                TeamPickerStep::Choose => state.team_picker_move(delta),
+                TeamPickerStep::StartNewSession => {
+                    state.team_picker_toggle_start_new_session();
+                }
+            }
+            TerminalRequest::None
+        }
+        PickerKeyAction::Other => TerminalRequest::None,
+    }
+}
+
+fn persist_team_picker_selection(state: &mut AppState, preset: config::TeamPreset) -> bool {
+    let Some(path) = state.config_path.as_deref() else {
+        state.record_status_message(StatusKind::Warning, "config path is unavailable");
+        return false;
+    };
+    let mut config = match config::Config::load(path) {
+        Ok(config) => config,
+        Err(error) => {
+            state.record_status_message(
+                StatusKind::Warning,
+                format!("could not load config: {error:#}"),
+            );
+            return false;
+        }
+    };
+    preset.apply(&mut config);
+    match config::save_user_config_preserving_session_routes(path, &mut config) {
+        Ok(()) => {
+            state.configured_models = config.model_names();
+            state.acp_inventory =
+                crate::roster::rediscover_inventory(&config, &state.acp_inventory);
+            state.record_status_message(StatusKind::Info, format!("{} team saved", preset.label()));
+            true
+        }
+        Err(error) => {
+            state.record_status_message(
+                StatusKind::Warning,
+                format!("team was not saved: {error:#}"),
+            );
+            false
+        }
+    }
+}
+
 fn persist_primary_picker_selection(
     state: &mut AppState,
     role: crate::roster::ResolvedAgent,
@@ -6608,6 +6728,10 @@ fn draw(
         draw_agent_picker_modal(f, f.area(), state);
     }
 
+    if state.team_picker.is_some() {
+        draw_team_picker_modal(f, f.area(), state);
+    }
+
     if state.review_picker.is_some() {
         draw_review_picker_modal(f, f.area(), state);
     }
@@ -6753,6 +6877,11 @@ fn draw_inline_chat(
         return;
     }
 
+    if state.team_picker.is_some() {
+        draw_inline_team_picker(f, f.area(), state);
+        return;
+    }
+
     if state.review_picker.is_some() {
         draw_inline_review_picker(f, f.area(), state);
         return;
@@ -6872,6 +7001,99 @@ fn centered_visible_range(total: usize, selected: usize, visible: usize) -> Rang
         .saturating_sub(visible / 2)
         .min(total.saturating_sub(visible));
     start..(start + visible).min(total)
+}
+
+fn team_picker_items(state: &AppState, width: u16) -> Vec<ListItem<'static>> {
+    let Some(picker) = state.team_picker.as_ref() else {
+        return Vec::new();
+    };
+    config::TeamPreset::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, preset)| {
+            truncate_line(
+                format!("{:<31} {}", preset.label(), preset.description()),
+                width,
+                index == picker.selected,
+                state.theme,
+            )
+        })
+        .collect()
+}
+
+fn draw_inline_team_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    f.render_widget(Clear, area);
+    let content = inline_content_rect(area);
+    if content.width == 0 || content.height < 5 {
+        return;
+    }
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(content);
+    f.render_widget(
+        Paragraph::new("Switch coding team").style(
+            Style::default()
+                .ink(state.theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        layout[0],
+    );
+    let step = state
+        .team_picker
+        .as_ref()
+        .map(|picker| picker.step)
+        .unwrap_or(TeamPickerStep::Choose);
+    let detail = match step {
+        TeamPickerStep::Choose => "Choose who codes and who reviews",
+        TeamPickerStep::StartNewSession => "Saved. Start a new session now to apply every route?",
+    };
+    f.render_widget(
+        Paragraph::new(detail).style(Style::default().ink(state.theme.muted)),
+        layout[1],
+    );
+    match step {
+        TeamPickerStep::Choose => {
+            f.render_widget(
+                List::new(team_picker_items(state, layout[2].width)),
+                layout[2],
+            );
+        }
+        TeamPickerStep::StartNewSession => {
+            let start_new_session = state
+                .team_picker
+                .as_ref()
+                .is_some_and(|picker| picker.start_new_session);
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(if start_new_session {
+                        "› start new session"
+                    } else {
+                        "  start new session"
+                    }),
+                    Line::from(if start_new_session {
+                        "  keep current session"
+                    } else {
+                        "› keep current session"
+                    }),
+                ]),
+                layout[2],
+            );
+        }
+    }
+    let footer = match step {
+        TeamPickerStep::Choose => "Ctrl+Tab/Up/Down choose | Enter save | Esc cancel",
+        TeamPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
+    };
+    f.render_widget(
+        Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
+        layout[3],
+    );
 }
 
 fn agent_picker_items(state: &AppState, width: u16, visible: usize) -> Vec<ListItem<'static>> {
@@ -11661,11 +11883,11 @@ fn idle_prompt_title(
 ) -> Line<'static> {
     let hint = if voice_input_supported {
         format!(
-            " (Enter send | {PROMPT_NEWLINE_HINT} newline | Shift-Tab model/effort | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " (Enter send | {PROMPT_NEWLINE_HINT} newline | Ctrl-Tab team | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     } else {
         format!(
-            " (Enter send | {PROMPT_NEWLINE_HINT} newline | Shift-Tab model/effort | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " (Enter send | {PROMPT_NEWLINE_HINT} newline | Ctrl-Tab team | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     };
     prompt_title_line(state, hint)
@@ -13337,8 +13559,8 @@ fn help_modal_lines(
         help_blank_line(),
         help_section_line("Config", theme),
         help_binding_line(
-            "/mjconfig → Agent/Reviewer/Subagents",
-            "edit role-scoped session defaults",
+            "/mjconfig → Team/Agent/Reviewer/Subagents",
+            "choose the team or edit role-scoped session defaults",
             theme,
         ),
         help_blank_line(),
@@ -13356,6 +13578,11 @@ fn general_help_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<
         help_section_line("General", theme),
         help_binding_line("Ctrl-N", "new session", theme),
         help_binding_line("Ctrl-O", "load session", theme),
+        help_binding_line(
+            "Ctrl-Tab",
+            "switch between Codex, Claude, and the two coder/reviewer pairings",
+            theme,
+        ),
         help_binding_line(
             "Shift-Tab",
             "choose the primary model and reasoning effort",
@@ -13579,6 +13806,77 @@ fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppStat
     f.render_widget(
         Paragraph::new("Up/Down choose | Enter review | Esc cancel")
             .style(Style::default().ink(state.theme.muted)),
+        layout[2],
+    );
+}
+
+fn draw_team_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let Some(picker) = state.team_picker.as_ref() else {
+        return;
+    };
+    let height = 11.min(area.height.saturating_sub(2));
+    let width = area.width.saturating_sub(8).min(84);
+    if height < 8 || width < 32 {
+        return;
+    }
+    let rect = centered_modal_rect(area, width, height);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Switch coding team ")
+        .style(Style::default().ink(state.theme.primary));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    let header = match picker.step {
+        TeamPickerStep::Choose => vec![
+            Line::from("Choose who codes and who reviews."),
+            Line::from("The coder also supplies implementation subagents."),
+        ],
+        TeamPickerStep::StartNewSession => vec![
+            Line::from("Saved. Start a new session now to apply every route?"),
+            Line::from("Keeping this session leaves its current routes unchanged."),
+        ],
+    };
+    f.render_widget(Paragraph::new(header), layout[0]);
+    match picker.step {
+        TeamPickerStep::Choose => {
+            f.render_widget(
+                List::new(team_picker_items(state, layout[1].width)),
+                layout[1],
+            );
+        }
+        TeamPickerStep::StartNewSession => {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(if picker.start_new_session {
+                        "› start new session"
+                    } else {
+                        "  start new session"
+                    }),
+                    Line::from(if picker.start_new_session {
+                        "  keep current session"
+                    } else {
+                        "› keep current session"
+                    }),
+                ]),
+                layout[1],
+            );
+        }
+    }
+    let footer = match picker.step {
+        TeamPickerStep::Choose => "Ctrl+Tab/Up/Down choose | Enter save | Esc cancel",
+        TeamPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
+    };
+    f.render_widget(
+        Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
         layout[2],
     );
 }
@@ -18345,6 +18643,52 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_tab_saves_a_team_configuration_then_starts_a_new_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        config.save(&config_path).expect("save config");
+        let mut state = AppState::new();
+        state.config_path = Some(config_path.clone());
+        state.review_enabled = false;
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.team_picker.as_ref().expect("team picker").selected, 0);
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.team_picker.as_ref().expect("team picker").selected, 1);
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(
+            state
+                .team_picker
+                .as_ref()
+                .is_some_and(|picker| picker.step == TeamPickerStep::StartNewSession)
+        );
+        let saved = config::Config::load(&config_path).expect("load config");
+        assert_eq!(
+            config::TeamPreset::from_config(&saved),
+            Some(config::TeamPreset::Claude)
+        );
+        assert!(!state.review_enabled, "active session policy is unchanged");
+        assert!(cmd_rx.try_recv().is_err(), "no live policy update is sent");
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        assert!(state.team_picker.is_none());
+        assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
+    }
+
+    #[test]
     fn shift_tab_saves_primary_model_and_effort_then_offers_a_new_session() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("config.toml");
@@ -18815,11 +19159,9 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         // ACP Servers tab: toggle Codex off.
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu.as_mut().expect("menu").editor.selected =
-            crate::settings::SERVER_ROW_OFFSET;
+        let editor = &mut state.mjconfig_menu.as_mut().expect("menu").editor;
+        editor.tab = crate::settings::SettingsTab::AcpServers;
+        editor.selected = crate::settings::SERVER_ROW_OFFSET;
         handle_mjconfig_menu_key(
             &mut state,
             &cmd_tx,
@@ -18829,8 +19171,8 @@ mod tests {
         );
 
         // Appearance tab: preview theme and spinner live.
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
+        state.mjconfig_menu.as_mut().expect("menu").editor.tab =
+            crate::settings::SettingsTab::Appearance;
         state.mjconfig_menu_key(KeyCode::Right);
         let previewed_theme = state.theme_kind;
         state.mjconfig_menu_key(KeyCode::Down);
@@ -18839,8 +19181,9 @@ mod tests {
 
         // Reviewer tab: toggle discrete review, deepen the review tier, and
         // apply both to the running session.
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
+        let editor = &mut state.mjconfig_menu.as_mut().expect("menu").editor;
+        editor.tab = crate::settings::SettingsTab::Reviewer;
+        editor.selected = 0;
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Char(' '));
         state.mjconfig_menu_key(KeyCode::Down);
@@ -19035,10 +19378,14 @@ mod tests {
         assert!(rendered.contains("Agent"), "rendered:\n{rendered}");
         assert!(rendered.contains("Reviewer"), "rendered:\n{rendered}");
         assert!(rendered.contains("Subagents"), "rendered:\n{rendered}");
-        assert!(rendered.contains("ACP Priority"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Team"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("ACP Priority"), "rendered:\n{rendered}");
         assert!(rendered.contains("ACP Servers"), "rendered:\n{rendered}");
         assert!(rendered.contains("Appearance"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Primary model"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("Codex coder + Claude reviewer"),
+            "rendered:\n{rendered}"
+        );
         assert!(!rendered.contains("Saved primary defaults"));
     }
 
@@ -22836,10 +23183,7 @@ mod tests {
             "rendered:\n{rendered}"
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
-        assert!(
-            rendered.contains("Shift-Tab model/effort"),
-            "rendered:\n{rendered}"
-        );
+        assert!(rendered.contains("Ctrl-Tab team"), "rendered:\n{rendered}");
         assert!(
             rendered.contains("F12 select text"),
             "rendered:\n{rendered}"
@@ -22907,10 +23251,7 @@ mod tests {
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
         assert!(rendered.contains("F10 help"), "rendered:\n{rendered}");
-        assert!(
-            rendered.contains("Shift-Tab model/effort"),
-            "rendered:\n{rendered}"
-        );
+        assert!(rendered.contains("Ctrl-Tab team"), "rendered:\n{rendered}");
         assert!(!rendered.contains("F12"), "rendered:\n{rendered}");
         assert!(!rendered.contains("prompt"), "rendered:\n{rendered}");
         assert!(!rendered.contains("ready"), "rendered:\n{rendered}");

@@ -17,7 +17,7 @@ pub const DISABLED_MODEL: &str = "disabled";
 pub const CONFIG_VERSION: u32 = 3;
 /// Version of the product-model explanation accepted by the user. This is
 /// intentionally independent from the storage schema version.
-pub const ONBOARDING_CONTENT_VERSION: u32 = 3;
+pub const ONBOARDING_CONTENT_VERSION: u32 = 4;
 pub const DEFAULT_ACP_PRIORITY: [&str; 2] = ["codex-acp", "claude-acp"];
 /// Schema version this build can migrate forward from.
 const MIGRATABLE_VERSION: u32 = 2;
@@ -179,6 +179,93 @@ impl Default for ModelsConfig {
             primary_source: None,
             review_source: None,
             subagent_source: None,
+        }
+    }
+}
+
+/// One of the supported coding/review provider combinations.
+///
+/// A team pins the primary and subagent seats to its coder and the discrete
+/// review seat to its reviewer. Models remain automatic within those sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeamPreset {
+    Codex,
+    Claude,
+    CodexWithClaudeReviewer,
+    ClaudeWithCodexReviewer,
+}
+
+impl TeamPreset {
+    pub const ALL: [Self; 4] = [
+        Self::Codex,
+        Self::Claude,
+        Self::CodexWithClaudeReviewer,
+        Self::ClaudeWithCodexReviewer,
+    ];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::CodexWithClaudeReviewer => "codex_claude",
+            Self::ClaudeWithCodexReviewer => "claude_codex",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+            Self::CodexWithClaudeReviewer => "Codex coder + Claude reviewer",
+            Self::ClaudeWithCodexReviewer => "Claude coder + Codex reviewer",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex codes, delegates, and reviews",
+            Self::Claude => "Claude codes, delegates, and reviews",
+            Self::CodexWithClaudeReviewer => "Codex codes and delegates; Claude reviews",
+            Self::ClaudeWithCodexReviewer => "Claude codes and delegates; Codex reviews",
+        }
+    }
+
+    pub const fn sources(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Codex => ("codex-acp", "codex-acp"),
+            Self::Claude => ("claude-acp", "claude-acp"),
+            Self::CodexWithClaudeReviewer => ("codex-acp", "claude-acp"),
+            Self::ClaudeWithCodexReviewer => ("claude-acp", "codex-acp"),
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|preset| preset.id() == id)
+    }
+
+    pub fn from_config(config: &Config) -> Option<Self> {
+        let coder = config.agent.acp_source.as_deref()?;
+        if config.subagents.acp_source.as_deref() != Some(coder) {
+            return None;
+        }
+        let reviewer = config.review.acp_source.as_deref()?;
+        Self::ALL
+            .into_iter()
+            .find(|preset| preset.sources() == (coder, reviewer))
+    }
+
+    pub fn apply(self, config: &mut Config) {
+        let (coder, reviewer) = self.sources();
+        config.agent.model = default_auto();
+        config.agent.acp_source = Some(coder.to_string());
+        config.agent.discrete_review = true;
+        config.review.model = default_auto();
+        config.review.acp_source = Some(reviewer.to_string());
+        config.subagents.model = default_auto();
+        config.subagents.acp_source = Some(coder.to_string());
+        config.subagents.auto_failover = true;
+        for source in [coder, reviewer] {
+            config.set_acp_server_policy(source, AcpServerPolicy::Enabled);
         }
     }
 }
@@ -2009,6 +2096,31 @@ mode = "ask"
         assert!(!config.set_acp_server_policy("custom:missing", AcpServerPolicy::Disabled));
         assert_eq!(config.acp.policy("codex-acp"), AcpServerPolicy::Disabled);
         assert_eq!(config.acp.servers[0].policy, AcpServerPolicy::Disabled);
+    }
+
+    #[test]
+    fn team_presets_pin_coder_subagents_and_reviewer() {
+        for preset in TeamPreset::ALL {
+            let mut config = Config::default();
+            config.agent.model = "provider-specific-primary".to_string();
+            config.review.model = "provider-specific-review".to_string();
+            config.subagents.model = "provider-specific-subagent".to_string();
+
+            preset.apply(&mut config);
+
+            let (coder, reviewer) = preset.sources();
+            assert_eq!(TeamPreset::from_config(&config), Some(preset));
+            assert_eq!(config.agent.acp_source.as_deref(), Some(coder));
+            assert_eq!(config.subagents.acp_source.as_deref(), Some(coder));
+            assert_eq!(config.review.acp_source.as_deref(), Some(reviewer));
+            assert_eq!(config.agent.model, "auto");
+            assert_eq!(config.review.model, "auto");
+            assert_eq!(config.subagents.model, "auto");
+            assert!(config.agent.discrete_review);
+            assert_eq!(config.acp.policy(coder), AcpServerPolicy::Enabled);
+            assert_eq!(config.acp.policy(reviewer), AcpServerPolicy::Enabled);
+            assert_eq!(TeamPreset::from_id(preset.id()), Some(preset));
+        }
     }
 
     #[test]

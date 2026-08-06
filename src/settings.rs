@@ -11,7 +11,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::config::{AcpServerPolicy, Config, ModelsConfig};
+use crate::config::{AcpServerPolicy, Config, ModelsConfig, TeamPreset};
 use crate::ink::InkStyle;
 use crate::palette::TerminalTheme;
 use crate::roster::{AcpInventory, ModelChoice};
@@ -28,30 +28,30 @@ pub(crate) fn is_configurable_acp_server(id: &str) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
+    Team,
     Agents,
     Reviewer,
     Subagents,
-    AcpPriority,
     AcpServers,
     Appearance,
 }
 
 impl SettingsTab {
     const ALL: [Self; 6] = [
+        Self::Team,
         Self::Agents,
         Self::Reviewer,
         Self::Subagents,
         Self::AcpServers,
-        Self::AcpPriority,
         Self::Appearance,
     ];
 
     fn label(self) -> &'static str {
         match self {
+            Self::Team => "Team",
             Self::Agents => "Agent",
             Self::Reviewer => "Reviewer",
             Self::Subagents => "Subagents",
-            Self::AcpPriority => "ACP Priority",
             Self::AcpServers => "ACP Servers",
             Self::Appearance => "Appearance",
         }
@@ -65,13 +65,6 @@ pub enum SettingsAction {
     Authenticate(crate::auth::AuthVendor),
     Save,
     Cancel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PrioritySeat {
-    Primary,
-    Review,
-    Subagents,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,8 +100,6 @@ pub struct SettingsEditor {
     active_models: Option<ModelsConfig>,
     active_session_config: Vec<SessionConfigOption>,
     inventory: AcpInventory,
-    priority_editor: Option<PrioritySeat>,
-    priority_selected: usize,
 }
 
 impl SettingsEditor {
@@ -116,15 +107,13 @@ impl SettingsEditor {
         let inventory = crate::roster::discover_inventory(&config);
         Self {
             config,
-            tab: SettingsTab::Agents,
+            tab: SettingsTab::Team,
             selected: 0,
             notice,
             choices,
             active_models: None,
             active_session_config: Vec::new(),
             inventory,
-            priority_editor: None,
-            priority_selected: 0,
         }
     }
 
@@ -153,27 +142,12 @@ impl SettingsEditor {
     }
 
     pub fn handle_key(&mut self, code: KeyCode) -> SettingsAction {
-        if self.priority_editor.is_some() {
-            return self.handle_priority_key(code);
-        }
         match code {
             KeyCode::Esc => SettingsAction::Cancel,
             KeyCode::Enter
                 if self.tab == SettingsTab::AcpServers && self.selected < ACCOUNT_COUNT =>
             {
                 SettingsAction::Authenticate(crate::auth::AuthVendor::ALL[self.selected])
-            }
-            KeyCode::Enter if self.tab == SettingsTab::AcpPriority && self.selected == 0 => {
-                self.open_priority_editor(PrioritySeat::Primary);
-                SettingsAction::None
-            }
-            KeyCode::Enter if self.tab == SettingsTab::AcpPriority && self.selected == 1 => {
-                self.open_priority_editor(PrioritySeat::Review);
-                SettingsAction::None
-            }
-            KeyCode::Enter if self.tab == SettingsTab::AcpPriority && self.selected == 2 => {
-                self.open_priority_editor(PrioritySeat::Subagents);
-                SettingsAction::None
             }
             KeyCode::Enter => SettingsAction::Save,
             KeyCode::Tab => {
@@ -212,10 +186,10 @@ impl SettingsEditor {
 
     fn row_count(&self) -> usize {
         match self.tab {
+            SettingsTab::Team => 1,
             SettingsTab::Agents | SettingsTab::Reviewer | SettingsTab::Subagents => {
                 self.settings_rows(self.tab).len()
             }
-            SettingsTab::AcpPriority => 3,
             SettingsTab::AcpServers => self.configurable_servers().count() + SERVER_ROW_OFFSET,
             SettingsTab::Appearance => 4,
         }
@@ -262,14 +236,9 @@ impl SettingsEditor {
             return SettingsAction::Changed;
         }
         match self.tab {
-            SettingsTab::AcpPriority => {
-                let seat = match self.selected {
-                    0 => PrioritySeat::Primary,
-                    1 => PrioritySeat::Review,
-                    2 => PrioritySeat::Subagents,
-                    _ => return SettingsAction::None,
-                };
-                self.cycle_source(seat, delta);
+            SettingsTab::Team => {
+                self.cycle_team(delta);
+                return SettingsAction::Changed;
             }
             SettingsTab::AcpServers => {
                 let Some(index) = self.selected.checked_sub(SERVER_ROW_OFFSET) else {
@@ -350,7 +319,10 @@ impl SettingsEditor {
             return SettingsAction::Changed;
         }
         match self.tab {
-            SettingsTab::AcpPriority => return SettingsAction::None,
+            SettingsTab::Team => {
+                self.cycle_team(1);
+                return SettingsAction::Changed;
+            }
             SettingsTab::AcpServers => {
                 let Some(index) = self.selected.checked_sub(SERVER_ROW_OFFSET) else {
                     return SettingsAction::None;
@@ -691,6 +663,23 @@ impl SettingsEditor {
         self.config.agent.review_tier = tiers[next];
     }
 
+    fn cycle_team(&mut self, delta: i32) {
+        let current = TeamPreset::from_config(&self.config)
+            .and_then(|active| TeamPreset::ALL.iter().position(|preset| *preset == active))
+            .unwrap_or_else(|| {
+                if delta < 0 {
+                    0
+                } else {
+                    TeamPreset::ALL.len() - 1
+                }
+            });
+        let next = (current as i32 + delta).rem_euclid(TeamPreset::ALL.len() as i32) as usize;
+        TeamPreset::ALL[next].apply(&mut self.config);
+        self.refresh_inventory();
+        self.notice =
+            Some("Team updated; start a new session or restart Mjolnir to apply it.".to_string());
+    }
+
     pub(crate) fn model_choices(&self, role: usize) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut choices = vec!["auto".to_string()];
@@ -705,152 +694,6 @@ impl SettingsEditor {
             }
         }
         choices
-    }
-
-    fn priority(&self, seat: PrioritySeat) -> &Vec<String> {
-        match seat {
-            PrioritySeat::Primary => &self.config.agent.acp_priority,
-            PrioritySeat::Review => &self.config.review.acp_priority,
-            PrioritySeat::Subagents => &self.config.subagents.acp_priority,
-        }
-    }
-
-    pub(crate) fn source(&self, seat: PrioritySeat) -> &Option<String> {
-        match seat {
-            PrioritySeat::Primary => &self.config.agent.acp_source,
-            PrioritySeat::Review => &self.config.review.acp_source,
-            PrioritySeat::Subagents => &self.config.subagents.acp_source,
-        }
-    }
-
-    fn source_mut(&mut self, seat: PrioritySeat) -> &mut Option<String> {
-        match seat {
-            PrioritySeat::Primary => &mut self.config.agent.acp_source,
-            PrioritySeat::Review => &mut self.config.review.acp_source,
-            PrioritySeat::Subagents => &mut self.config.subagents.acp_source,
-        }
-    }
-
-    fn cycle_source(&mut self, seat: PrioritySeat, delta: i32) {
-        let choices = std::iter::once(None)
-            .chain(self.effective_priority(seat).into_iter().map(Some))
-            .collect::<Vec<_>>();
-        let current = choices
-            .iter()
-            .position(|choice| choice == self.source(seat))
-            .unwrap_or(0);
-        let next = (current as i32 + delta).rem_euclid(choices.len() as i32) as usize;
-        *self.source_mut(seat) = choices[next].clone();
-        self.notice = Some(
-            "Source constraint updated; start a new session or restart Mjolnir to apply it."
-                .to_string(),
-        );
-    }
-
-    fn priority_mut(&mut self, seat: PrioritySeat) -> &mut Vec<String> {
-        match seat {
-            PrioritySeat::Primary => &mut self.config.agent.acp_priority,
-            PrioritySeat::Review => &mut self.config.review.acp_priority,
-            PrioritySeat::Subagents => &mut self.config.subagents.acp_priority,
-        }
-    }
-
-    pub(crate) fn effective_priority(&self, seat: PrioritySeat) -> Vec<String> {
-        let mut priority = self.priority(seat).clone();
-        for server in &self.inventory.servers {
-            if !priority.contains(&server.id) {
-                priority.push(server.id.clone());
-            }
-        }
-        priority
-    }
-
-    fn open_priority_editor(&mut self, seat: PrioritySeat) {
-        let priority = self.effective_priority(seat);
-        *self.priority_mut(seat) = priority;
-        self.priority_editor = Some(seat);
-        self.priority_selected = 0;
-        self.notice = None;
-    }
-
-    fn handle_priority_key(&mut self, code: KeyCode) -> SettingsAction {
-        let Some(seat) = self.priority_editor else {
-            return SettingsAction::None;
-        };
-        let len = self.priority(seat).len();
-        match code {
-            KeyCode::Esc | KeyCode::Enter => {
-                self.priority_editor = None;
-                self.notice = None;
-            }
-            KeyCode::Up | KeyCode::Char('k') if len > 0 => {
-                self.priority_selected = self
-                    .priority_selected
-                    .checked_sub(1)
-                    .unwrap_or(len.saturating_sub(1));
-            }
-            KeyCode::Down | KeyCode::Char('j') if len > 0 => {
-                self.priority_selected = (self.priority_selected + 1) % len;
-            }
-            KeyCode::Left | KeyCode::Char('h') if self.priority_selected > 0 => {
-                let selected = self.priority_selected;
-                self.priority_mut(seat).swap(selected, selected - 1);
-                self.priority_selected -= 1;
-                self.notice = Some(
-                    "Priority updated; start a new session or restart Mjolnir to apply it."
-                        .to_string(),
-                );
-            }
-            KeyCode::Right | KeyCode::Char('l') if self.priority_selected + 1 < len => {
-                let selected = self.priority_selected;
-                self.priority_mut(seat).swap(selected, selected + 1);
-                self.priority_selected += 1;
-                self.notice = Some(
-                    "Priority updated; start a new session or restart Mjolnir to apply it."
-                        .to_string(),
-                );
-            }
-            KeyCode::Char('r') => {
-                *self.priority_mut(seat) = crate::config::DEFAULT_ACP_PRIORITY
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect();
-                self.priority_selected = 0;
-                self.notice = Some(
-                    "Priority reset; start a new session or restart Mjolnir to apply it."
-                        .to_string(),
-                );
-            }
-            _ => return SettingsAction::None,
-        }
-        SettingsAction::Changed
-    }
-
-    fn priority_summary(&self, seat: PrioritySeat) -> String {
-        self.effective_priority(seat)
-            .iter()
-            .map(|id| {
-                self.inventory
-                    .servers
-                    .iter()
-                    .find(|server| server.id == *id)
-                    .map_or_else(|| id.clone(), |server| server.label.clone())
-            })
-            .collect::<Vec<_>>()
-            .join(" → ")
-    }
-
-    fn source_summary(&self, seat: PrioritySeat) -> String {
-        self.source(seat).as_ref().map_or_else(
-            || "any enabled source".to_string(),
-            |id| {
-                self.inventory
-                    .servers
-                    .iter()
-                    .find(|server| server.id == *id)
-                    .map_or_else(|| id.clone(), |server| format!("{} only", server.label))
-            },
-        )
     }
 
     pub(crate) fn staged_model_detail(&self, model: &str) -> String {
@@ -977,10 +820,10 @@ pub fn draw_settings_panel(
         .split(inner);
     draw_tabs(frame, rows[0], editor, theme);
     match editor.tab {
+        SettingsTab::Team => draw_team(frame, rows[1], editor, theme),
         SettingsTab::Agents => draw_agents(frame, rows[1], editor, theme),
         SettingsTab::Reviewer => draw_reviewer(frame, rows[1], editor, theme),
         SettingsTab::Subagents => draw_subagents(frame, rows[1], editor, theme),
-        SettingsTab::AcpPriority => draw_acp_priority(frame, rows[1], editor, theme),
         SettingsTab::AcpServers => draw_servers(frame, rows[1], editor, theme),
         SettingsTab::Appearance => draw_appearance(frame, rows[1], editor, theme),
     }
@@ -992,14 +835,10 @@ pub fn draw_settings_panel(
             rows[2],
         );
     }
-    let footer = if editor.priority_editor.is_some() {
-        "↑/↓ select · ←/→ move · r reset default · Enter done · Esc back"
+    let footer = if editor.tab == SettingsTab::AcpServers && editor.selected < ACCOUNT_COUNT {
+        "Enter sign in · ↑/↓ select · Tab view · Esc cancel"
     } else {
-        if editor.tab == SettingsTab::AcpServers && editor.selected < ACCOUNT_COUNT {
-            "Enter sign in · ↑/↓ select · Tab view · Esc cancel"
-        } else {
-            "Tab view · ↑/↓ select · ←/→ change · Space toggle · Enter save · Esc cancel"
-        }
+        "Tab view · ↑/↓ select · ←/→ change · Space toggle · Enter save · Esc cancel"
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().ink(theme.muted)),
@@ -1474,85 +1313,46 @@ fn draw_scrolling_settings_lines(
     );
 }
 
-fn draw_acp_priority(
+fn draw_team(
     frame: &mut ratatui::Frame,
     area: Rect,
     editor: &SettingsEditor,
     theme: TerminalTheme,
 ) {
-    if let Some(seat) = editor.priority_editor {
-        let title = match seat {
-            PrioritySeat::Primary => "Primary ACP priority",
-            PrioritySeat::Review => "Review ACP priority",
-            PrioritySeat::Subagents => "Subagent ACP priority",
-        };
-        let mut lines = vec![
-            Line::styled(
-                format!("{title} · first matching adapter wins"),
-                Style::default().ink(theme.muted),
-            ),
-            Line::styled(
-                "r resets to Codex → Claude",
-                Style::default().ink(theme.muted),
-            ),
-            Line::raw(""),
-        ];
-        for (index, id) in editor.priority(seat).iter().enumerate() {
-            let label = editor
-                .inventory
-                .servers
-                .iter()
-                .find(|server| server.id == *id)
-                .map_or(id.as_str(), |server| server.label.as_str());
-            lines.push(selected_line(
-                editor.priority_selected == index,
-                format!("{}. {label} ({id})", index + 1),
-                theme,
-            ));
-        }
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-        return;
-    }
-
-    let lines = vec![
+    let active = TeamPreset::from_config(&editor.config);
+    let active_label = active.map_or("Custom routing", TeamPreset::label);
+    let mut lines = vec![
         Line::styled(
-            "Left/Right constrains a seat to one source; Enter edits fallback priority.",
+            "The coder handles the primary and subagent seats; the reviewer checks changed turns.",
             Style::default().ink(theme.muted),
         ),
         Line::raw(""),
-        selected_line(
-            editor.selected == 0,
-            format!(
-                "Primary   < {} >  [Enter] {}",
-                editor.source_summary(PrioritySeat::Primary),
-                editor.priority_summary(PrioritySeat::Primary)
-            ),
-            theme,
-        ),
-        selected_line(
-            editor.selected == 1,
-            format!(
-                "Review    < {} >  [Enter] {}",
-                editor.source_summary(PrioritySeat::Review),
-                editor.priority_summary(PrioritySeat::Review)
-            ),
-            theme,
-        ),
-        selected_line(
-            editor.selected == 2,
-            format!(
-                "Subagents < {} >  [Enter] {}",
-                editor.source_summary(PrioritySeat::Subagents),
-                editor.priority_summary(PrioritySeat::Subagents)
-            ),
-            theme,
-        ),
+        selected_line(true, format!("Team  < {active_label} >"), theme),
         Line::raw(""),
         Line::styled(
-            "ACP Servers controls eligibility; source constraints preserve Auto within one route.",
+            "Available configurations",
             Style::default().ink(theme.muted),
         ),
     ];
+    for preset in TeamPreset::ALL {
+        let marker = if Some(preset) == active { "*" } else { " " };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {marker} {:<31}", preset.label()),
+                Style::default().ink(if Some(preset) == active {
+                    theme.primary
+                } else {
+                    theme.text
+                }),
+            ),
+            Span::styled(preset.description(), Style::default().ink(theme.muted)),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "Ctrl+Tab opens the same team switcher from a session.",
+        Style::default().ink(theme.muted),
+    ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
@@ -2352,65 +2152,46 @@ mod tests {
     }
 
     #[test]
-    fn primary_and_subagent_acp_priorities_reorder_independently() {
+    fn team_configuration_updates_all_three_routes() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        editor.tab = SettingsTab::AcpPriority;
-        editor.selected = 0;
-        assert_eq!(editor.handle_key(KeyCode::Enter), SettingsAction::None);
-        assert_eq!(editor.priority_editor, Some(PrioritySeat::Primary));
-        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
-        assert_eq!(editor.config.agent.acp_priority[0], "claude-acp");
-        assert_eq!(editor.config.subagents.acp_priority[0], "codex-acp");
-        assert_eq!(
-            editor.notice.as_deref(),
-            Some("Priority updated; start a new session or restart Mjolnir to apply it.")
-        );
-        editor.handle_key(KeyCode::Enter);
-
-        editor.selected = 2;
-        editor.handle_key(KeyCode::Enter);
-        editor.handle_key(KeyCode::Right);
-        assert_eq!(editor.config.subagents.acp_priority[0], "claude-acp");
-        assert_eq!(editor.config.agent.acp_priority[0], "claude-acp");
-        assert_eq!(editor.config.agent.acp_priority[1], "codex-acp");
-        assert_eq!(
-            editor.handle_key(KeyCode::Char('r')),
-            SettingsAction::Changed
-        );
-        assert_eq!(
-            editor.config.subagents.acp_priority,
-            crate::config::DEFAULT_ACP_PRIORITY.map(str::to_string)
-        );
-        assert_eq!(
-            editor.notice.as_deref(),
-            Some("Priority reset; start a new session or restart Mjolnir to apply it.")
-        );
-    }
-
-    #[test]
-    fn acp_source_constraints_cycle_independently() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        editor.tab = SettingsTab::AcpPriority;
+        editor.tab = SettingsTab::Team;
 
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(
+            TeamPreset::from_config(&editor.config),
+            Some(TeamPreset::Codex)
+        );
         assert_eq!(editor.config.agent.acp_source.as_deref(), Some("codex-acp"));
-        assert_eq!(editor.config.review.acp_source, None);
-        assert_eq!(editor.config.subagents.acp_source, None);
-
-        editor.selected = 2;
-        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(
             editor.config.subagents.acp_source.as_deref(),
             Some("codex-acp")
         );
-        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
-        assert_eq!(editor.config.subagents.acp_source, None);
+        assert_eq!(
+            editor.config.review.acp_source.as_deref(),
+            Some("codex-acp")
+        );
+        assert_eq!(
+            editor.notice.as_deref(),
+            Some("Team updated; start a new session or restart Mjolnir to apply it.")
+        );
     }
 
     #[test]
-    fn acp_priority_tab_exposes_both_seat_editors() {
+    fn team_configuration_cycles_through_all_four_options() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        editor.tab = SettingsTab::AcpPriority;
+        editor.tab = SettingsTab::Team;
+
+        for expected in TeamPreset::ALL {
+            assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+            assert_eq!(TeamPreset::from_config(&editor.config), Some(expected));
+        }
+    }
+
+    #[test]
+    fn team_tab_exposes_all_four_configurations() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        TeamPreset::CodexWithClaudeReviewer.apply(&mut editor.config);
+        editor.tab = SettingsTab::Team;
         let backend = ratatui::backend::TestBackend::new(90, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
 
@@ -2419,15 +2200,10 @@ mod tests {
             .expect("draw");
 
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("ACP Priority"), "rendered:\n{rendered}");
-        assert!(
-            rendered.contains("Primary   < any enabled source >"),
-            "rendered:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("Subagents < any enabled source >"),
-            "rendered:\n{rendered}"
-        );
+        assert!(!rendered.contains("ACP Priority"), "rendered:\n{rendered}");
+        for preset in TeamPreset::ALL {
+            assert!(rendered.contains(preset.label()), "rendered:\n{rendered}");
+        }
     }
 
     #[test]
@@ -2499,6 +2275,12 @@ mod tests {
             Vec::new(),
             None,
         );
+
+        editor.tab = SettingsTab::Team;
+        let team = render(&editor, 100, 30);
+        for preset in TeamPreset::ALL {
+            assert!(team.contains(preset.label()), "rendered:\n{team}");
+        }
 
         editor.tab = SettingsTab::Agents;
         let agents = render(&editor, 100, 30);
@@ -2641,10 +2423,9 @@ mod tests {
     }
 
     #[test]
-    fn notice_and_priority_editor_footer_are_visible() {
+    fn team_change_notice_and_footer_are_visible() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        editor.tab = SettingsTab::AcpPriority;
-        editor.priority_editor = Some(PrioritySeat::Primary);
+        editor.tab = SettingsTab::Team;
         editor.notice = Some("restart required".to_string());
 
         let rendered = render(&editor, 100, 30);
@@ -2653,7 +2434,7 @@ mod tests {
             rendered.contains("restart required"),
             "rendered:\n{rendered}"
         );
-        assert!(rendered.contains("move"), "rendered:\n{rendered}");
-        assert!(rendered.contains("reset default"), "rendered:\n{rendered}");
+        assert!(rendered.contains("change"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Enter save"), "rendered:\n{rendered}");
     }
 }
