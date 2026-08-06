@@ -682,7 +682,10 @@ impl AgentStderrTail {
         if self.is_empty() {
             let _ = tokio::time::timeout(Duration::from_millis(25), changed).await;
         }
-        tokio::task::yield_now().await;
+        // stderr and the ACP response travel over different pipes. Give the
+        // reader a brief quiet window to collect trailing chunks that were
+        // written before the launch error response.
+        tokio::time::sleep(Duration::from_millis(5)).await;
         self.rendered()
     }
 
