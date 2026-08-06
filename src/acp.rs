@@ -1359,6 +1359,7 @@ pub async fn run(
         let message = format!("acp agent teardown failed: {error:#}");
         emit_fatal(&ui_tx, &fatal_emitted, message);
     }
+    let result = combine_runtime_and_teardown(result, teardown);
     if let Some(role) = cfg.role_config.as_ref()
         && let Some(session_tag) = role.session_tag.as_deref()
     {
@@ -1368,17 +1369,24 @@ pub async fn run(
             god = %role.label,
             model = %role.model_id,
             adapter = %role.adapter_source_id,
-            outcome = if result.is_ok() && teardown.is_ok() { "completed" } else { "failed" },
-            error = result
-                .as_ref()
-                .err()
-                .map(|error| format!("{error:#}"))
-                .or_else(|| teardown.as_ref().err().map(|error| format!("{error:#}"))),
+            outcome = if result.is_ok() { "completed" } else { "failed" },
+            error = result.as_ref().err().map(|error| format!("{error:#}")),
             "agent runtime finished"
         );
     }
-    teardown.map_err(|error| anyhow::anyhow!("reap agent process tree: {error:#}"))?;
     result
+}
+
+fn combine_runtime_and_teardown(result: Result<()>, teardown: Result<()>) -> Result<()> {
+    match (result, teardown) {
+        (result, Ok(())) => result,
+        (Ok(()), Err(teardown_error)) => Err(anyhow::anyhow!(
+            "reap agent process tree: {teardown_error:#}"
+        )),
+        (Err(runtime_error), Err(teardown_error)) => Err(anyhow::anyhow!(
+            "{runtime_error:#}\nreap agent process tree: {teardown_error:#}"
+        )),
+    }
 }
 
 pub(crate) struct PreparedAgentCommand {
@@ -6403,6 +6411,29 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("SIGKILL failed"));
         assert!(message.contains("child was not reaped"));
+    }
+
+    #[test]
+    fn runtime_failure_is_preserved_when_teardown_also_fails() {
+        let error = combine_runtime_and_teardown(
+            Err(anyhow::anyhow!(
+                "launch failed\nagent stderr tail: actionable path"
+            )),
+            Err(anyhow::anyhow!("taskkill exited with code 128")),
+        )
+        .expect_err("combined failure");
+        let message = format!("{error:#}");
+
+        assert!(message.contains("launch failed"), "{message}");
+        assert!(
+            message.contains("agent stderr tail: actionable path"),
+            "{message}"
+        );
+        assert!(message.contains("reap agent process tree"), "{message}");
+        assert!(
+            message.contains("taskkill exited with code 128"),
+            "{message}"
+        );
     }
 
     #[test]
