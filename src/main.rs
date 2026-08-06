@@ -2441,9 +2441,7 @@ async fn run_session(
                 session_cwd: cwd.clone(),
                 model_choices: roster.choices.clone(),
                 acp_inventory: roster.inventory.clone(),
-                configured_models: config::Config::load(&config_path)
-                    .map(|config| config.model_names())
-                    .unwrap_or_default(),
+                configured_models: ui_config.model_names(),
                 active_models: config::ModelsConfig {
                     primary: roster.primary.model.model.clone(),
                     primary_source: Some(roster.primary.launch.source_id.clone()),
