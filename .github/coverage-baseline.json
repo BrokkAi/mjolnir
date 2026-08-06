@@ -13,6 +13,10 @@
       "minimum": 51.5,
       "reason": "The binary entrypoint is exercised primarily through PTY and end-to-end process tests; the keep-awake config plumbing added entrypoint-only lines and per-run coverage varies ~0.2pt with PTY test timing."
     },
+    "src/opencode.rs": {
+      "minimum": 30.0,
+      "reason": "This module only binds the OpenCode identity to the shared managed ACP installer; the installer state machine and per-agent isolation are covered in src/managed_acp.rs."
+    },
     "src/pull_request.rs": {
       "minimum": 0.0,
       "reason": "This boundary shells out to an authenticated GitHub CLI and needs a hermetic integration harness."

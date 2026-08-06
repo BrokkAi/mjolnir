@@ -269,7 +269,6 @@ pub struct Availability {
     pub claude_status: ClaudeAuthStatus,
     pub kimi_credentials: bool,
     pub kimi: Option<PathBuf>,
-    pub opencode_credentials: bool,
     pub opencode: Option<PathBuf>,
     /// Subscription tier behind each vendor-native account, which decides
     /// which provider `auto` routes the primary seat through.
@@ -283,7 +282,6 @@ impl Availability {
             claude_status: claude_auth_status(),
             kimi_credentials: kimi_credentials_available(),
             kimi: crate::kimi::detect().path,
-            opencode_credentials: opencode_credentials_available(),
             opencode: crate::opencode::detect().path,
             subscriptions: Subscriptions::detect(),
         }
@@ -297,9 +295,6 @@ impl Availability {
             }
             AdapterKind::Kimi if !self.kimi_credentials => Some("Kimi credentials not found"),
             AdapterKind::Kimi if self.kimi.is_none() => Some("Kimi Code is not installed"),
-            AdapterKind::OpenCode if !self.opencode_credentials => {
-                Some("OpenCode credentials not found")
-            }
             AdapterKind::OpenCode if self.opencode.is_none() => Some("OpenCode is not installed"),
             _ => None,
         }
@@ -385,6 +380,13 @@ fn opencode_credentials_available() -> bool {
     crate::auth::detect(crate::auth::AuthVendor::OpenCode).available()
 }
 
+fn opencode_detected(availability: &Availability) -> bool {
+    // OpenCode also discovers provider configuration, environment credentials,
+    // and credential-free models itself. A launchable binary is enough to let
+    // its ACP probe report the models that are actually available.
+    availability.opencode.is_some()
+}
+
 fn codex_detection() -> Option<String> {
     for name in ["CODEX_API_KEY", "OPENAI_API_KEY"] {
         if nonempty_env(&[name]) {
@@ -423,11 +425,15 @@ fn adapter_kind(model: &str) -> Option<AdapterKind> {
     }
 }
 
-/// Drop leaderboard rows whose provider no built-in adapter serves. Ranking
-/// them would only ever produce unlaunchable choices.
-fn natively_served(rows: Vec<Row>) -> Vec<Row> {
+/// Drop leaderboard rows that no selected built-in can serve. OpenCode is an
+/// aggregator, so its probe may make any ranked provider launchable.
+fn ranked_rows_for_inventory(rows: Vec<Row>, inventory: &AcpInventory) -> Vec<Row> {
+    let opencode_selected = inventory
+        .servers
+        .iter()
+        .any(|server| server.id == "opencode" && server.selected);
     rows.into_iter()
-        .filter(|row| adapter_kind(&row.model).is_some())
+        .filter(|row| adapter_kind(&row.model).is_some() || opencode_selected)
         .collect()
 }
 
@@ -436,13 +442,16 @@ fn natively_served(rows: Vec<Row>) -> Vec<Row> {
 /// has no entry for it (e.g. the catalog was resolved while that vendor was
 /// disabled). `None` when no built-in adapter serves the model's provider.
 pub(crate) fn native_source_id(model: &str) -> Option<String> {
-    Some(launch_for(adapter_kind(model)?).source_id)
+    let kind = adapter_kind(model).or_else(|| {
+        (!deepswe::model_provider(model).is_empty()).then_some(AdapterKind::OpenCode)
+    })?;
+    Some(launch_for(kind).source_id)
 }
 
 /// Whether any built-in adapter serves this model's provider. Lets config
 /// load drop seat pins that no longer have a route.
 pub(crate) fn model_has_builtin_adapter(model: &str) -> bool {
-    adapter_kind(model).is_some()
+    adapter_kind(model).is_some() || !deepswe::model_provider(model).is_empty()
 }
 
 /// A config that discovery is guaranteed to surface at least one built-in
@@ -543,8 +552,7 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
         ),
         (
             AdapterKind::OpenCode,
-            (availability.opencode_credentials && availability.opencode.is_some())
-                .then(|| opencode.evidence.clone()),
+            opencode_detected(&availability).then(|| opencode.evidence.clone()),
             opencode.evidence.clone(),
         ),
     ];
@@ -1170,7 +1178,7 @@ fn unavailable_reason(
                         || config.acp.policy("kimi") == AcpServerPolicy::Enabled
                 }
                 AdapterKind::OpenCode => {
-                    (availability.opencode_credentials && availability.opencode.is_some())
+                    opencode_detected(availability)
                         || config.acp.policy("opencode") == AcpServerPolicy::Enabled
                 }
                 AdapterKind::Custom => false,
@@ -1249,9 +1257,9 @@ pub async fn resolve_streaming(config: &Config, cwd: &Path) -> Result<StreamingR
         deepswe::DEFAULT_URL,
     )
     .await;
-    let rows = natively_served(deepswe::eligible_high(&leaderboard.rows));
     let availability = Availability::detect();
     let inventory = discover_inventory(config);
+    let rows = ranked_rows_for_inventory(deepswe::eligible_high(&leaderboard.rows), &inventory);
 
     let mut results: Vec<(usize, AdapterLaunch, ProbeResult)> = Vec::new();
     let mut pending: Vec<(usize, AdapterLaunch)> = Vec::new();
@@ -1377,9 +1385,9 @@ async fn resolve_inner(config: &Config, cwd: &Path) -> Result<Roster> {
         deepswe::DEFAULT_URL,
     )
     .await;
-    let rows = natively_served(deepswe::eligible_high(&leaderboard.rows));
     let availability = Availability::detect();
     let inventory = discover_inventory(config);
+    let rows = ranked_rows_for_inventory(deepswe::eligible_high(&leaderboard.rows), &inventory);
     let discovery = discover_available(&rows, &inventory, cwd).await;
     assemble_roster(config, &rows, &availability, inventory, discovery)
 }
@@ -2065,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn unserved_providers_are_dropped_from_the_ranked_catalog() {
+    fn aggregator_rows_are_ranked_only_when_opencode_is_selected() {
         let rows = vec![
             role_at("gpt-5-6-sol", 0.7, 1.0).model,
             role_at("claude-sonnet-5", 0.6, 1.0).model,
@@ -2084,7 +2092,7 @@ mod tests {
             },
         ];
 
-        let served = natively_served(rows);
+        let served = ranked_rows_for_inventory(rows.clone(), &AcpInventory::default());
 
         assert_eq!(
             served
@@ -2093,6 +2101,42 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["gpt-5-6-sol", "claude-sonnet-5", "kimi-k2-7-code"]
         );
+
+        let launch = opencode_launch();
+        let inventory = AcpInventory {
+            servers: vec![AcpServerInfo {
+                id: launch.source_id.clone(),
+                label: "OpenCode".to_string(),
+                policy: AcpServerPolicy::Auto,
+                detected: true,
+                selected: true,
+                evidence: "OpenCode on PATH".to_string(),
+                launch,
+                model_count: 0,
+                error: None,
+                installing: false,
+                origin: None,
+                session_config: Vec::new(),
+                subscription: None,
+            }],
+        };
+        assert_eq!(ranked_rows_for_inventory(rows, &inventory).len(), 5);
+        assert_eq!(native_source_id("glm-5-2").as_deref(), Some("opencode"));
+        assert!(model_has_builtin_adapter("gemini-3-5-flash"));
+    }
+
+    #[test]
+    fn installed_opencode_is_detected_without_an_auth_file() {
+        let availability = Availability {
+            codex_credentials: false,
+            claude_status: ClaudeAuthStatus::NotLoggedIn,
+            kimi_credentials: false,
+            kimi: None,
+            opencode: Some(PathBuf::from("/tools/opencode")),
+            subscriptions: Subscriptions::default(),
+        };
+
+        assert!(opencode_detected(&availability));
     }
 
     #[test]
@@ -2326,7 +2370,6 @@ mod tests {
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
-            opencode_credentials: false,
             opencode: None,
             subscriptions: Subscriptions::default(),
         };
@@ -2512,7 +2555,6 @@ mod tests {
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
-            opencode_credentials: false,
             opencode: None,
             subscriptions: Subscriptions::default(),
         };
@@ -2542,7 +2584,6 @@ mod tests {
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
-            opencode_credentials: false,
             opencode: None,
             subscriptions: Subscriptions::default(),
         };
@@ -2624,7 +2665,6 @@ mod tests {
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
-            opencode_credentials: false,
             opencode: None,
             subscriptions: Subscriptions::default(),
         };

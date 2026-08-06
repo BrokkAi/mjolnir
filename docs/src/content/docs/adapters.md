@@ -22,7 +22,7 @@ qualifying adapter no model is launchable.
 | Codex | Existing OpenAI/Codex credentials | Runs the Codex ACP bridge through `npx`; sign-in actions require the official `codex` CLI |
 | Claude | Existing Anthropic/Claude credentials | Runs the Claude ACP bridge through `npx`; sign-in actions require the official `claude` CLI |
 | Kimi Code | Existing Kimi credentials or `/mjconfig` sign-in | Mjolnir can install the official binary from the ACP registry |
-| OpenCode | Existing OpenCode provider credentials or `/mjconfig` sign-in | Multi-provider aggregator; offers the models of providers signed into OpenCode plus its free-tier Zen models. Mjolnir can install the official binary from the ACP registry |
+| OpenCode | Installed OpenCode, existing provider credentials, or `/mjconfig` sign-in | Multi-provider aggregator; offers configured provider models plus credential-free Zen models. Mjolnir can install the official binary from the ACP registry |
 
 Credential discovery checks supported local credential files and environment
 variables without logging secret values or launching the npm bridges. First

@@ -2268,6 +2268,19 @@ mod tests {
             notices[0]
         );
     }
+
+    #[test]
+    fn reset_unroutable_models_uses_opencode_for_aggregated_providers() {
+        let mut config = Config::default();
+        config.agent.model = "glm-5-2".to_string();
+        config.set_acp_server_policy("opencode", AcpServerPolicy::Disabled);
+
+        let notices = reset_unroutable_models(&mut config, &[]);
+
+        assert_eq!(config.agent.model, "auto");
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("Agent model glm-5-2"), "{}", notices[0]);
+    }
     use agent_client_protocol::schema::v1::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     };

@@ -1286,7 +1286,7 @@ acp_source = "retired-acp"
 acp_priority = ["retired-acp", "codex-acp"]
 
 [review]
-model = "auto"
+model = "retired-model"
 acp_priority = ["codex-acp", "retired-acp"]
 
 [subagents]
@@ -1311,8 +1311,11 @@ kimi = "disabled"
             loaded.acp.policies.get("kimi"),
             Some(&AcpServerPolicy::Disabled)
         );
-        // The pinned model's provider has no built-in adapter left either.
-        assert_eq!(loaded.agent.model, "auto");
+        // OpenCode can serve ranked providers beyond the vendor-native set,
+        // so the GLM pin remains usable after the retired source is removed.
+        assert_eq!(loaded.agent.model, "glm-5-2");
+        // A model with no recognized provider still falls back safely.
+        assert_eq!(loaded.review.model, "auto");
         // Still-served pins are untouched.
         assert_eq!(loaded.subagents.model, "gpt-5-6-sol");
         assert_eq!(loaded.subagents.acp_source.as_deref(), Some("codex-acp"));
