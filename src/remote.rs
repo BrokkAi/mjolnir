@@ -86,7 +86,7 @@ const FILESYSTEM_SEARCH_SCAN_LIMIT: usize = 5_000;
 const FILESYSTEM_SEARCH_RESULT_LIMIT: usize = 50;
 const FILESYSTEM_SEARCH_QUERY_MAX_CHARS: usize = 128;
 const RECENT_FILESYSTEM_DIRECTORY_LIMIT: usize = 6;
-const RECENT_FILESYSTEM_SESSION_SCAN_LIMIT: usize = 100;
+const RECENT_FILESYSTEM_DIRECTORY_HISTORY_LIMIT: usize = 100;
 /// Cadence of the tracker's current-branch pull-request probe. Slower than
 /// the TUI's 5s status-line poll on purpose: remote viewers tolerate a stale
 /// badge, and each probe spawns `git` + `gh` subprocesses.
@@ -7282,12 +7282,12 @@ async fn create_server_owned_session(
     let want_worktree = request.worktree;
     // Path validation and worktree creation shell out to git; both are
     // blocking work.
-    let (cwd, worktree) = tokio::task::spawn_blocking(move || {
-        let cwd = directory_under_roots(roots.as_slice(), &cwd)?;
+    let (selected_cwd, cwd, worktree) = tokio::task::spawn_blocking(move || {
+        let selected_cwd = directory_under_roots(roots.as_slice(), &cwd)?;
         if !want_worktree {
-            return Ok((cwd, None));
+            return Ok((selected_cwd.clone(), selected_cwd, None));
         }
-        let project_root = crate::worktree::git_toplevel(&cwd)
+        let project_root = crate::worktree::git_toplevel(&selected_cwd)
             .map_err(|error| (StatusCode::BAD_REQUEST, format!("{error:#}")))?;
         let canonical_project_root = std::fs::canonicalize(&project_root).map_err(|error| {
             (
@@ -7304,10 +7304,10 @@ async fn create_server_owned_session(
                 "project root is outside configured workspace roots".to_string(),
             ));
         }
-        let created = crate::worktree::create_noninteractive(&cwd)
+        let created = crate::worktree::create_noninteractive(&selected_cwd)
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")))?;
         let name = crate::paths::folder_label(&created.worktree_root);
-        Ok((created.session_cwd, Some(name)))
+        Ok((selected_cwd, created.session_cwd, Some(name)))
     })
     .await
     .map_err(internal_error)??;
@@ -7328,6 +7328,17 @@ async fn create_server_owned_session(
                 format!("saved configuration cannot start a session: {error}"),
             ));
         }
+    }
+    let db_path = Arc::clone(&state.db_path);
+    let recent_cwd = selected_cwd;
+    match tokio::task::spawn_blocking(move || {
+        record_recent_filesystem_directory(db_path.as_ref().as_path(), &recent_cwd)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!(%error, "failed to record recent filesystem directory"),
+        Err(error) => warn!(%error, "recent filesystem directory task failed"),
     }
     let launch_id = state.session_manager.start_session(cwd.clone());
     Ok((
@@ -8118,6 +8129,10 @@ fn init_db(db_path: &Path) -> Result<()> {
             config_id text,
             value text not null,
             created_at text not null
+        );
+        create table if not exists recent_filesystem_directories (
+            path text primary key,
+            selected_at text not null
         );",
     )
     .context("create remote-control schema")?;
@@ -8509,41 +8524,70 @@ fn load_recent_filesystem_directories(
     let conn = open_db(db_path)?;
     let mut stmt = conn
         .prepare(
-            "select status_json
-            from sessions
-            where status_json is not null
-            order by coalesce(nullif(last_prompt_at, ''), start_time) desc, session_id asc
+            "select path
+            from recent_filesystem_directories
+            order by selected_at desc, path asc
             limit ?1",
         )
         .context("prepare recent filesystem directory query")?;
     let rows = stmt
         .query_map(
-            params![RECENT_FILESYSTEM_SESSION_SCAN_LIMIT as i64],
+            params![RECENT_FILESYSTEM_DIRECTORY_HISTORY_LIMIT as i64],
             |row| row.get::<_, String>(0),
         )
         .context("query recent filesystem directories")?;
-    let mut seen = HashSet::new();
     let mut recent = Vec::new();
-    for status_json in rows {
-        let status_json = status_json.context("read recent filesystem directory")?;
-        let Ok(status) = serde_json::from_str::<SessionStatusRecord>(&status_json) else {
+    for path in rows {
+        let path = path.context("read recent filesystem directory")?;
+        let Ok(path) = directory_under_roots(roots, path.trim()) else {
             continue;
         };
-        let Some(cwd) = status.cwd.filter(|cwd| !cwd.trim().is_empty()) else {
-            continue;
-        };
-        let Ok(path) = directory_under_roots(roots, cwd.trim()) else {
-            continue;
-        };
-        if !seen.insert(path.clone()) {
-            continue;
-        }
         recent.push(filesystem_directory_record(&path));
         if recent.len() == RECENT_FILESYSTEM_DIRECTORY_LIMIT {
             break;
         }
     }
     Ok(recent)
+}
+
+fn record_recent_filesystem_directory(db_path: &Path, path: &Path) -> Result<()> {
+    record_recent_filesystem_directory_at(db_path, path, &now_rfc3339())
+}
+
+fn record_recent_filesystem_directory_at(
+    db_path: &Path,
+    path: &Path,
+    selected_at: &str,
+) -> Result<()> {
+    init_db(db_path)?;
+    let mut conn = open_db(db_path)?;
+    let transaction = conn
+        .transaction()
+        .context("begin recent filesystem directory transaction")?;
+    transaction
+        .execute(
+            "insert into recent_filesystem_directories (path, selected_at)
+         values (?1, ?2)
+         on conflict(path) do update set selected_at = excluded.selected_at",
+            params![path.display().to_string(), selected_at],
+        )
+        .context("record recent filesystem directory")?;
+    transaction
+        .execute(
+            "delete from recent_filesystem_directories
+             where path not in (
+                 select path
+                 from recent_filesystem_directories
+                 order by selected_at desc, path asc
+                 limit ?1
+             )",
+            params![RECENT_FILESYSTEM_DIRECTORY_HISTORY_LIMIT as i64],
+        )
+        .context("prune recent filesystem directories")?;
+    transaction
+        .commit()
+        .context("commit recent filesystem directory")?;
+    Ok(())
 }
 
 fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<SessionRecord>> {
@@ -10207,6 +10251,13 @@ mod tests {
         assert!(viewer.contains("is-failed"));
         // The old behaviour: a timer that silently dropped the card.
         assert!(!viewer.contains("SESSION_LAUNCH_INDICATOR_TTL_MS"));
+    }
+
+    #[test]
+    fn embedded_viewer_defaults_new_sessions_to_worktrees() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("id=\"new-session-worktree\" checked"));
+        assert!(viewer.contains("newSessionWorktreeEl.checked = true;"));
     }
 
     #[test]
@@ -12700,7 +12751,7 @@ mod tests {
         let db_path = dir.path().join("sessions.sqlite3");
         let token = "integration-token".to_string();
         let app = build_router(RouterConfig {
-            db_path,
+            db_path: db_path.clone(),
             token: token.clone(),
             viewer_code: "123456".to_string(),
             cookie_key: "test-cookie-key".to_string(),
@@ -12733,6 +12784,18 @@ mod tests {
             crate::paths::worktree_name_from_cwd(session_cwd).as_deref(),
             Some(name.as_str())
         );
+        let recent =
+            load_recent_filesystem_directories(&db_path, &test_workspace_roots(dir.path()))
+                .expect("load recent directories");
+        assert_eq!(recent.len(), 1);
+        assert_eq!(
+            recent[0].path,
+            std::fs::canonicalize(&repo)
+                .expect("canonical selected folder")
+                .display()
+                .to_string()
+        );
+        assert_ne!(recent[0].path, parsed.cwd);
     }
 
     #[tokio::test]
@@ -15210,7 +15273,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_filesystem_directories_are_valid_unique_and_newest_first() {
+    fn recent_filesystem_directories_are_selected_valid_unique_and_newest_first() {
         let dir = tempfile::tempdir().expect("root");
         let older_path = dir.path().join("older");
         let newer_path = dir.path().join("newer");
@@ -15220,34 +15283,14 @@ mod tests {
         let roots = test_workspace_roots(dir.path());
         let db_path = dir.path().join("sessions.sqlite3");
 
-        let mut older = session_named("older", "2026-06-10T10:00:00Z");
-        older.last_prompt_at = Some("2026-06-10T10:00:00Z".to_string());
-        older.status = Some(SessionStatusRecord {
-            cwd: Some(older_path.display().to_string()),
-            ..SessionStatusRecord::default()
-        });
-        upsert_session_record(&db_path, &older).expect("insert older session");
-
-        let mut newer = session_named("newer", "2026-06-10T10:02:00Z");
-        newer.last_prompt_at = Some("2026-06-10T10:02:00Z".to_string());
-        newer.status = Some(SessionStatusRecord {
-            cwd: Some(newer_path.display().to_string()),
-            ..SessionStatusRecord::default()
-        });
-        upsert_session_record(&db_path, &newer).expect("insert newer session");
-
-        let mut duplicate = session_named("duplicate", "2026-06-10T10:03:00Z");
-        duplicate.last_prompt_at = Some("2026-06-10T10:03:00Z".to_string());
-        duplicate.status = newer.status.clone();
-        upsert_session_record(&db_path, &duplicate).expect("insert duplicate session");
-
-        let mut invalid = session_named("invalid", "2026-06-10T10:04:00Z");
-        invalid.last_prompt_at = Some("2026-06-10T10:04:00Z".to_string());
-        invalid.status = Some(SessionStatusRecord {
-            cwd: Some(outside.path().display().to_string()),
-            ..SessionStatusRecord::default()
-        });
-        upsert_session_record(&db_path, &invalid).expect("insert invalid session");
+        record_recent_filesystem_directory_at(&db_path, &older_path, "2026-06-10T10:00:00Z")
+            .expect("record older selection");
+        record_recent_filesystem_directory_at(&db_path, &newer_path, "2026-06-10T10:02:00Z")
+            .expect("record newer selection");
+        record_recent_filesystem_directory_at(&db_path, &newer_path, "2026-06-10T10:03:00Z")
+            .expect("record duplicate selection");
+        record_recent_filesystem_directory_at(&db_path, outside.path(), "2026-06-10T10:04:00Z")
+            .expect("record outside selection");
 
         let recent =
             load_recent_filesystem_directories(&db_path, &roots).expect("load recent directories");
@@ -15258,6 +15301,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["newer", "older"]
         );
+    }
+
+    #[test]
+    fn session_worktrees_do_not_implicitly_populate_recent_folders() {
+        let dir = tempfile::tempdir().expect("root");
+        let worktree_path = dir.path().join(".mjolnir/worktrees/generated");
+        std::fs::create_dir_all(&worktree_path).expect("worktree directory");
+        let roots = test_workspace_roots(dir.path());
+        let db_path = dir.path().join("sessions.sqlite3");
+        let mut session = session_named("worktree", "2026-06-10T10:00:00Z");
+        session.worktree = Some("generated".to_string());
+        session.status = Some(SessionStatusRecord {
+            cwd: Some(worktree_path.display().to_string()),
+            ..SessionStatusRecord::default()
+        });
+        upsert_session_record(&db_path, &session).expect("insert worktree session");
+
+        let recent =
+            load_recent_filesystem_directories(&db_path, &roots).expect("load recent directories");
+
+        assert!(recent.is_empty());
     }
 
     #[tokio::test]

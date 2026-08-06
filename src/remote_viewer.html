@@ -3474,7 +3474,7 @@
         <div class="fs-toolbar">
           <button id="fs-parent-button" class="fs-parent-button" type="button">Up</button>
           <label class="fs-worktree-toggle">
-            <input type="checkbox" id="new-session-worktree" />
+            <input type="checkbox" id="new-session-worktree" checked />
             New worktree
           </label>
           <span class="fs-spacer"></span>
@@ -4888,7 +4888,7 @@
           return;
         }
         newSessionModalEl.hidden = false;
-        newSessionWorktreeEl.checked = false;
+        newSessionWorktreeEl.checked = true;
         fsSearchInputEl.value = "";
         filesystemState = null;
         fsCurrentPathEl.textContent = "";
