@@ -10210,6 +10210,27 @@ mod tests {
     }
 
     #[test]
+    fn embedded_viewer_keeps_session_actions_in_wrapping_mobile_header() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("id=\"mobile-new-session-button\""));
+        assert!(viewer.contains("id=\"mobile-logout-button\""));
+        let phone_layout = viewer
+            .split_once("@media (max-width: 800px) {")
+            .expect("phone media query")
+            .1
+            .split_once("@media (prefers-reduced-motion: reduce)")
+            .expect("end of phone media query")
+            .0;
+        assert!(phone_layout.contains("grid-template-columns: minmax(0, 1fr)"));
+        assert!(phone_layout.contains(".chat-header {\n          flex-wrap: wrap;"));
+        assert!(phone_layout.contains(".mobile-chat-actions {\n          display: flex;"));
+        assert!(viewer.contains(
+            "mobileNewSessionButtonEl.addEventListener(\"click\", openNewSessionPicker)"
+        ));
+        assert!(viewer.contains("mobileLogoutButtonEl.addEventListener(\"click\", logout)"));
+    }
+
+    #[test]
     fn embedded_viewer_contains_elicitation_controls() {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("renderElicitationControls"));

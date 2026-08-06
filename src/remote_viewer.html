@@ -551,6 +551,7 @@
         display: flex;
         flex-direction: column;
         min-height: 0;
+        min-width: 0;
         border-right: 1px solid var(--line);
         background: var(--surface-chrome);
 
@@ -564,9 +565,11 @@
         display: flex;
         align-items: center;
         gap: 12px;
+        min-width: 0;
 
         & h1 {
           flex: 1;
+          min-width: 0;
           margin: 0;
           display: flex;
           align-items: center;
@@ -1330,6 +1333,10 @@
         flex: 0 0 auto;
         font-size: 16px;
         letter-spacing: 0;
+      }
+
+      .mobile-chat-actions {
+        display: none;
       }
 
       .chat-heading {
@@ -3137,7 +3144,7 @@
 
       @media (max-width: 800px) {
         .layout {
-          grid-template-columns: 1fr;
+          grid-template-columns: minmax(0, 1fr);
         }
 
         .layout:not(.show-chat) .main {
@@ -3202,8 +3209,25 @@
         }
 
         .chat-header {
+          flex-wrap: wrap;
+          gap: 8px;
           padding-left: 12px;
           padding-right: calc(12px + var(--theme-toggle-reserve) + env(safe-area-inset-right));
+        }
+
+        .mobile-chat-actions {
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          flex: 0 0 auto;
+        }
+
+        .connection-badge,
+        .archive-badge,
+        .side-badge,
+        .approval-badge,
+        .working-badge {
+          order: 1;
         }
 
         .ragnarok-panel {
@@ -3360,6 +3384,10 @@
           <span id="side-badge" class="side-badge" hidden>side</span>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
           <span id="working-badge" class="working-badge" hidden>working</span>
+          <div class="mobile-chat-actions">
+            <button id="mobile-new-session-button" class="primary sidebar-new-button" type="button">New</button>
+            <button id="mobile-logout-button" class="ghost-danger" type="button">Log out</button>
+          </div>
           <button id="workspace-diff-button" class="icon-button" type="button" aria-label="Show uncommitted changes">±</button>
           <button id="settings-button" class="icon-button" type="button" aria-label="Open viewer settings">⚙</button>
         </header>
@@ -3574,6 +3602,8 @@
       const authErrorEl = $("auth-error");
       const logoutButtonEl = $("logout-button");
       const newSessionButtonEl = $("new-session-button");
+      const mobileLogoutButtonEl = $("mobile-logout-button");
+      const mobileNewSessionButtonEl = $("mobile-new-session-button");
       const settingsButtonEl = $("settings-button");
       const workspaceDiffButtonEl = $("workspace-diff-button");
       const workspaceDiffModalEl = $("workspace-diff-modal");
@@ -8939,6 +8969,8 @@
       authFormEl.addEventListener("submit", submitAuth);
       logoutButtonEl.addEventListener("click", logout);
       newSessionButtonEl.addEventListener("click", openNewSessionPicker);
+      mobileLogoutButtonEl.addEventListener("click", logout);
+      mobileNewSessionButtonEl.addEventListener("click", openNewSessionPicker);
       historyToggleEl.addEventListener("click", () => {
         void toggleHistory();
       });
