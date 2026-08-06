@@ -18,7 +18,7 @@ pub const CONFIG_VERSION: u32 = 3;
 /// Version of the product-model explanation accepted by the user. This is
 /// intentionally independent from the storage schema version.
 pub const ONBOARDING_CONTENT_VERSION: u32 = 2;
-pub const DEFAULT_ACP_PRIORITY: [&str; 3] = ["codex-acp", "claude-acp", "kimi"];
+pub const DEFAULT_ACP_PRIORITY: [&str; 4] = ["codex-acp", "claude-acp", "kimi", "opencode"];
 /// Schema version this build can migrate forward from.
 const MIGRATABLE_VERSION: u32 = 2;
 
@@ -620,7 +620,7 @@ impl Config {
     }
 
     pub fn set_acp_server_policy(&mut self, id: &str, policy: AcpServerPolicy) -> bool {
-        if matches!(id, "codex-acp" | "claude-acp" | "kimi") {
+        if matches!(id, "codex-acp" | "claude-acp" | "kimi" | "opencode") {
             if policy == AcpServerPolicy::Auto {
                 self.acp.policies.remove(id);
             } else {

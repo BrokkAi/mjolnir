@@ -417,7 +417,13 @@ impl State {
         self.roster = None;
         self.inventory = crate::roster::discover_inventory(&self.editor.config);
         self.screen = Screen::Connections;
-        self.selected = if error.to_ascii_lowercase().contains("kimi") {
+        let lowered = error.to_ascii_lowercase();
+        self.selected = if lowered.contains("opencode") {
+            crate::auth::AuthVendor::ALL
+                .iter()
+                .position(|vendor| *vendor == crate::auth::AuthVendor::OpenCode)
+                .unwrap_or(0)
+        } else if lowered.contains("kimi") {
             crate::auth::AuthVendor::ALL
                 .iter()
                 .position(|vendor| *vendor == crate::auth::AuthVendor::Kimi)

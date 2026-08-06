@@ -22,6 +22,7 @@ pub enum AdapterKind {
     Codex,
     Claude,
     Kimi,
+    OpenCode,
     Custom,
 }
 
@@ -31,6 +32,7 @@ impl AdapterKind {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
             Self::Kimi => "Kimi Code",
+            Self::OpenCode => "OpenCode",
             Self::Custom => "Custom",
         }
     }
@@ -40,6 +42,7 @@ impl AdapterKind {
             "codex-acp" => Some(Self::Codex),
             "claude-acp" => Some(Self::Claude),
             "kimi" => Some(Self::Kimi),
+            "opencode" => Some(Self::OpenCode),
             _ => None,
         }
     }
@@ -74,7 +77,7 @@ pub fn configure_permissions(
         (AdapterKind::Claude, PermissionPreset::Manual) => ("mode", "default", None),
         (AdapterKind::Claude, PermissionPreset::Auto) => ("mode", "auto", Some("default")),
         (AdapterKind::Claude, PermissionPreset::Yolo) => ("mode", "bypassPermissions", None),
-        (AdapterKind::Kimi, _) => return None,
+        (AdapterKind::Kimi | AdapterKind::OpenCode, _) => return None,
         (AdapterKind::Custom, PermissionPreset::Manual) => ("permission_mode", "default", None),
         (AdapterKind::Custom, PermissionPreset::Auto) => {
             ("permission_mode", "auto", Some("default"))
@@ -266,6 +269,8 @@ pub struct Availability {
     pub claude_status: ClaudeAuthStatus,
     pub kimi_credentials: bool,
     pub kimi: Option<PathBuf>,
+    pub opencode_credentials: bool,
+    pub opencode: Option<PathBuf>,
     /// Subscription tier behind each vendor-native account, which decides
     /// which provider `auto` routes the primary seat through.
     pub subscriptions: Subscriptions,
@@ -278,6 +283,8 @@ impl Availability {
             claude_status: claude_auth_status(),
             kimi_credentials: kimi_credentials_available(),
             kimi: crate::kimi::detect().path,
+            opencode_credentials: opencode_credentials_available(),
+            opencode: crate::opencode::detect().path,
             subscriptions: Subscriptions::detect(),
         }
     }
@@ -290,6 +297,10 @@ impl Availability {
             }
             AdapterKind::Kimi if !self.kimi_credentials => Some("Kimi credentials not found"),
             AdapterKind::Kimi if self.kimi.is_none() => Some("Kimi Code is not installed"),
+            AdapterKind::OpenCode if !self.opencode_credentials => {
+                Some("OpenCode credentials not found")
+            }
+            AdapterKind::OpenCode if self.opencode.is_none() => Some("OpenCode is not installed"),
             _ => None,
         }
     }
@@ -368,6 +379,10 @@ fn claude_auth_status() -> ClaudeAuthStatus {
 
 fn kimi_credentials_available() -> bool {
     crate::auth::detect(crate::auth::AuthVendor::Kimi).available()
+}
+
+fn opencode_credentials_available() -> bool {
+    crate::auth::detect(crate::auth::AuthVendor::OpenCode).available()
 }
 
 fn codex_detection() -> Option<String> {
@@ -449,6 +464,9 @@ fn adapter_accepts_model(kind: AdapterKind, model: &str) -> bool {
         AdapterKind::Codex => deepswe::model_provider(model) == "openai",
         AdapterKind::Claude => deepswe::model_provider(model) == "anthropic",
         AdapterKind::Kimi => deepswe::model_provider(model) == "moonshotai",
+        // OpenCode is a multi-provider aggregator; any ranked model it
+        // actually advertises during the probe may route through it.
+        AdapterKind::OpenCode => true,
         AdapterKind::Custom => true,
     }
 }
@@ -485,6 +503,16 @@ fn launch_for(kind: AdapterKind) -> AdapterLaunch {
                 env: detection.env,
             }
         }
+        AdapterKind::OpenCode => {
+            let detection = crate::opencode::detect();
+            AdapterLaunch {
+                kind,
+                source_id: "opencode".to_string(),
+                command: detection.path.unwrap_or_else(|| PathBuf::from("opencode")),
+                args: detection.args,
+                env: detection.env,
+            }
+        }
         AdapterKind::Custom => unreachable!("custom launches come from configuration"),
     }
 }
@@ -492,6 +520,7 @@ fn launch_for(kind: AdapterKind) -> AdapterLaunch {
 pub fn discover_inventory(config: &Config) -> AcpInventory {
     let availability = Availability::detect();
     let kimi = crate::kimi::detect();
+    let opencode = crate::opencode::detect();
     let detections = [
         (
             AdapterKind::Codex,
@@ -512,6 +541,12 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
                 .then(|| kimi.evidence.clone()),
             kimi.evidence.clone(),
         ),
+        (
+            AdapterKind::OpenCode,
+            (availability.opencode_credentials && availability.opencode.is_some())
+                .then(|| opencode.evidence.clone()),
+            opencode.evidence.clone(),
+        ),
     ];
     let mut servers = detections
         .into_iter()
@@ -530,7 +565,11 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
                 launch,
                 model_count: 0,
                 error: None,
-                installing: kind == AdapterKind::Kimi && kimi.installing,
+                installing: match kind {
+                    AdapterKind::Kimi => kimi.installing,
+                    AdapterKind::OpenCode => opencode.installing,
+                    _ => false,
+                },
                 origin: None,
                 session_config: Vec::new(),
                 subscription: availability
@@ -577,6 +616,12 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
     if let Some(server) = servers.iter_mut().find(|server| server.id == "kimi") {
         server.error = kimi.error;
         if let Some(path) = availability.kimi {
+            server.launch.command = path;
+        }
+    }
+    if let Some(server) = servers.iter_mut().find(|server| server.id == "opencode") {
+        server.error = opencode.error;
+        if let Some(path) = availability.opencode {
             server.launch.command = path;
         }
     }
@@ -829,7 +874,7 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
                 });
             }
         }
-        if launch.kind == AdapterKind::Custom {
+        if matches!(launch.kind, AdapterKind::Custom | AdapterKind::OpenCode) {
             for option in options
                 .iter()
                 .filter(|option| !matched_values.contains(&option.value))
@@ -940,8 +985,10 @@ fn explicit<'a>(
     }
     if selector.starts_with("custom/") {
         if let Some(candidate) = available.iter().find(|candidate| {
-            candidate.launch.kind == AdapterKind::Custom
-                && custom_model_id(&candidate.launch.source_id, &candidate.model_value) == selector
+            matches!(
+                candidate.launch.kind,
+                AdapterKind::Custom | AdapterKind::OpenCode
+            ) && custom_model_id(&candidate.launch.source_id, &candidate.model_value) == selector
         }) {
             return Ok(candidate);
         }
@@ -1122,12 +1169,17 @@ fn unavailable_reason(
                     (availability.kimi_credentials && availability.kimi.is_some())
                         || config.acp.policy("kimi") == AcpServerPolicy::Enabled
                 }
+                AdapterKind::OpenCode => {
+                    (availability.opencode_credentials && availability.opencode.is_some())
+                        || config.acp.policy("opencode") == AcpServerPolicy::Enabled
+                }
                 AdapterKind::Custom => false,
             };
             let native_enabled = match native {
                 AdapterKind::Codex => config.acp.policy("codex-acp") != AcpServerPolicy::Disabled,
                 AdapterKind::Claude => config.acp.policy("claude-acp") != AcpServerPolicy::Disabled,
                 AdapterKind::Kimi => config.acp.policy("kimi") != AcpServerPolicy::Disabled,
+                AdapterKind::OpenCode => config.acp.policy("opencode") != AcpServerPolicy::Disabled,
                 AdapterKind::Custom => true,
             };
             if !native_enabled {
@@ -1159,6 +1211,14 @@ pub async fn resolve_waiting_for_installs(config: &Config, cwd: &Path) -> Result
         crate::kimi::wait_until_ready()
             .await
             .context("install managed Kimi Code")?;
+    }
+    if config.acp.policy("opencode") != AcpServerPolicy::Disabled
+        && opencode_credentials_available()
+        && crate::opencode::detect().path.is_none()
+    {
+        crate::opencode::wait_until_ready()
+            .await
+            .context("install managed OpenCode")?;
     }
     resolve_inner(config, cwd).await
 }
@@ -2266,6 +2326,8 @@ mod tests {
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
+            opencode_credentials: false,
+            opencode: None,
             subscriptions: Subscriptions::default(),
         };
         let roster = assemble_roster(
@@ -2331,6 +2393,84 @@ mod tests {
         assert_eq!(role.model_value, "company/private-model");
     }
 
+    fn opencode_launch() -> AdapterLaunch {
+        AdapterLaunch {
+            kind: AdapterKind::OpenCode,
+            source_id: "opencode".to_string(),
+            command: PathBuf::from("opencode"),
+            args: vec!["acp".to_string()],
+            env: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn opencode_is_probed_and_serves_any_ranked_provider() {
+        let rows = vec![role_at("gpt-5-5", 0.6, 5.0).model];
+        // No synthesized capabilities: the aggregator's model list depends on
+        // which providers the user authenticated, so it must be probed.
+        assert!(credentialed_provider_capabilities(&opencode_launch(), &rows).is_none());
+        assert_eq!(
+            AdapterKind::from_source_id("opencode"),
+            Some(AdapterKind::OpenCode)
+        );
+        assert!(adapter_accepts_model(AdapterKind::OpenCode, "gpt-5-5"));
+        assert!(adapter_accepts_model(
+            AdapterKind::OpenCode,
+            "claude-fable-5"
+        ));
+        assert_eq!(launch_for(AdapterKind::OpenCode).source_id, "opencode");
+    }
+
+    #[test]
+    fn opencode_probe_ranks_matching_models_and_exposes_extras_unranked() {
+        let rows = vec![
+            role_at("claude-fable-5", 0.7, 8.0).model,
+            role_at("gpt-5-5", 0.6, 5.0).model,
+        ];
+        let discovery = resolve_probes(
+            &rows,
+            vec![(
+                0,
+                opencode_launch(),
+                capabilities(
+                    true,
+                    &["anthropic/claude-fable-5", "openrouter/qwen/private-model"],
+                ),
+            )],
+        );
+
+        let ranked = discovery
+            .available
+            .iter()
+            .find(|role| role.ranked)
+            .expect("ranked opencode route");
+        assert_eq!(ranked.model.model, "claude-fable-5");
+        assert_eq!(ranked.model_value, "anthropic/claude-fable-5");
+        assert_eq!(ranked.launch.source_id, "opencode");
+
+        let extra = discovery
+            .available
+            .iter()
+            .find(|role| !role.ranked)
+            .expect("unranked opencode extra");
+        assert_eq!(
+            extra.model.model,
+            "custom/opencode/openrouter/qwen/private-model"
+        );
+        assert_eq!(extra.model_value, "openrouter/qwen/private-model");
+
+        let resolved = explicit(
+            "Agent",
+            "custom/opencode/openrouter/qwen/private-model",
+            &rows,
+            &discovery.available,
+            &[],
+        )
+        .expect("explicit opencode extra selector");
+        assert_eq!(resolved.model_value, "openrouter/qwen/private-model");
+        assert_eq!(resolved.launch.source_id, "opencode");
+    }
+
     #[test]
     fn explicit_custom_selector_resolves_ranked_model_by_exact_advertised_value() {
         let rows = vec![Row {
@@ -2372,6 +2512,8 @@ mod tests {
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
+            opencode_credentials: false,
+            opencode: None,
             subscriptions: Subscriptions::default(),
         };
         assert_eq!(
@@ -2400,6 +2542,8 @@ mod tests {
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
+            opencode_credentials: false,
+            opencode: None,
             subscriptions: Subscriptions::default(),
         };
         let error = explicit("Agent", "gpt-5-6-sol", &rows, &[], &[])
@@ -2480,6 +2624,8 @@ mod tests {
             claude_status: ClaudeAuthStatus::NotLoggedIn,
             kimi_credentials: false,
             kimi: None,
+            opencode_credentials: false,
+            opencode: None,
             subscriptions: Subscriptions::default(),
         };
 

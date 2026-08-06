@@ -1753,7 +1753,7 @@ fn draw_acp_priority(
                 Style::default().ink(theme.muted),
             ),
             Line::styled(
-                "r resets to Codex → Claude → Kimi",
+                "r resets to Codex → Claude → Kimi → OpenCode",
                 Style::default().ink(theme.muted),
             ),
             Line::raw(""),

@@ -23,10 +23,12 @@ mod install;
 mod keep_awake;
 mod kimi;
 mod labels;
+mod managed_acp;
 mod menu;
 mod model_resolve;
 mod notifications;
 mod onboarding;
+mod opencode;
 mod orchestrator;
 mod palette;
 mod paths;
@@ -1400,6 +1402,12 @@ async fn run_app(
         && !cfg.acp.servers.iter().any(|server| server.id == "kimi")
     {
         kimi::start_background_install();
+    }
+    if auth::detect(auth::AuthVendor::OpenCode).available()
+        && cfg.acp.policy("opencode") != config::AcpServerPolicy::Disabled
+        && !cfg.acp.servers.iter().any(|server| server.id == "opencode")
+    {
+        opencode::start_background_install();
     }
     let mut roster_updates = None;
     let mut pending_probe_servers = Vec::new();

@@ -11,15 +11,17 @@ use anyhow::{Context, Result, bail};
 pub enum AuthVendor {
     OpenAi,
     Kimi,
+    OpenCode,
 }
 
 impl AuthVendor {
-    pub const ALL: [Self; 2] = [Self::OpenAi, Self::Kimi];
+    pub const ALL: [Self; 3] = [Self::OpenAi, Self::Kimi, Self::OpenCode];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::OpenAi => "OpenAI / ChatGPT",
             Self::Kimi => "Kimi",
+            Self::OpenCode => "OpenCode",
         }
     }
 
@@ -27,6 +29,7 @@ impl AuthVendor {
         match self {
             Self::OpenAi => "Codex",
             Self::Kimi => "Kimi Code",
+            Self::OpenCode => "OpenCode",
         }
     }
 
@@ -35,6 +38,7 @@ impl AuthVendor {
         match self {
             Self::OpenAi => "openai",
             Self::Kimi => "kimi",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -86,6 +90,7 @@ pub fn detect(vendor: AuthVendor) -> CredentialSource {
     match vendor {
         AuthVendor::OpenAi => detect_openai(),
         AuthVendor::Kimi => detect_kimi(),
+        AuthVendor::OpenCode => detect_opencode(),
     }
 }
 
@@ -93,6 +98,7 @@ pub fn executable(vendor: AuthVendor) -> Option<PathBuf> {
     let name = match vendor {
         AuthVendor::OpenAi => "codex",
         AuthVendor::Kimi => "kimi",
+        AuthVendor::OpenCode => "opencode",
     };
     find_on_path(name)
 }
@@ -101,6 +107,7 @@ pub fn install_hint(vendor: AuthVendor) -> &'static str {
     match vendor {
         AuthVendor::OpenAi => "npm install -g @openai/codex",
         AuthVendor::Kimi => "install Kimi Code from the ACP registry",
+        AuthVendor::OpenCode => "install OpenCode from the ACP registry",
     }
 }
 
@@ -151,6 +158,40 @@ fn detect_kimi_with(has_api_key: bool, root: Option<PathBuf>) -> CredentialSourc
         root.map(|root| root.join("credentials").join("kimi-code.json")),
         &["/access_token", "/refresh_token"],
     )
+}
+
+/// OpenCode is a multi-provider aggregator: `opencode auth login` stores one
+/// entry per provider in `auth.json` under its data directory, with no fixed
+/// key to point at. Any provider entry counts as a credential.
+fn detect_opencode() -> CredentialSource {
+    let root = std::env::var_os("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("share")))
+        .map(|data| data.join("opencode"));
+    detect_opencode_with(root)
+}
+
+fn detect_opencode_with(root: Option<PathBuf>) -> CredentialSource {
+    let Some(path) = root.map(|root| root.join("auth.json")) else {
+        return CredentialSource::Missing;
+    };
+    if credential_file_has_entries(&path) {
+        CredentialSource::File(path)
+    } else {
+        CredentialSource::Missing
+    }
+}
+
+fn credential_file_has_entries(path: &Path) -> bool {
+    let Ok(contents) = std::fs::read(path) else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&contents)
+        .ok()
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|providers| !providers.is_empty())
 }
 
 fn detect_file(path: Option<PathBuf>, pointers: &[&str]) -> CredentialSource {
@@ -233,6 +274,10 @@ pub async fn headless_login_invocation(vendor: AuthVendor) -> Result<(PathBuf, V
             Some(command) => command,
             None => crate::kimi::wait_until_ready().await?,
         },
+        AuthVendor::OpenCode => match executable(vendor) {
+            Some(command) => command,
+            None => crate::opencode::wait_until_ready().await?,
+        },
         _ => executable(vendor).with_context(|| {
             format!(
                 "{} CLI is not installed; run `{}`",
@@ -244,6 +289,7 @@ pub async fn headless_login_invocation(vendor: AuthVendor) -> Result<(PathBuf, V
     let args = match vendor {
         AuthVendor::OpenAi => vec!["login".to_string(), "--device-auth".to_string()],
         AuthVendor::Kimi => vec!["login".to_string()],
+        AuthVendor::OpenCode => vec!["auth".to_string(), "login".to_string()],
     };
     Ok((command, args))
 }
@@ -255,6 +301,13 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
             None => {
                 println!("Preparing the official Kimi Code login helper...");
                 crate::kimi::wait_until_ready().await?
+            }
+        },
+        AuthVendor::OpenCode => match executable(vendor) {
+            Some(command) => command,
+            None => {
+                println!("Preparing the official OpenCode login helper...");
+                crate::opencode::wait_until_ready().await?
             }
         },
         _ => executable(vendor).with_context(|| {
@@ -297,6 +350,7 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
             }
         }
         AuthVendor::Kimi => vec!["login"],
+        AuthVendor::OpenCode => vec!["auth", "login"],
     };
     println!(
         "Signing in to {}. Mjolnir will return when it finishes.\n",
@@ -335,7 +389,10 @@ mod tests {
 
     #[test]
     fn vendors_report_labels_capabilities_and_install_hints() {
-        assert_eq!(AuthVendor::ALL, [AuthVendor::OpenAi, AuthVendor::Kimi]);
+        assert_eq!(
+            AuthVendor::ALL,
+            [AuthVendor::OpenAi, AuthVendor::Kimi, AuthVendor::OpenCode]
+        );
         assert_eq!(AuthVendor::OpenAi.label(), "OpenAI / ChatGPT");
         assert_eq!(AuthVendor::OpenAi.enables(), "Codex");
         assert_eq!(
@@ -347,6 +404,14 @@ mod tests {
         assert_eq!(
             install_hint(AuthVendor::Kimi),
             "install Kimi Code from the ACP registry"
+        );
+        assert_eq!(AuthVendor::OpenCode.label(), "OpenCode");
+        assert_eq!(AuthVendor::OpenCode.enables(), "OpenCode");
+        assert_eq!(AuthVendor::OpenCode.id(), "opencode");
+        assert_eq!(AuthVendor::from_id("opencode"), Some(AuthVendor::OpenCode));
+        assert_eq!(
+            install_hint(AuthVendor::OpenCode),
+            "install OpenCode from the ACP registry"
         );
     }
 
@@ -445,6 +510,38 @@ mod tests {
             CredentialSource::File(path)
         );
         assert_eq!(detect_kimi_with(false, None), CredentialSource::Missing);
+    }
+
+    #[test]
+    fn opencode_detection_requires_at_least_one_provider_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let path = root.join("auth.json");
+
+        assert_eq!(
+            detect_opencode_with(Some(root.clone())),
+            CredentialSource::Missing
+        );
+
+        std::fs::write(&path, r#"{}"#).unwrap();
+        assert_eq!(
+            detect_opencode_with(Some(root.clone())),
+            CredentialSource::Missing
+        );
+
+        std::fs::write(&path, b"not json").unwrap();
+        assert_eq!(
+            detect_opencode_with(Some(root.clone())),
+            CredentialSource::Missing
+        );
+
+        std::fs::write(&path, r#"{"anthropic":{"type":"oauth"}}"#).unwrap();
+        assert_eq!(
+            detect_opencode_with(Some(root)),
+            CredentialSource::File(path)
+        );
+
+        assert_eq!(detect_opencode_with(None), CredentialSource::Missing);
     }
 
     #[test]
