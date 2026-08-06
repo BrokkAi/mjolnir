@@ -6377,8 +6377,8 @@ fn draw(
             Constraint::Length(terminal_rows),
             Constraint::Length(queued_row),
             Constraint::Length(input_height),
-            Constraint::Length(usage_quota_rows),
             Constraint::Length(1),
+            Constraint::Length(usage_quota_rows),
         ])
         .split(f.area());
 
@@ -6398,8 +6398,8 @@ fn draw(
     draw_running_terminals_row(f, chunks[3], state);
     draw_queued_prompt_row(f, chunks[4], state);
     draw_input(f, chunks[5], state, mode);
-    draw_usage_quota_row(f, chunks[6], state);
-    draw_status_line(f, chunks[7], state);
+    draw_status_line(f, chunks[6], state);
+    draw_usage_quota_row(f, chunks[7], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -6513,8 +6513,8 @@ fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 8] {
             Constraint::Length(running_terminals_row_count(state)),
             Constraint::Length(queued_prompt_row_count(state)),
             Constraint::Min(MIN_INPUT_HEIGHT),
-            Constraint::Length(usage_quota_row_count(state, area.width) as u16),
             Constraint::Length(1),
+            Constraint::Length(usage_quota_row_count(state, area.width) as u16),
         ])
         .split(area);
     std::array::from_fn(|index| chunks[index])
@@ -6609,8 +6609,8 @@ fn draw_inline_chat(
     draw_running_terminals_row(f, chunks[3], state);
     draw_queued_prompt_row(f, chunks[4], state);
     draw_input(f, chunks[5], state, UiMode::InlineChat);
-    draw_usage_quota_row(f, chunks[6], state);
-    draw_status_line(f, chunks[7], state);
+    draw_status_line(f, chunks[6], state);
+    draw_usage_quota_row(f, chunks[7], state);
 
     if state.autocomplete.visible
         && !state.has_pending_permission()
@@ -11966,14 +11966,14 @@ fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         return;
     }
 
+    // Quota rows deliberately stay on the terminal's plain foreground: the
+    // status line directly above already spends every accent color, so a
+    // distinct un-accented color keeps the two regions visually separable.
+    let color = state.theme.text;
     let paragraph = if let Some(quota_items) = attributed_usage_quota_items(state) {
         let lines = quota_items
             .into_iter()
             .map(|(owner, quota)| {
-                let color = match owner {
-                    UsageQuotaOwner::Primary => state.theme.primary,
-                    UsageQuotaOwner::Subagents => state.theme.secondary,
-                };
                 Line::from(vec![
                     Span::styled(
                         format!("[{}]", owner.display_label()),
@@ -11986,8 +11986,7 @@ fn draw_usage_quota_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
             .collect::<Vec<_>>();
         Paragraph::new(lines)
     } else {
-        Paragraph::new(truncate_text_to_width(label, area.width))
-            .style(Style::default().ink(state.theme.warning))
+        Paragraph::new(truncate_text_to_width(label, area.width)).style(Style::default().ink(color))
     };
     f.render_widget(paragraph, area);
 }
@@ -24884,9 +24883,11 @@ mod tests {
         let rendered = buffer_lines(buffer);
         assert!(rendered[0].starts_with("[PRIMARY] Claude usage unavailable"));
         assert!(rendered[1].starts_with("[SUBAGENTS] Codex usage unavailable"));
+        // Both rows share the terminal's plain foreground so the quota block
+        // never reuses one of the status line's accent colors.
         assert_eq!(
             buffer.cell((1, 0)).expect("primary cell").style().fg,
-            Some(state.theme.primary.color())
+            Some(state.theme.text.color())
         );
         let primary_quota_x = rendered[0].find("Claude usage").expect("primary quota") as u16;
         assert_eq!(
@@ -24895,11 +24896,11 @@ mod tests {
                 .expect("primary quota cell")
                 .style()
                 .fg,
-            Some(state.theme.primary.color())
+            Some(state.theme.text.color())
         );
         assert_eq!(
             buffer.cell((1, 1)).expect("subagents cell").style().fg,
-            Some(state.theme.secondary.color())
+            Some(state.theme.text.color())
         );
         let subagent_quota_x = rendered[1].find("Codex usage").expect("subagent quota") as u16;
         assert_eq!(
@@ -24908,7 +24909,7 @@ mod tests {
                 .expect("subagent quota cell")
                 .style()
                 .fg,
-            Some(state.theme.secondary.color())
+            Some(state.theme.text.color())
         );
     }
 
