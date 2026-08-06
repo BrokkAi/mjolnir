@@ -4158,6 +4158,9 @@
         if (role.active_model && value !== role.active_model) {
           row.appendChild(mjDetail(`active: ${role.active_detail}`));
         }
+        if (mjcfg.snapshot?.probing) {
+          row.appendChild(mjDetail("discovering models…"));
+        }
         return row;
       }
 

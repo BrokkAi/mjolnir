@@ -1744,6 +1744,13 @@ impl ServerSessionLaunchReporter {
 #[derive(Debug)]
 struct ServerSessionManager {
     launch: RwLock<ServerSessionLaunch>,
+    /// Serialize the check-resolve-publish sequence so concurrent session
+    /// requests cannot launch from the old roster while another refreshes it.
+    roster_refresh_lock: tokio::sync::Mutex<()>,
+    /// Credentials and ACP capabilities can change without touching the
+    /// config file. Force the next server-owned session through resolution
+    /// when discovery observes such a change.
+    roster_refresh_requested: AtomicBool,
     /// Directory the startup roster was resolved against; config-change
     /// re-resolves reuse it. `None` disables re-resolving (tests).
     resolve_cwd: Option<PathBuf>,
@@ -1811,6 +1818,8 @@ impl ServerSessionManager {
                 roster: None,
                 config_hash: None,
             }),
+            roster_refresh_lock: tokio::sync::Mutex::new(()),
+            roster_refresh_requested: AtomicBool::new(false),
             resolve_cwd: None,
             additional_directories,
             snapshot_exclusions: Vec::new(),
@@ -1834,6 +1843,8 @@ impl ServerSessionManager {
                 roster: Some(roster),
                 config_hash,
             }),
+            roster_refresh_lock: tokio::sync::Mutex::new(()),
+            roster_refresh_requested: AtomicBool::new(false),
             resolve_cwd: Some(resolve_cwd),
             additional_directories,
             snapshot_exclusions,
@@ -1843,9 +1854,9 @@ impl ServerSessionManager {
         }
     }
 
-    /// Re-resolve the roster when the saved config changed since the last
-    /// resolution, so a new session launches what `/mjconfig` (or any other
-    /// config edit) saved instead of the binding frozen at server startup.
+    /// Re-resolve the roster when the saved config or detected capabilities
+    /// changed since the last resolution, so a new session does not use the
+    /// binding frozen at server startup.
     /// Returns the fresh roster when a re-resolve happened, and an error when
     /// the saved config cannot bind a roster at all — callers must refuse to
     /// start the session rather than silently launching the stale binding.
@@ -1856,14 +1867,19 @@ impl ServerSessionManager {
         let Some(resolve_cwd) = self.resolve_cwd.clone() else {
             return Ok(None);
         };
+        let _refresh_guard = self.roster_refresh_lock.lock().await;
+        let refresh_requested = self.roster_refresh_requested.swap(false, Ordering::AcqRel);
         let hash = config_file_hash(config_path);
         {
             let launch = self.launch.read().expect("server launch lock");
-            if launch.config_hash == hash {
+            if !refresh_requested && launch.config_hash == hash {
                 return Ok(None);
             }
         }
         let Ok(config) = config::Config::load(config_path) else {
+            if refresh_requested {
+                self.roster_refresh_requested.store(true, Ordering::Release);
+            }
             return Ok(None);
         };
         match roster::resolve(&config, &resolve_cwd).await {
@@ -1875,10 +1891,21 @@ impl ServerSessionManager {
                 Ok(Some(roster))
             }
             Err(error) => {
-                warn!("config changed but roster re-resolve failed: {error:#}");
+                if refresh_requested {
+                    self.roster_refresh_requested.store(true, Ordering::Release);
+                }
+                warn!("roster re-resolve failed: {error:#}");
                 Err(format!("{error:#}"))
             }
         }
+    }
+
+    fn request_roster_refresh(&self) {
+        self.roster_refresh_requested.store(true, Ordering::Release);
+    }
+
+    fn resolve_cwd(&self) -> Option<PathBuf> {
+        self.resolve_cwd.clone()
     }
 
     fn launch_state(&self, launch_id: u64) -> Option<ServerSessionLaunchState> {
@@ -5504,6 +5531,9 @@ struct MjConfigDiscovery {
     /// Invalidates an older probe stream when config changes trigger a newer
     /// blocking roster resolution.
     generation: u64,
+    /// A completed in-panel login must refresh even when the account was
+    /// already detected (for example, signing into a different account).
+    refresh_requested: bool,
 }
 
 impl MjConfigRuntime {
@@ -5522,6 +5552,7 @@ impl MjConfigRuntime {
                 probing: false,
                 revision: 0,
                 generation: 0,
+                refresh_requested: false,
             }),
             login: Mutex::new(None),
             install: Mutex::new(None),
@@ -5548,6 +5579,35 @@ impl MjConfigRuntime {
         discovery.generation
     }
 
+    /// Start another roster pass when local account or adapter inputs changed
+    /// since the last published inventory. The panel keeps the current choices
+    /// visible while the replacement catalog is assembled.
+    fn begin_discovery_if_needed(&self, config: &config::Config) -> Option<u64> {
+        let mut discovery = self.discovery.lock().expect("mjconfig discovery lock");
+        if discovery.probing {
+            return None;
+        }
+        let refreshed = roster::rediscover_inventory(config, &discovery.inventory);
+        if !discovery.refresh_requested
+            && inventory_discovery_inputs_equal(&discovery.inventory, &refreshed)
+        {
+            return None;
+        }
+        discovery.refresh_requested = false;
+        discovery.inventory = refreshed;
+        discovery.generation = discovery.generation.wrapping_add(1);
+        discovery.probing = true;
+        discovery.revision = discovery.revision.wrapping_add(1);
+        Some(discovery.generation)
+    }
+
+    fn request_discovery(&self) {
+        self.discovery
+            .lock()
+            .expect("mjconfig discovery lock")
+            .refresh_requested = true;
+    }
+
     /// Apply a background probe snapshot without rebinding the seats that the
     /// running server session already owns. This is the same distinction the
     /// TUI makes for `UiEvent::RosterUpdate`.
@@ -5568,6 +5628,26 @@ impl MjConfigRuntime {
             discovery.probing = false;
         }
     }
+}
+
+fn inventory_discovery_inputs_equal(
+    previous: &roster::AcpInventory,
+    refreshed: &roster::AcpInventory,
+) -> bool {
+    previous.servers.len() == refreshed.servers.len()
+        && previous.servers.iter().all(|server| {
+            refreshed.servers.iter().any(|candidate| {
+                server.id == candidate.id
+                    && server.policy == candidate.policy
+                    && server.detected == candidate.detected
+                    && server.selected == candidate.selected
+                    && server.launch.kind == candidate.launch.kind
+                    && server.launch.command == candidate.launch.command
+                    && server.launch.args == candidate.launch.args
+                    && server.launch.env == candidate.launch.env
+                    && server.subscription == candidate.subscription
+            })
+        })
 }
 
 /// A vendor sign-in running server-side. The child's combined output streams
@@ -6013,6 +6093,11 @@ fn mjconfig_install_status(state: &ServerState) -> Option<MjInstallStatus> {
 }
 
 fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> MjConfigSnapshot {
+    // Read the job first. If sign-in completed, its task has already requested
+    // discovery; if it is still running, this snapshot keeps browser polling
+    // active until a later response can start the refresh.
+    let login = mjconfig_login_status(state);
+    refresh_mjconfig_discovery_if_needed(state);
     let install_notice = mjconfig_absorb_finished_install(state);
     let config = mjconfig_load(state);
     let (editor, probing, discovery_revision) = mjconfig_editor(state, config);
@@ -6201,12 +6286,46 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                 .collect(),
         },
         appearance,
-        login: mjconfig_login_status(state),
+        login,
         install: mjconfig_install_status(state),
         probing,
         discovery_revision,
         notice: notice.or(install_notice),
     }
+}
+
+fn refresh_mjconfig_discovery_if_needed(state: &ServerState) {
+    let Some(cwd) = state.session_manager.resolve_cwd() else {
+        return;
+    };
+    let config = mjconfig_load(state);
+    let Some(generation) = state.mjconfig.begin_discovery_if_needed(&config) else {
+        return;
+    };
+    state.session_manager.request_roster_refresh();
+    let runtime = Arc::clone(&state.mjconfig);
+    tokio::spawn(async move {
+        let resolution = match roster::resolve_streaming(&config, &cwd).await {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                warn!("refresh /mjconfig model discovery: {error:#}");
+                runtime.finish_discovery(generation);
+                return;
+            }
+        };
+        if !runtime.update_discovery(generation, &resolution.roster) {
+            return;
+        }
+        if let Some(mut updates) = resolution.updates {
+            while updates.changed().await.is_ok() {
+                let snapshot = updates.borrow_and_update().clone();
+                if !runtime.update_discovery(generation, &snapshot) {
+                    return;
+                }
+            }
+        }
+        runtime.finish_discovery(generation);
+    });
 }
 
 async fn mjconfig_snapshot(State(state): State<ServerState>) -> Json<MjConfigSnapshot> {
@@ -6657,8 +6776,12 @@ async fn mjconfig_login_start(
         Arc::new(Mutex::new(None));
     let task_output = Arc::clone(&output);
     let task_result = Arc::clone(&result);
+    let discovery = Arc::clone(&state.mjconfig);
     let task = tokio::spawn(async move {
         let outcome = mjconfig_run_login(vendor, task_output).await;
+        if outcome.is_ok() {
+            discovery.request_discovery();
+        }
         *task_result.lock().expect("login result") =
             Some(outcome.map_err(|error| format!("{error:#}")));
     });
@@ -6729,7 +6852,7 @@ async fn mjconfig_run_login(
     crate::roster::invalidate_model_cache()
         .context("signed in, but failed to clear the model capability cache")?;
     Ok(format!(
-        "Signed in to {}; models refresh on new sessions",
+        "Signed in to {}; refreshing models for new sessions",
         vendor.label()
     ))
 }
@@ -9880,6 +10003,106 @@ mod tests {
                 .primary,
             "fresh-model"
         );
+    }
+
+    #[test]
+    fn discovery_inputs_track_account_and_adapter_availability() {
+        let config = roster::config_with_a_visible_builtin();
+        let inventory = roster::discover_inventory(&config);
+        let mut refreshed = inventory.clone();
+        {
+            let server = refreshed.servers.first_mut().expect("visible server");
+            server.model_count += 1;
+            server.error = Some("transient probe failure".to_string());
+        }
+        assert!(inventory_discovery_inputs_equal(&inventory, &refreshed));
+
+        let server = refreshed.servers.first_mut().expect("visible server");
+        server.detected = !server.detected;
+        assert!(!inventory_discovery_inputs_equal(&inventory, &refreshed));
+    }
+
+    #[test]
+    fn explicit_discovery_request_refreshes_unchanged_inventory() {
+        let config = roster::config_with_a_visible_builtin();
+        let inventory = roster::discover_inventory(&config);
+        let runtime =
+            MjConfigRuntime::new(PathBuf::from("unused.toml"), Vec::new(), None, inventory);
+
+        assert!(runtime.begin_discovery_if_needed(&config).is_none());
+        runtime.request_discovery();
+        let generation = runtime
+            .begin_discovery_if_needed(&config)
+            .expect("requested discovery");
+        assert!(runtime.discovery.lock().expect("discovery lock").probing);
+        runtime.finish_discovery(generation);
+    }
+
+    #[test]
+    fn model_discovery_forces_the_next_server_session_to_reresolve() {
+        let manager = test_session_manager();
+        assert!(!manager.roster_refresh_requested.load(Ordering::Acquire));
+
+        manager.request_roster_refresh();
+
+        assert!(manager.roster_refresh_requested.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn concurrent_roster_refreshes_are_serialized() {
+        let manager = test_session_manager();
+        let first = manager.roster_refresh_lock.lock().await;
+        let second_manager = Arc::clone(&manager);
+        let second = tokio::spawn(async move {
+            let _guard = second_manager.roster_refresh_lock.lock().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!second.is_finished());
+
+        drop(first);
+
+        second.await.expect("second refresh acquires lock");
+    }
+
+    #[tokio::test]
+    async fn completed_login_snapshot_starts_requested_model_discovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let config = config::Config::default();
+        config.save(&config_path).expect("save config");
+        let roster = test_roster("stale-model");
+        let runtime = Arc::new(MjConfigRuntime::new(
+            config_path.clone(),
+            roster.choices.clone(),
+            Some(models_config_from_roster(&roster)),
+            roster::discover_inventory(&config),
+        ));
+        runtime.request_discovery();
+        let login_task = tokio::spawn(std::future::pending::<()>());
+        *runtime.login.lock().expect("login lock") = Some(MjLoginJob {
+            vendor: crate::auth::AuthVendor::OpenAi,
+            output: Arc::new(Mutex::new(String::new())),
+            result: Arc::new(Mutex::new(Some(Ok("Signed in".to_string())))),
+            abort: login_task.abort_handle(),
+        });
+        let manager = Arc::new(ServerSessionManager::new_roster(
+            roster,
+            config_file_hash(&config_path),
+            dir.path().to_path_buf(),
+            Vec::new(),
+            Vec::new(),
+            crate::acp::DEFAULT_FS_TEXT_BYTES,
+        ));
+        let mut state = test_state();
+        state.session_manager = manager;
+        state.mjconfig = runtime;
+
+        let snapshot = mjconfig_snapshot_response(&state, None);
+
+        let login = snapshot.login.expect("completed login status");
+        assert!(!login.running);
+        assert!(snapshot.probing);
+        login_task.abort();
     }
 
     #[tokio::test]
