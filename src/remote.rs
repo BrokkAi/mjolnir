@@ -8089,9 +8089,7 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
 }
 
 fn init_db(db_path: &Path) -> Result<()> {
-    let mut conn = open_db(db_path)?;
-    let backfill_recent_directories =
-        !database_table_exists(&conn, "recent_filesystem_directories")?;
+    let conn = open_db(db_path)?;
     conn.execute_batch(
         "create table if not exists sessions (
             session_id text primary key,
@@ -8169,73 +8167,6 @@ fn init_db(db_path: &Path) -> Result<()> {
         "images_json",
         "text not null default '[]'",
     )?;
-    if backfill_recent_directories {
-        backfill_recent_filesystem_directories(&mut conn)?;
-    }
-    Ok(())
-}
-
-fn database_table_exists(conn: &Connection, table: &str) -> Result<bool> {
-    conn.query_row(
-        "select exists(
-            select 1 from sqlite_master where type = 'table' and name = ?1
-        )",
-        params![table],
-        |row| row.get(0),
-    )
-    .with_context(|| format!("check whether {table} table exists"))
-}
-
-fn backfill_recent_filesystem_directories(conn: &mut Connection) -> Result<()> {
-    let legacy_directories = {
-        let mut stmt = conn
-            .prepare(
-                "select status_json, coalesce(nullif(last_prompt_at, ''), start_time)
-                 from sessions
-                 where status_json is not null and worktree is null
-                 order by coalesce(nullif(last_prompt_at, ''), start_time) desc, session_id asc
-                 limit ?1",
-            )
-            .context("prepare recent filesystem directory backfill")?;
-        let rows = stmt
-            .query_map(
-                params![RECENT_FILESYSTEM_DIRECTORY_HISTORY_LIMIT as i64],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .context("query recent filesystem directory backfill")?;
-        let mut directories = Vec::new();
-        for row in rows {
-            let (status_json, selected_at) =
-                row.context("read recent filesystem directory backfill")?;
-            let Ok(status) = serde_json::from_str::<SessionStatusRecord>(&status_json) else {
-                continue;
-            };
-            let Some(cwd) = status.cwd.filter(|cwd| !cwd.trim().is_empty()) else {
-                continue;
-            };
-            if crate::paths::worktree_name_from_cwd(Path::new(&cwd)).is_some() {
-                continue;
-            }
-            directories.push((cwd, selected_at));
-        }
-        directories
-    };
-
-    let transaction = conn
-        .transaction()
-        .context("begin recent filesystem directory backfill")?;
-    for (path, selected_at) in legacy_directories {
-        transaction
-            .execute(
-                "insert or ignore into recent_filesystem_directories (path, selected_at)
-                 values (?1, ?2)",
-                params![path, selected_at],
-            )
-            .context("backfill recent filesystem directory")?;
-    }
-    transaction
-        .commit()
-        .context("commit recent filesystem directory backfill")?;
     Ok(())
 }
 
@@ -15373,49 +15304,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_recent_folders_backfill_non_worktree_sessions_only() {
-        let dir = tempfile::tempdir().expect("root");
-        let selected_path = dir.path().join("selected");
-        let worktree_path = dir.path().join(".mjolnir/worktrees/generated");
-        std::fs::create_dir_all(&selected_path).expect("selected directory");
-        std::fs::create_dir_all(&worktree_path).expect("worktree directory");
-        let roots = test_workspace_roots(dir.path());
-        let db_path = dir.path().join("sessions.sqlite3");
-
-        let mut selected = session_named("selected", "2026-06-10T10:00:00Z");
-        selected.status = Some(SessionStatusRecord {
-            cwd: Some(selected_path.display().to_string()),
-            ..SessionStatusRecord::default()
-        });
-        upsert_session_record(&db_path, &selected).expect("insert selected session");
-
-        let mut worktree = session_named("worktree", "2026-06-10T10:01:00Z");
-        worktree.status = Some(SessionStatusRecord {
-            cwd: Some(worktree_path.display().to_string()),
-            ..SessionStatusRecord::default()
-        });
-        upsert_session_record(&db_path, &worktree).expect("insert worktree session");
-
-        let conn = open_db(&db_path).expect("open database");
-        conn.execute("drop table recent_filesystem_directories", [])
-            .expect("remove new table to simulate legacy database");
-        drop(conn);
-
-        init_db(&db_path).expect("migrate legacy database");
-        let recent =
-            load_recent_filesystem_directories(&db_path, &roots).expect("load recent directories");
-
-        assert_eq!(
-            recent
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["selected"]
-        );
-    }
-
-    #[test]
-    fn sessions_do_not_implicitly_populate_recent_folders_after_migration() {
+    fn sessions_do_not_implicitly_populate_recent_folders() {
         let dir = tempfile::tempdir().expect("root");
         let plain_path = dir.path().join("plain");
         let worktree_path = dir.path().join(".mjolnir/worktrees/generated");
