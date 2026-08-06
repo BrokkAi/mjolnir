@@ -15147,7 +15147,13 @@ mod tests {
                 .to_bytes(),
         )
         .expect("browse response");
-        assert_eq!(body.current.path, root.path().display().to_string());
+        assert_eq!(
+            body.current.path,
+            std::fs::canonicalize(root.path())
+                .expect("canonical root")
+                .display()
+                .to_string()
+        );
         assert!(body.recent.is_empty());
     }
 
