@@ -178,6 +178,85 @@ impl Default for ModelsConfig {
     }
 }
 
+/// How much machinery one discrete review is allowed to spend.
+///
+/// `Quick` runs a single general reviewer and then validates its findings,
+/// which is the cheap default. `Extended` runs the full adversarial
+/// supervisor with its on-demand Norse specialist roster.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewTier {
+    #[default]
+    Quick,
+    Extended,
+}
+
+impl ReviewTier {
+    pub const ALL: [Self; 2] = [Self::Quick, Self::Extended];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Extended => "extended",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Quick => "Quick",
+            Self::Extended => "Extended",
+        }
+    }
+
+    /// One line of `/mjconfig` help describing what the tier actually spends.
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Quick => "one general reviewer, then a validation pass over its findings",
+            Self::Extended => {
+                "adversarial supervisor with on-demand Norse specialist lanes; far more tokens"
+            }
+        }
+    }
+
+    /// Compact representation for the orchestrator's atomic live switch.
+    pub const fn as_index(self) -> u8 {
+        match self {
+            Self::Quick => 0,
+            Self::Extended => 1,
+        }
+    }
+
+    /// Unknown indexes fall back to the cheap tier: an unreadable switch must
+    /// never silently upgrade a user into the expensive review.
+    pub const fn from_index(index: u8) -> Self {
+        match index {
+            1 => Self::Extended,
+            _ => Self::Quick,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        matches!(self, Self::Quick)
+    }
+}
+
+impl std::fmt::Display for ReviewTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ReviewTier {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|tier| tier.as_str().eq_ignore_ascii_case(value))
+            .ok_or(())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AgentConfig {
     #[serde(default = "default_auto")]
@@ -203,6 +282,11 @@ pub struct AgentConfig {
     pub session_defaults: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default = "default_true")]
     pub discrete_review: bool,
+    /// How much review machinery each discrete review spends. Absent from an
+    /// older config means the cheap default, so upgrading users land on
+    /// `Quick` without editing anything.
+    #[serde(default, skip_serializing_if = "ReviewTier::is_default")]
+    pub review_tier: ReviewTier,
     /// How many corrective re-review passes one user turn may dispatch after
     /// its initial discrete review. `0` accepts the first correction without
     /// re-reviewing it; the default spends exactly one bounded verification
@@ -220,6 +304,7 @@ impl Default for AgentConfig {
             reasoning_effort: None,
             session_defaults: BTreeMap::new(),
             discrete_review: true,
+            review_tier: ReviewTier::default(),
             max_correction_rounds: default_max_correction_rounds(),
         }
     }
@@ -813,6 +898,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
             reasoning_effort: old.thor.reasoning_effort,
             session_defaults: BTreeMap::new(),
             discrete_review: old.thor.discrete_review,
+            review_tier: ReviewTier::default(),
             max_correction_rounds: old.thor.max_correction_rounds,
         },
         review: ReviewConfig {
@@ -1102,6 +1188,55 @@ mod tests {
         );
         assert_eq!(cfg.agent.acp_priority, cfg.review.acp_priority);
         assert_eq!(cfg.agent.acp_priority, cfg.subagents.acp_priority);
+    }
+
+    #[test]
+    fn review_tier_defaults_to_quick_and_persists_only_when_upgraded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        // A config written before review tiers existed keeps automatic review
+        // on and lands on the cheap tier.
+        std::fs::write(
+            &path,
+            format!("version = {CONFIG_VERSION}\n[agent]\nmodel = \"gpt-5-6-sol\"\n"),
+        )
+        .expect("write");
+        let cfg = Config::load(&path).expect("load");
+        assert!(cfg.agent.discrete_review);
+        assert_eq!(cfg.agent.review_tier, ReviewTier::Quick);
+
+        // The default stays out of the file; an explicit upgrade is written.
+        cfg.save(&path).expect("save quick");
+        let body = std::fs::read_to_string(&path).expect("read quick");
+        assert!(!body.contains("review_tier"), "body: {body:?}");
+
+        let mut upgraded = cfg;
+        upgraded.agent.review_tier = ReviewTier::Extended;
+        upgraded.save(&path).expect("save extended");
+        let body = std::fs::read_to_string(&path).expect("read extended");
+        assert!(
+            body.contains("review_tier = \"extended\""),
+            "body: {body:?}"
+        );
+        assert_eq!(
+            Config::load(&path).expect("reload").agent.review_tier,
+            ReviewTier::Extended
+        );
+    }
+
+    #[test]
+    fn review_tier_parses_its_own_wire_names() {
+        for tier in ReviewTier::ALL {
+            assert_eq!(tier.as_str().parse::<ReviewTier>(), Ok(tier));
+        }
+        assert_eq!("EXTENDED".parse::<ReviewTier>(), Ok(ReviewTier::Extended));
+        assert!("thorough".parse::<ReviewTier>().is_err());
+        // An unreadable live switch degrades to the cheap tier, never up.
+        assert_eq!(ReviewTier::from_index(9), ReviewTier::Quick);
+        for tier in ReviewTier::ALL {
+            assert_eq!(ReviewTier::from_index(tier.as_index()), tier);
+        }
     }
 
     #[test]
@@ -1448,6 +1583,7 @@ origin = "custom"
                 reasoning_effort: None,
                 session_defaults: BTreeMap::new(),
                 discrete_review: false,
+                review_tier: ReviewTier::Extended,
                 max_correction_rounds: default_max_correction_rounds(),
             },
             subagents: SubagentsConfig {
@@ -1473,6 +1609,7 @@ origin = "custom"
         assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
         assert_eq!(loaded.agent.model, "gpt-5-6-sol");
         assert!(!loaded.agent.discrete_review);
+        assert_eq!(loaded.agent.review_tier, ReviewTier::Extended);
         assert!(!loaded.subagents.auto_failover);
         assert_eq!(loaded.acp.servers[0].id, "custom:company");
         assert_eq!(loaded.acp.servers[0].args, vec!["--stdio"]);

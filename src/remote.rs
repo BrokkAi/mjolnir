@@ -4487,6 +4487,7 @@ fn start_server_agent_session(
                 app_config.subagents.progress_wake_minutes,
             ),
             discrete_review: app_config.agent.discrete_review,
+            review_tier: app_config.agent.review_tier,
             max_correction_rounds: app_config.agent.max_correction_rounds,
             primary_model: roster
                 .as_ref()
@@ -5531,6 +5532,8 @@ struct MjConfigSnapshot {
 struct MjAgentsPanel {
     roles: Vec<MjRoleEntry>,
     discrete_review: bool,
+    review_tier: String,
+    review_tiers: Vec<MjReviewTierEntry>,
     max_parallel: usize,
     max_parallel_limit: usize,
     auto_failover: bool,
@@ -5551,6 +5554,13 @@ struct MjRoleEntry {
 struct MjModelChoiceEntry {
     model: String,
     detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MjReviewTierEntry {
+    tier: String,
+    label: String,
+    description: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -5662,6 +5672,8 @@ struct MjConfigApplyRequest {
     review_model: Option<String>,
     subagents_model: Option<String>,
     discrete_review: Option<bool>,
+    /// `quick` | `extended`.
+    review_tier: Option<String>,
     max_parallel: Option<usize>,
     auto_failover: Option<bool>,
     theme: Option<String>,
@@ -6066,6 +6078,15 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         agents: MjAgentsPanel {
             roles,
             discrete_review: config.agent.discrete_review,
+            review_tier: config.agent.review_tier.as_str().to_string(),
+            review_tiers: config::ReviewTier::ALL
+                .into_iter()
+                .map(|tier| MjReviewTierEntry {
+                    tier: tier.as_str().to_string(),
+                    label: tier.label().to_string(),
+                    description: tier.description().to_string(),
+                })
+                .collect(),
             max_parallel: config.subagents.max_parallel,
             max_parallel_limit: 16,
             auto_failover: config.subagents.auto_failover,
@@ -6107,6 +6128,11 @@ fn mjconfig_apply_edits(
     }
     if let Some(enabled) = request.discrete_review {
         config.agent.discrete_review = enabled;
+    }
+    if let Some(tier) = request.review_tier {
+        config.agent.review_tier = tier
+            .parse()
+            .map_err(|()| bad_request(format!("unknown review tier: {tier}")))?;
     }
     if let Some(max_parallel) = request.max_parallel {
         if max_parallel > 16 {
@@ -9514,6 +9540,7 @@ mod tests {
                 Some(serde_json::json!({
                     "primary_model": "gpt-5-6-terra",
                     "discrete_review": false,
+                    "review_tier": "extended",
                     "max_parallel": 4,
                     "theme": "ansi",
                     "spinner": "wave",
@@ -9536,6 +9563,8 @@ mod tests {
         let snapshot = json_body(response).await;
         assert_eq!(snapshot["agents"]["roles"][0]["model"], "gpt-5-6-terra");
         assert_eq!(snapshot["agents"]["discrete_review"], false);
+        assert_eq!(snapshot["agents"]["review_tier"], "extended");
+        assert_eq!(snapshot["agents"]["review_tiers"][0]["tier"], "quick");
         assert_eq!(snapshot["agents"]["max_parallel"], 4);
         assert_eq!(snapshot["appearance"]["theme"], "ansi");
         assert_eq!(snapshot["appearance"]["spinner"], "wave");
@@ -9544,6 +9573,7 @@ mod tests {
         let saved = config::Config::load(&config_path).expect("reload saved config");
         assert_eq!(saved.agent.model, "gpt-5-6-terra");
         assert!(!saved.agent.discrete_review);
+        assert_eq!(saved.agent.review_tier, config::ReviewTier::Extended);
         assert_eq!(saved.subagents.max_parallel, 4);
         assert_eq!(saved.theme, crate::theme::TerminalThemeKind::Ansi);
         assert_eq!(saved.spinner, crate::spinner::SpinnerStyle::Wave);
@@ -9644,6 +9674,7 @@ mod tests {
             serde_json::json!({ "max_parallel": 40 }),
             serde_json::json!({ "theme": "solarized" }),
             serde_json::json!({ "spinner": "cube" }),
+            serde_json::json!({ "review_tier": "thorough" }),
             serde_json::json!({ "priority": { "sidekick": { "source": "x" } } }),
             serde_json::json!({ "add_custom_server": { "name": "bad name!", "command": "x" } }),
             serde_json::json!({ "add_custom_server": { "name": "ok", "command": "" } }),

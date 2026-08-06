@@ -124,6 +124,7 @@ enum SettingsRow {
         option_index: usize,
     },
     DiscreteReview,
+    ReviewTier,
     MaxParallelSubagents,
     AutomaticQuotaFailover,
 }
@@ -299,6 +300,7 @@ impl SettingsEditor {
                     self.config.subagents.max_parallel =
                         (self.config.subagents.max_parallel as i32 + delta).rem_euclid(17) as usize;
                 }
+                SettingsRow::ReviewTier => self.cycle_review_tier(delta),
                 SettingsRow::DiscreteReview | SettingsRow::AutomaticQuotaFailover => {
                     return SettingsAction::None;
                 }
@@ -377,6 +379,9 @@ impl SettingsEditor {
                 SettingsRow::DiscreteReview => {
                     self.config.agent.discrete_review = !self.config.agent.discrete_review;
                 }
+                // Two tiers, so the toggle key advances the same way the
+                // left/right keys do rather than doing nothing here.
+                SettingsRow::ReviewTier => self.cycle_review_tier(1),
                 SettingsRow::AutomaticQuotaFailover => {
                     self.config.subagents.auto_failover = !self.config.subagents.auto_failover;
                 }
@@ -432,6 +437,7 @@ impl SettingsEditor {
                 );
                 rows.push(SettingsRow::ReviewModel);
                 rows.push(SettingsRow::DiscreteReview);
+                rows.push(SettingsRow::ReviewTier);
                 rows
             }
             SettingsTab::Subagents => {
@@ -690,6 +696,16 @@ impl SettingsEditor {
             2 => self.config.subagents.model.clone_from(&choices[next]),
             _ => {}
         }
+    }
+
+    fn cycle_review_tier(&mut self, delta: i32) {
+        let tiers = crate::config::ReviewTier::ALL;
+        let current = tiers
+            .iter()
+            .position(|tier| *tier == self.config.agent.review_tier)
+            .unwrap_or(0);
+        let next = (current as i32 + delta).rem_euclid(tiers.len() as i32) as usize;
+        self.config.agent.review_tier = tiers[next];
     }
 
     pub(crate) fn model_choices(&self, role: usize) -> Vec<String> {
@@ -1552,6 +1568,28 @@ fn draw_agents(
                 ),
                 theme,
             )),
+            SettingsRow::ReviewTier => {
+                let tier = editor.config.agent.review_tier;
+                lines.push(selected_line(
+                    selected,
+                    format!("Review depth < {} >", tier.label()),
+                    theme,
+                ));
+                lines.push(Line::styled(
+                    format!("  {}", tier.description()),
+                    Style::default().ink(if editor.config.agent.discrete_review {
+                        theme.muted
+                    } else {
+                        theme.warning
+                    }),
+                ));
+                if !editor.config.agent.discrete_review {
+                    lines.push(Line::styled(
+                        "  discrete review is off, so no tier runs",
+                        Style::default().ink(theme.warning),
+                    ));
+                }
+            }
             SettingsRow::SubagentModel
             | SettingsRow::MaxParallelSubagents
             | SettingsRow::AutomaticQuotaFailover => {}
@@ -1654,7 +1692,10 @@ fn draw_subagents(
                 ),
                 theme,
             )),
-            SettingsRow::PrimaryModel | SettingsRow::ReviewModel | SettingsRow::DiscreteReview => {}
+            SettingsRow::PrimaryModel
+            | SettingsRow::ReviewModel
+            | SettingsRow::DiscreteReview
+            | SettingsRow::ReviewTier => {}
         }
     }
     draw_scrolling_settings_lines(frame, area, lines, selected_line_index);
@@ -2141,6 +2182,7 @@ fn on_off(enabled: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ReviewTier;
 
     fn render(editor: &SettingsEditor, width: u16, height: u16) -> String {
         let backend = ratatui::backend::TestBackend::new(width, height);
@@ -2600,6 +2642,34 @@ mod tests {
     }
 
     #[test]
+    fn review_tier_cycles_next_to_the_discrete_review_switch() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        let rows = editor.settings_rows(SettingsTab::Agents);
+        let review = rows
+            .iter()
+            .position(|row| *row == SettingsRow::DiscreteReview)
+            .expect("discrete review row");
+        let tier = rows
+            .iter()
+            .position(|row| *row == SettingsRow::ReviewTier)
+            .expect("review tier row");
+        assert_eq!(tier, review + 1, "the tier belongs beside the switch");
+
+        editor.selected = tier;
+        assert_eq!(editor.config.agent.review_tier, ReviewTier::Quick);
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.agent.review_tier, ReviewTier::Extended);
+        // Two tiers, so left, right, and the toggle key all return to Quick.
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert_eq!(editor.config.agent.review_tier, ReviewTier::Quick);
+        assert_eq!(
+            editor.handle_key(KeyCode::Char(' ')),
+            SettingsAction::Changed
+        );
+        assert_eq!(editor.config.agent.review_tier, ReviewTier::Extended);
+    }
+
+    #[test]
     fn quota_failover_can_be_disabled() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::Subagents;
@@ -2817,6 +2887,8 @@ mod tests {
         let agents = render(&editor, 100, 30);
         assert!(agents.contains("Primary model"), "rendered:\n{agents}");
         assert!(agents.contains("Discrete review"), "rendered:\n{agents}");
+        assert!(agents.contains("Review depth"), "rendered:\n{agents}");
+        assert!(agents.contains("Quick"), "rendered:\n{agents}");
 
         editor.tab = SettingsTab::Subagents;
         let subagents = render(&editor, 100, 30);

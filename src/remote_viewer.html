@@ -4058,6 +4058,28 @@
           }),
         );
         mjconfigBodyEl.appendChild(reviewRow);
+
+        const tierRow = mjRow("Review depth");
+        const tier = mjEditedValue("review_tier", panel.review_tier);
+        tierRow.appendChild(
+          mjCombo(
+            panel.review_tiers.map((entry) => ({
+              value: entry.tier,
+              label: entry.label,
+              description: entry.description,
+            })),
+            tier,
+            (next) => {
+              mjcfg.edits.review_tier = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const selectedTier = panel.review_tiers.find((entry) => entry.tier === tier);
+        if (selectedTier) {
+          tierRow.appendChild(mjDetail(selectedTier.description));
+        }
+        mjconfigBodyEl.appendChild(tierRow);
       }
 
       function renderMjSubagents() {

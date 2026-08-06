@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use std::time::Duration;
 
@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     agent_usage::{Record, Seat},
+    config::ReviewTier,
     discrete_review,
     event::{
         AgentCommandOutcome, CompactTrigger, InternalMessage, InternalMessageKind, PromptImage,
@@ -107,6 +108,9 @@ pub struct Handle {
     turn: Arc<Mutex<ActiveTurn>>,
     user_messages: Arc<Mutex<UserMessageHistory>>,
     review_enabled: Arc<AtomicBool>,
+    /// Live [`ReviewTier`] switch, read once per dispatch so a `/mjconfig`
+    /// change applies to the next turn without replacing the ACP session.
+    review_tier: Arc<AtomicU8>,
     runtime_commands: mpsc::UnboundedSender<UiCommand>,
     events: mpsc::UnboundedSender<UiEvent>,
     review_requests: mpsc::UnboundedSender<ReviewTarget>,
@@ -139,6 +143,10 @@ impl Handle {
 
     pub fn set_review_enabled(&self, enabled: bool) {
         self.review_enabled.store(enabled, Ordering::Release);
+    }
+
+    pub fn set_review_tier(&self, tier: ReviewTier) {
+        self.review_tier.store(tier.as_index(), Ordering::Release);
     }
 
     pub fn request_review(&self, target: ReviewTarget) {
@@ -356,6 +364,8 @@ pub struct Config {
     /// with progress alone. `None` disables the heartbeat.
     pub progress_wake: Option<Duration>,
     pub discrete_review: bool,
+    /// How much machinery each discrete review may spend.
+    pub review_tier: ReviewTier,
     /// How many corrective re-review passes one turn may dispatch after its
     /// initial discrete review. Findings-driven corrections re-arm the review
     /// only while this budget lasts; the turn is then released.
@@ -417,10 +427,12 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
     let turn = Arc::new(Mutex::new(ActiveTurn::default()));
     let user_messages = Arc::new(Mutex::new(UserMessageHistory::default()));
     let review_enabled = Arc::new(AtomicBool::new(config.discrete_review));
+    let review_tier = Arc::new(AtomicU8::new(config.review_tier.as_index()));
     let handle = Handle {
         turn: turn.clone(),
         user_messages: user_messages.clone(),
         review_enabled: review_enabled.clone(),
+        review_tier: review_tier.clone(),
         runtime_commands: config.runtime_commands.clone(),
         events: events_tx.clone(),
         review_requests,
@@ -1416,6 +1428,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         epoch: active.epoch,
                         workflow_id,
                         review_pass,
+                        tier: ReviewTier::from_index(review_tier.load(Ordering::Acquire)),
                         workflow: workflow.clone(),
                         task: active.task.clone(),
                         images: active.images.as_ref().clone(),
@@ -1427,11 +1440,18 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         focus_snapshot,
                         prior_review,
                     };
+                    let tier = job.tier;
                     trajectory.reset_attempt();
                     let cancel = CancellationToken::new();
-                    let _ = events_tx.send(UiEvent::Info(
-                        "reviewing the completed work · dispatching specialist lanes…".to_string(),
-                    ));
+                    let _ = events_tx.send(UiEvent::Info(match tier {
+                        ReviewTier::Quick => {
+                            "reviewing the completed work · quick review…".to_string()
+                        }
+                        ReviewTier::Extended => {
+                            "reviewing the completed work · dispatching specialist lanes…"
+                                .to_string()
+                        }
+                    }));
                     let task = spawner.spawn(
                         job,
                         events_tx.clone(),
@@ -2263,6 +2283,7 @@ mod tests {
             subagent_runs: SubagentRegistry::default(),
             progress_wake: None,
             discrete_review: true,
+            review_tier: ReviewTier::Extended,
             max_correction_rounds: 1,
             primary_model: None,
             review_root: PathBuf::from("."),
@@ -2342,6 +2363,44 @@ mod tests {
                 "the withheld completion escaped while findings were pending"
             );
         }
+
+        drop(runtime_tx);
+        running.task.await.expect("orchestrator task");
+    }
+
+    #[tokio::test]
+    async fn review_tier_is_read_per_dispatch_so_mjconfig_applies_to_the_next_turn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let snapshot = changed_workspace(temp.path()).await;
+        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let (tiers_tx, mut tiers_rx) = mpsc::unbounded_channel();
+        let spawner = discrete_review::Spawner::stub(move |job, _events, _cancel, outcomes| {
+            let _ = tiers_tx.send(job.tier);
+            let _ = outcomes.send(discrete_review::ReviewOutcome {
+                epoch: job.epoch,
+                verdict: discrete_review::ReviewVerdict::Clean,
+            });
+        });
+        // The session started on the extended tier; the user picks quick in
+        // `/mjconfig` while it runs.
+        let running = spawn(runtime_rx, fanout_config(command_tx, spawner));
+        running.handle.set_review_tier(ReviewTier::Quick);
+        running
+            .handle
+            .begin_turn(1, "add a retry".to_string(), Vec::new(), snapshot)
+            .await;
+        runtime_tx.send(completion()).expect("send completion");
+
+        let tier = tokio::time::timeout(Duration::from_secs(5), tiers_rx.recv())
+            .await
+            .expect("a review was dispatched")
+            .expect("tier channel open");
+        assert_eq!(
+            tier,
+            ReviewTier::Quick,
+            "the dispatch must use the live tier, not the one the session started with"
+        );
 
         drop(runtime_tx);
         running.task.await.expect("orchestrator task");
@@ -3492,6 +3551,7 @@ mod tests {
                 subagent_runs: SubagentRegistry::default(),
                 progress_wake: None,
                 discrete_review: false,
+                review_tier: ReviewTier::default(),
                 max_correction_rounds: 1,
                 primary_model: None,
                 review_root: PathBuf::from("."),
@@ -3552,6 +3612,7 @@ mod tests {
             subagent_runs,
             progress_wake,
             discrete_review: false,
+            review_tier: ReviewTier::default(),
             max_correction_rounds: 1,
             primary_model: None,
             review_root: PathBuf::from("."),

@@ -416,7 +416,10 @@ pub enum UiCommand {
     },
     /// Change the discrete review policy without replacing the primary ACP
     /// session.
-    SetReviewPolicy { enabled: bool },
+    SetReviewPolicy {
+        enabled: bool,
+        tier: crate::config::ReviewTier,
+    },
     /// Run one Mjolnir-owned findings-only review while the primary is idle.
     RunReview { target: ReviewTarget },
     /// Recompute the worktree-versus-`HEAD` diff for the Ctrl-G reader. Sent

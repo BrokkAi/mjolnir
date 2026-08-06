@@ -1184,13 +1184,20 @@ fn readiness_lines(state: &State, theme: TerminalTheme) -> Vec<Line<'static>> {
         ));
         lines.push(detail_line(
             if state.config().agent.discrete_review {
+                let tier = state.config().agent.review_tier;
                 if roster.subagent_default.is_some() {
-                    "Automatic review every changed turn  ·  specialist reviewers available"
+                    format!(
+                        "Automatic {} review every changed turn  ·  reviewers available",
+                        tier.as_str()
+                    )
                 } else {
-                    "Automatic review every changed turn  ·  no specialist worker pool"
+                    format!(
+                        "Automatic {} review every changed turn  ·  no reviewer worker pool",
+                        tier.as_str()
+                    )
                 }
             } else {
-                "Review supervisor resolved, but automatic review is disabled"
+                "Review supervisor resolved, but automatic review is disabled".to_string()
             },
             theme,
         ));
@@ -1709,7 +1716,10 @@ mod tests {
             "PRIMARY",
             "Implementation subagents",
             "CHECK",
-            "specialist reviewers",
+            "reviewers available",
+            // The default tier is named, so the readiness screen never implies
+            // the expensive review is what will run.
+            "Automatic quick review",
             "every changed turn",
             "primary, subagent, and review roles",
         ] {

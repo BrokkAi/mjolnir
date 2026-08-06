@@ -1207,6 +1207,7 @@ pub struct AppState {
     pub configured_models: crate::config::ModelsConfig,
     pub active_models: crate::config::ModelsConfig,
     pub review_enabled: bool,
+    pub review_tier: crate::config::ReviewTier,
     pub ragnarok_models: Vec<crate::roster::ResolvedAgent>,
     /// Holds the platform clipboard lease so copied text remains available
     /// on Linux/X11 where the owning process must stay alive.
@@ -1749,6 +1750,7 @@ impl AppState {
             configured_models: crate::config::ModelsConfig::default(),
             active_models: crate::config::ModelsConfig::default(),
             review_enabled: true,
+            review_tier: crate::config::ReviewTier::default(),
             ragnarok_models: Vec::new(),
             clipboard_lease: None,
             queued_prompts: VecDeque::new(),
