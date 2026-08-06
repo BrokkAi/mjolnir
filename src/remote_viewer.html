@@ -3893,8 +3893,8 @@
       }
 
       /// Poll while a background job (sign-in, install) runs so its output and
-      /// progress stream into the panel. Structural re-render only happens on
-      /// job completion, so open dropdowns and focused inputs stay alive.
+      /// progress stream into the panel. Structural re-render happens when a
+      /// job completes or ACP discovery publishes new choices and options.
       function mjSchedulePoll() {
         if (mjcfg.pollTimer) {
           clearTimeout(mjcfg.pollTimer);
@@ -3928,7 +3928,9 @@
                 (mjcfg.snapshot.login && mjcfg.snapshot.login.running)
                 || (mjcfg.snapshot.install && mjcfg.snapshot.install.running)
                 || mjcfg.snapshot.probing;
-              if (wasRunning && !stillRunning) {
+              const discoveryChanged =
+                previous.discovery_revision !== mjcfg.snapshot.discovery_revision;
+              if (discoveryChanged || (wasRunning && !stillRunning)) {
                 renderMjConfig();
               } else {
                 mjPatchJobUi();

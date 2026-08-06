@@ -4202,14 +4202,16 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
         resolved.inventory.clone(),
     ));
     if let Some(mut updates) = roster_updates {
-        mjconfig.probing.store(true, Ordering::Relaxed);
+        let generation = mjconfig.begin_discovery();
         let mjconfig_updates = Arc::clone(&mjconfig);
         tokio::spawn(async move {
             while updates.changed().await.is_ok() {
                 let snapshot = updates.borrow_and_update().clone();
-                mjconfig_updates.update_discovery(&snapshot);
+                if !mjconfig_updates.update_discovery(generation, &snapshot) {
+                    return;
+                }
             }
-            mjconfig_updates.probing.store(false, Ordering::Relaxed);
+            mjconfig_updates.finish_discovery(generation);
         });
     }
     let session_manager = Arc::new(ServerSessionManager::new_roster(
@@ -5481,16 +5483,27 @@ fn spawn_tailscale_cert_renewer(ts: TailscaleTls, resolver: Arc<SniCertResolver>
 #[derive(Debug)]
 struct MjConfigRuntime {
     config_path: PathBuf,
-    choices: Mutex<Vec<roster::ModelChoice>>,
-    active_models: Mutex<Option<config::ModelsConfig>>,
-    /// Probed ACP inventory from the last roster resolution. Carries the
-    /// agent-advertised session options; rebuilding inventory from config
-    /// alone would lose them (`discover_inventory` starts them empty).
-    inventory: Mutex<roster::AcpInventory>,
-    probing: AtomicBool,
+    discovery: Mutex<MjConfigDiscovery>,
     login: Mutex<Option<MjLoginJob>>,
     install: Mutex<Option<MjInstallJob>>,
     registry: tokio::sync::Mutex<Option<crate::registry::Registry>>,
+}
+
+#[derive(Debug)]
+struct MjConfigDiscovery {
+    choices: Vec<roster::ModelChoice>,
+    active_models: Option<config::ModelsConfig>,
+    /// Probed ACP inventory from the last roster resolution. Carries the
+    /// agent-advertised session options; rebuilding inventory from config
+    /// alone would lose them (`discover_inventory` starts them empty).
+    inventory: roster::AcpInventory,
+    probing: bool,
+    /// Advances whenever a background probe publishes a new roster snapshot,
+    /// allowing the browser to render useful capabilities before all probes end.
+    revision: u64,
+    /// Invalidates an older probe stream when config changes trigger a newer
+    /// blocking roster resolution.
+    generation: u64,
 }
 
 impl MjConfigRuntime {
@@ -5502,10 +5515,14 @@ impl MjConfigRuntime {
     ) -> Self {
         Self {
             config_path,
-            choices: Mutex::new(choices),
-            active_models: Mutex::new(active_models),
-            inventory: Mutex::new(inventory),
-            probing: AtomicBool::new(false),
+            discovery: Mutex::new(MjConfigDiscovery {
+                choices,
+                active_models,
+                inventory,
+                probing: false,
+                revision: 0,
+                generation: 0,
+            }),
             login: Mutex::new(None),
             install: Mutex::new(None),
             registry: tokio::sync::Mutex::new(None),
@@ -5515,18 +5532,41 @@ impl MjConfigRuntime {
     /// Sync the editor's model choices and active seat details after a
     /// config-change re-resolve, so the panel reports the new bindings.
     fn update_from_roster(&self, roster: &roster::Roster) {
-        *self.choices.lock().expect("mjconfig choices lock") = roster.choices.clone();
-        *self.active_models.lock().expect("mjconfig models lock") =
-            Some(models_config_from_roster(roster));
-        *self.inventory.lock().expect("mjconfig inventory lock") = roster.inventory.clone();
+        let mut discovery = self.discovery.lock().expect("mjconfig discovery lock");
+        discovery.generation = discovery.generation.wrapping_add(1);
+        discovery.choices.clone_from(&roster.choices);
+        discovery.inventory.clone_from(&roster.inventory);
+        discovery.active_models = Some(models_config_from_roster(roster));
+        discovery.probing = false;
+        discovery.revision = discovery.revision.wrapping_add(1);
+    }
+
+    fn begin_discovery(&self) -> u64 {
+        let mut discovery = self.discovery.lock().expect("mjconfig discovery lock");
+        discovery.generation = discovery.generation.wrapping_add(1);
+        discovery.probing = true;
+        discovery.generation
     }
 
     /// Apply a background probe snapshot without rebinding the seats that the
     /// running server session already owns. This is the same distinction the
     /// TUI makes for `UiEvent::RosterUpdate`.
-    fn update_discovery(&self, roster: &roster::Roster) {
-        *self.choices.lock().expect("mjconfig choices lock") = roster.choices.clone();
-        *self.inventory.lock().expect("mjconfig inventory lock") = roster.inventory.clone();
+    fn update_discovery(&self, generation: u64, roster: &roster::Roster) -> bool {
+        let mut discovery = self.discovery.lock().expect("mjconfig discovery lock");
+        if discovery.generation != generation {
+            return false;
+        }
+        discovery.choices.clone_from(&roster.choices);
+        discovery.inventory.clone_from(&roster.inventory);
+        discovery.revision = discovery.revision.wrapping_add(1);
+        true
+    }
+
+    fn finish_discovery(&self, generation: u64) {
+        let mut discovery = self.discovery.lock().expect("mjconfig discovery lock");
+        if discovery.generation == generation {
+            discovery.probing = false;
+        }
     }
 }
 
@@ -5574,6 +5614,8 @@ struct MjConfigSnapshot {
     /// True while adapters are still being probed for model and session-option
     /// capabilities. The browser polls until the final inventory is available.
     probing: bool,
+    /// Changes whenever an incremental probe snapshot updates the inventory.
+    discovery_revision: u64,
     /// One-shot message produced while folding finished background jobs into
     /// the config (e.g. "installed X" or an install failure).
     notice: Option<String>,
@@ -5785,35 +5827,29 @@ fn mjconfig_load(state: &ServerState) -> config::Config {
     config::Config::load(&state.mjconfig.config_path).unwrap_or_default()
 }
 
-fn mjconfig_editor(state: &ServerState, config: config::Config) -> crate::settings::SettingsEditor {
-    let choices = state
+fn mjconfig_editor(
+    state: &ServerState,
+    config: config::Config,
+) -> (crate::settings::SettingsEditor, bool, u64) {
+    let discovery = state
         .mjconfig
-        .choices
+        .discovery
         .lock()
-        .expect("mjconfig choices lock")
-        .clone();
+        .expect("mjconfig discovery lock");
     // Rediscover on top of the cached probe inventory: policy and detection
     // re-derive from the *current* config (a just-saved policy shows
     // immediately) while probe-only fields like session options survive.
-    let cached = state
-        .mjconfig
-        .inventory
-        .lock()
-        .expect("mjconfig inventory lock")
-        .clone();
-    let inventory = roster::rediscover_inventory(&config, &cached);
-    let mut editor =
-        crate::settings::SettingsEditor::new(config, choices, None).with_inventory(inventory);
-    let active_models = state
-        .mjconfig
-        .active_models
-        .lock()
-        .expect("mjconfig models lock")
-        .clone();
+    let inventory = roster::rediscover_inventory(&config, &discovery.inventory);
+    let mut editor = crate::settings::SettingsEditor::new(config, discovery.choices.clone(), None)
+        .with_inventory(inventory);
+    let probing = discovery.probing;
+    let discovery_revision = discovery.revision;
+    let active_models = discovery.active_models.clone();
+    drop(discovery);
     if let Some(models) = active_models {
         editor = editor.with_active_models(models);
     }
-    editor
+    (editor, probing, discovery_revision)
 }
 
 /// Mirror of the TUI's server-row status line in `settings::draw_servers`.
@@ -5977,7 +6013,7 @@ fn mjconfig_install_status(state: &ServerState) -> Option<MjInstallStatus> {
 fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> MjConfigSnapshot {
     let install_notice = mjconfig_absorb_finished_install(state);
     let config = mjconfig_load(state);
-    let editor = mjconfig_editor(state, config);
+    let (editor, probing, discovery_revision) = mjconfig_editor(state, config);
     let config = &editor.config;
     let inventory = editor.inventory();
 
@@ -6163,7 +6199,8 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         appearance,
         login: mjconfig_login_status(state),
         install: mjconfig_install_status(state),
-        probing: state.mjconfig.probing.load(Ordering::Relaxed),
+        probing,
+        discovery_revision,
         notice: notice.or(install_notice),
     }
 }
@@ -6362,21 +6399,17 @@ async fn mjconfig_apply(
     Json(request): Json<MjConfigApplyRequest>,
 ) -> std::result::Result<Json<MjConfigSnapshot>, (StatusCode, String)> {
     let mut config = mjconfig_load(&state);
-    let inventory = state
+    let discovery = state
         .mjconfig
-        .inventory
+        .discovery
         .lock()
-        .expect("mjconfig inventory lock")
-        .clone();
+        .expect("mjconfig discovery lock");
+    let inventory = discovery.inventory.clone();
+    let choices = discovery.choices.clone();
+    drop(discovery);
     mjconfig_apply_edits(&mut config, request, &inventory)?;
     // Same guard as the TUI's save: a policy edit that strands a pinned seat
     // model flips that seat to auto, with a notice instead of a later failure.
-    let choices = state
-        .mjconfig
-        .choices
-        .lock()
-        .expect("mjconfig choices lock")
-        .clone();
     let reroute_notices = crate::settings::reset_unroutable_models(&mut config, &choices);
     config::save_user_config_preserving_session_routes(&state.mjconfig.config_path, &mut config)
         .map_err(|error| internal_error(format!("save config: {error:#}")))?;
@@ -9652,6 +9685,47 @@ mod tests {
         ))
     }
 
+    fn test_roster(model: &str) -> roster::Roster {
+        let launch = roster::AdapterLaunch {
+            kind: roster::AdapterKind::Custom,
+            source_id: "test-acp".to_string(),
+            command: PathBuf::from("false"),
+            args: Vec::new(),
+            env: HashMap::new(),
+        };
+        let primary = roster::ResolvedAgent {
+            model: crate::deepswe::Row {
+                model: model.to_string(),
+                reasoning_effort: None,
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+            },
+            model_value: model.to_string(),
+            launch,
+            ranked: true,
+            reasoning_effort: None,
+        };
+        roster::Roster {
+            primary: primary.clone(),
+            review_supervisor: None,
+            subagent_default: None,
+            available: vec![primary],
+            choices: vec![roster::ModelChoice {
+                model: model.to_string(),
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("test-acp".to_string()),
+                ranked: true,
+            }],
+            warnings: Vec::new(),
+            inventory: roster::AcpInventory::default(),
+            subagent_acp_priority: Vec::new(),
+            subagent_acp_source: None,
+        }
+    }
+
     fn mjconfig_request(
         method: &str,
         token: Option<&str>,
@@ -9723,6 +9797,29 @@ mod tests {
         assert!(matches!(manager.refresh_for_config(&path).await, Ok(None)));
     }
 
+    #[test]
+    fn config_reresolve_invalidates_older_discovery_updates() {
+        let runtime = test_mjconfig_runtime();
+        let startup_generation = runtime.begin_discovery();
+        runtime.update_from_roster(&test_roster("fresh-model"));
+
+        assert!(!runtime.update_discovery(startup_generation, &test_roster("stale-model")));
+        runtime.finish_discovery(startup_generation);
+
+        let discovery = runtime.discovery.lock().expect("discovery lock");
+        assert!(!discovery.probing);
+        assert_eq!(discovery.revision, 1);
+        assert_eq!(discovery.choices[0].model, "fresh-model");
+        assert_eq!(
+            discovery
+                .active_models
+                .as_ref()
+                .expect("active models")
+                .primary,
+            "fresh-model"
+        );
+    }
+
     #[tokio::test]
     async fn mjconfig_snapshot_reports_every_panel() {
         let token = "mjconfig-token";
@@ -9787,12 +9884,17 @@ mod tests {
         assert!(snapshot["login"].is_null());
         assert!(snapshot["install"].is_null());
         assert_eq!(snapshot["probing"], false);
+        assert_eq!(snapshot["discovery_revision"], 0);
     }
 
     #[tokio::test]
     async fn mjconfig_snapshot_reports_background_acp_discovery() {
         let runtime = test_mjconfig_runtime();
-        runtime.probing.store(true, Ordering::Relaxed);
+        {
+            let mut discovery = runtime.discovery.lock().expect("discovery lock");
+            discovery.probing = true;
+            discovery.revision = 3;
+        }
         let token = "mjconfig-token";
         let app = mjconfig_test_router(runtime, token);
 
@@ -9803,6 +9905,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let snapshot = json_body(response).await;
         assert_eq!(snapshot["probing"], true);
+        assert_eq!(snapshot["discovery_revision"], 3);
     }
 
     #[tokio::test]
@@ -9826,7 +9929,7 @@ mod tests {
                 SessionConfigSelectOption::new("flex", "Flex"),
             ],
         )];
-        *runtime.inventory.lock().expect("inventory lock") = inventory;
+        runtime.discovery.lock().expect("discovery lock").inventory = inventory;
 
         let token = "mjconfig-token";
         let app = mjconfig_test_router(runtime, token);
@@ -9870,7 +9973,7 @@ mod tests {
             )
             .category(SessionConfigOptionCategory::ThoughtLevel),
         ];
-        *runtime.inventory.lock().expect("inventory lock") = inventory;
+        runtime.discovery.lock().expect("discovery lock").inventory = inventory;
 
         let token = "mjconfig-token";
         let app = mjconfig_test_router(runtime, token);
@@ -10014,7 +10117,7 @@ mod tests {
     #[tokio::test]
     async fn mjconfig_apply_flips_stranded_models_to_auto_with_notice() {
         let runtime = test_mjconfig_runtime();
-        *runtime.choices.lock().expect("choices lock") = vec![roster::ModelChoice {
+        runtime.discovery.lock().expect("discovery lock").choices = vec![roster::ModelChoice {
             model: "model-a".to_string(),
             pass_at_1: 0.5,
             mean_cost_usd: 1.0,
@@ -10291,6 +10394,7 @@ mod tests {
         assert!(viewer.contains("edits.primary_session_defaults[activeSource]"));
         assert!(!viewer.contains("Object.values(edits.primary_session_defaults)"));
         assert!(viewer.contains("snapshot.probing"));
+        assert!(viewer.contains("previous.discovery_revision"));
         assert!(viewer.contains("Discovering ACP session options"));
         assert!(viewer.contains("openMjConfig(\"agents\")"));
     }
