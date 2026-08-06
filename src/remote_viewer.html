@@ -4110,8 +4110,14 @@
             },
           ),
         );
-        row.appendChild(mjDetail(role.description));
-        row.appendChild(mjDetail(`saved: ${role.saved_detail} · active: ${role.active_detail}`));
+        if (value === role.model && role.model_warning) {
+          const warning = mjDetail(role.model_warning);
+          warning.classList.add("is-error");
+          row.appendChild(warning);
+        }
+        if (role.active_model && value !== role.active_model) {
+          row.appendChild(mjDetail(`active: ${role.active_detail}`));
+        }
         return row;
       }
 
@@ -4120,8 +4126,6 @@
       function mjSeatOptionRows(group, editsField, seat) {
         const rows = [];
         if (!group) {
-          const label = seat === "primary" ? "agent" : (seat === "review" ? "reviewer" : "subagent");
-          rows.push(mjNote(`No selectable ACP session options were reported for the ${label} route.`));
           return rows;
         }
         rows.push(mjSectionTitle(`${group.server_label} session options`));
@@ -4158,12 +4162,13 @@
             const activeLabel = live
               ? (live.choices || []).find((choice) => choice.value === live.current_value)?.label
                 || live.current_value
-              : "next session only";
-            row.appendChild(mjDetail(`saved default · active: ${activeLabel}`));
-          } else if (seat === "review") {
-            row.appendChild(mjDetail("saved default · applies to review sessions started later"));
-          } else {
-            row.appendChild(mjDetail("saved default · already-running subagents are unchanged"));
+              : null;
+            const selectedLabel = option.choices.find(
+              (choice) => choice.value === value,
+            )?.label || value;
+            if (activeLabel && activeLabel !== selectedLabel) {
+              row.appendChild(mjDetail(`active: ${activeLabel}`));
+            }
           }
           rows.push(row);
         }
@@ -4172,9 +4177,6 @@
 
       function renderMjAgents() {
         const panel = mjcfg.snapshot.agents;
-        mjconfigBodyEl.appendChild(
-          mjNote("Primary model and ACP session defaults. Compatible option changes update the selected live session on save; model changes apply to new sessions."),
-        );
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[0], "primary_model"));
         for (const row of mjSeatOptionRows(mjcfg.snapshot.primary_options, "primary_session_defaults", "primary")) {
           mjconfigBodyEl.appendChild(row);
@@ -4183,9 +4185,6 @@
 
       function renderMjReviewer() {
         const panel = mjcfg.snapshot.agents;
-        mjconfigBodyEl.appendChild(
-          mjNote("Reviewer model and ACP session defaults. Changes apply to review sessions started after save."),
-        );
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[1], "review_model"));
         for (const row of mjSeatOptionRows(mjcfg.snapshot.review_options, "review_session_defaults", "review")) {
           mjconfigBodyEl.appendChild(row);
@@ -4224,9 +4223,6 @@
 
       function renderMjSubagents() {
         const panel = mjcfg.snapshot.agents;
-        mjconfigBodyEl.appendChild(
-          mjNote("Subagent defaults apply to newly delegated create_subagent sessions."),
-        );
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[2], "subagents_model"));
         for (const row of mjSeatOptionRows(mjcfg.snapshot.subagent_options, "subagent_session_defaults", "subagents")) {
           mjconfigBodyEl.appendChild(row);
