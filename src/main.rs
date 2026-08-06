@@ -2424,6 +2424,7 @@ async fn run_session(
                 }),
                 session_boundary: session_boundary.take(),
                 session_cwd: cwd.clone(),
+                additional_workspace_roots: runtime_options.additional_directories.clone(),
                 model_choices: roster.choices.clone(),
                 acp_inventory: roster.inventory.clone(),
                 configured_models: ui_config.model_names(),

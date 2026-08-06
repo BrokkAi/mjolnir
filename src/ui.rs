@@ -48,8 +48,9 @@ use crate::app::{
     PRIMARY_EFFORT_OPTIONS, PastedAttachment, PastedImageAttachment, PendingElicitation,
     PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus,
     RagnarokFighterUi, RagnarokObservation, RagnarokUi, StatusKind, StatusMessage, SubagentStatus,
-    ToolCallOutput, TranscriptSearch, UiExitReason, classify_elicitation, config_option_choices,
-    config_option_current_value_label, primary_effort_value,
+    ToolCallOutput, TranscriptSearch, UiExitReason, WorkspaceFile, classify_elicitation,
+    config_option_choices, config_option_current_value_label, file_mention_text,
+    primary_effort_value, workspace_file_candidates,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -1135,6 +1136,8 @@ pub struct UiRunOptions<'a> {
     pub session_boundary: Option<String>,
     /// The ACP session cwd; `/ragnarok` battles are rooted here.
     pub session_cwd: PathBuf,
+    /// Additional directories registered with the ACP session.
+    pub additional_workspace_roots: Vec<PathBuf>,
     pub model_choices: Vec<crate::roster::ModelChoice>,
     pub acp_inventory: crate::roster::AcpInventory,
     pub configured_models: crate::config::ModelsConfig,
@@ -1170,6 +1173,7 @@ struct UiInitialState {
     keep_awake_enabled: bool,
     session_boundary: Option<String>,
     session_cwd: PathBuf,
+    additional_workspace_roots: Vec<PathBuf>,
     model_choices: Vec<crate::roster::ModelChoice>,
     acp_inventory: crate::roster::AcpInventory,
     configured_models: crate::config::ModelsConfig,
@@ -1191,6 +1195,21 @@ struct UiLoopOutcome {
     theme_kind: TerminalThemeKind,
     spinner_style: SpinnerStyle,
     history: Vec<String>,
+}
+
+struct FileAutocompleteScan {
+    roots: Vec<PathBuf>,
+    candidates: Vec<WorkspaceFile>,
+}
+
+fn start_file_autocomplete_scan(
+    roots: Vec<PathBuf>,
+    tx: mpsc::UnboundedSender<FileAutocompleteScan>,
+) {
+    std::mem::drop(tokio::task::spawn_blocking(move || {
+        let candidates = workspace_file_candidates(&roots);
+        let _ = tx.send(FileAutocompleteScan { roots, candidates });
+    }));
 }
 
 pub async fn run(
@@ -1235,6 +1254,7 @@ pub async fn run(
             keep_awake_enabled: options.keep_awake_enabled,
             session_boundary: options.session_boundary,
             session_cwd: options.session_cwd,
+            additional_workspace_roots: options.additional_workspace_roots,
             model_choices: options.model_choices,
             acp_inventory: options.acp_inventory,
             configured_models: options.configured_models,
@@ -1487,6 +1507,7 @@ async fn ui_loop(
     }
     state.active_agent_launch = initial.active_agent_launch;
     state.session_cwd = initial.session_cwd;
+    state.additional_workspace_roots = initial.additional_workspace_roots;
     state.model_choices = initial.model_choices;
     state.acp_inventory = initial.acp_inventory;
     state.configured_models = initial.configured_models;
@@ -1520,6 +1541,7 @@ async fn ui_loop(
     let mut dictation_cancel_tx: Option<std_mpsc::Sender<()>> = None;
     let (current_pr_tx, mut current_pr_rx) = mpsc::unbounded_channel::<CurrentBranchPrProbe>();
     let mut current_pr_probe_in_flight = false;
+    let (file_scan_tx, mut file_scan_rx) = mpsc::unbounded_channel::<FileAutocompleteScan>();
     // Ragnarok battles report through their own channel (the sender stays
     // alive here for the whole loop, so `recv` pends rather than closing).
     let (ragnarok_tx, mut ragnarok_rx) = mpsc::unbounded_channel::<ragnarok::RagnarokEvent>();
@@ -1677,6 +1699,32 @@ async fn ui_loop(
                     && apply_current_branch_pr_probe(&mut state, probe)
                 {
                     pending_redraw.mark_interactive();
+                }
+            }
+            maybe_scan = file_scan_rx.recv() => {
+                if let Some(scan) = maybe_scan {
+                    let apply_current = state.awaits_file_autocomplete_scan(&scan.roots);
+                    let apply_main = main_state
+                        .as_ref()
+                        .is_some_and(|main| main.awaits_file_autocomplete_scan(&scan.roots));
+                    let applied = match (apply_current, apply_main) {
+                        // Both states can only be waiting after each scheduled
+                        // its own scan. Let the next result populate `main`
+                        // instead of cloning the potentially large index here.
+                        (true, true) => {
+                            state.apply_file_autocomplete_scan(scan.roots, scan.candidates)
+                        }
+                        (true, false) => {
+                            state.apply_file_autocomplete_scan(scan.roots, scan.candidates)
+                        }
+                        (false, true) => main_state.as_mut().is_some_and(|main| {
+                            main.apply_file_autocomplete_scan(scan.roots, scan.candidates)
+                        }),
+                        (false, false) => false,
+                    };
+                    if applied {
+                        pending_redraw.mark_interactive();
+                    }
                 }
             }
             _ = current_pr_tick.tick(), if !current_pr_probe_in_flight => {
@@ -1850,6 +1898,16 @@ async fn ui_loop(
                     pending_redraw.mark_animation();
                 }
             }
+        }
+
+        if let Some(roots) = state.take_file_autocomplete_scan_request() {
+            start_file_autocomplete_scan(roots, file_scan_tx.clone());
+        }
+        if let Some(roots) = main_state
+            .as_mut()
+            .and_then(AppState::take_file_autocomplete_scan_request)
+        {
+            start_file_autocomplete_scan(roots, file_scan_tx.clone());
         }
 
         if state.side_start_requested && main_state.is_none() {
@@ -4801,14 +4859,6 @@ fn should_open_help(modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty() && matches!(code, KeyCode::F(10))
 }
 
-fn file_mention_text(path: &str) -> String {
-    if path.chars().any(char::is_whitespace) {
-        format!("@\"{}\"", path.replace('\\', "\\\\").replace('"', "\\\""))
-    } else {
-        format!("@{path}")
-    }
-}
-
 fn input_text_with_attachments(
     input: &str,
     attachments: &[PastedAttachment],
@@ -5195,7 +5245,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
-    state.record_user_prompt(display_text);
+    state.record_user_prompt_with_resources(display_text, resources.clone());
     let _ = cmd_tx.send(UiCommand::SendPrompt {
         text,
         images,
@@ -5758,7 +5808,7 @@ fn drain_queued_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCo
     let Some(queued) = state.take_queued_prompt() else {
         return;
     };
-    state.record_user_prompt(queued.display_text);
+    state.record_user_prompt_with_resources(queued.display_text, queued.resources.clone());
     let _ = cmd_tx.send(UiCommand::SendPrompt {
         text: queued.text,
         images: queued.images,
@@ -5810,7 +5860,7 @@ fn finalize_startup_prompt(state: &mut AppState) {
         state.scroll_input_to_bottom();
     }
 
-    state.record_user_prompt(prompt.display_text);
+    state.record_user_prompt_with_resources(prompt.display_text, prompt.resources);
 }
 
 /// Truncate the display text to a short single-line preview for the
@@ -26263,6 +26313,23 @@ mod tests {
         assert_eq!(resources[0].uri, "file:///workspace/src/acp.rs");
         assert_eq!(resources[0].size, Some(42));
         assert!(state.file_attachments.is_empty());
+
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        assert!(state.prompt_history_previous());
+        assert_eq!(state.input, "Review  now");
+        assert_eq!(state.file_attachments.len(), 1);
+
+        submit_prompt(&mut state, &cmd_tx);
+        let UiCommand::SendPrompt { resources, .. } =
+            cmd_rx.try_recv().expect("replayed prompt command")
+        else {
+            panic!("expected replayed prompt command");
+        };
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].uri, "file:///workspace/src/acp.rs");
     }
 
     #[test]
