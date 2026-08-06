@@ -5107,7 +5107,8 @@
           if (query) {
             params.set("query", query);
           }
-          const url = params.size ? `/api/filesystem?${params}` : "/api/filesystem";
+          const queryString = params.toString();
+          const url = queryString ? `/api/filesystem?${queryString}` : "/api/filesystem";
           const response = await apiFetch(url, { cache: "no-store" });
           if (!response.ok) {
             const message = await response.text();

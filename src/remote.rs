@@ -7194,7 +7194,10 @@ async fn browse_filesystem(
     let response = tokio::task::spawn_blocking(move || {
         let recent =
             load_recent_filesystem_directories(db_path.as_ref().as_path(), roots.as_slice())
-                .map_err(internal_error)?;
+                .unwrap_or_else(|error| {
+                    warn!(%error, "failed to load recent filesystem directories");
+                    Vec::new()
+                });
         browse_filesystem_under_roots(
             roots.as_slice(),
             requested_path.as_deref(),
@@ -7683,10 +7686,25 @@ fn search_filesystem_under_roots(
     roots: &[PathBuf],
     query: &str,
 ) -> (Vec<FilesystemDirectoryRecord>, bool) {
+    search_filesystem_under_roots_with_limits(
+        roots,
+        query,
+        FILESYSTEM_SEARCH_SCAN_LIMIT,
+        FILESYSTEM_SEARCH_RESULT_LIMIT,
+    )
+}
+
+fn search_filesystem_under_roots_with_limits(
+    roots: &[PathBuf],
+    query: &str,
+    scan_limit: usize,
+    result_limit: usize,
+) -> (Vec<FilesystemDirectoryRecord>, bool) {
     let query = query.to_lowercase();
     let mut pending = VecDeque::from_iter(roots.iter().cloned());
     let mut visited = roots.iter().cloned().collect::<HashSet<_>>();
     let mut matches = Vec::new();
+    let mut scanned_entries = 0;
     let mut truncated = false;
 
     'search: while let Some(directory) = pending.pop_front() {
@@ -7695,7 +7713,16 @@ fn search_filesystem_under_roots(
         };
         let mut children = Vec::new();
         let mut scan_limit_reached = false;
-        for entry in read_dir.flatten() {
+        for entry in read_dir {
+            if scanned_entries >= scan_limit {
+                truncated = true;
+                scan_limit_reached = true;
+                break;
+            }
+            scanned_entries += 1;
+            let Ok(entry) = entry else {
+                continue;
+            };
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
@@ -7710,11 +7737,6 @@ fn search_filesystem_under_roots(
                 || visited.contains(&path)
             {
                 continue;
-            }
-            if visited.len() >= FILESYSTEM_SEARCH_SCAN_LIMIT {
-                truncated = true;
-                scan_limit_reached = true;
-                break;
             }
             visited.insert(path.clone());
             children.push(path);
@@ -7731,7 +7753,7 @@ fn search_filesystem_under_roots(
                 || record.display_path.to_lowercase().contains(&query)
             {
                 matches.push(record);
-                if matches.len() == FILESYSTEM_SEARCH_RESULT_LIMIT {
+                if matches.len() >= result_limit {
                     truncated = true;
                     break 'search;
                 }
@@ -14994,6 +15016,49 @@ mod tests {
     }
 
     #[test]
+    fn filesystem_search_counts_regular_files_toward_scan_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("one.txt"), "one").expect("first file");
+        std::fs::write(dir.path().join("two.txt"), "two").expect("second file");
+        let roots = test_workspace_roots(dir.path());
+
+        let (matches, truncated) =
+            search_filesystem_under_roots_with_limits(&roots, "match", 1, 50);
+
+        assert!(matches.is_empty());
+        assert!(truncated);
+    }
+
+    #[test]
+    fn filesystem_search_rejects_overlong_queries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let roots = test_workspace_roots(dir.path());
+        let query = "x".repeat(FILESYSTEM_SEARCH_QUERY_MAX_CHARS + 1);
+
+        let error = browse_filesystem_under_roots(&roots, None, Some(&query), Vec::new())
+            .expect_err("overlong search should fail");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_search_does_not_follow_symlinks_outside_roots() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::create_dir(outside.path().join("secret-match")).expect("outside directory");
+        symlink(outside.path(), root.path().join("escape")).expect("outside symlink");
+        let roots = test_workspace_roots(root.path());
+
+        let listing = browse_filesystem_under_roots(&roots, None, Some("secret"), Vec::new())
+            .expect("search folders");
+
+        assert!(listing.entries.is_empty());
+    }
+
+    #[test]
     fn recent_filesystem_directories_are_valid_unique_and_newest_first() {
         let dir = tempfile::tempdir().expect("root");
         let older_path = dir.path().join("older");
@@ -15042,6 +15107,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["newer", "older"]
         );
+    }
+
+    #[tokio::test]
+    async fn filesystem_browse_works_when_recent_history_is_unavailable() {
+        let root = tempfile::tempdir().expect("root");
+        let invalid_db_path = tempfile::tempdir().expect("invalid db path");
+        let token = "integration-token".to_string();
+        let app = build_router(RouterConfig {
+            db_path: invalid_db_path.path().to_path_buf(),
+            token: token.clone(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "test-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+            workspace_roots: test_workspace_roots(root.path()),
+            session_manager: test_session_manager(),
+            mjconfig: test_mjconfig_runtime(),
+        });
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/filesystem")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("browse request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: FilesystemBrowseResponse = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("browse body")
+                .to_bytes(),
+        )
+        .expect("browse response");
+        assert_eq!(body.current.path, root.path().display().to_string());
+        assert!(body.recent.is_empty());
     }
 
     #[test]
