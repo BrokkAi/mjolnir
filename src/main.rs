@@ -3057,7 +3057,7 @@ mod tests {
     // here, ACP protocol behavior is tested with mock transports in `acp`, and
     // real terminal restoration is covered by `tests/termination_pty.rs`.
     use super::*;
-    use clap::{CommandFactory, Parser};
+    use clap::CommandFactory;
     use std::{
         collections::HashSet,
         panic::{AssertUnwindSafe, catch_unwind},
@@ -3521,16 +3521,16 @@ mod tests {
 
     #[test]
     fn parse_accepts_debug_file_aliases() {
-        let cli = Cli::try_parse_from(["mj", "--debug-file", "debug.log"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "--debug-file", "debug.log"]).expect("parse");
         assert_eq!(cli.log_file, Some(PathBuf::from("debug.log")));
 
-        let cli = Cli::try_parse_from(["mj", "--log-file", "legacy.log"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "--log-file", "legacy.log"]).expect("parse");
         assert_eq!(cli.log_file, Some(PathBuf::from("legacy.log")));
     }
 
     #[test]
     fn parse_accepts_headless_role_overrides_and_normalizes_none() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_hermetic(&[
             "mj",
             "--print",
             "hello",
@@ -3556,7 +3556,7 @@ mod tests {
 
     #[test]
     fn parse_accepts_role_overrides_after_stdin_print_sentinel() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_hermetic(&[
             "mj",
             "--print",
             "-",
@@ -3580,7 +3580,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_role_overrides_without_print() {
-        let error = Cli::try_parse_from(["mj", "--model", "gpt-test"])
+        let error = try_parse_hermetic(&["mj", "--model", "gpt-test"])
             .expect_err("--model must require --print");
         assert!(error.to_string().contains("--print"), "{error}");
     }
@@ -3712,11 +3712,11 @@ mod tests {
     fn parse_rejects_auto_and_disabled_primary_overrides() {
         for value in ["auto", "disabled", "none"] {
             assert!(
-                Cli::try_parse_from(["mj", "--print", "hello", "--model", value]).is_err(),
+                try_parse_hermetic(&["mj", "--print", "hello", "--model", value]).is_err(),
                 "accepted invalid --model override {value}"
             );
             assert!(
-                Cli::try_parse_from(["mj", "--print", "hello", "--review-model", value]).is_err(),
+                try_parse_hermetic(&["mj", "--print", "hello", "--review-model", value]).is_err(),
                 "accepted invalid --review-model override {value}"
             );
         }
@@ -3724,10 +3724,10 @@ mod tests {
 
     #[test]
     fn parse_accepts_filesystem_text_limit() {
-        let cli = Cli::try_parse_from(["mj", "--fs-max-text-bytes", "4096"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "--fs-max-text-bytes", "4096"]).expect("parse");
         assert_eq!(cli.fs_max_text_bytes, 4096);
 
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_hermetic(&[
             "mj",
             "--fs-max-text-bytes",
             &acp::MAX_CONFIGURABLE_FS_TEXT_BYTES.to_string(),
@@ -3735,28 +3735,28 @@ mod tests {
         .expect("parse max");
         assert_eq!(cli.fs_max_text_bytes, acp::MAX_CONFIGURABLE_FS_TEXT_BYTES);
 
-        let cli = Cli::try_parse_from(["mj", "server", "--fs-max-text-bytes", "8192"])
+        let cli = try_parse_hermetic(&["mj", "server", "--fs-max-text-bytes", "8192"])
             .expect("parse server");
         assert_eq!(cli.fs_max_text_bytes, 8192);
     }
 
     #[test]
     fn parse_rejects_unsafe_filesystem_text_limit() {
-        let err = Cli::try_parse_from(["mj", "--fs-max-text-bytes", "0"]).expect_err("reject 0");
+        let err = try_parse_hermetic(&["mj", "--fs-max-text-bytes", "0"]).expect_err("reject 0");
         assert!(
             err.to_string()
                 .contains("filesystem text byte limit must be between 1")
         );
 
         let too_large = (acp::MAX_CONFIGURABLE_FS_TEXT_BYTES + 1).to_string();
-        let err = Cli::try_parse_from(["mj", "--fs-max-text-bytes", &too_large])
+        let err = try_parse_hermetic(&["mj", "--fs-max-text-bytes", &too_large])
             .expect_err("reject too large");
         assert!(
             err.to_string()
                 .contains("filesystem text byte limit must be between 1")
         );
 
-        let err = Cli::try_parse_from(["mj", "--fs-max-text-bytes", "many"])
+        let err = try_parse_hermetic(&["mj", "--fs-max-text-bytes", "many"])
             .expect_err("reject non-number");
         assert!(
             err.to_string()
@@ -3810,19 +3810,19 @@ mod tests {
 
     #[test]
     fn parse_accepts_worktree_short_flag() {
-        let cli = Cli::try_parse_from(["mj", "-w"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "-w"]).expect("parse");
         assert_eq!(cli.worktree, Some(String::new()));
 
-        let cli = Cli::try_parse_from(["mj", "-w", "named-tree"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "-w", "named-tree"]).expect("parse");
         assert_eq!(cli.worktree.as_deref(), Some("named-tree"));
     }
 
     #[test]
     fn parse_accepts_fullscreen_tui_flags() {
-        let cli = Cli::try_parse_from(["mj", "--fullscreen-tui"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "--fullscreen-tui"]).expect("parse");
         assert!(cli.fullscreen_tui);
 
-        let cli = Cli::try_parse_from(["mj", "resume", "sess-123", "--fullscreen-tui"])
+        let cli = try_parse_hermetic(&["mj", "resume", "sess-123", "--fullscreen-tui"])
             .expect("parse resume");
         if let Some(Commands::Resume(args)) = cli.command {
             assert!(args.fullscreen_tui);
@@ -3830,59 +3830,82 @@ mod tests {
             panic!("expected Resume subcommand");
         }
 
-        let cli = Cli::try_parse_from(["mj", "--fullscreen-tui", "resume", "sess-123"])
+        let cli = try_parse_hermetic(&["mj", "--fullscreen-tui", "resume", "sess-123"])
             .expect("parse top-level resume");
         assert!(cli.fullscreen_tui);
     }
 
+    /// Parse argv with every env-backed default detached. Tests must use this
+    /// instead of `Cli::try_parse_from` so they stay hermetic when the test
+    /// process inherits variables like `MJOLNIR_NO_UPDATE_CHECK` or
+    /// `BROKK_TUI_AGENT_STDERR` from the developer's shell. (An exported
+    /// `MJOLNIR_NO_UPDATE_CHECK=1` even fails *unrelated* parses outright,
+    /// because "1" is not a valid clap boolean.)
+    fn try_parse_hermetic(args: &[&str]) -> Result<Cli, clap::Error> {
+        fn detach_env(cmd: clap::Command) -> clap::Command {
+            let subcommands: Vec<String> = cmd
+                .get_subcommands()
+                .map(|sc| sc.get_name().to_string())
+                .collect();
+            let mut cmd = cmd.mut_args(|arg| arg.env(None::<&str>));
+            for name in subcommands {
+                cmd = cmd.mut_subcommand(name, detach_env);
+            }
+            cmd
+        }
+        use clap::FromArgMatches;
+        let matches = detach_env(Cli::command()).try_get_matches_from(args)?;
+        Cli::from_arg_matches(&matches)
+    }
+
     #[test]
     fn startup_update_check_runs_only_for_interactive_modes() {
-        let cli = Cli::try_parse_from(["mj"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj"]).expect("parse");
         assert!(should_run_startup_update_check(&cli));
 
-        let cli = Cli::try_parse_from(["mj", "--no-update-check"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "--no-update-check"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
 
-        let cli = Cli::try_parse_from(["mj", "--print", "hi"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "--print", "hi"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
 
-        let cli = Cli::try_parse_from(["mj", "resume", "--list"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "resume", "--list"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
 
-        let cli = Cli::try_parse_from(["mj", "resume", "sess-123"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "resume", "sess-123"]).expect("parse");
         assert!(should_run_startup_update_check(&cli));
 
-        let cli = Cli::try_parse_from(["mj", "server"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "server"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
 
-        let cli = Cli::try_parse_from(["mj", "models", "refresh"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "models", "refresh"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
     }
 
     #[test]
     fn parse_accepts_permission_mode_canonical_and_legacy_values() {
         let canonical =
-            Cli::try_parse_from(["mj", "--permission-mode", "auto"]).expect("parse canonical");
+            try_parse_hermetic(&["mj", "--permission-mode", "auto"]).expect("parse canonical");
         assert!(matches!(
             canonical.permission_mode,
             Some(HeadlessPermissionMode::Auto)
         ));
 
         let legacy =
-            Cli::try_parse_from(["mj", "--permission-mode", "acceptEdits"]).expect("parse legacy");
+            try_parse_hermetic(&["mj", "--permission-mode", "acceptEdits"]).expect("parse legacy");
         assert!(matches!(
             legacy.permission_mode,
             Some(HeadlessPermissionMode::Auto)
         ));
 
         let canonical =
-            Cli::try_parse_from(["mj", "--permission-mode", "yolo"]).expect("parse canonical");
+            try_parse_hermetic(&["mj", "--permission-mode", "yolo"]).expect("parse canonical");
         assert!(matches!(
             canonical.permission_mode,
             Some(HeadlessPermissionMode::Yolo)
         ));
 
-        let legacy = Cli::try_parse_from(["mj", "--permission-mode", "bypassPermissions"])
+        let legacy = try_parse_hermetic(&["mj", "--permission-mode", "bypassPermissions"])
             .expect("parse legacy");
         assert!(matches!(
             legacy.permission_mode,
@@ -3890,7 +3913,7 @@ mod tests {
         ));
 
         let legacy =
-            Cli::try_parse_from(["mj", "--permission-mode", "default"]).expect("parse legacy");
+            try_parse_hermetic(&["mj", "--permission-mode", "default"]).expect("parse legacy");
         assert!(matches!(
             legacy.permission_mode,
             Some(HeadlessPermissionMode::Manual)
@@ -3899,19 +3922,19 @@ mod tests {
 
     #[test]
     fn parse_leaves_permission_mode_unset_when_omitted() {
-        let cli = Cli::try_parse_from(["mj"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj"]).expect("parse");
         assert!(cli.permission_mode.is_none());
     }
 
     #[test]
     fn parse_rejects_unknown_permission_mode_value() {
-        let err = Cli::try_parse_from(["mj", "--permission-mode", "unsafe"]).expect_err("reject");
+        let err = try_parse_hermetic(&["mj", "--permission-mode", "unsafe"]).expect_err("reject");
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     #[test]
     fn parse_accepts_resume_session() {
-        let cli = Cli::try_parse_from(["mj", "--print", "hi", "--resume-session", "sess-123"])
+        let cli = try_parse_hermetic(&["mj", "--print", "hi", "--resume-session", "sess-123"])
             .expect("parse");
         assert_eq!(cli.resume_session.as_deref(), Some("sess-123"));
     }
@@ -3936,7 +3959,7 @@ mod tests {
 
     #[test]
     fn parse_resume_subcommand_without_args() {
-        let cli = Cli::try_parse_from(["mj", "resume"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "resume"]).expect("parse");
         assert!(matches!(cli.command, Some(Commands::Resume(_))));
         if let Some(Commands::Resume(args)) = cli.command {
             assert!(args.session_id.is_none());
@@ -3949,7 +3972,7 @@ mod tests {
 
     #[test]
     fn parse_models_refresh_subcommand() {
-        let cli = Cli::try_parse_from(["mj", "models", "refresh"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "models", "refresh"]).expect("parse");
         assert!(matches!(
             cli.command,
             Some(Commands::Models(ModelsArgs {
@@ -3957,16 +3980,20 @@ mod tests {
             }))
         ));
 
-        let error = Cli::try_parse_from(["mj", "models"]).expect_err("refresh is required");
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        // Assert the behavior (missing subcommand is an error naming `refresh`)
+        // rather than the exact clap error kind, which changed within the 4.x
+        // range the manifest accepts.
+        let error = try_parse_hermetic(&["mj", "models"]).expect_err("refresh is required");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("refresh"),
+            "error should name the missing subcommand: {rendered}"
         );
     }
 
     #[test]
     fn parse_agents_install_subcommand() {
-        let cli = Cli::try_parse_from(["mj", "agents", "install", "--yes"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "agents", "install", "--yes"]).expect("parse");
         assert!(matches!(
             cli.command,
             Some(Commands::Agents(AgentsArgs {
@@ -3974,16 +4001,20 @@ mod tests {
             }))
         ));
 
-        let error = Cli::try_parse_from(["mj", "agents"]).expect_err("install is required");
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        // Assert the behavior (missing subcommand is an error naming `install`)
+        // rather than the exact clap error kind, which changed within the 4.x
+        // range the manifest accepts.
+        let error = try_parse_hermetic(&["mj", "agents"]).expect_err("install is required");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("install"),
+            "error should name the missing subcommand: {rendered}"
         );
     }
 
     #[test]
     fn parse_server_subcommand() {
-        let cli = Cli::try_parse_from(["mj", "server"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "server"]).expect("parse");
         match cli.command {
             Some(Commands::Server(args)) => {
                 assert!(args.hostname.is_none());
@@ -3997,7 +4028,7 @@ mod tests {
 
     #[test]
     fn parse_server_subcommand_with_session_flags() {
-        let cli = Cli::try_parse_from(["mj", "server", "--session-ttl-days", "7", "--logout-all"])
+        let cli = try_parse_hermetic(&["mj", "server", "--session-ttl-days", "7", "--logout-all"])
             .expect("parse");
         match cli.command {
             Some(Commands::Server(args)) => {
@@ -4010,7 +4041,7 @@ mod tests {
 
     #[test]
     fn parse_server_subcommand_with_global_cwd() {
-        let cli = Cli::try_parse_from(["mj", "--cwd", "/tmp/test", "server"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "--cwd", "/tmp/test", "server"]).expect("parse");
         assert_eq!(cli.cwd, Some(PathBuf::from("/tmp/test")));
         assert!(matches!(cli.command, Some(Commands::Server(_))));
     }
@@ -4018,7 +4049,7 @@ mod tests {
     #[test]
     fn parse_server_subcommand_with_hostname() {
         let cli =
-            Cli::try_parse_from(["mj", "server", "--hostname", "example.com"]).expect("parse");
+            try_parse_hermetic(&["mj", "server", "--hostname", "example.com"]).expect("parse");
         match cli.command {
             Some(Commands::Server(args)) => {
                 assert_eq!(args.hostname.as_deref(), Some("example.com"))
@@ -4029,7 +4060,7 @@ mod tests {
 
     #[test]
     fn parse_server_subcommand_with_tailscale() {
-        let cli = Cli::try_parse_from(["mj", "server", "--tailscale"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "server", "--tailscale"]).expect("parse");
         match cli.command {
             Some(Commands::Server(args)) => {
                 assert!(args.tailscale);
@@ -4042,14 +4073,14 @@ mod tests {
     #[test]
     fn parse_server_rejects_tailscale_with_hostname() {
         let error =
-            Cli::try_parse_from(["mj", "server", "--tailscale", "--hostname", "example.com"])
+            try_parse_hermetic(&["mj", "server", "--tailscale", "--hostname", "example.com"])
                 .expect_err("conflicting flags");
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
     fn parse_resume_subcommand_with_session_id() {
-        let cli = Cli::try_parse_from(["mj", "resume", "sess-123"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "resume", "sess-123"]).expect("parse");
         if let Some(Commands::Resume(args)) = cli.command {
             assert_eq!(args.session_id, Some("sess-123".to_string()));
             assert!(!args.list);
@@ -4060,7 +4091,7 @@ mod tests {
 
     #[test]
     fn parse_resume_subcommand_with_list_flag() {
-        let cli = Cli::try_parse_from(["mj", "resume", "--list"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "resume", "--list"]).expect("parse");
         if let Some(Commands::Resume(args)) = cli.command {
             assert!(args.list);
             assert!(args.session_id.is_none());
@@ -4072,7 +4103,7 @@ mod tests {
     #[test]
     fn parse_resume_subcommand_with_list_and_format() {
         let cli =
-            Cli::try_parse_from(["mj", "resume", "--list", "--format", "json"]).expect("parse");
+            try_parse_hermetic(&["mj", "resume", "--list", "--format", "json"]).expect("parse");
         if let Some(Commands::Resume(args)) = cli.command {
             assert!(args.list);
             assert!(matches!(args.format, HeadlessOutputFormat::Json));
@@ -4083,7 +4114,7 @@ mod tests {
 
     #[test]
     fn parse_resume_subcommand_with_cwd() {
-        let cli = Cli::try_parse_from(["mj", "resume", "--cwd", "/tmp/test"]).expect("parse");
+        let cli = try_parse_hermetic(&["mj", "resume", "--cwd", "/tmp/test"]).expect("parse");
         if let Some(Commands::Resume(args)) = cli.command {
             assert_eq!(args.cwd, Some(PathBuf::from("/tmp/test")));
         } else {
@@ -4093,7 +4124,7 @@ mod tests {
 
     #[test]
     fn parse_additional_directories_for_new_and_resume_sessions() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_hermetic(&[
             "mj",
             "--additional-directory",
             "/tmp/one",
@@ -4106,7 +4137,7 @@ mod tests {
             vec![PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")]
         );
 
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_hermetic(&[
             "mj",
             "resume",
             "sess-123",
@@ -4123,7 +4154,7 @@ mod tests {
             panic!("expected Resume subcommand");
         }
 
-        let cli = Cli::try_parse_from(["mj", "--add-dir", "/tmp/top", "resume", "sess-123"])
+        let cli = try_parse_hermetic(&["mj", "--add-dir", "/tmp/top", "resume", "sess-123"])
             .expect("parse top-level add-dir before resume");
         assert_eq!(cli.additional_directories, vec![PathBuf::from("/tmp/top")]);
     }
@@ -4267,7 +4298,7 @@ mod tests {
 
     #[test]
     fn parse_resume_subcommand_with_worktree() {
-        let cli = Cli::try_parse_from(["mj", "resume", "sess-123", "--worktree", "named-tree"])
+        let cli = try_parse_hermetic(&["mj", "resume", "sess-123", "--worktree", "named-tree"])
             .expect("parse");
         if let Some(Commands::Resume(args)) = cli.command {
             assert_eq!(args.session_id, Some("sess-123".to_string()));
@@ -4276,7 +4307,7 @@ mod tests {
             panic!("expected Resume subcommand");
         }
 
-        let cli = Cli::try_parse_from(["mj", "resume", "sess-123", "--worktree"])
+        let cli = try_parse_hermetic(&["mj", "resume", "sess-123", "--worktree"])
             .expect("parse missing value");
         if let Some(Commands::Resume(args)) = cli.command {
             assert_eq!(args.worktree.as_deref(), Some(""));
@@ -4287,20 +4318,20 @@ mod tests {
 
     #[test]
     fn parse_resume_subcommand_rejects_list_with_session_id() {
-        let err = Cli::try_parse_from(["mj", "resume", "sess-123", "--list"]).expect_err("reject");
+        let err = try_parse_hermetic(&["mj", "resume", "sess-123", "--list"]).expect_err("reject");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
     fn parse_resume_subcommand_rejects_format_without_list() {
-        let err = Cli::try_parse_from(["mj", "resume", "--format", "json"]).expect_err("reject");
+        let err = try_parse_hermetic(&["mj", "resume", "--format", "json"]).expect_err("reject");
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
     fn parse_resume_subcommand_with_agent_stderr() {
         let cli =
-            Cli::try_parse_from(["mj", "resume", "--agent-stderr", "agent.log"]).expect("parse");
+            try_parse_hermetic(&["mj", "resume", "--agent-stderr", "agent.log"]).expect("parse");
         if let Some(Commands::Resume(args)) = cli.command {
             assert_eq!(args.agent_stderr, Some(PathBuf::from("agent.log")));
         } else {
@@ -4310,7 +4341,7 @@ mod tests {
 
     #[test]
     fn parse_resume_subcommand_combined_flags() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_hermetic(&[
             "mj",
             "resume",
             "sess-456",
