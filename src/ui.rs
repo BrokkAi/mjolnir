@@ -12621,9 +12621,9 @@ fn attributed_usage_quota_items(state: &AppState) -> Option<Vec<(UsageQuotaOwner
     {
         labels.push((UsageQuotaOwner::Subagents, label));
     }
-    // No seat resolved to a quota provider (e.g. a custom ACP server primary).
-    // Fall through to the priority chain so a still-live poller keeps the row
-    // populated instead of blanking it.
+    // No seat resolved to a quota provider. Fall through to the priority
+    // chain so a still-live poller keeps the row populated instead of
+    // blanking it.
     (!labels.is_empty()).then_some(labels)
 }
 

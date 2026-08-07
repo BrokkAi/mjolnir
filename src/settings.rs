@@ -899,6 +899,33 @@ pub fn reset_unroutable_models(config: &mut Config, choices: &[ModelChoice]) -> 
         if model == "auto" || model == crate::config::DISABLED_MODEL {
             continue;
         }
+        // Judge the route from the model catalog when it knows the model,
+        // falling back to the provider's native adapter — the catalog may
+        // have been resolved while that vendor was disabled and lack the
+        // entry entirely.
+        let route = choices
+            .iter()
+            .find(|choice| choice.model == model)
+            .and_then(|choice| choice.adapter.clone())
+            .or_else(|| crate::roster::native_source_id(&model));
+        // An explicit model choice with a source pin to another adapter could
+        // never resolve; move the pin to the route that serves the model.
+        if let Some(route) = route.as_deref() {
+            let source_slot = match seat {
+                Seat::Agent => &mut config.agent.acp_source,
+                Seat::Review => &mut config.review.acp_source,
+                Seat::Subagents => &mut config.subagents.acp_source,
+            };
+            if source_slot
+                .as_deref()
+                .is_some_and(|source| source != route)
+            {
+                *source_slot = Some(route.to_string());
+                notices.push(format!(
+                    "{label} ACP source moved to {route}, which serves the selected model {model}"
+                ));
+            }
+        }
         let seat_source = match seat {
             Seat::Agent => config.agent.acp_source.clone(),
             Seat::Review => config.review.acp_source.clone(),
@@ -918,15 +945,6 @@ pub fn reset_unroutable_models(config: &mut Config, choices: &[ModelChoice]) -> 
         {
             continue;
         }
-        // Judge the route from the model catalog when it knows the model,
-        // falling back to the provider's native adapter — the catalog may
-        // have been resolved while that vendor was disabled and lack the
-        // entry entirely. Custom-server models resolve to their own id.
-        let route = choices
-            .iter()
-            .find(|choice| choice.model == model)
-            .and_then(|choice| choice.adapter.clone())
-            .or_else(|| crate::roster::native_source_id(&model));
         // No catalog entry and no built-in adapter for the model's provider
         // means nothing enabled can serve the pin either.
         if route

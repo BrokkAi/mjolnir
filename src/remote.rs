@@ -10266,7 +10266,7 @@ mod tests {
         assert_eq!(snapshot["appearance"]["spinner"], "wave");
         assert_eq!(snapshot["appearance"]["thought_output"], "full");
         assert_eq!(snapshot["appearance"]["feature_hints"], false);
-        assert_eq!(snapshot["team"]["selected"], "claude_codex");
+        assert_eq!(snapshot["team"]["selected"], "codex");
 
         let saved = config::Config::load(&config_path).expect("reload saved config");
         assert_eq!(saved.agent.model, "gpt-5-6-terra");
@@ -10308,7 +10308,7 @@ mod tests {
         // A thought-level default also updates the seat's reasoning effort.
         assert_eq!(saved.subagents.reasoning_effort.as_deref(), Some("low"));
         assert_eq!(saved.review.acp_source.as_deref(), Some("codex-acp"));
-        assert_eq!(saved.agent.acp_source.as_deref(), Some("claude-acp"));
+        assert_eq!(saved.agent.acp_source.as_deref(), Some("codex-acp"));
         assert_eq!(saved.subagents.acp_source.as_deref(), Some("codex-acp"));
     }
 

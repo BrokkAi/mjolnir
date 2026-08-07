@@ -372,8 +372,7 @@ fn claude_auth_status_logged_in(output: &[u8]) -> bool {
 }
 
 /// The built-in adapter whose vendor serves this model. `None` for providers
-/// no built-in adapter speaks; such models only reach the roster through a
-/// configured custom ACP server, never through the ranked catalog.
+/// no built-in adapter speaks; such ranked rows have no launchable route.
 fn adapter_kind(model: &str) -> Option<AdapterKind> {
     match deepswe::model_provider(model) {
         "openai" => Some(AdapterKind::Codex),
@@ -772,9 +771,6 @@ fn is_claude_opus(model: &str) -> bool {
 /// larger subscription on the other vendor wins the seat. Quality is worth
 /// less than being able to finish: the marginally better model on an entry
 /// plan runs the account dry, while the larger plan carries the whole day.
-/// Only the vendor-native adapters count - an Anthropic model routed through
-/// a custom ACP server bills somewhere else entirely, so it never stands in
-/// for the Claude subscription.
 fn choose_primary_auto<'a>(
     available: &'a [ResolvedAgent],
     subscriptions: &Subscriptions,
