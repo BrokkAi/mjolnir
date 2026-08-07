@@ -467,6 +467,10 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
+        text: "Choose Current or Full thought output under Appearance in /mjconfig; Full shows every available thought line.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
         text: "Mjolnir can queue another prompt while an agent is working; Ctrl+C cancels the active turn first.",
         requirement: FeatureHintRequirement::Always,
     },
@@ -949,6 +953,7 @@ pub struct MjConfigMenu {
     pub editor: SettingsEditor,
     orig_theme: TerminalThemeKind,
     orig_spinner: SpinnerStyle,
+    orig_thought_output: crate::config::ThoughtOutput,
 }
 
 #[derive(Debug)]
@@ -958,6 +963,8 @@ pub struct AppState {
     /// Client-side prompt-activity spinner style. Purely cosmetic; persisted
     /// in config like [`theme_kind`](Self::theme_kind).
     pub spinner_style: SpinnerStyle,
+    /// Amount of agent thought text shown in the normal transcript.
+    pub thought_output: crate::config::ThoughtOutput,
     /// Open `/mjconfig` overlay, if any.
     pub mjconfig_menu: Option<MjConfigMenu>,
     pub acp_inventory: crate::roster::AcpInventory,
@@ -1893,6 +1900,7 @@ impl AppState {
             theme_kind,
             theme: theme_kind.palette(),
             spinner_style: SpinnerStyle::default(),
+            thought_output: crate::config::ThoughtOutput::default(),
             mjconfig_menu: None,
             acp_inventory: crate::roster::AcpInventory::default(),
             ragnarok: None,
@@ -2034,6 +2042,7 @@ impl AppState {
         side.theme_kind = self.theme_kind;
         side.theme = self.theme;
         side.spinner_style = self.spinner_style;
+        side.thought_output = self.thought_output;
         side.feature_hints_enabled = self.feature_hints_enabled;
         side.keep_awake.set_enabled(self.keep_awake.enabled());
         side.project_label = self.project_label.clone();
@@ -2085,6 +2094,13 @@ impl AppState {
 
     pub fn set_spinner_style(&mut self, spinner_style: SpinnerStyle) {
         self.spinner_style = spinner_style;
+    }
+
+    pub fn set_thought_output(&mut self, thought_output: crate::config::ThoughtOutput) {
+        if self.thought_output != thought_output {
+            self.bump_transcript_revision();
+        }
+        self.thought_output = thought_output;
     }
 
     pub fn open_agent_picker(&mut self) -> bool {
@@ -2226,6 +2242,7 @@ impl AppState {
             .unwrap_or_default();
         config.theme = self.theme_kind;
         config.spinner = self.spinner_style;
+        config.thought_output = self.thought_output;
         self.mjconfig_menu = Some(MjConfigMenu {
             editor: SettingsEditor::new(config, self.model_choices.clone(), None)
                 .with_active_models(self.active_models.clone())
@@ -2233,6 +2250,7 @@ impl AppState {
                 .with_inventory(self.acp_inventory.clone()),
             orig_theme: self.theme_kind,
             orig_spinner: self.spinner_style,
+            orig_thought_output: self.thought_output,
         });
     }
 
@@ -2244,8 +2262,10 @@ impl AppState {
         let action = menu.editor.handle_key(code);
         let theme = menu.editor.config.theme;
         let spinner = menu.editor.config.spinner;
+        let thought_output = menu.editor.config.thought_output;
         self.set_theme(theme);
         self.set_spinner_style(spinner);
+        self.set_thought_output(thought_output);
         action
     }
 
@@ -2280,6 +2300,7 @@ impl AppState {
         if let Some(menu) = self.mjconfig_menu.take() {
             self.set_theme(menu.orig_theme);
             self.set_spinner_style(menu.orig_spinner);
+            self.set_thought_output(menu.orig_thought_output);
         }
     }
 
@@ -11498,6 +11519,15 @@ mod tests {
             other => panic!("expected feature hint, got {other:?}"),
         };
         assert_ne!(&first, second);
+    }
+
+    #[test]
+    fn feature_hints_include_thought_output_configuration() {
+        assert!(FEATURE_HINTS.iter().any(|hint| {
+            hint.requirement == FeatureHintRequirement::Always
+                && hint.text.contains("Current or Full thought output")
+                && hint.text.contains("/mjconfig")
+        }));
     }
 
     #[test]

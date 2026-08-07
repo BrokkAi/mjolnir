@@ -3625,6 +3625,7 @@
       let commandMatches = [];
       let commandSelected = 0;
       let showTranscriptDiffs = true;
+      let thoughtOutput = "current";
       const draftBySessionId = new Map();
       const attachmentsBySessionId = new Map();
       const activityBySessionId = new Map();
@@ -3717,6 +3718,26 @@
         renderChat();
       }
 
+      function applyThoughtOutputSnapshot(snapshot, render = false) {
+        const next = snapshot?.appearance?.thought_output === "full" ? "full" : "current";
+        const changed = thoughtOutput !== next;
+        thoughtOutput = next;
+        if (render && changed) {
+          renderChat();
+        }
+      }
+
+      async function refreshThoughtOutput() {
+        try {
+          const response = await apiFetch("/api/mjconfig", { cache: "no-store" });
+          if (response.ok) {
+            applyThoughtOutputSnapshot(await response.json());
+          }
+        } catch {
+          // Keep the compatibility default when configuration is unavailable.
+        }
+      }
+
       function openViewerSettings() {
         settingsModalEl.hidden = false;
         showDiffsToggleEl.focus();
@@ -3783,6 +3804,7 @@
             throw new Error(`HTTP ${response.status}`);
           }
           mjcfg.snapshot = await response.json();
+          applyThoughtOutputSnapshot(mjcfg.snapshot, true);
           mjSetStatus("");
           renderMjConfig();
           mjSchedulePoll();
@@ -4284,8 +4306,9 @@
       }
 
       function renderMjAppearance() {
+        const panel = mjcfg.snapshot.appearance;
         mjconfigBodyEl.appendChild(
-          mjNote("Web viewer theme. Terminal appearance (theme, spinner, feature tips) lives in the TUI's /mjconfig."),
+          mjNote("The web theme is local to this browser. Thought output applies to web and terminal transcripts."),
         );
         const themeRow = mjRow("Theme");
         const current = themePreference();
@@ -4303,6 +4326,30 @@
           themeRow.appendChild(button);
         }
         mjconfigBodyEl.appendChild(themeRow);
+
+        const thoughtRow = mjRow("Thought output");
+        const currentThoughtOutput = mjEditedValue("thought_output", panel.thought_output);
+        thoughtRow.appendChild(
+          mjCombo(
+            panel.thought_outputs.map((value) => ({
+              value,
+              label: value.charAt(0).toUpperCase() + value.slice(1),
+            })),
+            currentThoughtOutput,
+            (next) => {
+              mjcfg.edits.thought_output = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        thoughtRow.appendChild(
+          mjDetail(
+            currentThoughtOutput === "full"
+              ? "show all available thought output"
+              : "summarize completed thoughts; show the latest live thought",
+          ),
+        );
+        mjconfigBodyEl.appendChild(thoughtRow);
       }
 
       async function saveMjConfig() {
@@ -4328,6 +4375,7 @@
             return;
           }
           mjcfg.snapshot = await response.json();
+          applyThoughtOutputSnapshot(mjcfg.snapshot, true);
           // Parity with the TUI: saved primary session-option defaults also
           // update the selected live session where it exposes the same option.
           const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
@@ -6790,6 +6838,8 @@
           entry.actor || "",
           JSON.stringify(entryToolDiffs(entry)),
           showTranscriptDiffs ? "diffs-on" : "diffs-off",
+          entryKind(entry) === "thought" ? thoughtOutput : "",
+          entry._thoughtCompleted === true ? "thought-complete" : "thought-active",
         ].join("\u0000");
       }
 
@@ -6815,7 +6865,10 @@
         });
         refs.body.replaceChildren();
         const voice = refs.kind === "agent" || refs.kind === "thought" ? "prose" : "mono";
-        const text = entry.text || "";
+        let text = entry.text || "";
+        if (refs.kind === "thought" && thoughtOutput === "current") {
+          text = entry._thoughtCompleted ? thoughtSummary(text) : activeThoughtTail(text);
+        }
         if (refs.kind === "tool" && entry.tool_kind === "execute" && text.trim()) {
           appendExecuteToolBody(refs.body, entry);
         } else {
@@ -6832,6 +6885,30 @@
             }
           }
         }
+      }
+
+      const ACTIVE_THOUGHT_TAIL_LINES = 3;
+      const ACTIVE_THOUGHT_TAIL_CHARS = 360;
+
+      function thoughtLines(text) {
+        const lines = String(text || "").split("\n");
+        if (lines.at(-1) === "") {
+          lines.pop();
+        }
+        return lines;
+      }
+
+      function thoughtSummary(text) {
+        const count = Math.max(1, thoughtLines(text).length);
+        return `thought · ${count} ${count === 1 ? "line" : "lines"}`;
+      }
+
+      function activeThoughtTail(text) {
+        const tail = thoughtLines(text).slice(-ACTIVE_THOUGHT_TAIL_LINES).join("\n");
+        const chars = Array.from(tail);
+        return chars.length > ACTIVE_THOUGHT_TAIL_CHARS
+          ? `…${chars.slice(-ACTIVE_THOUGHT_TAIL_CHARS).join("")}`
+          : tail;
       }
 
       function toolPlaceholderBody(entry) {
@@ -6858,7 +6935,31 @@
         );
       }
 
-      function normalizeTranscript(entries) {
+      function nestedThoughtFinished(actor, laterEntries, session) {
+        const match = /^(subagent|review-intent|review-supervisor)-(\d+)$/.exec(actor);
+        if (!match) {
+          return false;
+        }
+        const actorPrefix = match[1];
+        const nestedId = Number(match[2]);
+        if (actorPrefix === "subagent") {
+          const status = Array.isArray(session?.subagents)
+            ? session.subagents.find((candidate) => candidate.subagent_id === nestedId)
+            : null;
+          if (status?.finished_at) {
+            return true;
+          }
+        }
+        const lifecycleActor = actorPrefix === "subagent" ? "subagent" : "review";
+        const lifecycleMarker = ` #${nestedId} ·`;
+        return laterEntries.some((candidate) => (
+          entryKind(candidate) === "system"
+          && candidate.actor === lifecycleActor
+          && String(candidate.text || "").includes(lifecycleMarker)
+        ));
+      }
+
+      function normalizeTranscript(entries, session) {
         const out = [];
         for (let i = 0; i < entries.length; i += 1) {
           const current = entries[i];
@@ -6873,6 +6974,26 @@
           } else {
             out.push(current);
           }
+        }
+        const active = sessionHasActiveTurn(session);
+        for (let index = 0; index < out.length; index += 1) {
+          const entry = out[index];
+          if (entryKind(entry) !== "thought") {
+            continue;
+          }
+          const actor = typeof entry.actor === "string" ? entry.actor : "";
+          const laterEntries = out.slice(index + 1);
+          const followedBySameActor = laterEntries.some((candidate) => {
+            const candidateActor = typeof candidate.actor === "string" ? candidate.actor : "";
+            return candidateActor === actor;
+          });
+          out[index] = {
+            ...entry,
+            _thoughtCompleted:
+              !active
+              || followedBySameActor
+              || nestedThoughtFinished(actor, laterEntries, session),
+          };
         }
         return out;
       }
@@ -6948,7 +7069,7 @@
         }
 
         const rawTranscript = Array.isArray(session.transcript) ? session.transcript : [];
-        const transcript = normalizeTranscript(rawTranscript);
+        const transcript = normalizeTranscript(rawTranscript, session);
         transcriptTitleEl.textContent = sessionLabel(session);
         const archiveMeta = archived
           ? `Archived ${formatRelative(session.last_update || session.start_time) || "session"} · `
@@ -8285,6 +8406,7 @@
       async function tryResumeViewerSession() {
         if (viewerToken) {
           showApp();
+          await refreshThoughtOutput();
           await refreshSessions();
           applyRoute();
           return;
@@ -8307,6 +8429,7 @@
           syncPendingStopState();
           noteSessionActivity();
           showApp();
+          await refreshThoughtOutput();
           const routed = routeSessionId();
           if (routed && !sessions.some((session) => session.session_id === routed)) {
             await refreshHistory(false);
@@ -8550,6 +8673,7 @@
           }
           authTokenEl.value = "";
           showApp();
+          await refreshThoughtOutput();
           await refreshSessions();
           applyRoute();
         } catch (error) {

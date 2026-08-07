@@ -11,7 +11,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::config::{AcpServerPolicy, Config, ModelsConfig, TeamPreset};
+use crate::config::{AcpServerPolicy, Config, ModelsConfig, TeamPreset, ThoughtOutput};
 use crate::ink::InkStyle;
 use crate::palette::TerminalTheme;
 use crate::roster::{AcpInventory, ModelChoice};
@@ -213,7 +213,7 @@ impl SettingsEditor {
                 self.settings_rows(self.tab).len()
             }
             SettingsTab::AcpServers => self.configurable_servers().count() + SERVER_ROW_OFFSET,
-            SettingsTab::Appearance => 4,
+            SettingsTab::Appearance => 5,
         }
     }
 
@@ -306,9 +306,18 @@ impl SettingsEditor {
                 self.config.spinner = SpinnerStyle::ALL[next];
             }
             SettingsTab::Appearance if self.selected == 2 => {
-                self.config.feature_hints = !self.config.feature_hints;
+                let current = ThoughtOutput::ALL
+                    .iter()
+                    .position(|output| *output == self.config.thought_output)
+                    .unwrap_or(0);
+                let next =
+                    (current as i32 + delta).rem_euclid(ThoughtOutput::ALL.len() as i32) as usize;
+                self.config.thought_output = ThoughtOutput::ALL[next];
             }
             SettingsTab::Appearance if self.selected == 3 => {
+                self.config.feature_hints = !self.config.feature_hints;
+            }
+            SettingsTab::Appearance if self.selected == 4 => {
                 self.config.keep_awake = !self.config.keep_awake;
             }
             _ => return SettingsAction::None,
@@ -1488,6 +1497,18 @@ fn draw_appearance(
         spinner_preview_line(editor.selected == 1, editor.config.spinner, theme),
         selected_line(
             editor.selected == 2,
+            format!("Thought output < {} >", editor.config.thought_output),
+            theme,
+        ),
+        Line::styled(
+            format!(
+                "               {}",
+                editor.config.thought_output.description()
+            ),
+            Style::default().ink(theme.muted),
+        ),
+        selected_line(
+            editor.selected == 3,
             format!(
                 "Feature tips < {} >",
                 if editor.config.feature_hints {
@@ -1499,7 +1520,7 @@ fn draw_appearance(
             theme,
         ),
         selected_line(
-            editor.selected == 3,
+            editor.selected == 4,
             format!(
                 "Keep awake  < {} >",
                 if editor.config.keep_awake {
@@ -2270,7 +2291,7 @@ mod tests {
     fn appearance_tab_toggles_feature_hints() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::Appearance;
-        editor.selected = 2;
+        editor.selected = 3;
 
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert!(!editor.config.feature_hints);
@@ -2279,10 +2300,23 @@ mod tests {
     }
 
     #[test]
+    fn appearance_tab_cycles_thought_output() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Appearance;
+        editor.selected = 2;
+
+        assert_eq!(editor.config.thought_output, ThoughtOutput::Current);
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.thought_output, ThoughtOutput::Full);
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert_eq!(editor.config.thought_output, ThoughtOutput::Current);
+    }
+
+    #[test]
     fn appearance_tab_toggles_keep_awake() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::Appearance;
-        editor.selected = 3;
+        editor.selected = 4;
 
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert!(!editor.config.keep_awake);
@@ -2342,6 +2376,10 @@ mod tests {
         let appearance = render(&editor, 100, 30);
         assert!(appearance.contains("Theme"), "rendered:\n{appearance}");
         assert!(appearance.contains("Spinner"), "rendered:\n{appearance}");
+        assert!(
+            appearance.contains("Thought output"),
+            "rendered:\n{appearance}"
+        );
         assert!(
             appearance.contains("Feature tips"),
             "rendered:\n{appearance}"

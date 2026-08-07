@@ -43,6 +43,65 @@ pub struct ModelOverrides {
     pub subagent_effort: Option<String>,
 }
 
+/// Amount of agent thought text shown in the normal transcript view.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThoughtOutput {
+    /// Preserve the compact transcript: completed thoughts become summaries
+    /// and an active thought shows only its latest bounded tail.
+    #[default]
+    Current,
+    /// Render every available line of agent thought text.
+    Full,
+}
+
+impl ThoughtOutput {
+    pub const ALL: [Self; 2] = [Self::Current, Self::Full];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Full => "full",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Current => "summarize completed thoughts; show the latest live thought",
+            Self::Full => "show all available thought output",
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl std::fmt::Display for ThoughtOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ThoughtOutput {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "current" => Ok(Self::Current),
+            "full" => Ok(Self::Full),
+            _ => Err(format!(
+                "unknown thought output {value:?}; expected one of: {}",
+                Self::ALL
+                    .iter()
+                    .map(|output| output.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Config {
     pub version: u32,
@@ -52,6 +111,9 @@ pub struct Config {
     pub theme: TerminalThemeKind,
     #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
     pub spinner: SpinnerStyle,
+    /// Amount of thought text shown in terminal and web transcripts.
+    #[serde(default, skip_serializing_if = "ThoughtOutput::is_default")]
+    pub thought_output: ThoughtOutput,
     /// Show occasional capability-aware tips between completed turns.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub feature_hints: bool,
@@ -96,6 +158,7 @@ impl Default for Config {
             onboarding_version: 0,
             theme: TerminalThemeKind::default(),
             spinner: SpinnerStyle::default(),
+            thought_output: ThoughtOutput::default(),
             feature_hints: true,
             keep_awake: true,
             agent: AgentConfig::default(),
@@ -984,6 +1047,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
         onboarding_version: 0,
         theme: old.theme,
         spinner: old.spinner,
+        thought_output: ThoughtOutput::default(),
         feature_hints: true,
         keep_awake: true,
         agent: AgentConfig {
@@ -2182,6 +2246,31 @@ mode = "ask"
 
         let loaded = Config::load(&path).expect("load saved");
         assert_eq!(loaded.spinner, SpinnerStyle::Bars);
+    }
+
+    #[test]
+    fn thought_output_defaults_to_current_and_full_roundtrips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        Config::default().save(&path).expect("save default");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(!body.contains("thought_output"));
+        assert_eq!(
+            Config::load(&path).expect("load default").thought_output,
+            ThoughtOutput::Current
+        );
+
+        let config = Config {
+            thought_output: ThoughtOutput::Full,
+            ..Config::default()
+        };
+        config.save(&path).expect("save full");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(body.contains("thought_output = \"full\""));
+        assert_eq!(
+            Config::load(&path).expect("load full").thought_output,
+            ThoughtOutput::Full
+        );
     }
 
     #[test]

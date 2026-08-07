@@ -168,10 +168,14 @@ configuration remains unchanged.
 
 ## Appearance and session controls
 
-Theme, spinner, and feature-tip preferences are persistent. Feature tips are
-enabled by default and appear occasionally between completed turns; disable
-them under **Appearance** in `/mjconfig` or set `feature_hints = false` in the
-top level of the config file.
+Theme, spinner, thought-output, and feature-tip preferences are persistent.
+Thought output defaults to **Current**, which summarizes completed thoughts and
+shows a bounded tail while a thought is streaming. Choose **Full** under
+**Appearance** in the TUI or web `/mjconfig`, or set `thought_output = "full"`
+at the top level of the config file, to show all available thought text in both
+transcripts. Feature tips are enabled by default and appear occasionally
+between completed turns; disable them under **Appearance** or set
+`feature_hints = false` in the top level of the config file.
 
 The **Agent**, **Reviewer**, and **Subagents** tabs list the selectable session
 options advertised by that role's selected ACP source. Each role stores its

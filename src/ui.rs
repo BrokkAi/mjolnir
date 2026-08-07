@@ -1130,6 +1130,7 @@ pub struct UiRunOptions<'a> {
     pub mode: UiMode,
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
+    pub thought_output: config::ThoughtOutput,
     pub feature_hints_enabled: bool,
     pub keep_awake_enabled: bool,
     pub active_agent_launch: Option<ragnarok::Launch>,
@@ -1169,6 +1170,7 @@ struct UiInitialState {
     config_path: Option<PathBuf>,
     theme_kind: TerminalThemeKind,
     spinner_style: SpinnerStyle,
+    thought_output: config::ThoughtOutput,
     feature_hints_enabled: bool,
     keep_awake_enabled: bool,
     session_boundary: Option<String>,
@@ -1250,6 +1252,7 @@ pub async fn run(
             config_path: options.persistence.config_path.map(Path::to_path_buf),
             theme_kind: options.theme_kind,
             spinner_style: options.spinner_style,
+            thought_output: options.thought_output,
             feature_hints_enabled: options.feature_hints_enabled,
             keep_awake_enabled: options.keep_awake_enabled,
             session_boundary: options.session_boundary,
@@ -1521,6 +1524,7 @@ async fn ui_loop(
     state.transcript_export_dir = initial.transcript_export_dir;
     state.set_theme(initial.theme_kind);
     state.set_spinner_style(initial.spinner_style);
+    state.set_thought_output(initial.thought_output);
     state.feature_hints_enabled = initial.feature_hints_enabled;
     state.keep_awake.set_enabled(initial.keep_awake_enabled);
     state.config_path = initial.config_path;
@@ -5337,6 +5341,7 @@ fn persist_mjconfig_selection(
         || state.review_tier != config.agent.review_tier;
     let feature_hints_enabled = config.feature_hints;
     let keep_awake_enabled = config.keep_awake;
+    let thought_output = config.thought_output;
     let live_session_updates = live_primary_session_config_updates(state, &config);
     // A policy edit in this save may have disabled the only route of a pinned
     // seat model; flip such seats to auto and tell the user, instead of
@@ -5353,6 +5358,7 @@ fn persist_mjconfig_selection(
                 state.review_tier = config.agent.review_tier;
                 state.feature_hints_enabled = feature_hints_enabled;
                 state.keep_awake.set_enabled(keep_awake_enabled);
+                state.set_thought_output(thought_output);
                 if review_changed {
                     let _ = cmd_tx.send(UiCommand::SetReviewPolicy {
                         enabled: config.agent.discrete_review,
@@ -7787,13 +7793,7 @@ fn render_nested_agent_lines(
                 push_styled_message(&mut out, text, state.theme.accent, false, state.theme);
             }
             Entry::FeatureHint(text) => {
-                push_styled_message(
-                    &mut out,
-                    &format!("Mjolnir tip · {text}"),
-                    state.theme.muted,
-                    false,
-                    state.theme,
-                );
+                push_feature_hint(&mut out, text, state.theme);
             }
             Entry::SessionBoundary(text) => {
                 out.push(Line::from(""));
@@ -9109,7 +9109,7 @@ fn render_transcript_entry_range_with_turns(
                 (THOUGHT_GLYPH, theme.thought),
                 state.stream_visible_text(entry_index, &thought.text),
                 thought.completed,
-                collapse_limit.is_some(),
+                collapse_limit.is_some() && state.thought_output == config::ThoughtOutput::Current,
                 width,
                 theme,
             ),
@@ -9118,7 +9118,7 @@ fn render_transcript_entry_range_with_turns(
                 (SUBAGENT_THOUGHT_GLYPH, theme.secondary),
                 state.stream_visible_text(entry_index, &thought.text),
                 thought.completed,
-                collapse_limit.is_some(),
+                collapse_limit.is_some() && state.thought_output == config::ThoughtOutput::Current,
                 width,
                 theme,
             ),
@@ -9274,13 +9274,7 @@ fn render_transcript_entry_range_with_turns(
                 push_styled_message(&mut out, text, theme.accent, collapse_message, theme);
             }
             Entry::FeatureHint(text) => {
-                push_styled_message(
-                    &mut out,
-                    &format!("Mjolnir tip · {text}"),
-                    theme.muted,
-                    false,
-                    theme,
-                );
+                push_feature_hint(&mut out, text, theme);
             }
             Entry::SessionBoundary(text) => {
                 if !text.starts_with("subagent ·") {
@@ -9553,6 +9547,16 @@ fn push_styled_message(
     }
     if collapsed {
         push_message_collapse_hint(out, theme);
+    }
+    out.push(Line::from(""));
+}
+
+fn push_feature_hint(out: &mut Vec<Line<'static>>, text: &str, theme: TerminalTheme) {
+    let style = Style::default()
+        .ink(theme.tip)
+        .add_modifier(Modifier::ITALIC);
+    for raw in format!("Mjolnir tip · {text}").split('\n') {
+        out.push(Line::from(Span::styled(raw.to_string(), style)));
     }
     out.push(Line::from(""));
 }
@@ -19172,7 +19176,7 @@ mod tests {
             UiMode::FullscreenTui,
         );
 
-        // Appearance tab: preview theme and spinner live.
+        // Appearance tab: preview theme, spinner, and thought output live.
         state.mjconfig_menu.as_mut().expect("menu").editor.tab =
             crate::settings::SettingsTab::Appearance;
         state.mjconfig_menu_key(KeyCode::Right);
@@ -19180,6 +19184,9 @@ mod tests {
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);
         let previewed = state.spinner_style;
+        state.mjconfig_menu_key(KeyCode::Down);
+        state.mjconfig_menu_key(KeyCode::Right);
+        let previewed_thought_output = state.thought_output;
 
         // Reviewer tab: toggle discrete review, deepen the review tier, and
         // apply both to the running session.
@@ -19203,6 +19210,7 @@ mod tests {
         let saved = config::Config::load(&path).expect("load saved config");
         assert_eq!(saved.spinner, previewed);
         assert_eq!(saved.theme, previewed_theme);
+        assert_eq!(saved.thought_output, previewed_thought_output);
         assert_eq!(
             saved.acp.policy("codex-acp"),
             crate::config::AcpServerPolicy::Disabled
@@ -19296,6 +19304,7 @@ mod tests {
         let mut state = AppState::new();
         let orig_theme = state.theme_kind;
         let orig_spinner = state.spinner_style;
+        let orig_thought_output = state.thought_output;
         state.open_mjconfig_menu();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
@@ -19308,7 +19317,10 @@ mod tests {
         state.mjconfig_menu_key(KeyCode::Right);
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);
+        state.mjconfig_menu_key(KeyCode::Down);
+        state.mjconfig_menu_key(KeyCode::Right);
         assert!(state.theme_kind != orig_theme || state.spinner_style != orig_spinner);
+        assert_ne!(state.thought_output, orig_thought_output);
 
         handle_mjconfig_menu_key(
             &mut state,
@@ -19321,6 +19333,10 @@ mod tests {
         assert!(state.mjconfig_menu.is_none(), "menu closes on cancel");
         assert_eq!(state.theme_kind, orig_theme, "theme reverted");
         assert_eq!(state.spinner_style, orig_spinner, "spinner reverted");
+        assert_eq!(
+            state.thought_output, orig_thought_output,
+            "thought output reverted"
+        );
     }
 
     #[test]
@@ -22278,6 +22294,20 @@ mod tests {
     }
 
     #[test]
+    fn thought_output_change_invalidates_the_transcript_cache() {
+        let mut state = AppState::new();
+        let starting_revision = state.transcript_revision();
+
+        state.set_thought_output(config::ThoughtOutput::Full);
+
+        assert_eq!(state.thought_output, config::ThoughtOutput::Full);
+        assert_ne!(state.transcript_revision(), starting_revision);
+        let changed_revision = state.transcript_revision();
+        state.set_thought_output(config::ThoughtOutput::Full);
+        assert_eq!(state.transcript_revision(), changed_revision);
+    }
+
+    #[test]
     fn ctrl_shift_t_also_toggles_tool_output_expansion() {
         let mut state = AppState::new();
         assert!(!state.expand_transcript_details);
@@ -23863,6 +23893,14 @@ mod tests {
             vec!["○ thought · 2 lines", ""]
         );
 
+        state.thought_output = config::ThoughtOutput::Full;
+        let configured_full = render_transcript_lines(&state, 80);
+        assert_eq!(
+            configured_full.iter().map(line_text).collect::<Vec<_>>(),
+            vec!["○ first line", "  second line", ""]
+        );
+
+        state.thought_output = config::ThoughtOutput::Current;
         state.expand_transcript_details = true;
         let expanded = render_transcript_lines(&state, 80);
         assert_eq!(
@@ -28089,6 +28127,15 @@ mod tests {
         assert!(text.contains("Mjolnir tip"));
         assert!(text.contains("/mjconfig"));
         assert!(rendered.len() > 1, "narrow hint should wrap: {text:?}");
+        assert_ne!(state.theme.tip.color(), state.theme.muted.color());
+        for span in rendered
+            .iter()
+            .flat_map(|line| &line.spans)
+            .filter(|span| !span.content.is_empty())
+        {
+            assert_eq!(span.style.fg, Some(state.theme.tip.color()));
+            assert!(span.style.add_modifier.contains(Modifier::ITALIC));
+        }
 
         let mut exported = String::new();
         push_export_entries(&mut exported, &state.transcript, &state);

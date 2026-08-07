@@ -12,7 +12,7 @@ equivalents.
 
 | Category | Purpose |
 | --- | --- |
-| `config.toml` | Primary/subagent models, ACP policy, review, theme, and spinner preferences |
+| `config.toml` | Models, ACP policy, review, and appearance preferences including thought output |
 | Session provenance | Maps resumable session IDs to their original adapter/model route |
 | Transcript exports | User-requested Markdown exports |
 | DeepSWE cache | Live model-ranking snapshot, refreshed on a time-to-live |

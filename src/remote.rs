@@ -5772,6 +5772,8 @@ struct MjAppearancePanel {
     themes: Vec<String>,
     spinner: String,
     spinners: Vec<MjSpinnerEntry>,
+    thought_output: String,
+    thought_outputs: Vec<String>,
     feature_hints: bool,
     keep_awake: bool,
 }
@@ -5807,6 +5809,7 @@ struct MjConfigApplyRequest {
     auto_failover: Option<bool>,
     theme: Option<String>,
     spinner: Option<String>,
+    thought_output: Option<String>,
     feature_hints: Option<bool>,
     keep_awake: Option<bool>,
     /// Server id → `auto` | `enabled` | `disabled`.
@@ -6072,6 +6075,11 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                     .collect(),
             })
             .collect(),
+        thought_output: config.thought_output.to_string(),
+        thought_outputs: config::ThoughtOutput::ALL
+            .into_iter()
+            .map(|output| output.to_string())
+            .collect(),
         feature_hints: config.feature_hints,
         keep_awake: config.keep_awake,
     };
@@ -6192,6 +6200,11 @@ fn mjconfig_apply_edits(
         config.spinner = spinner
             .parse()
             .map_err(|_| bad_request(format!("unknown spinner: {spinner}")))?;
+    }
+    if let Some(thought_output) = request.thought_output {
+        config.thought_output = thought_output
+            .parse()
+            .map_err(|_| bad_request(format!("unknown thought output: {thought_output}")))?;
     }
     if let Some(enabled) = request.feature_hints {
         config.feature_hints = enabled;
@@ -9780,6 +9793,14 @@ mod tests {
         for spinner in spinners {
             assert!(!spinner["frames"].as_array().expect("frames").is_empty());
         }
+        assert_eq!(snapshot["appearance"]["thought_output"], "current");
+        assert_eq!(
+            snapshot["appearance"]["thought_outputs"]
+                .as_array()
+                .expect("thought outputs")
+                .len(),
+            config::ThoughtOutput::ALL.len()
+        );
 
         assert!(
             snapshot.get("primary_options").is_some(),
@@ -9978,6 +9999,7 @@ mod tests {
                     "max_parallel": 4,
                     "theme": "ansi",
                     "spinner": "wave",
+                    "thought_output": "full",
                     "feature_hints": false,
                     "primary_session_defaults": {
                         "codex-acp": { "config:collaboration_mode": "yolo" }
@@ -10009,6 +10031,7 @@ mod tests {
         assert_eq!(snapshot["agents"]["max_parallel"], 4);
         assert_eq!(snapshot["appearance"]["theme"], "ansi");
         assert_eq!(snapshot["appearance"]["spinner"], "wave");
+        assert_eq!(snapshot["appearance"]["thought_output"], "full");
         assert_eq!(snapshot["appearance"]["feature_hints"], false);
         assert_eq!(snapshot["team"]["selected"], "claude_codex");
 
@@ -10019,6 +10042,7 @@ mod tests {
         assert_eq!(saved.subagents.max_parallel, 4);
         assert_eq!(saved.theme, crate::theme::TerminalThemeKind::Ansi);
         assert_eq!(saved.spinner, crate::spinner::SpinnerStyle::Wave);
+        assert_eq!(saved.thought_output, config::ThoughtOutput::Full);
         assert!(!saved.feature_hints);
         assert_eq!(
             saved
@@ -10102,6 +10126,7 @@ mod tests {
             serde_json::json!({ "max_parallel": 40 }),
             serde_json::json!({ "theme": "solarized" }),
             serde_json::json!({ "spinner": "cube" }),
+            serde_json::json!({ "thought_output": "summary" }),
             serde_json::json!({ "review_tier": "thorough" }),
             serde_json::json!({ "team": "sidekick" }),
             serde_json::json!({ "priority": { "sidekick": { "source": "x" } } }),
@@ -10386,6 +10411,22 @@ mod tests {
         assert!(viewer.contains("function renderMjTeam()"));
         assert!(!viewer.contains("ACP Priority"));
         assert!(!viewer.contains("renderMjPriority"));
+    }
+
+    #[test]
+    fn embedded_viewer_configures_and_renders_thought_output() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("mjRow(\"Thought output\")"));
+        assert!(viewer.contains("mjcfg.edits.thought_output = next"));
+        assert!(viewer.contains("function refreshThoughtOutput()"));
+        assert!(viewer.contains("function thoughtSummary(text)"));
+        assert!(viewer.contains("function activeThoughtTail(text)"));
+        assert!(viewer.contains("function nestedThoughtFinished(actor, laterEntries, session)"));
+        assert!(viewer.contains("review-intent|review-supervisor"));
+        assert!(viewer.contains("status?.finished_at"));
+        assert!(viewer.contains("actorPrefix === \"subagent\" ? \"subagent\" : \"review\""));
+        assert!(viewer.contains("entry._thoughtCompleted"));
+        assert!(viewer.contains("thoughtOutput === \"current\""));
     }
 
     #[test]
