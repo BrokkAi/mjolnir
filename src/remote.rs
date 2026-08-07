@@ -10325,12 +10325,16 @@ mod tests {
     }
 
     #[test]
-    fn embedded_viewer_labels_tui_and_web_sessions() {
+    fn embedded_viewer_labels_only_attached_tui_sessions() {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("class=\"session-runtime runtime-badge\""));
         assert!(viewer.contains("id=\"runtime-badge\""));
         assert!(viewer.contains("function updateRuntimeBadge"));
-        assert!(viewer.contains("attached ? \"TUI\" : \"Web\""));
+        assert!(viewer.contains("session?.has_attached_tui === true"));
+        assert!(viewer.contains("element.hidden = !attached"));
+        assert!(viewer.contains("element.textContent = \"TUI\""));
+        assert!(!viewer.contains("data-runtime=\"web\""));
+        assert!(!viewer.contains("Session type: web"));
         assert!(viewer.contains("updateRuntimeBadge(card.runtime, session)"));
         assert!(viewer.contains("updateRuntimeBadge(runtimeBadgeEl, session)"));
     }

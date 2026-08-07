@@ -1252,11 +1252,6 @@
           color: var(--agent);
           background: color-mix(in srgb, var(--agent) 16%, var(--inline-bg-strong));
         }
-
-        &[data-runtime="web"] {
-          color: var(--thought);
-          background: color-mix(in srgb, var(--thought) 16%, var(--inline-bg-strong));
-        }
       }
 
       #runtime-badge {
@@ -5208,22 +5203,18 @@
       }
 
       function updateRuntimeBadge(element, session) {
-        const attached = session?.has_attached_tui;
-        const known = typeof attached === "boolean";
-        element.hidden = !known;
-        if (!known) {
+        const attached = session?.has_attached_tui === true;
+        element.hidden = !attached;
+        if (!attached) {
           delete element.dataset.runtime;
           element.textContent = "";
           element.removeAttribute("title");
           element.removeAttribute("aria-label");
           return;
         }
-        const runtime = attached ? "tui" : "web";
-        element.dataset.runtime = runtime;
-        element.textContent = attached ? "TUI" : "Web";
-        const description = attached
-          ? "Session type: attached terminal UI"
-          : "Session type: web";
+        element.dataset.runtime = "tui";
+        element.textContent = "TUI";
+        const description = "Session type: attached terminal UI";
         element.title = description;
         element.setAttribute("aria-label", description);
       }
