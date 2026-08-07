@@ -1482,9 +1482,11 @@ async fn run_app(
     let config_path = config::default_config_path();
     let config_exists = config::Config::path_has_current_version(&config_path);
     let mut cfg = Config::load(&config_path)?;
+    let team_selection_required = config::TeamPreset::from_config(&cfg).is_none();
     let onboarding_kind = onboarding_kind(
         config_exists,
         cfg.onboarding_version,
+        team_selection_required,
         resume_target.as_ref(),
         initial_agent.as_ref(),
     );
@@ -1499,6 +1501,10 @@ async fn run_app(
             &config_path,
             &cwd,
             termination.clone(),
+            team_selection_required.then_some(
+                "Your previous configuration does not map to a supported Team. Choose one of the four Teams to continue."
+                    .to_string(),
+            ),
         )
         .await?
         else {
@@ -1632,6 +1638,7 @@ async fn run_app(
 fn onboarding_kind(
     config_exists: bool,
     onboarding_version: u32,
+    team_selection_required: bool,
     resume_target: Option<&ResumeTarget>,
     initial_agent: Option<&SelectedAgent>,
 ) -> Option<onboarding::Kind> {
@@ -1641,7 +1648,8 @@ fn onboarding_kind(
     if !config_exists {
         return Some(onboarding::Kind::Fresh);
     }
-    (onboarding_version < config::ONBOARDING_CONTENT_VERSION).then_some(onboarding::Kind::Upgrade)
+    (team_selection_required || onboarding_version < config::ONBOARDING_CONTENT_VERSION)
+        .then_some(onboarding::Kind::Upgrade)
 }
 
 async fn run_startup_onboarding(
@@ -1651,8 +1659,9 @@ async fn run_startup_onboarding(
     config_path: &Path,
     cwd: &Path,
     termination: CancellationToken,
+    notice: Option<String>,
 ) -> Result<Option<(Config, roster::Roster)>> {
-    let outcome = run_onboarding_once(kind, candidate, preview, None, cwd, termination).await?;
+    let outcome = run_onboarding_once(kind, candidate, preview, notice, cwd, termination).await?;
     match outcome {
         onboarding::Outcome::Accept(next, resolved) => {
             let next = *next;
@@ -3446,19 +3455,23 @@ mod tests {
         };
 
         assert_eq!(
-            onboarding_kind(false, 0, None, None),
+            onboarding_kind(false, 0, false, None, None),
             Some(onboarding::Kind::Fresh)
         );
         assert_eq!(
-            onboarding_kind(true, 0, None, None),
+            onboarding_kind(true, 0, false, None, None),
             Some(onboarding::Kind::Upgrade)
         );
         assert_eq!(
-            onboarding_kind(true, config::ONBOARDING_CONTENT_VERSION, None, None),
+            onboarding_kind(true, config::ONBOARDING_CONTENT_VERSION, false, None, None),
             None
         );
-        assert_eq!(onboarding_kind(false, 0, Some(&resume), None), None);
-        assert_eq!(onboarding_kind(false, 0, None, Some(&agent)), None);
+        assert_eq!(
+            onboarding_kind(true, config::ONBOARDING_CONTENT_VERSION, true, None, None),
+            Some(onboarding::Kind::Upgrade)
+        );
+        assert_eq!(onboarding_kind(false, 0, true, Some(&resume), None), None);
+        assert_eq!(onboarding_kind(false, 0, true, None, Some(&agent)), None);
     }
 
     #[test]

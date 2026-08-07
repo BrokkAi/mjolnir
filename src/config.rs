@@ -356,6 +356,12 @@ impl TeamPreset {
         Self::ALL.into_iter().find(|preset| preset.id() == id)
     }
 
+    fn from_legacy_sources(coder: &str, reviewer: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|preset| preset.sources() == (coder, reviewer))
+    }
+
     pub fn from_config(config: &Config) -> Option<Self> {
         if let Some(team) = config.team.as_deref() {
             return Self::from_id(team);
@@ -872,6 +878,9 @@ impl Config {
         }
         let mut cfg: Self =
             toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?;
+        if cfg.team.is_none() {
+            cfg.team = legacy_team_preset(&document).map(|team| team.id().to_string());
+        }
         cfg.normalize()?;
         if has_persisted_acp_source && let Err(error) = cfg.save(path) {
             tracing::warn!(
@@ -946,6 +955,23 @@ impl Config {
 
         Ok(())
     }
+}
+
+/// The old configuration stored one ACP route per role. The supported Team
+/// model has only a coder route and a reviewer route; workers intentionally
+/// follow the reviewer. Preserve the selected valid team on upgrade by using
+/// the old primary/reviewer pair and normalizing the old worker route.
+fn legacy_team_preset(document: &toml::Value) -> Option<TeamPreset> {
+    let source = |seat: &str| {
+        document
+            .get(seat)
+            .and_then(toml::Value::as_table)
+            .and_then(|table| table.get("acp_source"))
+            .and_then(toml::Value::as_str)
+    };
+    let coder = source("agent")?;
+    let reviewer = source("review").or_else(|| source("subagents"))?;
+    TeamPreset::from_legacy_sources(coder, reviewer)
 }
 
 impl AcpConfig {
@@ -2142,10 +2168,15 @@ acp_source = "codex-acp"
 
         assert_eq!(config.agent.model, "gpt-5-6-terra");
         assert_eq!(config.review.model, "claude-fable-5");
-        assert_eq!(config.agent.acp_source, None);
-        assert_eq!(config.review.acp_source, None);
+        assert_eq!(config.team.as_deref(), Some("claude_codex"));
+        assert_eq!(config.agent.acp_source.as_deref(), Some("claude-acp"));
+        assert_eq!(config.review.acp_source.as_deref(), Some("codex-acp"));
         let rewritten = std::fs::read_to_string(&path).expect("read rewritten config");
         assert!(!rewritten.contains("acp_source"), "config: {rewritten}");
+        assert!(
+            rewritten.contains("team = \"claude_codex\""),
+            "config: {rewritten}"
+        );
     }
 
     #[test]
