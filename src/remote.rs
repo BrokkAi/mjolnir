@@ -13231,7 +13231,12 @@ mod tests {
                 .to_bytes(),
         )
         .expect("load response json");
-        assert_eq!(loaded.cwd, dir.path().display().to_string());
+        assert_eq!(
+            Path::new(&loaded.cwd),
+            std::fs::canonicalize(dir.path())
+                .expect("canonicalize session cwd")
+                .as_path()
+        );
         assert!(loaded.launch_id > 0);
     }
 
