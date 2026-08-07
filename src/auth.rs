@@ -53,10 +53,6 @@ pub enum LoginOutcome {
 }
 
 impl LoginOutcome {
-    pub fn succeeded(&self) -> bool {
-        matches!(self, Self::SignedIn(_))
-    }
-
     pub fn into_message(self) -> String {
         match self {
             Self::SignedIn(message) | Self::Cancelled(message) => message,
@@ -314,11 +310,11 @@ mod tests {
     #[test]
     fn login_outcome_distinguishes_success_from_cancellation() {
         let signed_in = LoginOutcome::SignedIn("connected".to_string());
-        assert!(signed_in.succeeded());
+        assert!(matches!(&signed_in, LoginOutcome::SignedIn(_)));
         assert_eq!(signed_in.into_message(), "connected");
 
         let cancelled = LoginOutcome::Cancelled("cancelled".to_string());
-        assert!(!cancelled.succeeded());
+        assert!(matches!(&cancelled, LoginOutcome::Cancelled(_)));
         assert_eq!(cancelled.into_message(), "cancelled");
     }
 

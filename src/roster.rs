@@ -788,6 +788,50 @@ fn preferred_route<'a>(
         })
 }
 
+/// Apply primary-only product ranking policy within an optional adapter.
+fn preferred_primary_candidate(
+    available: &[ResolvedAgent],
+    adapter: Option<AdapterKind>,
+) -> Option<&ResolvedAgent> {
+    let eligible = |candidate: &&ResolvedAgent| {
+        candidate.ranked && adapter.is_none_or(|kind| candidate.launch.kind == kind)
+    };
+    let strongest_opus = available
+        .iter()
+        .filter(eligible)
+        .filter(|candidate| is_claude_opus(&candidate.model.model))
+        .map(|candidate| candidate.model.pass_at_1)
+        .max_by(f64::total_cmp);
+    available.iter().filter(eligible).max_by(|a, b| {
+        primary_ranking_score(a, strongest_opus)
+            .total_cmp(&primary_ranking_score(b, strongest_opus))
+            .then_with(|| b.model.mean_cost_usd.total_cmp(&a.model.mean_cost_usd))
+            .then_with(|| b.model.model.cmp(&a.model.model))
+    })
+}
+
+fn primary_ranking_score(candidate: &ResolvedAgent, strongest_opus: Option<f64>) -> f64 {
+    if is_claude_fable_5(&candidate.model.model) {
+        // Fable 5 is the Claude flagship for the primary seat. Lift it only
+        // enough to outrank Opus without changing review or subagent scoring.
+        strongest_opus.map_or(candidate.model.pass_at_1, |opus| {
+            candidate.model.pass_at_1.max(opus + f64::EPSILON)
+        })
+    } else {
+        candidate.model.pass_at_1
+    }
+}
+
+fn is_claude_fable_5(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model == "claude-fable-5" || model.starts_with("claude-fable-5-")
+}
+
+fn is_claude_opus(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model == "claude-opus" || model.starts_with("claude-opus-")
+}
+
 /// `auto` takes the best-ranked launchable model, except that a strictly
 /// larger subscription on the other vendor wins the seat. Quality is worth
 /// less than being able to finish: the marginally better model on an entry
@@ -800,16 +844,13 @@ fn choose_primary_auto<'a>(
     subscriptions: &Subscriptions,
     acp_priority: &[String],
 ) -> Option<&'a ResolvedAgent> {
-    let best_model = available.iter().find(|candidate| candidate.ranked)?;
+    let best_model = preferred_primary_candidate(available, None)?;
     let best = preferred_route(&best_model.model.model, available, acp_priority)
         .expect("ranked model has a launchable route");
     let Some(favored) = subscriptions.favored() else {
         return Some(best);
     };
-    let Some(preferred) = available
-        .iter()
-        .find(|candidate| candidate.ranked && candidate.launch.kind == favored)
-    else {
+    let Some(preferred) = preferred_primary_candidate(available, Some(favored)) else {
         return Some(best);
     };
     if best.model.model != preferred.model.model || best.launch.kind != preferred.launch.kind {
@@ -1324,6 +1365,42 @@ mod tests {
     }
 
     #[test]
+    fn auto_primary_prefers_fable_5_when_opus_would_otherwise_win() {
+        let available = vec![
+            role("claude-opus-5", 0.75),
+            role("claude-fable-5", 0.65),
+            role("gpt-5-6-sol", 0.60),
+        ];
+
+        for subscriptions in [Subscriptions::default(), plans("max20", "plus")] {
+            assert_eq!(
+                choose_primary_auto(&available, &subscriptions, &[])
+                    .expect("primary model")
+                    .model
+                    .model,
+                "claude-fable-5"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_primary_keeps_a_higher_ranked_non_opus_model() {
+        let available = vec![
+            role("gpt-5-6-sol", 0.80),
+            role("claude-opus-5", 0.75),
+            role("claude-fable-5", 0.65),
+        ];
+
+        assert_eq!(
+            choose_primary_auto(&available, &Subscriptions::default(), &[])
+                .expect("primary model")
+                .model
+                .model,
+            "gpt-5-6-sol"
+        );
+    }
+
+    #[test]
     fn source_constraint_keeps_auto_selection_within_codex() {
         let available = vec![
             role("claude-fable-5", 0.70),
@@ -1423,6 +1500,23 @@ mod tests {
                 .model
                 .model,
             "claude-fable-5"
+        );
+    }
+
+    #[test]
+    fn auto_review_keeps_normal_ranking_between_opus_and_fable() {
+        let available = vec![
+            role("gpt-5-6-sol", 0.80),
+            role("claude-opus-5", 0.75),
+            role("claude-fable-5", 0.65),
+        ];
+
+        assert_eq!(
+            choose_review_auto(&available[0], &available, &[])
+                .expect("review model")
+                .model
+                .model,
+            "claude-opus-5"
         );
     }
 

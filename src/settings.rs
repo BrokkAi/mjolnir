@@ -19,6 +19,8 @@ use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
 
 const ACCOUNT_COUNT: usize = crate::auth::AuthVendor::ALL.len();
+pub(crate) const SETTINGS_PANEL_MIN_WIDTH: u16 = 28;
+pub(crate) const SETTINGS_PANEL_MIN_HEIGHT: u16 = 12;
 pub(crate) const SERVER_ROW_OFFSET: usize = ACCOUNT_COUNT;
 pub(crate) const CONFIGURABLE_ACP_SERVERS: [&str; 2] = ["codex-acp", "claude-acp"];
 
@@ -818,7 +820,7 @@ pub fn draw_settings_panel(
     editor: &SettingsEditor,
     title: &str,
 ) {
-    if area.width < 28 || area.height < 12 {
+    if area.width < SETTINGS_PANEL_MIN_WIDTH || area.height < SETTINGS_PANEL_MIN_HEIGHT {
         return;
     }
     let theme = editor.config.theme.palette();
@@ -1345,7 +1347,11 @@ fn draw_team(
     let active_label = active.map_or("Custom routing", TeamPreset::label);
     let mut lines = vec![
         Line::styled(
-            "The coder handles the primary and subagent seats; the reviewer checks changed turns.",
+            "Mjolnir automatically reviews generated code before returning the result.",
+            Style::default().ink(theme.text),
+        ),
+        Line::styled(
+            "Mix Codex and Claude, or use one provider. Auto models can reduce review cost.",
             Style::default().ink(theme.muted),
         ),
         Line::raw(""),

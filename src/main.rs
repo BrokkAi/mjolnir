@@ -1543,13 +1543,6 @@ async fn run_startup_onboarding(
                 .with_context(|| format!("save {}", config_path.display()))?;
             Ok(Some((next, *resolved)))
         }
-        onboarding::Outcome::Skip(next) => {
-            let next = *next;
-            next.save(config_path)
-                .with_context(|| format!("save {}", config_path.display()))?;
-            let resolved = resolve_roster_for_tui(&next, cwd).await?;
-            Ok(Some((next, resolved)))
-        }
         onboarding::Outcome::Cancel => Ok(None),
     }
 }

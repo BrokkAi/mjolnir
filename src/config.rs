@@ -183,10 +183,10 @@ impl Default for ModelsConfig {
     }
 }
 
-/// One of the supported coding/review provider combinations.
+/// One of the supported primary/review provider combinations.
 ///
-/// A team pins the primary and subagent seats to its coder and the discrete
-/// review seat to its reviewer. Models remain automatic within those sources.
+/// A team pins the primary seat to its coder and the subagent and discrete
+/// review seats to its reviewer. Models remain automatic within those sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeamPreset {
     Codex,
@@ -223,10 +223,14 @@ impl TeamPreset {
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Codex => "Codex codes, delegates, and reviews",
-            Self::Claude => "Claude codes, delegates, and reviews",
-            Self::CodexWithClaudeReviewer => "Codex codes and delegates; Claude reviews",
-            Self::ClaudeWithCodexReviewer => "Claude codes and delegates; Codex reviews",
+            Self::Codex => "Codex handles primary, subagents, and review",
+            Self::Claude => "Claude handles primary, subagents, and review",
+            Self::CodexWithClaudeReviewer => {
+                "Codex is primary; Claude handles subagents and review"
+            }
+            Self::ClaudeWithCodexReviewer => {
+                "Claude is primary; Codex handles subagents and review"
+            }
         }
     }
 
@@ -245,10 +249,10 @@ impl TeamPreset {
 
     pub fn from_config(config: &Config) -> Option<Self> {
         let coder = config.agent.acp_source.as_deref()?;
-        if config.subagents.acp_source.as_deref() != Some(coder) {
+        let reviewer = config.review.acp_source.as_deref()?;
+        if config.subagents.acp_source.as_deref() != Some(reviewer) {
             return None;
         }
-        let reviewer = config.review.acp_source.as_deref()?;
         Self::ALL
             .into_iter()
             .find(|preset| preset.sources() == (coder, reviewer))
@@ -262,7 +266,7 @@ impl TeamPreset {
         config.review.model = default_auto();
         config.review.acp_source = Some(reviewer.to_string());
         config.subagents.model = default_auto();
-        config.subagents.acp_source = Some(coder.to_string());
+        config.subagents.acp_source = Some(reviewer.to_string());
         config.subagents.auto_failover = true;
         for source in [coder, reviewer] {
             config.set_acp_server_policy(source, AcpServerPolicy::Enabled);
@@ -2099,7 +2103,7 @@ mode = "ask"
     }
 
     #[test]
-    fn team_presets_pin_coder_subagents_and_reviewer() {
+    fn team_presets_pin_primary_separately_from_subagents_and_reviewer() {
         for preset in TeamPreset::ALL {
             let mut config = Config::default();
             config.agent.model = "provider-specific-primary".to_string();
@@ -2111,7 +2115,7 @@ mode = "ask"
             let (coder, reviewer) = preset.sources();
             assert_eq!(TeamPreset::from_config(&config), Some(preset));
             assert_eq!(config.agent.acp_source.as_deref(), Some(coder));
-            assert_eq!(config.subagents.acp_source.as_deref(), Some(coder));
+            assert_eq!(config.subagents.acp_source.as_deref(), Some(reviewer));
             assert_eq!(config.review.acp_source.as_deref(), Some(reviewer));
             assert_eq!(config.agent.model, "auto");
             assert_eq!(config.review.model, "auto");
@@ -2121,6 +2125,15 @@ mode = "ask"
             assert_eq!(config.acp.policy(reviewer), AcpServerPolicy::Enabled);
             assert_eq!(TeamPreset::from_id(preset.id()), Some(preset));
         }
+    }
+
+    #[test]
+    fn mixed_team_does_not_match_legacy_coder_routed_subagents() {
+        let mut config = Config::default();
+        TeamPreset::CodexWithClaudeReviewer.apply(&mut config);
+        config.subagents.acp_source = config.agent.acp_source.clone();
+
+        assert_eq!(TeamPreset::from_config(&config), None);
     }
 
     #[test]
