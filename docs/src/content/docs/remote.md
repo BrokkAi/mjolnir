@@ -1,10 +1,10 @@
 ---
 title: Remote control
-description: Control the Codex session on your machine from a browser with explicit network and session boundaries.
+description: Control the coding session on your machine from a browser with explicit network and session boundaries.
 ---
 
 `mj server` starts Mjolnir's self-hosted remote-control server with the same
-resolved Codex model and subagent configuration as the terminal client. The
+resolved team, model, and subagent configuration as the terminal client. The
 repository and agent processes stay on the host running Mjolnir; the browser is
 a control surface for that session.
 
@@ -31,6 +31,13 @@ and search results are canonicalized against the current roots before they are
 shown, so changing the server's workspace configuration does not expose old
 paths. Broad searches are capped; refine the query when the picker reports that
 only the first matches are shown.
+
+## Archiving sessions
+
+The viewer can archive a server-owned session to move it out of the active
+list and load or unarchive it later. A live TUI session cannot be archived;
+exit it in the terminal first. Archiving changes where the session is listed,
+not its retained transcript data.
 
 ## Subagents in the viewer
 
@@ -68,7 +75,10 @@ breaks cost down per seat and per model, where the unpriced seats are visible.
 
 ## Ragnarok in the viewer
 
-While a local `/ragnarok` arena is active, the browser shows its task and
+`/ragnarok <task>` is Mjolnir's model-vs-model arena: several champion models
+implement the same task in parallel worktrees, each adversarially reviews a
+rival's implementation, and a router agent judges the results and crowns a
+winner. While a local `/ragnarok` arena is active, the browser shows its task and
 phase, each fighter's model source, status, and vigor, plus the final verdict
 and adoption guidance when available. This view is read-only: summoning the
 arena, approving `UNLEASH`, choosing between finalists, and publishing a draft

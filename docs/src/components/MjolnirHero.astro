@@ -55,8 +55,8 @@ const hammerArt = [...hammerMask]
     <p class="hero-kicker">
       <span aria-hidden="true"></span> Mjolnir by <a href="https://brokk.ai" rel="external">Brokk</a>
     </p>
-    <h1 id="_top">The power<br /><em>frontend</em> for Codex.</h1>
-    <p class="hero-tagline">Keep the workspace and control plane on your machine. Control Codex remotely, isolate work in worktrees, speak your prompts, and challenge changes before they land.</p>
+    <h1 id="_top">The power<br /><em>frontend</em> for Codex and Claude.</h1>
+    <p class="hero-tagline">Choose who codes and who reviews. Keep the workspace and control plane on your machine, drive the session remotely, isolate work in worktrees, speak your prompts, and challenge every change before it lands.</p>
     {
       actions.length > 0 && (
         <div class="hero-actions">
@@ -80,14 +80,14 @@ const hammerArt = [...hammerMask]
       </div>
       <p class="hero-install-status" data-install-status aria-live="polite"></p>
     </section>
-    <ul class="hero-facts" aria-label="What Mjolnir adds to Codex">
-      <li><span>01 / CONTROL</span><strong>Self-hosted remote control</strong></li>
-      <li><span>02 / ISOLATE</span><strong>Worktrees + voice</strong></li>
+    <ul class="hero-facts" aria-label="What Mjolnir adds to Codex and Claude">
+      <li><span>01 / TEAMS</span><strong>Codex + Claude teams</strong></li>
+      <li><span>02 / CONTROL</span><strong>Self-hosted remote control</strong></li>
       <li><span>03 / REVIEW</span><strong>Adversarial review</strong></li>
     </ul>
   </div>
 
-  <div class="storm-console mj-panel" aria-label="How Codex and Mjolnir run a delegated, reviewed turn">
+  <div class="storm-console mj-panel" aria-label="How a Mjolnir coding team runs a delegated, reviewed turn">
     <div class="console-bar">
       <span><i></i> SESSION</span>
     </div>
@@ -95,7 +95,7 @@ const hammerArt = [...hammerMask]
       <div
         class="turn-flow"
         role="img"
-        aria-label="Your prompt goes to Codex, which owns the turn and can launch background subagents with standalone briefs; each subagent pushes its report back and the answer returns through Mjolnir. Once delegated work changes the workspace, specialist review lanes can re-read the diff and an adversarial supervisor holds the completed turn until review finishes."
+        aria-label="Your prompt goes to the coder — Codex or Claude — which owns the turn and can launch background subagents with standalone briefs; each subagent pushes its report back and the answer returns through Mjolnir. When review is enabled and a completed turn changed the workspace with its subagents drained, an independent reviewer — from the other provider on a mixed team — challenges the diff and holds the turn until review finishes."
       >
         <div class="flow-node flow-node--you">
           <div><strong>YOU</strong><span>/ ONE TERMINAL</span></div>
@@ -107,8 +107,8 @@ const hammerArt = [...hammerMask]
         </div>
 
         <div class="flow-node flow-node--primary">
-          <div><strong>CODEX</strong><span>/ OWNS THE TURN</span></div>
-          <small>plans the work · writes the briefs</small>
+          <div><strong>CODER</strong><span>/ OWNS THE TURN</span></div>
+          <small>Codex or Claude · plans the work · writes the briefs</small>
         </div>
 
         <div class="flow-link" aria-hidden="true">
@@ -122,9 +122,9 @@ const hammerArt = [...hammerMask]
         </div>
 
         <aside class="flow-observer">
-          <div><strong>REVIEW</strong><span>/ VETS</span></div>
-          <small>specialist lanes re-read the diff</small>
-          <small>an adversarial supervisor decides</small>
+          <div><strong>REVIEWER</strong><span>/ CHALLENGES</span></div>
+          <small>an independent session re-reads the diff</small>
+          <small>pair providers so the reviewer is not the author</small>
           <b>HOLDS THE TURN UNTIL CLEAN</b>
           <i class="flow-tap flow-tap--in" aria-hidden="true"></i>
           <i class="flow-tap flow-tap--out" aria-hidden="true"></i>
@@ -134,23 +134,23 @@ const hammerArt = [...hammerMask]
     </div>
     <div class="seat-board">
       <div class="seat-head">
-        <span>SEATS / CODEX FIRST</span>
-        <small>OTHER AGENTS OPTIONAL</small>
+        <span>TEAMS / CHOOSE WHO CODES, WHO REVIEWS</span>
+        <small>SWITCH WITH CTRL+TAB</small>
       </div>
       <ul class="seat-list">
         <li>
-          <b>PRIMARY</b>
-          <span>Codex owns the turn and launches the subagents</span>
-          <em class="seat-route" aria-hidden="true">Codex</em>
+          <b>CODER</b>
+          <span>owns the turn and launches the subagents</span>
+          <em class="seat-route" data-seat-rotator data-agents="Codex|Claude" aria-hidden="true">Codex</em>
         </li>
         <li>
-          <b>SUBAGENT</b>
-          <span>runs one standalone brief in a fresh session</span>
-          <em class="seat-route" data-seat-rotator data-agents="Codex|Claude Code" aria-hidden="true">Codex</em>
+          <b>REVIEWER</b>
+          <span>challenges changed turns from an independent session</span>
+          <em class="seat-route" data-seat-rotator data-agents="Claude|Codex" aria-hidden="true">Claude</em>
         </li>
       </ul>
       <p class="seat-note">
-        Start with Codex in every seat. Add other models as specialists when the work benefits from them.
+        Run Codex or Claude solo, or split the seats either way. Switching teams keeps the terminal, permissions, sessions, and remote workflow unchanged.
       </p>
     </div>
   </div>

@@ -1,11 +1,13 @@
 ---
 title: Delegation and adversarial review
-description: Give Codex bounded subagent work and interpret Mjolnir's independent review pass.
+description: Give the coder bounded subagent work and interpret Mjolnir's independent review pass.
 ---
 
-Codex delegation works best when the task has a clear seam, concrete inputs, and an
+Delegation works best when the task has a clear seam, concrete inputs, and an
 observable finish condition. A subagent runs in a brand-new session with no
-memory of the conversation, so the brief has to carry everything.
+memory of the conversation, so the brief has to carry everything. Everything
+on this page applies to whichever coder the selected [team](/teams/) put in
+charge — Codex or Claude.
 
 ## A useful brief
 
@@ -60,7 +62,28 @@ When automatic review is enabled, any completed turn that changed the workspace
 is reviewable once write-capable implementation subagents have drained. This is
 independent from delegation: a turn implemented entirely by the primary follows
 the same review gate. Mjolnir holds the completion and reviews the work before
-releasing it:
+releasing it. On a mixed [team](/teams/), the review seat runs on the other
+provider, so the model challenging the change is not the model that made it.
+
+Discrete review is toggled on the Reviewer tab of `/mjconfig`. The same tab
+chooses the **review tier** — how much machinery one review may spend. The
+tier is read when a review dispatches, so a change applies to the next
+reviewed turn.
+
+### Quick tier (default)
+
+One general read-only reviewer (Vör, visible as `review · vor`) works the
+cumulative turn patch directly with Bifrost navigation tools, prioritizing
+correctness against the user's stated intent. No intent-extraction model call
+is made and no specialist lanes exist in this tier. Every finding it reports
+is re-verified by a validation pass before anything reaches the primary, so
+few verified findings beat many plausible ones.
+
+### Extended tier
+
+The full adversarial pass, selected on the Reviewer tab or with
+`review_tier = "extended"` under `[agent]` in the config file. It is more
+thorough than Quick and spends far more tokens:
 
 1. A single self-contained user prompt goes directly to review without another
    model call. For multi-message histories, a read-only intent analyst extracts
@@ -80,20 +103,23 @@ releasing it:
    risks can justify several lanes even in a small patch. Reports arrive as
    later turns in the same supervisor session, where the supervisor verifies
    them and returns one adversarial verdict.
-4. Surviving findings are injected as a corrective turn on the primary, framed
-   as strong leads to verify rather than instructions to obey. Nothing survives
-   vetting means the turn is released as it stands.
-5. If correction changes the workspace, one bounded, delta-scoped verification
-   pass checks the corrections while reusing prior evidence instead of blindly
-   relaunching every specialist.
 
-The supervisor and reviewers have no model-turn deadline. The supervisor is
-reported as an internal `review_session`, while selected specialists remain
-visible as `review · {name}` subagent rows. The normal Stop action cancels the
-supervisor and all of its reviewers and reaps their processes.
-Reviewers cannot delegate further or write to the workspace. Model usage is
-accounted to the review seat. Discrete review is toggled on the Reviewer tab of
-`/mjconfig`.
+### After the review
+
+On both tiers, surviving findings are injected as a corrective turn on the
+primary, framed as strong leads to verify rather than instructions to obey.
+Nothing surviving means the turn is released as it stands. If correction
+changes the workspace, one bounded, delta-scoped verification pass checks the
+corrections while reusing prior evidence instead of blindly relaunching every
+reviewer.
+
+Reviewers have no model-turn deadline. The extended supervisor is reported as
+an internal `review_session`, while dispatched reviewers — Vör on the quick
+tier, selected specialists on the extended tier — remain visible as
+`review · {name}` subagent rows. The normal Stop action cancels the active
+review pass and all of its reviewers and reaps their processes. Reviewers
+cannot delegate further or write to the workspace. Model usage is accounted to
+the review seat.
 
 ## Review surfaces
 
@@ -113,4 +139,4 @@ When comparing setups, record the exact primary and subagent models and
 adapters, how many subagents ran and whether they overlapped, permission
 decisions, elapsed time, token and cost telemetry, validation result, review
 findings, and whether the requested delegation actually occurred. The checked
-[10-minute Codex evaluation](/evaluate/) provides a small common task.
+[10-minute evaluation](/evaluate/) provides a small common task.

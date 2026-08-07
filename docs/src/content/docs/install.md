@@ -92,7 +92,7 @@ Useful environment variables:
 
 ```bash
 MJOLNIR_INSTALL_DIR=/opt/bin \
-MJOLNIR_VERSION=v1.0.2 \
+MJOLNIR_VERSION=v1.7.0 \
 bash install.sh
 ```
 
@@ -128,33 +128,43 @@ You only need Rust to build from source or contribute. See
 [CONTRIBUTING.md](https://github.com/BrokkAi/mjolnir/blob/master/CONTRIBUTING.md)
 for voice prerequisites and the full validation matrix.
 
-## Connect Codex
+## Connect Codex or Claude
 
-Install and authenticate the official Codex CLI if it is not already
-available:
+You need at least one authenticated provider CLI; a mixed team needs both.
+
+For Codex, install and authenticate the official Codex CLI:
 
 ```bash
 npm install -g @openai/codex
 codex login
 ```
 
-Run `mj`. First launch asks you to choose one of four teams: **Codex**,
-**Claude**, **Codex coder + Claude reviewer**, or **Claude coder + Codex
-reviewer**. The coder backs both the primary and subagent seats; the reviewer
-backs the independent review seat. Use **Customize every route** for model,
-review, parallelism, and appearance controls.
+For Claude, install the official Claude Code CLI and complete its sign-in;
+Mjolnir verifies the login with `claude auth status`:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+claude
+```
+
+Run `mj`. First launch opens onboarding on the Team tab and asks you to choose
+one of four teams: **Codex**, **Claude**, **Codex coder + Claude reviewer**,
+or **Claude coder + Codex reviewer**. The coder backs the primary session; the
+reviewer backs the independent review pass and the default subagent pool. The
+other tabs hold model, review, parallelism, and appearance controls.
 
 Press **Ctrl+Tab** during a session to switch between the four teams, or return
 to the same choice on the **Team** tab in `/mjconfig`. Start a new session after
 switching so the new coder owns the complete turn.
 
 Existing Codex credentials can be detected without launching the ACP bridge
-during discovery. Launch requires the PATH-visible `codex` CLI. For `npx` ACP
+during discovery; Claude login status comes from `claude auth status`. Launch
+requires the matching PATH-visible provider CLI. For `npx` ACP
 bridges and Bifrost, Mjolnir uses a PATH-visible `npx` or, on Linux, macOS, and
-Windows, installs embedded Node.js 24 automatically. Mjolnir uses the `codex`
-CLI for its Codex sign-in action as well.
+Windows, installs embedded Node.js 24 automatically. Sign-in actions use the
+`codex` and `claude` CLIs as well.
 
-Claude and custom ACP servers are optional. The ACP Servers panel configures
+Custom ACP servers are optional. The ACP Servers panel configures
 only the built-in Codex and Claude routes. Custom ACP commands can still be
 declared directly in `config.toml` for advanced deployments.
 
@@ -168,7 +178,7 @@ agent.
 mj --version
 ```
 
-Then run the [10-minute Codex evaluation](/evaluate/). A successful `mj --version`
+Then run the [10-minute evaluation](/evaluate/). A successful `mj --version`
 only proves the binary starts; it does not prove that a provider route can
 launch or that delegation works end to end.
 

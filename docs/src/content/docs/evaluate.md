@@ -1,13 +1,14 @@
 ---
-title: Evaluate Codex in Mjolnir in ten minutes
-description: Exercise Codex, subagents, adversarial review, resume, and headless output in a disposable fixture.
+title: Evaluate Mjolnir in ten minutes
+description: Exercise your coding team, subagents, adversarial review, resume, and headless output in a disposable fixture.
 ---
 
-> Fixture and CLI surface reviewed against Mjolnir 1.0.2 on 2026-07-26.
+> Fixture and CLI surface reviewed against Mjolnir 1.7.0 on 2026-08-07.
 > Live provider output is model- and availability-dependent and is not run in docs CI.
 
-This evaluation uses Codex with a checked-in Python fixture in a disposable Git
-repository. It proves that a configured Codex session can inspect a small project,
+This evaluation uses the coding team you select — Codex, Claude, or a mixed
+team — with a checked-in Python fixture in a disposable Git repository. It
+proves that a configured session can inspect a small project,
 delegate a bounded change to a background subagent, surface that subagent's live
 status and its pushed-back report, run an explicit review, preserve a resumable
 session, and emit headless stream records.
@@ -23,12 +24,14 @@ You need:
 - Mjolnir installed and `mj --version` working.
 - Python 3 for the fixture test.
 - Git.
-- An authenticated, launchable Codex route. Codex use may cost money.
+- An authenticated, launchable Codex or Claude route. Provider use may cost
+  money.
 
-Run `mj`, open `/mjconfig`, and choose **Codex** on the Team tab. This pins the
-primary, subagent, and review seats to Codex while keeping their models on
-Auto. Team or ACP-server changes apply to a new session, so start one after
-changing them.
+Run `mj`, open `/mjconfig`, and choose a team on the Team tab: **Codex**,
+**Claude**, or a mixed team such as **Codex coder + Claude reviewer**. A team
+pins the primary seat to its coder and the review and subagent seats to its
+reviewer while keeping their models on Auto. Team or ACP-server changes apply
+to a new session, so start one after changing them.
 
 ## Prepare the disposable fixture
 
@@ -139,10 +142,12 @@ subagent report has been delivered.
 
 ## Interpret the result
 
-A successful run proves the selected Codex route can support the core
-delegation path on one small repository. Compare models or advanced provider
-routes by repeating the same fixture and recording model IDs, elapsed time,
-token/cost telemetry, whether the
+A successful run proves the selected team can support the core
+delegation path on one small repository. Compare teams by pressing
+**Ctrl+Tab**, choosing another of the four configurations, and repeating the
+same fixture — the mixed teams are the quickest way to watch one provider's
+reviewer challenge the other provider's change. Record model IDs, elapsed
+time, token/cost telemetry, whether the
 delegation occurred, test outcome, review outcome, and any manual intervention.
 
 Before broader use, read [Permissions and workspace scope](/permissions/) and

@@ -21,6 +21,8 @@ canceling fresh setup leaves onboarding incomplete.
 
 ## Minimal config
 
+What the **Codex coder + Claude reviewer** team writes:
+
 ```toml
 version = 3
 
@@ -31,18 +33,19 @@ discrete_review = true
 
 [review]
 model = "auto"
-acp_source = "codex-acp"
+acp_source = "claude-acp"
 
 [subagents]
 model = "auto"
-acp_source = "codex-acp"
+acp_source = "claude-acp"
 max_parallel = 6
 auto_failover = true
 ```
 
 `[agent]` is the primary agent: the session that owns every user turn. It cannot
-be disabled. `[review]` configures the discrete-review supervisor model; review
-is still enabled or disabled with `agent.discrete_review`. `[subagents]`
+be disabled. `[review]` configures the discrete-review model; review
+is still enabled or disabled with `agent.discrete_review`, and its depth is
+chosen with `agent.review_tier`. `[subagents]`
 configures the default backing for `create_subagent`; set `model = "disabled"`
 (or `"none"`) to turn subagents off entirely.
 
@@ -54,6 +57,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `agent.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `agent.session_defaults` | Per-ACP saved session-option defaults for new primary sessions |
 | `agent.discrete_review` | Run the end-of-turn discrete review |
+| `agent.review_tier` | Review depth: `quick` (default) sends one general reviewer and validates its findings; `extended` runs the adversarial supervisor with on-demand Norse specialist lanes and spends far more tokens |
 | `review.model` | Review supervisor model, or `auto` |
 | `review.acp_source` | Optional exact ACP source constraint for the review seat |
 | `review.acp_priority` | ACP source preference for the review supervisor model |
@@ -75,18 +79,18 @@ error, not a silently clamped value.
 Onboarding, the **Team** tab in `/mjconfig`, and **Ctrl+Tab** during a session
 all offer the same four configurations:
 
-| Team | Coder and subagents | Reviewer |
+| Team | Primary (coder) | Subagents and review (reviewer) |
 | --- | --- | --- |
 | **Codex** | Codex | Codex |
 | **Claude** | Claude | Claude |
 | **Codex coder + Claude reviewer** | Codex | Claude |
 | **Claude coder + Codex reviewer** | Claude | Codex |
 
-Choosing a team keeps all three model selections on Auto, pins the primary and
-subagent seats to the coder, pins the review seat to the reviewer, enables
+Choosing a team keeps all three model selections on Auto, pins the primary
+seat to the coder, pins the subagent and review seats to the reviewer, enables
 discrete review and subagent failover, and enables the required built-in ACP
 routes. After saving from **Ctrl+Tab**, start the offered new session to use the
-new team immediately.
+new team immediately. See [Teams and adversarial review](/teams/).
 
 ACP priority lists default to `codex-acp`, then `claude-acp`,
 preserving the automatic behavior of earlier configurations. When a source is

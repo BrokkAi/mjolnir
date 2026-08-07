@@ -48,6 +48,8 @@ control](/remote/) for behavioral boundaries.
 | `/review uncommitted` | Review all current worktree changes |
 | `/review head` | Review `HEAD` |
 | `/compact` | Compact the primary agent's session where supported |
+| `/subagents` | Open the session-wide actor roster and its retained transcripts |
+| `/ragnarok TASK` | Summon the model-vs-model arena for one implementation task |
 
 The interactive autocomplete is the source of truth for commands in the
 installed version.
@@ -59,6 +61,10 @@ installed version.
 - PageUp/PageDown scroll the transcript.
 - Ctrl+Tab switches between the four Codex and Claude coder/reviewer teams.
 - Shift+Tab changes the current agent's model and effort.
+- Typing `@` opens workspace file autocomplete; the chosen file is attached to
+  the prompt as an ACP resource link.
+- Alt+Up (or Shift+Left) pulls the newest queued prompt back into the composer
+  for editing.
 - F10 toggles help.
 - Esc dismisses autocomplete, clears input, or cancels a permission prompt.
 - Ctrl-C cancels the active turn together with every running subagent; on an

@@ -44,9 +44,10 @@ Choose one of four teams during onboarding, from `/mjconfig`, or with
 - **Codex coder + Claude reviewer**
 - **Claude coder + Codex reviewer**
 
-The coder owns the primary session and its subagents. The reviewer runs in an
-independent session after changed turns. Switching teams keeps Mjolnir's
-terminal, permissions, sessions, tools, and remote workflow unchanged.
+The coder owns the primary session. The reviewer backs the independent review
+pass that challenges changed turns, plus the default subagent pool. Switching
+teams keeps Mjolnir's terminal, permissions, sessions, tools, and remote
+workflow unchanged.
 
 Mjolnir itself, its remote-control server, transcripts, and workspace tools run
 on infrastructure you control. Model requests still use the selected provider
@@ -124,7 +125,7 @@ use. Press **Ctrl+Tab** to switch teams later, or open the **Team** tab in
 
 ## Try it
 
-The [10-minute Codex evaluation](https://mjolnir.brokk.ai/evaluate/) uses a
+The [10-minute evaluation](https://mjolnir.brokk.ai/evaluate/) uses a
 checked-in disposable fixture to exercise a delegated subagent change, its
 pushed-back report, explicit review, session resume, and headless output without
 risking a real repository.
@@ -143,9 +144,11 @@ mj --worktree
 
 ## Documentation
 
-- [Start with Codex](https://mjolnir.brokk.ai/codex/)
+- [Teams and adversarial review](https://mjolnir.brokk.ai/teams/)
 - [Install and run](https://mjolnir.brokk.ai/install/)
-- [10-minute Codex evaluation](https://mjolnir.brokk.ai/evaluate/)
+- [Start with Codex](https://mjolnir.brokk.ai/codex/)
+- [Start with Claude](https://mjolnir.brokk.ai/claude/)
+- [10-minute evaluation](https://mjolnir.brokk.ai/evaluate/)
 - [Remote control](https://mjolnir.brokk.ai/remote/)
 - [Voice dictation](https://mjolnir.brokk.ai/voice/)
 - [Subagents](https://mjolnir.brokk.ai/subagents/)

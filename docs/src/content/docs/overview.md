@@ -31,21 +31,32 @@ available through more than one adapter.
 user
   │
   ▼
-primary agent ──── create_subagent ────▶ subagent #1  (fresh session, writes)
-  │                                 └──▶ subagent #2  (fresh session, writes)
-  │                                            │
-  └──── owns every user turn                   └──── report injected back as a
-                                                     user message when it finishes
+primary agent (coder) ── create_subagent ──▶ subagent #1  (fresh session, writes)
+  │                                     └──▶ subagent #2  (fresh session, writes)
+  │                                                │
+  ├──── owns every user turn                       └──── report injected back as a
+  │                                                      user message when it finishes
+  ▼ turn completed with workspace changes
+reviewer (independent session, read-only)
+  └──── holds the turn · challenges the diff · surviving findings
+        return as a corrective turn before the release
 ```
 
 The primary agent owns every user turn and cannot be disabled. Subagents are
 launched on demand, run in the background, and push their reports back into the
-primary session. The primary model and the default subagent model are selected
-independently from launchable routes; subagents can be turned off entirely.
+primary session. When discrete review is enabled and a completed turn changed
+the workspace, the review seat challenges it from an independent session — once
+any subagents have drained — before the turn is released; on a
+mixed [team](/teams/), the challenge comes from the other provider. Each
+seat's model is selected
+independently from launchable routes; subagents and discrete review can each
+be turned off.
 
 ## Good first uses
 
 - Work in one repository from an inline terminal interface.
+- Pair one provider as coder with the other as reviewer so every changed turn
+  faces adversarial review.
 - Let the primary agent hand bounded work to several fresh contexts at once.
 - Isolate a session in a linked Git worktree and resume it later.
 - Run the same setup headlessly or through Mjolnir's remote viewer.
@@ -55,7 +66,7 @@ agent will make a correct change. Its remote-control plane is self-hosted;
 provider requests still use OpenAI or Anthropic. Provider cost, capability,
 and data handling still apply. Start with [Install and run](/install/), then
 use the checked
-[10-minute Codex evaluation](/evaluate/) in a disposable repository.
+[10-minute evaluation](/evaluate/) in a disposable repository.
 
 ## Interfaces
 

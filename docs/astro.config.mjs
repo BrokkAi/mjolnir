@@ -23,7 +23,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'Mjolnir',
-      description: 'The self-hosted power frontend for Codex, with remote control, voice, subagents, worktrees, and adversarial review.',
+      description: 'A full-featured frontend for Codex and Claude — pair them as coder and reviewer for adversarial review, with self-hosted remote control, subagents, worktrees, and voice.',
       head: [
         { tag: 'link', attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' } },
         { tag: 'link', attrs: { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: true } },
@@ -43,7 +43,7 @@ export default defineConfig({
           tag: 'meta',
           attrs: {
             property: 'og:image:alt',
-            content: 'Mjolnir: the self-hosted power frontend for Codex, with an ASCII-art hammer.',
+            content: 'Mjolnir: choose Codex or Claude to code and review, with an ASCII-art hammer.',
           },
         },
         { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
@@ -52,7 +52,7 @@ export default defineConfig({
           tag: 'meta',
           attrs: {
             name: 'twitter:image:alt',
-            content: 'Mjolnir: the self-hosted power frontend for Codex, with an ASCII-art hammer.',
+            content: 'Mjolnir: choose Codex or Claude to code and review, with an ASCII-art hammer.',
           },
         },
       ],
@@ -74,16 +74,18 @@ export default defineConfig({
       ],
       sidebar: [
         {
-          label: 'Start with Codex',
+          label: 'Get started',
           items: [
-            { label: 'Why Mjolnir for Codex', slug: 'codex' },
+            { label: 'Teams and adversarial review', slug: 'teams' },
             { label: 'Install and run', slug: 'install' },
-            { label: '10-minute Codex evaluation', slug: 'evaluate' },
+            { label: 'Start with Codex', slug: 'codex' },
+            { label: 'Start with Claude', slug: 'claude' },
+            { label: '10-minute evaluation', slug: 'evaluate' },
             { label: 'Data and trust boundaries', slug: 'data-boundaries' },
           ],
         },
         {
-          label: 'Codex workflows',
+          label: 'Workflows',
           items: [
             { label: 'Remote control', slug: 'remote' },
             { label: 'Voice dictation', slug: 'voice' },

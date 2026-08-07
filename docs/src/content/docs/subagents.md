@@ -45,7 +45,7 @@ told not to invent one.
 ### The injected report
 
 ```text
-<subagent_result id="3" label="fix-tests" agent="codex-acp" model="gpt-5.6-sol" outcome="completed" elapsed="4m12s">
+<subagent_result id="3" label="fix-tests" agent="claude-acp" model="claude-opus-5" outcome="completed" elapsed="4m12s">
 <report>
 …the subagent's final message…
 </report>
@@ -178,15 +178,16 @@ so primary scrollback and terminal geometry are not rewritten.
 
 ## Discrete review
 
-When a turn that used at least one subagent completes with the pool drained and
-the workspace changed, Mjolnir reviews the finished work before releasing the
-turn. A visible supervisor on the configured review model investigates the immutable
-change packet and asynchronously launches only the useful read-only Norse
-reviewers. Their reports return to the same supervisor session for vetting, and
-surviving findings come back as a corrective turn. The supervisor and reviewers
-use the same workflow progress and nested transcript machinery as ordinary
-subagents but do not receive implementation write access or recursive
-delegation tools. See
+When automatic review is enabled, a completed turn changed the workspace, and
+the subagent pool has drained, Mjolnir reviews the finished work before
+releasing the turn — delegation is not required for the gate. On the default Quick tier one general reviewer
+investigates the change and a validation pass re-verifies its findings; on the
+Extended tier a visible supervisor on the configured review model investigates
+the immutable change packet and asynchronously launches only the useful
+read-only Norse reviewers, vetting their reports in its own session. Either
+way, surviving findings come back as a corrective turn. Reviewers use the same
+workflow progress and nested transcript machinery as ordinary subagents but do
+not receive implementation write access or recursive delegation tools. See
 [Delegation and review](/delegation-review/).
 
 ## Turning subagents off

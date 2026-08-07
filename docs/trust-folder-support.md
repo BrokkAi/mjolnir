@@ -1,5 +1,9 @@
 # Trust Folder Support
 
+> **Design note.** Recommendation recorded for issue #228; kept as history and
+> not maintained as product documentation. Current docs live in
+> `docs/src/content/docs/`.
+
 Issue: https://github.com/BrokkAi/mjolnir/issues/228
 
 Date: 2026-06-25

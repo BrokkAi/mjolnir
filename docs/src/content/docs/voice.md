@@ -5,7 +5,7 @@ description: Dictate prompts locally in Mjolnir and understand the supported pla
 
 Mjolnir can transcribe a spoken prompt locally and insert the result into the
 composer. Press **Ctrl-R** to start dictation and press it again to stop. Review
-or edit the transcript before sending it to Codex.
+or edit the transcript before sending it to the selected agent.
 
 ## Platform support
 
@@ -29,8 +29,8 @@ binary with `MJ_VOICE_WORKER`.
 
 The voice worker records microphone audio only after Ctrl-R activation. It runs
 the speech-recognition engine in a separate local process, returns transcribed
-text to Mjolnir, and does not send the audio to Codex. Only the prompt text you
-choose to submit enters the agent conversation.
+text to Mjolnir, and does not send the audio to any agent. Only the prompt text
+you choose to submit enters the agent conversation.
 
 The recognition model is downloaded on first use and currently requires about
 0.7 GB of cached assets. The sidecar process keeps a native speech-engine crash

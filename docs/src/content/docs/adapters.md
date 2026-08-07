@@ -1,11 +1,13 @@
 ---
 title: Other agents and models
-description: Add specialist models, alternative agents, or custom ACP servers after the Codex path works.
+description: How Mjolnir resolves models and adapters for each seat, and how to add custom ACP servers.
 ---
 
-Codex is Mjolnir's recommended primary experience. You can keep Codex in every
-seat or add another agent when a subtask, independent review, or provider
-fallback benefits from it.
+Mjolnir ships two first-class routes, Codex and Claude, and a
+[team](/teams/) decides which one fills each seat. This page covers what
+happens underneath — discovery, probing, and model resolution — and how to add
+custom ACP servers when a subtask, independent review, or provider fallback
+benefits from one.
 
 Under the hood, Mjolnir selects a model for the primary agent and a default model for
 subagents, then chooses a launchable Agent Client Protocol adapter that can
@@ -47,7 +49,7 @@ enabled adapter, and reports the available model count. Normal startup and
 
 Onboarding, `/mjconfig`, and **Ctrl+Tab** expose four first-class teams: Codex,
 Claude, Codex coder + Claude reviewer, and Claude coder + Codex reviewer. A
-team pins the primary and subagent routes to its coder and the review route to
+team pins the primary route to its coder and the review and subagent routes to
 its reviewer while leaving model selection on Auto.
 
 - The primary prefers the strongest launchable eligible row.
@@ -60,7 +62,7 @@ its reviewer while leaving model selection on Auto.
   subagent seats apply their independent ACP priority lists. All lists default
   to Codex, then Claude.
 - Unranked custom models are selectable explicitly but do not participate in
-  Auto or Ragnarok.
+  Auto or Ragnarok (the `/ragnarok` model-vs-model arena).
 
 Availability, credentials, advertised capabilities, and the current ranking
 can change the result. Auto chooses across launchable ranked models; adapter

@@ -1,5 +1,9 @@
 # Session Rewind Extension Plan
 
+> **Design note.** Proposal recorded for issue #213; kept as history and not
+> maintained as product documentation. Current docs live in
+> `docs/src/content/docs/`.
+
 Issue #213 asked whether `mjolnir` should support rewinding an ACP session to an
 earlier point in time. ACP 0.14 has no standard `session/rewind` method, but the
 Rust SDK exposes `_meta` on `session/fork`, `session/load`, and `session/resume`.
