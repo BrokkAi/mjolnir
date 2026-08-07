@@ -611,8 +611,12 @@ async fn main() -> Result<()> {
             Commands::Memory(args) => run_memory_command(args.command, &cwd),
             Commands::Models(args) => match args.command {
                 ModelsCommand::Refresh => {
-                    let cfg = Config::load(&config::default_config_path())?;
-                    let roster = roster::resolve(&cfg, &cwd).await?;
+                    let config_path = config::default_config_path();
+                    let mut cfg = Config::load(&config_path)?;
+                    let (roster, notices) = roster::resolve_recovering(&mut cfg, &cwd).await?;
+                    if !notices.is_empty() {
+                        cfg.save(&config_path)?;
+                    }
                     println!(
                         "Probed enabled ACP adapters; {} models available.",
                         available_model_count(&roster)
@@ -946,7 +950,7 @@ async fn run_resume(
     let mut resume_roster = if args.list {
         roster::resolve(&cfg, &cwd).await?
     } else {
-        resolve_roster_for_tui(&cfg, &cwd).await?
+        with_startup_spinner(roster::resolve(&cfg, &cwd)).await?
     };
     let mut agent = selected_agent_for_role(&resume_roster.primary);
     if let Some(session_id) = args.session_id.as_deref()
@@ -1404,8 +1408,11 @@ fn apply_session_result_to_config(cfg: &mut Config, result: &RunSessionResult) {
     cfg.spinner = result.spinner_style;
 }
 
-async fn resolve_roster_for_tui(cfg: &Config, cwd: &Path) -> Result<roster::Roster> {
-    with_startup_spinner(roster::resolve(cfg, cwd)).await
+async fn resolve_roster_for_tui(
+    cfg: &mut Config,
+    cwd: &Path,
+) -> Result<(roster::Roster, Vec<String>)> {
+    with_startup_spinner(roster::resolve_recovering(cfg, cwd)).await
 }
 
 async fn with_startup_spinner<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
@@ -1482,7 +1489,9 @@ async fn run_app(
         initial_agent.as_ref(),
     );
     let mut roster = if let Some(kind) = onboarding_kind {
-        let initial_resolution = resolve_roster_for_tui(&cfg, &cwd).await;
+        let initial_resolution = resolve_roster_for_tui(&mut cfg, &cwd)
+            .await
+            .map(|(roster, _)| roster);
         let Some((accepted_config, accepted_roster)) = run_startup_onboarding(
             kind,
             cfg,
@@ -1498,7 +1507,11 @@ async fn run_app(
         cfg = accepted_config;
         accepted_roster
     } else {
-        resolve_roster_for_tui(&cfg, &cwd).await?
+        let (roster, notices) = resolve_roster_for_tui(&mut cfg, &cwd).await?;
+        if !notices.is_empty() {
+            cfg.save(&config_path)?;
+        }
+        roster
     };
     if let Some(agent) = initial_agent.as_ref()
         && let Some(pinned) = roster.available.iter().find(|role| {
@@ -1558,7 +1571,11 @@ async fn run_app(
             UiExitReason::NewSession | UiExitReason::ClearSession => {
                 let show_new_session_boundary = session_result.reason == UiExitReason::NewSession;
                 cfg = Config::load(&config_path)?;
-                roster = resolve_roster_for_tui(&cfg, &cwd).await?;
+                let (resolved, notices) = resolve_roster_for_tui(&mut cfg, &cwd).await?;
+                if !notices.is_empty() {
+                    cfg.save(&config_path)?;
+                }
+                roster = resolved;
                 primary_agent = selected_agent_for_role(&roster.primary);
                 initial_agent = Some(primary_agent.clone());
                 pending_new_session_boundary = show_new_session_boundary;

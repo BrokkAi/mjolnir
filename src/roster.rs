@@ -918,10 +918,16 @@ fn unavailable_reason(
 }
 
 pub async fn resolve(config: &Config, cwd: &Path) -> Result<Roster> {
-    resolve_inner(config, cwd).await
+    let mut config = config.clone();
+    resolve_recovering(&mut config, cwd)
+        .await
+        .map(|(roster, _)| roster)
 }
 
-async fn resolve_inner(config: &Config, cwd: &Path) -> Result<Roster> {
+/// Resolve the roster and reset persisted explicit model choices only when a
+/// successful adapter probe proves they are no longer offered. Callers that
+/// own the config file should save `config` when notices are returned.
+pub async fn resolve_recovering(config: &mut Config, cwd: &Path) -> Result<(Roster, Vec<String>)> {
     let leaderboard = deepswe::load(
         &deepswe::default_cache_path(),
         deepswe::CACHE_TTL,
@@ -932,7 +938,61 @@ async fn resolve_inner(config: &Config, cwd: &Path) -> Result<Roster> {
     let availability = Availability::detect();
     let inventory = discover_inventory(config);
     let discovery = discover_available(&rows, &inventory, cwd).await;
-    assemble_roster(config, &rows, &availability, inventory, discovery)
+    let notices = recover_unavailable_explicit_models(config, &inventory, &discovery);
+    let mut roster = assemble_roster(config, &rows, &availability, inventory, discovery)?;
+    roster.warnings.extend(notices.iter().cloned());
+    roster.warnings.sort();
+    Ok((roster, notices))
+}
+
+fn recover_unavailable_explicit_models(
+    config: &mut Config,
+    inventory: &AcpInventory,
+    discovery: &Discovery,
+) -> Vec<String> {
+    let mut notices = Vec::new();
+    let source_was_probed = |source: &str| {
+        inventory
+            .servers
+            .iter()
+            .any(|server| server.selected && server.id == source)
+            && !discovery.adapter_errors.contains_key(source)
+    };
+    let all_selected_sources_were_probed = inventory
+        .servers
+        .iter()
+        .filter(|server| server.selected)
+        .all(|server| !discovery.adapter_errors.contains_key(&server.id));
+    let model_is_missing = |model: &str| {
+        !discovery
+            .available
+            .iter()
+            .any(|candidate| candidate.model.model == model)
+    };
+    let conclusively_missing = |model: &str| match adapter_kind(model) {
+        Some(kind) => model_is_missing(model) && source_was_probed(&launch_for(kind).source_id),
+        None => model_is_missing(model) && all_selected_sources_were_probed,
+    };
+
+    for (label, model) in [
+        ("Agent", &mut config.agent.model),
+        ("Review", &mut config.review.model),
+        ("Subagent", &mut config.subagents.model),
+    ] {
+        if matches!(
+            model.as_str(),
+            "auto" | crate::config::DISABLED_MODEL | "none"
+        ) || !conclusively_missing(model)
+        {
+            continue;
+        }
+        let unavailable = model.clone();
+        *model = "auto".to_string();
+        notices.push(format!(
+            "{label} model '{unavailable}' is no longer offered; switched to automatic selection"
+        ));
+    }
+    notices
 }
 
 /// Bind the primary agent and the default subagent model plus the model
@@ -1767,6 +1827,43 @@ mod tests {
                 .contains("no HTTP-MCP-capable ACP adapter")
         );
         let _ = availability;
+    }
+
+    #[test]
+    fn confirmed_missing_explicit_model_switches_the_saved_seat_to_auto() {
+        let mut config = Config::default();
+        config.agent.model = "gpt-5-6-terra".to_string();
+        config.set_acp_server_policy("codex-acp", AcpServerPolicy::Enabled);
+        let inventory = discover_inventory(&config);
+        let discovery = Discovery {
+            available: vec![role("gpt-5-6-sol", 0.7)],
+            adapter_errors: HashMap::new(),
+            session_config: HashMap::new(),
+        };
+
+        let notices = recover_unavailable_explicit_models(&mut config, &inventory, &discovery);
+
+        assert_eq!(config.agent.model, "auto");
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("gpt-5-6-terra"));
+    }
+
+    #[test]
+    fn failed_adapter_probe_keeps_an_explicit_model_selection() {
+        let mut config = Config::default();
+        config.agent.model = "gpt-5-6-terra".to_string();
+        config.set_acp_server_policy("codex-acp", AcpServerPolicy::Enabled);
+        let inventory = discover_inventory(&config);
+        let discovery = Discovery {
+            available: vec![role("gpt-5-6-sol", 0.7)],
+            adapter_errors: HashMap::from([("codex-acp".to_string(), "timed out".to_string())]),
+            session_config: HashMap::new(),
+        };
+
+        let notices = recover_unavailable_explicit_models(&mut config, &inventory, &discovery);
+
+        assert_eq!(config.agent.model, "gpt-5-6-terra");
+        assert!(notices.is_empty());
     }
 
     #[test]
