@@ -85,6 +85,10 @@ const HELP_SCROLL_PAGE_STEP: u16 = 10;
 /// Inline viewport height for the `/mjconfig` overlay (border + two sections).
 const INLINE_MJCONFIG_HEIGHT: u16 = 24;
 const QUEUED_PROMPT_VISIBLE_ROWS: usize = 3;
+/// Keep the terminal selector compact so its output pane always has room.
+const TERMINAL_ROSTER_VISIBLE_ROWS: u16 = 5;
+/// Border plus one visible row of terminal output.
+const TERMINAL_OUTPUT_MIN_HEIGHT: u16 = 3;
 /// Workflow progress rows rendered before the area folds into a "… N more"
 /// line. Normal orchestration has at most delegation and review active.
 const WORKFLOW_PROGRESS_VISIBLE_ROWS: usize = 2;
@@ -7832,12 +7836,24 @@ fn draw_terminals_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppStat
         .min(usize::from(u16::MAX)) as u16;
 
     let summaries = state.terminal_summaries();
-    let roster_rows = summaries.len().clamp(1, usize::from(u16::MAX)) as u16;
+    let roster_rows = summaries
+        .len()
+        .clamp(1, usize::from(TERMINAL_ROSTER_VISIBLE_ROWS)) as u16;
+    let desired_roster_height = roster_rows.saturating_add(2);
+    let roster_budget = area
+        .height
+        .saturating_sub(footer_height)
+        .saturating_sub(TERMINAL_OUTPUT_MIN_HEIGHT);
+    let roster_height = if roster_budget >= 3 {
+        desired_roster_height.min(roster_budget)
+    } else {
+        0
+    };
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(roster_rows.saturating_add(2)),
-            Constraint::Min(1),
+            Constraint::Length(roster_height),
+            Constraint::Min(TERMINAL_OUTPUT_MIN_HEIGHT),
             Constraint::Length(footer_height),
         ])
         .split(area);
@@ -17564,6 +17580,53 @@ mod tests {
             .expect("draw");
         let text = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(text.contains("no output yet"), "got {text}");
+    }
+
+    #[test]
+    fn terminals_viewer_bounds_roster_so_selected_output_remains_visible() {
+        let mut state = AppState::new();
+        let terminals = [
+            ("call-1", "term-1"),
+            ("call-2", "term-2"),
+            ("call-3", "term-3"),
+            ("call-4", "term-4"),
+            ("call-5", "term-5"),
+            ("call-6", "term-6"),
+            ("call-7", "term-7"),
+            ("call-8", "term-8"),
+            ("call-9", "term-9"),
+            ("call-10", "term-10"),
+        ];
+        for (index, (call_id, terminal_id)) in terminals.into_iter().enumerate() {
+            state.apply_event(terminal_tool_call_event(
+                call_id,
+                &format!("command {}", index + 1),
+                terminal_id,
+            ));
+        }
+        state.apply_event(UiEvent::TerminalOutput(
+            crate::event::TerminalOutputSnapshot {
+                terminal_id: "term-10".to_string(),
+                output: "selected terminal output remains visible".to_string(),
+                truncated: false,
+                exit_status: None,
+            },
+        ));
+        assert!(state.open_terminals_viewer());
+        state.select_terminal(false);
+
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_terminals_viewer(frame, frame.area(), &mut state, true))
+            .expect("draw");
+        let text = buffer_lines(terminal.backend().buffer()).join("\n");
+
+        assert!(text.contains("command 10"), "selection missing: {text}");
+        assert!(
+            text.contains("selected terminal output remains visible"),
+            "the terminal roster consumed the output pane: {text}"
+        );
     }
 
     /// The reader takes the whole inline viewport like the other readers, so
