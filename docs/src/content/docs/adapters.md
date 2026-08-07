@@ -51,11 +51,11 @@ team pins the primary route to its coder and the review and subagent routes to
 its reviewer while leaving model selection on Auto.
 
 - The primary prefers the strongest launchable eligible row.
-- The review supervisor prefers the strongest distinct model after the primary,
-  first from another provider when available, then from the primary provider if
-  needed.
-- The default subagent model prefers a cost-efficient qualifying model on the
-  current quality frontier, but can reuse the primary's model.
+- The review supervisor and default subagent model exclude the primary first,
+  then prefer the cheapest cost-efficient model on the current quality frontier
+  that meets the Sonnet quality floor. If no distinct model clears that floor,
+  they choose the strongest distinct frontier model that costs less than the
+  primary; otherwise, they reuse the primary.
 - When several adapters offer the selected model, the primary, review, and
   subagent seats apply their independent ACP priority lists. All lists default
   to Codex, then Claude.

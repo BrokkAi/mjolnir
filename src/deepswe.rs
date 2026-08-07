@@ -214,6 +214,7 @@ pub fn sonnet_anchor(rows: &[Row]) -> Option<&Row> {
 
 /// Choose the cheapest Pareto point that meets the Sonnet High quality
 /// floor. If none does, retain the strongest point on the frontier.
+#[cfg(test)]
 pub fn subagent_frontier_choice(rows: &[Row], sonnet_pass_at_1: f64) -> Option<Row> {
     let frontier = pareto_frontier(rows);
     frontier

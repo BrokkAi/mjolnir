@@ -134,20 +134,26 @@ impl Roster {
             return;
         }
         let available = source_candidates(&self.available, config.review.acp_source.as_deref());
-        self.review_supervisor =
-            choose_review_auto(&self.primary, &available, &config.review.acp_priority);
+        let rows = self
+            .choices
+            .iter()
+            .filter(|choice| choice.ranked)
+            .map(|choice| Row {
+                model: choice.model.clone(),
+                reasoning_effort: None,
+                pass_at_1: choice.pass_at_1,
+                mean_cost_usd: choice.mean_cost_usd,
+            })
+            .collect::<Vec<_>>();
+        self.review_supervisor = choose_review_auto(
+            &self.primary,
+            &rows,
+            &available,
+            &config.review.acp_priority,
+        );
         if let Some(review_supervisor) = self.review_supervisor.as_mut() {
             review_supervisor.reasoning_effort = config.review.reasoning_effort.clone();
         }
-    }
-}
-
-fn provider_key(model: &str) -> &str {
-    let provider = deepswe::model_provider(model);
-    if provider.is_empty() {
-        model.split_once('-').map_or(model, |(prefix, _)| prefix)
-    } else {
-        provider
     }
 }
 
@@ -806,40 +812,55 @@ fn choose_primary_auto<'a>(
     Some(preferred)
 }
 
-fn choose_subagent_default(
+/// Shared automatic selection for review and subagent seats. Prefer the
+/// cheapest Pareto-efficient distinct model at the Sonnet quality floor; when
+/// none clears it, keep costs below the primary before falling back to it.
+fn choose_secondary_auto(
+    primary: &ResolvedAgent,
     rows: &[Row],
     available: &[ResolvedAgent],
     acp_priority: &[String],
 ) -> Option<ResolvedAgent> {
-    let anchor = deepswe::sonnet_anchor(rows)?;
-    let launchable_rows: Vec<Row> = available
+    let distinct = available
         .iter()
         .filter(|role| role.ranked)
-        .map(|role| role.model.clone())
-        .collect();
-    deepswe::subagent_frontier_choice(&launchable_rows, anchor.pass_at_1)
-        .and_then(|row| preferred_route(&row.model, available, acp_priority).cloned())
+        .filter(|role| role.model.model != primary.model.model)
+        .cloned()
+        .collect::<Vec<_>>();
+    let launchable_rows: Vec<Row> = distinct.iter().map(|role| role.model.clone()).collect();
+    let candidate = deepswe::sonnet_anchor(rows)
+        .and_then(|anchor| {
+            deepswe::pareto_frontier(&launchable_rows)
+                .into_iter()
+                .filter(|row| row.pass_at_1 >= anchor.pass_at_1)
+                .min_by(|a, b| {
+                    a.mean_cost_usd
+                        .total_cmp(&b.mean_cost_usd)
+                        .then_with(|| b.pass_at_1.total_cmp(&a.pass_at_1))
+                })
+        })
+        .or_else(|| {
+            deepswe::pareto_frontier(&launchable_rows)
+                .into_iter()
+                .filter(|row| row.mean_cost_usd < primary.model.mean_cost_usd)
+                .max_by(|a, b| {
+                    a.pass_at_1
+                        .total_cmp(&b.pass_at_1)
+                        .then_with(|| b.mean_cost_usd.total_cmp(&a.mean_cost_usd))
+                })
+        });
+    candidate
+        .and_then(|row| preferred_route(&row.model, &distinct, acp_priority).cloned())
+        .or_else(|| Some(primary.clone()))
 }
 
 fn choose_review_auto(
     primary: &ResolvedAgent,
+    rows: &[Row],
     available: &[ResolvedAgent],
     acp_priority: &[String],
 ) -> Option<ResolvedAgent> {
-    let primary_provider = provider_key(&primary.model.model);
-    let distinct = available
-        .iter()
-        .filter(|candidate| candidate.ranked)
-        .filter(|candidate| candidate.model.model != primary.model.model)
-        .collect::<Vec<_>>();
-    distinct
-        .iter()
-        .find(|candidate| provider_key(&candidate.model.model) != primary_provider)
-        .copied()
-        .or_else(|| distinct.first().copied())
-        .and_then(|candidate| {
-            preferred_route(&candidate.model.model, available, acp_priority).cloned()
-        })
+    choose_secondary_auto(primary, rows, available, acp_priority)
 }
 
 fn resolve_review_supervisor(
@@ -857,7 +878,7 @@ fn resolve_review_supervisor(
         bail!("Review model cannot be disabled; use agent.discrete_review = false");
     }
     Ok(if selector == "auto" {
-        choose_review_auto(primary, available, acp_priority)
+        choose_review_auto(primary, rows, available, acp_priority)
     } else {
         Some(explicit("Review", selector, rows, available, acp_priority)?.clone())
     })
@@ -867,19 +888,18 @@ fn resolve_subagent_default(
     selector: &str,
     rows: &[Row],
     available: &[ResolvedAgent],
-    excluded_models: &[&str],
+    primary: &ResolvedAgent,
     acp_priority: &[String],
 ) -> Result<Option<ResolvedAgent>> {
     if selector == crate::config::DISABLED_MODEL || selector == "none" {
         Ok(None)
     } else if selector == "auto" {
-        let distinct = available
-            .iter()
-            .filter(|role| !excluded_models.contains(&role.model.model.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-        Ok(choose_subagent_default(rows, &distinct, acp_priority)
-            .or_else(|| choose_subagent_default(rows, available, acp_priority)))
+        Ok(choose_secondary_auto(
+            primary,
+            rows,
+            available,
+            acp_priority,
+        ))
     } else {
         explicit("Subagent", selector, rows, available, acp_priority).map(|role| Some(role.clone()))
     }
@@ -1118,7 +1138,6 @@ fn assemble_roster(
         &config.review.acp_priority,
         config.agent.discrete_review,
     )?;
-    let occupied = vec![primary.model.model.as_str()];
     let subagent_available = candidates_for_selector(
         &available,
         &config.subagents.model,
@@ -1128,7 +1147,7 @@ fn assemble_roster(
         &config.subagents.model,
         rows,
         &subagent_available,
-        &occupied,
+        primary,
         &config.subagents.acp_priority,
     )?;
 
@@ -1466,32 +1485,40 @@ mod tests {
     }
 
     #[test]
-    fn auto_review_chooses_best_model_from_another_provider() {
+    fn auto_review_uses_the_same_cost_quality_frontier_as_subagents() {
         let available = vec![
-            role("gpt-5-6-sol", 0.70),
-            role("gpt-5-5", 0.65),
-            role("claude-fable-5", 0.64),
+            role_at("gpt-5-6-sol", 0.70, 3.5),
+            role_at("gpt-5-5", 0.65, 1.2),
+            role_at("claude-sonnet-5", 0.60, 7.0),
         ];
+        let rows = available
+            .iter()
+            .map(|role| role.model.clone())
+            .collect::<Vec<_>>();
 
         assert_eq!(
-            choose_review_auto(&available[0], &available, &[])
-                .expect("cross-provider review model")
+            choose_review_auto(&available[0], &rows, &available, &[])
+                .expect("cost-efficient review model")
                 .model
                 .model,
-            "claude-fable-5"
+            "gpt-5-5"
         );
     }
 
     #[test]
-    fn auto_review_keeps_normal_ranking_between_opus_and_fable() {
+    fn auto_review_uses_the_sonnet_quality_floor() {
         let available = vec![
-            role("gpt-5-6-sol", 0.80),
-            role("claude-opus-5", 0.75),
-            role("claude-fable-5", 0.65),
+            role_at("gpt-5-6-sol", 0.80, 3.0),
+            role_at("claude-opus-5", 0.75, 6.0),
+            role_at("claude-sonnet-5", 0.65, 7.0),
         ];
+        let rows = available
+            .iter()
+            .map(|role| role.model.clone())
+            .collect::<Vec<_>>();
 
         assert_eq!(
-            choose_review_auto(&available[0], &available, &[])
+            choose_review_auto(&available[0], &rows, &available, &[])
                 .expect("review model")
                 .model
                 .model,
@@ -1500,12 +1527,20 @@ mod tests {
     }
 
     #[test]
-    fn auto_review_falls_back_to_next_same_provider_model() {
-        let available = vec![role("gpt-5-6-sol", 0.70), role("gpt-5-5", 0.65)];
+    fn auto_review_falls_back_to_the_strongest_distinct_model() {
+        let available = vec![
+            role_at("gpt-5-6-sol", 0.70, 3.0),
+            role_at("gpt-5-5", 0.45, 1.0),
+        ];
+        let rows = vec![
+            available[0].model.clone(),
+            available[1].model.clone(),
+            role_at("claude-sonnet-5", 0.50, 7.0).model,
+        ];
 
         assert_eq!(
-            choose_review_auto(&available[0], &available, &[])
-                .expect("same-provider fallback")
+            choose_review_auto(&available[0], &rows, &available, &[])
+                .expect("strongest fallback")
                 .model
                 .model,
             "gpt-5-5"
@@ -1513,10 +1548,20 @@ mod tests {
     }
 
     #[test]
-    fn auto_review_is_unavailable_when_no_distinct_model_exists() {
+    fn auto_review_reuses_primary_when_no_distinct_model_exists() {
         let available = vec![role("gpt-5-6-sol", 0.70)];
+        let rows = available
+            .iter()
+            .map(|role| role.model.clone())
+            .collect::<Vec<_>>();
 
-        assert!(choose_review_auto(&available[0], &available, &[]).is_none());
+        assert_eq!(
+            choose_review_auto(&available[0], &rows, &available, &[])
+                .expect("primary fallback")
+                .model
+                .model,
+            "gpt-5-6-sol"
+        );
     }
 
     #[test]
@@ -1547,7 +1592,35 @@ mod tests {
             review_supervisor: Some(claude.clone()),
             subagent_default: None,
             available: vec![gpt, claude.clone()],
-            choices: Vec::new(),
+            choices: vec![
+                ModelChoice {
+                    model: "gpt-5-6-sol".to_string(),
+                    pass_at_1: 0.70,
+                    mean_cost_usd: 1.0,
+                    available: true,
+                    disabled_reason: None,
+                    adapter: Some("codex-acp".to_string()),
+                    ranked: true,
+                },
+                ModelChoice {
+                    model: "claude-fable-5".to_string(),
+                    pass_at_1: 0.64,
+                    mean_cost_usd: 1.0,
+                    available: true,
+                    disabled_reason: None,
+                    adapter: Some("claude-acp".to_string()),
+                    ranked: true,
+                },
+                ModelChoice {
+                    model: "claude-sonnet-5".to_string(),
+                    pass_at_1: 0.60,
+                    mean_cost_usd: 7.0,
+                    available: false,
+                    disabled_reason: None,
+                    adapter: None,
+                    ranked: true,
+                },
+            ],
             warnings: Vec::new(),
             inventory: AcpInventory::default(),
             subagent_acp_priority: Vec::new(),
@@ -1939,7 +2012,7 @@ mod tests {
         ];
 
         assert_eq!(
-            choose_subagent_default(&rows, &available, &[])
+            choose_secondary_auto(&available[0], &rows, &available, &[])
                 .expect("subagent default choice")
                 .model
                 .model,
@@ -1952,7 +2025,7 @@ mod tests {
         let rows = vec![role_at("gpt-5-6-sol", 0.694, 3.47).model];
         let available = vec![role_at("claude-fable-5", 0.64, 4.0)];
 
-        let error = resolve_subagent_default("gpt-5-6-sol", &rows, &available, &[], &[])
+        let error = resolve_subagent_default("gpt-5-6-sol", &rows, &available, &available[0], &[])
             .expect_err("explicit unavailable subagent model must fail");
         assert!(
             error
@@ -1970,7 +2043,7 @@ mod tests {
 
         let _ = &primary;
         assert!(
-            resolve_subagent_default("none", &rows, &available, &[], &[])
+            resolve_subagent_default("none", &rows, &available, &primary, &[])
                 .unwrap()
                 .is_none()
         );
@@ -2021,7 +2094,7 @@ mod tests {
         let available = vec![subagent];
 
         assert_eq!(
-            resolve_subagent_default("auto", &rows, &available, &["gpt-5-6-terra"], &[])
+            resolve_subagent_default("auto", &rows, &available, &available[0], &[])
                 .unwrap()
                 .unwrap()
                 .model
@@ -2045,18 +2118,12 @@ mod tests {
         ];
 
         assert_eq!(
-            resolve_subagent_default(
-                "auto",
-                &rows,
-                &available,
-                &["gpt-5-6-sol", "gpt-5-6-terra"],
-                &[],
-            )
-            .unwrap()
-            .unwrap()
-            .model
-            .model,
-            "claude-fable-5"
+            resolve_subagent_default("auto", &rows, &available, &available[0], &[],)
+                .unwrap()
+                .unwrap()
+                .model
+                .model,
+            "gpt-5-6-terra"
         );
     }
 }
