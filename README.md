@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://mjolnir.brokk.ai/">
-    <img src="docs/public/og.png" alt="Mjolnir — choose Codex or Claude to code and review" width="720">
+    <img src="docs/public/og.png?v=2" alt="Mjolnir — choose Codex or Claude to code and review" width="720">
   </a>
 </p>
 
