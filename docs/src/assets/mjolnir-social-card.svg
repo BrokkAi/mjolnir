@@ -47,9 +47,10 @@
     </text>
     <text x="2" y="246" fill="#b5aabd" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="18">
       <tspan x="2" y="246">Four teams · One Ctrl+Tab shortcut away</tspan>
-      <tspan x="2" y="275">Codex · Claude</tspan>
-      <tspan x="2" y="304">Codex coder + Claude reviewer</tspan>
-      <tspan x="2" y="333">Claude coder + Codex reviewer</tspan>
+      <tspan x="2" y="274">• Codex</tspan>
+      <tspan x="2" y="300">• Claude</tspan>
+      <tspan x="2" y="326">• Codex coder + Claude reviewer</tspan>
+      <tspan x="2" y="352">• Claude coder + Codex reviewer</tspan>
     </text>
   </g>
 
