@@ -6,9 +6,35 @@
   </a>
 </p>
 
-Mjolnir (`mj`) is the self-hosted power frontend for **Codex and Claude**. It
-wraps either agent in self-hosted remote control, a worktree-first workflow,
-cross-platform voice input, and integrated adversarial review.
+Mjolnir (`mj`) is a full-featured frontend for **Codex and Claude**. It gives
+both agents the same terminal workflow, team configuration, review pipeline,
+and remote-control surface.
+
+## Features
+
+- **Codex and Claude teams:** use either agent for coding and review, or split
+  the roles between them without changing tools or workflows.
+- **Parallel subagents:** delegate to as many as 16 write-capable agents in
+  fresh sessions, with live progress and completed reports returned to the
+  primary agent.
+- **Integrated adversarial review:** automatically challenge changed turns
+  with an independent reviewer and targeted specialist checks.
+- **Worktree sessions:** start work in a linked Git worktree and keep agent
+  changes separate from the current checkout, whichever coder you choose.
+- **Remote control:** run the workspace and control plane on your machine while
+  driving the session from another browser or device.
+- **Local voice input:** dictate prompts on macOS, Linux, and Windows with
+  cross-platform, on-device speech recognition.
+
+### Terminal
+
+![Mjolnir review session showing the primary agent, reviewer progress, and usage](docs/readme-images/default-ui.png)
+
+### Web interface
+
+![Mjolnir browser interface showing session history, streaming agent output, and queued prompt controls](docs/readme-images/remote-ui.png)
+
+## Four teams, one shortcut
 
 Choose one of four teams during onboarding, from `/mjconfig`, or with
 **Ctrl+Tab** in a session:
@@ -18,38 +44,9 @@ Choose one of four teams during onboarding, from `/mjconfig`, or with
 - **Codex coder + Claude reviewer**
 - **Claude coder + Codex reviewer**
 
-The selected coder remains in charge of the turn while Mjolnir provides the
-operating environment around it:
-
-- the coder owns every user turn — planning, delegating, implementing, and
-  answering;
-- the coder can launch background subagents (up to 16 in parallel, all
-  write-capable, each in a fresh session) while Mjolnir tracks them;
-- stable workflow progress rows summarize delegation and review phases,
-  aggregate actor outcomes, and elapsed time; `/subagents` opens retained
-  nested detail;
-- each finished subagent's report, activity log, and diff are pushed back into
-  the primary session as a new user message — nothing polls.
-
-Each team pins the primary agent and subagents to its coder and the independent
-review seat to its reviewer. The terminal, permissions, sessions, tools, and
-remote workflow stay consistent when you switch teams.
-
-![Mjolnir coding session showing streaming agent output and tool activity](docs/readme-images/default-ui.png)
-
-## What Mjolnir adds to Codex and Claude
-
-- **Self-hosted remote control:** keep the workspace and control plane on your
-  machine and drive the session from another browser or device.
-- **Worktree-first workflow:** start Codex in a linked Git worktree so agent
-  changes stay separate from your current checkout and remain easy to inspect.
-- **Cross-platform desktop voice:** dictate prompts locally on macOS, Linux,
-  and Windows with Ctrl-R.
-- **Integrated adversarial review:** challenge workspace changes with a
-  separate review supervisor and targeted specialist lanes before a delegated
-  turn completes.
-- **Four ready-made teams:** run Codex or Claude alone, or assign one to code
-  while the other independently reviews.
+The coder owns the primary session and its subagents. The reviewer runs in an
+independent session after changed turns. Switching teams keeps Mjolnir's
+terminal, permissions, sessions, tools, and remote workflow unchanged.
 
 Mjolnir itself, its remote-control server, transcripts, and workspace tools run
 on infrastructure you control. Model requests still use the selected provider
@@ -57,74 +54,73 @@ under its terms and data boundaries.
 
 ## Requirements
 
-The recommended path needs an authenticated, PATH-visible Codex or Claude CLI
-plus Node.js/npm for its ACP bridge. Provider use may incur cost.
+You need credentials for at least one configured model provider. Mjolnir ships
+with built-in Codex and Claude ACP routes and, on macOS, Linux, and Windows,
+manages the Node.js runtime those routes need. A system Node.js installation is
+only required when installing through npm/npx or when using the built-in routes
+on Android. Provider use may incur cost.
 
-Other agents are optional. Mjolnir can also use existing Claude credentials
-or a custom ACP server configured directly in `config.toml`. Read
-[Start with Codex](https://mjolnir.brokk.ai/codex/),
-[installation](https://mjolnir.brokk.ai/install/), and the
-[data and trust boundaries](https://mjolnir.brokk.ai/data-boundaries/)
-before connecting a private repository.
+Custom ACP servers can be configured directly in `config.toml`. Review the
+[data and trust boundaries](https://mjolnir.brokk.ai/data-boundaries/) before
+connecting a private repository.
 
-## Install and run
+## Install
 
-With Node.js 18 or later, npm is the simplest persistent install and npx runs
-Mjolnir once without changing your global packages:
+Choose any of the following methods.
 
-```bash
-npm install -g @brokkai/mjolnir
-mj --version
-
-npx -y @brokkai/mjolnir --version
-```
-
-The npm package includes the native `mj` bundle for your platform—plus, on
-desktop, `mj-voice-worker`—so it does not download Mjolnir on first run. Upgrade with `npm update -g @brokkai/mjolnir` and remove it with
-`npm uninstall -g @brokkai/mjolnir`.
-
-On macOS (Apple Silicon and Intel) and Linux (x86-64 or ARM64 glibc), install
-from the Homebrew tap:
-
-```bash
-brew install brokkai/tap/mjolnir
-```
-
-The formula puts `mj` on `PATH` and keeps `mj-voice-worker` in its private
-`libexec`. Upgrade with `brew upgrade mjolnir`.
-
-The release installer supports macOS and Linux on x86-64 or ARM64, plus Android ARM64:
+**Release installer:** macOS and Linux on x86-64 or ARM64; Android on ARM64:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash
 ```
 
-It installs `mj`; desktop installs also include `mj-voice-worker`. Windows
-users should use a release archive or Cargo.
+**Homebrew:** macOS (Apple Silicon or Intel) and Linux (x86-64 or ARM64 glibc):
 
-Discrete review runs Bifrost through `npx -y @brokkai/bifrost`. On Linux,
-macOS, and Windows, Mjolnir uses `npx` from `PATH` when available and otherwise
-installs an embedded Node.js 24 runtime automatically. Android users already
-need Node.js/npm for Mjolnir's built-in ACP bridges.
+```bash
+brew install brokkai/tap/mjolnir
+```
 
-Desktop users can install Mjolnir and its optional voice worker from crates.io:
+**npm or npx:** macOS, Linux, Windows, and Android with Node.js 18 or later:
+
+```bash
+npm install -g @brokkai/mjolnir
+# Or run without a global install:
+npx -y @brokkai/mjolnir
+```
+
+**crates.io:** install the terminal client and desktop voice worker with Rust:
 
 ```bash
 cargo install --locked brokk-mjolnir brokk-mj-voice-worker
 ```
 
-Then open a repository and run:
+**Release archive:** download the archive for Linux, macOS, Windows, or
+Android from [GitHub Releases](https://github.com/BrokkAi/mjolnir/releases).
+
+**Build from source:**
+
+```bash
+git clone https://github.com/BrokkAi/mjolnir.git
+cd mjolnir
+cargo build --release
+./target/release/mj --cwd .
+```
+
+Desktop release packages include `mj-voice-worker`; Android packages omit
+voice support. See the full [installation guide](https://mjolnir.brokk.ai/install/)
+for platform details, upgrades, checksums, and custom install paths.
+
+## Run
+
+Open a repository and run:
 
 ```bash
 mj
 ```
 
-First launch asks which agent codes and which reviews. Choose one of the four
-teams and start the session. Press **Ctrl+Tab** to switch teams later, or open
-the **Team** tab in `/mjconfig`. Team, model, and adapter changes apply to a new
-session. If provider credentials or capabilities change, start a new session
-so the configured adapters are probed again. `mj models refresh` runs the same
-probe as a standalone diagnostic.
+First launch discovers available provider credentials and asks which team to
+use. Press **Ctrl+Tab** to switch teams later, or open the **Team** tab in
+`/mjconfig`. Team, model, and adapter changes apply to a new session.
 
 ## Try it
 
