@@ -2240,6 +2240,7 @@ mode = "ask"
         let mut config = Config::default();
         TeamPreset::CodexWithClaudeReviewer.apply(&mut config);
         config.subagents.acp_source = config.agent.acp_source.clone();
+        config.team = None;
 
         assert_eq!(TeamPreset::from_config(&config), None);
     }
