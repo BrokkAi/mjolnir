@@ -1253,7 +1253,7 @@
           background: color-mix(in srgb, var(--agent) 16%, var(--inline-bg-strong));
         }
 
-        &[data-runtime="headless"] {
+        &[data-runtime="web"] {
           color: var(--thought);
           background: color-mix(in srgb, var(--thought) 16%, var(--inline-bg-strong));
         }
@@ -5218,12 +5218,12 @@
           element.removeAttribute("aria-label");
           return;
         }
-        const runtime = attached ? "tui" : "headless";
+        const runtime = attached ? "tui" : "web";
         element.dataset.runtime = runtime;
-        element.textContent = attached ? "TUI" : "Headless";
+        element.textContent = attached ? "TUI" : "Web";
         const description = attached
           ? "Session type: attached terminal UI"
-          : "Session type: headless";
+          : "Session type: web";
         element.title = description;
         element.setAttribute("aria-label", description);
       }
