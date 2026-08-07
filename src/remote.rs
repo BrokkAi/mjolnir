@@ -10272,7 +10272,7 @@ mod tests {
         assert_eq!(snapshot["appearance"]["spinner"], "wave");
         assert_eq!(snapshot["appearance"]["thought_output"], "full");
         assert_eq!(snapshot["appearance"]["feature_hints"], false);
-        assert_eq!(snapshot["team"]["selected"], serde_json::Value::Null);
+        assert_eq!(snapshot["team"]["selected"], "claude_codex");
 
         let saved = config::Config::load(&config_path).expect("reload saved config");
         assert_eq!(saved.agent.model, "gpt-5-6-terra");

@@ -159,6 +159,16 @@ fn source_candidates(available: &[ResolvedAgent], source: Option<&str>) -> Vec<R
         .collect()
 }
 
+/// Team routes constrain automatic selection only. A concrete saved model
+/// always resolves through the adapter that advertises that model.
+fn candidates_for_selector(
+    available: &[ResolvedAgent],
+    selector: &str,
+    source: Option<&str>,
+) -> Vec<ResolvedAgent> {
+    source_candidates(available, (selector == "auto").then_some(source).flatten())
+}
+
 fn failover_roles(
     initial: ResolvedAgent,
     available: &[ResolvedAgent],
@@ -1068,8 +1078,13 @@ fn assemble_roster(
     ) {
         bail!("the primary agent cannot be disabled");
     }
-    let primary_available = source_candidates(&available, config.agent.acp_source.as_deref());
-    if primary_available.is_empty()
+    let primary_available = candidates_for_selector(
+        &available,
+        &config.agent.model,
+        config.agent.acp_source.as_deref(),
+    );
+    if config.agent.model == "auto"
+        && primary_available.is_empty()
         && let Some(source) = &config.agent.acp_source
     {
         bail!("Agent ACP source '{source}' has no launchable models");
@@ -1090,7 +1105,11 @@ fn assemble_roster(
             &config.agent.acp_priority,
         )?
     };
-    let review_available = source_candidates(&available, config.review.acp_source.as_deref());
+    let review_available = candidates_for_selector(
+        &available,
+        &config.review.model,
+        config.review.acp_source.as_deref(),
+    );
     let mut review_supervisor = resolve_review_supervisor(
         &config.review.model,
         primary,
@@ -1100,7 +1119,11 @@ fn assemble_roster(
         config.agent.discrete_review,
     )?;
     let occupied = vec![primary.model.model.as_str()];
-    let subagent_available = source_candidates(&available, config.subagents.acp_source.as_deref());
+    let subagent_available = candidates_for_selector(
+        &available,
+        &config.subagents.model,
+        config.subagents.acp_source.as_deref(),
+    );
     let mut subagent_default = resolve_subagent_default(
         &config.subagents.model,
         rows,
@@ -1163,7 +1186,9 @@ fn assemble_roster(
         warnings,
         inventory,
         subagent_acp_priority: config.subagents.acp_priority.clone(),
-        subagent_acp_source: config.subagents.acp_source.clone(),
+        subagent_acp_source: (config.subagents.model == "auto")
+            .then(|| config.subagents.acp_source.clone())
+            .flatten(),
     })
 }
 
@@ -1372,6 +1397,39 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.launch.source_id == "codex-acp")
         );
+    }
+
+    #[test]
+    fn explicit_model_ignores_a_runtime_team_route() {
+        let primary = role("gpt-5-6-sol", 0.70);
+        let reviewer = role("claude-fable-5", 0.64);
+        let rows = vec![primary.model.clone(), reviewer.model.clone()];
+        let discovery = Discovery {
+            available: vec![primary.clone(), reviewer],
+            adapter_errors: HashMap::new(),
+            session_config: HashMap::new(),
+        };
+        let availability = Availability {
+            codex_credentials: false,
+            claude_status: ClaudeAuthStatus::NotLoggedIn,
+            subscriptions: Subscriptions::default(),
+        };
+        let mut config = Config::default();
+        config.agent.model = primary.model.model.clone();
+        config.agent.acp_source = Some("claude-acp".to_string());
+        config.subagents.model = crate::config::DISABLED_MODEL.to_string();
+
+        let roster = assemble_roster(
+            &config,
+            &rows,
+            &availability,
+            AcpInventory::default(),
+            discovery,
+        )
+        .expect("explicit model resolves through its own adapter");
+
+        assert_eq!(roster.primary.model.model, "gpt-5-6-sol");
+        assert_eq!(roster.primary.launch.source_id, "codex-acp");
     }
 
     #[test]

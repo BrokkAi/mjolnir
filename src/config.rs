@@ -125,6 +125,10 @@ pub struct Config {
     /// Persistent cross-session memory behavior.
     #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
     pub memory: MemoryConfig,
+    /// The semantic team preference used to constrain automatic selection.
+    /// ACP adapter identities themselves are never persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
     /// The primary agent's model and review behavior.
     #[serde(default, skip_serializing_if = "AgentConfig::is_default")]
     pub agent: AgentConfig,
@@ -166,6 +170,7 @@ impl Default for Config {
             feature_hints: true,
             keep_awake: true,
             memory: MemoryConfig::default(),
+            team: None,
             agent: AgentConfig::default(),
             review: ReviewConfig::default(),
             subagents: SubagentsConfig::default(),
@@ -352,6 +357,9 @@ impl TeamPreset {
     }
 
     pub fn from_config(config: &Config) -> Option<Self> {
+        if let Some(team) = config.team.as_deref() {
+            return Self::from_id(team);
+        }
         let coder = config.agent.acp_source.as_deref()?;
         let reviewer = config.review.acp_source.as_deref()?;
         if config.subagents.acp_source.as_deref() != Some(reviewer) {
@@ -363,6 +371,7 @@ impl TeamPreset {
     }
 
     pub fn apply(self, config: &mut Config) {
+        config.team = Some(self.id().to_string());
         let (coder, reviewer) = self.sources();
         config.agent.model = default_auto();
         config.agent.acp_source = Some(coder.to_string());
@@ -375,6 +384,13 @@ impl TeamPreset {
         for source in [coder, reviewer] {
             config.set_acp_server_policy(source, AcpServerPolicy::Enabled);
         }
+    }
+
+    fn apply_runtime_routes(self, config: &mut Config) {
+        let (coder, reviewer) = self.sources();
+        config.agent.acp_source = Some(coder.to_string());
+        config.review.acp_source = Some(reviewer.to_string());
+        config.subagents.acp_source = Some(reviewer.to_string());
     }
 }
 
@@ -891,6 +907,11 @@ impl Config {
             self.subagents.model = DISABLED_MODEL.to_string();
         }
         self.drop_retired_sources();
+        if let Some(team) = self.team.as_deref().and_then(TeamPreset::from_id) {
+            team.apply_runtime_routes(self);
+        } else {
+            self.team = None;
+        }
         for (seat, priority) in [
             ("agent", &self.agent.acp_priority),
             ("review", &self.review.acp_priority),
@@ -1051,6 +1072,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
         feature_hints: true,
         keep_awake: true,
         memory: MemoryConfig::default(),
+        team: None,
         agent: AgentConfig {
             model: old.thor.model,
             acp_source: None,

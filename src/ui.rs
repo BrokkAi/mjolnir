@@ -19073,7 +19073,10 @@ mod tests {
                 .is_some_and(|picker| picker.step == TeamPickerStep::StartNewSession)
         );
         let saved = config::Config::load(&config_path).expect("load config");
-        assert_eq!(config::TeamPreset::from_config(&saved), None);
+        assert_eq!(
+            config::TeamPreset::from_config(&saved),
+            Some(config::TeamPreset::Claude)
+        );
         assert!(!state.review_enabled, "active session policy is unchanged");
         assert!(cmd_rx.try_recv().is_err(), "no live policy update is sent");
 
