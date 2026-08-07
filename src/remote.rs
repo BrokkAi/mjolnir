@@ -10047,7 +10047,7 @@ mod tests {
         for spinner in spinners {
             assert!(!spinner["frames"].as_array().expect("frames").is_empty());
         }
-        assert_eq!(snapshot["appearance"]["thought_output"], "current");
+        assert_eq!(snapshot["appearance"]["thought_output"], "default");
         assert_eq!(
             snapshot["appearance"]["thought_outputs"]
                 .as_array()
@@ -10680,7 +10680,7 @@ mod tests {
         assert!(viewer.contains("status?.finished_at"));
         assert!(viewer.contains("actorPrefix === \"subagent\" ? \"subagent\" : \"review\""));
         assert!(viewer.contains("entry._thoughtCompleted"));
-        assert!(viewer.contains("thoughtOutput === \"current\""));
+        assert!(viewer.contains("thoughtOutput === \"default\""));
     }
 
     #[test]

@@ -467,7 +467,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
-        text: "Choose Current or Full thought output under Appearance in /mjconfig; Full shows every available thought line.",
+        text: "Choose Default or Full thought output under Appearance in /mjconfig; Full shows every available thought line.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -11531,7 +11531,7 @@ mod tests {
     fn feature_hints_include_thought_output_configuration() {
         assert!(FEATURE_HINTS.iter().any(|hint| {
             hint.requirement == FeatureHintRequirement::Always
-                && hint.text.contains("Current or Full thought output")
+                && hint.text.contains("Default or Full thought output")
                 && hint.text.contains("/mjconfig")
         }));
     }

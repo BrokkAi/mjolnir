@@ -3660,7 +3660,7 @@
       let commandMatches = [];
       let commandSelected = 0;
       let showTranscriptDiffs = true;
-      let thoughtOutput = "current";
+      let thoughtOutput = "default";
       const draftBySessionId = new Map();
       const attachmentsBySessionId = new Map();
       const activityBySessionId = new Map();
@@ -3755,7 +3755,7 @@
       }
 
       function applyThoughtOutputSnapshot(snapshot, render = false) {
-        const next = snapshot?.appearance?.thought_output === "full" ? "full" : "current";
+        const next = snapshot?.appearance?.thought_output === "full" ? "full" : "default";
         const changed = thoughtOutput !== next;
         thoughtOutput = next;
         if (render && changed) {
@@ -6988,7 +6988,7 @@
         refs.body.replaceChildren();
         const voice = refs.kind === "agent" || refs.kind === "thought" ? "prose" : "mono";
         let text = entry.text || "";
-        if (refs.kind === "thought" && thoughtOutput === "current") {
+        if (refs.kind === "thought" && thoughtOutput === "default") {
           text = entry._thoughtCompleted ? thoughtSummary(text) : activeThoughtTail(text);
         }
         if (refs.kind === "tool" && entry.tool_kind === "execute" && text.trim()) {

@@ -169,7 +169,7 @@ configuration remains unchanged.
 ## Appearance and session controls
 
 Theme, spinner, thought-output, and feature-tip preferences are persistent.
-Thought output defaults to **Current**, which summarizes completed thoughts and
+Thought output defaults to **Default**, which summarizes completed thoughts and
 shows a bounded tail while a thought is streaming. Choose **Full** under
 **Appearance** in the TUI or web `/mjconfig`, or set `thought_output = "full"`
 at the top level of the config file, to show all available thought text in both

@@ -9222,7 +9222,7 @@ fn render_transcript_entry_range_with_turns(
                 (THOUGHT_GLYPH, theme.thought),
                 state.stream_visible_text(entry_index, &thought.text),
                 thought.completed,
-                collapse_limit.is_some() && state.thought_output == config::ThoughtOutput::Current,
+                collapse_limit.is_some() && state.thought_output == config::ThoughtOutput::Default,
                 width,
                 theme,
             ),
@@ -9231,7 +9231,7 @@ fn render_transcript_entry_range_with_turns(
                 (SUBAGENT_THOUGHT_GLYPH, theme.secondary),
                 state.stream_visible_text(entry_index, &thought.text),
                 thought.completed,
-                collapse_limit.is_some() && state.thought_output == config::ThoughtOutput::Current,
+                collapse_limit.is_some() && state.thought_output == config::ThoughtOutput::Default,
                 width,
                 theme,
             ),
@@ -9613,6 +9613,7 @@ fn push_thinking(
             thought_style,
         )));
     } else {
+        out.push(Line::from(Span::styled("thought", thought_style)));
         let text = if compact {
             active_thought_tail(&text)
         } else {
@@ -20474,7 +20475,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
-        assert_eq!(tail, vec!["○ I need to inspect this", ""]);
+        assert_eq!(tail, vec!["○ thought", "  I need to inspect this", ""]);
 
         state.apply_event(subagent_session_update(SessionUpdate::AgentThoughtChunk(
             text_chunk("implementing"),
@@ -21182,7 +21183,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
-        assert_eq!(primary_tail, vec!["○ planning the handoff", ""]);
+        assert_eq!(primary_tail, vec!["○ thought", "  planning the handoff", ""]);
 
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
@@ -21203,7 +21204,8 @@ mod tests {
         assert_eq!(
             live,
             vec![
-                "○ planning the handoff",
+                "○ thought",
+                "  planning the handoff",
                 "",
                 "subagent #1 · subagent · gpt-builder · started",
                 ""
@@ -21228,7 +21230,8 @@ mod tests {
                 .map(line_text)
                 .collect::<Vec<_>>(),
             vec![
-                "○ planning the handoff",
+                "○ thought",
+                "  planning the handoff",
                 "",
                 "subagent #1 · subagent · gpt-builder · started",
                 "",
@@ -24043,7 +24046,8 @@ mod tests {
         let active_text = active.iter().map(line_text).collect::<Vec<_>>();
         assert!(!active_text.iter().any(|line| line.contains("old one")));
         assert!(!active_text.iter().any(|line| line.contains("old two")));
-        assert!(active_text.iter().any(|line| line == "○ new one"));
+        assert!(active_text.iter().any(|line| line == "○ thought"));
+        assert!(active_text.iter().any(|line| line == "  new one"));
         assert!(active_text.iter().any(|line| line == "  new two"));
         assert!(active_text.iter().any(|line| line == "  new three"));
 
@@ -24071,17 +24075,17 @@ mod tests {
         let configured_full = render_transcript_lines(&state, 80);
         assert_eq!(
             configured_full.iter().map(line_text).collect::<Vec<_>>(),
-            vec!["○ first line", "  second line", ""]
+            vec!["○ thought", "  first line", "  second line", ""]
         );
 
-        state.thought_output = config::ThoughtOutput::Current;
+        state.thought_output = config::ThoughtOutput::Default;
         state.expand_transcript_details = true;
         let expanded = render_transcript_lines(&state, 80);
         assert_eq!(
             expanded.iter().map(line_text).collect::<Vec<_>>(),
-            vec!["○ first line", "  second line", ""]
+            vec!["○ thought", "  first line", "  second line", ""]
         );
-        for line in expanded.iter().take(2) {
+        for line in expanded.iter().take(3) {
             assert!(
                 line.spans
                     .iter()
@@ -24096,7 +24100,7 @@ mod tests {
                 .iter()
                 .map(line_text)
                 .collect::<Vec<_>>(),
-            vec!["○ first line", "  second line", ""]
+            vec!["○ thought", "  first line", "  second line", ""]
         );
     }
 
@@ -25065,10 +25069,11 @@ mod tests {
             .iter()
             .find(|l| line_text(l).contains("weighing"))
             .expect("thought row");
+        assert!(lines.iter().any(|line| line_text(line) == "○ thought"));
         assert!(
             lines
                 .iter()
-                .any(|line| line_text(line) == "○ weighing the options")
+                .any(|line| line_text(line) == "  weighing the options")
         );
         for span in &row.spans {
             assert_eq!(

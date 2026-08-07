@@ -50,24 +50,25 @@ pub enum ThoughtOutput {
     /// Preserve the compact transcript: completed thoughts become summaries
     /// and an active thought shows only its latest bounded tail.
     #[default]
-    Current,
+    #[serde(alias = "current")]
+    Default,
     /// Render every available line of agent thought text.
     Full,
 }
 
 impl ThoughtOutput {
-    pub const ALL: [Self; 2] = [Self::Current, Self::Full];
+    pub const ALL: [Self; 2] = [Self::Default, Self::Full];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Current => "current",
+            Self::Default => "default",
             Self::Full => "full",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::Current => "summarize completed thoughts; show the latest live thought",
+            Self::Default => "summarize completed thoughts; show the latest live thought",
             Self::Full => "show all available thought output",
         }
     }
@@ -88,7 +89,8 @@ impl std::str::FromStr for ThoughtOutput {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "current" => Ok(Self::Current),
+            // "current" was the v1.7.0 name for this variant.
+            "default" | "current" => Ok(Self::Default),
             "full" => Ok(Self::Full),
             _ => Err(format!(
                 "unknown thought output {value:?}; expected one of: {}",
@@ -2262,7 +2264,7 @@ mode = "ask"
     }
 
     #[test]
-    fn thought_output_defaults_to_current_and_full_roundtrips() {
+    fn thought_output_defaults_to_default_and_full_roundtrips() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         Config::default().save(&path).expect("save default");
@@ -2270,7 +2272,7 @@ mode = "ask"
         assert!(!body.contains("thought_output"));
         assert_eq!(
             Config::load(&path).expect("load default").thought_output,
-            ThoughtOutput::Current
+            ThoughtOutput::Default
         );
 
         let config = Config {
@@ -2283,6 +2285,23 @@ mode = "ask"
         assert_eq!(
             Config::load(&path).expect("load full").thought_output,
             ThoughtOutput::Full
+        );
+    }
+
+    #[test]
+    fn thought_output_accepts_legacy_current_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        Config::default().save(&path).expect("save default");
+        let body = std::fs::read_to_string(&path).expect("read");
+        std::fs::write(&path, format!("{body}thought_output = \"current\"\n")).expect("write");
+        assert_eq!(
+            Config::load(&path).expect("load legacy").thought_output,
+            ThoughtOutput::Default
+        );
+        assert_eq!(
+            "current".parse::<ThoughtOutput>().expect("parse legacy"),
+            ThoughtOutput::Default
         );
     }
 

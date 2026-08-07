@@ -2311,11 +2311,11 @@ mod tests {
         editor.tab = SettingsTab::Appearance;
         editor.selected = 2;
 
-        assert_eq!(editor.config.thought_output, ThoughtOutput::Current);
+        assert_eq!(editor.config.thought_output, ThoughtOutput::Default);
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(editor.config.thought_output, ThoughtOutput::Full);
         assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
-        assert_eq!(editor.config.thought_output, ThoughtOutput::Current);
+        assert_eq!(editor.config.thought_output, ThoughtOutput::Default);
     }
 
     #[test]
