@@ -1062,11 +1062,7 @@
         border: 0;
         border-bottom: 1px solid var(--line-row);
         background: transparent;
-        padding: 12px 14px 12px 18px;
-        cursor: pointer;
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
+        padding: 0;
         transition: background-color 0.15s ease;
 
         &:hover {
@@ -1076,6 +1072,54 @@
         &.active {
           background: linear-gradient(90deg, rgb(235 63 51 / 0.11), transparent 70%);
         }
+      }
+
+      .session-open {
+        width: 100%;
+        min-width: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        padding: 12px 52px 12px 18px;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        text-align: left;
+        font: inherit;
+      }
+
+      .session-action {
+        position: absolute;
+        z-index: 1;
+        top: 7px;
+        right: 10px;
+        width: 32px;
+        height: 32px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line-row);
+        background: var(--inline-bg);
+        color: var(--muted);
+        font: 700 12px/1 var(--font-mono);
+        cursor: pointer;
+      }
+
+      .session-action:hover,
+      .session-action:focus-visible {
+        border-color: var(--button-edge-hover);
+        color: var(--button-hover-text);
+        background: var(--inline-bg-strong);
+      }
+
+      .session-action.is-terminal {
+        cursor: help;
+        color: var(--dim);
+      }
+
+      .session-action:disabled {
+        cursor: wait;
+        opacity: 0.5;
       }
 
       .session-item.needs-approval {
@@ -1251,17 +1295,6 @@
         padding: 4px 8px 3px;
         box-shadow: 0 0 0 1px rgb(235 63 51 / 0.2), 0 0 16px rgb(235 63 51 / 0.22);
         animation: attention-fade 1.4s ease-in-out infinite;
-      }
-
-      .session-archive {
-        flex: 0 0 auto;
-        padding: 4px 8px 3px;
-        clip-path: var(--shape-chip);
-        background: var(--inline-bg-strong);
-        color: var(--dim);
-        font: 700 9px/1 var(--font-mono);
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
       }
 
       .session-meta {
@@ -3431,23 +3464,25 @@
     </section>
 
     <template id="tpl-session">
-      <button type="button" class="session-item">
-        <div class="session-top">
-          <span class="live-dot" aria-hidden="true"></span>
-          <span class="session-title"></span>
-          <span class="session-approval" hidden>approval</span>
-          <span class="session-archive" hidden>archived</span>
-        </div>
-        <div class="session-meta">
-          <span class="session-project"></span>
-          <span class="session-worktree" hidden></span>
-          <span class="session-agent"></span>
-        </div>
-        <div class="session-foot">
-          <span class="session-counts"></span>
-          <span class="session-updated" data-ts=""></span>
-        </div>
-      </button>
+      <div class="session-item">
+        <button type="button" class="session-open">
+          <div class="session-top">
+            <span class="live-dot" aria-hidden="true"></span>
+            <span class="session-title"></span>
+            <span class="session-approval" hidden>approval</span>
+          </div>
+          <div class="session-meta">
+            <span class="session-project"></span>
+            <span class="session-worktree" hidden></span>
+            <span class="session-agent"></span>
+          </div>
+          <div class="session-foot">
+            <span class="session-counts"></span>
+            <span class="session-updated" data-ts=""></span>
+          </div>
+        </button>
+        <button type="button" class="session-action"></button>
+      </div>
     </template>
 
     <template id="tpl-entry">
@@ -3630,6 +3665,7 @@
       const activityBySessionId = new Map();
       const sessionCardById = new Map();
       const historyCardById = new Map();
+      const pendingSessionActions = new Set();
       const stopRequestBySessionId = new Map();
       const deletingQueuedPromptIds = new Set();
       // Decisions already POSTed, keyed "<session_id>\u001f<request_id>",
@@ -4447,6 +4483,7 @@
         setSessionCreationUi(false);
         sessionCardById.clear();
         historyCardById.clear();
+        pendingSessionActions.clear();
         activityBySessionId.clear();
         sentDecisions.clear();
         sentConfigChanges.clear();
@@ -5273,18 +5310,92 @@
         return launchSessionCard.root;
       }
 
+      async function runSessionCardAction(sessionId, mode) {
+        if (mode === "terminal") {
+          statusEl.textContent =
+            "This is a live TUI session. Exit it in the terminal before it can be archived.";
+          return;
+        }
+        if (pendingSessionActions.has(sessionId)) {
+          return;
+        }
+        pendingSessionActions.add(sessionId);
+        renderAll();
+        try {
+          if (mode === "archive") {
+            statusEl.textContent = "Archiving session…";
+            const response = await apiFetch(
+              `/api/sessions/${encodeURIComponent(sessionId)}/archive`,
+              { method: "POST" },
+            );
+            if (!response.ok) {
+              const detail = await response.text();
+              throw new Error(detail || `HTTP ${response.status}`);
+            }
+            historyVisible = true;
+            historyLoaded = false;
+            await refreshSessions();
+            await refreshHistory();
+            statusEl.textContent = "Session archived.";
+            return;
+          }
+
+          statusEl.textContent = "Loading archived session…";
+          const response = await apiFetch(
+            `/api/sessions/${encodeURIComponent(sessionId)}/unarchive`,
+            { method: "POST" },
+          );
+          if (!response.ok) {
+            const detail = await response.text();
+            throw new Error(detail || `HTTP ${response.status}`);
+          }
+          const launch = await response.json();
+          const deadline = Date.now() + SESSION_LAUNCH_TIMEOUT_MS;
+          while (Date.now() < deadline) {
+            await sleep(600);
+            const launchFailure = await serverLaunchFailure(launch.launch_id);
+            if (launchFailure) {
+              throw new Error(launchFailure);
+            }
+            await refreshSessions();
+            if (sessions.some((session) => session.session_id === sessionId)) {
+              await refreshHistory(false);
+              navigateToSession(sessionId);
+              statusEl.textContent = "Session loaded.";
+              return;
+            }
+          }
+          throw new Error(SESSION_LAUNCH_TIMEOUT_DETAIL);
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            statusEl.textContent = `Session action failed: ${error.message}`;
+          }
+        } finally {
+          pendingSessionActions.delete(sessionId);
+          if (authenticated) {
+            renderAll();
+          }
+        }
+      }
+
       function createSessionCard(sessionId) {
         const root = cloneTemplate(sessionTpl);
         root.dataset.sessionId = sessionId;
-        root.addEventListener("click", () => {
+        const open = root.querySelector(".session-open");
+        const action = root.querySelector(".session-action");
+        open.addEventListener("click", () => {
           saveDraftForSelectedSession();
           navigateToSession(sessionId);
         });
+        action.addEventListener("click", () => {
+          void runSessionCardAction(sessionId, action.dataset.mode);
+        });
         return {
           root,
+          open,
+          action,
           title: root.querySelector(".session-title"),
           approval: root.querySelector(".session-approval"),
-          archive: root.querySelector(".session-archive"),
           project: root.querySelector(".session-project"),
           worktree: root.querySelector(".session-worktree"),
           agent: root.querySelector(".session-agent"),
@@ -5315,7 +5426,18 @@
         const needsApproval = !archived && sessionPendingPermissions(session).length > 0;
         card.root.classList.toggle("needs-approval", needsApproval);
         card.approval.hidden = !needsApproval;
-        card.archive.hidden = !archived;
+        const actionMode = archived ? "load" : session.web_owned ? "archive" : "terminal";
+        const actionHelp = actionMode === "load"
+          ? `Load ${sessionLabel(session)}`
+          : actionMode === "archive"
+            ? `Archive ${sessionLabel(session)}`
+            : "This is a live TUI session. Exit it in the terminal before it can be archived.";
+        card.action.dataset.mode = actionMode;
+        card.action.textContent = actionMode === "load" ? "↺" : actionMode === "archive" ? "⇩" : ">_";
+        card.action.title = actionHelp;
+        card.action.setAttribute("aria-label", actionHelp);
+        card.action.classList.toggle("is-terminal", actionMode === "terminal");
+        card.action.disabled = pendingSessionActions.has(session.session_id);
       }
 
       function renderSessions() {

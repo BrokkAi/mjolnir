@@ -234,6 +234,16 @@ pub struct SessionRecord {
     pub status: Option<SessionStatusRecord>,
 }
 
+/// A live session plus viewer-only ownership metadata. Ownership is derived
+/// from the in-process server session registry rather than persisted: terminal
+/// sessions and server-owned sessions publish the same durable record shape.
+#[derive(Debug, Serialize)]
+struct LiveSessionRecord {
+    #[serde(flatten)]
+    session: SessionRecord,
+    web_owned: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RagnarokRecord {
     pub task: String,
@@ -1638,6 +1648,7 @@ struct ServerState {
 
 #[derive(Debug)]
 struct ServerAgentSession {
+    session_id: Arc<Mutex<Option<String>>>,
     command_tx: mpsc::UnboundedSender<UiCommand>,
     task: JoinHandle<()>,
 }
@@ -1719,6 +1730,12 @@ impl ServerSessionLaunchRegistry {
 struct ServerSessionLaunchReporter {
     registry: Arc<ServerSessionLaunchRegistry>,
     launch_id: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ServerSessionStart {
+    resume_session: Option<String>,
+    reporter: Option<ServerSessionLaunchReporter>,
 }
 
 impl ServerSessionLaunchReporter {
@@ -1931,6 +1948,14 @@ impl ServerSessionManager {
     /// outcome: the agent starts on a detached task, so the launch has not
     /// succeeded merely because this returned.
     fn start_session(&self, cwd: PathBuf) -> u64 {
+        self.start_session_with_resume(cwd, None)
+    }
+
+    fn resume_session(&self, cwd: PathBuf, session_id: String) -> u64 {
+        self.start_session_with_resume(cwd, Some(session_id))
+    }
+
+    fn start_session_with_resume(&self, cwd: PathBuf, resume_session: Option<String>) -> u64 {
         let launch = self.launch.read().expect("server launch lock").clone();
         let launch_id = self.launches.begin();
         let reporter = ServerSessionLaunchReporter {
@@ -1944,7 +1969,10 @@ impl ServerSessionManager {
             self.additional_directories.clone(),
             self.snapshot_exclusions.clone(),
             self.fs_max_text_bytes,
-            Some(reporter.clone()),
+            ServerSessionStart {
+                resume_session,
+                reporter: Some(reporter.clone()),
+            },
         );
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.push(session);
@@ -1953,6 +1981,36 @@ impl ServerSessionManager {
             reporter.failed("server is shutting down");
         }
         launch_id
+    }
+
+    fn owns_session(&self, session_id: &str) -> bool {
+        self.sessions.lock().is_ok_and(|sessions| {
+            sessions.iter().any(|session| {
+                !session.task.is_finished()
+                    && session
+                        .session_id
+                        .lock()
+                        .is_ok_and(|current| current.as_deref() == Some(session_id))
+            })
+        })
+    }
+
+    async fn archive_session(&self, session_id: &str) -> bool {
+        let session = self.sessions.lock().ok().and_then(|mut sessions| {
+            sessions.retain(|session| !session.task.is_finished());
+            let index = sessions.iter().position(|session| {
+                session
+                    .session_id
+                    .lock()
+                    .is_ok_and(|current| current.as_deref() == Some(session_id))
+            })?;
+            Some(sessions.swap_remove(index))
+        });
+        let Some(session) = session else {
+            return false;
+        };
+        session.shutdown().await;
+        true
     }
 
     async fn shutdown_all(&self) {
@@ -4387,8 +4445,12 @@ fn start_server_agent_session(
     additional_directories: Vec<PathBuf>,
     snapshot_exclusions: Vec<PathBuf>,
     fs_max_text_bytes: u64,
-    launch_reporter: Option<ServerSessionLaunchReporter>,
+    start: ServerSessionStart,
 ) -> ServerAgentSession {
+    let ServerSessionStart {
+        resume_session,
+        reporter: launch_reporter,
+    } = start;
     let side_agent = agent.clone();
     let side_cwd = cwd.clone();
     let side_additional_directories = additional_directories.clone();
@@ -4397,6 +4459,8 @@ fn start_server_agent_session(
     let (server_cmd_tx, mut server_cmd_rx) = mpsc::unbounded_channel();
     let (remote_event_tx, mut remote_event_rx) = mpsc::unbounded_channel();
     let (side_event_tx, mut side_event_rx) = mpsc::unbounded_channel();
+    let session_id = Arc::new(Mutex::new(resume_session.clone()));
+    let published_session_id = Arc::clone(&session_id);
     // The adapter source id ("codex-acp", ...) — not the synthetic
     // `roster:{model}` launch id — so saved session options load from and
     // accepted live values persist to the same buckets the TUI uses.
@@ -4521,8 +4585,12 @@ fn start_server_agent_session(
         cwd,
         additional_directories,
         mcp_servers: Vec::new(),
-        resume_session: None,
-        session_restore_mode: acp::SessionRestoreMode::Continue,
+        resume_session: resume_session.clone(),
+        session_restore_mode: if resume_session.is_some() {
+            acp::SessionRestoreMode::Replay
+        } else {
+            acp::SessionRestoreMode::Continue
+        },
         env: agent.env,
         agent_stderr: None,
         fs_max_text_bytes,
@@ -4755,6 +4823,11 @@ fn start_server_agent_session(
                     {
                         reporter.started(session_id);
                     }
+                    if let UiEvent::SessionStarted { session_id, .. } = &event
+                        && let Ok(mut current) = published_session_id.lock()
+                    {
+                        *current = Some(session_id.clone());
+                    }
                     if let (Some(primary), UiEvent::SessionStarted { session_id, .. }) =
                         (provenance_primary.as_ref(), &event)
                     {
@@ -4812,7 +4885,11 @@ fn start_server_agent_session(
         tracker.shutdown().await;
     });
 
-    ServerAgentSession { command_tx, task }
+    ServerAgentSession {
+        session_id,
+        command_tx,
+        task,
+    }
 }
 
 impl ServerAgentSession {
@@ -6483,6 +6560,14 @@ fn build_router(config: RouterConfig) -> Router {
             axum::routing::delete(disconnect_session),
         )
         .route(
+            "/api/sessions/{session_id}/archive",
+            post(archive_server_owned_session),
+        )
+        .route(
+            "/api/sessions/{session_id}/unarchive",
+            post(unarchive_session),
+        )
+        .route(
             "/api/queued-prompts",
             get(list_queued_prompts).post(queue_prompt),
         )
@@ -6983,7 +7068,7 @@ async fn list_sessions(
 
 async fn list_live_sessions(
     State(state): State<ServerState>,
-) -> std::result::Result<Json<Vec<SessionRecord>>, (StatusCode, String)> {
+) -> std::result::Result<Json<Vec<LiveSessionRecord>>, (StatusCode, String)> {
     let db_path = Arc::clone(&state.db_path);
     let cutoff = connected_session_cutoff_rfc3339();
     let mut sessions = tokio::task::spawn_blocking(move || {
@@ -6993,7 +7078,148 @@ async fn list_live_sessions(
     .map_err(internal_error)?
     .map_err(internal_error)?;
     apply_live_native_modes(&mut sessions, &state.native_modes);
-    Ok(Json(sessions))
+    Ok(Json(
+        sessions
+            .into_iter()
+            .map(|session| LiveSessionRecord {
+                web_owned: state.session_manager.owns_session(&session.session_id),
+                session,
+            })
+            .collect(),
+    ))
+}
+
+async fn archive_server_owned_session(
+    State(state): State<ServerState>,
+    AxumPath(session_id): AxumPath<String>,
+) -> std::result::Result<StatusCode, (StatusCode, String)> {
+    let db_path = Arc::clone(&state.db_path);
+    let lookup_session_id = session_id.clone();
+    let connected = tokio::task::spawn_blocking(move || {
+        session_record_connection_state(
+            db_path.as_ref().as_path(),
+            &lookup_session_id,
+            &connected_session_cutoff_rfc3339(),
+        )
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    let Some(connected) = connected else {
+        return Err((StatusCode::NOT_FOUND, "unknown session".to_string()));
+    };
+    if !connected {
+        return Err((
+            StatusCode::CONFLICT,
+            "session is already archived".to_string(),
+        ));
+    }
+    if !state.session_manager.archive_session(&session_id).await {
+        return Err((
+            StatusCode::CONFLICT,
+            "this is a live TUI session; exit it in the terminal before it can be archived"
+                .to_string(),
+        ));
+    }
+
+    // The runtime performs the same disconnect during its final flush. Repeat
+    // it locally so the archive transition does not depend on loopback HTTP
+    // completing before this request returns.
+    let db_path = Arc::clone(&state.db_path);
+    let disconnected_session_id = session_id.clone();
+    tokio::task::spawn_blocking(move || {
+        disconnect_session_record(db_path.as_ref().as_path(), &disconnected_session_id)
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    if let Ok(mut native_modes) = state.native_modes.lock() {
+        native_modes.remove(&session_id);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unarchive_session(
+    State(state): State<ServerState>,
+    AxumPath(session_id): AxumPath<String>,
+) -> std::result::Result<(StatusCode, Json<NewServerSessionResponse>), (StatusCode, String)> {
+    if state.session_manager.owns_session(&session_id) {
+        return Err((
+            StatusCode::CONFLICT,
+            "session is already loaded in the web viewer".to_string(),
+        ));
+    }
+
+    let db_path = Arc::clone(&state.db_path);
+    let lookup_session_id = session_id.clone();
+    let (session, connected) = tokio::task::spawn_blocking(move || {
+        let session = load_session_record(db_path.as_ref().as_path(), &lookup_session_id)?;
+        let connected = session_record_is_connected(
+            db_path.as_ref().as_path(),
+            &lookup_session_id,
+            &connected_session_cutoff_rfc3339(),
+        )?;
+        Ok::<_, anyhow::Error>((session, connected))
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    let Some(session) = session else {
+        return Err((StatusCode::NOT_FOUND, "unknown session".to_string()));
+    };
+    if connected {
+        return Err((
+            StatusCode::CONFLICT,
+            "session is still live; exit its terminal instance before loading it in the web viewer"
+                .to_string(),
+        ));
+    }
+
+    let Some(cwd) = session
+        .status
+        .as_ref()
+        .and_then(|status| status.cwd.as_deref())
+        .filter(|cwd| !cwd.trim().is_empty())
+    else {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "archived session did not publish its working directory".to_string(),
+        ));
+    };
+    let roots = Arc::clone(&state.workspace_roots);
+    let requested_cwd = cwd.to_string();
+    let cwd = tokio::task::spawn_blocking(move || {
+        directory_under_roots(roots.as_slice(), &requested_cwd)
+    })
+    .await
+    .map_err(internal_error)??;
+
+    match state
+        .session_manager
+        .refresh_for_config(&state.mjconfig.config_path)
+        .await
+    {
+        Ok(Some(roster)) => state.mjconfig.update_from_roster(&roster),
+        Ok(None) => {}
+        Err(error) => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("saved configuration cannot load the session: {error}"),
+            ));
+        }
+    }
+    let launch_id = state
+        .session_manager
+        .resume_session(cwd.clone(), session_id);
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(NewServerSessionResponse {
+            display_path: crate::paths::display_path_with_tilde(&cwd),
+            cwd: cwd.display().to_string(),
+            worktree: session.worktree,
+            launch_id,
+        }),
+    ))
 }
 
 fn apply_live_native_modes(
@@ -8236,40 +8462,38 @@ fn prune_stale_records(db_path: &Path, history_ttl: Option<Duration>) -> Result<
     Ok(counts)
 }
 
+const SESSION_RECORD_SELECT: &str = "select
+    session_id,
+    name,
+    start_time,
+    last_update,
+    last_prompt_at,
+    total_messages,
+    project,
+    agent,
+    transcript_json,
+    pending_permissions_json,
+    session_config_json,
+    available_commands_json,
+    prompt_in_flight,
+    (
+        select count(*)
+        from queued_prompts
+        where queued_prompts.session_id = sessions.session_id
+    ) as queued_prompt_count,
+    prompt_images_supported,
+    worktree,
+    subagents_json,
+    status_json,
+    workspace_diff_json,
+    ragnarok_json
+from sessions";
+
 fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
     init_db(db_path)?;
     let conn = open_db(db_path)?;
-    let mut stmt = conn
-        .prepare(
-            "select
-                session_id,
-                name,
-                start_time,
-                last_update,
-                last_prompt_at,
-                total_messages,
-                project,
-                agent,
-                transcript_json,
-                pending_permissions_json,
-                session_config_json,
-                available_commands_json,
-                prompt_in_flight,
-                (
-                    select count(*)
-                    from queued_prompts
-                    where queued_prompts.session_id = sessions.session_id
-                ) as queued_prompt_count,
-                prompt_images_supported,
-                worktree,
-                subagents_json,
-                status_json,
-                workspace_diff_json,
-                ragnarok_json
-            from sessions
-            order by session_id asc",
-        )
-        .context("prepare session query")?;
+    let sql = format!("{SESSION_RECORD_SELECT} order by session_id asc");
+    let mut stmt = conn.prepare(&sql).context("prepare session query")?;
     let rows = stmt
         .query_map([], session_record_from_row)
         .context("query sessions")?;
@@ -8279,6 +8503,36 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
         .context("collect sessions")?;
     sort_session_records(&mut sessions);
     Ok(sessions)
+}
+
+fn load_session_record(db_path: &Path, session_id: &str) -> Result<Option<SessionRecord>> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    let sql = format!("{SESSION_RECORD_SELECT} where sessions.session_id = ?1");
+    conn.query_row(&sql, params![session_id], session_record_from_row)
+        .optional()
+        .context("query remote-control session")
+}
+
+fn session_record_is_connected(db_path: &Path, session_id: &str, cutoff: &str) -> Result<bool> {
+    Ok(session_record_connection_state(db_path, session_id, cutoff)?.unwrap_or(false))
+}
+
+fn session_record_connection_state(
+    db_path: &Path,
+    session_id: &str,
+    cutoff: &str,
+) -> Result<Option<bool>> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    conn.query_row(
+        "select connected = 1 and last_update >= ?2
+        from sessions where session_id = ?1",
+        params![session_id, cutoff],
+        |row| row.get::<_, bool>(0),
+    )
+    .optional()
+    .context("query remote-control session connection state")
 }
 
 fn load_recent_filesystem_directories(
@@ -10457,6 +10711,17 @@ mod tests {
         assert!(viewer.contains("selectedSessionIsArchived()"));
         assert!(viewer.contains("!selectedSessionIsLive()"));
         assert!(viewer.contains("Only live sessions can accept prompts."));
+    }
+
+    #[test]
+    fn embedded_viewer_exposes_owned_archive_and_history_load_actions() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("class=\"session-action\""));
+        assert!(viewer.contains("session.web_owned ? \"archive\" : \"terminal\""));
+        assert!(viewer.contains("/archive`"));
+        assert!(viewer.contains("/unarchive`"));
+        assert!(viewer.contains("Exit it in the terminal before it can be archived."));
+        assert!(viewer.contains("pendingSessionActions"));
     }
 
     #[tokio::test]
@@ -12838,6 +13103,136 @@ mod tests {
             .await
             .expect("unknown launch");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn web_owned_session_can_be_archived_while_terminal_session_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let token = "archive-token".to_string();
+        let manager = test_session_manager();
+        let mut web_session = session_named("web-session", &now_rfc3339());
+        web_session.status = Some(SessionStatusRecord {
+            model: "agent".to_string(),
+            cwd: Some(dir.path().display().to_string()),
+            ..SessionStatusRecord::default()
+        });
+        let terminal_session = session_named("terminal-session", &now_rfc3339());
+        upsert_session_record(&db_path, &web_session).expect("insert web session");
+        upsert_session_record(&db_path, &terminal_session).expect("insert terminal session");
+
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            assert!(matches!(command_rx.recv().await, Some(UiCommand::Shutdown)));
+        });
+        manager
+            .sessions
+            .lock()
+            .expect("server sessions")
+            .push(ServerAgentSession {
+                session_id: Arc::new(Mutex::new(Some("web-session".to_string()))),
+                command_tx,
+                task,
+            });
+
+        let app = build_router(RouterConfig {
+            db_path: db_path.clone(),
+            token: token.clone(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "test-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+            workspace_roots: test_workspace_roots(dir.path()),
+            session_manager: Arc::clone(&manager),
+            mjconfig: test_mjconfig_runtime(),
+        });
+        let request = |method: &str, uri: &str| {
+            axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .expect("request")
+        };
+
+        let live = app
+            .clone()
+            .oneshot(request("GET", "/live/sessions"))
+            .await
+            .expect("list live sessions");
+        let live: serde_json::Value = serde_json::from_slice(
+            &live
+                .into_body()
+                .collect()
+                .await
+                .expect("live body")
+                .to_bytes(),
+        )
+        .expect("live json");
+        let web = live
+            .as_array()
+            .expect("live array")
+            .iter()
+            .find(|session| session["session_id"] == "web-session")
+            .expect("web session");
+        let terminal = live
+            .as_array()
+            .expect("live array")
+            .iter()
+            .find(|session| session["session_id"] == "terminal-session")
+            .expect("terminal session");
+        assert_eq!(web["web_owned"], true);
+        assert_eq!(terminal["web_owned"], false);
+
+        let archived = app
+            .clone()
+            .oneshot(request("POST", "/api/sessions/web-session/archive"))
+            .await
+            .expect("archive web session");
+        assert_eq!(archived.status(), StatusCode::NO_CONTENT);
+        assert!(!manager.owns_session("web-session"));
+        assert!(
+            !session_record_is_connected(
+                &db_path,
+                "web-session",
+                &connected_session_cutoff_rfc3339(),
+            )
+            .expect("web connection state")
+        );
+
+        let rejected = app
+            .clone()
+            .oneshot(request("POST", "/api/sessions/terminal-session/archive"))
+            .await
+            .expect("reject terminal archive");
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+        let detail = String::from_utf8(
+            rejected
+                .into_body()
+                .collect()
+                .await
+                .expect("rejection body")
+                .to_bytes()
+                .to_vec(),
+        )
+        .expect("rejection text");
+        assert!(detail.contains("exit it in the terminal"), "{detail}");
+
+        let loaded = app
+            .oneshot(request("POST", "/api/sessions/web-session/unarchive"))
+            .await
+            .expect("load archived web session");
+        assert_eq!(loaded.status(), StatusCode::ACCEPTED);
+        let loaded: NewServerSessionResponse = serde_json::from_slice(
+            &loaded
+                .into_body()
+                .collect()
+                .await
+                .expect("load response body")
+                .to_bytes(),
+        )
+        .expect("load response json");
+        assert_eq!(loaded.cwd, dir.path().display().to_string());
+        assert!(loaded.launch_id > 0);
     }
 
     #[tokio::test]
