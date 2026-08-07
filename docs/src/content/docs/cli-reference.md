@@ -46,6 +46,7 @@ control](/remote/) for behavioral boundaries.
 | Command | Purpose |
 | --- | --- |
 | `/mjconfig` | Configure agents, ACP servers, and appearance |
+| `/diff` | Show workspace changes against `HEAD` |
 | `/agents` | Show the active model selections and per-seat usage |
 | `/review` | Choose a recent, uncommitted, or HEAD findings-only review |
 | `/review recent` | Review the latest change-producing turn |

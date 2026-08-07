@@ -5120,6 +5120,16 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
+    if plain_text_only && text == "/diff" {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        state.open_workspace_diff_viewer();
+        let _ = cmd_tx.send(UiCommand::RefreshWorkspaceDiff);
+        return;
+    }
+
     if plain_text_only && text == "/agents" {
         state.input.clear();
         clear_attachments(state);
@@ -19527,6 +19537,26 @@ mod tests {
 
         assert!(state.mjconfig_menu.is_some(), "menu should be open");
         assert!(state.input.is_empty(), "input should be consumed");
+    }
+
+    #[test]
+    fn slash_diff_opens_workspace_viewer_without_queueing_while_busy() {
+        let mut state = AppState::new();
+        state.record_user_prompt("active".to_string());
+        state.input = "/diff".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.workspace_diff_viewer, "viewer should be open");
+        assert!(state.workspace_diff_loading, "refresh should be in flight");
+        assert!(state.input.is_empty(), "input should be consumed");
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::RefreshWorkspaceDiff)
+        ));
+        assert!(cmd_rx.try_recv().is_err(), "no prompt should be queued");
+        assert_eq!(state.queued_prompt_count(), 0);
     }
 
     #[test]

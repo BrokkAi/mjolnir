@@ -216,6 +216,7 @@ const BUILTIN_LOAD_COMMAND: &str = "load";
 const BUILTIN_FORK_COMMAND: &str = "fork";
 const BUILTIN_SIDE_COMMAND: &str = "side";
 const BUILTIN_EXPORT_COMMAND: &str = "export";
+const BUILTIN_DIFF_COMMAND: &str = "diff";
 const BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
 const BUILTIN_AGENTS_COMMAND: &str = "agents";
 const BUILTIN_SUBAGENTS_COMMAND: &str = "subagents";
@@ -275,6 +276,10 @@ fn builtin_mjconfig_command() -> AvailableCommand {
     )
 }
 
+fn builtin_diff_command() -> AvailableCommand {
+    AvailableCommand::new(BUILTIN_DIFF_COMMAND, "show workspace changes against HEAD")
+}
+
 fn builtin_agents_command() -> AvailableCommand {
     AvailableCommand::new(
         BUILTIN_AGENTS_COMMAND,
@@ -330,6 +335,7 @@ fn install_builtin_commands(
             && command.name != BUILTIN_FORK_COMMAND
             && command.name != BUILTIN_SIDE_COMMAND
             && command.name != BUILTIN_EXPORT_COMMAND
+            && command.name != BUILTIN_DIFF_COMMAND
             && command.name != BUILTIN_MJCONFIG_COMMAND
             && command.name != BUILTIN_AGENTS_COMMAND
             && command.name != BUILTIN_SUBAGENTS_COMMAND
@@ -347,6 +353,7 @@ fn install_builtin_commands(
     commands.insert(0, builtin_ragnarok_command());
     commands.insert(0, builtin_memory_command());
     commands.insert(0, builtin_mjconfig_command());
+    commands.insert(0, builtin_diff_command());
     commands.insert(0, builtin_review_command());
     commands.insert(0, builtin_terminals_command());
     commands.insert(0, builtin_subagents_command());
@@ -367,6 +374,7 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
             BUILTIN_LOAD_COMMAND,
             BUILTIN_FORK_COMMAND,
             BUILTIN_SIDE_COMMAND,
+            BUILTIN_DIFF_COMMAND,
             BUILTIN_MJCONFIG_COMMAND,
             BUILTIN_AGENTS_COMMAND,
             BUILTIN_SUBAGENTS_COMMAND,
@@ -10607,6 +10615,7 @@ mod tests {
                 "subagents",
                 "terminals",
                 "review",
+                "diff",
                 "mjconfig",
                 "memory",
                 "ragnarok"
@@ -10648,6 +10657,7 @@ mod tests {
                 "subagents",
                 "terminals",
                 "review",
+                "diff",
                 "mjconfig",
                 "memory",
                 "ragnarok",
@@ -10696,6 +10706,7 @@ mod tests {
                 "subagents",
                 "terminals",
                 "review",
+                "diff",
                 "mjconfig",
                 "memory",
                 "ragnarok",
@@ -10757,6 +10768,7 @@ mod tests {
                 "subagents",
                 "terminals",
                 "review",
+                "diff",
                 "mjconfig",
                 "memory",
                 "ragnarok",
