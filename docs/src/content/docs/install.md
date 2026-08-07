@@ -164,9 +164,8 @@ bridges and Bifrost, Mjolnir uses a PATH-visible `npx` or, on Linux, macOS, and
 Windows, installs embedded Node.js 24 automatically. Sign-in actions use the
 `codex` and `claude` CLIs as well.
 
-Custom ACP servers are optional. The ACP Servers panel configures
-only the built-in Codex and Claude routes. Custom ACP commands can still be
-declared directly in `config.toml` for advanced deployments.
+The ACP Servers panel configures the built-in Codex and Claude routes, which
+are the only supported ACP servers.
 
 Adapters must advertise ACP Streamable HTTP MCP support; Mjolnir uses that
 capability to expose its authenticated `mj-subagents` tools to the primary

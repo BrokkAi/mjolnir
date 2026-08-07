@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use futures::{StreamExt, stream};
 
-use crate::config::{AcpServerOrigin, AcpServerPolicy, Config, PermissionPreset};
+use crate::config::{AcpServerPolicy, Config, PermissionPreset};
 use crate::deepswe::{self, Row};
 use crate::subscription::Subscriptions;
 use crate::{model_resolve, probe};
@@ -21,7 +21,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 pub enum AdapterKind {
     Codex,
     Claude,
-    Custom,
 }
 
 impl AdapterKind {
@@ -29,7 +28,6 @@ impl AdapterKind {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
-            Self::Custom => "Custom",
         }
     }
 
@@ -71,13 +69,6 @@ pub fn configure_permissions(
         (AdapterKind::Claude, PermissionPreset::Manual) => ("mode", "default", None),
         (AdapterKind::Claude, PermissionPreset::Auto) => ("mode", "auto", Some("default")),
         (AdapterKind::Claude, PermissionPreset::Yolo) => ("mode", "bypassPermissions", None),
-        (AdapterKind::Custom, PermissionPreset::Manual) => ("permission_mode", "default", None),
-        (AdapterKind::Custom, PermissionPreset::Auto) => {
-            ("permission_mode", "auto", Some("default"))
-        }
-        (AdapterKind::Custom, PermissionPreset::Yolo) => {
-            ("permission_mode", "bypassPermissions", None)
-        }
     };
     Some(RuntimePermissionConfig {
         config_id: config_id.to_string(),
@@ -238,7 +229,6 @@ pub struct AcpServerInfo {
     pub launch: AdapterLaunch,
     pub model_count: usize,
     pub error: Option<String>,
-    pub origin: Option<AcpServerOrigin>,
     pub session_config: Vec<agent_client_protocol::schema::v1::SessionConfigOption>,
     /// Subscription tier behind this server's account, when it has one.
     pub subscription: Option<String>,
@@ -427,7 +417,6 @@ fn adapter_accepts_model(kind: AdapterKind, model: &str) -> bool {
     match kind {
         AdapterKind::Codex => deepswe::model_provider(model) == "openai",
         AdapterKind::Claude => deepswe::model_provider(model) == "anthropic",
-        AdapterKind::Custom => true,
     }
 }
 
@@ -453,7 +442,6 @@ fn launch_for(kind: AdapterKind) -> AdapterLaunch {
             ],
             env: HashMap::new(),
         },
-        AdapterKind::Custom => unreachable!("custom launches come from configuration"),
     }
 }
 
@@ -491,7 +479,6 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
                 launch,
                 model_count: 0,
                 error: None,
-                origin: None,
                 session_config: Vec::new(),
                 subscription: availability
                     .subscriptions
@@ -500,36 +487,6 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
             }
         })
         .collect::<Vec<_>>();
-    let configured_ids = config
-        .acp
-        .servers
-        .iter()
-        .map(|server| server.id.as_str())
-        .collect::<HashSet<_>>();
-    servers.retain(|server| !configured_ids.contains(server.id.as_str()));
-    servers.extend(config.acp.servers.iter().map(|server| {
-        let selected = server.policy == AcpServerPolicy::Enabled;
-        AcpServerInfo {
-            id: server.id.clone(),
-            label: server.label.clone(),
-            policy: server.policy,
-            detected: true,
-            selected,
-            evidence: "custom command".to_string(),
-            launch: AdapterLaunch {
-                kind: AdapterKind::Custom,
-                source_id: server.id.clone(),
-                command: server.command.clone(),
-                args: server.args.clone(),
-                env: server.env.clone(),
-            },
-            model_count: 0,
-            error: None,
-            origin: Some(server.origin),
-            session_config: Vec::new(),
-            subscription: None,
-        }
-    }));
     servers.retain(inventory_server_is_visible);
     AcpInventory { servers }
 }
@@ -556,7 +513,6 @@ fn inventory_server_is_visible(server: &AcpServerInfo) -> bool {
     AdapterKind::from_source_id(&server.id).is_some()
         || server.detected
         || server.error.is_some()
-        || server.origin.is_some()
         || server.policy != AcpServerPolicy::Auto
 }
 
@@ -635,16 +591,7 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
             capabilities.session_config.clone(),
         );
         let options = capabilities.models;
-        let matched_values = options
-            .iter()
-            .filter(|option| {
-                rows.iter().any(|row| {
-                    adapter_accepts_model(launch.kind, &row.model)
-                        && option_matches(&launch, option, row)
-                })
-            })
-            .map(|option| option.value.clone())
-            .collect::<HashSet<_>>();
+        let mut matched_values = HashSet::new();
         for row in rows
             .iter()
             .filter(|row| adapter_accepts_model(launch.kind, &row.model))
@@ -653,6 +600,7 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
                 .iter()
                 .find(|option| option_matches(&launch, option, row))
             {
+                matched_values.insert(option.value.clone());
                 resolved.push(ResolvedAgent {
                     model: row.clone(),
                     model_value: option.value.clone(),
@@ -662,25 +610,25 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
                 });
             }
         }
-        if launch.kind == AdapterKind::Custom {
-            for option in options
-                .iter()
-                .filter(|option| !matched_values.contains(&option.value))
-            {
-                let id = custom_model_id(&launch.source_id, &option.value);
-                resolved.push(ResolvedAgent {
-                    model: Row {
-                        model: id,
-                        reasoning_effort: None,
-                        pass_at_1: 0.0,
-                        mean_cost_usd: 0.0,
-                    },
-                    model_value: option.value.clone(),
-                    launch: launch.clone(),
-                    ranked: false,
+        // Adapters advertise models the leaderboard doesn't rank (e.g.
+        // claude-acp's `haiku`). Surface them unranked under their advertised
+        // value so they stay selectable.
+        for option in options
+            .iter()
+            .filter(|option| !matched_values.contains(&option.value))
+        {
+            resolved.push(ResolvedAgent {
+                model: Row {
+                    model: option.value.clone(),
                     reasoning_effort: None,
-                });
-            }
+                    pass_at_1: 0.0,
+                    mean_cost_usd: 0.0,
+                },
+                model_value: option.value.clone(),
+                launch: launch.clone(),
+                ranked: false,
+                reasoning_effort: None,
+            });
         }
     }
     resolved.sort_by(|a, b| {
@@ -704,11 +652,6 @@ fn configured_launches(inventory: &AcpInventory) -> Vec<AdapterLaunch> {
         .filter(|server| server.selected)
         .map(|server| server.launch.clone())
         .collect()
-}
-
-fn custom_model_id(source_id: &str, model_value: &str) -> String {
-    let name = source_id.strip_prefix("custom:").unwrap_or(source_id);
-    format!("custom/{name}/{model_value}")
 }
 
 async fn discover_available(rows: &[Row], inventory: &AcpInventory, cwd: &Path) -> Discovery {
@@ -754,17 +697,10 @@ fn explicit<'a>(
     if let Some(candidate) = preferred_route(selector, available, acp_priority) {
         return Ok(candidate);
     }
-    if selector.starts_with("custom/") {
-        if let Some(candidate) = available.iter().find(|candidate| {
-            candidate.launch.kind == AdapterKind::Custom
-                && custom_model_id(&candidate.launch.source_id, &candidate.model_value) == selector
-        }) {
-            return Ok(candidate);
-        }
-        bail!("{seat} model '{selector}' is unavailable from its configured custom ACP server");
-    }
     if !rows.iter().any(|row| row.model == selector) {
-        bail!("{seat} model '{selector}' is not an eligible DeepSWE High/default model");
+        bail!(
+            "{seat} model '{selector}' is not a ranked DeepSWE model and no connected ACP adapter advertised it"
+        );
     }
     bail!("{seat} model '{selector}' is unavailable: no HTTP-MCP-capable ACP adapter advertised it")
 }
@@ -950,18 +886,6 @@ fn unavailable_reason(
     adapter_errors: &HashMap<String, String>,
 ) -> String {
     let mut reasons = Vec::new();
-    for server in config
-        .acp
-        .servers
-        .iter()
-        .filter(|server| server.policy == AcpServerPolicy::Enabled)
-    {
-        let source = server.id.clone();
-        reasons.push(match adapter_errors.get(&source) {
-            Some(reason) => format!("{}: {reason}", server.label),
-            None => format!("{} did not advertise this model", server.label),
-        });
-    }
     match adapter_kind(&row.model) {
         None => reasons.push("no built-in ACP adapter serves this model's provider".to_string()),
         Some(native) => {
@@ -975,12 +899,10 @@ fn unavailable_reason(
                     availability.claude_status.logged_in()
                         || config.acp.policy("claude-acp") == AcpServerPolicy::Enabled
                 }
-                AdapterKind::Custom => false,
             };
             let native_enabled = match native {
                 AdapterKind::Codex => config.acp.policy("codex-acp") != AcpServerPolicy::Disabled,
                 AdapterKind::Claude => config.acp.policy("claude-acp") != AcpServerPolicy::Disabled,
-                AdapterKind::Custom => true,
             };
             if !native_enabled {
                 reasons.push(format!("{native_source} is disabled in config"));
@@ -1081,9 +1003,7 @@ fn assemble_roster(
             .next()
             .map(|reason| format!(" ({reason})"))
             .unwrap_or_default();
-        bail!(
-            "no model is launchable{diagnostic}: install or authenticate an ACP adapter, or configure a custom ACP server"
-        );
+        bail!("no model is launchable{diagnostic}: install or authenticate Codex or Claude Code");
     }
 
     if matches!(
@@ -1257,25 +1177,13 @@ mod tests {
     }
 
     #[test]
-    fn custom_explicit_yolo_permission_uses_the_generic_config_option() {
-        let mut env = HashMap::new();
-        let custom = configure_permissions(AdapterKind::Custom, PermissionPreset::Yolo, &mut env)
-            .expect("Custom preset");
-
-        assert_eq!(custom.config_id, "permission_mode");
-        assert_eq!(custom.value, "bypassPermissions");
-        assert_eq!(custom.manual_fallback, None);
-        assert_eq!(custom.mode, PermissionPreset::Yolo);
-    }
-
-    #[test]
-    fn custom_without_explicit_permission_mode_sends_no_config() {
+    fn omitted_permission_mode_sends_no_config() {
         let mut env = HashMap::new();
         let omitted: Option<PermissionPreset> = None;
-        let custom =
-            omitted.and_then(|mode| configure_permissions(AdapterKind::Custom, mode, &mut env));
+        let sent =
+            omitted.and_then(|mode| configure_permissions(AdapterKind::Claude, mode, &mut env));
 
-        assert_eq!(custom, None);
+        assert_eq!(sent, None);
     }
 
     fn option(value: &str) -> probe::ModelOption {
@@ -1292,16 +1200,6 @@ mod tests {
             models: values.iter().map(|value| option(value)).collect(),
             session_config: Vec::new(),
         })
-    }
-
-    fn custom_launch(name: &str) -> AdapterLaunch {
-        AdapterLaunch {
-            kind: AdapterKind::Custom,
-            source_id: format!("custom:{name}"),
-            command: PathBuf::from(name),
-            args: Vec::new(),
-            env: HashMap::new(),
-        }
     }
 
     fn role(model: &str, pass_at_1: f64) -> ResolvedAgent {
@@ -1451,39 +1349,6 @@ mod tests {
                 .model,
             "claude-fable-5"
         );
-    }
-
-    #[test]
-    fn auto_primary_ignores_third_party_routes_for_a_favored_vendor() {
-        // An Anthropic model served through a custom ACP server bills that
-        // server, not the Claude subscription, so it cannot satisfy a Claude
-        // preference.
-        let mut bridged_claude = role("claude-fable-5", 0.70);
-        bridged_claude.launch = custom_launch("bridge");
-        let available = vec![bridged_claude, role("gpt-5-6-sol", 0.68)];
-
-        let chosen =
-            choose_primary_auto(&available, &plans("max20", "plus"), &[]).expect("ranked fallback");
-        assert_eq!(chosen.launch.kind, AdapterKind::Custom);
-        assert_eq!(chosen.model.model, "claude-fable-5");
-    }
-
-    #[test]
-    fn auto_primary_keeps_the_favored_vendor_route_over_custom_priority() {
-        let mut bridged_gpt = role("gpt-5-6-sol", 0.68);
-        bridged_gpt.launch = custom_launch("bridge");
-        let available = vec![
-            role("claude-fable-5", 0.70),
-            bridged_gpt,
-            role("gpt-5-6-sol", 0.68),
-        ];
-        let priority = vec!["custom:bridge".to_string(), "codex-acp".to_string()];
-
-        let chosen = choose_primary_auto(&available, &plans("pro", "pro"), &priority)
-            .expect("favored native route");
-
-        assert_eq!(chosen.model.model, "gpt-5-6-sol");
-        assert_eq!(chosen.launch.kind, AdapterKind::Codex);
     }
 
     #[test]
@@ -1698,54 +1563,12 @@ mod tests {
     fn adapter_display_names_match_the_primary_acp_products() {
         assert_eq!(AdapterKind::Codex.display_name(), "Codex");
         assert_eq!(AdapterKind::Claude.display_name(), "Claude Code");
-        assert_eq!(AdapterKind::Custom.display_name(), "Custom");
-    }
-
-    #[test]
-    fn opencode_normalizes_provider_and_openrouter_model_values() {
-        let row = role_at("claude-opus-4-8", 0.5, 4.0).model;
-        let launch = AdapterLaunch {
-            kind: AdapterKind::Custom,
-            source_id: "opencode".to_string(),
-            command: PathBuf::from("opencode"),
-            args: vec!["acp".to_string()],
-            env: HashMap::new(),
-        };
-        assert!(option_matches(
-            &launch,
-            &option("anthropic/claude-opus-4-8"),
-            &row
-        ));
-        assert!(option_matches(
-            &launch,
-            &option("openrouter/anthropic/claude-opus-4-8"),
-            &row
-        ));
     }
 
     #[test]
     fn configured_launches_exclude_disabled_adapters() {
         let mut config = Config::default();
         config.set_acp_server_policy("codex-acp", AcpServerPolicy::Disabled);
-        config.set_acp_server_policy("opencode-acp", AcpServerPolicy::Disabled);
-        config.acp.servers.push(crate::config::ConfiguredAcpServer {
-            id: "custom:disabled".to_string(),
-            label: "disabled".to_string(),
-            command: PathBuf::from("disabled-acp"),
-            args: Vec::new(),
-            env: HashMap::new(),
-            origin: AcpServerOrigin::Custom,
-            policy: AcpServerPolicy::Disabled,
-        });
-        config.acp.servers.push(crate::config::ConfiguredAcpServer {
-            id: "custom:enabled".to_string(),
-            label: "enabled".to_string(),
-            command: PathBuf::from("enabled-acp"),
-            args: Vec::new(),
-            env: HashMap::new(),
-            origin: AcpServerOrigin::Custom,
-            policy: AcpServerPolicy::Enabled,
-        });
         let mut inventory = discover_inventory(&config);
         for server in &mut inventory.servers {
             if server.id == "claude-acp" {
@@ -1757,8 +1580,7 @@ mod tests {
             .into_iter()
             .map(|launch| launch.source_id)
             .collect::<Vec<_>>();
-        assert!(ids.contains(&"custom:enabled".to_string()));
-        assert!(!ids.contains(&"custom:disabled".to_string()));
+        assert!(ids.contains(&"claude-acp".to_string()));
         assert!(!ids.contains(&"codex-acp".to_string()));
     }
 
@@ -1828,7 +1650,6 @@ mod tests {
             launch,
             model_count: 0,
             error: None,
-            origin: None,
             session_config: Vec::new(),
             subscription: None,
         };
@@ -1856,175 +1677,60 @@ mod tests {
     }
 
     #[test]
-    fn route_precedence_is_custom_then_native() {
+    fn incompatible_and_failed_adapters_are_excluded_with_sanitized_reasons() {
         let rows = vec![
             role_at("gpt-5-5", 0.6, 5.0).model,
             role_at("claude-opus-4-8", 0.5, 4.0).model,
-            Row {
-                model: "glm-5-2".to_string(),
-                reasoning_effort: Some("high".to_string()),
-                pass_at_1: 0.1,
-                mean_cost_usd: 9.0,
-            },
         ];
-        let custom = custom_launch("company");
-        let discovery = resolve_probes(
-            &rows,
-            vec![
-                (
-                    0,
-                    custom.clone(),
-                    capabilities(true, &["gpt-5-5", "glm-5-2"]),
-                ),
-                (
-                    1,
-                    launch_for(AdapterKind::Codex),
-                    capabilities(true, &["gpt-5-5"]),
-                ),
-                (
-                    2,
-                    launch_for(AdapterKind::Claude),
-                    capabilities(true, &["claude-opus-4-8"]),
-                ),
-            ],
-        );
-        let route = |model: &str| {
-            discovery
-                .available
-                .iter()
-                .find(|role| role.model.model == model)
-                .expect("resolved route")
-                .launch
-                .source_id
-                .as_str()
-        };
-        assert_eq!(route("gpt-5-5"), "custom:company");
-        assert_eq!(route("claude-opus-4-8"), "claude-acp");
-        // Only the custom server advertised this one, so it wins by default.
-        assert_eq!(route("glm-5-2"), "custom:company");
-    }
-
-    #[test]
-    fn duplicate_model_routes_are_retained_and_each_seat_uses_its_priority() {
-        let rows = vec![role_at("gpt-5-5", 0.6, 5.0).model];
         let discovery = resolve_probes(
             &rows,
             vec![
                 (
                     0,
                     launch_for(AdapterKind::Codex),
-                    capabilities(true, &["gpt-5-5"]),
-                ),
-                (1, custom_launch("bridge"), capabilities(true, &["gpt-5-5"])),
-            ],
-        );
-        assert_eq!(discovery.available.len(), 2);
-
-        let mut config = Config::default();
-        config.agent.model = "gpt-5-5".to_string();
-        config.agent.acp_priority = vec!["custom:bridge".to_string(), "codex-acp".to_string()];
-        config.subagents.model = "gpt-5-5".to_string();
-        config.subagents.acp_priority = vec!["codex-acp".to_string(), "custom:bridge".to_string()];
-        let availability = Availability {
-            codex_credentials: true,
-            claude_status: ClaudeAuthStatus::NotLoggedIn,
-            subscriptions: Subscriptions::default(),
-        };
-        let roster = assemble_roster(
-            &config,
-            &rows,
-            &availability,
-            AcpInventory::default(),
-            discovery,
-        )
-        .expect("resolve independent seat priorities");
-
-        assert_eq!(roster.primary.launch.source_id, "custom:bridge");
-        assert_eq!(
-            roster
-                .subagent_default
-                .expect("subagent route")
-                .launch
-                .source_id,
-            "codex-acp"
-        );
-    }
-
-    #[test]
-    fn incompatible_and_failed_adapters_are_excluded_with_sanitized_reasons() {
-        let rows = vec![role_at("gpt-5-5", 0.6, 5.0).model];
-        let discovery = resolve_probes(
-            &rows,
-            vec![
-                (
-                    0,
-                    custom_launch("no-http"),
                     capabilities(false, &["gpt-5-5"]),
                 ),
                 (
                     1,
-                    custom_launch("needs-auth"),
+                    launch_for(AdapterKind::Claude),
                     Err("needs auth".to_string()),
                 ),
             ],
         );
         assert!(discovery.available.is_empty());
         assert_eq!(
-            discovery.adapter_errors["custom:no-http"],
+            discovery.adapter_errors["codex-acp"],
             "ACP server does not advertise mcpCapabilities.http"
         );
-        assert_eq!(discovery.adapter_errors["custom:needs-auth"], "needs auth");
+        assert_eq!(discovery.adapter_errors["claude-acp"], "needs auth");
     }
 
     #[test]
-    fn custom_unmatched_models_are_unranked_and_preserve_exact_values() {
-        let rows = vec![role_at("gpt-5-5", 0.6, 5.0).model];
+    fn builtin_unranked_models_surface_by_advertised_value() {
+        // claude-acp advertises `haiku`, which has no leaderboard row: it must
+        // stay selectable, unranked, under its plain advertised value.
+        let rows = vec![role_at("claude-opus-4-8", 0.5, 4.0).model];
         let discovery = resolve_probes(
             &rows,
             vec![(
                 0,
-                custom_launch("company"),
-                capabilities(true, &["company/private-model"]),
-            )],
-        );
-        let role = discovery.available.first().expect("unranked model");
-        assert!(!role.ranked);
-        assert_eq!(role.model.model, "custom/company/company/private-model");
-        assert_eq!(role.model_value, "company/private-model");
-    }
-
-    #[test]
-    fn explicit_custom_selector_resolves_ranked_model_by_exact_advertised_value() {
-        let rows = vec![Row {
-            model: "kimi-k2-7-code".to_string(),
-            reasoning_effort: None,
-            pass_at_1: 0.3,
-            mean_cost_usd: 2.8,
-        }];
-        let discovery = resolve_probes(
-            &rows,
-            vec![(
-                0,
-                custom_launch("bpr-agent"),
-                capabilities(true, &["openrouter::moonshotai/kimi-k2.7-code"]),
+                launch_for(AdapterKind::Claude),
+                capabilities(true, &["claude-opus-4-8", "haiku"]),
             )],
         );
 
-        let resolved = explicit(
-            "Agent",
-            "custom/bpr-agent/openrouter::moonshotai/kimi-k2.7-code",
-            &rows,
-            &discovery.available,
-            &[],
-        )
-        .expect("exact custom selector");
+        let haiku = discovery
+            .available
+            .iter()
+            .find(|role| role.model.model == "haiku")
+            .expect("unranked haiku entry");
+        assert!(!haiku.ranked);
+        assert_eq!(haiku.model_value, "haiku");
+        assert_eq!(haiku.launch.source_id, "claude-acp");
 
-        assert_eq!(resolved.model.model, "kimi-k2-7-code");
-        assert_eq!(
-            resolved.model_value,
-            "openrouter::moonshotai/kimi-k2.7-code"
-        );
-        assert_eq!(resolved.launch.source_id, "custom:bpr-agent");
+        let resolved =
+            explicit("Agent", "haiku", &rows, &discovery.available, &[]).expect("haiku pin");
+        assert_eq!(resolved.model_value, "haiku");
     }
 
     #[test]

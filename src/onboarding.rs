@@ -246,7 +246,7 @@ mod tests {
             },
             model_value: model.to_string(),
             launch: AdapterLaunch {
-                kind: AdapterKind::Custom,
+                kind: AdapterKind::from_source_id(source_id).unwrap_or(AdapterKind::Claude),
                 source_id: source_id.to_string(),
                 command: PathBuf::from(source_id),
                 args: Vec::new(),

@@ -1045,8 +1045,8 @@ pub struct AppState {
     /// Human-readable ACP adapter backing the primary model, such as Codex or
     /// Claude Code. Kept separate from the role/model label in the header.
     primary_acp_name: String,
-    /// Registry `source_id` of the launched agent (e.g. `claude-acp`,
-    /// `opencode`, `custom:foo`). Distinct from `agent_label`,
+    /// Registry `source_id` of the launched agent (`claude-acp` or
+    /// `codex-acp`). Distinct from `agent_label`,
     /// which is a *display* string; this is the stable id the model-score
     /// resolver keys on. Empty until the launch site fills it in.
     pub agent_source_id: String,

@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::paths::{expand_home_shortcut, normalize_spawn_program};
 use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
 
@@ -594,8 +593,6 @@ pub struct AcpConfig {
     /// Policy overrides for built-in auto-detected servers. Missing means Auto.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub policies: BTreeMap<String, AcpServerPolicy>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub servers: Vec<ConfiguredAcpServer>,
 }
 
 impl AcpConfig {
@@ -621,36 +618,6 @@ impl std::fmt::Display for AcpServerPolicy {
             Self::Disabled => f.write_str("off"),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AcpServerOrigin {
-    #[serde(alias = "registry")]
-    Custom,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfiguredAcpServer {
-    pub id: String,
-    pub label: String,
-    pub command: PathBuf,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub args: Vec<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub env: HashMap<String, String>,
-    pub origin: AcpServerOrigin,
-    #[serde(default = "enabled_policy", skip_serializing_if = "is_enabled_policy")]
-    pub policy: AcpServerPolicy,
-}
-
-fn enabled_policy() -> AcpServerPolicy {
-    AcpServerPolicy::Enabled
-}
-
-fn is_enabled_policy(policy: &AcpServerPolicy) -> bool {
-    *policy == AcpServerPolicy::Enabled
 }
 
 /// Knobs for `/ragnarok` battles.
@@ -739,11 +706,19 @@ impl Config {
         let known = DEFAULT_ACP_PRIORITY
             .iter()
             .map(|id| (*id).to_string())
-            .chain(self.acp.servers.iter().map(|server| server.id.clone()))
             .collect::<std::collections::HashSet<_>>();
         let retired_model = |model: &str| {
-            !matches!(model, "auto" | DISABLED_MODEL | "none")
-                && !model.starts_with("custom/")
+            if matches!(model, "auto" | DISABLED_MODEL | "none") {
+                return false;
+            }
+            // Legacy custom-server selectors can never resolve again.
+            if model.starts_with("custom/") {
+                return true;
+            }
+            // A model with no derivable provider may be an adapter-advertised
+            // alias (e.g. claude-acp's `haiku`); only drop pins whose provider
+            // is known but unserved by a built-in adapter.
+            !crate::deepswe::model_provider(model).is_empty()
                 && !crate::roster::model_has_builtin_adapter(model)
         };
 
@@ -784,11 +759,7 @@ impl Config {
             }
             return true;
         }
-        let Some(server) = self.acp.servers.iter_mut().find(|server| server.id == id) else {
-            return false;
-        };
-        server.policy = policy;
-        true
+        false
     }
 
     pub fn model_names(&self) -> ModelsConfig {
@@ -897,36 +868,6 @@ impl Config {
             "subagents.max_parallel must be between 0 and 16"
         );
 
-        let mut names = std::collections::HashSet::new();
-        for server in &mut self.acp.servers {
-            let valid_name = !server.id.is_empty()
-                && server
-                    .id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'));
-            anyhow::ensure!(
-                valid_name,
-                "ACP server id '{}' contains unsupported characters",
-                server.id
-            );
-            anyhow::ensure!(
-                names.insert(server.id.clone()),
-                "duplicate configured ACP server id '{}'",
-                server.id
-            );
-            anyhow::ensure!(
-                !server.command.as_os_str().is_empty(),
-                "configured ACP server '{}' has an empty command",
-                server.id
-            );
-            server.command = expand_home_shortcut(&server.command.to_string_lossy());
-            server.command = normalize_spawn_program(server.command.clone());
-            server.args = server
-                .args
-                .iter()
-                .map(|arg| expand_home_shortcut(arg).to_string_lossy().into_owned())
-                .collect();
-        }
         Ok(())
     }
 }
@@ -1476,27 +1417,20 @@ kimi = "disabled"
     }
 
     #[test]
-    fn loading_keeps_models_served_by_a_configured_custom_server() {
+    fn loading_drops_legacy_custom_server_model_pins() {
+        // Custom ACP servers are no longer supported; a config still pinning
+        // one falls back to automatic selection instead of failing.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut cfg = Config::default();
-        cfg.acp.servers.push(ConfiguredAcpServer {
-            id: "custom:bridge".to_string(),
-            label: "bridge".to_string(),
-            command: PathBuf::from("bridge"),
-            args: Vec::new(),
-            env: HashMap::new(),
-            origin: AcpServerOrigin::Custom,
-            policy: AcpServerPolicy::Enabled,
-        });
-        cfg.agent.model = "custom/bridge/bedrock::zai.glm-5".to_string();
+        cfg.agent.model = "custom/bridge/private-model".to_string();
         cfg.agent.acp_source = Some("custom:bridge".to_string());
         cfg.save(&path).expect("save");
 
         let loaded = Config::load(&path).expect("load");
 
-        assert_eq!(loaded.agent.model, "custom/bridge/bedrock::zai.glm-5");
-        assert_eq!(loaded.agent.acp_source.as_deref(), Some("custom:bridge"));
+        assert_eq!(loaded.agent.model, "auto");
+        assert_eq!(loaded.agent.acp_source, None);
     }
 
     #[test]
@@ -1614,10 +1548,9 @@ origin = "custom"
         assert_eq!(cfg.subagents.progress_wake_minutes, 5);
         assert_eq!(cfg.ragnarok.max_competitors, 4);
         assert_eq!(cfg.acp.policy("codex-acp"), AcpServerPolicy::Disabled);
-        assert_eq!(cfg.acp.servers[0].id, "custom:company");
-        assert_eq!(cfg.acp.servers[0].args, vec!["--stdio"]);
 
         // The migrated file is persisted, so the next load is a plain v3 read.
+        // Legacy custom-server sections are tolerated on load and dropped.
         let body = std::fs::read_to_string(&path).expect("read migrated");
         println!("--- migrated v3 config.toml ---\n{body}--- end ---");
         assert!(body.contains("version = 3"), "{body}");
@@ -1626,6 +1559,7 @@ origin = "custom"
         assert!(!body.contains("[loki]"), "{body}");
         assert!(!body.contains("[council]"), "{body}");
         assert!(!body.contains("permission_mode"), "{body}");
+        assert!(!body.contains("acp.servers"), "{body}");
         assert_eq!(Config::load(&path).expect("reload migrated"), cfg);
     }
 
@@ -1754,18 +1688,6 @@ origin = "custom"
                 auto_failover: false,
                 ..SubagentsConfig::default()
             },
-            acp: AcpConfig {
-                servers: vec![ConfiguredAcpServer {
-                    id: "custom:company".to_string(),
-                    label: "company".to_string(),
-                    command: PathBuf::from("/usr/local/bin/company-acp"),
-                    args: vec!["--stdio".to_string()],
-                    env: HashMap::new(),
-                    origin: AcpServerOrigin::Custom,
-                    policy: AcpServerPolicy::Enabled,
-                }],
-                ..AcpConfig::default()
-            },
             ..Config::default()
         };
         cfg.save(&path).expect("save");
@@ -1775,8 +1697,6 @@ origin = "custom"
         assert!(!loaded.agent.discrete_review);
         assert_eq!(loaded.agent.review_tier, ReviewTier::Extended);
         assert!(!loaded.subagents.auto_failover);
-        assert_eq!(loaded.acp.servers[0].id, "custom:company");
-        assert_eq!(loaded.acp.servers[0].args, vec!["--stdio"]);
     }
 
     #[test]
@@ -2062,10 +1982,9 @@ eitri = "gpt-5-6-luna"
     }
 
     #[test]
-    fn load_expands_home_shortcuts_in_configured_servers() {
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
+    fn legacy_custom_server_sections_are_ignored_on_load() {
+        // Custom ACP servers are no longer supported; a config still carrying
+        // the old `[[acp.servers]]` section loads cleanly without it.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(
@@ -2076,47 +1995,13 @@ version = 3
 id = "custom:my-agent"
 label = "my-agent"
 command = "~/bin/agent"
-args = ["--config", "$HOME/.config/agent.toml"]
 origin = "custom"
 "#,
         )
         .expect("write");
 
         let cfg = Config::load(&path).expect("load");
-        assert_eq!(cfg.acp.servers.len(), 1);
-        let server = &cfg.acp.servers[0];
-        assert_eq!(server.command, home.join("bin/agent"));
-        assert_eq!(
-            server.args,
-            vec![
-                "--config".to_string(),
-                home.join(".config/agent.toml").display().to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn configured_acp_servers_validate_ids_commands_and_duplicates() {
-        for (body, expected) in [
-            (
-                "version = 3\n[[acp.servers]]\nid = 'bad name'\nlabel = 'bad'\ncommand = 'server'\norigin = 'custom'\n",
-                "unsupported characters",
-            ),
-            (
-                "version = 3\n[[acp.servers]]\nid = 'empty'\nlabel = 'empty'\ncommand = ''\norigin = 'custom'\n",
-                "empty command",
-            ),
-            (
-                "version = 3\n[[acp.servers]]\nid = 'same'\nlabel = 'one'\ncommand = 'one'\norigin = 'custom'\n[[acp.servers]]\nid = 'same'\nlabel = 'two'\ncommand = 'two'\norigin = 'custom'\n",
-                "duplicate",
-            ),
-        ] {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let path = dir.path().join("config.toml");
-            std::fs::write(&path, body).expect("write");
-            let error = Config::load(&path).expect_err("invalid custom server");
-            assert!(error.to_string().contains(expected), "{error:#}");
-        }
+        assert_eq!(cfg.acp, AcpConfig::default());
     }
 
     #[test]
@@ -2142,28 +2027,12 @@ mode = "ask"
     }
 
     #[test]
-    fn server_policies_update_builtins_and_configured_servers() {
-        let mut config = Config {
-            acp: AcpConfig {
-                servers: vec![ConfiguredAcpServer {
-                    id: "custom:company".to_string(),
-                    label: "company".to_string(),
-                    command: PathBuf::from("company-acp"),
-                    args: Vec::new(),
-                    env: HashMap::new(),
-                    origin: AcpServerOrigin::Custom,
-                    policy: AcpServerPolicy::Enabled,
-                }],
-                ..AcpConfig::default()
-            },
-            ..Config::default()
-        };
+    fn server_policies_update_builtins_only() {
+        let mut config = Config::default();
 
         assert!(config.set_acp_server_policy("codex-acp", AcpServerPolicy::Disabled));
-        assert!(config.set_acp_server_policy("custom:company", AcpServerPolicy::Disabled));
-        assert!(!config.set_acp_server_policy("custom:missing", AcpServerPolicy::Disabled));
+        assert!(!config.set_acp_server_policy("custom:company", AcpServerPolicy::Disabled));
         assert_eq!(config.acp.policy("codex-acp"), AcpServerPolicy::Disabled);
-        assert_eq!(config.acp.servers[0].policy, AcpServerPolicy::Disabled);
     }
 
     #[test]

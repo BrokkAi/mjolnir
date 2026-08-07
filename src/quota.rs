@@ -126,7 +126,6 @@ impl Gate {
                     }
                 }
             }
-            AdapterKind::Custom => Check::Unavailable,
         };
         self.cache.lock().await.insert(
             key,

@@ -91,4 +91,4 @@ The mixed teams are where Mjolnir earns its keep: **Claude coder + Codex
 reviewer** keeps Claude in charge of the turn while Codex challenges every
 changed turn from an independent session, and the reverse team swaps the
 roles. See [Teams and adversarial review](/teams/), or
-[Other agents and models](/adapters/) for custom ACP servers.
+[Other agents and models](/adapters/) for model resolution details.

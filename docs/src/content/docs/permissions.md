@@ -37,7 +37,7 @@ model blanket permission to change it.
 
 Mjolnir canonicalizes roots and constrains its hosted filesystem and terminal
 requests to them. Agent-owned tools can have provider- or adapter-owned policy
-that Mjolnir does not replace. Custom ACP servers inherit the environment and
+that Mjolnir does not replace. ACP servers inherit the environment and
 run from the workspace directory.
 
 ## Nested subagent requests

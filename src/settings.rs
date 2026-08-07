@@ -272,15 +272,11 @@ impl SettingsEditor {
                     return SettingsAction::None;
                 };
                 let id = server.id.clone();
-                let choices: &[AcpServerPolicy] = if server.origin.is_some() {
-                    &[AcpServerPolicy::Enabled, AcpServerPolicy::Disabled]
-                } else {
-                    &[
-                        AcpServerPolicy::Auto,
-                        AcpServerPolicy::Enabled,
-                        AcpServerPolicy::Disabled,
-                    ]
-                };
+                let choices: &[AcpServerPolicy] = &[
+                    AcpServerPolicy::Auto,
+                    AcpServerPolicy::Enabled,
+                    AcpServerPolicy::Disabled,
+                ];
                 let current = choices
                     .iter()
                     .position(|policy| *policy == server.policy)
@@ -364,13 +360,7 @@ impl SettingsEditor {
                     return SettingsAction::None;
                 };
                 let id = server.id.clone();
-                let policy = if server.origin.is_some() {
-                    if server.policy == AcpServerPolicy::Enabled {
-                        AcpServerPolicy::Disabled
-                    } else {
-                        AcpServerPolicy::Enabled
-                    }
-                } else if server.policy == AcpServerPolicy::Auto && !server.detected {
+                let policy = if server.policy == AcpServerPolicy::Auto && !server.detected {
                     AcpServerPolicy::Enabled
                 } else if server.policy == AcpServerPolicy::Disabled {
                     AcpServerPolicy::Auto
@@ -888,15 +878,8 @@ pub fn reset_unroutable_models(config: &mut Config, choices: &[ModelChoice]) -> 
     // Only an explicit `disabled` policy strands a route. Absence from the
     // discovered inventory is not proof: an undetected server (not signed in,
     // not probed yet) may still serve the model once it comes back.
-    let source_disabled = |config: &Config, source: &str| {
-        config
-            .acp
-            .servers
-            .iter()
-            .find(|server| server.id == source)
-            .map_or_else(|| config.acp.policy(source), |server| server.policy)
-            == AcpServerPolicy::Disabled
-    };
+    let source_disabled =
+        |config: &Config, source: &str| config.acp.policy(source) == AcpServerPolicy::Disabled;
     let mut notices = Vec::new();
     enum Seat {
         Agent,
@@ -913,12 +896,25 @@ pub fn reset_unroutable_models(config: &mut Config, choices: &[ModelChoice]) -> 
             Seat::Review => config.review.model.clone(),
             Seat::Subagents => config.subagents.model.clone(),
         };
-        if model == "auto"
-            || model == crate::config::DISABLED_MODEL
-            // Custom-selector models have no native built-in adapter; only
-            // their catalog entry (when present) can judge them.
-            || (model.starts_with("custom/")
-                && !choices.iter().any(|choice| choice.model == model))
+        if model == "auto" || model == crate::config::DISABLED_MODEL {
+            continue;
+        }
+        let seat_source = match seat {
+            Seat::Agent => config.agent.acp_source.clone(),
+            Seat::Review => config.review.acp_source.clone(),
+            Seat::Subagents => config.subagents.acp_source.clone(),
+        };
+        let seat_source_is_disabled = seat_source
+            .as_deref()
+            .is_some_and(|source| source_disabled(config, source));
+        // Adapter-advertised aliases (e.g. claude-acp's `haiku`) have no
+        // derivable provider; only their catalog entry can judge them. When
+        // absent, keep the pin — an undetected server may still serve it —
+        // unless the seat's own source is explicitly disabled, in which case
+        // the alias can never resolve and falls through to the reset below.
+        if crate::deepswe::model_provider(&model).is_empty()
+            && !choices.iter().any(|choice| choice.model == model)
+            && !seat_source_is_disabled
         {
             continue;
         }
@@ -937,14 +933,25 @@ pub fn reset_unroutable_models(config: &mut Config, choices: &[ModelChoice]) -> 
             .as_deref()
             .is_none_or(|route| source_disabled(config, route))
         {
-            let slot = match seat {
-                Seat::Agent => &mut config.agent.model,
-                Seat::Review => &mut config.review.model,
-                Seat::Subagents => &mut config.subagents.model,
+            let (model_slot, source_slot) = match seat {
+                Seat::Agent => (&mut config.agent.model, &mut config.agent.acp_source),
+                Seat::Review => (&mut config.review.model, &mut config.review.acp_source),
+                Seat::Subagents => (
+                    &mut config.subagents.model,
+                    &mut config.subagents.acp_source,
+                ),
             };
-            "auto".clone_into(slot);
+            "auto".clone_into(model_slot);
+            // A source pin to a disabled adapter would still abort roster
+            // assembly ("no launchable models"); clear it with the model.
+            let source_note = if seat_source_is_disabled {
+                *source_slot = None;
+                " and its disabled ACP source pin was cleared"
+            } else {
+                ""
+            };
             notices.push(format!(
-                "{label} model {model} is not provided by any enabled ACP server; switched to automatic selection"
+                "{label} model {model} is not provided by any enabled ACP server; switched to automatic selection{source_note}"
             ));
         }
     }
@@ -1689,6 +1696,43 @@ mod tests {
             "{}",
             notices[0]
         );
+    }
+
+    #[test]
+    fn reset_unroutable_models_clears_a_source_pin_to_a_disabled_adapter() {
+        // An adapter-advertised alias pinned with its source: disabling that
+        // source must clear both, or roster assembly aborts on the stale
+        // source pin ("no launchable models") despite the model reset.
+        let mut config = Config::default();
+        config.agent.model = "haiku".to_string();
+        config.agent.acp_source = Some("claude-acp".to_string());
+        config.set_acp_server_policy("claude-acp", AcpServerPolicy::Disabled);
+
+        let notices = reset_unroutable_models(&mut config, &[]);
+
+        assert_eq!(config.agent.model, "auto");
+        assert_eq!(config.agent.acp_source, None);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("source pin was cleared"),
+            "{}",
+            notices[0]
+        );
+    }
+
+    #[test]
+    fn reset_unroutable_models_keeps_an_uncataloged_alias_pin() {
+        // Same alias pin, but its source is merely undetected, not disabled:
+        // the pin survives until the catalog can judge it.
+        let mut config = Config::default();
+        config.agent.model = "haiku".to_string();
+        config.agent.acp_source = Some("claude-acp".to_string());
+
+        let notices = reset_unroutable_models(&mut config, &[]);
+
+        assert_eq!(config.agent.model, "haiku");
+        assert_eq!(config.agent.acp_source.as_deref(), Some("claude-acp"));
+        assert!(notices.is_empty());
     }
 
     #[test]
@@ -2461,27 +2505,14 @@ mod tests {
     }
 
     #[test]
-    fn acp_server_panel_hides_custom_configured_servers() {
-        let mut config = crate::roster::config_with_a_visible_builtin();
-        config.acp.servers.push(crate::config::ConfiguredAcpServer {
-            id: "custom:local".to_string(),
-            label: "Local custom server".to_string(),
-            command: "local-acp".into(),
-            args: Vec::new(),
-            env: Default::default(),
-            origin: crate::config::AcpServerOrigin::Custom,
-            policy: AcpServerPolicy::Enabled,
-        });
+    fn acp_server_panel_lists_only_builtin_servers() {
+        let config = crate::roster::config_with_a_visible_builtin();
         let mut editor = SettingsEditor::new(config, Vec::new(), None);
         editor.tab = SettingsTab::AcpServers;
 
         let servers = render(&editor, 100, 30);
 
         assert!(servers.contains("Codex"), "rendered:\n{servers}");
-        assert!(
-            !servers.contains("Local custom server"),
-            "rendered:\n{servers}"
-        );
         assert_eq!(
             editor.row_count(),
             ACCOUNT_COUNT + editor.configurable_servers().count()

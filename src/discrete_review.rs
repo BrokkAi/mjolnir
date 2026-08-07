@@ -2958,7 +2958,7 @@ mod tests {
             },
             model_value: "review-test".to_string(),
             launch: AdapterLaunch {
-                kind: AdapterKind::Custom,
+                kind: AdapterKind::Claude,
                 source_id: "review-test".to_string(),
                 command,
                 args,

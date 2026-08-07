@@ -106,7 +106,7 @@ struct Cli {
     /// Accepts an optional trailing `+<effort>` (off, none, minimal, low,
     /// medium, high, xhigh, max) to set this seat's ACP reasoning effort
     /// independent of the adapter's own default, e.g.
-    /// `custom/bpr-agent/bedrock::openai.gpt-5.6-sol+high`.
+    /// `gpt-5-6-sol+high`.
     #[arg(long, value_name = "MODEL[+EFFORT]", requires = "print", value_parser = parse_model_override)]
     model: Option<(String, Option<String>)>,
 
@@ -261,7 +261,7 @@ fn parse_fs_max_text_bytes(value: &str) -> std::result::Result<u64, String> {
 }
 
 /// Reasoning-effort tokens accepted as a trailing `+<effort>` suffix on a
-/// role-override model selector, e.g. `custom/bpr-agent/...::model+high`.
+/// role-override model selector, e.g. `gpt-5-6-sol+high`.
 /// Case-insensitive; `none` canonicalizes to `off`, which explicitly turns
 /// reasoning off rather than leaving the adapter's default effort untouched.
 const KNOWN_REASONING_EFFORTS: &[&str] = &[
@@ -3131,7 +3131,8 @@ mod tests {
             },
             model_value: model.to_string(),
             launch: roster::AdapterLaunch {
-                kind: roster::AdapterKind::Custom,
+                kind: roster::AdapterKind::from_source_id(agent)
+                    .unwrap_or(roster::AdapterKind::Claude),
                 source_id: agent.to_string(),
                 command: PathBuf::from(agent),
                 args: Vec::new(),
@@ -3533,29 +3534,20 @@ mod tests {
     #[test]
     fn parse_model_override_splits_trailing_effort() {
         assert_eq!(
-            parse_model_override("custom/bpr-agent/bedrock::openai.gpt-5.6-sol+high"),
-            Ok((
-                "custom/bpr-agent/bedrock::openai.gpt-5.6-sol".to_string(),
-                Some("high".to_string())
-            ))
+            parse_model_override("gpt-5-6-sol+high"),
+            Ok(("gpt-5-6-sol".to_string(), Some("high".to_string())))
         );
         assert_eq!(
-            parse_model_override("custom/bpr-agent/bedrock::us.anthropic.claude-opus-4-8+high"),
-            Ok((
-                "custom/bpr-agent/bedrock::us.anthropic.claude-opus-4-8".to_string(),
-                Some("high".to_string())
-            ))
+            parse_model_override("gpt-5.6-sol+high"),
+            Ok(("gpt-5.6-sol".to_string(), Some("high".to_string())))
         );
     }
 
     #[test]
     fn parse_model_override_leaves_effort_less_selectors_unchanged() {
         assert_eq!(
-            parse_model_override("custom/bpr-agent/deepseek::deepseek-v4-pro"),
-            Ok((
-                "custom/bpr-agent/deepseek::deepseek-v4-pro".to_string(),
-                None
-            ))
+            parse_model_override("deepseek-v4-pro"),
+            Ok(("deepseek-v4-pro".to_string(), None))
         );
     }
 
@@ -3581,22 +3573,16 @@ mod tests {
     #[test]
     fn parse_optional_role_override_splits_trailing_effort() {
         assert_eq!(
-            parse_optional_role_override("custom/bpr-agent/bedrock::openai.gpt-5.6-terra+medium"),
-            Ok((
-                "custom/bpr-agent/bedrock::openai.gpt-5.6-terra".to_string(),
-                Some("medium".to_string())
-            ))
+            parse_optional_role_override("gpt-5-6-terra+medium"),
+            Ok(("gpt-5-6-terra".to_string(), Some("medium".to_string())))
         );
     }
 
     #[test]
     fn parse_optional_role_override_plus_none_maps_to_off_effort_not_disabled() {
         assert_eq!(
-            parse_optional_role_override("custom/bpr-agent/bedrock::model+none"),
-            Ok((
-                "custom/bpr-agent/bedrock::model".to_string(),
-                Some("off".to_string())
-            ))
+            parse_optional_role_override("some-model+none"),
+            Ok(("some-model".to_string(), Some("off".to_string())))
         );
     }
 
@@ -3619,11 +3605,8 @@ mod tests {
     #[test]
     fn parse_optional_role_override_leaves_effort_less_selectors_unchanged() {
         assert_eq!(
-            parse_optional_role_override("custom/bpr-agent/deepseek::deepseek-v4-pro"),
-            Ok((
-                "custom/bpr-agent/deepseek::deepseek-v4-pro".to_string(),
-                None
-            ))
+            parse_optional_role_override("deepseek-v4-pro"),
+            Ok(("deepseek-v4-pro".to_string(), None))
         );
     }
 

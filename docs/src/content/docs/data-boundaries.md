@@ -15,7 +15,6 @@ are separate from Mjolnir's license and local controls.
 | Provider ACP adapter | Credentials/environment, prompts, source/tool context | Provider API requests, ACP messages and tool requests |
 | Mjolnir filesystem/terminal tools | Files and commands under active workspace roots | Approved file and process effects under those roots |
 | `mj-subagents` MCP server | The primary agent's authenticated local tool calls | Background subagent sessions, their reports, and their workspace diffs |
-| Custom ACP server | Inherited environment, workspace cwd, ACP messages | Server-defined network, file, and provider behavior |
 | Remote server | Viewer login, prompts, permissions, transcript activity | Local SQLite/session state, cookies, TLS material, downloads |
 | Voice worker | Microphone audio after Ctrl-R activation | Local model cache and transcribed prompt text |
 
@@ -25,9 +24,8 @@ The primary `--cwd` and any `--additional-directory` values define active
 workspace roots for Mjolnir-hosted file and terminal operations. Adding a root
 widens access; it does not assert that files or instructions inside it are safe.
 
-Agent-owned tools can follow adapter-specific permission policy. A custom ACP
-server runs in the workspace and inherits Mjolnir's environment unless you
-launch it through a wrapper that constrains that environment.
+Agent-owned tools can follow adapter-specific permission policy. The Codex and
+Claude adapters run in the workspace and inherit Mjolnir's environment.
 
 ## Credentials
 
@@ -66,9 +64,8 @@ session metadata. Read [Remote control](/remote/) before leaving loopback.
 2. Confirm the active models with `/agents`; subagents and discrete review can create many additional provider calls and cost.
 3. Limit workspace roots and use a worktree for change-producing evaluation.
 4. Review every permission request and avoid unattended `yolo` mode.
-5. Inspect custom ACP commands and inherited environment values.
-6. Decide whether remote control and voice downloads are acceptable.
-7. Protect or periodically clear local transcripts, provenance, caches, and worktrees according to your policy.
+5. Decide whether remote control and voice downloads are acceptable.
+6. Protect or periodically clear local transcripts, provenance, caches, and worktrees according to your policy.
 
 For exact local categories, continue with [Storage and network
 activity](/storage-network/).

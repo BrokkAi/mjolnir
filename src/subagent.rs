@@ -3710,7 +3710,7 @@ mod tests {
             },
             model_value: format!("{model}-value"),
             launch: AdapterLaunch {
-                kind: AdapterKind::from_source_id(source_id).unwrap_or(AdapterKind::Custom),
+                kind: AdapterKind::from_source_id(source_id).unwrap_or(AdapterKind::Claude),
                 source_id: source_id.into(),
                 command: PathBuf::from(source_id),
                 args: Vec::new(),

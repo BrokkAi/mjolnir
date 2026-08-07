@@ -6079,18 +6079,11 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         .iter()
         .filter(|server| crate::settings::is_configurable_acp_server(&server.id))
         .map(|server| {
-            let allowed: &[config::AcpServerPolicy] = if server.origin.is_some() {
-                &[
-                    config::AcpServerPolicy::Enabled,
-                    config::AcpServerPolicy::Disabled,
-                ]
-            } else {
-                &[
-                    config::AcpServerPolicy::Auto,
-                    config::AcpServerPolicy::Enabled,
-                    config::AcpServerPolicy::Disabled,
-                ]
-            };
+            let allowed: &[config::AcpServerPolicy] = &[
+                config::AcpServerPolicy::Auto,
+                config::AcpServerPolicy::Enabled,
+                config::AcpServerPolicy::Disabled,
+            ];
             MjServerEntry {
                 id: server.id.clone(),
                 label: server.label.clone(),
@@ -9703,7 +9696,7 @@ mod tests {
 
     fn test_roster(model: &str) -> roster::Roster {
         let launch = roster::AdapterLaunch {
-            kind: roster::AdapterKind::Custom,
+            kind: roster::AdapterKind::Claude,
             source_id: "test-acp".to_string(),
             command: PathBuf::from("false"),
             args: Vec::new(),
@@ -10077,16 +10070,7 @@ mod tests {
     #[tokio::test]
     async fn mjconfig_snapshot_only_exposes_codex_and_claude_server_controls() {
         let runtime = test_mjconfig_runtime();
-        let mut config = roster::config_with_a_visible_builtin();
-        config.acp.servers.push(config::ConfiguredAcpServer {
-            id: "custom:company".to_string(),
-            label: "Company".to_string(),
-            command: PathBuf::from("company-acp"),
-            args: Vec::new(),
-            env: Default::default(),
-            origin: config::AcpServerOrigin::Custom,
-            policy: config::AcpServerPolicy::Enabled,
-        });
+        let config = roster::config_with_a_visible_builtin();
         config.save(&runtime.config_path).expect("seed config");
         let app = mjconfig_test_router(runtime, "mjconfig-token");
 
@@ -10104,11 +10088,6 @@ mod tests {
             servers
                 .iter()
                 .all(|server| matches!(server["id"].as_str(), Some("codex-acp" | "claude-acp")))
-        );
-        assert!(
-            !servers
-                .iter()
-                .any(|server| server["id"] == "custom:company")
         );
     }
 

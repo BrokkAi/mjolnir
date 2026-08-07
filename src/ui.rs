@@ -6403,6 +6403,16 @@ fn persist_primary_picker_selection(
         }
     };
     config.agent.model.clone_from(&role.model.model);
+    // A seat pinned to another ACP source could never resolve the picked
+    // route; move the pin to the route that actually serves this model.
+    if config
+        .agent
+        .acp_source
+        .as_deref()
+        .is_some_and(|source| source != role.launch.source_id)
+    {
+        config.agent.acp_source = Some(role.launch.source_id.clone());
+    }
     config.agent.reasoning_effort = effort;
     match config.save(path) {
         Ok(()) => {
@@ -19001,7 +19011,8 @@ mod tests {
                 },
                 model_value: source_id.to_string(),
                 launch: crate::roster::AdapterLaunch {
-                    kind: crate::roster::AdapterKind::Custom,
+                    kind: crate::roster::AdapterKind::from_source_id(source_id)
+                        .unwrap_or(crate::roster::AdapterKind::Claude),
                     source_id: source_id.to_string(),
                     command: PathBuf::from(source_id),
                     args: Vec::new(),
@@ -19036,7 +19047,8 @@ mod tests {
                 },
                 model_value: source_id.to_string(),
                 launch: crate::roster::AdapterLaunch {
-                    kind: crate::roster::AdapterKind::Custom,
+                    kind: crate::roster::AdapterKind::from_source_id(source_id)
+                        .unwrap_or(crate::roster::AdapterKind::Claude),
                     source_id: source_id.to_string(),
                     command: PathBuf::from(source_id),
                     args: Vec::new(),
@@ -19130,7 +19142,8 @@ mod tests {
                 },
                 model_value: source_id.to_string(),
                 launch: crate::roster::AdapterLaunch {
-                    kind: crate::roster::AdapterKind::Custom,
+                    kind: crate::roster::AdapterKind::from_source_id(source_id)
+                        .unwrap_or(crate::roster::AdapterKind::Claude),
                     source_id: source_id.to_string(),
                     command: PathBuf::from(source_id),
                     args: Vec::new(),
@@ -19147,6 +19160,44 @@ mod tests {
 
         assert_eq!(state.exit_reason, None);
         assert!(state.agent_picker.is_some());
+    }
+
+    #[test]
+    fn picker_save_moves_a_mismatched_source_pin_to_the_picked_route() {
+        // A seat pinned to codex-acp picking a claude-served model (e.g. an
+        // unranked `haiku`) must not persist an unresolvable source/model pair.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = crate::config::Config::default();
+        config.agent.acp_source = Some("codex-acp".to_string());
+        config.save(&path).expect("seed config");
+
+        let mut state = AppState::new();
+        state.config_path = Some(path.clone());
+        let role = crate::roster::ResolvedAgent {
+            model: crate::deepswe::Row {
+                model: "haiku".to_string(),
+                reasoning_effort: None,
+                pass_at_1: 0.0,
+                mean_cost_usd: 0.0,
+            },
+            model_value: "haiku".to_string(),
+            launch: crate::roster::AdapterLaunch {
+                kind: crate::roster::AdapterKind::Claude,
+                source_id: "claude-acp".to_string(),
+                command: PathBuf::from("claude-acp"),
+                args: Vec::new(),
+                env: Default::default(),
+            },
+            ranked: false,
+            reasoning_effort: None,
+        };
+
+        assert!(persist_primary_picker_selection(&mut state, role, None));
+
+        let saved = crate::config::Config::load(&path).expect("reload");
+        assert_eq!(saved.agent.model, "haiku");
+        assert_eq!(saved.agent.acp_source.as_deref(), Some("claude-acp"));
     }
 
     #[test]

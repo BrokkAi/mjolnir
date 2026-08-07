@@ -1,13 +1,11 @@
 ---
 title: Other agents and models
-description: How Mjolnir resolves models and adapters for each seat, and how to add custom ACP servers.
+description: How Mjolnir resolves models and adapters for each seat.
 ---
 
 Mjolnir ships two first-class routes, Codex and Claude, and a
 [team](/teams/) decides which one fills each seat. This page covers what
-happens underneath — discovery, probing, and model resolution — and how to add
-custom ACP servers when a subtask, independent review, or provider fallback
-benefits from one.
+happens underneath — discovery, probing, and model resolution.
 
 Under the hood, Mjolnir selects a model for the primary agent and a default model for
 subagents, then chooses a launchable Agent Client Protocol adapter that can
@@ -61,8 +59,9 @@ its reviewer while leaving model selection on Auto.
 - When several adapters offer the selected model, the primary, review, and
   subagent seats apply their independent ACP priority lists. All lists default
   to Codex, then Claude.
-- Unranked custom models are selectable explicitly but do not participate in
-  Auto or Ragnarok (the `/ragnarok` model-vs-model arena).
+- Adapter-advertised models without a leaderboard row (for example Claude's
+  `haiku`) are selectable explicitly but do not participate in Auto or
+  Ragnarok (the `/ragnarok` model-vs-model arena).
 
 Availability, credentials, advertised capabilities, and the current ranking
 can change the result. Auto chooses across launchable ranked models; adapter
@@ -72,30 +71,11 @@ seat even though Codex is first in adapter priority. Choose a Team preset to
 retain Auto model selection within its assigned provider, and use `/agents` to
 record what actually launched.
 
-## Custom ACP servers
+## Codex and Claude only
 
-The ACP Servers panel intentionally contains only Codex and Claude. Add custom
-servers directly to `config.toml` when an advanced deployment requires one.
-
-```toml
-version = 3
-
-[[acp.servers]]
-id = "custom:company"
-label = "company"
-command = "/opt/company/bin/acp-server"
-args = ["--stdio"]
-origin = "custom"
-
-[acp.servers.env]
-COMPANY_REGION = "dev"
-```
-
-Custom commands launch directly without a shell, inherit Mjolnir's environment,
-and run in the active workspace directory. New custom routes follow the saved
-seat priorities until the user reorders them. Use an absolute command path
-where possible and avoid putting secret values directly in a committed config
-file.
+The ACP Servers panel intentionally contains only Codex and Claude; Mjolnir
+does not support user-configured ACP servers. Legacy `[[acp.servers]]`
+sections in `config.toml` are ignored on load and dropped on the next save.
 
 ACP servers are model agents. They are not the same as MCP servers: Mjolnir does
 not expose a generic user-facing MCP-server list here. Its internal `mj-subagents`

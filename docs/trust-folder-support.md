@@ -100,15 +100,13 @@ configuration can run, or whether tools may bypass prompts.
 
 ## Compatibility Impact
 
-Mjolnir configures Codex and Claude as built-in ACP routes. Advanced users can
-still declare custom ACP commands directly in `config.toml`.
+Mjolnir configures Codex and Claude as its only built-in ACP routes.
 
 A Mjolnir-local trust database would create inconsistent behavior across those
 routes:
 
 - agents that implement their own trust model might ignore Mjolnir's decision;
 - agents without folder trust would receive a misleading UI promise;
-- custom ACP commands have unknown trust and sandbox semantics;
 - "always allow" permission choices are already agent-defined, so Mjolnir cannot
   know whether they mean command trust, edit trust, project trust, or only a
   specific tool rule.

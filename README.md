@@ -61,7 +61,7 @@ manages the Node.js runtime those routes need. A system Node.js installation is
 only required when installing through npm/npx or when using the built-in routes
 on Android. Provider use may incur cost.
 
-Custom ACP servers can be configured directly in `config.toml`. Review the
+Review the
 [data and trust boundaries](https://mjolnir.brokk.ai/data-boundaries/) before
 connecting a private repository.
 

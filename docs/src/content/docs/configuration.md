@@ -109,8 +109,7 @@ acp_priority = ["codex-acp", "claude-acp"]
 
 The ACP Servers tab controls eligibility. Priority only decides which enabled
 adapter supplies a selected model when more than one advertises it.
-Sources absent from a saved list are appended in discovery order, so adding a
-custom adapter does not unexpectedly move it ahead of an explicit preference.
+Sources absent from a saved list are appended in discovery order.
 
 ## Migrating from version 2
 
@@ -132,26 +131,16 @@ values in memory.
 
 ## ACP policy
 
-The ACP Servers tab exposes only the built-in Codex and Claude adapters, which
-can stay on Auto or be explicitly enabled or disabled. Advanced deployments
-can still declare a custom command, arguments, environment values, origin, and
-policy directly in the config file.
+The ACP Servers tab exposes the built-in Codex and Claude adapters, which
+can stay on Auto or be explicitly enabled or disabled.
 
 ```toml
 [acp.policies]
 codex-acp = "auto"
 claude-acp = "disabled"
-
-[[acp.servers]]
-id = "custom:company"
-label = "Company agent"
-command = "/opt/company/bin/acp-server"
-args = ["--stdio"]
-origin = "custom"
-policy = "enabled"
 ```
 
-Custom commands inherit Mjolnir's environment and use the workspace as their
+Adapters inherit Mjolnir's environment and use the workspace as their
 working directory. See [Data and trust boundaries](/data-boundaries/).
 
 ## One-shot overrides
