@@ -1817,6 +1817,10 @@ async fn ui_loop(
                                     != crate::config::DISABLED_MODEL,
                                 ragnarok: state.ragnarok_models.len() >= 2,
                                 voice: voice_input_supported(),
+                                fork: state.session_fork_supported,
+                                side: state.side_session_supported,
+                                images: state.prompt_images_supported,
+                                fullscreen: mode == UiMode::FullscreenTui,
                             });
                         }
                         let visibility_changed = stream_reveal.observe(&mut state);

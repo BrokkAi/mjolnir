@@ -433,6 +433,10 @@ pub struct FeatureHintCapabilities {
     pub subagents: bool,
     pub ragnarok: bool,
     pub voice: bool,
+    pub fork: bool,
+    pub side: bool,
+    pub images: bool,
+    pub fullscreen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -441,6 +445,11 @@ enum FeatureHintRequirement {
     Subagents,
     Ragnarok,
     Voice,
+    Fork,
+    Side,
+    Images,
+    Fullscreen,
+    Inline,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -496,6 +505,58 @@ const FEATURE_HINTS: &[FeatureHint] = &[
     },
     FeatureHint {
         text: "For adapter diagnostics, use --debug-file and --agent-stderr when starting mj.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Run /review to check recent, uncommitted, or HEAD changes; F9 opens the review issue ledger.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Use /terminals to view terminals the agent started, including ones still running.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Use /compact to shrink the primary agent's session context where the agent supports it.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Run /agents to see active model selections and usage for each seat.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Use /side to open an isolated ephemeral conversation without disturbing this thread.",
+        requirement: FeatureHintRequirement::Side,
+    },
+    FeatureHint {
+        text: "Use /fork to branch the current session and explore an alternative direction.",
+        requirement: FeatureHintRequirement::Fork,
+    },
+    FeatureHint {
+        text: "With an empty prompt, Ctrl+F searches the transcript; n and N jump between matches.",
+        requirement: FeatureHintRequirement::Fullscreen,
+    },
+    FeatureHint {
+        text: "Press Shift+Tab to choose the primary model and reasoning effort.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Paste an image from the clipboard with Ctrl+V; it attaches as a chip on your next prompt.",
+        requirement: FeatureHintRequirement::Images,
+    },
+    FeatureHint {
+        text: "Ctrl+N starts a new session and Ctrl+O opens the session picker.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Press Alt+T to expand or collapse the latest visible tool output.",
+        requirement: FeatureHintRequirement::Fullscreen,
+    },
+    FeatureHint {
+        text: "Open the transcript reader with Ctrl+T; / or Ctrl+F searches, n and N jump between matches, and Alt+T toggles the latest tool output.",
+        requirement: FeatureHintRequirement::Inline,
+    },
+    FeatureHint {
+        text: "The prompt honors readline keys: Ctrl+A/E jump to line start/end and Ctrl+K/U/W delete.",
         requirement: FeatureHintRequirement::Always,
     },
 ];
@@ -3145,6 +3206,11 @@ impl AppState {
                 FeatureHintRequirement::Subagents => capabilities.subagents,
                 FeatureHintRequirement::Ragnarok => capabilities.ragnarok,
                 FeatureHintRequirement::Voice => capabilities.voice,
+                FeatureHintRequirement::Fork => capabilities.fork,
+                FeatureHintRequirement::Side => capabilities.side,
+                FeatureHintRequirement::Images => capabilities.images,
+                FeatureHintRequirement::Fullscreen => capabilities.fullscreen,
+                FeatureHintRequirement::Inline => !capabilities.fullscreen,
             };
             if eligible {
                 self.transcript
@@ -11501,7 +11567,123 @@ mod tests {
             subagents: true,
             ragnarok: true,
             voice: true,
+            fork: true,
+            side: true,
+            images: true,
+            fullscreen: true,
         }
+    }
+
+    /// Capabilities where exactly `requirement` is (un)satisfied and every
+    /// other gate stays off, so a hint's eligibility flips with `enabled`.
+    fn capabilities_for(
+        requirement: FeatureHintRequirement,
+        enabled: bool,
+    ) -> FeatureHintCapabilities {
+        let mut caps = FeatureHintCapabilities {
+            subagents: false,
+            ragnarok: false,
+            voice: false,
+            fork: false,
+            side: false,
+            images: false,
+            fullscreen: false,
+        };
+        match requirement {
+            FeatureHintRequirement::Always => {}
+            FeatureHintRequirement::Subagents => caps.subagents = enabled,
+            FeatureHintRequirement::Ragnarok => caps.ragnarok = enabled,
+            FeatureHintRequirement::Voice => caps.voice = enabled,
+            FeatureHintRequirement::Fork => caps.fork = enabled,
+            FeatureHintRequirement::Side => caps.side = enabled,
+            FeatureHintRequirement::Images => caps.images = enabled,
+            FeatureHintRequirement::Fullscreen => caps.fullscreen = enabled,
+            FeatureHintRequirement::Inline => caps.fullscreen = !enabled,
+        }
+        caps
+    }
+
+    #[test]
+    fn every_gated_feature_hint_follows_its_own_capability() {
+        for (index, hint) in FEATURE_HINTS.iter().enumerate() {
+            if hint.requirement == FeatureHintRequirement::Always {
+                continue;
+            }
+
+            let mut state = AppState::new();
+            state.feature_hint_cursor = index;
+            state.completed_turns_since_hint = FEATURE_HINT_INTERVAL_TURNS - 1;
+            assert!(state.maybe_record_feature_hint(capabilities_for(hint.requirement, true)));
+            let Some(Entry::FeatureHint(text)) = state.transcript.last() else {
+                panic!("expected feature hint at index {index}");
+            };
+            assert_eq!(
+                text.as_str(),
+                hint.text,
+                "cursor at index {index} should select its own hint when supported"
+            );
+
+            let mut state = AppState::new();
+            state.feature_hint_cursor = index;
+            state.completed_turns_since_hint = FEATURE_HINT_INTERVAL_TURNS - 1;
+            assert!(state.maybe_record_feature_hint(capabilities_for(hint.requirement, false)));
+            let Some(Entry::FeatureHint(text)) = state.transcript.last() else {
+                panic!("expected fallback feature hint at index {index}");
+            };
+            assert_ne!(
+                text.as_str(),
+                hint.text,
+                "hint at index {index} must be skipped when unsupported"
+            );
+        }
+    }
+
+    /// The loop test above skips `Always` hints, so it cannot notice a gated
+    /// hint whose requirement was accidentally widened to `Always`. Pin each
+    /// gated hint's declared requirement here instead.
+    #[test]
+    fn gated_feature_hints_keep_their_capability_requirements() {
+        let expected = [
+            (
+                "F8 opens the nested-agent viewer",
+                FeatureHintRequirement::Subagents,
+            ),
+            ("/ragnarok", FeatureHintRequirement::Ragnarok),
+            ("dictate", FeatureHintRequirement::Voice),
+            ("/fork", FeatureHintRequirement::Fork),
+            ("/side", FeatureHintRequirement::Side),
+            ("Paste an image", FeatureHintRequirement::Images),
+            (
+                "With an empty prompt, Ctrl+F",
+                FeatureHintRequirement::Fullscreen,
+            ),
+            ("Press Alt+T", FeatureHintRequirement::Fullscreen),
+            ("Open the transcript reader", FeatureHintRequirement::Inline),
+        ];
+        for (needle, requirement) in expected {
+            let matches: Vec<_> = FEATURE_HINTS
+                .iter()
+                .filter(|hint| hint.text.contains(needle))
+                .collect();
+            assert_eq!(
+                matches.len(),
+                1,
+                "expected exactly one hint containing {needle:?}"
+            );
+            assert_eq!(
+                matches[0].requirement, requirement,
+                "hint containing {needle:?} has the wrong requirement"
+            );
+        }
+        let gated = FEATURE_HINTS
+            .iter()
+            .filter(|hint| hint.requirement != FeatureHintRequirement::Always)
+            .count();
+        assert_eq!(
+            gated,
+            expected.len(),
+            "gated hints changed; update this table to match"
+        );
     }
 
     #[test]
@@ -11549,6 +11731,10 @@ mod tests {
             subagents: false,
             ragnarok: false,
             voice: false,
+            fork: false,
+            side: false,
+            images: false,
+            fullscreen: false,
         }));
         let Some(Entry::FeatureHint(text)) = state.transcript.last() else {
             panic!("expected feature hint");
@@ -11556,6 +11742,9 @@ mod tests {
         assert!(!text.contains("subagent"));
         assert!(!text.contains("ragnarok"));
         assert!(!text.contains("Ctrl+R"));
+        assert!(!text.contains("/fork"));
+        assert!(!text.contains("/side"));
+        assert!(!text.contains("Ctrl+V"));
     }
 
     #[test]
