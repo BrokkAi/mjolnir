@@ -38,6 +38,10 @@ use crate::theme::TerminalThemeKind;
 /// Beyond this we truncate with an ellipsis.
 pub const QUEUED_PROMPT_PREVIEW_WIDTH: usize = 40;
 
+/// Maximum width of the provisional session title seeded from the first
+/// user prompt while waiting for the agent's `SessionInfoUpdate`.
+const PROVISIONAL_TITLE_WIDTH: u16 = 48;
+
 /// Longest excerpt of an objective or failure message kept in a subagent's
 /// permanent transcript record.
 const SUBAGENT_RECORD_LINE_CHARS: usize = 160;
@@ -3614,6 +3618,18 @@ impl AppState {
         });
         self.pending_workspace_diff_total = None;
         self.agent_open_message_index = None;
+        // The agent names sessions with an asynchronous summarization call
+        // that can land well after the first exchange; until then the header
+        // shows no title and the pickers fall back to the bare session id.
+        // Seed a provisional title from the first prompt — the agent's
+        // `SessionInfoUpdate` overwrites it whenever it arrives.
+        if self.session_title.is_none() {
+            let provisional = crate::text::truncate_text_to_width(
+                crate::notifications::sanitize_message(&text),
+                PROVISIONAL_TITLE_WIDTH,
+            );
+            self.set_session_title(&provisional);
+        }
         let prompt_index = self.transcript.len();
         self.transcript.push(Entry::UserPrompt(text.clone()));
         self.prompt_turns.push(PromptTurn {
@@ -6685,6 +6701,64 @@ mod tests {
         assert!(!state.workspace_diff_viewer);
         assert_eq!(state.workspace_diff_selected_file, 0);
         assert_eq!(state.workspace_diff_scroll_offset, 0);
+    }
+
+    #[test]
+    fn first_prompt_seeds_provisional_session_title() {
+        let mut state = AppState::new();
+        assert_eq!(state.session_title, None);
+
+        state.record_user_prompt("fix the flaky\nresume test".to_string());
+
+        assert_eq!(
+            state.session_title.as_deref(),
+            Some("fix the flaky resume test")
+        );
+    }
+
+    #[test]
+    fn provisional_session_title_is_truncated_to_width() {
+        let mut state = AppState::new();
+
+        state.record_user_prompt("x".repeat(100));
+
+        let title = state.session_title.expect("provisional title");
+        assert_eq!(title, format!("{}...", "x".repeat(45)));
+    }
+
+    #[test]
+    fn later_prompts_do_not_replace_an_existing_session_title() {
+        let mut state = AppState::new();
+        state.record_user_prompt("first prompt".to_string());
+
+        state.record_user_prompt("second prompt".to_string());
+
+        assert_eq!(state.session_title.as_deref(), Some("first prompt"));
+    }
+
+    #[test]
+    fn agent_session_info_update_overwrites_provisional_title() {
+        let mut state = AppState::new();
+        state.record_user_prompt("first prompt".to_string());
+
+        state.apply_session_update(SessionUpdate::SessionInfoUpdate(
+            agent_client_protocol::schema::v1::SessionInfoUpdate::new().title("Real agent title"),
+        ));
+
+        assert_eq!(state.session_title.as_deref(), Some("Real agent title"));
+    }
+
+    #[test]
+    fn resumed_session_title_survives_the_next_prompt() {
+        let mut state = AppState::new();
+        assert!(state.set_session_title("Carried over from resume"));
+
+        state.record_user_prompt("follow-up work".to_string());
+
+        assert_eq!(
+            state.session_title.as_deref(),
+            Some("Carried over from resume")
+        );
     }
 
     #[test]
