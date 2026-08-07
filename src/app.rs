@@ -495,6 +495,14 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
+        text: "Choose an activity spinner under Appearance in /mjconfig to change the prompt-working animation.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "If a terminal or multiplexer reports colors unreliably, choose the strict 16-color ANSI theme under Appearance in /mjconfig.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
         text: "Mjolnir can queue another prompt while an agent is working; Ctrl+C cancels the active turn first.",
         requirement: FeatureHintRequirement::Always,
     },
@@ -11809,6 +11817,32 @@ mod tests {
                 && hint.text.contains("Default or Full thought output")
                 && hint.text.contains("/mjconfig")
         }));
+    }
+
+    #[test]
+    fn feature_hints_include_spinner_and_ansi_appearance_configuration() {
+        let spinner = FEATURE_HINTS
+            .iter()
+            .find(|hint| {
+                hint.requirement == FeatureHintRequirement::Always
+                    && hint.text.contains("activity spinner")
+                    && hint.text.contains("/mjconfig")
+            })
+            .expect("spinner appearance hint");
+        let ansi = FEATURE_HINTS
+            .iter()
+            .find(|hint| {
+                hint.requirement == FeatureHintRequirement::Always
+                    && hint.text.contains("strict 16-color ANSI theme")
+                    && hint.text.contains("terminal or multiplexer")
+                    && hint.text.contains("/mjconfig")
+            })
+            .expect("ANSI appearance hint");
+
+        assert_ne!(
+            spinner.text, ansi.text,
+            "spinner and ANSI tips must remain separate"
+        );
     }
 
     #[test]
