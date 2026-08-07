@@ -91,6 +91,9 @@ pub struct AcpRuntimeConfig {
     /// Optional model-visible subagent MCP service. Interactive TUI sessions
     /// set this; nested and non-interactive runtimes leave it absent.
     pub subagents: Option<subagent::Config>,
+    /// Persistent cross-session memory behavior. Primary sessions set this;
+    /// side conversations, subagents, and review lanes leave it absent.
+    pub memory: Option<crate::memory::SessionMemory>,
     /// Apply the model-visible policy used by ephemeral side conversations.
     pub side_prompt_policy: bool,
     /// Forces the runtime through its normal process-tree teardown path. This
@@ -1286,6 +1289,7 @@ pub async fn run(
             cfg.saved_session_config.clone(),
             cfg.role_config.clone(),
             cfg.subagents.clone(),
+            cfg.memory.clone(),
             cfg.side_prompt_policy,
             Some(stderr_tail.clone()),
         );
@@ -1863,6 +1867,7 @@ where
         HashMap::new(),
         None,
         None,
+        None,
         false,
         None,
     )
@@ -1896,6 +1901,7 @@ where
         None,
         None,
         HashMap::new(),
+        None,
         None,
         None,
         false,
@@ -1934,6 +1940,7 @@ where
         HashMap::new(),
         None,
         None,
+        None,
         false,
         None,
     )
@@ -1958,6 +1965,7 @@ async fn drive_client_with_fs_limit<T>(
     saved_session_config: HashMap<String, String>,
     role_config: Option<RuntimeRoleConfig>,
     subagents: Option<subagent::Config>,
+    memory: Option<crate::memory::SessionMemory>,
     side_prompt_policy: bool,
     stderr_tail: Option<AgentStderrTail>,
 ) -> Result<()>
@@ -2226,6 +2234,7 @@ where
                 saved_session_config,
                 role_config,
                 subagents,
+                memory,
                 side_prompt_policy,
                 drive_subagent_controller,
                 context_usage,
@@ -2273,6 +2282,7 @@ async fn drive_session(
     saved_session_config: HashMap<String, String>,
     role_config: Option<RuntimeRoleConfig>,
     subagents: Option<subagent::Config>,
+    memory: Option<crate::memory::SessionMemory>,
     side_prompt_policy: bool,
     subagent_controller: subagent::Controller,
     context_usage: Arc<ContextUsageTracker>,
@@ -2394,6 +2404,27 @@ async fn drive_session(
         None
     };
     if let Some(server) = subagent_http.as_ref() {
+        mcp_servers.push(server.advertised().clone());
+    }
+    // Memory tools are additive: an adapter without HTTP MCP support or a
+    // failed listener downgrades to injection-only rather than aborting.
+    let memory_http = match memory.as_ref().filter(|memory| memory.tools) {
+        Some(session_memory) if init_resp.agent_capabilities.mcp_capabilities.http => {
+            match crate::memory::HttpServer::start(session_memory).await {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    tracing::warn!("could not start memory MCP server: {error:#}");
+                    None
+                }
+            }
+        }
+        Some(_) => {
+            tracing::debug!("agent lacks HTTP MCP support; memory tools unavailable");
+            None
+        }
+        None => None,
+    };
+    if let Some(server) = memory_http.as_ref() {
         mcp_servers.push(server.advertised().clone());
     }
     let side_session_unsupported_reason =
@@ -2609,6 +2640,11 @@ async fn drive_session(
     workspace_roots.extend(additional_directories.iter().cloned());
     let mut next_turn_diff_id = 1_u64;
     let mut session_has_history = resumed;
+    // Stored memories ride the first prompt of this runtime rather than every
+    // turn; entries saved mid-session reach the next session.
+    let mut memory_preamble = memory
+        .as_ref()
+        .and_then(crate::memory::SessionMemory::preamble);
     // Prompts that arrived while another operation owned `ui_rx` (a turn, a
     // config update, a session fork). They are replayed here, ahead of any
     // command still sitting in the channel, instead of being dropped: an
@@ -2662,6 +2698,11 @@ async fn drive_session(
                     );
                 }
                 session_state.clear_permissions_cancelled(&session_id).await;
+                let text = match memory_preamble.take() {
+                    Some(preamble) if text.is_empty() => preamble,
+                    Some(preamble) => format!("{preamble}\n\n{text}"),
+                    None => text,
+                };
                 let prompt = prompt_content_blocks(text, images, resources, side_prompt_policy);
                 let req = PromptRequest::new(session_id.clone(), prompt);
                 let keep_running = drive_prompt_turn(
@@ -2762,6 +2803,11 @@ async fn drive_session(
                         context_usage.reset_for_session();
                         session_has_history = false;
                         next_turn_diff_id = 1;
+                        // The previous session consumed the first-prompt
+                        // memory copy; a fresh session must get one again.
+                        memory_preamble = memory
+                            .as_ref()
+                            .and_then(crate::memory::SessionMemory::preamble);
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(message) => {
@@ -2857,6 +2903,11 @@ async fn drive_session(
                         session_id = switched_session_id;
                         context_usage.reset_for_session();
                         session_has_history = true;
+                        // A switched-in session behaves like a resume: its
+                        // next prompt carries the current stored memories.
+                        memory_preamble = memory
+                            .as_ref()
+                            .and_then(crate::memory::SessionMemory::preamble);
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(launch_err) => {
@@ -8284,6 +8335,7 @@ mod tests {
                 reasoning_effort: None,
             }),
             None,
+            None,
             false,
             None,
         ));
@@ -9321,6 +9373,58 @@ mod tests {
             .await;
     }
 
+    async fn run_mock_agent_recording_prompts_fresh_sessions(
+        stream: tokio::io::DuplexStream,
+        prompts: Arc<std::sync::Mutex<Vec<String>>>,
+        new_session_calls: Arc<AtomicUsize>,
+    ) {
+        let calls = new_session_calls.clone();
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(InitializeResponse::new(ProtocolVersion::V1))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: NewSessionRequest, responder, _cx| {
+                    let call = calls.fetch_add(1, Ordering::SeqCst);
+                    let session_id = if call == 0 {
+                        "old-session"
+                    } else {
+                        "fresh-session"
+                    };
+                    responder.respond(NewSessionResponse::new(SessionId::new(session_id)))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: agent_client_protocol::schema::v1::PromptRequest,
+                            responder,
+                            _cx| {
+                    let text = req
+                        .prompt
+                        .iter()
+                        .map(content_block_text)
+                        .collect::<Vec<_>>()
+                        .join("");
+                    prompts.lock().expect("prompt log").push(text);
+                    responder.respond(PromptResponse::new(StopReason::EndTurn))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
     async fn run_mock_agent_restart_session_load(
         stream: tokio::io::DuplexStream,
         load_seen: Arc<StdAtomicBool>,
@@ -9626,6 +9730,16 @@ mod tests {
         }
     }
 
+    async fn wait_for_prompt_count(prompts: &Arc<std::sync::Mutex<Vec<String>>>, count: usize) {
+        for _ in 0..100 {
+            if prompts.lock().expect("prompt log").len() >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("timed out waiting for {count} recorded prompts");
+    }
+
     async fn wait_for_fatal(ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>) -> String {
         loop {
             let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
@@ -9889,6 +10003,7 @@ mod tests {
             None,
             HashMap::new(),
             Some(role_config),
+            None,
             None,
             false,
             None,
@@ -11388,6 +11503,7 @@ mod tests {
                 reasoning_effort: None,
             }),
             None,
+            None,
             false,
             None,
         ));
@@ -11596,6 +11712,7 @@ mod tests {
             saved_session_config: HashMap::new(),
             role_config: None,
             subagents: None,
+            memory: None,
             side_prompt_policy: false,
             termination: None,
         };
@@ -11656,6 +11773,7 @@ mod tests {
                 reasoning_effort: None,
             }),
             subagents: None,
+            memory: None,
             side_prompt_policy: false,
             termination: None,
         };
@@ -11702,6 +11820,7 @@ mod tests {
             saved_session_config: HashMap::new(),
             role_config: None,
             subagents: None,
+            memory: None,
             side_prompt_policy: false,
             termination: None,
         };
@@ -11862,6 +11981,7 @@ mod tests {
             saved_session_config: HashMap::new(),
             role_config: None,
             subagents: None,
+            memory: None,
             side_prompt_policy: false,
             termination: None,
         };
@@ -11978,6 +12098,7 @@ mod tests {
             saved_session_config: HashMap::new(),
             role_config: None,
             subagents: None,
+            memory: None,
             side_prompt_policy: false,
             termination: None,
         };
@@ -12009,6 +12130,7 @@ mod tests {
             saved_session_config: HashMap::new(),
             role_config: None,
             subagents: None,
+            memory: None,
             side_prompt_policy: false,
             termination: None,
         };
@@ -12036,6 +12158,7 @@ mod tests {
             saved_session_config: HashMap::new(),
             role_config: None,
             subagents: None,
+            memory: None,
             side_prompt_policy: false,
             termination: Some(termination.clone()),
         };
@@ -12563,6 +12686,7 @@ mod tests {
             HashMap::new(),
             None,
             None,
+            None,
             false,
             Some(stderr_tail),
         ));
@@ -12734,6 +12858,96 @@ mod tests {
         );
         wait_for_session_started(&mut ui_rx, "fresh-session").await;
         assert_eq!(new_session_calls.load(Ordering::SeqCst), 2);
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        client_task.abort();
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_preamble_rides_first_prompt_and_rearms_after_new_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = dir.path().join("memories.json");
+        crate::memory::add(&store, "prefers pnpm", None).expect("seed memory");
+
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let new_session_calls = Arc::new(AtomicUsize::new(0));
+        let agent_task = tokio::spawn(run_mock_agent_recording_prompts_fresh_sessions(
+            agent_side,
+            prompts.clone(),
+            new_session_calls.clone(),
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client_with_fs_limit(
+            client_transport,
+            std::env::temp_dir(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            SessionRestoreMode::Continue,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+            DEFAULT_FS_TEXT_BYTES,
+            RuntimeAccessMode::Full,
+            None,
+            None,
+            HashMap::new(),
+            None,
+            None,
+            Some(crate::memory::SessionMemory {
+                store_path: store,
+                project: PathBuf::from("/tmp/proj"),
+                inject: true,
+                tools: false,
+            }),
+            false,
+            None,
+        ));
+
+        wait_for_session_started(&mut ui_rx, "old-session").await;
+        let send = |text: &str| UiCommand::SendPrompt {
+            text: text.to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+        };
+        cmd_tx.send(send("first")).expect("send first");
+        cmd_tx.send(send("second")).expect("send second");
+        wait_for_prompt_count(&prompts, 2).await;
+        {
+            let log = prompts.lock().expect("prompt log");
+            assert!(log[0].contains("<mj-memory>"), "first prompt: {:?}", log[0]);
+            assert!(log[0].contains("prefers pnpm"));
+            assert!(log[0].ends_with("first"));
+            // The preamble rides only the first prompt of a session.
+            assert_eq!(log[1], "second");
+        }
+
+        let (responder, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::NewSession { responder })
+            .expect("send new session");
+        assert_eq!(
+            response.await.expect("new session response"),
+            LoadSessionResult::Switched
+        );
+        wait_for_session_started(&mut ui_rx, "fresh-session").await;
+        cmd_tx.send(send("third")).expect("send third");
+        wait_for_prompt_count(&prompts, 3).await;
+        {
+            let log = prompts.lock().expect("prompt log");
+            assert!(
+                log[2].contains("<mj-memory>"),
+                "fresh-session prompt must carry memories again: {:?}",
+                log[2]
+            );
+            assert!(log[2].ends_with("third"));
+        }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         client_task.abort();

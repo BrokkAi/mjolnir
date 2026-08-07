@@ -159,6 +159,43 @@ Overrides require explicit model IDs; `auto` is not accepted. Each accepts an
 optional `+<effort>` suffix (`--model provider/model-id+high`). The saved
 configuration remains unchanged.
 
+## Memories
+
+Mjolnir keeps short, durable facts (at most 2,000 bytes each) across sessions
+in `memories.json`, next to the config. Memory integration applies only to
+**Codex primary sessions**: Claude Code and custom adapters keep their own
+native memory systems, so mjolnir neither injects memories nor exposes the
+save tools there. The store and its management commands work regardless of
+the active adapter.
+
+Memories are global or scoped to the enclosing project (worktree sessions
+share the parent project's memories), and are created explicitly: ask the
+agent to remember something (it calls the `memory_save` tool exposed by the
+in-process `mj-memory` MCP server), or run `/memory add` in the TUI or
+`mj memory add` from the CLI. The relevant entries are injected at the start
+of the next Codex primary session in a `<mj-memory>` block, size-bounded with
+the oldest entries dropped first. Side conversations, subagents, and review
+lanes never see or write memories.
+
+The feature is optional. A master switch plus two toggles control it, all on
+by default:
+
+```toml
+[memory]
+enabled = true           # master switch; false disables the feature entirely
+use_memories = true      # inject stored memories into new primary sessions
+generate_memories = true # expose the memory_save / memory_forget tools
+```
+
+Set `enabled = false` (or run `/memory off` in the TUI) to switch memory off
+entirely — no injection and no tools, regardless of the other toggles. The
+store and the management commands below keep working while disabled, and
+`/memory` and `mj memory list` call out the disabled state. Toggle the
+sub-switches with `/memory use on|off` and `/memory generate on|off`; all
+changes apply to sessions started afterwards. `/memory` lists the stored
+entries, `/memory forget <id>` deletes one, and `/memory clear confirm` (or
+`mj memory clear --yes`) deletes everything.
+
 ## Appearance and session controls
 
 Theme, spinner, thought-output, and feature-tip preferences are persistent.

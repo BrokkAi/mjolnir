@@ -339,6 +339,11 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     access_mode: acp::RuntimeAccessMode::Full,
                 })
         }),
+        memory: crate::memory::SessionMemory::from_config(
+            &app_config.memory,
+            &cfg.cwd,
+            Some(primary.launch.kind),
+        ),
         side_prompt_policy: false,
         termination: Some(cfg.termination.clone()),
     };

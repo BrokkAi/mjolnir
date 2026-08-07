@@ -4576,6 +4576,11 @@ fn start_server_agent_session(
     });
     let provenance_primary = roster.as_ref().map(|resolved| resolved.primary.clone());
     let provenance_cwd = cwd.clone();
+    let session_memory = crate::memory::SessionMemory::from_config(
+        &app_config.memory,
+        &cwd,
+        roster.as_ref().map(|resolved| resolved.primary.launch.kind),
+    );
     let mut workspace_roots = Vec::with_capacity(1 + additional_directories.len());
     workspace_roots.push(cwd.clone());
     workspace_roots.extend(additional_directories.iter().cloned());
@@ -4600,6 +4605,7 @@ fn start_server_agent_session(
         saved_session_config,
         role_config,
         subagents,
+        memory: session_memory,
         side_prompt_policy: false,
         termination: None,
     };

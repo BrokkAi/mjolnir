@@ -31,6 +31,10 @@ explicit model IDs. The optional `+EFFORT` suffix (`off`, `none`, `minimal`,
 mj resume [SESSION_ID]
 mj resume --list --format json --cwd /work/project
 mj models refresh
+mj memory list
+mj memory add [--global] "one short fact"
+mj memory forget m7
+mj memory clear --yes
 mj server [--hostname HOST | --tailscale]
 ```
 
@@ -47,6 +51,8 @@ control](/remote/) for behavioral boundaries.
 | `/review recent` | Review the latest change-producing turn |
 | `/review uncommitted` | Review all current worktree changes |
 | `/review head` | Review `HEAD` |
+| `/memory` | List stored memories and the use/generate toggles |
+| `/memory add [--global] <text>` | Save a memory for this project (or globally) |
 | `/compact` | Compact the primary agent's session where supported |
 | `/subagents` | Open the session-wide actor roster and its retained transcripts |
 | `/ragnarok TASK` | Summon the model-vs-model arena for one implementation task |

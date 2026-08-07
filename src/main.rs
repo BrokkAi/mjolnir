@@ -21,6 +21,7 @@ mod headless;
 mod ink;
 mod keep_awake;
 mod labels;
+mod memory;
 mod menu;
 mod model_resolve;
 mod notifications;
@@ -202,6 +203,8 @@ struct Cli {
 enum Commands {
     /// Install repository guidance for coding agents.
     Agents(AgentsArgs),
+    /// List and manage persistent cross-session memories.
+    Memory(MemoryArgs),
     /// Inspect or refresh model discovery state.
     Models(ModelsArgs),
     /// Resume an existing ACP session.
@@ -231,6 +234,47 @@ enum AgentsCommand {
 #[derive(Debug, clap::Args)]
 struct AgentsInstallArgs {
     /// Apply the displayed diff without an interactive confirmation.
+    #[arg(short = 'y', long)]
+    yes: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct MemoryArgs {
+    #[command(subcommand)]
+    command: MemoryCommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum MemoryCommand {
+    /// Print every stored memory, grouped by scope.
+    List,
+    /// Save one memory, scoped to the current project unless --global.
+    Add(MemoryAddArgs),
+    /// Delete one memory by id.
+    Forget(MemoryForgetArgs),
+    /// Delete every stored memory in every project.
+    Clear(MemoryClearArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct MemoryAddArgs {
+    /// One short, self-contained fact to remember across sessions.
+    #[arg(required = true)]
+    text: Vec<String>,
+    /// Save for every project instead of scoping to the current one.
+    #[arg(long)]
+    global: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct MemoryForgetArgs {
+    /// Memory id as shown in listings (accepts `7` or `m7`).
+    id: String,
+}
+
+#[derive(Debug, clap::Args)]
+struct MemoryClearArgs {
+    /// Delete without a confirmation round trip.
     #[arg(short = 'y', long)]
     yes: bool,
 }
@@ -468,10 +512,65 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
     match &cli.command {
         Some(Commands::Agents(_)) => false,
+        Some(Commands::Memory(_)) => false,
         Some(Commands::Models(_)) => false,
         Some(Commands::Resume(args)) => !args.list,
         Some(Commands::Server(_)) => false,
         None => true,
+    }
+}
+
+fn run_memory_command(command: MemoryCommand, cwd: &Path) -> Result<()> {
+    let store = memory::default_path();
+    match command {
+        MemoryCommand::List => {
+            let memory_config = Config::load(&config::default_config_path())
+                .map(|config| config.memory)
+                .unwrap_or_default();
+            println!("{}", memory::render_full_list(&store, &memory_config));
+            Ok(())
+        }
+        MemoryCommand::Add(args) => {
+            let text = args.text.join(" ");
+            let scope = (!args.global).then(|| memory::project_key(cwd));
+            let entry = memory::add(&store, &text, scope.clone())?;
+            match scope {
+                Some(project) => println!("Saved memory m{} for {}.", entry.id, project.display()),
+                None => println!("Saved memory m{} (global).", entry.id),
+            }
+            Ok(())
+        }
+        MemoryCommand::Forget(args) => {
+            let id = args
+                .id
+                .strip_prefix('m')
+                .unwrap_or(&args.id)
+                .parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("invalid memory id: {}", args.id))?;
+            match memory::forget(&store, id)? {
+                Some(entry) => {
+                    println!("Forgot memory m{}: {}", entry.id, entry.text);
+                    Ok(())
+                }
+                None => Err(anyhow::anyhow!("no memory with id m{id}")),
+            }
+        }
+        MemoryCommand::Clear(args) => {
+            if !args.yes {
+                let count = memory::entries(&store)
+                    .map(|entries| entries.len())
+                    .unwrap_or(0);
+                println!(
+                    "This deletes all {} across every project. \
+                     Re-run with --yes to proceed.",
+                    memory::count_label(count)
+                );
+                return Ok(());
+            }
+            let removed = memory::clear(&store)?;
+            println!("Cleared {}.", memory::count_label(removed));
+            Ok(())
+        }
     }
 }
 
@@ -509,6 +608,7 @@ async fn main() -> Result<()> {
             Commands::Agents(args) => match args.command {
                 AgentsCommand::Install(args) => agent_instructions::install(&cwd, args.yes),
             },
+            Commands::Memory(args) => run_memory_command(args.command, &cwd),
             Commands::Models(args) => match args.command {
                 ModelsCommand::Refresh => {
                     let cfg = Config::load(&config::default_config_path())?;
@@ -1844,6 +1944,36 @@ fn adapter_source_id_for_ui(role: &roster::ResolvedAgent) -> String {
     role.launch.source_id.clone()
 }
 
+/// Adapter kind of the agent this session actually launches. Resume and
+/// session-switch flows can route a session to a different adapter than
+/// `roster.primary` without re-resolving the roster, so memory gating must
+/// follow the launch itself; a launch not found in the roster yields `None`.
+///
+/// Launched agents encode their roster model as `roster:<model>`
+/// (`selected_agent_for_role`), and the match requires model, command, args,
+/// and env: distinct routes that merely share a launch command — a custom
+/// server wrapping the codex binary, say — must never be conflated.
+fn launched_adapter_kind(
+    roster: &roster::Roster,
+    agent: &SelectedAgent,
+) -> Option<roster::AdapterKind> {
+    let model = agent.source_id.strip_prefix("roster:")?;
+    let matches = |role: &roster::ResolvedAgent| {
+        role.model.model == model
+            && role.launch.command == agent.program
+            && role.launch.args == agent.args
+            && role.launch.env == agent.env
+    };
+    if matches(&roster.primary) {
+        return Some(roster.primary.launch.kind);
+    }
+    roster
+        .available
+        .iter()
+        .find(|role| matches(role))
+        .map(|role| role.launch.kind)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
     agent: &SelectedAgent,
@@ -2021,6 +2151,9 @@ async fn run_session(
     let primary_permission = runtime_options.permission_mode.and_then(|mode| {
         roster::configure_permissions(roster.primary.launch.kind, mode, &mut primary_env)
     });
+    let memory_config = Config::load(&config::default_config_path())
+        .map(|config| config.memory)
+        .unwrap_or_default();
     let runtime_cfg = acp::AcpRuntimeConfig {
         command: agent.program.clone(),
         args: agent.args.clone(),
@@ -2073,6 +2206,11 @@ async fn run_session(
                     access_mode: acp::RuntimeAccessMode::Full,
                 })
         }),
+        memory: memory::SessionMemory::from_config(
+            &memory_config,
+            &cwd,
+            launched_adapter_kind(&roster, agent),
+        ),
         side_prompt_policy: false,
         termination: None,
     };
@@ -3917,6 +4055,94 @@ mod tests {
             rendered.contains("refresh"),
             "error should name the missing subcommand: {rendered}"
         );
+    }
+
+    #[test]
+    fn launched_adapter_kind_follows_the_launched_agent_not_roster_primary() {
+        let mut codex = test_roster_agent("gpt-5", "codex-acp");
+        codex.launch.kind = roster::AdapterKind::Codex;
+        let mut claude = test_roster_agent("opus", "claude-acp");
+        claude.launch.kind = roster::AdapterKind::Claude;
+        let codex_roster = test_roster(codex.clone(), vec![codex.clone(), claude.clone()]);
+
+        // Normal path: the launched agent is the roster primary.
+        assert_eq!(
+            launched_adapter_kind(&codex_roster, &selected_agent_for_role(&codex)),
+            Some(roster::AdapterKind::Codex)
+        );
+        // Cross-adapter switch: a Claude session resumed under a
+        // Codex-primary roster must not count as Codex.
+        assert_eq!(
+            launched_adapter_kind(&codex_roster, &selected_agent_for_role(&claude)),
+            Some(roster::AdapterKind::Claude)
+        );
+        // The reverse: Codex resumed under a Claude-primary roster is Codex.
+        let claude_roster = test_roster(claude.clone(), vec![claude.clone(), codex.clone()]);
+        assert_eq!(
+            launched_adapter_kind(&claude_roster, &selected_agent_for_role(&codex)),
+            Some(roster::AdapterKind::Codex)
+        );
+        // A custom route that reuses the codex launch command must classify
+        // as Custom, not as the Codex primary it shares a command with.
+        let mut custom = test_roster_agent("proxy-model", "codex-acp");
+        custom.launch.kind = roster::AdapterKind::Custom;
+        custom.launch.source_id = "custom:proxy".to_string();
+        let shared_launch_roster = test_roster(codex.clone(), vec![codex, claude, custom.clone()]);
+        assert_eq!(
+            launched_adapter_kind(&shared_launch_roster, &selected_agent_for_role(&custom)),
+            Some(roster::AdapterKind::Custom)
+        );
+        // A launch the roster does not know stays ungated.
+        let unknown = SelectedAgent {
+            source_id: "custom:mystery".to_string(),
+            program: PathBuf::from("/usr/bin/mystery"),
+            args: Vec::new(),
+            env: Default::default(),
+        };
+        assert_eq!(launched_adapter_kind(&shared_launch_roster, &unknown), None);
+    }
+
+    #[test]
+    fn parse_memory_subcommands() {
+        let cli = try_parse_hermetic(&["mj", "memory", "list"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Memory(MemoryArgs {
+                command: MemoryCommand::List
+            }))
+        ));
+
+        let cli = try_parse_hermetic(&["mj", "memory", "add", "--global", "prefers", "rebase"])
+            .expect("parse");
+        match cli.command {
+            Some(Commands::Memory(MemoryArgs {
+                command: MemoryCommand::Add(args),
+            })) => {
+                assert!(args.global);
+                assert_eq!(args.text.join(" "), "prefers rebase");
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+
+        let cli = try_parse_hermetic(&["mj", "memory", "forget", "m7"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Memory(MemoryArgs {
+                command: MemoryCommand::Forget(MemoryForgetArgs { ref id })
+            })) if id == "m7"
+        ));
+
+        let cli = try_parse_hermetic(&["mj", "memory", "clear", "--yes"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Memory(MemoryArgs {
+                command: MemoryCommand::Clear(MemoryClearArgs { yes: true })
+            }))
+        ));
+
+        // `add` without text and bare `memory` are parse errors.
+        try_parse_hermetic(&["mj", "memory", "add"]).expect_err("text is required");
+        try_parse_hermetic(&["mj", "memory"]).expect_err("subcommand is required");
     }
 
     #[test]

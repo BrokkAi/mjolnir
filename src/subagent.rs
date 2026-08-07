@@ -1066,6 +1066,7 @@ fn spawn_subagent_runtime(
         saved_session_config,
         role_config,
         subagents: None,
+        memory: None,
         side_prompt_policy: false,
         termination: Some(cancel.clone()),
     };
@@ -1219,7 +1220,7 @@ impl Drop for HttpServer {
     }
 }
 
-async fn require_bearer(
+pub(crate) async fn require_bearer(
     State(expected): State<String>,
     request: Request,
     next: Next,

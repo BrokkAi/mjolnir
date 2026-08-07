@@ -222,6 +222,7 @@ const BUILTIN_SUBAGENTS_COMMAND: &str = "subagents";
 const BUILTIN_REVIEW_COMMAND: &str = "review";
 const BUILTIN_RAGNAROK_COMMAND: &str = "ragnarok";
 const BUILTIN_TERMINALS_COMMAND: &str = "terminals";
+const BUILTIN_MEMORY_COMMAND: &str = "memory";
 const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
 
 fn builtin_new_command() -> AvailableCommand {
@@ -309,6 +310,13 @@ fn builtin_terminals_command() -> AvailableCommand {
     )
 }
 
+fn builtin_memory_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_MEMORY_COMMAND,
+        "list and manage persistent memories (usage: /memory [add|forget|on|off|use|generate|clear])",
+    )
+}
+
 fn install_builtin_commands(
     commands: &mut Vec<AvailableCommand>,
     include_fork: bool,
@@ -328,6 +336,7 @@ fn install_builtin_commands(
             && command.name != BUILTIN_REVIEW_COMMAND
             && command.name != BUILTIN_RAGNAROK_COMMAND
             && command.name != BUILTIN_TERMINALS_COMMAND
+            && command.name != BUILTIN_MEMORY_COMMAND
     });
     if include_fork {
         commands.insert(0, builtin_fork_command());
@@ -336,6 +345,7 @@ fn install_builtin_commands(
         commands.insert(0, builtin_side_command());
     }
     commands.insert(0, builtin_ragnarok_command());
+    commands.insert(0, builtin_memory_command());
     commands.insert(0, builtin_mjconfig_command());
     commands.insert(0, builtin_review_command());
     commands.insert(0, builtin_terminals_command());
@@ -363,6 +373,7 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
             BUILTIN_REVIEW_COMMAND,
             BUILTIN_RAGNAROK_COMMAND,
             BUILTIN_TERMINALS_COMMAND,
+            BUILTIN_MEMORY_COMMAND,
         ]
         .contains(&command.name.as_str())
     });
@@ -1041,6 +1052,9 @@ pub struct AppState {
     /// The ACP session cwd; `/ragnarok` forges its worktrees off this
     /// directory's git project.
     pub session_cwd: PathBuf,
+    /// Persistent memory store `/memory` operates on. Tests point this at a
+    /// temp file; production uses the default path.
+    pub memory_store_path: PathBuf,
     pub agent_label: String,
     /// Human-readable ACP adapter backing the primary model, such as Codex or
     /// Claude Code. Kept separate from the role/model label in the header.
@@ -1971,6 +1985,7 @@ impl AppState {
             ragnarok: None,
             ragnarok_launch: None,
             session_cwd: PathBuf::from("."),
+            memory_store_path: crate::memory::default_path(),
             agent_label: String::new(),
             primary_acp_name: "ACP server".to_string(),
             agent_source_id: String::new(),
@@ -10593,6 +10608,7 @@ mod tests {
                 "terminals",
                 "review",
                 "mjconfig",
+                "memory",
                 "ragnarok"
             ]
         );
@@ -10633,6 +10649,7 @@ mod tests {
                 "terminals",
                 "review",
                 "mjconfig",
+                "memory",
                 "ragnarok",
                 "fork"
             ]
@@ -10680,6 +10697,7 @@ mod tests {
                 "terminals",
                 "review",
                 "mjconfig",
+                "memory",
                 "ragnarok",
                 "fork",
                 "review_pr"
@@ -10707,7 +10725,7 @@ mod tests {
             "show active model selections and usage"
         );
         assert_eq!(
-            s.available_commands[11].description,
+            s.available_commands[12].description,
             "fork the current session (unstable ACP extension)"
         );
     }
@@ -10740,6 +10758,7 @@ mod tests {
                 "terminals",
                 "review",
                 "mjconfig",
+                "memory",
                 "ragnarok",
                 "review_pr"
             ]

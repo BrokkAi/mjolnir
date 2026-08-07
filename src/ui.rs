@@ -5130,6 +5130,26 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     }
 
     if plain_text_only
+        && let Some(rest) = text.strip_prefix("/memory")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        let args = rest.trim().to_string();
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        if state.is_side {
+            state.record_status_message(
+                StatusKind::Warning,
+                "memories are unavailable in side conversations",
+            );
+            return;
+        }
+        handle_memory_command(state, &args);
+        return;
+    }
+
+    if plain_text_only
         && let Some(rest) = text.strip_prefix("/review")
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
     {
@@ -5382,6 +5402,198 @@ fn parse_review_target(value: &str) -> Option<ReviewTarget> {
         "uncommitted" => Some(ReviewTarget::Uncommitted),
         "head" => Some(ReviewTarget::Head),
         _ => None,
+    }
+}
+
+const MEMORY_USAGE: &str = "usage: /memory [add [--global] <text> | forget <id> | on|off | \
+     use on|off | generate on|off | clear]";
+
+/// `/memory` subcommands. Everything operates on the store directly; toggle
+/// changes persist to the config and apply to sessions started afterwards.
+fn handle_memory_command(state: &mut AppState, args: &str) {
+    let store = state.memory_store_path.clone();
+    let project = crate::memory::project_key(&state.session_cwd);
+    let (subcommand, rest) = match args.split_once(char::is_whitespace) {
+        Some((subcommand, rest)) => (subcommand, rest.trim()),
+        None => (args, ""),
+    };
+    match subcommand {
+        "" => {
+            let memory_config = memory_config_from_disk(state);
+            let mut listing = crate::memory::render_list(&store, &project, &memory_config);
+            if !state.agent_source_id.is_empty()
+                && crate::roster::AdapterKind::from_source_id(&state.agent_source_id)
+                    != Some(crate::roster::AdapterKind::Codex)
+            {
+                listing.push_str(
+                    "\nNote: memories apply only to Codex primary sessions; the current \
+                     primary agent will not receive them.",
+                );
+            }
+            state.push_system_message(listing);
+        }
+        "add" => {
+            let (global, text) = match rest.strip_prefix("--global") {
+                Some(after) if after.is_empty() || after.starts_with(char::is_whitespace) => {
+                    (true, after.trim())
+                }
+                _ => (false, rest),
+            };
+            if text.is_empty() {
+                state.record_status_message(
+                    StatusKind::Warning,
+                    "usage: /memory add [--global] <text>",
+                );
+                return;
+            }
+            let scope = (!global).then(|| project.clone());
+            match crate::memory::add(&store, text, scope) {
+                Ok(entry) => state.record_status_message(
+                    StatusKind::Info,
+                    format!(
+                        "saved memory m{} ({}); applies to new Codex sessions",
+                        entry.id,
+                        if global { "global" } else { "this project" }
+                    ),
+                ),
+                Err(error) => state.record_status_message(
+                    StatusKind::Warning,
+                    format!("could not save memory: {error:#}"),
+                ),
+            }
+        }
+        "forget" => match rest.strip_prefix('m').unwrap_or(rest).parse::<u64>() {
+            Err(_) => {
+                state.record_status_message(StatusKind::Warning, "usage: /memory forget <id>");
+            }
+            Ok(id) => match crate::memory::forget(&store, id) {
+                Ok(Some(entry)) => state.record_status_message(
+                    StatusKind::Info,
+                    format!("forgot memory m{}: {}", entry.id, entry.text),
+                ),
+                Ok(None) => state
+                    .record_status_message(StatusKind::Warning, format!("no memory with id m{id}")),
+                Err(error) => state.record_status_message(
+                    StatusKind::Warning,
+                    format!("could not forget memory: {error:#}"),
+                ),
+            },
+        },
+        "on" | "off" if rest.is_empty() => {
+            set_memory_toggle(state, MemoryToggle::Enabled, subcommand == "on");
+        }
+        "use" | "generate" => {
+            let enabled = match rest {
+                "on" => true,
+                "off" => false,
+                _ => {
+                    state.record_status_message(
+                        StatusKind::Warning,
+                        format!("usage: /memory {subcommand} on|off"),
+                    );
+                    return;
+                }
+            };
+            let toggle = if subcommand == "use" {
+                MemoryToggle::Use
+            } else {
+                MemoryToggle::Generate
+            };
+            set_memory_toggle(state, toggle, enabled);
+        }
+        "clear" => {
+            if rest == "confirm" {
+                match crate::memory::clear(&store) {
+                    Ok(removed) => state.record_status_message(
+                        StatusKind::Info,
+                        format!("cleared {}", crate::memory::count_label(removed)),
+                    ),
+                    Err(error) => state.record_status_message(
+                        StatusKind::Warning,
+                        format!("could not clear memories: {error:#}"),
+                    ),
+                }
+            } else {
+                let count = crate::memory::entries(&store)
+                    .map(|entries| entries.len())
+                    .unwrap_or(0);
+                state.record_status_message(
+                    StatusKind::Warning,
+                    format!(
+                        "this deletes all {} across every project; \
+                         run /memory clear confirm to proceed",
+                        crate::memory::count_label(count)
+                    ),
+                );
+            }
+        }
+        _ => state.record_status_message(StatusKind::Warning, MEMORY_USAGE),
+    }
+}
+
+fn memory_config_from_disk(state: &AppState) -> config::MemoryConfig {
+    state
+        .config_path
+        .as_deref()
+        .and_then(|path| config::Config::load(path).ok())
+        .map(|config| config.memory)
+        .unwrap_or_default()
+}
+
+#[derive(Clone, Copy)]
+enum MemoryToggle {
+    /// Master switch for the whole feature.
+    Enabled,
+    Use,
+    Generate,
+}
+
+impl MemoryToggle {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Enabled => "memory",
+            Self::Use => "memory use",
+            Self::Generate => "memory generate",
+        }
+    }
+}
+
+fn set_memory_toggle(state: &mut AppState, toggle: MemoryToggle, enabled: bool) {
+    let Some(path) = state.config_path.clone() else {
+        state.record_status_message(
+            StatusKind::Warning,
+            "no config path; memory settings cannot be persisted",
+        );
+        return;
+    };
+    let mut config = match config::Config::load(&path) {
+        Ok(config) => config,
+        Err(error) => {
+            state.record_status_message(
+                StatusKind::Warning,
+                format!("could not load config: {error:#}"),
+            );
+            return;
+        }
+    };
+    match toggle {
+        MemoryToggle::Enabled => config.memory.enabled = enabled,
+        MemoryToggle::Use => config.memory.use_memories = enabled,
+        MemoryToggle::Generate => config.memory.generate_memories = enabled,
+    }
+    match config::save_user_config_preserving_session_routes(&path, &mut config) {
+        Ok(()) => state.record_status_message(
+            StatusKind::Info,
+            format!(
+                "{} {}; applies to sessions started from now on",
+                toggle.label(),
+                if enabled { "enabled" } else { "disabled" },
+            ),
+        ),
+        Err(error) => state.record_status_message(
+            StatusKind::Warning,
+            format!("could not save config: {error:#}"),
+        ),
     }
 }
 
@@ -19365,6 +19577,161 @@ mod tests {
                 if text
                     == "Active models\nprimary    claude-opus via claude-acp\nreview     gpt-5.6 via codex-acp\nsubagents  gpt-5.5 via opencode\n\nUsage\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
         ));
+    }
+
+    #[test]
+    fn slash_memory_add_forget_and_clear_operate_on_the_store_locally() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = AppState::new();
+        state.memory_store_path = dir.path().join("memories.json");
+        state.session_cwd = PathBuf::from("/tmp/proj");
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        state.input = "/memory add uses pnpm".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        assert!(cmd_rx.try_recv().is_err(), "command must remain local");
+        assert!(
+            state
+                .status_line
+                .as_ref()
+                .is_some_and(|status| status.text.contains("saved memory m1"))
+        );
+        let entries = crate::memory::entries(&state.memory_store_path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].project.as_deref(),
+            Some(std::path::Path::new("/tmp/proj"))
+        );
+
+        state.input = "/memory add --global prefers rebase merges".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        let entries = crate::memory::entries(&state.memory_store_path).unwrap();
+        assert_eq!(entries[1].project, None);
+
+        state.input = "/memory forget m1".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        let remaining = crate::memory::entries(&state.memory_store_path).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, 2);
+
+        // Clearing needs an explicit confirm round trip.
+        state.input = "/memory clear".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        assert_eq!(
+            crate::memory::entries(&state.memory_store_path)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            state
+                .status_line
+                .as_ref()
+                .is_some_and(|status| status.text.contains("clear confirm"))
+        );
+        state.input = "/memory clear confirm".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        assert!(
+            crate::memory::entries(&state.memory_store_path)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn slash_memory_lists_memories_as_a_system_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = AppState::new();
+        state.memory_store_path = dir.path().join("memories.json");
+        state.session_cwd = PathBuf::from("/tmp/proj");
+        crate::memory::add(&state.memory_store_path, "global fact", None).unwrap();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        state.input = "/memory".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::System(text)) if text.contains("[m1] global fact")
+        ));
+    }
+
+    #[test]
+    fn slash_memory_notes_when_the_primary_is_not_codex() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = AppState::new();
+        state.memory_store_path = dir.path().join("memories.json");
+        state.agent_source_id = "claude-acp".to_string();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        state.input = "/memory".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::System(text)) if text.contains("apply only to Codex primary sessions")
+        ));
+
+        state.agent_source_id = "codex-acp".to_string();
+        state.input = "/memory".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::System(text)) if !text.contains("apply only to Codex primary sessions")
+        ));
+    }
+
+    #[test]
+    fn slash_memory_is_unavailable_in_side_conversations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = AppState::new();
+        state.memory_store_path = dir.path().join("memories.json");
+        state.is_side = true;
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        state.input = "/memory add should not persist".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err(), "command must remain local");
+        assert!(
+            state
+                .status_line
+                .as_ref()
+                .is_some_and(|status| status.text.contains("unavailable in side conversations"))
+        );
+        assert!(!state.memory_store_path.exists());
+    }
+
+    #[test]
+    fn slash_memory_toggles_persist_to_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        config::Config::default()
+            .save(&config_path)
+            .expect("save config");
+        let mut state = AppState::new();
+        state.config_path = Some(config_path.clone());
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        state.input = "/memory use off".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+
+        let saved = config::Config::load(&config_path).expect("reload config");
+        assert!(saved.memory.enabled);
+        assert!(!saved.memory.use_memories);
+        assert!(saved.memory.generate_memories);
+
+        // The master switch persists independently of the two sub-toggles.
+        state.input = "/memory off".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        let saved = config::Config::load(&config_path).expect("reload config");
+        assert!(!saved.memory.enabled);
+        assert!(saved.memory.generate_memories);
+
+        state.input = "/memory on".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        let saved = config::Config::load(&config_path).expect("reload config");
+        assert!(saved.memory.enabled);
     }
 
     #[test]

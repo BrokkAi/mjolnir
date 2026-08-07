@@ -1902,6 +1902,7 @@ fn runtime_config(
         saved_session_config,
         role_config,
         subagents: None,
+        memory: None,
         side_prompt_policy: false,
         termination,
     }

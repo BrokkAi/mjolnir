@@ -122,6 +122,9 @@ pub struct Config {
     /// runs, and while a terminal session has a turn in flight.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub keep_awake: bool,
+    /// Persistent cross-session memory behavior.
+    #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
+    pub memory: MemoryConfig,
     /// The primary agent's model and review behavior.
     #[serde(default, skip_serializing_if = "AgentConfig::is_default")]
     pub agent: AgentConfig,
@@ -162,6 +165,7 @@ impl Default for Config {
             thought_output: ThoughtOutput::default(),
             feature_hints: true,
             keep_awake: true,
+            memory: MemoryConfig::default(),
             agent: AgentConfig::default(),
             review: ReviewConfig::default(),
             subagents: SubagentsConfig::default(),
@@ -178,6 +182,42 @@ fn is_zero(value: &u32) -> bool {
 
 fn is_true(value: &bool) -> bool {
     *value
+}
+
+/// Persistent cross-session memories: whether the feature is on at all,
+/// whether stored entries are injected into new primary sessions, and
+/// whether the agent may save new ones. The store itself lives next to the
+/// config as `memories.json`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MemoryConfig {
+    /// Master switch. `false` disables the whole feature — no injection and
+    /// no memory tools — regardless of the toggles below. The store and its
+    /// management commands remain available.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    /// Inject stored memories into the first prompt of new primary sessions.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_memories: bool,
+    /// Expose the `memory_save` / `memory_forget` MCP tools so the agent can
+    /// persist memories when the user asks.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub generate_memories: bool,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            use_memories: true,
+            generate_memories: true,
+        }
+    }
+}
+
+impl MemoryConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Permission preset applied to an ACP runtime. Never persisted: interactive
@@ -997,6 +1037,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
         thought_output: ThoughtOutput::default(),
         feature_hints: true,
         keep_awake: true,
+        memory: MemoryConfig::default(),
         agent: AgentConfig {
             model: old.thor.model,
             acp_source: None,
@@ -1277,6 +1318,41 @@ mod tests {
         cfg.save(&path).expect("save custom");
         let body = std::fs::read_to_string(&path).expect("read saved");
         assert!(body.contains("max_competitors = 3"), "body: {body:?}");
+    }
+
+    #[test]
+    fn memory_config_defaults_on_and_roundtrips_overrides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        // Defaults are on and omitted from the serialized form.
+        Config::default().save(&path).expect("save default");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !body.contains("memory"),
+            "default memory config should not be serialized: {body:?}"
+        );
+        let cfg = Config::load(&path).expect("load");
+        assert!(cfg.memory.enabled);
+        assert!(cfg.memory.use_memories);
+        assert!(cfg.memory.generate_memories);
+
+        // Overrides survive the round trip.
+        std::fs::write(
+            &path,
+            format!(
+                "version = {CONFIG_VERSION}\n[memory]\nenabled = false\nuse_memories = false\n"
+            ),
+        )
+        .expect("write");
+        let cfg = Config::load(&path).expect("load custom");
+        assert!(!cfg.memory.enabled);
+        assert!(!cfg.memory.use_memories);
+        assert!(cfg.memory.generate_memories);
+        cfg.save(&path).expect("save custom");
+        let body = std::fs::read_to_string(&path).expect("read saved");
+        assert!(body.contains("enabled = false"), "body: {body:?}");
+        assert!(body.contains("use_memories = false"), "body: {body:?}");
     }
 
     #[test]
