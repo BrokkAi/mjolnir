@@ -69,13 +69,52 @@ const hammerArt = [...hammerMask]
         </div>
       )
     }
-    <section class="hero-install" aria-label="Install Mjolnir">
-      <div class="hero-install-tabs">
-        <span>curl</span>
+    <section class="hero-install" aria-labelledby="install-mjolnir">
+      <div class="hero-install-heading">
+        <p id="install-mjolnir">Install Mjolnir</p>
+        <div class="hero-install-tabs" role="tablist" aria-label="Installation methods">
+          <button id="install-curl-tab" type="button" role="tab" aria-selected="true" aria-controls="install-curl-panel" tabindex="0">curl</button>
+          <button id="install-homebrew-tab" type="button" role="tab" aria-selected="false" aria-controls="install-homebrew-panel" tabindex="-1">Homebrew</button>
+          <button id="install-npm-tab" type="button" role="tab" aria-selected="false" aria-controls="install-npm-panel" tabindex="-1">npm</button>
+          <button id="install-npx-tab" type="button" role="tab" aria-selected="false" aria-controls="install-npx-panel" tabindex="-1">npx</button>
+          <button id="install-cargo-tab" type="button" role="tab" aria-selected="false" aria-controls="install-cargo-panel" tabindex="-1">Cargo</button>
+          <button id="install-archive-tab" type="button" role="tab" aria-selected="false" aria-controls="install-archive-panel" tabindex="-1">Archive</button>
+          <button id="install-source-tab" type="button" role="tab" aria-selected="false" aria-controls="install-source-panel" tabindex="-1">Source</button>
+        </div>
       </div>
-      <div class="hero-install-command">
+      <div id="install-curl-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-curl-tab">
         <span aria-hidden="true">❯</span>
-        <code>curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash</code>
+        <code title="curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash">curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash</code>
+        <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy install command">Copy</button>
+      </div>
+      <div id="install-homebrew-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-homebrew-tab" hidden>
+        <span aria-hidden="true">❯</span>
+        <code title="brew install brokkai/tap/mjolnir">brew install brokkai/tap/mjolnir</code>
+        <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy install command">Copy</button>
+      </div>
+      <div id="install-npm-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-npm-tab" hidden>
+        <span aria-hidden="true">❯</span>
+        <code title="npm install -g @brokkai/mjolnir">npm install -g @brokkai/mjolnir</code>
+        <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy install command">Copy</button>
+      </div>
+      <div id="install-npx-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-npx-tab" hidden>
+        <span aria-hidden="true">❯</span>
+        <code title="npx -y @brokkai/mjolnir">npx -y @brokkai/mjolnir</code>
+        <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy run command">Copy</button>
+      </div>
+      <div id="install-cargo-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-cargo-tab" hidden>
+        <span aria-hidden="true">❯</span>
+        <code title="cargo install --locked brokk-mjolnir brokk-mj-voice-worker">cargo install --locked brokk-mjolnir brokk-mj-voice-worker</code>
+        <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy install command">Copy</button>
+      </div>
+      <div id="install-archive-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-archive-tab" hidden>
+        <span aria-hidden="true">→</span>
+        <span class="hero-install-description">Download a release archive for your platform</span>
+        <a class="hero-install-link" href="https://github.com/BrokkAi/mjolnir/releases" rel="external">Releases</a>
+      </div>
+      <div id="install-source-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-source-tab" hidden>
+        <span aria-hidden="true">❯</span>
+        <code title="git clone https://github.com/BrokkAi/mjolnir.git && cd mjolnir && cargo build --release">git clone https://github.com/BrokkAi/mjolnir.git &amp;&amp; cd mjolnir &amp;&amp; cargo build --release</code>
         <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy install command">Copy</button>
       </div>
       <p class="hero-install-status" data-install-status aria-live="polite"></p>
@@ -228,31 +267,62 @@ const hammerArt = [...hammerMask]
     });
   };
 
-  const installCommand = 'curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash';
-  const enableInstallCopy = () => {
-    document.querySelectorAll<HTMLButtonElement>('[data-install-copy]').forEach((button) => {
-      if (button.dataset.ready === 'true') return;
-      button.dataset.ready = 'true';
+  const enableInstallControls = () => {
+    const tablist = document.querySelector<HTMLElement>('.hero-install [role="tablist"]');
+    if (!tablist || tablist.dataset.ready === 'true') return;
+
+    tablist.dataset.ready = 'true';
+    const tabs = Array.from(tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    const status = tablist.closest('.hero-install')?.querySelector<HTMLElement>('[data-install-status]');
+    const selectTab = (selectedTab: HTMLButtonElement) => {
+      for (const tab of tabs) {
+        const selected = tab === selectedTab;
+        tab.setAttribute('aria-selected', String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+        const panelId = tab.getAttribute('aria-controls');
+        const panel = panelId ? document.getElementById(panelId) : null;
+        if (panel) panel.hidden = !selected;
+      }
+      if (status) status.textContent = '';
+    };
+
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('click', () => selectTab(tab));
+      tab.addEventListener('keydown', (event) => {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        event.preventDefault();
+        const offset = event.key === 'ArrowRight' ? 1 : -1;
+        const nextTab = tabs[(index + offset + tabs.length) % tabs.length];
+        selectTab(nextTab);
+        nextTab.focus();
+      });
+    });
+
+    tablist.closest('.hero-install')?.querySelectorAll<HTMLButtonElement>('[data-install-copy]').forEach((button) => {
       button.addEventListener('click', async () => {
-        const status = button.closest('.hero-install')?.querySelector<HTMLElement>('[data-install-status]');
+        const command = button.previousElementSibling?.textContent?.trim();
+        if (!command) return;
         try {
-          await navigator.clipboard.writeText(installCommand);
+          await navigator.clipboard.writeText(command);
           button.textContent = 'Copied';
-          status!.textContent = 'Install command copied.';
+          if (status) status.textContent = 'Install command copied.';
+          window.setTimeout(() => {
+            button.textContent = 'Copy';
+          }, 1800);
         } catch {
-          status!.textContent = 'Copy the command above to install Mjolnir.';
+          if (status) status.textContent = 'Copy the command above to install Mjolnir.';
         }
       });
     });
   };
 
-  enableInstallCopy();
+  enableInstallControls();
   animateHammers();
   rotateSeats();
   document.addEventListener('astro:page-load', () => {
     animateHammers();
     rotateSeats();
-    enableInstallCopy();
+    enableInstallControls();
   });
 </script>
 
@@ -385,21 +455,46 @@ const hammerArt = [...hammerMask]
       box-shadow: 0 18px 42px color-mix(in srgb, var(--mj-violet) 10%, transparent), inset 0 1px var(--mj-highlight);
       font-family: var(--sl-font-mono);
     }
-    .hero-install-tabs { display: flex; padding: 0.45rem 0.45rem 0; border-bottom: 1px solid var(--mj-line); }
-    .hero-install-tabs span {
-      padding: 0.45rem 0.75rem;
-      border: 0;
-      border-bottom: 2px solid var(--mj-violet);
-      background: color-mix(in srgb, var(--mj-violet) 10%, transparent);
+    .hero-install-heading {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: var(--space-3);
+      padding: 0.45rem 0.45rem 0;
+      border-bottom: 1px solid var(--mj-line);
+    }
+    .hero-install-heading p {
+      flex: none;
+      margin: 0;
+      padding: 0.45rem 0.55rem calc(0.45rem + 2px);
       color: var(--mj-ink);
-      font: inherit;
       font-size: 0.6rem;
       font-weight: 750;
       letter-spacing: 0.1em;
       text-transform: uppercase;
     }
+    .hero-install-tabs { display: flex; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+    .hero-install-tabs button {
+      flex: none;
+      padding: 0.45rem 0.55rem;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      color: var(--mj-muted);
+      font: inherit;
+      font-size: 0.6rem;
+      font-weight: 750;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .hero-install-tabs button:hover, .hero-install-tabs button:focus-visible { color: var(--mj-ink); }
+    .hero-install-tabs button[aria-selected='true'] { border-bottom-color: var(--mj-violet); background: color-mix(in srgb, var(--mj-violet) 10%, transparent); color: var(--mj-ink); }
     .hero-install-command { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0.75rem; align-items: center; padding: 0.85rem 0.9rem; background: color-mix(in srgb, var(--mj-surface-raised) 88%, transparent); }
+    .hero-install-command[hidden] { display: none; }
     .hero-install-command > span { color: var(--mj-gold); }
+    .hero-install-command .hero-install-description { min-width: 0; overflow: hidden; color: var(--mj-ink); font-size: clamp(0.63rem, 1.25vw, 0.76rem); line-height: 1.55; text-overflow: ellipsis; white-space: nowrap; }
     .hero-install-command code {
       min-width: 0;
       padding: 0;
@@ -411,7 +506,7 @@ const hammerArt = [...hammerMask]
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .hero-install-copy {
+    .hero-install-copy, .hero-install-link {
       padding: 0.45rem 0.55rem;
       border: 1px solid var(--mj-line-strong);
       background: transparent;
@@ -423,8 +518,15 @@ const hammerArt = [...hammerMask]
       text-transform: uppercase;
       cursor: pointer;
     }
-    .hero-install-copy:hover, .hero-install-copy:focus-visible { border-color: var(--mj-violet); background: color-mix(in srgb, var(--mj-violet) 11%, transparent); color: var(--mj-ink); }
+    .hero-install-link { text-decoration: none; }
+    .hero-install-copy:hover, .hero-install-copy:focus-visible, .hero-install-link:hover, .hero-install-link:focus-visible { border-color: var(--mj-violet); background: color-mix(in srgb, var(--mj-violet) 11%, transparent); color: var(--mj-ink); }
     .hero-install-status { min-height: 1.1rem; margin: 0; padding: 0 0.9rem 0.55rem; color: var(--mj-muted); font-size: 0.56rem; }
+
+    @media (width < 40rem) {
+      .hero-install-heading { display: block; padding-inline: 0; }
+      .hero-install-heading p { padding-inline: 0.9rem; }
+      .hero-install-tabs { padding-inline: 0.35rem; }
+    }
 
     .hero-facts {
       display: grid;
