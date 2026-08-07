@@ -185,6 +185,10 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
     pub agent: String,
+    /// Whether this session is attached to a local terminal UI. `None` is
+    /// retained for history written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_attached_tui: Option<bool>,
     #[serde(default)]
     pub transcript: Vec<TranscriptEntry>,
     #[serde(default)]
@@ -1528,6 +1532,7 @@ struct TrackerState {
     worktree: Option<String>,
     cwd: Option<PathBuf>,
     agent: String,
+    has_attached_tui: bool,
     /// ACP adapter serving the primary model, for the `model via source`
     /// status-line field.
     model_source: Option<String>,
@@ -1980,6 +1985,7 @@ impl TrackerState {
             worktree: None,
             cwd: None,
             agent,
+            has_attached_tui: false,
             model_source: None,
             reasoning_effort: None,
             agent_usage: crate::agent_usage::Snapshot::default(),
@@ -3022,6 +3028,7 @@ impl TrackerState {
             project: self.project.clone(),
             worktree: self.worktree.clone(),
             agent: self.agent.clone(),
+            has_attached_tui: Some(self.has_attached_tui),
             transcript: self.published_transcript(),
             queued_prompt_count: 0,
             prompt_in_flight: if self.side_state == RemoteSideState::Inactive {
@@ -3184,6 +3191,7 @@ impl RemoteSessionTracker {
         let dir = remote_control_dir();
         let connection = build_connection(&dir);
         let mut state = TrackerState::new(project, agent);
+        state.has_attached_tui = attached_ui;
         state.side_coordinator_supported = ui_event_tx.is_some();
         state.worktree = worktree;
         state.model_source = status.model_source;
@@ -7922,6 +7930,7 @@ fn init_db(db_path: &Path) -> Result<()> {
         "integer not null default 0",
     )?;
     ensure_sessions_column(&conn, "worktree", "text")?;
+    ensure_sessions_column(&conn, "has_attached_tui", "integer")?;
     ensure_sessions_column(&conn, "subagents_json", "text not null default '[]'")?;
     ensure_sessions_column(&conn, "status_json", "text")?;
     ensure_sessions_column(&conn, "workspace_diff_json", "text")?;
@@ -8011,6 +8020,9 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
     } else {
         0
     };
+    let has_attached_tui = session
+        .has_attached_tui
+        .map(|attached| if attached { 1_i64 } else { 0_i64 });
     // The conflict arm refuses to move `last_update` backwards: every state
     // change touches the timestamp before the snapshot is taken, so a
     // delayed or replayed upload can never overwrite newer session state
@@ -8036,8 +8048,9 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             status_json,
             workspace_diff_json,
             ragnarok_json,
+            has_attached_tui,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -8062,6 +8075,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             status_json = excluded.status_json,
             workspace_diff_json = excluded.workspace_diff_json,
             ragnarok_json = excluded.ragnarok_json,
+            has_attached_tui = coalesce(excluded.has_attached_tui, sessions.has_attached_tui),
             connected = 1
         where excluded.last_update >= sessions.last_update",
         params![
@@ -8084,6 +8098,7 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             status_json,
             workspace_diff_json,
             ragnarok_json,
+            has_attached_tui,
         ],
     )
     .context("upsert remote-control session")?;
@@ -8265,7 +8280,8 @@ fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
                 subagents_json,
                 status_json,
                 workspace_diff_json,
-                ragnarok_json
+                ragnarok_json,
+                has_attached_tui
             from sessions
             order by session_id asc",
         )
@@ -8384,7 +8400,8 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                 subagents_json,
                 status_json,
                 workspace_diff_json,
-                ragnarok_json
+                ragnarok_json,
+                has_attached_tui
             from sessions
             where connected = 1 and last_update >= ?1
             order by session_id asc",
@@ -8414,6 +8431,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let status_json: Option<String> = row.get(17)?;
     let workspace_diff_json: Option<String> = row.get(18)?;
     let ragnarok_json: Option<String> = row.get(19)?;
+    let has_attached_tui: Option<i64> = row.get(20)?;
     let transcript: Vec<TranscriptEntry> =
         serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
@@ -8434,6 +8452,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         project: row.get(6)?,
         worktree: row.get::<_, Option<String>>(15)?,
         agent: row.get(7)?,
+        has_attached_tui: has_attached_tui.map(|attached| attached != 0),
         transcript,
         queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
         prompt_in_flight: prompt_in_flight != 0,
@@ -10306,6 +10325,17 @@ mod tests {
     }
 
     #[test]
+    fn embedded_viewer_labels_attached_and_headless_sessions() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("class=\"session-runtime runtime-badge\""));
+        assert!(viewer.contains("id=\"runtime-badge\""));
+        assert!(viewer.contains("function updateRuntimeBadge"));
+        assert!(viewer.contains("attached ? \"TUI\" : \"Headless\""));
+        assert!(viewer.contains("updateRuntimeBadge(card.runtime, session)"));
+        assert!(viewer.contains("updateRuntimeBadge(runtimeBadgeEl, session)"));
+    }
+
+    #[test]
     fn embedded_viewer_keeps_session_actions_in_wrapping_mobile_header() {
         let viewer = include_str!("remote_viewer.html").replace("\r\n", "\n");
         assert!(viewer.contains("id=\"mobile-new-session-button\""));
@@ -10701,6 +10731,31 @@ mod tests {
         ));
 
         assert_eq!(state.total_messages, 2);
+    }
+
+    #[test]
+    fn tracker_snapshot_reports_tui_attachment() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        assert_eq!(
+            state
+                .snapshot()
+                .expect("headless snapshot")
+                .has_attached_tui,
+            Some(false)
+        );
+        state.has_attached_tui = true;
+        assert_eq!(
+            state
+                .snapshot()
+                .expect("attached snapshot")
+                .has_attached_tui,
+            Some(true)
+        );
     }
 
     #[test]
@@ -12511,6 +12566,7 @@ mod tests {
             project: "mjolnir".to_string(),
             worktree: Some("bold-fox".to_string()),
             agent: "opencode".to_string(),
+            has_attached_tui: Some(true),
             transcript: vec![
                 TranscriptEntry {
                     kind: "user".to_string(),
@@ -12614,6 +12670,7 @@ mod tests {
         assert_eq!(sessions[0].total_messages, 6);
         assert!(sessions[0].prompt_in_flight);
         assert!(sessions[0].prompt_images_supported);
+        assert_eq!(sessions[0].has_attached_tui, Some(true));
         assert_eq!(sessions[0].start_time, "2026-06-03T10:00:00Z");
         assert_eq!(sessions[0].last_update, "2026-06-03T10:00:40Z");
         assert_eq!(
@@ -12644,6 +12701,7 @@ mod tests {
         }"#;
         let record: SessionRecord = serde_json::from_str(json).expect("deserialize");
         assert_eq!(record.worktree, None);
+        assert_eq!(record.has_attached_tui, None);
     }
 
     fn init_committed_git_repo(path: &Path) {
@@ -12939,6 +12997,7 @@ mod tests {
             project: "mjolnir".to_string(),
             worktree: None,
             agent: "agent".to_string(),
+            has_attached_tui: Some(true),
             transcript: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
@@ -13909,6 +13968,7 @@ mod tests {
             project: "proj".to_string(),
             worktree: None,
             agent: "agent".to_string(),
+            has_attached_tui: Some(false),
             transcript: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
@@ -14804,6 +14864,7 @@ mod tests {
             project: "mjolnir".to_string(),
             worktree: None,
             agent: "opencode".to_string(),
+            has_attached_tui: Some(false),
             transcript: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
@@ -16069,6 +16130,7 @@ mod tests {
             project: "proj".to_string(),
             worktree: None,
             agent: "agent".to_string(),
+            has_attached_tui: Some(false),
             transcript: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,

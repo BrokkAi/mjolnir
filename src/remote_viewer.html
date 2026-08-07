@@ -1240,6 +1240,30 @@
         white-space: nowrap;
       }
 
+      .runtime-badge {
+        flex: 0 0 auto;
+        padding: 4px 8px 3px;
+        clip-path: var(--shape-chip);
+        font: 700 9px/1 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+
+        &[data-runtime="tui"] {
+          color: var(--agent);
+          background: color-mix(in srgb, var(--agent) 16%, var(--inline-bg-strong));
+        }
+
+        &[data-runtime="headless"] {
+          color: var(--thought);
+          background: color-mix(in srgb, var(--thought) 16%, var(--inline-bg-strong));
+        }
+      }
+
+      #runtime-badge {
+        padding: 5px 9px 4px;
+        font-size: 10px;
+      }
+
       .session-approval {
         flex: 0 0 auto;
         font: 700 9px/1 var(--font-mono);
@@ -3115,6 +3139,7 @@
         }
 
         .connection-badge,
+        #runtime-badge,
         .archive-badge,
         .side-badge,
         .approval-badge,
@@ -3271,6 +3296,7 @@
             <h2 id="transcript-title">Transcript</h2>
             <p id="transcript-meta">Select a session to inspect its history.</p>
           </div>
+          <span id="runtime-badge" class="runtime-badge" hidden></span>
           <span id="connection-badge" class="connection-badge" role="status" hidden>reconnecting</span>
           <span id="archive-badge" class="archive-badge" hidden>archived</span>
           <span id="side-badge" class="side-badge" hidden>side</span>
@@ -3435,6 +3461,7 @@
         <div class="session-top">
           <span class="live-dot" aria-hidden="true"></span>
           <span class="session-title"></span>
+          <span class="session-runtime runtime-badge" hidden></span>
           <span class="session-approval" hidden>approval</span>
           <span class="session-archive" hidden>archived</span>
         </div>
@@ -3543,6 +3570,7 @@
       const ragnarokFightersEl = $("ragnarok-fighters");
       const ragnarokResultEl = $("ragnarok-result");
       const workingBadgeEl = $("working-badge");
+      const runtimeBadgeEl = $("runtime-badge");
       const approvalBadgeEl = $("approval-badge");
       const connectionBadgeEl = $("connection-badge");
       const archiveBadgeEl = $("archive-badge");
@@ -5179,6 +5207,27 @@
         return `${sessionId}\u001f${requestId}`;
       }
 
+      function updateRuntimeBadge(element, session) {
+        const attached = session?.has_attached_tui;
+        const known = typeof attached === "boolean";
+        element.hidden = !known;
+        if (!known) {
+          delete element.dataset.runtime;
+          element.textContent = "";
+          element.removeAttribute("title");
+          element.removeAttribute("aria-label");
+          return;
+        }
+        const runtime = attached ? "tui" : "headless";
+        element.dataset.runtime = runtime;
+        element.textContent = attached ? "TUI" : "Headless";
+        const description = attached
+          ? "Session type: attached terminal UI"
+          : "Session type: headless";
+        element.title = description;
+        element.setAttribute("aria-label", description);
+      }
+
       /* ---- session list (keyed, patched in place) ---- */
 
       function createLaunchSessionCard() {
@@ -5283,6 +5332,7 @@
         return {
           root,
           title: root.querySelector(".session-title"),
+          runtime: root.querySelector(".session-runtime"),
           approval: root.querySelector(".session-approval"),
           archive: root.querySelector(".session-archive"),
           project: root.querySelector(".session-project"),
@@ -5298,6 +5348,7 @@
         card.root.classList.toggle("working", !archived && sessionIsWorking(session));
         card.root.classList.toggle("archived", archived);
         card.title.textContent = sessionLabel(session);
+        updateRuntimeBadge(card.runtime, session);
         card.project.textContent = session.project || "-";
         card.worktree.textContent = session.worktree || "";
         card.worktree.hidden = !session.worktree;
@@ -8217,6 +8268,7 @@
         const readOnly = Boolean(selectedSessionId) && !selectedSessionIsLive();
         const sideActive = sessionHasCommand(session, "exit");
         composerEl.hidden = readOnly;
+        updateRuntimeBadge(runtimeBadgeEl, session);
         archiveBadgeEl.hidden = !archived;
         sideBadgeEl.hidden = readOnly || !sideActive;
         renderStatusLine(session);
