@@ -21183,7 +21183,10 @@ mod tests {
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
-        assert_eq!(primary_tail, vec!["○ thought", "  planning the handoff", ""]);
+        assert_eq!(
+            primary_tail,
+            vec!["○ thought", "  planning the handoff", ""]
+        );
 
         state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
             subagent_id: 1,
