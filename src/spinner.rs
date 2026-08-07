@@ -106,11 +106,11 @@ pub enum SpinnerStyle {
     /// Vertical bars bounce like an audio equalizer.
     Bars,
     /// The whole row breathes brightness in unison (calmest).
-    #[default]
     Shimmer,
     /// A lit sphere rotates in place, carrying its dark side into view.
     Globe,
     /// A lit head sweeps to one wall and back, trailing a fading tail.
+    #[default]
     Scan,
 }
 
@@ -512,10 +512,10 @@ mod tests {
     }
 
     #[test]
-    fn default_is_shimmer_and_only_default_is_default() {
-        assert_eq!(SpinnerStyle::default(), SpinnerStyle::Shimmer);
+    fn default_is_scan_and_only_default_is_default() {
+        assert_eq!(SpinnerStyle::default(), SpinnerStyle::Scan);
         for style in SpinnerStyle::ALL {
-            assert_eq!(style.is_default(), style == SpinnerStyle::Shimmer);
+            assert_eq!(style.is_default(), style == SpinnerStyle::Scan);
         }
     }
 
