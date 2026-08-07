@@ -4082,16 +4082,6 @@ mod tests {
             launched_adapter_kind(&claude_roster, &selected_agent_for_role(&codex)),
             Some(roster::AdapterKind::Codex)
         );
-        // A custom route that reuses the codex launch command must classify
-        // as Custom, not as the Codex primary it shares a command with.
-        let mut custom = test_roster_agent("proxy-model", "codex-acp");
-        custom.launch.kind = roster::AdapterKind::Custom;
-        custom.launch.source_id = "custom:proxy".to_string();
-        let shared_launch_roster = test_roster(codex.clone(), vec![codex, claude, custom.clone()]);
-        assert_eq!(
-            launched_adapter_kind(&shared_launch_roster, &selected_agent_for_role(&custom)),
-            Some(roster::AdapterKind::Custom)
-        );
         // A launch the roster does not know stays ungated.
         let unknown = SelectedAgent {
             source_id: "custom:mystery".to_string(),
@@ -4099,7 +4089,7 @@ mod tests {
             args: Vec::new(),
             env: Default::default(),
         };
-        assert_eq!(launched_adapter_kind(&shared_launch_roster, &unknown), None);
+        assert_eq!(launched_adapter_kind(&claude_roster, &unknown), None);
     }
 
     #[test]

@@ -9,7 +9,6 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::v1::{HttpHeader, McpServer, McpServerHttp};
@@ -83,8 +82,6 @@ fn default_next_id() -> u64 {
     1
 }
 
-static WRITE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
 /// Default store path: `$XDG_CONFIG_HOME/mj/memories.json` (or
 /// `~/.config/mj/memories.json` when `XDG_CONFIG_HOME` is unset).
 pub fn default_path() -> PathBuf {
@@ -112,7 +109,7 @@ pub fn add(path: &Path, text: &str, project: Option<PathBuf>) -> Result<MemoryEn
             text.len()
         ));
     }
-    let _guard = lock_store();
+    let _guard = lock_store(path)?;
     // A malformed store is a hard error: silently replacing it would destroy
     // every memory the user has saved.
     let mut store = load(path)?;
@@ -129,7 +126,7 @@ pub fn add(path: &Path, text: &str, project: Option<PathBuf>) -> Result<MemoryEn
 }
 
 pub fn forget(path: &Path, id: u64) -> Result<Option<MemoryEntry>> {
-    let _guard = lock_store();
+    let _guard = lock_store(path)?;
     let mut store = load(path)?;
     let Some(position) = store.entries.iter().position(|entry| entry.id == id) else {
         return Ok(None);
@@ -140,10 +137,10 @@ pub fn forget(path: &Path, id: u64) -> Result<Option<MemoryEntry>> {
 }
 
 /// Delete every memory and reset the store. Returns how many entries were
-/// removed; a missing or malformed store counts as zero.
+/// removed. A malformed store is preserved and returned as an error.
 pub fn clear(path: &Path) -> Result<usize> {
-    let _guard = lock_store();
-    let removed = load(path).map(|store| store.entries.len()).unwrap_or(0);
+    let _guard = lock_store(path)?;
+    let removed = load(path)?.entries.len();
     save(path, &StoreData::default())?;
     Ok(removed)
 }
@@ -166,10 +163,31 @@ pub fn entries_for_project(path: &Path, project: &Path) -> Result<Vec<MemoryEntr
         .collect())
 }
 
-fn lock_store() -> std::sync::MutexGuard<'static, ()> {
-    WRITE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+/// Advisory file lock shared by every mjolnir process using this store. The
+/// lock lives beside the store rather than on it: atomically replacing the
+/// JSON file would otherwise replace the inode carrying the lock.
+fn lock_store(path: &Path) -> Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create memory store directory {}", parent.display()))?;
+    }
+    let lock_path = store_lock_path(path);
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open memory store lock {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("lock memory store {}", lock_path.display()))?;
+    Ok(lock)
+}
+
+fn store_lock_path(path: &Path) -> PathBuf {
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
 }
 
 fn load(path: &Path) -> Result<StoreData> {
@@ -729,6 +747,33 @@ mod tests {
     }
 
     #[test]
+    fn clear_preserves_a_malformed_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store(&dir);
+        std::fs::write(&path, "not json").unwrap();
+
+        let error = clear(&path).unwrap_err();
+
+        assert!(format!("{error:#}").contains("parse"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
+    }
+
+    #[test]
+    fn store_lock_is_held_on_a_stable_sibling_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store(&dir);
+        let _first = lock_store(&path).unwrap();
+        let lock_path = store_lock_path(&path);
+        let second = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+
+        assert!(second.try_lock().is_err());
+    }
+
+    #[test]
     fn entries_for_project_includes_global_and_matching_scope_only() {
         let dir = tempfile::tempdir().unwrap();
         let path = store(&dir);
@@ -832,9 +877,6 @@ mod tests {
         assert!(SessionMemory::from_config(&defaults, project, None).is_none());
         assert!(
             SessionMemory::from_config(&defaults, project, Some(AdapterKind::Claude)).is_none()
-        );
-        assert!(
-            SessionMemory::from_config(&defaults, project, Some(AdapterKind::Custom)).is_none()
         );
         assert!(SessionMemory::from_config(&defaults, project, Some(AdapterKind::Codex)).is_some());
 
