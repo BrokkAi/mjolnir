@@ -668,11 +668,31 @@ impl SettingsEditor {
             .position(|choice| choice == current)
             .unwrap_or(0);
         let next = (index as i32 + delta).rem_euclid(choices.len() as i32) as usize;
+        let model = &choices[next];
         match role {
-            0 => self.config.agent.model.clone_from(&choices[next]),
-            1 => self.config.review.model.clone_from(&choices[next]),
-            2 => self.config.subagents.model.clone_from(&choices[next]),
+            0 => self.config.agent.model.clone_from(model),
+            1 => self.config.review.model.clone_from(model),
+            2 => self.config.subagents.model.clone_from(model),
             _ => {}
+        }
+
+        // An explicit model choice also selects the ACP adapter that
+        // advertised it. Auto retains its source pin because Team presets use
+        // that pin to constrain automatic selection.
+        if model != "auto"
+            && model != crate::config::DISABLED_MODEL
+            && let Some(source) = self
+                .choices
+                .iter()
+                .find(|choice| choice.available && choice.model == *model)
+                .and_then(|choice| choice.adapter.clone())
+        {
+            match role {
+                0 => self.config.agent.acp_source = Some(source),
+                1 => self.config.review.acp_source = Some(source),
+                2 => self.config.subagents.acp_source = Some(source),
+                _ => {}
+            }
         }
     }
 
@@ -1733,6 +1753,31 @@ mod tests {
         assert_eq!(config.agent.model, "haiku");
         assert_eq!(config.agent.acp_source.as_deref(), Some("claude-acp"));
         assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn selecting_explicit_model_updates_its_acp_source() {
+        let mut config = Config::default();
+        config.agent.model = "claude-fable-5".to_string();
+        config.agent.acp_source = Some("claude-acp".to_string());
+        let mut editor = SettingsEditor::new(
+            config,
+            vec![ModelChoice {
+                model: "gpt-5-6-terra".to_string(),
+                pass_at_1: 0.54,
+                mean_cost_usd: 1.13,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("codex-acp".to_string()),
+                ranked: true,
+            }],
+            None,
+        );
+
+        editor.cycle_model(0, 1);
+
+        assert_eq!(editor.config.agent.model, "gpt-5-6-terra");
+        assert_eq!(editor.config.agent.acp_source.as_deref(), Some("codex-acp"));
     }
 
     #[test]
