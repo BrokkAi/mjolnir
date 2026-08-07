@@ -3291,6 +3291,14 @@ fn handle_crossterm(
         }
     }
 
+    if !state.autocomplete.visible
+        && state.transcript_search.is_none()
+        && is_edit_latest_queued_prompt_key(key.modifiers, key.code)
+        && restore_latest_queued_prompt(state)
+    {
+        return TerminalRequest::None;
+    }
+
     if mode == UiMode::FullscreenTui && key.modifiers == KeyModifiers::CONTROL {
         match key.code {
             KeyCode::PageUp => {
@@ -3526,6 +3534,95 @@ fn cancel_current_turn(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCo
         "cancelling current turn...".to_string()
     };
     state.status_line = Some(StatusMessage::info(msg));
+}
+
+fn is_edit_latest_queued_prompt_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
+    matches!(
+        (modifiers, code),
+        (KeyModifiers::ALT, KeyCode::Up) | (KeyModifiers::SHIFT, KeyCode::Left)
+    )
+}
+
+fn restore_latest_queued_prompt(state: &mut AppState) -> bool {
+    let Some(queued) = state.take_latest_queued_prompt() else {
+        return false;
+    };
+
+    let preview = queued_prompt_preview(&queued.display_text);
+    let mut input = queued.text;
+    let mut file_attachments = Vec::with_capacity(queued.resources.len());
+    let mut search_start = 0usize;
+    for resource in queued.resources {
+        let mention = file_mention_text(&resource.name);
+        let mention_start = input
+            .get(search_start..)
+            .and_then(|suffix| suffix.find(&mention).map(|offset| search_start + offset));
+        let position = if let Some(byte_start) = mention_start {
+            let position = input[..byte_start].chars().count();
+            input.replace_range(byte_start..byte_start + mention.len(), "");
+            search_start = byte_start;
+            position
+        } else {
+            input.chars().count()
+        };
+        let id = state.next_attachment_id;
+        state.next_attachment_id += 1;
+        file_attachments.push(FileAttachment {
+            id,
+            position,
+            display_path: resource.name.clone(),
+            resource,
+        });
+    }
+
+    let image_position = input.chars().count();
+    let image_attachments = queued
+        .images
+        .into_iter()
+        .map(|image| {
+            let id = state.next_attachment_id;
+            state.next_attachment_id += 1;
+            PastedImageAttachment {
+                id,
+                position: image_position,
+                byte_len: base64_decoded_len(&image.data_base64),
+                data_base64: image.data_base64,
+                mime_type: image.mime_type,
+                width: image.width,
+                height: image.height,
+            }
+        })
+        .collect();
+
+    state.input = input;
+    state.input_cursor = state.input.chars().count();
+    state.attachments.clear();
+    state.image_attachments = image_attachments;
+    state.file_attachments = file_attachments;
+    state.input_paste_burst.clear();
+    state.reset_history_navigation();
+    state.scroll_input_to_bottom();
+    state.update_autocomplete();
+
+    let remaining = state.queued_prompt_count();
+    let status = if remaining == 0 {
+        format!("unqueued for editing: {preview}")
+    } else {
+        format!("unqueued for editing ({remaining} still queued): {preview}")
+    };
+    state.status_line = Some(StatusMessage::info(status));
+    true
+}
+
+fn base64_decoded_len(encoded: &str) -> usize {
+    let padding = encoded
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count()
+        .min(2);
+    (encoded.len() / 4 * 3).saturating_sub(padding)
 }
 
 fn dictation_request_for_state(state: &AppState, voice_input_supported: bool) -> TerminalRequest {
@@ -11938,7 +12035,8 @@ fn queued_prompt_row_count(state: &AppState) -> u16 {
     }
     let visible = count.min(QUEUED_PROMPT_VISIBLE_ROWS);
     let overflow = usize::from(count > QUEUED_PROMPT_VISIBLE_ROWS);
-    (visible + overflow).min(u16::MAX as usize) as u16
+    let edit_hint = 1;
+    (visible + overflow + edit_hint).min(u16::MAX as usize) as u16
 }
 
 /// Height of the dedicated workflow progress area. Actor launch and finish
@@ -12267,6 +12365,14 @@ fn draw_queued_prompt_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) 
         lines.push(Line::from(Span::styled(
             format!(" ↳ ... {} more queued ", total - visible),
             Style::default().ink(state.theme.warning),
+        )));
+    }
+    if lines.len() < usize::from(area.height) {
+        lines.push(Line::from(Span::styled(
+            "   Alt-Up / Shift-Left edit last queued prompt",
+            Style::default()
+                .ink(state.theme.muted)
+                .add_modifier(Modifier::DIM),
         )));
     }
     let chip = Paragraph::new(lines);
@@ -13593,6 +13699,11 @@ fn general_help_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<
         help_binding_line(
             "Up/Down",
             "cursor line or browse prompt history (top/bottom)",
+            theme,
+        ),
+        help_binding_line(
+            "Alt-Up / Shift-Left",
+            "edit the most recently queued prompt",
             theme,
         ),
         help_binding_line("PageUp/Down", "move the cursor five lines", theme),
@@ -27609,6 +27720,10 @@ mod tests {
                 rendered.contains("queued 1/2: alpha") && rendered.contains("queued 2/2: beta"),
                 "{render_mode:?} must show the queued list above the input:\n{rendered}"
             );
+            assert!(
+                rendered.contains("Alt-Up / Shift-Left edit last queued prompt"),
+                "{render_mode:?} must show how to edit the newest queued prompt:\n{rendered}"
+            );
         }
     }
 
@@ -27681,6 +27796,133 @@ mod tests {
             .map(|prompt| prompt.text.as_str())
             .collect::<Vec<_>>();
         assert_eq!(queued, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn alt_up_unqueues_latest_prompt_into_composer() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "alpha");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        type_string(&mut state, &cmd_tx, "beta");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        type_string(&mut state, &cmd_tx, "replace this draft");
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Up, KeyModifiers::ALT),
+        );
+
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "unqueueing stays local to the UI"
+        );
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        assert_eq!(state.input, "beta");
+        assert_eq!(state.input_cursor, 4);
+        assert_eq!(state.queued_prompt_count(), 1);
+        assert_eq!(
+            state
+                .queued_prompts()
+                .next()
+                .expect("older prompt kept")
+                .text,
+            "alpha"
+        );
+        assert_eq!(
+            state
+                .status_line
+                .as_ref()
+                .map(|status| status.text.as_str()),
+            Some("unqueued for editing (1 still queued): beta")
+        );
+    }
+
+    #[test]
+    fn shift_left_also_unqueues_latest_prompt() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+        state.push_queued_prompt(QueuedPrompt {
+            text: "edit me".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "edit me".to_string(),
+        });
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Left, KeyModifiers::SHIFT),
+        );
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert_eq!(state.input, "edit me");
+        assert_eq!(state.queued_prompt_count(), 0);
+        assert_eq!(
+            state
+                .status_line
+                .as_ref()
+                .map(|status| status.text.as_str()),
+            Some("unqueued for editing: edit me")
+        );
+    }
+
+    #[test]
+    fn unqueue_restores_image_and_file_attachment_chips() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+        let resource = PromptResource {
+            name: "src/lib.rs".to_string(),
+            uri: "file:///workspace/src/lib.rs".to_string(),
+            size: Some(42),
+        };
+        let image = PromptImage {
+            data_base64: "AQIDBA==".to_string(),
+            mime_type: "image/png".to_string(),
+            width: 2,
+            height: 3,
+        };
+        state.push_queued_prompt(QueuedPrompt {
+            text: "Review @src/lib.rs please".to_string(),
+            images: vec![image.clone()],
+            resources: vec![resource.clone()],
+            display_text: "Review @src/lib.rs please\n[Images: 1 attachment]".to_string(),
+        });
+        state.input = "replace me".to_string();
+        state.input_cursor = state.input.chars().count();
+        state.attachments.push(PastedAttachment {
+            id: 99,
+            position: 0,
+            content: "old pasted text".to_string(),
+        });
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Up, KeyModifiers::ALT),
+        );
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert_eq!(state.input, "Review  please");
+        assert!(state.attachments.is_empty());
+        assert_eq!(state.file_attachments.len(), 1);
+        assert_eq!(state.file_attachments[0].position, 7);
+        assert_eq!(state.file_attachments[0].resource, resource);
+        assert_eq!(state.image_attachments.len(), 1);
+        let restored_image = &state.image_attachments[0];
+        assert_eq!(restored_image.data_base64, image.data_base64);
+        assert_eq!(restored_image.mime_type, image.mime_type);
+        assert_eq!((restored_image.width, restored_image.height), (2, 3));
+        assert_eq!(restored_image.byte_len, 4);
+        assert_eq!(
+            input_text_with_attachments(&state.input, &state.attachments, &state.file_attachments,),
+            "Review @src/lib.rs please"
+        );
     }
 
     #[test]

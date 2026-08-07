@@ -2315,6 +2315,12 @@ impl AppState {
         self.queued_prompts.pop_front()
     }
 
+    /// Pull the newest queued prompt out for editing. Older prompts retain
+    /// their FIFO order and continue waiting behind the active turn.
+    pub fn take_latest_queued_prompt(&mut self) -> Option<QueuedPrompt> {
+        self.queued_prompts.pop_back()
+    }
+
     /// Remember the single command queued while the primary session starts.
     /// Returns `false` when an earlier Enter already staged the same startup
     /// slot, preventing duplicate runtime commands.
