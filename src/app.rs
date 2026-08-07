@@ -10736,7 +10736,11 @@ mod tests {
             "show active model selections and usage"
         );
         assert_eq!(
-            s.available_commands[12].description,
+            s.available_commands
+                .iter()
+                .find(|command| command.name == "fork")
+                .expect("fork command should be present")
+                .description,
             "fork the current session (unstable ACP extension)"
         );
     }
