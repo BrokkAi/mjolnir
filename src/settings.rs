@@ -916,10 +916,7 @@ pub fn reset_unroutable_models(config: &mut Config, choices: &[ModelChoice]) -> 
                 Seat::Review => &mut config.review.acp_source,
                 Seat::Subagents => &mut config.subagents.acp_source,
             };
-            if source_slot
-                .as_deref()
-                .is_some_and(|source| source != route)
-            {
+            if source_slot.as_deref().is_some_and(|source| source != route) {
                 *source_slot = Some(route.to_string());
                 notices.push(format!(
                     "{label} ACP source moved to {route}, which serves the selected model {model}"
