@@ -461,9 +461,9 @@ impl std::str::FromStr for ReviewTier {
 pub struct AgentConfig {
     #[serde(default = "default_auto")]
     pub model: String,
-    /// Restrict this seat to one ACP source while retaining automatic model
-    /// selection within that source. `None` allows every enabled source.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Runtime-only route hint. Model selection is the persisted preference;
+    /// a compatible ACP adapter is discovered when a session starts.
+    #[serde(skip)]
     pub acp_source: Option<String>,
     /// Preferred ACP sources when more than one enabled adapter offers the
     /// selected model. Unlisted sources follow in discovery order.
@@ -520,9 +520,9 @@ impl AgentConfig {
 pub struct ReviewConfig {
     #[serde(default = "default_auto")]
     pub model: String,
-    /// Restrict this seat to one ACP source while retaining automatic model
-    /// selection within that source. `None` allows every enabled source.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Runtime-only route hint. Never persist an ACP adapter alongside the
+    /// selected review model.
+    #[serde(skip)]
     pub acp_source: Option<String>,
     /// Preferred ACP sources when more than one enabled adapter offers the
     /// selected review supervisor model. Unlisted sources follow in discovery
@@ -563,9 +563,9 @@ impl ReviewConfig {
 pub struct SubagentsConfig {
     #[serde(default = "default_auto")]
     pub model: String,
-    /// Restrict this seat and its automatic failover pool to one ACP source.
-    /// `None` allows every enabled source.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Runtime-only route hint. Never persist an ACP adapter alongside the
+    /// selected subagent model.
+    #[serde(skip)]
     pub acp_source: Option<String>,
     /// Preferred ACP sources when more than one enabled adapter offers the
     /// selected worker model. Unlisted sources follow in discovery order.
@@ -826,6 +826,12 @@ impl Config {
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let document: toml::Value =
             toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?;
+        let has_persisted_acp_source = ["agent", "review", "subagents"].into_iter().any(|seat| {
+            document
+                .get(seat)
+                .and_then(toml::Value::as_table)
+                .is_some_and(|table| table.contains_key("acp_source"))
+        });
         let version = document.get("version").and_then(toml::Value::as_integer);
         if version == Some(i64::from(MIGRATABLE_VERSION)) {
             let mut cfg = migrate_v2(&s).with_context(|| format!("migrate {}", path.display()))?;
@@ -851,6 +857,13 @@ impl Config {
         let mut cfg: Self =
             toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?;
         cfg.normalize()?;
+        if has_persisted_acp_source && let Err(error) = cfg.save(path) {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "removed obsolete persisted ACP source pins in memory but could not write config"
+            );
+        }
         Ok(cfg)
     }
 
@@ -1489,9 +1502,10 @@ kimi = "disabled"
         assert!(!loaded.acp.policies.contains_key("kimi"));
         // The pinned model's provider has no built-in adapter left either.
         assert_eq!(loaded.agent.model, "auto");
-        // Still-served pins are untouched.
+        // Still-served model choices remain, but their obsolete source pin is
+        // removed as well.
         assert_eq!(loaded.subagents.model, "gpt-5-6-sol");
-        assert_eq!(loaded.subagents.acp_source.as_deref(), Some("codex-acp"));
+        assert_eq!(loaded.subagents.acp_source, None);
     }
 
     #[test]
@@ -1512,7 +1526,7 @@ kimi = "disabled"
     }
 
     #[test]
-    fn independent_acp_priorities_roundtrip() {
+    fn acp_priorities_roundtrip_without_persisting_source_pins() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut cfg = Config::default();
@@ -1526,9 +1540,9 @@ kimi = "disabled"
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
 
-        assert_eq!(loaded.agent.acp_source, cfg.agent.acp_source);
-        assert_eq!(loaded.review.acp_source, cfg.review.acp_source);
-        assert_eq!(loaded.subagents.acp_source, cfg.subagents.acp_source);
+        assert_eq!(loaded.agent.acp_source, None);
+        assert_eq!(loaded.review.acp_source, None);
+        assert_eq!(loaded.subagents.acp_source, None);
         assert_eq!(loaded.agent.acp_priority, cfg.agent.acp_priority);
         assert_eq!(loaded.review.acp_priority, cfg.review.acp_priority);
         assert_eq!(loaded.subagents.acp_priority, cfg.subagents.acp_priority);
@@ -2080,6 +2094,36 @@ origin = "custom"
 
         let cfg = Config::load(&path).expect("load");
         assert_eq!(cfg.acp, AcpConfig::default());
+    }
+
+    #[test]
+    fn load_removes_obsolete_persisted_acp_source_pins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+version = 3
+
+[agent]
+model = "gpt-5-6-terra"
+acp_source = "claude-acp"
+
+[review]
+model = "claude-fable-5"
+acp_source = "codex-acp"
+"#,
+        )
+        .expect("write");
+
+        let config = Config::load(&path).expect("load");
+
+        assert_eq!(config.agent.model, "gpt-5-6-terra");
+        assert_eq!(config.review.model, "claude-fable-5");
+        assert_eq!(config.agent.acp_source, None);
+        assert_eq!(config.review.acp_source, None);
+        let rewritten = std::fs::read_to_string(&path).expect("read rewritten config");
+        assert!(!rewritten.contains("acp_source"), "config: {rewritten}");
     }
 
     #[test]
