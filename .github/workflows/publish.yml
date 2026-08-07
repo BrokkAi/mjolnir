@@ -3,9 +3,6 @@ name: Publish to crates.io
 on:
   release:
     types: [published]
-  workflow_run:
-    workflows: [GitHub Release]
-    types: [completed]
   workflow_dispatch:
     inputs:
       release_tag:
@@ -24,13 +21,9 @@ permissions:
 jobs:
   package:
     name: Verify and package
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-      startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.event.workflow_run.head_branch }}
+      RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
 
     steps:
       - uses: actions/checkout@v6
@@ -74,14 +67,14 @@ jobs:
   publish:
     name: Publish crates
     needs: package
-    if: github.event_name == 'release' || github.event_name == 'workflow_run' || inputs.publish
+    if: github.event_name == 'release' || inputs.publish
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
       id-token: write
       contents: read
     env:
-      RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.event.workflow_run.head_branch }}
+      RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
 
     steps:
       - uses: actions/checkout@v6
@@ -109,9 +102,8 @@ jobs:
           version="${RELEASE_TAG#v}"
           # crates.io permanently reserves a version number once it is
           # published, and yanking does not release it, so an already-shipped
-          # version must be skipped rather than republished. The release and
-          # workflow_run triggers both fire for one release; this keeps the
-          # overlap from turning the second run red.
+          # version must be skipped rather than republished. This also makes a
+          # retry resume after a partial publish instead of turning red.
           already_published() {
             local crate="$1" path response status body
             case "${#crate}" in

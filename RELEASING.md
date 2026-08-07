@@ -56,13 +56,18 @@ to publish when the tag differs from either crate version, and packages both
 crates ahead of the `crates-io` environment gate so a packaging failure surfaces
 without spending an approval.
 
-Publishing runs automatically once the release workflow succeeds. Both the
-release event and the release workflow's completion trigger it, and each crate
-is skipped when that version is already on the registry, so the overlap cannot
-fail a run with nothing left to publish. That skip is also the recovery path: if
-one crate publishes and the other fails, re-running resumes at the crate that
-did not land. crates.io reserves a version number permanently once published and
-yanking does not release it, so a shipped version can never be republished.
+Publishing runs automatically once the release workflow succeeds. The automated
+release job explicitly dispatches `publish.yml` after creating the GitHub
+Release. This uses a trigger supported by crates.io trusted publishing; GitHub
+does not emit a second workflow from release events created with its workflow
+token, and crates.io rejects the `workflow_run` trigger. A release published by
+another actor also starts `publish.yml` through its release event.
+
+Each crate is skipped when that version is already on the registry. That is the
+recovery path if one crate publishes and the other fails: re-running resumes at
+the crate that did not land. crates.io reserves a version number permanently
+once published and yanking does not release it, so a shipped version can never
+be republished.
 
 To package a tag without publishing, run the workflow manually with `publish`
 off and inspect its `.crate` artifact.
