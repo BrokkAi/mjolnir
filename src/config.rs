@@ -107,6 +107,12 @@ impl std::str::FromStr for ThoughtOutput {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Config {
     pub version: u32,
+    /// The version found on disk when it was above this build's
+    /// `CONFIG_VERSION`. Such a config is loaded best-effort so its settings
+    /// still show, and treated as read-only: `save` refuses, so an older mj
+    /// never overwrites a file a newer mj maintains.
+    #[serde(skip)]
+    pub newer_config_version: Option<u32>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub onboarding_version: u32,
     #[serde(default, skip_serializing_if = "TerminalThemeKind::is_default")]
@@ -164,6 +170,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
+            newer_config_version: None,
             onboarding_version: 0,
             theme: TerminalThemeKind::default(),
             spinner: SpinnerStyle::default(),
@@ -733,10 +740,11 @@ pub struct SelectedAgent {
 }
 
 impl Config {
-    /// True when `path` holds a config this build can use directly or migrate
-    /// forward. Callers use it to decide whether the user is already
-    /// onboarded, so a migratable older file counts as an existing config.
-    pub fn path_has_current_version(path: &Path) -> bool {
+    /// True when `path` holds a config some mj build wrote: this build's
+    /// version, a migratable older one, or a newer build's. Callers use it to
+    /// decide whether the user is already onboarded, so a migratable older
+    /// file counts, and so does a newer file — its owner finished setup.
+    pub fn path_has_saved_config(path: &Path) -> bool {
         let Ok(contents) = std::fs::read_to_string(path) else {
             return false;
         };
@@ -745,7 +753,7 @@ impl Config {
                 .ok()
                 .and_then(|document| document.get("version").and_then(toml::Value::as_integer)),
             Some(version)
-                if version == i64::from(CONFIG_VERSION)
+                if version >= i64::from(CONFIG_VERSION)
                     || version == i64::from(V2_CONFIG_VERSION)
                     || version == i64::from(V3_CONFIG_VERSION)
         )
@@ -846,7 +854,10 @@ impl Config {
 
     /// Read the config from `path`. Returns `Config::default()` when the
     /// file does not exist; surfaces a parse error otherwise. Older supported
-    /// configs are migrated and written back before they are returned.
+    /// configs are migrated in memory only — the file is never rewritten by a
+    /// load, so a process that merely reads the config (the server's file
+    /// watcher, a headless run) cannot invalidate it for other installed
+    /// builds. The migrated form reaches disk on the next real save.
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -855,36 +866,26 @@ impl Config {
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let document: toml::Value =
             toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?;
-        let has_persisted_acp_source = ["agent", "review", "subagents"].into_iter().any(|seat| {
-            document
-                .get(seat)
-                .and_then(toml::Value::as_table)
-                .is_some_and(|table| table.contains_key("acp_source"))
-        });
         let version = document.get("version").and_then(toml::Value::as_integer);
         if version == Some(i64::from(V2_CONFIG_VERSION)) {
             let mut cfg = migrate_v2(&s).with_context(|| format!("migrate {}", path.display()))?;
             cfg.normalize()?;
-            if let Err(error) = cfg.save(path) {
-                tracing::warn!(
-                    path = %path.display(),
-                    %error,
-                    "config migrated from v2 in memory but could not be written back"
-                );
-            }
             return Ok(cfg);
         }
         if version == Some(i64::from(V3_CONFIG_VERSION)) {
             let mut cfg = migrate_v3(&s).with_context(|| format!("migrate {}", path.display()))?;
             cfg.normalize()?;
-            if let Err(error) = cfg.save(path) {
-                tracing::warn!(
-                    path = %path.display(),
-                    %error,
-                    "config migrated from v3 in memory but could not be written back"
-                );
-            }
             return Ok(cfg);
+        }
+        if let Some(found) = version.filter(|found| *found > i64::from(CONFIG_VERSION)) {
+            let found = u32::try_from(found).unwrap_or(u32::MAX);
+            tracing::warn!(
+                path = %path.display(),
+                found_version = found,
+                expected_version = CONFIG_VERSION,
+                "config was written by a newer mj; loading best-effort and refusing to save"
+            );
+            return Ok(Self::load_newer(&s, &document, found));
         }
         if version != Some(i64::from(CONFIG_VERSION)) {
             tracing::warn!(
@@ -901,19 +902,104 @@ impl Config {
             cfg.team = legacy_team_preset(&document).map(|team| team.id().to_string());
         }
         cfg.normalize()?;
-        if has_persisted_acp_source && let Err(error) = cfg.save(path) {
-            tracing::warn!(
-                path = %path.display(),
-                %error,
-                "removed obsolete persisted ACP source pins in memory but could not write config"
-            );
-        }
         Ok(cfg)
     }
 
+    /// Best-effort read of a config a newer build maintains. Unknown fields
+    /// drop away and unreadable data falls back to defaults field by field,
+    /// so one reshaped section costs only itself — the team, models, and
+    /// appearance that still parse keep showing instead of a misleading
+    /// fresh config. The marker keeps the result read-only.
+    fn load_newer(body: &str, document: &toml::Value, found: u32) -> Self {
+        let mut cfg = toml::from_str::<Self>(body).unwrap_or_else(|_| Self::salvage(document));
+        cfg.version = CONFIG_VERSION;
+        if cfg.team.is_none() {
+            cfg.team = legacy_team_preset(document).map(|team| team.id().to_string());
+        }
+        if cfg.normalize().is_err() {
+            // A value this build's validation rejects (a newer build may
+            // allow more) costs only the routing knobs, not the whole config.
+            for priority in [
+                &mut cfg.agent.acp_priority,
+                &mut cfg.review.acp_priority,
+                &mut cfg.subagents.acp_priority,
+            ] {
+                *priority = default_acp_priority();
+            }
+            cfg.subagents.max_parallel = cfg.subagents.max_parallel.min(16);
+            if cfg.normalize().is_err() {
+                cfg = Self::default();
+            }
+        }
+        cfg.newer_config_version = Some(found);
+        cfg
+    }
+
+    /// Recover each top-level field on its own when the document as a whole
+    /// no longer matches this build's schema.
+    fn salvage(document: &toml::Value) -> Self {
+        fn field<T: for<'de> Deserialize<'de>>(document: &toml::Value, key: &str) -> Option<T> {
+            document
+                .get(key)
+                .cloned()
+                .and_then(|value| value.try_into().ok())
+        }
+        let mut cfg = Self::default();
+        macro_rules! recover {
+            ($($name:ident),+ $(,)?) => {$(
+                if let Some(value) = field(document, stringify!($name)) {
+                    cfg.$name = value;
+                }
+            )+};
+        }
+        recover!(
+            onboarding_version,
+            theme,
+            spinner,
+            thought_output,
+            feature_hints,
+            keep_awake,
+            memory,
+            agent,
+            review,
+            subagents,
+            acp,
+            session_config,
+            ragnarok,
+        );
+        cfg.team = field(document, "team");
+        cfg
+    }
+
+    /// One-line warning for surfaces showing this config when the file on
+    /// disk belongs to a newer build; `None` for a config this build owns.
+    pub fn newer_build_notice(&self) -> Option<String> {
+        self.newer_config_version.map(|found| {
+            format!(
+                "Settings were saved by a newer mj (config version {found}; this build supports \
+                 {CONFIG_VERSION}) and are read-only here. Update mj, or edit them with the newer \
+                 build."
+            )
+        })
+    }
+
     /// Atomic-ish save: write to a tmp sibling then rename. Creates the
-    /// parent directory on demand.
+    /// parent directory on demand. Refuses when the file belongs to a newer
+    /// build — judged by the in-memory marker *and* a fresh look at the disk,
+    /// since a newer build may have rewritten the file after this config
+    /// loaded: overwriting it would silently destroy settings this build does
+    /// not understand.
     pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(found) = self
+            .newer_config_version
+            .or_else(|| newer_version_on_disk(path))
+        {
+            anyhow::bail!(
+                "{} was written by a newer mj (config version {found}; this build writes \
+                 {CONFIG_VERSION}). Update mj, or change settings with the newer build",
+                path.display()
+            );
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create config dir {}", parent.display()))?;
@@ -974,6 +1060,17 @@ impl Config {
 
         Ok(())
     }
+}
+
+/// The config version at `path` when it is above this build's. Read
+/// tolerantly: a missing or unparseable file never blocks a save.
+fn newer_version_on_disk(path: &Path) -> Option<u32> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let version = toml::from_str::<toml::Value>(&contents)
+        .ok()?
+        .get("version")?
+        .as_integer()?;
+    (version > i64::from(CONFIG_VERSION)).then(|| u32::try_from(version).unwrap_or(u32::MAX))
 }
 
 /// The old configuration stored one ACP route per role. The supported Team
@@ -1115,6 +1212,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
     };
     Ok(Config {
         version: CONFIG_VERSION,
+        newer_config_version: None,
         onboarding_version: 0,
         theme: old.theme,
         spinner: old.spinner,
@@ -1654,23 +1752,27 @@ kimi = "disabled"
     }
 
     #[test]
-    fn current_and_migratable_schemas_count_as_an_existing_config() {
+    fn current_migratable_and_newer_schemas_count_as_an_existing_config() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "version = 1\n").expect("old config");
-        assert!(!Config::path_has_current_version(&path));
+        assert!(!Config::path_has_saved_config(&path));
         // A v2 file is migrated on load, while the separate content version
         // still lets startup show the major-upgrade explanation.
         std::fs::write(&path, "version = 2\n").expect("v2 config");
-        assert!(Config::path_has_current_version(&path));
+        assert!(Config::path_has_saved_config(&path));
         std::fs::write(&path, "version = 3\n").expect("v3 config");
-        assert!(Config::path_has_current_version(&path));
+        assert!(Config::path_has_saved_config(&path));
         Config::default().save(&path).expect("current config");
-        assert!(Config::path_has_current_version(&path));
+        assert!(Config::path_has_saved_config(&path));
+        // A newer build's file counts too: its owner already finished setup,
+        // so this build must not run fresh onboarding over it.
+        std::fs::write(&path, format!("version = {}\n", CONFIG_VERSION + 1)).expect("newer config");
+        assert!(Config::path_has_saved_config(&path));
     }
 
     #[test]
-    fn v2_config_migrates_every_mapped_field_and_is_written_back() {
+    fn v2_config_migrates_every_mapped_field_in_memory_only() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(
@@ -1734,10 +1836,17 @@ origin = "custom"
         assert_eq!(cfg.ragnarok.max_competitors, 4);
         assert_eq!(cfg.acp.policy("codex-acp"), AcpServerPolicy::Disabled);
 
-        // The migrated file is persisted, so the next load is a current read.
-        // Legacy custom-server sections are tolerated on load and dropped.
-        let body = std::fs::read_to_string(&path).expect("read migrated");
-        println!("--- migrated config.toml ---\n{body}--- end ---");
+        // A load never rewrites the file: an older build must stay able to
+        // read it until the user actually saves. Reloading migrates again to
+        // the same result.
+        let body = std::fs::read_to_string(&path).expect("read after load");
+        assert!(body.contains("version = 2"), "{body}");
+        assert!(body.contains("[thor]"), "{body}");
+        assert_eq!(Config::load(&path).expect("reload"), cfg);
+
+        // The migrated schema reaches disk on the next real save.
+        cfg.save(&path).expect("save migrated");
+        let body = std::fs::read_to_string(&path).expect("read saved");
         assert!(
             body.contains(&format!("version = {CONFIG_VERSION}")),
             "{body}"
@@ -1748,7 +1857,7 @@ origin = "custom"
         assert!(!body.contains("[council]"), "{body}");
         assert!(!body.contains("permission_mode"), "{body}");
         assert!(!body.contains("acp.servers"), "{body}");
-        assert_eq!(Config::load(&path).expect("reload migrated"), cfg);
+        assert_eq!(Config::load(&path).expect("reload saved"), cfg);
     }
 
     #[test]
@@ -1783,6 +1892,23 @@ origin = "custom"
             assert_eq!(config.version, CONFIG_VERSION);
             assert_eq!(config.agent.max_correction_rounds, expected);
         }
+    }
+
+    #[test]
+    fn migratable_config_is_not_rewritten_by_a_load() {
+        // The write-back this test forbids is what let one newer build
+        // invalidate the config for every older build on the machine just by
+        // reading it (a server config watcher, a headless run).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let body = format!("version = {V3_CONFIG_VERSION}\nteam = \"claude_codex\"\n");
+        std::fs::write(&path, &body).expect("write v3 config");
+
+        let config = Config::load(&path).expect("migrate v3");
+
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(config.team.as_deref(), Some("claude_codex"));
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), body);
     }
 
     #[test]
@@ -2230,13 +2356,11 @@ origin = "custom"
     }
 
     #[test]
-    fn load_removes_obsolete_persisted_acp_source_pins() {
+    fn load_derives_the_team_from_obsolete_acp_source_pins_without_rewriting() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            format!(
-                r#"
+        let body = format!(
+            r#"
 version = {CONFIG_VERSION}
 
 [agent]
@@ -2247,9 +2371,8 @@ acp_source = "claude-acp"
 model = "claude-fable-5"
 acp_source = "codex-acp"
 "#
-            ),
-        )
-        .expect("write");
+        );
+        std::fs::write(&path, &body).expect("write");
 
         let config = Config::load(&path).expect("load");
 
@@ -2258,12 +2381,131 @@ acp_source = "codex-acp"
         assert_eq!(config.team.as_deref(), Some("claude_codex"));
         assert_eq!(config.agent.acp_source.as_deref(), Some("claude-acp"));
         assert_eq!(config.review.acp_source.as_deref(), Some("codex-acp"));
-        let rewritten = std::fs::read_to_string(&path).expect("read rewritten config");
-        assert!(!rewritten.contains("acp_source"), "config: {rewritten}");
-        assert!(
-            rewritten.contains("team = \"claude_codex\""),
-            "config: {rewritten}"
+        // The load leaves the file alone; a save writes the derived team and
+        // drops the runtime-only pins.
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), body);
+        config.save(&path).expect("save");
+        let saved = std::fs::read_to_string(&path).expect("read saved config");
+        assert!(!saved.contains("acp_source"), "config: {saved}");
+        assert!(saved.contains("team = \"claude_codex\""), "config: {saved}");
+    }
+
+    #[test]
+    fn newer_version_config_loads_best_effort_and_refuses_saving() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let body = format!(
+            "version = {}\nteam = \"claude_codex\"\nfield_from_the_future = true\n",
+            CONFIG_VERSION + 1
         );
+        std::fs::write(&path, &body).expect("write");
+
+        let config = Config::load(&path).expect("load newer config");
+
+        // The settings a newer build saved still show instead of a
+        // misleading fresh default.
+        assert_eq!(config.team.as_deref(), Some("claude_codex"));
+        assert_eq!(
+            TeamPreset::from_config(&config),
+            Some(TeamPreset::ClaudeWithCodexReviewer)
+        );
+        assert_eq!(config.newer_config_version, Some(CONFIG_VERSION + 1));
+        assert!(
+            config
+                .newer_build_notice()
+                .is_some_and(|notice| notice.contains("newer mj"))
+        );
+
+        // Saving would downgrade the newer build's file; it must refuse and
+        // leave the file untouched.
+        let error = config.save(&path).expect_err("save must refuse");
+        assert!(error.to_string().contains("newer mj"), "{error:#}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), body);
+    }
+
+    #[test]
+    fn newer_version_config_with_one_reshaped_section_keeps_the_rest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        // A future build reshaped `[agent] model` into a table, which breaks
+        // whole-document deserialization for this build. Only that section
+        // may fall back; the team and appearance still show.
+        let body = format!(
+            "version = {}\ntheme = \"ansi\"\nteam = \"codex\"\n\n[agent]\nmodel = {{ id = \
+             \"future\" }}\n",
+            CONFIG_VERSION + 1
+        );
+        std::fs::write(&path, &body).expect("write");
+
+        let config = Config::load(&path).expect("load reshaped newer config");
+
+        assert_eq!(config.team.as_deref(), Some("codex"));
+        assert_eq!(TeamPreset::from_config(&config), Some(TeamPreset::Codex));
+        assert_eq!(config.theme, TerminalThemeKind::Ansi);
+        // The broken section fell back to its default model; the team still
+        // routes it.
+        assert_eq!(config.agent.model, "auto");
+        assert_eq!(config.agent.acp_source.as_deref(), Some("codex-acp"));
+        assert_eq!(config.newer_config_version, Some(CONFIG_VERSION + 1));
+        config.save(&path).expect_err("save must refuse");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), body);
+    }
+
+    #[test]
+    fn newer_version_config_with_an_out_of_range_value_keeps_the_rest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        // A future build may allow more than 16 parallel subagents. The
+        // over-cap value clamps instead of resetting the whole config.
+        let body = format!(
+            "version = {}\nteam = \"claude\"\n\n[subagents]\nmax_parallel = 32\n",
+            CONFIG_VERSION + 1
+        );
+        std::fs::write(&path, &body).expect("write");
+
+        let config = Config::load(&path).expect("load newer config");
+
+        assert_eq!(config.team.as_deref(), Some("claude"));
+        assert_eq!(config.subagents.max_parallel, 16);
+        assert_eq!(config.newer_config_version, Some(CONFIG_VERSION + 1));
+    }
+
+    #[test]
+    fn unreadable_newer_version_config_falls_back_to_marked_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        // `team` as a table breaks this build's schema entirely; the load
+        // still succeeds read-only instead of failing startup.
+        let body = format!(
+            "version = {}\n\n[team]\ncoder = \"claude-acp\"\n",
+            CONFIG_VERSION + 1
+        );
+        std::fs::write(&path, &body).expect("write");
+
+        let config = Config::load(&path).expect("load unreadable newer config");
+
+        assert_eq!(config.team, None);
+        assert_eq!(config.newer_config_version, Some(CONFIG_VERSION + 1));
+        config.save(&path).expect_err("save must refuse");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), body);
+    }
+
+    #[test]
+    fn save_refuses_when_the_disk_config_became_newer_after_loading() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        Config::default().save(&path).expect("seed current config");
+        let config = Config::load(&path).expect("load current config");
+        assert_eq!(config.newer_config_version, None);
+
+        // A newer build rewrites the file while this config sits in memory;
+        // the stale in-memory marker alone must not authorize the save.
+        let body = format!("version = {}\nteam = \"codex\"\n", CONFIG_VERSION + 1);
+        std::fs::write(&path, &body).expect("newer build takes the file over");
+
+        let error = config.save(&path).expect_err("save must refuse");
+        assert!(error.to_string().contains("newer mj"), "{error:#}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), body);
     }
 
     #[test]

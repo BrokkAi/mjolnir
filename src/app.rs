@@ -2325,8 +2325,9 @@ impl AppState {
         config.theme = self.theme_kind;
         config.spinner = self.spinner_style;
         config.thought_output = self.thought_output;
+        let notice = config.newer_build_notice();
         self.mjconfig_menu = Some(MjConfigMenu {
-            editor: SettingsEditor::new(config, self.model_choices.clone(), None)
+            editor: SettingsEditor::new(config, self.model_choices.clone(), notice)
                 .with_active_models(self.active_models.clone())
                 .with_active_session_config(self.session_config_options.clone())
                 .with_inventory(self.acp_inventory.clone()),

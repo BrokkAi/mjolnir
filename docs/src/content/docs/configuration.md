@@ -10,8 +10,13 @@ capabilities are probed whenever a new session roster is resolved;
 `mj models refresh` runs that probe as a standalone diagnostic.
 
 The config schema is versioned. The current schema is `version = 4`; version 2
-and 3 files are migrated in place on load. Any other version starts from fresh
-defaults rather than guessing a field-by-field migration.
+and 3 files are migrated in memory on load and reach disk in the current schema
+the next time settings are saved — merely reading the file never rewrites it,
+so older and newer mj builds can share one config until someone actually saves.
+A file written by a *newer* build loads best-effort and is read-only: its
+settings still show, saving is refused with a warning, and nothing is
+downgraded. An unrecognized older version starts from fresh defaults rather
+than guessing a field-by-field migration.
 
 The guided product explanation has one monotonic `onboarding_version`, separate
 from the config schema. Mjolnir compares it only with the latest onboarding:
@@ -25,22 +30,27 @@ What the **Codex coder + Claude reviewer** team writes:
 
 ```toml
 version = 4
+team = "codex_claude"
 
 [agent]
 model = "auto"
-acp_source = "codex-acp"
 discrete_review = true
 
 [review]
 model = "auto"
-acp_source = "claude-acp"
 
 [subagents]
 model = "auto"
-acp_source = "claude-acp"
 max_parallel = 6
 auto_failover = true
+
+[acp.policies]
+claude-acp = "enabled"
+codex-acp = "enabled"
 ```
+
+`team` records the selected Team preset; the coder and reviewer ACP routes are
+derived from it on every launch and are never persisted themselves.
 
 `[agent]` is the primary agent: the session that owns every user turn. It cannot
 be disabled. `[review]` configures the discrete-review model; review
@@ -52,7 +62,6 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | Key | Meaning |
 | --- | --- |
 | `agent.model` | Primary model, or `auto` |
-| `agent.acp_source` | Optional exact ACP source constraint; keeps `auto` selection inside that adapter |
 | `agent.acp_priority` | ACP source preference when several enabled adapters offer the primary model |
 | `agent.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `agent.session_defaults` | Per-ACP saved session-option defaults for new primary sessions |
@@ -60,12 +69,10 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `agent.review_tier` | Review depth: `quick` (default) sends one general reviewer and validates its findings; `extended` runs the adversarial supervisor with on-demand Norse specialist lanes and spends far more tokens |
 | `agent.max_correction_rounds` | Optional override for review passes over findings-driven corrections; omitted defaults to `0` for Quick and `1` for Extended |
 | `review.model` | Review supervisor model, or `auto` |
-| `review.acp_source` | Optional exact ACP source constraint for the review seat |
 | `review.acp_priority` | ACP source preference for the review supervisor model |
 | `review.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `review.session_defaults` | Per-ACP saved session-option defaults for new review sessions |
 | `subagents.model` | Default subagent model, `auto`, or `disabled` |
-| `subagents.acp_source` | Optional exact ACP source constraint for default workers and their failover pool |
 | `subagents.acp_priority` | Independent ACP source preference for the default worker model |
 | `subagents.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `subagents.session_defaults` | Per-ACP saved session-option defaults for newly created subagents |
@@ -115,8 +122,7 @@ Sources absent from a saved list are appended in discovery order.
 ## Migrating older configs
 
 A `version = 2` file (`[thor]`, `[eitri]`, `[loki]`, `[council]`) is mapped onto
-the current schema the first time this build loads it, and the migrated result
-is written back to the same path:
+the current schema every time this build loads it:
 
 | v2 | v4 |
 | --- | --- |
@@ -126,9 +132,9 @@ is written back to the same path:
 | `council.auto_failover` | `subagents.auto_failover` |
 | `[loki]`, `council.permission_mode` | dropped |
 
-`theme`, `spinner`, `[acp]`, and `[ragnarok]` carry over unchanged. If the
-migrated file cannot be written back, the session still runs on the migrated
-values in memory.
+`theme`, `spinner`, `[acp]`, and `[ragnarok]` carry over unchanged. The file on
+disk keeps its old schema until settings are next saved, so other installed mj
+builds can still read it in the meantime.
 
 Versions 2 and 3 wrote the former global `max_correction_rounds = 1` default
 into saved files. Their migrations remove that generated value so review depth

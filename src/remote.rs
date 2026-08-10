@@ -6203,6 +6203,12 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         keep_awake: config.keep_awake,
     };
 
+    let notice = match (config.newer_build_notice(), notice) {
+        (Some(warning), Some(notice)) => Some(format!("{notice}. {warning}")),
+        (Some(warning), None) => Some(warning),
+        (None, notice) => notice,
+    };
+
     MjConfigSnapshot {
         team: MjTeamPanel {
             selected: config::TeamPreset::from_config(config).map(|preset| preset.id().to_string()),
@@ -6421,6 +6427,9 @@ async fn mjconfig_apply(
     Json(request): Json<MjConfigApplyRequest>,
 ) -> std::result::Result<Json<MjConfigSnapshot>, (StatusCode, String)> {
     let mut config = mjconfig_load(&state);
+    if let Some(warning) = config.newer_build_notice() {
+        return Err((StatusCode::CONFLICT, warning));
+    }
     let discovery = state
         .mjconfig
         .discovery
@@ -10533,6 +10542,48 @@ mod tests {
         assert!(
             notice.contains("switched to automatic selection"),
             "{notice}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mjconfig_refuses_to_edit_a_newer_build_config() {
+        let runtime = test_mjconfig_runtime();
+        let config_path = runtime.config_path.clone();
+        let body = format!(
+            "version = {}\nteam = \"claude_codex\"\n",
+            config::CONFIG_VERSION + 1
+        );
+        std::fs::write(&config_path, &body).expect("seed newer config");
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+
+        // The snapshot still shows the newer build's settings, plus the
+        // read-only warning.
+        let response = app
+            .clone()
+            .oneshot(mjconfig_request("GET", Some(token), None))
+            .await
+            .expect("snapshot response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = json_body(response).await;
+        assert_eq!(snapshot["team"]["selected"], "claude_codex");
+        let notice = snapshot["notice"].as_str().expect("notice");
+        assert!(notice.contains("newer mj"), "{notice}");
+
+        // An apply would downgrade the newer build's file: refuse and leave
+        // it untouched.
+        let response = app
+            .oneshot(mjconfig_request(
+                "POST",
+                Some(token),
+                Some(serde_json::json!({ "team": "codex" })),
+            ))
+            .await
+            .expect("apply response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read config"),
+            body
         );
     }
 

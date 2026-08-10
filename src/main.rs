@@ -616,8 +616,10 @@ async fn main() -> Result<()> {
                     let config_path = config::default_config_path();
                     let mut cfg = Config::load(&config_path)?;
                     let (roster, notices) = roster::resolve_recovering(&mut cfg, &cwd).await?;
-                    if !notices.is_empty() {
-                        cfg.save(&config_path)?;
+                    if !notices.is_empty()
+                        && let Err(error) = cfg.save(&config_path)
+                    {
+                        eprintln!("warning: model recovery notices were not persisted: {error:#}");
                     }
                     println!(
                         "Probed enabled ACP adapters; {} models available.",
@@ -1482,7 +1484,7 @@ async fn run_app(
 ) -> Result<Option<String>> {
     let termination = runtime_options.termination.clone();
     let config_path = config::default_config_path();
-    let config_exists = config::Config::path_has_current_version(&config_path);
+    let config_exists = config::Config::path_has_saved_config(&config_path);
     let mut cfg = Config::load(&config_path)?;
     let team_selection_required = config::TeamPreset::from_config(&cfg).is_none();
     let onboarding_kind = onboarding_kind(
@@ -1516,8 +1518,10 @@ async fn run_app(
         accepted_roster
     } else {
         let (roster, notices) = resolve_roster_for_tui(&mut cfg, &cwd).await?;
-        if !notices.is_empty() {
-            cfg.save(&config_path)?;
+        if !notices.is_empty()
+            && let Err(error) = cfg.save(&config_path)
+        {
+            tracing::warn!(%error, "model recovery notices were not persisted");
         }
         roster
     };
@@ -1580,8 +1584,10 @@ async fn run_app(
                 let show_new_session_boundary = session_result.reason == UiExitReason::NewSession;
                 cfg = Config::load(&config_path)?;
                 let (resolved, notices) = resolve_roster_for_tui(&mut cfg, &cwd).await?;
-                if !notices.is_empty() {
-                    cfg.save(&config_path)?;
+                if !notices.is_empty()
+                    && let Err(error) = cfg.save(&config_path)
+                {
+                    tracing::warn!(%error, "model recovery notices were not persisted");
                 }
                 roster = resolved;
                 primary_agent = selected_agent_for_role(&roster.primary);
@@ -1667,9 +1673,16 @@ async fn run_startup_onboarding(
     match outcome {
         onboarding::Outcome::Accept(next, resolved) => {
             let next = *next;
-            next.save(config_path)
-                .with_context(|| format!("save {}", config_path.display()))?;
-            Ok(Some((next, *resolved)))
+            let mut resolved = *resolved;
+            // A failed save must not abort the session the user just
+            // configured; the accepted config still drives it in memory.
+            if let Err(error) = next.save(config_path) {
+                resolved
+                    .warnings
+                    .push(format!("Setup choices were not saved: {error:#}"));
+                resolved.warnings.sort();
+            }
+            Ok(Some((next, resolved)))
         }
         onboarding::Outcome::Cancel => Ok(None),
     }
