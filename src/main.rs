@@ -57,6 +57,7 @@ mod text;
 mod theme;
 mod trajectory;
 mod ui;
+mod usage_fact;
 mod usage_format;
 mod version;
 mod workflow;

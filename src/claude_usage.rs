@@ -7,17 +7,36 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
+use crate::usage_fact::{StoredFact, UsageFactStore};
+
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 const RUNTIME_PREPARE_TIMEOUT: Duration = Duration::from_secs(180);
 static CLAUDE_RUNTIME_READY: OnceCell<()> = OnceCell::const_new();
+
+/// Provider key of the machine-wide shared `/usage` fact.
+const SHARED_FACT_PROVIDER: &str = "claude";
+/// How long a published fact satisfies [`query`] before someone probes
+/// again. Matches the quota gate's in-process cache TTL.
+const SHARED_FACT_TTL: Duration = Duration::from_secs(60);
+/// Checkout lease on the shared fact: long enough to cover first-run
+/// runtime preparation plus the probe itself, short enough that a
+/// crashed holder does not block other processes for long.
+const CHECKOUT_LEASE: Duration = RUNTIME_PREPARE_TIMEOUT
+    .saturating_add(USAGE_TIMEOUT)
+    .saturating_add(Duration::from_secs(10));
+/// How often waiters re-read the shared fact while another process
+/// holds the checkout lease.
+const CHECKOUT_POLL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaudeUsageStatus {
@@ -34,7 +53,7 @@ impl ClaudeUsageStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeUsageReport {
     pub five_hour: Option<ClaudeUsageWindow>,
     pub week: Option<ClaudeUsageWindow>,
@@ -58,7 +77,7 @@ impl ClaudeUsageReport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeUsageWindow {
     pub remaining_percent: u8,
     /// Text following `reset` in Claude Code output, without the word itself.
@@ -76,7 +95,7 @@ impl ClaudeUsageWindow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClaudeUsageError {
     TimedOut,
     NotInstalled,
@@ -121,9 +140,170 @@ impl fmt::Display for ClaudeUsageError {
     }
 }
 
+/// Claude subscription usage via the machine-wide shared fact.
+///
+/// Every mj process (TUI instances across worktrees, `mj server`,
+/// headless runs) shares one `/usage` fact in a small sqlite database.
+/// A fresh fact is returned directly; a stale one is refreshed by
+/// whichever caller wins the checkout lease while everyone else waits
+/// for the published result — so N concurrent mj instances spawn one
+/// `claude -p /usage` probe, not N.
+pub async fn query(
+    cwd: PathBuf,
+    env: HashMap<String, String>,
+) -> Result<ClaudeUsageReport, ClaudeUsageError> {
+    query_shared(cwd, env, SHARED_FACT_TTL).await
+}
+
+/// Like [`query`] but ignores the shared fact's age (still serialized
+/// through the checkout lease). Used to recheck quota right after an
+/// agent failure, where a minute-old "clear" answer is not good enough.
+pub async fn query_fresh(
+    cwd: PathBuf,
+    env: HashMap<String, String>,
+) -> Result<ClaudeUsageReport, ClaudeUsageError> {
+    query_shared(cwd, env, Duration::ZERO).await
+}
+
+async fn query_shared(
+    cwd: PathBuf,
+    env: HashMap<String, String>,
+    max_age: Duration,
+) -> Result<ClaudeUsageReport, ClaudeUsageError> {
+    let store = UsageFactStore::new(crate::usage_fact::default_store_path());
+    query_shared_with(store, max_age, move || probe(cwd, env)).await
+}
+
+async fn query_shared_with<F, Fut>(
+    store: UsageFactStore,
+    max_age: Duration,
+    probe: F,
+) -> Result<ClaudeUsageReport, ClaudeUsageError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<ClaudeUsageReport, ClaudeUsageError>>,
+{
+    // A per-process sequence keeps concurrent queries from sharing an
+    // owner id: `try_checkout` treats a matching owner as a renewal, so
+    // colliding owners would both win the lease and both probe.
+    static OWNER_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let started = crate::usage_fact::unix_now();
+    let owner = format!(
+        "mj-{}-{}",
+        std::process::id(),
+        OWNER_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let deadline = Instant::now() + CHECKOUT_LEASE + USAGE_TIMEOUT;
+    loop {
+        if let Some(result) = read_fact(&store)
+            .await
+            .filter(|fact| fact_is_current(fact, started, max_age))
+            .and_then(|fact| decode_fact(&fact))
+        {
+            return result;
+        }
+        if checkout_fact(&store, &owner).await {
+            let result = probe().await;
+            match serde_json::to_string(&result) {
+                Ok(payload) => publish_fact(&store, payload, owner).await,
+                Err(_) => release_fact(&store, owner).await,
+            }
+            return result;
+        }
+        if Instant::now() >= deadline {
+            // Waited out an entire lease without a publish. Fall back to
+            // any existing fact rather than blocking even longer.
+            if let Some(result) = read_fact(&store).await.and_then(|fact| decode_fact(&fact)) {
+                return result;
+            }
+            return Err(ClaudeUsageError::TimedOut);
+        }
+        tokio::time::sleep(CHECKOUT_POLL).await;
+    }
+}
+
+/// A fact is current when it satisfies the caller's age bound as of the
+/// call start, or was published after the call began (a concurrent
+/// lease holder just finished — that result is as fresh as our own
+/// probe would have been).
+fn fact_is_current(fact: &StoredFact, started: i64, max_age: Duration) -> bool {
+    if max_age.is_zero() {
+        // Timestamps have second granularity, so a fact stamped in the
+        // same second as the call may predate it. A forced recheck must
+        // never accept a possibly pre-failure answer; re-probing in that
+        // rare tie is the cheaper mistake.
+        return fact.fetched_at > started;
+    }
+    let max_age = i64::try_from(max_age.as_secs()).unwrap_or(i64::MAX);
+    fact.fetched_at >= started || started.saturating_sub(fact.fetched_at) <= max_age
+}
+
+/// `None` when the payload does not deserialize — e.g. written by a
+/// different mj version. The caller then probes and overwrites it.
+fn decode_fact(fact: &StoredFact) -> Option<Result<ClaudeUsageReport, ClaudeUsageError>> {
+    serde_json::from_str(&fact.payload).ok()
+}
+
+async fn read_fact(store: &UsageFactStore) -> Option<StoredFact> {
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.read(SHARED_FACT_PROVIDER)).await {
+        Ok(Ok(fact)) => fact,
+        Ok(Err(error)) => {
+            tracing::debug!("read shared Claude usage fact: {error}");
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+/// A storage failure counts as a successful checkout: the shared cache
+/// must never make usage reporting worse than probing directly.
+async fn checkout_fact(store: &UsageFactStore, owner: &str) -> bool {
+    let store = store.clone();
+    let owner = owner.to_string();
+    let now = crate::usage_fact::unix_now();
+    match tokio::task::spawn_blocking(move || {
+        store.try_checkout(SHARED_FACT_PROVIDER, &owner, CHECKOUT_LEASE, now)
+    })
+    .await
+    {
+        Ok(Ok(acquired)) => acquired,
+        Ok(Err(error)) => {
+            tracing::debug!("checkout shared Claude usage fact: {error}");
+            true
+        }
+        Err(_) => true,
+    }
+}
+
+async fn publish_fact(store: &UsageFactStore, payload: String, owner: String) {
+    let store = store.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        store.publish(
+            SHARED_FACT_PROVIDER,
+            &payload,
+            &owner,
+            crate::usage_fact::unix_now(),
+        )
+    })
+    .await;
+    if let Ok(Err(error)) = result {
+        tracing::debug!("publish shared Claude usage fact: {error}");
+    }
+}
+
+async fn release_fact(store: &UsageFactStore, owner: String) {
+    let store = store.clone();
+    let result =
+        tokio::task::spawn_blocking(move || store.release(SHARED_FACT_PROVIDER, &owner)).await;
+    if let Ok(Err(error)) = result {
+        tracing::debug!("release shared Claude usage fact: {error}");
+    }
+}
+
 /// Run the Claude executable bundled with `claude-agent-acp` and parse its
 /// `/usage` summary.
-pub async fn query(
+async fn probe(
     cwd: PathBuf,
     env: HashMap<String, String>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
@@ -632,6 +812,123 @@ fn normalize_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shared_store() -> (tempfile::TempDir, UsageFactStore) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = UsageFactStore::new(dir.path().join("usage.sqlite3"));
+        (dir, store)
+    }
+
+    fn sample_report() -> ClaudeUsageReport {
+        ClaudeUsageReport {
+            five_hour: Some(ClaudeUsageWindow {
+                remaining_percent: 88,
+                reset_context: Some("at 4:30pm".to_string()),
+            }),
+            week: Some(ClaudeUsageWindow {
+                remaining_percent: 63,
+                reset_context: None,
+            }),
+        }
+    }
+
+    async fn failing_probe() -> Result<ClaudeUsageReport, ClaudeUsageError> {
+        panic!("the shared fact should have satisfied this query")
+    }
+
+    #[tokio::test]
+    async fn fresh_shared_fact_short_circuits_the_probe() {
+        let (_dir, store) = shared_store();
+        let payload = serde_json::to_string(&Ok::<_, ClaudeUsageError>(sample_report()))
+            .expect("serialize fact");
+        store
+            .publish(
+                SHARED_FACT_PROVIDER,
+                &payload,
+                "seed",
+                crate::usage_fact::unix_now(),
+            )
+            .expect("publish");
+
+        let result = query_shared_with(store, SHARED_FACT_TTL, failing_probe).await;
+        assert_eq!(result, Ok(sample_report()));
+    }
+
+    #[tokio::test]
+    async fn stale_store_probes_once_and_publishes_for_later_queries() {
+        let (_dir, store) = shared_store();
+        let result = query_shared_with(store.clone(), SHARED_FACT_TTL, || async {
+            Ok(sample_report())
+        })
+        .await;
+        assert_eq!(result, Ok(sample_report()));
+
+        // The probe result became the shared fact, so a second query is
+        // answered from the store.
+        let result = query_shared_with(store, SHARED_FACT_TTL, failing_probe).await;
+        assert_eq!(result, Ok(sample_report()));
+    }
+
+    #[tokio::test]
+    async fn probe_errors_are_shared_to_avoid_stampedes() {
+        let (_dir, store) = shared_store();
+        let result = query_shared_with(store.clone(), SHARED_FACT_TTL, || async {
+            Err(ClaudeUsageError::NotSignedIn)
+        })
+        .await;
+        assert_eq!(result, Err(ClaudeUsageError::NotSignedIn));
+
+        let result = query_shared_with(store, SHARED_FACT_TTL, failing_probe).await;
+        assert_eq!(result, Err(ClaudeUsageError::NotSignedIn));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waiter_returns_the_fact_published_by_the_lease_holder() {
+        let (_dir, store) = shared_store();
+        store
+            .try_checkout(
+                SHARED_FACT_PROVIDER,
+                "other-process",
+                CHECKOUT_LEASE,
+                crate::usage_fact::unix_now(),
+            )
+            .expect("checkout");
+
+        let publisher = store.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let payload = serde_json::to_string(&Ok::<_, ClaudeUsageError>(sample_report()))
+                .expect("serialize fact");
+            publisher
+                .publish(
+                    SHARED_FACT_PROVIDER,
+                    &payload,
+                    "other-process",
+                    crate::usage_fact::unix_now(),
+                )
+                .expect("publish");
+        });
+
+        let result = query_shared_with(store, SHARED_FACT_TTL, failing_probe).await;
+        assert_eq!(result, Ok(sample_report()));
+    }
+
+    #[test]
+    fn stale_facts_are_current_again_once_republished() {
+        let fact = StoredFact {
+            payload: String::new(),
+            fetched_at: 1000,
+        };
+        assert!(fact_is_current(&fact, 1030, Duration::from_secs(60)));
+        assert!(!fact_is_current(&fact, 1090, Duration::from_secs(60)));
+        // A forced refresh only accepts facts strictly newer than the
+        // call: a same-second fact could predate the failure that
+        // triggered the recheck.
+        assert!(fact_is_current(&fact, 999, Duration::ZERO));
+        assert!(!fact_is_current(&fact, 1000, Duration::ZERO));
+        // Same-second is fine for ordinary TTL-bounded queries.
+        assert!(fact_is_current(&fact, 1000, Duration::from_secs(60)));
+    }
 
     #[cfg(unix)]
     #[tokio::test]

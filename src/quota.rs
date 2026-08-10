@@ -82,51 +82,58 @@ impl Gate {
             }
         }
 
-        let result = match role.launch.kind {
-            AdapterKind::Claude => {
-                match crate::claude_usage::query(self.cwd.clone(), role.launch.env.clone()).await {
-                    Ok(report) => {
-                        let result = claude_check(&report);
-                        let _ = self
-                            .ui_tx
-                            .send(UiEvent::ClaudeUsage(ClaudeUsageStatus::Available(report)));
-                        result
-                    }
-                    Err(error) => {
-                        let _ =
-                            self.ui_tx
-                                .send(UiEvent::ClaudeUsage(ClaudeUsageStatus::Unavailable(
-                                    error.user_reason().to_string(),
-                                )));
-                        Check::Unavailable
-                    }
-                }
-            }
-            AdapterKind::Codex => {
-                let mut client = self.codex.lock().await;
-                match crate::codex_usage::refresh(
-                    &mut client,
-                    self.cwd.clone(),
-                    role.launch.env.clone(),
-                )
-                .await
-                {
-                    CodexUsageStatus::Available(report) => {
-                        let result = codex_check(&report);
-                        let _ = self
-                            .ui_tx
-                            .send(UiEvent::CodexUsage(CodexUsageStatus::Available(report)));
-                        result
-                    }
-                    CodexUsageStatus::Unavailable(reason) => {
-                        let _ = self
-                            .ui_tx
-                            .send(UiEvent::CodexUsage(CodexUsageStatus::Unavailable(reason)));
-                        Check::Unavailable
+        let result =
+            match role.launch.kind {
+                AdapterKind::Claude => {
+                    // A forced recheck (after an agent failure) must not be
+                    // satisfied by a minute-old shared fact.
+                    let queried = if force {
+                        crate::claude_usage::query_fresh(self.cwd.clone(), role.launch.env.clone())
+                            .await
+                    } else {
+                        crate::claude_usage::query(self.cwd.clone(), role.launch.env.clone()).await
+                    };
+                    match queried {
+                        Ok(report) => {
+                            let result = claude_check(&report);
+                            let _ = self
+                                .ui_tx
+                                .send(UiEvent::ClaudeUsage(ClaudeUsageStatus::Available(report)));
+                            result
+                        }
+                        Err(error) => {
+                            let _ = self.ui_tx.send(UiEvent::ClaudeUsage(
+                                ClaudeUsageStatus::Unavailable(error.user_reason().to_string()),
+                            ));
+                            Check::Unavailable
+                        }
                     }
                 }
-            }
-        };
+                AdapterKind::Codex => {
+                    let mut client = self.codex.lock().await;
+                    match crate::codex_usage::refresh(
+                        &mut client,
+                        self.cwd.clone(),
+                        role.launch.env.clone(),
+                    )
+                    .await
+                    {
+                        CodexUsageStatus::Available(report) => {
+                            let result = codex_check(&report);
+                            let _ = self
+                                .ui_tx
+                                .send(UiEvent::CodexUsage(CodexUsageStatus::Available(report)));
+                            result
+                        }
+                        CodexUsageStatus::Unavailable(reason) => {
+                            let _ = self
+                                .ui_tx
+                                .send(UiEvent::CodexUsage(CodexUsageStatus::Unavailable(reason)));
+                            Check::Unavailable
+                        }
+                    }
+                }
+            };
         self.cache.lock().await.insert(
             key,
             Cached {
