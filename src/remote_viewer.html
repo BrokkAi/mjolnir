@@ -602,12 +602,30 @@
         letter-spacing: 0.08em;
       }
 
-      #status {
-        margin: 7px 0 0;
+      .sidebar-status-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 7px;
+      }
+
+      #status,
+      #active-session-count {
+        margin: 0;
         color: var(--dim);
         font: 400 10px/1.4 var(--font-mono);
         letter-spacing: 0.08em;
         text-transform: uppercase;
+      }
+
+      #status {
+        min-width: 0;
+      }
+
+      #active-session-count {
+        flex: 0 0 auto;
+        color: var(--red-hot);
       }
 
       .ghost-danger {
@@ -3285,7 +3303,10 @@
               <button id="logout-button" class="ghost-danger" type="button">Log out</button>
             </div>
           </div>
-          <p id="status">Loading…</p>
+          <div class="sidebar-status-row">
+            <p id="status">Loading…</p>
+            <p id="active-session-count" aria-live="polite">0 active</p>
+          </div>
         </div>
         <div id="session-lists">
           <div id="sessions" aria-label="Live sessions"></div>
@@ -3561,6 +3582,7 @@
       const fsParentButtonEl = $("fs-parent-button");
       const fsListEl = $("fs-list");
       const statusEl = $("status");
+      const activeSessionCountEl = $("active-session-count");
       const sessionsEl = $("sessions");
       const historyToggleEl = $("history-toggle");
       const historyToggleSummaryEl = $("history-toggle-summary");
@@ -5217,6 +5239,15 @@
         }
         const activity = activityBySessionId.get(session.session_id);
         return Boolean(activity) && Date.now() - activity.at < WORKING_WINDOW_MS;
+      }
+
+      function renderActiveSessionCount() {
+        const count = sessions.filter(sessionIsWorking).length;
+        const text = `${count} active`;
+        if (activeSessionCountEl.textContent !== text) {
+          activeSessionCountEl.textContent = text;
+          activeSessionCountEl.title = `${count} session${count === 1 ? "" : "s"} working`;
+        }
       }
 
       function syncPendingStopState() {
@@ -8473,6 +8504,7 @@
       }
 
       function renderAll() {
+        renderActiveSessionCount();
         renderSessions();
         renderHistorySessions();
         renderChat();

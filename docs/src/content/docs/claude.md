@@ -25,15 +25,15 @@ model service itself self-hosted.
 
 ## Recommended setup
 
-Install the official Claude Code CLI and complete its sign-in first:
+Complete sign-in with the Claude Code executable supplied by the ACP route:
 
 ```bash
-npm install -g @anthropic-ai/claude-code
-claude
+npx -y @agentclientprotocol/claude-agent-acp --cli
 ```
 
-Mjolnir verifies the login with `claude auth status`, so finish the CLI's
-sign-in flow before launching.
+You do not need a separate global `@anthropic-ai/claude-code` installation.
+Mjolnir detects the credentials written by this flow and runs the compatible
+Claude Code version installed transitively with `claude-agent-acp`.
 
 Then [install Mjolnir](/install/), open a repository, and run:
 

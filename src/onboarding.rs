@@ -161,26 +161,18 @@ pub async fn run(
                     Action::None => {}
                     Action::Cancel => return Ok(Outcome::Cancel),
                     Action::Authenticate(vendor) => {
-                        let notice = if crate::auth::executable(vendor).is_none() {
-                            format!(
-                                "{} CLI is not installed; run `{}`",
-                                vendor.label(),
-                                crate::auth::install_hint(vendor)
-                            )
-                        } else {
-                            crate::ui::restore_terminal_for_auth(
-                                terminal,
-                                crate::ui::UiMode::FullscreenTui,
-                            )?;
-                            let login = crate::auth::run_login(vendor).await;
-                            crate::ui::resume_terminal_after_auth(
-                                terminal,
-                                crate::ui::UiMode::FullscreenTui,
-                            )?;
-                            match login {
-                                Ok(outcome) => outcome.into_message(),
-                                Err(error) => format!("Sign-in failed: {error:#}"),
-                            }
+                        crate::ui::restore_terminal_for_auth(
+                            terminal,
+                            crate::ui::UiMode::FullscreenTui,
+                        )?;
+                        let login = crate::auth::run_login(vendor).await;
+                        crate::ui::resume_terminal_after_auth(
+                            terminal,
+                            crate::ui::UiMode::FullscreenTui,
+                        )?;
+                        let notice = match login {
+                            Ok(outcome) => outcome.into_message(),
+                            Err(error) => format!("Sign-in failed: {error:#}"),
                         };
                         state.editor.refresh_after_auth(notice);
                     }

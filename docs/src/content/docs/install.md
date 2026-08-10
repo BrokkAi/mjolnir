@@ -3,7 +3,7 @@ title: Install and run
 description: Install Mjolnir, connect Codex or Claude, and launch your first coding team.
 ---
 
-The recommended setup needs an authenticated Codex or Claude CLI and its
+The recommended setup needs authenticated Codex or Claude credentials and its
 launchable ACP bridge. Provider use may incur cost. The first launch can also
 download a managed runtime, ACP bridge, Bifrost package, model rankings, or
 voice assets.
@@ -124,28 +124,67 @@ cargo build --release
 ./target/release/mj --cwd .
 ```
 
-You only need Rust to build from source or contribute. See
+The default terminal build needs no WebView development package. To compile
+the optional `desktop-app` feature used for native desktop-shell development
+on macOS, install Apple's Command Line Tools. The shell uses the WebKit
+framework included in the macOS SDK:
+
+```bash
+xcode-select --install
+```
+
+On Linux, install the WebKitGTK 4.1 development package first:
+
+```bash
+# Ubuntu or Debian
+sudo apt-get update
+sudo apt-get install libwebkit2gtk-4.1-dev
+
+# Fedora
+sudo dnf install webkit2gtk4.1-devel
+```
+
+Fedora's `webkit2gtk4.1-devel` package provides the GTK 3 and libsoup 3 API
+expected by Wry; `webkitgtk6.0-devel` is the incompatible GTK 4 API. Build the
+feature with:
+
+```bash
+cargo build --release --features desktop-app
+```
+
+The default terminal client only needs Rust. On Linux, the optional desktop
+shell needs WebKitGTK and the voice worker needs ALSA development files. On
+macOS, both use frameworks from the SDK installed with the Command Line Tools.
+See
 [CONTRIBUTING.md](https://github.com/BrokkAi/mjolnir/blob/master/CONTRIBUTING.md)
 for voice prerequisites and the full validation matrix.
 
 ## Connect Codex or Claude
 
-You need at least one authenticated provider CLI; a mixed team needs both.
+You need credentials for at least one provider; a mixed team needs both.
 
-For Codex, install and authenticate the official Codex CLI:
-
-```bash
-npm install -g @openai/codex
-codex login
-```
-
-For Claude, install the official Claude Code CLI and complete its sign-in;
-Mjolnir verifies the login with `claude auth status`:
+For Codex, authenticate with the CLI bundled through `codex-acp`:
 
 ```bash
-npm install -g @anthropic-ai/claude-code
-claude
+npx --yes --package=@agentclientprotocol/codex-acp codex login
 ```
+
+For Claude, authenticate with the Claude Code executable bundled through
+`claude-agent-acp`:
+
+```bash
+npx -y @agentclientprotocol/claude-agent-acp --cli
+```
+
+These commands do not install a second global provider CLI. The ACP packages
+bring compatible platform-specific Codex and Claude executables as transitive
+dependencies, and Mjolnir uses those same package entry points for login and
+quota queries.
+
+Set `CODEX_PATH` only when you intentionally want both `codex-acp` and
+Mjolnir's Codex quota poller to use a specific compatible Codex executable.
+Without that override, both use the version supplied transitively by
+`@agentclientprotocol/codex-acp`.
 
 Run `mj`. First launch opens onboarding on the Team tab and asks you to choose
 one of four teams: **Codex**, **Claude**, **Codex coder + Claude reviewer**,
@@ -157,12 +196,11 @@ Press **Ctrl+Tab** during a session to switch between the four teams, or return
 to the same choice on the **Team** tab in `/mjconfig`. Start a new session after
 switching so the new coder owns the complete turn.
 
-Existing Codex credentials can be detected without launching the ACP bridge
-during discovery; Claude login status comes from `claude auth status`. Launch
-requires the matching PATH-visible provider CLI. For `npx` ACP
-bridges and Bifrost, Mjolnir uses a PATH-visible `npx` or, on Linux, macOS, and
-Windows, installs embedded Node.js 24 automatically. Sign-in actions use the
-`codex` and `claude` CLIs as well.
+Existing credentials are detected without launching the ACP bridge during
+discovery. For the ACP bridges, provider CLIs, and Bifrost, Mjolnir uses a
+PATH-visible `npx` or, on Linux, macOS, and Windows, installs embedded Node.js
+24 automatically. npm's cache location is an implementation detail; Mjolnir
+addresses the provider executables through their ACP package entry points.
 
 The ACP Servers panel configures the built-in Codex and Claude routes, which
 are the only supported ACP servers.

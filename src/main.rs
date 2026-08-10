@@ -15,6 +15,8 @@ mod clipboard;
 mod codex_usage;
 mod config;
 mod deepswe;
+#[cfg(any(test, all(feature = "desktop-app", not(target_os = "android"))))]
+mod desktop;
 mod discrete_review;
 mod event;
 mod headless;
@@ -2813,7 +2815,7 @@ fn isolated_subagent_role_from_home(
     }
     if !isolated.path().join("auth.json").exists() {
         anyhow::bail!(
-            "Codex is available but {} has no auth.json; run `codex login`",
+            "Codex is available but {} has no auth.json; sign in from /mjconfig",
             source.display()
         );
     }

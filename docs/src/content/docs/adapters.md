@@ -19,8 +19,8 @@ qualifying adapter no model is launchable.
 
 | Route | Discovery | Launch notes |
 | --- | --- | --- |
-| Codex | Existing OpenAI/Codex credentials | Runs the Codex ACP bridge through `npx`; sign-in actions require the official `codex` CLI |
-| Claude | Existing Anthropic/Claude credentials | Runs the Claude ACP bridge through `npx`; sign-in actions require the official `claude` CLI |
+| Codex | Existing OpenAI/Codex credentials | Runs the bridge and its bundled compatible Codex CLI through `npx` |
+| Claude | Existing Anthropic/Claude credentials | Runs the bridge and its bundled compatible Claude Code executable through `npx` |
 
 Credential discovery checks supported local credential files and environment
 variables without logging secret values. Roster resolution launches every

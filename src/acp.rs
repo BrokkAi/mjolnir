@@ -1398,6 +1398,50 @@ pub(crate) struct PreparedAgentCommand {
     pub(crate) env: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderCli {
+    Codex,
+    Claude,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedProviderCli {
+    pub(crate) command: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) env: HashMap<String, String>,
+}
+
+/// Resolve the provider CLI shipped transitively by a built-in ACP package.
+/// Keeping the package launcher in front avoids depending on npm's unstable
+/// `_npx/<hash>` cache paths or requiring a duplicate global CLI install.
+pub(crate) async fn prepare_provider_cli(
+    provider: ProviderCli,
+    env: &HashMap<String, String>,
+) -> std::result::Result<PreparedProviderCli, LaunchError> {
+    let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
+    let prepared = prepare_agent_command_for_spawn(Path::new("npx"), env, &ui_tx).await?;
+    Ok(PreparedProviderCli {
+        command: prepared.command,
+        args: provider_cli_args(provider),
+        env: prepared.env,
+    })
+}
+
+fn provider_cli_args(provider: ProviderCli) -> Vec<String> {
+    match provider {
+        ProviderCli::Codex => vec![
+            "--yes".to_string(),
+            "--package=@agentclientprotocol/codex-acp".to_string(),
+            "codex".to_string(),
+        ],
+        ProviderCli::Claude => vec![
+            "-y".to_string(),
+            "@agentclientprotocol/claude-agent-acp".to_string(),
+            "--cli".to_string(),
+        ],
+    }
+}
+
 pub(crate) async fn prepare_agent_command_for_spawn(
     command: &Path,
     env: &HashMap<String, String>,
@@ -12193,6 +12237,18 @@ mod tests {
             "npx"
         ));
         assert!(!is_program_name(std::path::Path::new("uvx"), "npx"));
+    }
+
+    #[test]
+    fn provider_cli_entry_points_use_the_acp_package_dependencies() {
+        assert_eq!(
+            provider_cli_args(ProviderCli::Codex),
+            ["--yes", "--package=@agentclientprotocol/codex-acp", "codex"]
+        );
+        assert_eq!(
+            provider_cli_args(ProviderCli::Claude),
+            ["-y", "@agentclientprotocol/claude-agent-acp", "--cli"]
+        );
     }
 
     #[test]

@@ -79,8 +79,8 @@ pub struct CodexUsageClient {
 }
 
 impl CodexUsageClient {
-    fn spawn(cwd: PathBuf, env: HashMap<String, String>) -> Result<Self, QueryError> {
-        let mut child = spawn_codex(cwd, env)?;
+    async fn spawn(cwd: PathBuf, env: HashMap<String, String>) -> Result<Self, QueryError> {
+        let mut child = spawn_codex(cwd, env).await?;
 
         let stdin = child
             .stdin
@@ -245,7 +245,7 @@ pub async fn refresh(
 ) -> CodexUsageStatus {
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
         if client.is_none() {
-            *client = Some(CodexUsageClient::spawn(cwd, env)?);
+            *client = Some(CodexUsageClient::spawn(cwd, env).await?);
         }
         let client = client.as_mut().expect("client initialized above");
         client.initialize().await?;
@@ -274,34 +274,38 @@ pub async fn refresh(
     }
 }
 
-fn spawn_codex(cwd: PathBuf, env: HashMap<String, String>) -> Result<Child, QueryError> {
-    let programs: &[&str] = if cfg!(windows) {
-        &["codex.exe", "codex.cmd"]
+async fn spawn_codex(cwd: PathBuf, env: HashMap<String, String>) -> Result<Child, QueryError> {
+    let (program, prefix_args, command_env) = if let Some(override_path) = env.get("CODEX_PATH") {
+        (PathBuf::from(override_path), Vec::new(), env)
     } else {
-        &["codex"]
+        let prepared = crate::acp::prepare_provider_cli(crate::acp::ProviderCli::Codex, &env)
+            .await
+            .map_err(|error| QueryError::Launch(error.to_string()))?;
+        (prepared.command, prepared.args, prepared.env)
     };
-    for (index, program) in programs.iter().enumerate() {
-        let mut command = Command::new(program);
-        command
-            .args(["app-server", "--stdio"])
-            .current_dir(&cwd)
-            .envs(&env)
-            .stderr(Stdio::null());
-        crate::acp::configure_isolated_child(
-            &mut command,
-            crate::acp::SpawnIsolation::ProcessGroup,
-        );
-        match command.spawn() {
-            Ok(child) => return Ok(child),
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound && index + 1 < programs.len() => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(QueryError::NotInstalled);
-            }
-            Err(error) => return Err(QueryError::Launch(error.to_string())),
-        }
+    let mut command = codex_app_server_command(program, prefix_args, command_env, &cwd);
+    crate::acp::configure_isolated_child(&mut command, crate::acp::SpawnIsolation::ProcessGroup);
+    match command.spawn() {
+        Ok(child) => Ok(child),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(QueryError::NotInstalled),
+        Err(error) => Err(QueryError::Launch(error.to_string())),
     }
-    Err(QueryError::NotInstalled)
+}
+
+fn codex_app_server_command(
+    program: PathBuf,
+    prefix_args: Vec<String>,
+    env: HashMap<String, String>,
+    cwd: &std::path::Path,
+) -> Command {
+    let mut command = Command::new(program);
+    command
+        .args(prefix_args)
+        .args(["app-server", "--stdio"])
+        .current_dir(cwd)
+        .envs(env)
+        .stderr(Stdio::null());
+    command
 }
 
 #[derive(Debug)]
@@ -335,6 +339,9 @@ impl QueryError {
             }
             Self::Unsupported => "installed Codex does not support quota queries",
             Self::NoData => "no rate-limit data returned",
+            Self::Protocol(ProtocolError::Closed) => {
+                "bundled Codex runtime exited before responding"
+            }
             Self::Protocol(_) => "Codex quota request failed",
         }
     }
@@ -436,6 +443,10 @@ mod tests {
             (
                 "CODEX_USAGE_TEST_LOG".to_string(),
                 log.to_string_lossy().into_owned(),
+            ),
+            (
+                "CODEX_PATH".to_string(),
+                executable.to_string_lossy().into_owned(),
             ),
         ]);
         (env, log)
@@ -645,6 +656,10 @@ mod tests {
                 QueryError::Protocol(ProtocolError::Io),
                 "Codex quota request failed",
             ),
+            (
+                QueryError::Protocol(ProtocolError::Closed),
+                "bundled Codex runtime exited before responding",
+            ),
         ];
         for (error, expected) in cases {
             assert_eq!(error.user_reason(), expected);
@@ -661,6 +676,35 @@ mod tests {
         assert_eq!(
             QueryError::Unsupported.to_string(),
             "installed Codex does not support quota queries"
+        );
+    }
+
+    #[test]
+    fn bundled_codex_command_runs_the_transitive_cli_app_server() {
+        let command = codex_app_server_command(
+            PathBuf::from("npx"),
+            vec![
+                "--yes".to_string(),
+                "--package=@agentclientprotocol/codex-acp".to_string(),
+                "codex".to_string(),
+            ],
+            HashMap::new(),
+            std::path::Path::new("."),
+        );
+        let command = command.as_std();
+        assert_eq!(command.get_program(), "npx");
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            [
+                "--yes",
+                "--package=@agentclientprotocol/codex-acp",
+                "codex",
+                "app-server",
+                "--stdio",
+            ]
         );
     }
 
@@ -711,8 +755,11 @@ mod tests {
     async fn refresh_reports_missing_codex_without_retaining_a_client() {
         let temp = tempfile::tempdir().expect("tempdir");
         let env = HashMap::from([(
-            "PATH".to_string(),
-            temp.path().to_string_lossy().into_owned(),
+            "CODEX_PATH".to_string(),
+            temp.path()
+                .join("missing-codex")
+                .to_string_lossy()
+                .into_owned(),
         )]);
         let mut client = None;
 

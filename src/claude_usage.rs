@@ -8,11 +8,16 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::process::{Output, Stdio};
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::OnceCell;
 
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
+const RUNTIME_PREPARE_TIMEOUT: Duration = Duration::from_secs(180);
+static CLAUDE_RUNTIME_READY: OnceCell<()> = OnceCell::const_new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaudeUsageStatus {
@@ -116,29 +121,17 @@ impl fmt::Display for ClaudeUsageError {
     }
 }
 
-/// Run `claude -p "/usage"` and parse the resulting quota summary.
+/// Run the Claude executable bundled with `claude-agent-acp` and parse its
+/// `/usage` summary.
 pub async fn query(
     cwd: PathBuf,
     env: HashMap<String, String>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    let mut cmd = Command::new(claude_program());
-    cmd.arg("-p")
-        .arg("/usage")
-        .current_dir(cwd)
-        .envs(env)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-
-    let output = tokio::time::timeout(USAGE_TIMEOUT, cmd.output())
+    let prepared = crate::acp::prepare_provider_cli(crate::acp::ProviderCli::Claude, &env)
         .await
-        .map_err(|_| ClaudeUsageError::TimedOut)?
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ClaudeUsageError::NotInstalled
-            } else {
-                ClaudeUsageError::Launch(error.to_string())
-            }
-        })?;
+        .map_err(|error| ClaudeUsageError::Launch(error.to_string()))?;
+    ensure_runtime_ready(&prepared, &cwd).await?;
+    let output = run_cli(&prepared, &cwd, &["-p", "/usage"], USAGE_TIMEOUT).await?;
 
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -171,11 +164,118 @@ pub async fn query(
     parse(&combined).ok_or_else(|| classify_unparsed_output(&combined))
 }
 
-fn claude_program() -> &'static str {
-    if cfg!(windows) {
-        "claude.cmd"
+async fn ensure_runtime_ready(
+    prepared: &crate::acp::PreparedProviderCli,
+    cwd: &std::path::Path,
+) -> Result<(), ClaudeUsageError> {
+    CLAUDE_RUNTIME_READY
+        .get_or_try_init(|| async {
+            let output = run_cli(prepared, cwd, &["--version"], RUNTIME_PREPARE_TIMEOUT)
+                .await
+                .map_err(|error| match error {
+                    ClaudeUsageError::TimedOut => ClaudeUsageError::Launch(
+                        "bundled Claude runtime preparation timed out".to_string(),
+                    ),
+                    other => other,
+                })?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                let detail = output_detail(&output);
+                Err(ClaudeUsageError::Launch(format!(
+                    "bundled Claude runtime preparation failed: {detail}"
+                )))
+            }
+        })
+        .await
+        .copied()
+}
+
+async fn run_cli(
+    prepared: &crate::acp::PreparedProviderCli,
+    cwd: &std::path::Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Output, ClaudeUsageError> {
+    let mut command = Command::new(&prepared.command);
+    command
+        .args(&prepared.args)
+        .args(args)
+        .current_dir(cwd)
+        .envs(&prepared.env)
+        .stderr(Stdio::piped());
+    crate::acp::configure_isolated_child(&mut command, crate::acp::SpawnIsolation::ProcessGroup);
+    // Quota polling is non-interactive. Override the helper's piped stdin
+    // after applying its process-group contract.
+    command.stdin(Stdio::null());
+
+    let mut child = command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ClaudeUsageError::NotInstalled
+        } else {
+            ClaudeUsageError::Launch(error.to_string())
+        }
+    })?;
+    let pid = child.id();
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        ClaudeUsageError::Launch("bundled Claude runtime stdout was not captured".to_string())
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        ClaudeUsageError::Launch("bundled Claude runtime stderr was not captured".to_string())
+    })?;
+    let stdout_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(result) => result.map_err(|error| ClaudeUsageError::Launch(error.to_string()))?,
+        Err(_) => {
+            if let Err(error) = crate::acp::kill_agent_tree(&mut child, pid).await {
+                tracing::warn!("reap timed-out Claude usage process tree: {error:#}");
+            }
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(ClaudeUsageError::TimedOut);
+        }
+    };
+    let teardown = crate::acp::kill_agent_tree(&mut child, pid).await;
+    let stdout = stdout_task
+        .await
+        .map_err(|error| ClaudeUsageError::Launch(error.to_string()))?
+        .map_err(|error| ClaudeUsageError::Launch(error.to_string()))?;
+    let stderr = stderr_task
+        .await
+        .map_err(|error| ClaudeUsageError::Launch(error.to_string()))?
+        .map_err(|error| ClaudeUsageError::Launch(error.to_string()))?;
+    if let Err(error) = teardown {
+        return Err(ClaudeUsageError::Launch(format!(
+            "reap Claude usage process tree: {error:#}"
+        )));
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn output_detail(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = format!("{stdout}\n{stderr}")
+        .split_whitespace()
+        .take(24)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if detail.is_empty() {
+        output.status.to_string()
     } else {
-        "claude"
+        detail
     }
 }
 
@@ -532,6 +632,52 @@ fn normalize_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_usage_query_reaps_the_wrapper_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("claude-wrapper");
+        let child_pid = temp.path().join("child.pid");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nsleep 30 &\necho \"$!\" > \"$CLAUDE_USAGE_CHILD_PID\"\nwait\n",
+        )
+        .expect("write wrapper");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make wrapper executable");
+        let prepared = crate::acp::PreparedProviderCli {
+            command: script,
+            args: Vec::new(),
+            env: HashMap::from([(
+                "CLAUDE_USAGE_CHILD_PID".to_string(),
+                child_pid.to_string_lossy().into_owned(),
+            )]),
+        };
+
+        assert!(matches!(
+            run_cli(&prepared, temp.path(), &[], Duration::from_millis(100)).await,
+            Err(ClaudeUsageError::TimedOut)
+        ));
+        let pid = std::fs::read_to_string(child_pid)
+            .expect("child pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric child pid");
+        let mut gone = false;
+        for _ in 0..20 {
+            // SAFETY: signal 0 only checks whether the recorded process exists.
+            let result = unsafe { libc::kill(pid, 0) };
+            if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(gone, "timed-out Claude usage child {pid} survived cleanup");
+    }
 
     #[test]
     fn parses_remaining_percent_lines() {

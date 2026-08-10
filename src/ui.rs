@@ -5637,17 +5637,6 @@ fn handle_mjconfig_menu_key(
                         Some("Wait for the current turn or prompt before signing in".to_string());
                 }
                 TerminalRequest::None
-            } else if vendor == crate::auth::AuthVendor::OpenAi
-                && crate::auth::executable(vendor).is_none()
-            {
-                if let Some(menu) = state.mjconfig_menu.as_mut() {
-                    menu.editor.notice = Some(format!(
-                        "{} CLI is not installed; run `{}`",
-                        vendor.label(),
-                        crate::auth::install_hint(vendor)
-                    ));
-                }
-                TerminalRequest::None
             } else {
                 TerminalRequest::Authenticate(vendor)
             }
