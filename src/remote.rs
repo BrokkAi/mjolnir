@@ -173,6 +173,11 @@ struct CodeAuthGuard {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRecord {
     pub session_id: String,
+    /// Identifies the client incarnation publishing this session. Older
+    /// clients omit it; new clients use it to keep a delayed shutdown from a
+    /// previous incarnation from archiving a resumed session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
     pub name: String,
     pub start_time: String,
     pub last_update: String,
@@ -242,6 +247,13 @@ struct LiveSessionRecord {
     #[serde(flatten)]
     session: SessionRecord,
     web_owned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FinishSessionRequest {
+    lease_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot: Option<SessionRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1528,6 +1540,7 @@ pub struct RemoteSessionTracker {
 
 #[derive(Debug)]
 struct TrackerState {
+    lease_id: String,
     session_id: Option<String>,
     name: Option<String>,
     start_time: Option<String>,
@@ -2028,6 +2041,7 @@ impl ServerSessionManager {
 impl TrackerState {
     fn new(project: String, agent: String) -> Self {
         Self {
+            lease_id: new_lease_id(),
             session_id: None,
             name: None,
             start_time: None,
@@ -3073,6 +3087,7 @@ impl TrackerState {
         Some(SessionRecord {
             name: self.name.clone().unwrap_or_else(|| session_id.clone()),
             session_id,
+            lease_id: Some(self.lease_id.clone()),
             start_time,
             last_update,
             last_prompt_at: self.last_prompt_at.clone(),
@@ -3610,13 +3625,17 @@ impl RemoteSessionTracker {
         let Some(connection) = self.connection() else {
             return;
         };
-        let (snapshot, mut sessions_to_disconnect) = match self.state.lock() {
+        let (snapshot, mut sessions_to_disconnect, lease_id) = match self.state.lock() {
             Ok(mut state) => {
                 state.pending_permissions.clear();
                 state.touch();
-                (state.snapshot(), state.take_sessions_to_disconnect())
+                (
+                    state.snapshot(),
+                    state.take_sessions_to_disconnect(),
+                    state.lease_id.clone(),
+                )
             }
-            Err(_) => (None, Vec::new()),
+            Err(_) => (None, Vec::new(), String::new()),
         };
         let session_id = snapshot
             .as_ref()
@@ -3624,22 +3643,23 @@ impl RemoteSessionTracker {
         if let Some(current) = session_id.as_ref() {
             sessions_to_disconnect.retain(|id| id != current);
         }
-        let mut requests = Vec::with_capacity(
-            usize::from(snapshot.is_some())
-                + sessions_to_disconnect.len()
-                + usize::from(session_id.is_some()),
-        );
-        if let Some(snapshot) = snapshot {
-            requests.push(FinalRemoteRequest::Snapshot(Box::new(snapshot)));
+        let mut requests =
+            Vec::with_capacity(usize::from(snapshot.is_some()) + sessions_to_disconnect.len());
+        if let (Some(session_id), Some(snapshot)) = (session_id.clone(), snapshot) {
+            requests.push(FinalRemoteRequest::Finish {
+                session_id,
+                request: Box::new(FinishSessionRequest {
+                    lease_id: lease_id.clone(),
+                    snapshot: Some(snapshot),
+                }),
+            });
         }
-        requests.extend(
-            sessions_to_disconnect
-                .into_iter()
-                .map(FinalRemoteRequest::StaleDisconnect),
-        );
-        if let Some(session_id) = session_id {
-            requests.push(FinalRemoteRequest::Disconnect(session_id));
-        }
+        requests.extend(sessions_to_disconnect.into_iter().map(|session_id| {
+            FinalRemoteRequest::StaleFinish {
+                session_id,
+                lease_id: lease_id.clone(),
+            }
+        }));
         flush_final_remote_requests(
             requests.into_iter().map(|request| {
                 let description = request.description();
@@ -3649,12 +3669,23 @@ impl RemoteSessionTracker {
                 let connection = connection.clone();
                 async move {
                     match request {
-                        FinalRemoteRequest::Snapshot(snapshot) => {
-                            send_snapshot(connection, *snapshot).await
-                        }
-                        FinalRemoteRequest::StaleDisconnect(session_id)
-                        | FinalRemoteRequest::Disconnect(session_id) => {
-                            send_disconnect(connection, &session_id).await
+                        FinalRemoteRequest::Finish {
+                            session_id,
+                            request,
+                        } => send_finish(connection, &session_id, *request).await,
+                        FinalRemoteRequest::StaleFinish {
+                            session_id,
+                            lease_id,
+                        } => {
+                            send_finish(
+                                connection,
+                                &session_id,
+                                FinishSessionRequest {
+                                    lease_id,
+                                    snapshot: None,
+                                },
+                            )
+                            .await
                         }
                     }
                 }
@@ -3773,11 +3804,15 @@ impl RemoteSessionTracker {
                         }
                     }
                 }
-                let (snapshot, sessions_to_disconnect) = {
+                let (snapshot, sessions_to_disconnect, lease_id) = {
                     let Ok(mut state) = state.lock() else {
                         continue;
                     };
-                    (state.snapshot(), state.take_sessions_to_disconnect())
+                    (
+                        state.snapshot(),
+                        state.take_sessions_to_disconnect(),
+                        state.lease_id.clone(),
+                    )
                 };
                 let Some(snapshot) = snapshot else {
                     continue;
@@ -3798,7 +3833,16 @@ impl RemoteSessionTracker {
                     else {
                         break;
                     };
-                    if let Err(error) = send_disconnect(connection.clone(), &old_session_id).await {
+                    if let Err(error) = send_finish(
+                        connection.clone(),
+                        &old_session_id,
+                        FinishSessionRequest {
+                            lease_id: lease_id.clone(),
+                            snapshot: None,
+                        },
+                    )
+                    .await
+                    {
                         debug!("remote-control stale-session disconnect failed: {error:#}");
                         tracker.reload_connection();
                     }
@@ -6571,6 +6615,7 @@ fn build_router(config: RouterConfig) -> Router {
             "/api/sessions/{session_id}",
             axum::routing::delete(disconnect_session),
         )
+        .route("/api/sessions/{session_id}/finish", post(finish_session))
         .route(
             "/api/sessions/{session_id}/archive",
             post(archive_server_owned_session),
@@ -7030,20 +7075,22 @@ async fn upsert_session(
     State(state): State<ServerState>,
     Json(session): Json<SessionRecord>,
 ) -> std::result::Result<StatusCode, (StatusCode, String)> {
-    if let Ok(mut native_modes) = state.native_modes.lock() {
-        if let Some(mode) = session.native_mode.clone() {
-            native_modes.insert(session.session_id.clone(), mode);
-        } else {
-            native_modes.remove(&session.session_id);
-        }
-    }
+    let session_id = session.session_id.clone();
+    let native_mode = session.native_mode.clone();
     let db_path = Arc::clone(&state.db_path);
-    tokio::task::spawn_blocking(move || {
+    let accepted = tokio::task::spawn_blocking(move || {
         upsert_session_record(db_path.as_ref().as_path(), &session)
     })
     .await
     .map_err(internal_error)?
     .map_err(internal_error)?;
+    if accepted && let Ok(mut native_modes) = state.native_modes.lock() {
+        if let Some(mode) = native_mode {
+            native_modes.insert(session_id, mode);
+        } else {
+            native_modes.remove(&session_id);
+        }
+    }
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -7053,13 +7100,43 @@ async fn disconnect_session(
 ) -> std::result::Result<StatusCode, (StatusCode, String)> {
     let db_path = Arc::clone(&state.db_path);
     let db_session_id = session_id.clone();
-    tokio::task::spawn_blocking(move || {
-        disconnect_session_record(db_path.as_ref().as_path(), &db_session_id)
+    let disconnected = tokio::task::spawn_blocking(move || {
+        disconnect_legacy_session_record(db_path.as_ref().as_path(), &db_session_id)
     })
     .await
     .map_err(internal_error)?
     .map_err(internal_error)?;
-    if let Ok(mut native_modes) = state.native_modes.lock() {
+    if disconnected && let Ok(mut native_modes) = state.native_modes.lock() {
+        native_modes.remove(&session_id);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn finish_session(
+    State(state): State<ServerState>,
+    AxumPath(session_id): AxumPath<String>,
+    Json(request): Json<FinishSessionRequest>,
+) -> std::result::Result<StatusCode, (StatusCode, String)> {
+    if request.lease_id.is_empty()
+        || request.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.session_id != session_id
+                || snapshot.lease_id.as_deref() != Some(request.lease_id.as_str())
+        })
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "finish snapshot must match the requested session and lease".to_string(),
+        ));
+    }
+    let db_path = Arc::clone(&state.db_path);
+    let db_session_id = session_id.clone();
+    let finished = tokio::task::spawn_blocking(move || {
+        finish_session_record(db_path.as_ref().as_path(), &db_session_id, &request)
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    if finished && let Ok(mut native_modes) = state.native_modes.lock() {
         native_modes.remove(&session_id);
     }
     Ok(StatusCode::NO_CONTENT)
@@ -8141,6 +8218,7 @@ fn init_db(db_path: &Path) -> Result<()> {
     .context("create remote-control schema")?;
     ensure_sessions_column(&conn, "transcript_json", "text not null default '[]'")?;
     ensure_sessions_column(&conn, "connected", "integer not null default 0")?;
+    ensure_sessions_column(&conn, "lease_id", "text")?;
     ensure_sessions_column(&conn, "last_prompt_at", "text")?;
     ensure_sessions_column(
         &conn,
@@ -8209,9 +8287,13 @@ fn open_db(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> {
+fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<bool> {
     init_db(db_path)?;
     let conn = open_db(db_path)?;
+    upsert_session_record_in(&conn, session)
+}
+
+fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Result<bool> {
     let total_messages =
         i64::try_from(session.total_messages).context("total_messages exceeds sqlite integer")?;
     let transcript_json = serde_json::to_string(&session.transcript)
@@ -8249,11 +8331,13 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
     } else {
         0
     };
-    // The conflict arm refuses to move `last_update` backwards: every state
-    // change touches the timestamp before the snapshot is taken, so a
-    // delayed or replayed upload can never overwrite newer session state
-    // (in particular a cleared pending permission).
-    conn.execute(
+    // The conflict arm refuses to move `last_update` backwards. A new lease
+    // may immediately take over a live row when its first snapshot is newer,
+    // which is how crash-then-resume avoids waiting for the heartbeat TTL.
+    // Once accepted, delayed equal-or-older writes from the previous lease
+    // cannot take ownership back. An explicit finish also closes a lease: the
+    // same lease cannot reconnect a disconnected row.
+    let changed = conn.execute(
         "insert into sessions (
             session_id,
             name,
@@ -8274,8 +8358,9 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             status_json,
             workspace_diff_json,
             ragnarok_json,
+            lease_id,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -8300,8 +8385,20 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             status_json = excluded.status_json,
             workspace_diff_json = excluded.workspace_diff_json,
             ragnarok_json = excluded.ragnarok_json,
+            lease_id = excluded.lease_id,
             connected = 1
-        where excluded.last_update >= sessions.last_update",
+        where excluded.last_update >= sessions.last_update
+            and (
+                (sessions.connected = 1 and sessions.lease_id = excluded.lease_id)
+                or (sessions.lease_id is null and excluded.lease_id is null)
+                or (
+                    sessions.lease_id is not excluded.lease_id
+                    and (
+                        sessions.connected = 0
+                        or excluded.last_update > sessions.last_update
+                    )
+                )
+            )",
         params![
             session.session_id,
             session.name,
@@ -8322,10 +8419,11 @@ fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<()> 
             status_json,
             workspace_diff_json,
             ragnarok_json,
+            session.lease_id,
         ],
     )
     .context("upsert remote-control session")?;
-    Ok(())
+    Ok(changed > 0)
 }
 
 fn disconnect_session_record(db_path: &Path, session_id: &str) -> Result<()> {
@@ -8336,6 +8434,66 @@ fn disconnect_session_record(db_path: &Path, session_id: &str) -> Result<()> {
         params![session_id],
     )
     .context("disconnect remote-control session")?;
+    clear_live_session_actions(&conn, session_id)?;
+    Ok(())
+}
+
+/// Backward-compatible disconnect for clients that predate leases. It may
+/// only archive an equally old, unleased registration; a delayed request can
+/// therefore never disconnect a newer leased incarnation.
+fn disconnect_legacy_session_record(db_path: &Path, session_id: &str) -> Result<bool> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    let changed = conn
+        .execute(
+            "update sessions set connected = 0, ragnarok_json = null
+            where session_id = ?1 and lease_id is null",
+            params![session_id],
+        )
+        .context("disconnect legacy remote-control session")?;
+    if changed > 0 {
+        clear_live_session_actions(&conn, session_id)?;
+    }
+    Ok(changed > 0)
+}
+
+/// Persist the last snapshot and archive the matching client incarnation in a
+/// single transaction. A mismatched lease is an idempotent no-op.
+fn finish_session_record(
+    db_path: &Path,
+    session_id: &str,
+    request: &FinishSessionRequest,
+) -> Result<bool> {
+    init_db(db_path)?;
+    let mut conn = open_db(db_path)?;
+    let tx = conn
+        .transaction()
+        .context("begin session finish transaction")?;
+    if let Some(snapshot) = request.snapshot.as_ref() {
+        if snapshot.session_id != session_id
+            || snapshot.lease_id.as_deref() != Some(&request.lease_id)
+        {
+            return Err(anyhow!(
+                "finish snapshot does not match its session and lease"
+            ));
+        }
+        let _ = upsert_session_record_in(&tx, snapshot)?;
+    }
+    let changed = tx
+        .execute(
+            "update sessions set connected = 0, ragnarok_json = null
+            where session_id = ?1 and lease_id = ?2",
+            params![session_id, request.lease_id],
+        )
+        .context("finish remote-control session")?;
+    if changed > 0 {
+        clear_live_session_actions(&tx, session_id)?;
+    }
+    tx.commit().context("commit session finish transaction")?;
+    Ok(changed > 0)
+}
+
+fn clear_live_session_actions(conn: &Connection, session_id: &str) -> Result<()> {
     // A permission decision can only resolve a prompt held in the live
     // session's memory, so the session going away makes its queued
     // decisions unclaimable; drop them immediately. Queued prompts stay:
@@ -8692,6 +8850,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         .or_else(|| last_prompt_at_from_transcript(&transcript));
     Ok(SessionRecord {
         session_id: row.get(0)?,
+        lease_id: None,
         name: row.get(1)?,
         start_time: row.get(2)?,
         last_update: row.get(3)?,
@@ -9151,17 +9310,21 @@ fn claim_config_change_record(
 }
 
 enum FinalRemoteRequest {
-    Snapshot(Box<SessionRecord>),
-    StaleDisconnect(String),
-    Disconnect(String),
+    Finish {
+        session_id: String,
+        request: Box<FinishSessionRequest>,
+    },
+    StaleFinish {
+        session_id: String,
+        lease_id: String,
+    },
 }
 
 impl FinalRemoteRequest {
     fn description(&self) -> &'static str {
         match self {
-            Self::Snapshot(_) => "final remote-control flush",
-            Self::StaleDisconnect(_) => "remote-control stale-session disconnect",
-            Self::Disconnect(_) => "remote-control disconnect",
+            Self::Finish { .. } => "final remote-control session finish",
+            Self::StaleFinish { .. } => "remote-control stale-session finish",
         }
     }
 }
@@ -9207,19 +9370,25 @@ async fn send_snapshot(connection: RemoteConnection, snapshot: SessionRecord) ->
     Ok(())
 }
 
-async fn send_disconnect(connection: RemoteConnection, session_id: &str) -> Result<()> {
+async fn send_finish(
+    connection: RemoteConnection,
+    session_id: &str,
+    request: FinishSessionRequest,
+) -> Result<()> {
     let encoded_session_id =
         url::form_urlencoded::byte_serialize(session_id.as_bytes()).collect::<String>();
-    let request = connection
+    connection
         .client
-        .delete(format!("{REMOTE_CONTROL_UPSERT_URL}/{encoded_session_id}"))
-        .bearer_auth(connection.token.as_str());
-    request
+        .post(format!(
+            "{REMOTE_CONTROL_UPSERT_URL}/{encoded_session_id}/finish"
+        ))
+        .bearer_auth(connection.token.as_str())
+        .json(&request)
         .send()
         .await
-        .context("send remote-control disconnect")?
+        .context("send remote-control session finish")?
         .error_for_status()
-        .context("remote-control disconnect returned an error")?;
+        .context("remote-control session finish returned an error")?;
     Ok(())
 }
 
@@ -9553,6 +9722,16 @@ fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+fn new_lease_id() -> String {
+    static NEXT_LEASE: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        OffsetDateTime::now_utc().unix_timestamp_nanos(),
+        NEXT_LEASE.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn connected_session_cutoff_rfc3339() -> String {
@@ -12794,6 +12973,7 @@ mod tests {
         let db_path = dir.path().join("sessions.sqlite3");
         let session = SessionRecord {
             session_id: "sess-1".to_string(),
+            lease_id: None,
             name: "demo".to_string(),
             start_time: "2026-06-03T10:00:00Z".to_string(),
             last_update: "2026-06-03T10:00:20Z".to_string(),
@@ -13357,6 +13537,7 @@ mod tests {
         let fresh = now_rfc3339();
         let active = SessionRecord {
             session_id: "sess-active".to_string(),
+            lease_id: None,
             name: "active".to_string(),
             start_time: fresh.clone(),
             last_update: fresh.clone(),
@@ -14327,6 +14508,7 @@ mod tests {
     fn session_named(session_id: &str, last_update: &str) -> SessionRecord {
         SessionRecord {
             session_id: session_id.to_string(),
+            lease_id: None,
             name: session_id.to_string(),
             start_time: "2026-06-10T08:00:00Z".to_string(),
             last_update: last_update.to_string(),
@@ -15139,6 +15321,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finish_endpoint_atomically_persists_snapshot_and_archives_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let token = "finish-token".to_string();
+        let mut live = session_named("sess-1", "2026-06-10T10:00:01Z");
+        live.lease_id = Some("lease-a".to_string());
+        upsert_session_record(&db_path, &live).expect("publish live snapshot");
+
+        let mut final_snapshot = live.clone();
+        final_snapshot.last_update = "2026-06-10T10:00:02Z".to_string();
+        final_snapshot.total_messages = 9;
+        let app = build_router(RouterConfig {
+            db_path: db_path.clone(),
+            token: token.clone(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "test-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+            workspace_roots: test_workspace_roots(dir.path()),
+            session_manager: test_session_manager(),
+            mjconfig: test_mjconfig_runtime(),
+        });
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/sess-1/finish")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&FinishSessionRequest {
+                            lease_id: "lease-a".to_string(),
+                            snapshot: Some(final_snapshot),
+                        })
+                        .expect("finish json"),
+                    ))
+                    .expect("finish request"),
+            )
+            .await
+            .expect("finish response");
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            session_record_connection_state(&db_path, "sess-1", "1970-01-01T00:00:00Z")
+                .expect("connection state"),
+            Some(false)
+        );
+        let history = load_session_records(&db_path).expect("load history");
+        assert_eq!(history[0].total_messages, 9);
+        assert_eq!(history[0].last_update, "2026-06-10T10:00:02Z");
+
+        // A request that was already in flight when shutdown began may reach
+        // the server after the finish transaction. Closing a lease is final:
+        // only a new incarnation with a new lease may reconnect the row.
+        let mut delayed_same_lease = live;
+        delayed_same_lease.last_update = "2026-06-10T10:00:03Z".to_string();
+        delayed_same_lease.total_messages = 99;
+        upsert_session_record(&db_path, &delayed_same_lease).expect("late publish is harmless");
+        assert_eq!(
+            session_record_connection_state(&db_path, "sess-1", "1970-01-01T00:00:00Z")
+                .expect("connection state after late publish"),
+            Some(false)
+        );
+        assert_eq!(
+            load_session_records(&db_path).expect("reload history")[0].total_messages,
+            9
+        );
+    }
+
+    #[test]
+    fn newer_lease_takes_over_live_row_and_rejects_delayed_old_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let mut old = session_named("sess-1", "2026-06-10T10:00:01Z");
+        old.lease_id = Some("lease-old".to_string());
+        upsert_session_record(&db_path, &old).expect("publish old lease");
+
+        // The old process disappeared without finishing, so the row is still
+        // connected. A newer incarnation must take it over immediately rather
+        // than waiting for CONNECTED_SESSION_TTL.
+        let mut resumed = session_named("sess-1", "2026-06-10T10:00:02Z");
+        resumed.lease_id = Some("lease-new".to_string());
+        resumed.total_messages = 7;
+        assert!(upsert_session_record(&db_path, &resumed).expect("publish resumed lease"));
+
+        let mut delayed_old_snapshot = old;
+        delayed_old_snapshot.last_update = resumed.last_update.clone();
+        delayed_old_snapshot.total_messages = 99;
+        assert!(
+            !finish_session_record(
+                &db_path,
+                "sess-1",
+                &FinishSessionRequest {
+                    lease_id: "lease-old".to_string(),
+                    snapshot: Some(delayed_old_snapshot),
+                },
+            )
+            .expect("ignore stale finish")
+        );
+        assert!(
+            !disconnect_legacy_session_record(&db_path, "sess-1")
+                .expect("ignore legacy disconnect")
+        );
+
+        assert_eq!(
+            session_record_connection_state(&db_path, "sess-1", "1970-01-01T00:00:00Z")
+                .expect("connection state"),
+            Some(true)
+        );
+        let history = load_session_records(&db_path).expect("load session");
+        assert_eq!(history[0].total_messages, 7);
+        let conn = open_db(&db_path).expect("open db");
+        let lease: Option<String> = conn
+            .query_row(
+                "select lease_id from sessions where session_id = 'sess-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load lease");
+        assert_eq!(lease.as_deref(), Some("lease-new"));
+
+        assert!(
+            finish_session_record(
+                &db_path,
+                "sess-1",
+                &FinishSessionRequest {
+                    lease_id: "lease-new".to_string(),
+                    snapshot: None,
+                },
+            )
+            .expect("finish resumed lease")
+        );
+        assert_eq!(
+            session_record_connection_state(&db_path, "sess-1", "1970-01-01T00:00:00Z")
+                .expect("finished connection state"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn leased_client_immediately_takes_over_live_pre_migration_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let legacy = session_named("sess-1", "2026-06-10T10:00:01Z");
+        upsert_session_record(&db_path, &legacy).expect("publish legacy client");
+
+        let mut upgraded = session_named("sess-1", "2026-06-10T10:00:02Z");
+        upgraded.lease_id = Some("lease-new".to_string());
+        upgraded.total_messages = 8;
+        assert!(upsert_session_record(&db_path, &upgraded).expect("publish upgraded client"));
+
+        let conn = open_db(&db_path).expect("open db");
+        let (lease, connected): (Option<String>, bool) = conn
+            .query_row(
+                "select lease_id, connected = 1 from sessions where session_id = 'sess-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load upgraded row");
+        assert_eq!(lease.as_deref(), Some("lease-new"));
+        assert!(connected);
+        assert_eq!(
+            load_session_records(&db_path).expect("load upgraded session")[0].total_messages,
+            8
+        );
+    }
+
+    #[tokio::test]
     async fn intercept_is_a_passthrough_without_a_ui_event_channel() {
         // Headless trackers cannot apply remote decisions, so they must not
         // advertise pending permissions: the prompt passes through with its
@@ -15222,6 +15571,7 @@ mod tests {
         };
         let session = SessionRecord {
             session_id: "sess-1".to_string(),
+            lease_id: None,
             name: "demo".to_string(),
             start_time: "2026-06-10T10:00:00Z".to_string(),
             last_update: "2026-06-10T10:00:20Z".to_string(),
@@ -16487,6 +16837,7 @@ mod tests {
         let record_time = now_rfc3339();
         let record = SessionRecord {
             session_id: "sess-int".to_string(),
+            lease_id: None,
             name: "demo".to_string(),
             start_time: record_time.clone(),
             last_update: record_time,
