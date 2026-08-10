@@ -9816,6 +9816,11 @@ fn push_thinking(
         .map(|line| strip_html_comments(line, &mut in_html_comment))
         .collect::<Vec<_>>()
         .join("\n");
+    // codex-acp separates reasoning summary sections with a "\n\n" thought
+    // chunk and sends one before the first summary, so drop whitespace-only
+    // leading lines to keep the thought label adjacent to the first visible
+    // row. Interior blank lines between sections stay untouched.
+    let text = trim_leading_blank_lines(&text);
     if text.is_empty() {
         return;
     }
@@ -9830,9 +9835,9 @@ fn push_thinking(
     } else {
         out.push(Line::from(Span::styled("thought", thought_style)));
         let text = if compact {
-            active_thought_tail(&text)
+            active_thought_tail(text)
         } else {
-            text
+            text.to_string()
         };
         for line in text.lines() {
             out.push(Line::from(inline_markdown_spans_with_style(
@@ -9842,6 +9847,17 @@ fn push_thinking(
             )));
         }
     }
+}
+
+/// Drop whitespace-only lines from the start of a thought, keeping the
+/// indentation of the first non-blank line and all interior blank lines.
+fn trim_leading_blank_lines(text: &str) -> &str {
+    let blank_prefix = text
+        .split_inclusive('\n')
+        .take_while(|line| line.trim().is_empty())
+        .map(str::len)
+        .sum::<usize>();
+    &text[blank_prefix..]
 }
 
 fn active_thought_tail(text: &str) -> String {
@@ -24582,6 +24598,82 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["○ thought", "  first line", "  second line", ""]
         );
+    }
+
+    #[test]
+    fn leading_blank_thought_lines_do_not_detach_the_label_from_its_summary() {
+        // codex-acp sends a "\n\n" separator chunk before the first reasoning
+        // summary; the label must stay adjacent to the first visible row while
+        // interior section spacing and bold Markdown survive.
+        let mut state = AppState::new();
+        state.thought_output = config::ThoughtOutput::Full;
+        state
+            .transcript
+            .push(Entry::AgentThought(crate::app::ThoughtEntry {
+                text: "\n\n**First summary**\n\n**Second summary**".to_string(),
+                completed: true,
+            }));
+        state
+            .transcript
+            .push(Entry::SubagentThought(crate::app::ThoughtEntry {
+                text: "\n\n**Sub summary**".to_string(),
+                completed: true,
+            }));
+        let rendered = render_transcript_lines(&state, 80);
+        assert_eq!(
+            rendered.iter().map(line_text).collect::<Vec<_>>(),
+            vec![
+                "○ thought",
+                "  First summary",
+                "",
+                "  Second summary",
+                "",
+                "◇ thought",
+                "  Sub summary",
+                "",
+            ]
+        );
+        assert!(
+            rendered[1]
+                .spans
+                .iter()
+                .any(|span| span.content == "First summary"
+                    && span.style.add_modifier.contains(Modifier::BOLD))
+        );
+
+        state.thought_output = config::ThoughtOutput::Default;
+        state.expand_transcript_details = true;
+        let expanded = render_transcript_lines(&state, 80);
+        assert_eq!(line_text(&expanded[0]), "○ thought");
+        assert_eq!(line_text(&expanded[1]), "  First summary");
+    }
+
+    #[test]
+    fn leading_blank_thought_lines_are_not_counted_or_rendered_as_content() {
+        let mut state = AppState::new();
+        state
+            .transcript
+            .push(Entry::AgentThought(crate::app::ThoughtEntry {
+                text: "\n\n**Validating final draft PR commit**".to_string(),
+                completed: true,
+            }));
+        // Compact completed summaries count only visible rows.
+        assert_eq!(
+            render_transcript_lines(&state, 80)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>(),
+            vec!["○ thought · 1 line", ""]
+        );
+
+        // An active streamed thought whose visible prefix is only the
+        // separator renders nothing until real text arrives.
+        let Entry::AgentThought(thought) = &mut state.transcript[0] else {
+            panic!("thought entry");
+        };
+        thought.text = "\n\n".to_string();
+        thought.completed = false;
+        assert!(render_transcript_lines(&state, 80).is_empty());
     }
 
     #[test]
