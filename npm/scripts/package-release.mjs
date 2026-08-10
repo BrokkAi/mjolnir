@@ -75,8 +75,9 @@ export function versionFromTag(tag) {
 
 export async function cargoVersion() {
   const manifest = await readFile(path.join(repositoryRoot, "Cargo.toml"), "utf8");
-  const version = manifest.match(/^version = "([^"]+)"$/m)?.[1];
-  if (!version) throw new Error("could not read the root Cargo.toml version");
+  // The release version lives in [workspace.package]; both crates inherit it.
+  const version = manifest.match(/^\[workspace\.package\]$[^[]*^version = "([^"]+)"$/m)?.[1];
+  if (!version) throw new Error("could not read the [workspace.package] version from Cargo.toml");
   return version;
 }
 

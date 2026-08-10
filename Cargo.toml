@@ -1,6 +1,6 @@
 [package]
 name = "brokk-mjolnir"
-version = "1.8.0"
+version.workspace = true
 edition = "2024"
 description = "Forge-grade terminal client for any Agent Client Protocol (ACP) server"
 license = "GPL-3.0-only"
@@ -10,6 +10,11 @@ publish = true
 [workspace]
 members = ["voice-worker"]
 default-members = ["."]
+
+# Single source of truth for the release version; both crates inherit it, so
+# they cannot drift apart (RELEASING.md requires them to match).
+[workspace.package]
+version = "1.9.0"
 
 [[bin]]
 name = "mj"

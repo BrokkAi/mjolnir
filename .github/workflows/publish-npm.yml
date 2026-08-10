@@ -44,7 +44,7 @@ jobs:
 
       - name: Confirm the tag owns the Cargo release version
         run: |
-          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          version="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
           test -n "$version"
           test "v$version" = "$RELEASE_TAG"
 
@@ -79,7 +79,7 @@ jobs:
 
       - name: Smoke-test the Linux npm installation
         run: |
-          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          version="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
           mkdir npm-smoke
           npm install --prefix npm-smoke --ignore-scripts \
             "npm/dist/brokkai-mjolnir-$version.tgz" \
@@ -121,7 +121,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          version="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
           wait_for_version() {
             local package="$1"
             local published_version

@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-voice-worker"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "bzip2 0.6.1",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
