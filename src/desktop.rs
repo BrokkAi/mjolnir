@@ -161,28 +161,23 @@ pub(crate) fn run(options: DesktopShellOptions) -> Result<DesktopShellExit> {
         .build(&event_loop)
         .context("create Mjolnir desktop window")?;
 
-    let navigation_policy = policy.clone();
     let popup_policy = policy.clone();
     let builder = WebViewBuilder::new()
         .with_url("about:blank")
         .with_incognito(true)
-        .with_navigation_handler(move |url| {
+        .with_new_window_req_handler(move |url, _features| {
+            let _ = handle_navigation(&popup_policy, &url);
+            NewWindowResponse::Deny
+        });
+    #[cfg(not(target_os = "macos"))]
+    let builder = {
+        let navigation_policy = policy.clone();
+        builder.with_navigation_handler(move |url| {
             if url == "about:blank" {
                 return true;
             }
             handle_navigation(&navigation_policy, &url)
         })
-        .with_new_window_req_handler(move |url, _features| {
-            let _ = handle_navigation(&popup_policy, &url);
-            NewWindowResponse::Deny
-        });
-
-    #[cfg(target_os = "macos")]
-    let builder = {
-        // tauri-apps/wry#1707 evaluates trust against only this in-memory
-        // anchor. It neither changes the system trust store nor accepts any
-        // other invalid certificate.
-        builder.with_trusted_ca(options.certificate_der.clone())
     };
 
     #[cfg(target_os = "linux")]
@@ -198,6 +193,14 @@ pub(crate) fn run(options: DesktopShellOptions) -> Result<DesktopShellExit> {
         .build(&window)
         .context("create Mjolnir system WebView")?;
 
+    #[cfg(target_os = "macos")]
+    let _certificate_pin = install_platform_certificate_pin(
+        &webview,
+        &policy,
+        &options.certificate_der,
+        event_proxy.clone(),
+    )?;
+    #[cfg(not(target_os = "macos"))]
     install_platform_certificate_pin(
         &webview,
         &policy,
@@ -255,13 +258,194 @@ fn handle_navigation(policy: &OriginPolicy, url: &str) -> bool {
 
 #[cfg(all(feature = "desktop-app", target_os = "macos"))]
 fn install_platform_certificate_pin(
-    _webview: &WebView,
-    _policy: &OriginPolicy,
-    _certificate_der: &[u8],
-    _event_proxy: EventLoopProxy<ShellEvent>,
-) -> Result<()> {
-    // Installed on WebViewBuilder before WKWebView construction.
-    Ok(())
+    webview: &WebView,
+    policy: &OriginPolicy,
+    certificate_der: &[u8],
+    event_proxy: EventLoopProxy<ShellEvent>,
+) -> Result<impl Sized + use<>> {
+    use objc2::rc::Retained;
+    use objc2::runtime::{NSObject, ProtocolObject};
+    use objc2::{DeclaredClass, MainThreadOnly, define_class, msg_send};
+    use objc2_foundation::{
+        MainThreadMarker, NSData, NSObjectProtocol, NSString, NSURLAuthenticationChallenge,
+        NSURLCredential, NSURLSessionAuthChallengeDisposition,
+    };
+    use objc2_web_kit::{
+        WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKWebView,
+    };
+    use wry::WebViewExtMacOS;
+
+    struct MacNavigationDelegateIvars {
+        certificate_der: Vec<u8>,
+        policy: OriginPolicy,
+        event_proxy: EventLoopProxy<ShellEvent>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = MacNavigationDelegateIvars]
+        struct MacNavigationDelegate;
+
+        unsafe impl NSObjectProtocol for MacNavigationDelegate {}
+
+        unsafe impl WKNavigationDelegate for MacNavigationDelegate {
+            #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
+            fn decide_navigation(
+                &self,
+                _webview: &WKWebView,
+                action: &WKNavigationAction,
+                handler: &block2::DynBlock<dyn Fn(WKNavigationActionPolicy)>,
+            ) {
+                // Replacing Wry's navigation delegate also replaces its
+                // download guard and builder navigation handler.
+                let should_download = unsafe {
+                    action.respondsToSelector(objc2::sel!(shouldPerformDownload))
+                        && action.shouldPerformDownload()
+                };
+                if should_download {
+                    handler.call((WKNavigationActionPolicy::Cancel,));
+                    return;
+                }
+
+                let candidate = unsafe { action.request() }
+                    .URL()
+                    .and_then(|url| url.absoluteString())
+                    .map(|url| url.to_string());
+                let allow = candidate.as_deref().is_some_and(|url| {
+                    url == "about:blank" || handle_navigation(&self.ivars().policy, url)
+                });
+                handler.call((if allow {
+                    WKNavigationActionPolicy::Allow
+                } else {
+                    WKNavigationActionPolicy::Cancel
+                },));
+            }
+
+            #[unsafe(method(webView:didReceiveAuthenticationChallenge:completionHandler:))]
+            fn authenticate(
+                &self,
+                _webview: &WKWebView,
+                challenge: &NSURLAuthenticationChallenge,
+                handler: &block2::DynBlock<
+                    dyn Fn(NSURLSessionAuthChallengeDisposition, *mut NSURLCredential),
+                >,
+            ) {
+                handle_macos_authentication_challenge(self, challenge, handler);
+            }
+        }
+    );
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        fn SecCertificateCreateWithData(
+            allocator: *const std::ffi::c_void,
+            data: *const objc2::runtime::AnyObject,
+        ) -> *mut std::ffi::c_void;
+        fn SecTrustSetAnchorCertificates(
+            trust: *const std::ffi::c_void,
+            anchors: *const objc2::runtime::AnyObject,
+        ) -> i32;
+        fn SecTrustSetAnchorCertificatesOnly(trust: *const std::ffi::c_void, only: bool) -> i32;
+        fn SecTrustEvaluateWithError(
+            trust: *const std::ffi::c_void,
+            error: *mut *mut std::ffi::c_void,
+        ) -> bool;
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
+
+    fn handle_macos_authentication_challenge(
+        delegate: &MacNavigationDelegate,
+        challenge: &NSURLAuthenticationChallenge,
+        handler: &block2::DynBlock<
+            dyn Fn(NSURLSessionAuthChallengeDisposition, *mut NSURLCredential),
+        >,
+    ) {
+        unsafe {
+            let protection_space = challenge.protectionSpace();
+            let server_trust = NSString::from_str("NSURLAuthenticationMethodServerTrust");
+            if !protection_space
+                .authenticationMethod()
+                .isEqualToString(&server_trust)
+            {
+                handler.call((
+                    NSURLSessionAuthChallengeDisposition::PerformDefaultHandling,
+                    std::ptr::null_mut(),
+                ));
+                return;
+            }
+
+            let policy = &delegate.ivars().policy;
+            let host_matches = protection_space
+                .host()
+                .to_string()
+                .eq_ignore_ascii_case(&policy.host);
+            let port_matches = protection_space.port() == policy.port as isize;
+            let trust: *const std::ffi::c_void = msg_send![&*protection_space, serverTrust];
+            let certificate_data = NSData::with_bytes(&delegate.ivars().certificate_der);
+            let certificate = SecCertificateCreateWithData(
+                std::ptr::null(),
+                Retained::as_ptr(&certificate_data) as *const objc2::runtime::AnyObject,
+            );
+
+            let trusted =
+                if host_matches && port_matches && !trust.is_null() && !certificate.is_null() {
+                    let anchors: Retained<objc2::runtime::AnyObject> = msg_send![
+                        objc2::runtime::AnyClass::get(c"NSArray").expect("NSArray is available"),
+                        arrayWithObject: certificate as *mut objc2::runtime::AnyObject
+                    ];
+                    SecTrustSetAnchorCertificates(trust, Retained::as_ptr(&anchors)) == 0
+                        && SecTrustSetAnchorCertificatesOnly(trust, true) == 0
+                        && SecTrustEvaluateWithError(trust, std::ptr::null_mut())
+                } else {
+                    false
+                };
+
+            if !certificate.is_null() {
+                CFRelease(certificate);
+            }
+            if trusted {
+                let credential: *mut NSURLCredential = msg_send![
+                    objc2::runtime::AnyClass::get(c"NSURLCredential")
+                        .expect("NSURLCredential is available"),
+                    credentialForTrust: trust
+                ];
+                handler.call((
+                    NSURLSessionAuthChallengeDisposition::UseCredential,
+                    credential,
+                ));
+            } else {
+                let _ = delegate
+                    .ivars()
+                    .event_proxy
+                    .send_event(ShellEvent::Fatal(format!(
+                        "desktop WebView rejected an unexpected TLS certificate for https://{}:{}",
+                        protection_space.host(),
+                        protection_space.port()
+                    )));
+                handler.call((
+                    NSURLSessionAuthChallengeDisposition::CancelAuthenticationChallenge,
+                    std::ptr::null_mut(),
+                ));
+            }
+        }
+    }
+
+    let mtm =
+        MainThreadMarker::new().context("desktop WebView is not running on the main thread")?;
+    let delegate = mtm
+        .alloc::<MacNavigationDelegate>()
+        .set_ivars(MacNavigationDelegateIvars {
+            certificate_der: certificate_der.to_vec(),
+            policy: policy.clone(),
+            event_proxy,
+        });
+    let delegate: Retained<MacNavigationDelegate> = unsafe { msg_send![super(delegate), init] };
+    let native_webview = webview.webview();
+    unsafe {
+        native_webview.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    }
+    Ok(delegate)
 }
 
 #[cfg(all(feature = "desktop-app", target_os = "windows"))]
