@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::IsTerminal;
-use std::net::{IpAddr, TcpListener};
+use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -15,7 +15,7 @@ use agent_client_protocol::schema::v1::{
     SessionConfigOptionCategory, SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate,
     ToolCallContent, ToolCallStatus, ToolCallUpdateFields, ToolKind,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
 use axum::http::StatusCode;
 use axum::http::header::{
@@ -45,6 +45,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
+use url::Url;
 
 use crate::acp::{self, AcpRuntimeConfig};
 use crate::app::{StatusKind, status_transcript_text};
@@ -105,6 +106,11 @@ const NATIVE_MCP_APPROVAL_CHOICES: [(&str, &str, &str); 3] = [
 /// rows aggressively so they cannot affect a later turn.
 const PROMPT_CANCEL_TTL: Duration = Duration::from_secs(5 * 60);
 const SESSION_COOKIE_NAME: &str = "mj_remote_session";
+/// Cookie name for `mj app` desktop viewer sessions. Distinct from
+/// `SESSION_COOKIE_NAME` so a browser or webview that reaches both a desktop
+/// instance and `mj server` on the same host never replays one server's cookie
+/// against the other (browsers scope cookies by host, not port).
+const DESKTOP_SESSION_COOKIE_NAME: &str = "mj_desktop_session";
 const REMOTE_BUILTIN_NEW_COMMAND: &str = "new";
 const REMOTE_BUILTIN_CLEAR_COMMAND: &str = "clear";
 const REMOTE_BUILTIN_COMPACT_COMMAND: &str = "compact";
@@ -1653,6 +1659,9 @@ struct ServerState {
     /// Lifetime of an issued session cookie. `Duration::ZERO` means ephemeral:
     /// no cookie `Max-Age`, so it dies when the browser/PWA closes.
     session_ttl: Duration,
+    /// Name of the viewer session cookie. `mj server` and desktop mode use
+    /// different names so their cookies stay isolated on a shared host.
+    cookie_name: &'static str,
     code_guard: Arc<Mutex<CodeAuthGuard>>,
     workspace_roots: Arc<Vec<PathBuf>>,
     session_manager: Arc<ServerSessionManager>,
@@ -4424,6 +4433,27 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
         println!("session lifetime: {session_ttl_days} days");
     }
 
+    serve_listeners_until_terminated(listeners, tls_config, app, termination, session_manager)
+        .await
+        .with_context(|| {
+            format!(
+                "serve remote-control API on {}",
+                listen.bind_addrs.join(", ")
+            )
+        })
+}
+
+/// Serve `app` over TLS on every listener until the first listener task exits
+/// or `termination` fires, then drain the listeners and shut down the
+/// server-owned sessions within bounded timeouts. Shared by `mj server` and
+/// the `mj app` desktop runtime so both have identical lifecycle behavior.
+async fn serve_listeners_until_terminated(
+    listeners: Vec<TcpListener>,
+    tls_config: axum_server::tls_rustls::RustlsConfig,
+    app: Router,
+    termination: CancellationToken,
+    session_manager: Arc<ServerSessionManager>,
+) -> Result<()> {
     let server_handle = axum_server::Handle::new();
     let mut server_tasks = tokio::task::JoinSet::new();
     for listener in listeners {
@@ -4473,12 +4503,7 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
     {
         warn!("remote-control session shutdown timed out");
     }
-    result.with_context(|| {
-        format!(
-            "serve remote-control API on {}",
-            listen.bind_addrs.join(", ")
-        )
-    })
+    Ok(result?)
 }
 
 fn start_server_agent_session(
@@ -6608,7 +6633,12 @@ struct RouterConfig {
 }
 
 fn build_router(config: RouterConfig) -> Router {
+    build_router_with_cookie_name(config, SESSION_COOKIE_NAME)
+}
+
+fn build_router_with_cookie_name(config: RouterConfig, cookie_name: &'static str) -> Router {
     let state = ServerState {
+        cookie_name,
         db_path: Arc::new(config.db_path),
         native_modes: Arc::new(Mutex::new(HashMap::new())),
         token: Arc::new(config.token),
@@ -6735,7 +6765,7 @@ fn request_is_authorized(state: &ServerState, request: &Request) -> bool {
         .headers()
         .get(COOKIE)
         .and_then(|value| value.to_str().ok());
-    cookie_value(cookie_header, SESSION_COOKIE_NAME)
+    cookie_value(cookie_header, state.cookie_name)
         .is_some_and(|value| session_cookie_valid(&state.cookie_key, value, now_unix()))
 }
 
@@ -7025,31 +7055,31 @@ fn issue_session_cookie(
     let now = now_unix();
     let value = sign_session_cookie(&state.cookie_key, validity, now);
     let max_age = (!ephemeral).then_some(validity.as_secs());
-    let header = session_cookie_header(&value, max_age, now)?;
+    let header = session_cookie_header(state.cookie_name, &value, max_age, now)?;
 
     let mut response = status.into_response();
     response.headers_mut().insert(SET_COOKIE, header);
     Ok(response)
 }
 
-async fn clear_viewer_session() -> Response {
+async fn clear_viewer_session(State(state): State<ServerState>) -> Response {
     // Cookies are stateless, so logout is purely a client-side clear: there is no
     // server-side session to revoke. Rotate the cookie key (`--logout-all`) to
     // invalidate cookies that are already out on other devices.
     let mut response = StatusCode::NO_CONTENT.into_response();
     response
         .headers_mut()
-        .insert(SET_COOKIE, clear_session_cookie_header());
+        .insert(SET_COOKIE, clear_session_cookie_header(state.cookie_name));
     response
 }
 
 fn session_cookie_header(
+    cookie_name: &str,
     value: &str,
     max_age: Option<u64>,
     now_unix: u64,
 ) -> std::result::Result<HeaderValue, (StatusCode, String)> {
-    let mut cookie =
-        format!("{SESSION_COOKIE_NAME}={value}; Path=/; HttpOnly; Secure; SameSite=Strict");
+    let mut cookie = format!("{cookie_name}={value}; Path=/; HttpOnly; Secure; SameSite=Strict");
     if let Some(seconds) = max_age {
         cookie.push_str(&format!("; Max-Age={seconds}"));
         if let Some(expires) = cookie_expiry(now_unix.saturating_add(seconds)) {
@@ -7073,9 +7103,9 @@ fn cookie_expiry(unix_timestamp: u64) -> Option<String> {
     Some(format!("{} GMT", expires.format("%a, %d %b %Y %H:%M:%S")))
 }
 
-fn clear_session_cookie_header() -> HeaderValue {
+fn clear_session_cookie_header(cookie_name: &str) -> HeaderValue {
     HeaderValue::from_str(&format!(
-        "{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+        "{cookie_name}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
     ))
     .expect("valid cleared session cookie header")
 }
@@ -8186,6 +8216,480 @@ fn restrict_permissions(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+// --- `mj app` desktop server runtime ---
+//
+// The desktop app reuses the whole remote-control server (router, API, viewer
+// assets, session manager, cookie signing) but swaps the perimeter: an
+// OS-assigned loopback port instead of 11921, per-launch in-memory secrets
+// instead of persisted token/cookie-key files, and TLS material plus session
+// history kept in a dedicated per-user directory so a concurrent `mj server`
+// never contends with it.
+
+/// Server-side expiry baked into the desktop bootstrap cookie. Generous on
+/// purpose: the cookie only lives in the webview's in-memory store and the
+/// signing key dies with the process, so the real lifetime is the app run —
+/// this just has to outlast any plausible single run so the viewer never
+/// silently logs out mid-session.
+const DESKTOP_SESSION_VALIDITY: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Per-user directory holding the desktop app's TLS material and session
+/// database, separate from `remote-control/` so `mj app` and `mj server` never
+/// share certificates, secrets, or history.
+fn desktop_app_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from(".config"))
+        .join("mj")
+        .join("desktop-app")
+}
+
+#[derive(Debug)]
+struct DesktopTls {
+    cert_path: PathBuf,
+    key_path: PathBuf,
+    /// DER encoding of the served certificate, pinned by the desktop shell.
+    certificate_der: Vec<u8>,
+}
+
+/// Create or validate the desktop app directory. Fails closed on anything
+/// suspicious (symlink, foreign owner, group/world access) instead of trying
+/// to repair it: silently "fixing" an attacker-created directory would keep
+/// using attacker-chosen inodes.
+fn ensure_desktop_dir(root: &Path) -> Result<()> {
+    if let Some(parent) = root.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create desktop app parent dir {}", parent.display()))?;
+    }
+    let created = create_desktop_dir_owner_only(root)?;
+    let metadata = std::fs::symlink_metadata(root)
+        .with_context(|| format!("inspect desktop app dir {}", root.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "desktop app dir {} is a symlink; remove it and retry",
+            root.display()
+        );
+    }
+    if !metadata.is_dir() {
+        bail!(
+            "desktop app path {} is not a directory; remove it and retry",
+            root.display()
+        );
+    }
+    if !created {
+        validate_owner_only(
+            root,
+            &metadata,
+            "run `chmod 700` on it or remove it and retry",
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_desktop_dir_owner_only(root: &Path) -> Result<bool> {
+    use std::os::unix::fs::DirBuilderExt;
+    match std::fs::DirBuilder::new().mode(0o700).create(root) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("create desktop app dir {}", root.display()))
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn create_desktop_dir_owner_only(root: &Path) -> Result<bool> {
+    match std::fs::create_dir(root) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("create desktop app dir {}", root.display()))
+        }
+    }
+}
+
+/// Unix: require the current user as owner and no group/world permission bits.
+#[cfg(unix)]
+fn validate_owner_only(path: &Path, metadata: &std::fs::Metadata, remedy: &str) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let current_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != current_uid {
+        bail!(
+            "{} is owned by uid {} instead of the current user (uid {current_uid}); remove it and retry",
+            path.display(),
+            metadata.uid()
+        );
+    }
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o077 != 0 {
+        bail!(
+            "{} is accessible to other users (mode {mode:o}); {remedy}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Windows: files under the per-user config dir inherit an owner-only DACL
+/// from the profile directory, which is the same boundary the remote-control
+/// token and cookie key already rely on.
+#[cfg(not(unix))]
+fn validate_owner_only(_path: &Path, _metadata: &std::fs::Metadata, _remedy: &str) -> Result<()> {
+    Ok(())
+}
+
+/// Read an existing piece of desktop TLS material without following symlinks,
+/// failing closed (with the remedy in the error) on anything that is not an
+/// owner-only regular file. Returns `Ok(None)` only when the file is absent.
+fn read_desktop_tls_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(not(unix))]
+    {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspect {}", path.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "refusing to use {}: it is a symlink; remove it and retry",
+                path.display()
+            );
+        }
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            bail!(
+                "refusing to use {}: it is a symlink; remove it and retry",
+                path.display()
+            );
+        }
+        Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!(
+            "refusing to use {}: not a regular file; remove it and retry",
+            path.display()
+        );
+    }
+    validate_owner_only(
+        path,
+        &metadata,
+        "run `chmod 600` on it or remove it and retry",
+    )?;
+    let mut contents = Vec::new();
+    {
+        use std::io::Read;
+        let mut file = file;
+        file.read_to_end(&mut contents)
+            .with_context(|| format!("read {}", path.display()))?;
+    }
+    Ok(Some(contents))
+}
+
+/// Atomically create or replace a desktop file with owner-only permissions:
+/// the content is written to a fresh exclusive temp file (never through a
+/// symlink) that is renamed over the destination, so no reader ever observes
+/// lax permissions or partial content.
+fn write_desktop_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    let tmp_path = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("desktop"),
+        std::process::id()
+    ));
+    // A stale temp file can only be left by a crashed previous run under this
+    // same pid; remove it so the exclusive create below succeeds.
+    let _ = std::fs::remove_file(&tmp_path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    {
+        use std::io::Write;
+        let mut file = options
+            .open(&tmp_path)
+            .with_context(|| format!("create {}", tmp_path.display()))?;
+        file.write_all(contents)
+            .with_context(|| format!("write {}", tmp_path.display()))?;
+    }
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename {} to {}", tmp_path.display(), path.display()))?;
+    Ok(())
+}
+
+/// Load or mint the desktop TLS material inside `root`. Existing material is
+/// reused only when it passes the fail-closed safety checks and still parses
+/// as a servable certificate/key pair; corrupt-but-safe material is replaced.
+fn ensure_desktop_tls(root: &Path) -> Result<DesktopTls> {
+    ensure_desktop_dir(root)?;
+    let cert_path = root.join("cert.pem");
+    let key_path = root.join("key.pem");
+    let existing_cert = read_desktop_tls_file(&cert_path)?;
+    let existing_key = read_desktop_tls_file(&key_path)?;
+    if let (Some(cert_pem), Some(_)) = (&existing_cert, &existing_key) {
+        match load_certified_key(&cert_path, &key_path) {
+            Ok(_) => {
+                if let Some(certificate_der) = first_certificate_der(cert_pem) {
+                    return Ok(DesktopTls {
+                        cert_path,
+                        key_path,
+                        certificate_der,
+                    });
+                }
+            }
+            Err(error) => debug!("replacing unusable desktop TLS material: {error:#}"),
+        }
+    }
+
+    let cert = generate_simple_self_signed(vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ])
+    .context("generate desktop self-signed certificate")?;
+    let certificate_der = cert.cert.der().to_vec();
+    write_desktop_file_atomically(&key_path, cert.key_pair.serialize_pem().as_bytes())?;
+    write_desktop_file_atomically(&cert_path, cert.cert.pem().as_bytes())?;
+    Ok(DesktopTls {
+        cert_path,
+        key_path,
+        certificate_der,
+    })
+}
+
+fn first_certificate_der(cert_pem: &[u8]) -> Option<Vec<u8>> {
+    rustls_pemfile::certs(&mut &cert_pem[..])
+        .next()
+        .and_then(|cert| cert.ok())
+        .map(|cert| cert.to_vec())
+}
+
+/// Per-launch, in-memory authentication state for the desktop server. Nothing
+/// is persisted: the cookie signing key dies with the process, so every cookie
+/// minted for this instance stops validating the moment the app exits, and no
+/// secret ever reaches disk, argv, a URL, or the logs.
+struct DesktopAuth {
+    /// Bearer token the shared router requires on the QR/token paths. It is
+    /// never shown or exported anywhere, which leaves those paths inert in
+    /// desktop mode.
+    token: String,
+    /// Full-length random secret in place of the six-digit viewer code, so the
+    /// code-login path is unguessable instead of merely rate-limited.
+    viewer_code: String,
+    cookie_key: String,
+    /// Pre-minted signed session cookie the shell injects into the webview,
+    /// replacing the interactive viewer-code screen.
+    bootstrap_cookie: String,
+}
+
+impl DesktopAuth {
+    fn generate() -> Result<Self> {
+        let cookie_key = generate_token()?;
+        let bootstrap_cookie =
+            sign_session_cookie(&cookie_key, DESKTOP_SESSION_VALIDITY, now_unix());
+        Ok(Self {
+            token: generate_token()?,
+            viewer_code: generate_token()?,
+            cookie_key,
+            bootstrap_cookie,
+        })
+    }
+}
+
+/// Bind the desktop listener on an OS-assigned IPv4 loopback port, so it never
+/// collides with `mj server` on 11921 or with another running `mj app`.
+fn bind_desktop_listener() -> Result<(TcpListener, SocketAddr)> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).context("bind desktop app listener")?;
+    listener
+        .set_nonblocking(true)
+        .context("set desktop app listener to non-blocking")?;
+    let local_addr = listener
+        .local_addr()
+        .context("read desktop app listener address")?;
+    Ok((listener, local_addr))
+}
+
+/// Everything the desktop shell needs to open a window against the app-owned
+/// server: where to point the webview, which certificate to pin, and the
+/// bootstrap cookie that signs the viewer in without the viewer-code screen.
+// Consumed by the `mj app` CLI wiring in #727.
+#[allow(dead_code)]
+pub(crate) struct DesktopServerHandle {
+    pub origin: Url,
+    /// DER encoding of the served certificate, for `desktop::DesktopShellOptions`.
+    pub certificate_der: Vec<u8>,
+    pub bootstrap_cookie_name: &'static str,
+    /// Signed session cookie value. Held only in process memory and handed to
+    /// the webview's cookie store — never logged and never part of a URL.
+    pub bootstrap_cookie_value: String,
+}
+
+struct DesktopRuntimeConfig {
+    /// Directory holding the desktop TLS material and session database.
+    root: PathBuf,
+    history_ttl: Option<Duration>,
+    keep_awake: bool,
+    workspace_roots: Vec<PathBuf>,
+    session_manager: Arc<ServerSessionManager>,
+    mjconfig: Arc<MjConfigRuntime>,
+    termination: CancellationToken,
+}
+
+/// Bind and configure an app-owned desktop server instance, returning the
+/// shell handle plus the serve future. The future is the completion handle:
+/// it resolves once the listener has drained and the server-owned sessions
+/// have shut down (both within bounded timeouts) after `termination` fires or
+/// the listener fails.
+async fn prepare_desktop_runtime(
+    config: DesktopRuntimeConfig,
+) -> Result<(
+    DesktopServerHandle,
+    impl Future<Output = Result<()>> + Send + 'static,
+)> {
+    let DesktopRuntimeConfig {
+        root,
+        history_ttl,
+        keep_awake,
+        workspace_roots,
+        session_manager,
+        mjconfig,
+        termination,
+    } = config;
+    install_crypto_provider();
+    let tls = ensure_desktop_tls(&root)?;
+    let db_path = root.join("sessions.sqlite3");
+    init_db(&db_path)?;
+    let auth = DesktopAuth::generate()?;
+    let app = build_router_with_cookie_name(
+        RouterConfig {
+            db_path: db_path.clone(),
+            token: auth.token,
+            viewer_code: auth.viewer_code,
+            cookie_key: auth.cookie_key,
+            // Ephemeral: any cookie issued by the running server (not just the
+            // bootstrap one) omits Max-Age and dies with the webview.
+            session_ttl: Duration::ZERO,
+            workspace_roots,
+            session_manager: Arc::clone(&session_manager),
+            mjconfig,
+        },
+        DESKTOP_SESSION_COOKIE_NAME,
+    );
+    let tls_config =
+        axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
+            .await
+            .context("load desktop TLS certificate")?;
+    let (listener, local_addr) = bind_desktop_listener()?;
+    let origin = Url::parse(&format!("https://{local_addr}/"))
+        .with_context(|| format!("construct desktop viewer origin for {local_addr}"))?;
+    spawn_queue_pruner(db_path, history_ttl);
+    let serve = async move {
+        // Like `mj server`, the desktop server counts as "working" for its
+        // whole lifetime so sessions survive the host idling.
+        let _keep_awake = crate::keep_awake::KeepAwake::hold(keep_awake);
+        serve_listeners_until_terminated(
+            vec![listener],
+            tls_config,
+            app,
+            termination,
+            session_manager,
+        )
+        .await
+        .with_context(|| format!("serve desktop app API on {local_addr}"))
+    };
+    Ok((
+        DesktopServerHandle {
+            origin,
+            certificate_der: tls.certificate_der,
+            bootstrap_cookie_name: DESKTOP_SESSION_COOKIE_NAME,
+            bootstrap_cookie_value: auth.bootstrap_cookie,
+        },
+        serve,
+    ))
+}
+
+// Consumed by the `mj app` CLI wiring in #727.
+#[allow(dead_code)]
+pub(crate) struct DesktopServerOptions {
+    pub history_days: u32,
+    pub cwd: PathBuf,
+    pub additional_directories: Vec<PathBuf>,
+    pub snapshot_exclusions: Vec<PathBuf>,
+    pub fs_max_text_bytes: u64,
+    pub termination: CancellationToken,
+}
+
+/// Desktop-mode counterpart of [`run_server`]: same configuration resolution,
+/// workspace roots, and session manager, but bound to an OS-assigned loopback
+/// port with per-launch in-memory secrets and isolated on-disk state.
+// Consumed by the `mj app` CLI wiring in #727.
+#[allow(dead_code)]
+pub(crate) async fn prepare_desktop_server(
+    options: DesktopServerOptions,
+) -> Result<(
+    DesktopServerHandle,
+    impl Future<Output = Result<()>> + Send + 'static,
+)> {
+    let DesktopServerOptions {
+        history_days,
+        cwd,
+        additional_directories,
+        snapshot_exclusions,
+        fs_max_text_bytes,
+        termination,
+    } = options;
+    let config_path = config::default_config_path();
+    let cfg = config::Config::load(&config_path)
+        .with_context(|| format!("load {}", config_path.display()))?;
+    let resolved = roster::resolve(&cfg, &cwd).await?;
+    let workspace_roots =
+        crate::paths::WorkspaceRoots::new(&cwd, &additional_directories)?.active_roots();
+    let mjconfig = Arc::new(MjConfigRuntime::new(
+        config_path.clone(),
+        resolved.choices.clone(),
+        Some(models_config_from_roster(&resolved)),
+        resolved.inventory.clone(),
+    ));
+    let session_manager = Arc::new(ServerSessionManager::new_roster(
+        resolved,
+        config_file_hash(&config_path),
+        cwd,
+        additional_directories,
+        snapshot_exclusions,
+        fs_max_text_bytes,
+    ));
+    let history_ttl =
+        (history_days > 0).then(|| Duration::from_secs(u64::from(history_days) * 24 * 60 * 60));
+    prepare_desktop_runtime(DesktopRuntimeConfig {
+        root: desktop_app_dir(),
+        history_ttl,
+        keep_awake: cfg.keep_awake,
+        workspace_roots,
+        session_manager,
+        mjconfig,
+        termination,
+    })
+    .await
 }
 
 fn init_db(db_path: &Path) -> Result<()> {
@@ -16502,6 +17006,7 @@ mod tests {
 
     fn test_state() -> ServerState {
         ServerState {
+            cookie_name: SESSION_COOKIE_NAME,
             db_path: Arc::new(PathBuf::from("unused.sqlite3")),
             native_modes: Arc::new(Mutex::new(HashMap::new())),
             token: Arc::new("integration-token".to_string()),
@@ -16601,7 +17106,7 @@ mod tests {
 
     #[test]
     fn clearing_session_cookie_expires_it_immediately() {
-        let header = clear_session_cookie_header();
+        let header = clear_session_cookie_header(SESSION_COOKIE_NAME);
         let value = header.to_str().expect("header str");
         assert!(value.contains("Max-Age=0"));
         assert!(value.contains("Expires=Thu, 01 Jan 1970 00:00:00 GMT"));
@@ -17328,5 +17833,301 @@ mod tests {
         )
         .expect("live list after disconnect json");
         assert!(live_after_disconnect.is_empty());
+    }
+
+    #[test]
+    fn desktop_listener_binds_ephemeral_ipv4_loopback_port() {
+        let (first, first_addr) = bind_desktop_listener().expect("bind first desktop listener");
+        let (_second, second_addr) = bind_desktop_listener().expect("bind second desktop listener");
+        assert!(first_addr.ip().is_loopback());
+        assert!(first_addr.is_ipv4());
+        assert_ne!(first_addr.port(), 0);
+        assert_ne!(first_addr.port(), 11921);
+        assert_ne!(second_addr.port(), 11921);
+        // OS-assigned ports let two desktop instances coexist.
+        assert_ne!(first_addr.port(), second_addr.port());
+        drop(first);
+    }
+
+    #[test]
+    fn desktop_tls_material_is_created_owner_only_and_reused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("desktop-app");
+        let first = ensure_desktop_tls(&root).expect("create desktop TLS material");
+        assert!(!first.certificate_der.is_empty());
+        let second = ensure_desktop_tls(&root).expect("reuse desktop TLS material");
+        assert_eq!(
+            first.certificate_der, second.certificate_der,
+            "existing material must be reused, not regenerated"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(&root)
+                .expect("desktop dir metadata")
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(dir_mode, 0o700);
+            let key_mode = std::fs::metadata(&first.key_path)
+                .expect("desktop key metadata")
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(key_mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn desktop_tls_replaces_corrupt_material() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("desktop-app");
+        let first = ensure_desktop_tls(&root).expect("create desktop TLS material");
+        write_desktop_file_atomically(&first.cert_path, b"not a certificate")
+            .expect("corrupt certificate");
+        let second = ensure_desktop_tls(&root).expect("regenerate desktop TLS material");
+        assert_ne!(first.certificate_der, second.certificate_der);
+        // The regenerated pair must be servable again.
+        load_certified_key(&second.cert_path, &second.key_path).expect("regenerated pair parses");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_tls_fails_closed_on_symlinked_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("desktop-app");
+        let tls = ensure_desktop_tls(&root).expect("create desktop TLS material");
+        let moved = dir.path().join("moved-key.pem");
+        std::fs::rename(&tls.key_path, &moved).expect("move key aside");
+        std::os::unix::fs::symlink(&moved, &tls.key_path).expect("symlink key");
+        let error = format!(
+            "{:#}",
+            ensure_desktop_tls(&root).expect_err("symlinked key must fail closed")
+        );
+        assert!(error.contains("symlink"), "unexpected error: {error}");
+        assert!(
+            error.contains("key.pem"),
+            "error must name the offending file: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_tls_fails_closed_on_group_accessible_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("desktop-app");
+        let tls = ensure_desktop_tls(&root).expect("create desktop TLS material");
+        std::fs::set_permissions(&tls.key_path, std::fs::Permissions::from_mode(0o640))
+            .expect("loosen key permissions");
+        let error = format!(
+            "{:#}",
+            ensure_desktop_tls(&root).expect_err("group-readable key must fail closed")
+        );
+        assert!(
+            error.contains("accessible to other users"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("chmod 600"),
+            "error must carry the remedy: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_dir_fails_closed_when_accessible_to_other_users() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("desktop-app");
+        ensure_desktop_tls(&root).expect("create desktop TLS material");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
+            .expect("loosen dir permissions");
+        let error = format!(
+            "{:#}",
+            ensure_desktop_tls(&root).expect_err("shared dir must fail closed")
+        );
+        assert!(
+            error.contains("accessible to other users"),
+            "unexpected error: {error}"
+        );
+    }
+
+    fn desktop_test_router(auth: &DesktopAuth, dir: &Path) -> Router {
+        let db_path = dir.join("desktop-sessions.sqlite3");
+        init_db(&db_path).expect("init desktop test db");
+        build_router_with_cookie_name(
+            RouterConfig {
+                db_path,
+                token: auth.token.clone(),
+                viewer_code: auth.viewer_code.clone(),
+                cookie_key: auth.cookie_key.clone(),
+                session_ttl: Duration::ZERO,
+                workspace_roots: test_workspace_roots(dir),
+                session_manager: test_session_manager(),
+                mjconfig: test_mjconfig_runtime(),
+            },
+            DESKTOP_SESSION_COOKIE_NAME,
+        )
+    }
+
+    async fn sessions_status(app: Router, cookie: Option<String>) -> StatusCode {
+        let mut builder = axum::http::Request::builder()
+            .method("GET")
+            .uri("/sessions");
+        if let Some(cookie) = cookie {
+            builder = builder.header(axum::http::header::COOKIE, cookie);
+        }
+        app.oneshot(builder.body(axum::body::Body::empty()).expect("request"))
+            .await
+            .expect("sessions response")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn desktop_bootstrap_cookie_authenticates_protected_api() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let auth = DesktopAuth::generate().expect("desktop auth");
+        let app = desktop_test_router(&auth, dir.path());
+        assert_eq!(
+            sessions_status(app.clone(), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        let cookie = format!("{DESKTOP_SESSION_COOKIE_NAME}={}", auth.bootstrap_cookie);
+        assert_eq!(sessions_status(app, Some(cookie)).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn desktop_and_server_cookies_do_not_cross_authenticate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let auth = DesktopAuth::generate().expect("desktop auth");
+        let desktop_app = desktop_test_router(&auth, dir.path());
+
+        let server_cookie_key = "server-cookie-key";
+        let server_db = dir.path().join("server-sessions.sqlite3");
+        init_db(&server_db).expect("init server test db");
+        let server_app = build_router(RouterConfig {
+            db_path: server_db,
+            token: "server-token".to_string(),
+            viewer_code: "123456".to_string(),
+            cookie_key: server_cookie_key.to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+            workspace_roots: test_workspace_roots(dir.path()),
+            session_manager: test_session_manager(),
+            mjconfig: test_mjconfig_runtime(),
+        });
+        let server_cookie =
+            sign_session_cookie(server_cookie_key, Duration::from_secs(3600), now_unix());
+
+        // A normal-server cookie never authenticates the desktop instance,
+        // under either cookie name.
+        for name in [SESSION_COOKIE_NAME, DESKTOP_SESSION_COOKIE_NAME] {
+            assert_eq!(
+                sessions_status(desktop_app.clone(), Some(format!("{name}={server_cookie}"))).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        // And the desktop bootstrap cookie never authenticates `mj server`.
+        for name in [SESSION_COOKIE_NAME, DESKTOP_SESSION_COOKIE_NAME] {
+            assert_eq!(
+                sessions_status(
+                    server_app.clone(),
+                    Some(format!("{name}={}", auth.bootstrap_cookie))
+                )
+                .await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        // Each cookie still works against its own server.
+        assert_eq!(
+            sessions_status(
+                desktop_app,
+                Some(format!(
+                    "{DESKTOP_SESSION_COOKIE_NAME}={}",
+                    auth.bootstrap_cookie
+                ))
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            sessions_status(
+                server_app,
+                Some(format!("{SESSION_COOKIE_NAME}={server_cookie}"))
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_runtime_serves_pinned_https_and_stops_on_cancellation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let termination = CancellationToken::new();
+        let (handle, serve) = prepare_desktop_runtime(DesktopRuntimeConfig {
+            root: dir.path().join("desktop-app"),
+            history_ttl: None,
+            keep_awake: false,
+            workspace_roots: test_workspace_roots(dir.path()),
+            session_manager: test_session_manager(),
+            mjconfig: test_mjconfig_runtime(),
+            termination: termination.clone(),
+        })
+        .await
+        .expect("prepare desktop runtime");
+
+        assert_eq!(handle.origin.scheme(), "https");
+        assert_eq!(handle.origin.host_str(), Some("127.0.0.1"));
+        let port = handle.origin.port().expect("origin carries the bound port");
+        assert_ne!(port, 11921);
+        assert_eq!(handle.bootstrap_cookie_name, DESKTOP_SESSION_COOKIE_NAME);
+
+        let server = tokio::spawn(serve);
+
+        let certificate = reqwest::Certificate::from_der(&handle.certificate_der)
+            .expect("pin desktop certificate");
+        let client = reqwest::Client::builder()
+            .add_root_certificate(certificate)
+            .build()
+            .expect("pinned HTTPS client");
+
+        // The public viewer shell is served over HTTPS under the pinned
+        // certificate; a client trusting only that certificate succeeds.
+        let viewer = client
+            .get(handle.origin.clone())
+            .send()
+            .await
+            .expect("fetch viewer over pinned HTTPS");
+        assert_eq!(viewer.status(), reqwest::StatusCode::OK);
+
+        // The protected API stays unauthorized without the bootstrap cookie
+        // and opens with it.
+        let sessions_url = format!("{}sessions", handle.origin);
+        let unauthorized = client
+            .get(&sessions_url)
+            .send()
+            .await
+            .expect("fetch protected API without cookie");
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let authorized = client
+            .get(&sessions_url)
+            .header(
+                reqwest::header::COOKIE,
+                format!(
+                    "{}={}",
+                    handle.bootstrap_cookie_name, handle.bootstrap_cookie_value
+                ),
+            )
+            .send()
+            .await
+            .expect("fetch protected API with bootstrap cookie");
+        assert_eq!(authorized.status(), reqwest::StatusCode::OK);
+
+        termination.cancel();
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("desktop server stops within a bounded timeout")
+            .expect("join desktop serve task")
+            .expect("desktop serve result");
     }
 }
