@@ -254,6 +254,18 @@ fn headless_login_args(vendor: AuthVendor) -> &'static [&'static str] {
     }
 }
 
+/// Extra guidance printed before handing the terminal to the vendor CLI. The
+/// Claude CLI reads the authorization code without echoing it, which looks
+/// like a frozen prompt after a paste.
+fn login_terminal_hint(vendor: AuthVendor) -> Option<&'static str> {
+    match vendor {
+        AuthVendor::OpenAi => None,
+        AuthVendor::Anthropic => Some(
+            "Note: the authorization code will not appear when you paste it — paste and press Enter.",
+        ),
+    }
+}
+
 fn anthropic_login_args(use_console: bool) -> &'static [&'static str] {
     if use_console {
         &["auth", "login", "--console"]
@@ -318,9 +330,13 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
         }
     };
     println!(
-        "Signing in to {}. Mjolnir will return when it finishes.\n",
+        "Signing in to {}. Mjolnir will return when it finishes.",
         vendor.label()
     );
+    if let Some(hint) = login_terminal_hint(vendor) {
+        println!("{hint}");
+    }
+    println!();
     let mut invocation = bundled_invocation(vendor).await?;
     append_login_args(&mut invocation, args);
     let _interrupt_guard = crate::termination::suppress_interrupts();
@@ -415,6 +431,14 @@ mod tests {
         assert!(headless_login_args(AuthVendor::Anthropic).is_empty());
         assert_eq!(anthropic_login_args(false), ["auth", "login", "--claudeai"]);
         assert_eq!(anthropic_login_args(true), ["auth", "login", "--console"]);
+    }
+
+    #[test]
+    fn claude_login_warns_that_the_pasted_code_will_not_echo() {
+        assert!(login_terminal_hint(AuthVendor::OpenAi).is_none());
+        let hint = login_terminal_hint(AuthVendor::Anthropic).expect("Claude login hint");
+        assert!(hint.contains("will not appear"), "{hint}");
+        assert!(hint.contains("press Enter"), "{hint}");
     }
 
     #[tokio::test]
