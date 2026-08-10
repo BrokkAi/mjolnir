@@ -19286,6 +19286,54 @@ mod tests {
     }
 
     #[test]
+    fn primary_model_picker_defaults_effort_for_every_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config.agent.reasoning_effort = Some("high".to_string());
+        config.save(&config_path).expect("save config");
+
+        let mut state = AppState::new();
+        state.config_path = Some(config_path);
+        state.ragnarok_models = ["codex-acp", "claude-acp"]
+            .into_iter()
+            .map(|source_id| crate::roster::ResolvedAgent {
+                model: crate::deepswe::Row {
+                    model: source_id.to_string(),
+                    reasoning_effort: None,
+                    pass_at_1: 0.5,
+                    mean_cost_usd: 1.0,
+                },
+                model_value: source_id.to_string(),
+                launch: crate::roster::AdapterLaunch {
+                    kind: crate::roster::AdapterKind::from_source_id(source_id)
+                        .unwrap_or(crate::roster::AdapterKind::Claude),
+                    source_id: source_id.to_string(),
+                    command: PathBuf::from(source_id),
+                    args: Vec::new(),
+                    env: Default::default(),
+                },
+                ranked: true,
+                reasoning_effort: None,
+            })
+            .collect();
+
+        assert!(state.open_agent_picker());
+        assert_eq!(
+            state.agent_picker.as_ref().expect("picker").effort_selected,
+            0
+        );
+
+        state.agent_picker = None;
+        state.active_models.primary = "claude-acp".to_string();
+        assert!(state.open_agent_picker());
+        assert_eq!(
+            state.agent_picker.as_ref().expect("picker").effort_selected,
+            0
+        );
+    }
+
+    #[test]
     fn primary_effort_picker_uses_concise_option_labels() {
         let labels = (0..PRIMARY_EFFORT_OPTIONS.len())
             .map(primary_effort_label)

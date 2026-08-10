@@ -1711,17 +1711,6 @@ pub fn primary_effort_value(index: usize) -> Option<&'static str> {
     PRIMARY_EFFORT_OPTIONS.get(index).copied().flatten()
 }
 
-fn primary_effort_index(effort: Option<String>) -> usize {
-    effort
-        .as_deref()
-        .and_then(|effort| {
-            PRIMARY_EFFORT_OPTIONS.iter().position(|candidate| {
-                candidate.is_some_and(|candidate| candidate.eq_ignore_ascii_case(effort))
-            })
-        })
-        .unwrap_or(0)
-}
-
 /// Deferred primary-agent model picker overlay state.
 #[derive(Debug, Clone)]
 pub struct AgentPicker {
@@ -2219,12 +2208,9 @@ impl AppState {
         self.agent_picker = Some(AgentPicker {
             selected,
             role_indices,
-            effort_selected: primary_effort_index(
-                self.config_path
-                    .as_deref()
-                    .and_then(|path| crate::config::Config::load(path).ok())
-                    .and_then(|config| config.agent.reasoning_effort),
-            ),
+            // Effort is chosen for the model being selected. Do not carry a
+            // previous model's override into a new selection implicitly.
+            effort_selected: 0,
             step: AgentPickerStep::Model,
             start_new_session: true,
         });
