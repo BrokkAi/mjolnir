@@ -33,11 +33,45 @@ cargo build --release
 ./target/release/mj --cwd .
 ```
 
-The `brokk-mj-voice-worker` workspace member provides local Ctrl-R dictation.
-On Debian or Ubuntu, install the ALSA development headers before building it:
+The optional `desktop-app` feature builds the native WebView shell. On macOS,
+install Apple's Command Line Tools; the shell uses the WebKit framework from
+the macOS SDK:
 
 ```bash
+xcode-select --install
+```
+
+On Linux, install the WebKitGTK 4.1 development package first:
+
+```bash
+# Ubuntu or Debian
+sudo apt-get update
+sudo apt-get install libwebkit2gtk-4.1-dev
+
+# Fedora
+sudo dnf install webkit2gtk4.1-devel
+```
+
+Use `webkit2gtk4.1-devel` on Fedora: the shell targets WebKitGTK's GTK 3 and
+libsoup 3 API, not the GTK 4 `webkitgtk6.0-devel` package. Then build it with:
+
+```bash
+cargo build --release --features desktop-app
+```
+
+The `brokk-mj-voice-worker` workspace member provides local Ctrl-R dictation.
+On macOS it uses the system CoreAudio framework, so the Command Line Tools
+above are sufficient. On Linux, install the ALSA development package before
+building it:
+
+```bash
+# Ubuntu or Debian
+sudo apt-get update
 sudo apt-get install libasound2-dev
+
+# Fedora
+sudo dnf install alsa-lib-devel
+
 cargo build --release -p brokk-mj-voice-worker
 ```
 
@@ -103,9 +137,9 @@ run the same core checks as CI:
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo build --release
-cargo test
+cargo clippy --all-targets --features desktop-app -- -D warnings
+cargo build --release --features desktop-app
+cargo test --features desktop-app
 ```
 
 The separate LLVM coverage job, local collection commands, 70% production

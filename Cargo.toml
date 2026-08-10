@@ -15,6 +15,20 @@ default-members = ["."]
 name = "mj"
 path = "src/main.rs"
 
+[features]
+default = []
+# Kept opt-in until the `mj app` CLI and release packaging land in #727.
+# Android deliberately has no dependency entries for this feature.
+desktop-app = [
+    "dep:tao",
+    "dep:webbrowser",
+    "dep:wry",
+    "dep:gio",
+    "dep:webkit2gtk",
+    "dep:webview2-com",
+    "dep:windows-core",
+]
+
 [dependencies]
 agent-client-protocol = { version = "1", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"
@@ -83,3 +97,17 @@ http-body-util = "0.1"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = "3.4"
+tao = { version = "0.35", default-features = false, features = ["rwh_06", "x11"], optional = true }
+webbrowser = { version = "1.2", optional = true }
+# Wry's portable API does not yet expose private-CA trust. Pin the immutable
+# upstream PR commit until tauri-apps/wry#1707 is released. `version` lets Cargo
+# replace the source for crates.io packaging; desktop release wiring is #727.
+wry = { version = "0.55", git = "https://github.com/tauri-apps/wry", rev = "52ea8168d1c8ceab273df377dce6025a14d4ff4b", optional = true }
+
+[target.'cfg(all(target_os = "linux", not(target_os = "android")))'.dependencies]
+gio = { version = "0.18", optional = true }
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = { version = "0.38", optional = true }
+windows-core = { version = "0.61", optional = true }

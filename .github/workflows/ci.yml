@@ -41,6 +41,7 @@ jobs:
     - name: Check crate package license files
       run: |
         diff -u LICENSE voice-worker/LICENSE
+        cargo package --locked --allow-dirty --no-verify -p brokk-mjolnir
         cargo package --locked --allow-dirty --list -p brokk-mjolnir > /tmp/mjolnir-package-files.txt
         cargo package --locked --allow-dirty --list -p brokk-mj-voice-worker > /tmp/voice-worker-package-files.txt
         grep -Fx LICENSE /tmp/mjolnir-package-files.txt
@@ -64,11 +65,11 @@ jobs:
       with:
         components: rustfmt, clippy
 
-    - name: Install Linux audio dependencies
+    - name: Install Linux native dependencies
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
+        sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
 
     - name: Cache cargo registry and build
       uses: actions/cache@v5
@@ -86,13 +87,13 @@ jobs:
       run: cargo fmt --check
 
     - name: Run Clippy lints
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy --all-targets --features desktop-app -- -D warnings
 
     - name: Build mjolnir
-      run: cargo build --release
+      run: cargo build --release --features desktop-app
 
     - name: Run tests
-      run: cargo test
+      run: cargo test --features desktop-app
 
   voice-worker:
     name: Voice worker (ubuntu-latest)

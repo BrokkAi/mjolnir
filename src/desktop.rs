@@ -1,0 +1,475 @@
+//! Native desktop shell for the existing remote viewer.
+//!
+//! The CLI wiring lands in #727. Keeping policy and TLS verification here lets
+//! the server work in #728 depend on a small, security-reviewed interface.
+
+#![allow(dead_code)]
+
+use anyhow::{Context, Result, anyhow, bail};
+use std::net::TcpStream;
+use std::sync::Arc;
+use std::time::Duration;
+use url::Url;
+
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+use tao::event::{Event, WindowEvent};
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+use tao::platform::run_return::EventLoopExtRunReturn;
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+use tao::window::{Icon, WindowBuilder};
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+use wry::{NewWindowResponse, WebView, WebViewBuilder};
+
+const TLS_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone)]
+pub(crate) struct DesktopShellOptions {
+    pub origin: Url,
+    /// DER encoding of the private certificate/CA trusted for this invocation.
+    pub certificate_der: Vec<u8>,
+}
+
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DesktopShellExit {
+    WindowClosed,
+}
+
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellEvent {
+    Fatal(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavigationDecision {
+    Internal,
+    External,
+    Block,
+}
+
+/// Exact origin allowed to remain inside the application window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OriginPolicy {
+    scheme: String,
+    host: String,
+    port: u16,
+}
+
+impl OriginPolicy {
+    fn new(origin: &Url) -> Result<Self> {
+        if origin.scheme() != "https" {
+            bail!("desktop viewer origin must use HTTPS");
+        }
+        if !origin.username().is_empty() || origin.password().is_some() {
+            bail!("desktop viewer origin must not contain credentials");
+        }
+        let host = origin
+            .host_str()
+            .context("desktop viewer origin has no host")?
+            .to_ascii_lowercase();
+        let port = origin
+            .port_or_known_default()
+            .context("desktop viewer origin has no port")?;
+        Ok(Self {
+            scheme: origin.scheme().to_string(),
+            host,
+            port,
+        })
+    }
+
+    fn decide(&self, candidate: &str) -> NavigationDecision {
+        let Ok(candidate) = Url::parse(candidate) else {
+            return NavigationDecision::Block;
+        };
+        if self.matches(&candidate) {
+            NavigationDecision::Internal
+        } else if matches!(candidate.scheme(), "http" | "https") {
+            NavigationDecision::External
+        } else {
+            NavigationDecision::Block
+        }
+    }
+
+    fn matches(&self, candidate: &Url) -> bool {
+        candidate.scheme() == self.scheme
+            && candidate
+                .host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case(&self.host))
+            && candidate.port_or_known_default() == Some(self.port)
+            && candidate.username().is_empty()
+            && candidate.password().is_none()
+    }
+}
+
+/// Fail before creating a native window if the origin does not present the
+/// certificate supplied by the app-owned server. Platform WebViews enforce the
+/// same trust while rendering; this preflight turns setup failures into useful
+/// terminal errors instead of an opaque blank window.
+fn verify_pinned_tls(options: &DesktopShellOptions) -> Result<()> {
+    let policy = OriginPolicy::new(&options.origin)?;
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(
+            options.certificate_der.clone(),
+        ))
+        .context("load desktop TLS certificate")?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("configure desktop TLS protocol versions")?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let server_name = rustls::pki_types::ServerName::try_from(policy.host.clone())
+        .map_err(|_| anyhow!("invalid desktop viewer TLS host: {}", policy.host))?;
+    let addresses = options
+        .origin
+        .socket_addrs(|| Some(policy.port))
+        .context("resolve desktop viewer origin")?;
+    let address = addresses
+        .into_iter()
+        .next()
+        .context("desktop viewer origin resolved to no addresses")?;
+    let mut stream = TcpStream::connect_timeout(&address, TLS_PREFLIGHT_TIMEOUT)
+        .with_context(|| format!("connect to desktop viewer at {address}"))?;
+    stream
+        .set_read_timeout(Some(TLS_PREFLIGHT_TIMEOUT))
+        .context("set desktop TLS read timeout")?;
+    stream
+        .set_write_timeout(Some(TLS_PREFLIGHT_TIMEOUT))
+        .context("set desktop TLS write timeout")?;
+    let mut connection = rustls::ClientConnection::new(Arc::new(config), server_name)
+        .context("create desktop TLS verifier")?;
+    connection
+        .complete_io(&mut stream)
+        .context("verify desktop TLS certificate")?;
+    Ok(())
+}
+
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+pub(crate) fn run(options: DesktopShellOptions) -> Result<DesktopShellExit> {
+    let policy = OriginPolicy::new(&options.origin)?;
+    verify_pinned_tls(&options)?;
+
+    let mut event_loop = EventLoopBuilder::<ShellEvent>::with_user_event().build();
+    let event_proxy = event_loop.create_proxy();
+    let window = WindowBuilder::new()
+        .with_title("Mjolnir")
+        .with_window_icon(Some(application_icon()?))
+        .build(&event_loop)
+        .context("create Mjolnir desktop window")?;
+
+    let navigation_policy = policy.clone();
+    let popup_policy = policy.clone();
+    let builder = WebViewBuilder::new()
+        .with_url("about:blank")
+        .with_incognito(true)
+        .with_navigation_handler(move |url| {
+            if url == "about:blank" {
+                return true;
+            }
+            handle_navigation(&navigation_policy, &url)
+        })
+        .with_new_window_req_handler(move |url, _features| {
+            let _ = handle_navigation(&popup_policy, &url);
+            NewWindowResponse::Deny
+        });
+
+    #[cfg(target_os = "macos")]
+    let builder = {
+        // tauri-apps/wry#1707 evaluates trust against only this in-memory
+        // anchor. It neither changes the system trust store nor accepts any
+        // other invalid certificate.
+        builder.with_trusted_ca(options.certificate_der.clone())
+    };
+
+    #[cfg(target_os = "linux")]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        builder
+            .build_gtk(window.gtk_window())
+            .context("create Mjolnir WebKitGTK view")?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let webview = builder
+        .build(&window)
+        .context("create Mjolnir system WebView")?;
+
+    install_platform_certificate_pin(
+        &webview,
+        &policy,
+        &options.certificate_der,
+        event_proxy.clone(),
+    )?;
+    webview
+        .load_url(options.origin.as_str())
+        .context("load Mjolnir desktop viewer")?;
+
+    let mut result = Ok(DesktopShellExit::WindowClosed);
+    let _exit_code = event_loop.run_return(|event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(ShellEvent::Fatal(message)) => {
+                result = Err(anyhow!(message));
+                *control_flow = ControlFlow::Exit;
+            }
+            _ => {}
+        }
+    });
+    drop(webview);
+    drop(window);
+    result
+}
+
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+fn application_icon() -> Result<Icon> {
+    let image = image::load_from_memory_with_format(
+        include_bytes!("icons/icon-192.png"),
+        image::ImageFormat::Png,
+    )?
+    .into_rgba8();
+    let (width, height) = image.dimensions();
+    Icon::from_rgba(image.into_raw(), width, height).context("decode Mjolnir application icon")
+}
+
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+fn handle_navigation(policy: &OriginPolicy, url: &str) -> bool {
+    match policy.decide(url) {
+        NavigationDecision::Internal => true,
+        NavigationDecision::External => {
+            if let Err(error) = webbrowser::open(url) {
+                tracing::warn!(%url, %error, "failed to open external desktop link");
+            }
+            false
+        }
+        NavigationDecision::Block => false,
+    }
+}
+
+#[cfg(all(feature = "desktop-app", target_os = "macos"))]
+fn install_platform_certificate_pin(
+    _webview: &WebView,
+    _policy: &OriginPolicy,
+    _certificate_der: &[u8],
+    _event_proxy: EventLoopProxy<ShellEvent>,
+) -> Result<()> {
+    // Installed on WebViewBuilder before WKWebView construction.
+    Ok(())
+}
+
+#[cfg(all(feature = "desktop-app", target_os = "windows"))]
+fn install_platform_certificate_pin(
+    webview: &WebView,
+    policy: &OriginPolicy,
+    certificate_der: &[u8],
+    event_proxy: EventLoopProxy<ShellEvent>,
+) -> Result<()> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW,
+        COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL, ICoreWebView2_14,
+    };
+    use webview2_com::{ServerCertificateErrorDetectedEventHandler, take_pwstr};
+    use windows_core::{Interface, PWSTR};
+    use wry::WebViewExtWindows;
+
+    let webview: ICoreWebView2_14 = webview
+        .webview()
+        .cast()
+        .context("WebView2 runtime does not support certificate error handling")?;
+    let expected = certificate_der.to_vec();
+    let policy = policy.clone();
+    let handler = ServerCertificateErrorDetectedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else {
+            return Ok(());
+        };
+        let mut request_uri = PWSTR::null();
+        unsafe { args.RequestUri(&mut request_uri)? };
+        let request_uri = take_pwstr(request_uri);
+        let uri_matches = Url::parse(&request_uri)
+            .ok()
+            .is_some_and(|url| policy.matches(&url));
+        let certificate_matches = unsafe { args.ServerCertificate() }
+            .and_then(|certificate| {
+                let mut pem = PWSTR::null();
+                unsafe { certificate.ToPemEncoding(&mut pem)? };
+                Ok(take_pwstr(pem))
+            })
+            .ok()
+            .and_then(|pem| decode_certificate_pem(&pem))
+            .is_some_and(|actual| actual == expected);
+
+        if uri_matches && certificate_matches {
+            unsafe { args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW)? };
+        } else {
+            unsafe { args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL)? };
+            let _ = event_proxy.send_event(ShellEvent::Fatal(format!(
+                "desktop WebView rejected an unexpected TLS certificate for {request_uri}"
+            )));
+        }
+        Ok(())
+    }));
+    let mut token = 0;
+    unsafe { webview.add_ServerCertificateErrorDetected(&handler, &mut token) }
+        .context("install WebView2 certificate pin")?;
+    Ok(())
+}
+
+#[cfg(all(feature = "desktop-app", target_os = "linux"))]
+fn install_platform_certificate_pin(
+    webview: &WebView,
+    policy: &OriginPolicy,
+    certificate_der: &[u8],
+    event_proxy: EventLoopProxy<ShellEvent>,
+) -> Result<()> {
+    use gio::prelude::TlsCertificateExt;
+    use webkit2gtk::{WebContextExt, WebViewExt};
+    use wry::WebViewExtUnix;
+
+    let expected = certificate_der.to_vec();
+    let policy = policy.clone();
+    webview.webview().connect_load_failed_with_tls_errors(
+        move |webview, failing_uri, certificate, _errors| {
+            let uri_matches = Url::parse(failing_uri)
+                .ok()
+                .is_some_and(|url| policy.matches(&url));
+            let certificate_matches = certificate
+                .certificate()
+                .is_some_and(|actual| actual.as_ref() == expected.as_slice());
+            if uri_matches
+                && certificate_matches
+                && let Some(context) = webview.context()
+            {
+                context.allow_tls_certificate_for_host(certificate, &policy.host);
+                webview.load_uri(failing_uri);
+                return true;
+            }
+            let _ = event_proxy.send_event(ShellEvent::Fatal(format!(
+                "desktop WebView rejected an unexpected TLS certificate for {failing_uri}"
+            )));
+            true
+        },
+    );
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn decode_certificate_pem(pem: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+
+    let encoded = pem
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("-----"))
+        .collect::<String>();
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn origin_policy_allows_only_the_exact_https_origin() {
+        let policy = OriginPolicy::new(&Url::parse("https://localhost:43123/").unwrap()).unwrap();
+        assert_eq!(
+            policy.decide("https://LOCALHOST:43123/sessions?q=1#active"),
+            NavigationDecision::Internal
+        );
+        assert_eq!(
+            policy.decide("https://localhost:43124/"),
+            NavigationDecision::External
+        );
+        assert_eq!(
+            policy.decide("http://localhost:43123/"),
+            NavigationDecision::External
+        );
+        assert_eq!(
+            policy.decide("javascript:alert(1)"),
+            NavigationDecision::Block
+        );
+        assert_eq!(policy.decide("not a url"), NavigationDecision::Block);
+    }
+
+    #[test]
+    fn origin_policy_rejects_insecure_or_credentialed_origins() {
+        assert!(OriginPolicy::new(&Url::parse("http://localhost:1234/").unwrap()).is_err());
+        assert!(OriginPolicy::new(&Url::parse("https://user@localhost:1234/").unwrap()).is_err());
+    }
+
+    #[test]
+    fn certificate_pem_decoder_ignores_armor_and_whitespace() {
+        let bytes = b"desktop certificate";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let pem = format!("-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----\n");
+        assert_eq!(
+            decode_certificate_pem(&pem).as_deref(),
+            Some(bytes.as_slice())
+        );
+    }
+
+    #[test]
+    fn tls_preflight_accepts_only_the_configured_certificate() {
+        let expected = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+            .expect("expected certificate");
+        let expected_der = expected.cert.der().to_vec();
+        let (origin, server) = spawn_tls_server(&expected);
+        verify_pinned_tls(&DesktopShellOptions {
+            origin,
+            certificate_der: expected_der,
+        })
+        .expect("expected certificate must pass");
+        server.join().expect("server thread");
+
+        let presented = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+            .expect("presented certificate");
+        let unexpected = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+            .expect("unexpected certificate");
+        let (origin, server) = spawn_tls_server(&presented);
+        let error = verify_pinned_tls(&DesktopShellOptions {
+            origin,
+            certificate_der: unexpected.cert.der().to_vec(),
+        })
+        .expect_err("different certificate must fail");
+        assert!(format!("{error:#}").contains("verify desktop TLS certificate"));
+        server.join().expect("server thread");
+    }
+
+    fn spawn_tls_server(certificate: &rcgen::CertifiedKey) -> (Url, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind TLS listener");
+        let address = listener.local_addr().expect("TLS listener address");
+        let certs = vec![CertificateDer::from(certificate.cert.der().to_vec())];
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.key_pair.serialize_der(),
+        ));
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("TLS versions")
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("server certificate");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept TLS client");
+            let mut connection =
+                rustls::ServerConnection::new(Arc::new(config)).expect("server connection");
+            let _ = connection.complete_io(&mut stream);
+        });
+        (
+            Url::parse(&format!("https://{address}/")).expect("origin URL"),
+            server,
+        )
+    }
+}

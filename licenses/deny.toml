@@ -41,6 +41,11 @@ exceptions = [
     { crate = "brokk-mj-voice-worker", allow = ["GPL-3.0-only"] },
     # MPL applies at file scope. Keep it limited to the reviewed crate.
     { crate = "option-ext@0.2.0", allow = ["MPL-2.0"] },
+    # Wry's Android-only URL handling uses Servo's MPL-covered parser crates.
+    { crate = "cssparser@0.36.0", allow = ["MPL-2.0"] },
+    { crate = "cssparser-macros@0.6.1", allow = ["MPL-2.0"] },
+    { crate = "dtoa-short@0.3.5", allow = ["MPL-2.0"] },
+    { crate = "selectors@0.36.1", allow = ["MPL-2.0"] },
     # The bzip2/libbzip2 1.0.6 terms are permissive but use a non-SPDX id.
     { crate = "libbz2-rs-sys@0.2.5", allow = ["bzip2-1.0.6"] },
 ]

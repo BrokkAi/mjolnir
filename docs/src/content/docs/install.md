@@ -124,7 +124,38 @@ cargo build --release
 ./target/release/mj --cwd .
 ```
 
-You only need Rust to build from source or contribute. See
+The default terminal build needs no WebView development package. To compile
+the optional `desktop-app` feature used for native desktop-shell development
+on macOS, install Apple's Command Line Tools. The shell uses the WebKit
+framework included in the macOS SDK:
+
+```bash
+xcode-select --install
+```
+
+On Linux, install the WebKitGTK 4.1 development package first:
+
+```bash
+# Ubuntu or Debian
+sudo apt-get update
+sudo apt-get install libwebkit2gtk-4.1-dev
+
+# Fedora
+sudo dnf install webkit2gtk4.1-devel
+```
+
+Fedora's `webkit2gtk4.1-devel` package provides the GTK 3 and libsoup 3 API
+expected by Wry; `webkitgtk6.0-devel` is the incompatible GTK 4 API. Build the
+feature with:
+
+```bash
+cargo build --release --features desktop-app
+```
+
+The default terminal client only needs Rust. On Linux, the optional desktop
+shell needs WebKitGTK and the voice worker needs ALSA development files. On
+macOS, both use frameworks from the SDK installed with the Command Line Tools.
+See
 [CONTRIBUTING.md](https://github.com/BrokkAi/mjolnir/blob/master/CONTRIBUTING.md)
 for voice prerequisites and the full validation matrix.
 
