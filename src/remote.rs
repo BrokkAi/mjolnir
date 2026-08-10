@@ -8246,8 +8246,11 @@ fn desktop_app_dir() -> PathBuf {
 
 #[derive(Debug)]
 struct DesktopTls {
-    cert_path: PathBuf,
-    key_path: PathBuf,
+    /// Combined private-key + certificate PEM. The pair lives in one file that
+    /// is published with a single atomic rename, and the server uses these
+    /// in-memory bytes rather than re-reading disk, so concurrent launches can
+    /// never serve a mismatched pair or one that differs from the pinned DER.
+    pem: Vec<u8>,
     /// DER encoding of the served certificate, pinned by the desktop shell.
     certificate_der: Vec<u8>,
 }
@@ -8442,22 +8445,14 @@ fn write_desktop_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
 /// as a servable certificate/key pair; corrupt-but-safe material is replaced.
 fn ensure_desktop_tls(root: &Path) -> Result<DesktopTls> {
     ensure_desktop_dir(root)?;
-    let cert_path = root.join("cert.pem");
-    let key_path = root.join("key.pem");
-    let existing_cert = read_desktop_tls_file(&cert_path)?;
-    let existing_key = read_desktop_tls_file(&key_path)?;
-    if let (Some(cert_pem), Some(_)) = (&existing_cert, &existing_key) {
-        match load_certified_key(&cert_path, &key_path) {
-            Ok(_) => {
-                if let Some(certificate_der) = first_certificate_der(cert_pem) {
-                    return Ok(DesktopTls {
-                        cert_path,
-                        key_path,
-                        certificate_der,
-                    });
-                }
-            }
-            Err(error) => debug!("replacing unusable desktop TLS material: {error:#}"),
+    let pem_path = root.join("tls.pem");
+    if let Some(pem) = read_desktop_tls_file(&pem_path)? {
+        match parse_desktop_tls(&pem) {
+            Some(tls) => return Ok(tls),
+            None => debug!(
+                "replacing unusable desktop TLS material at {}",
+                pem_path.display()
+            ),
         }
     }
 
@@ -8467,12 +8462,23 @@ fn ensure_desktop_tls(root: &Path) -> Result<DesktopTls> {
         "::1".to_string(),
     ])
     .context("generate desktop self-signed certificate")?;
-    let certificate_der = cert.cert.der().to_vec();
-    write_desktop_file_atomically(&key_path, cert.key_pair.serialize_pem().as_bytes())?;
-    write_desktop_file_atomically(&cert_path, cert.cert.pem().as_bytes())?;
+    let mut pem = cert.key_pair.serialize_pem().into_bytes();
+    pem.extend_from_slice(cert.cert.pem().as_bytes());
+    write_desktop_file_atomically(&pem_path, &pem)?;
     Ok(DesktopTls {
-        cert_path,
-        key_path,
+        pem,
+        certificate_der: cert.cert.der().to_vec(),
+    })
+}
+
+/// Split a combined desktop `tls.pem` into a servable pair, or `None` when
+/// either the certificate or the private key is missing or unparseable so the
+/// caller regenerates both.
+fn parse_desktop_tls(pem: &[u8]) -> Option<DesktopTls> {
+    let certificate_der = first_certificate_der(pem)?;
+    rustls_pemfile::private_key(&mut &pem[..]).ok().flatten()?;
+    Some(DesktopTls {
+        pem: pem.to_vec(),
         certificate_der,
     })
 }
@@ -8595,8 +8601,10 @@ async fn prepare_desktop_runtime(
         },
         DESKTOP_SESSION_COOKIE_NAME,
     );
+    // The PEM parsers each pick out their own block type, so the combined
+    // in-memory pair feeds both sides without touching disk again.
     let tls_config =
-        axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
+        axum_server::tls_rustls::RustlsConfig::from_pem(tls.pem.clone(), tls.pem.clone())
             .await
             .context("load desktop TLS certificate")?;
     let (listener, local_addr) = bind_desktop_listener()?;
@@ -17869,7 +17877,7 @@ mod tests {
                 .mode()
                 & 0o7777;
             assert_eq!(dir_mode, 0o700);
-            let key_mode = std::fs::metadata(&first.key_path)
+            let key_mode = std::fs::metadata(root.join("tls.pem"))
                 .expect("desktop key metadata")
                 .permissions()
                 .mode()
@@ -17883,12 +17891,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("desktop-app");
         let first = ensure_desktop_tls(&root).expect("create desktop TLS material");
-        write_desktop_file_atomically(&first.cert_path, b"not a certificate")
+        write_desktop_file_atomically(&root.join("tls.pem"), b"not a certificate")
             .expect("corrupt certificate");
         let second = ensure_desktop_tls(&root).expect("regenerate desktop TLS material");
         assert_ne!(first.certificate_der, second.certificate_der);
         // The regenerated pair must be servable again.
-        load_certified_key(&second.cert_path, &second.key_path).expect("regenerated pair parses");
+        assert!(parse_desktop_tls(&second.pem).is_some());
     }
 
     #[cfg(unix)]
@@ -17896,17 +17904,18 @@ mod tests {
     fn desktop_tls_fails_closed_on_symlinked_key() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("desktop-app");
-        let tls = ensure_desktop_tls(&root).expect("create desktop TLS material");
-        let moved = dir.path().join("moved-key.pem");
-        std::fs::rename(&tls.key_path, &moved).expect("move key aside");
-        std::os::unix::fs::symlink(&moved, &tls.key_path).expect("symlink key");
+        ensure_desktop_tls(&root).expect("create desktop TLS material");
+        let pem_path = root.join("tls.pem");
+        let moved = dir.path().join("moved-tls.pem");
+        std::fs::rename(&pem_path, &moved).expect("move key aside");
+        std::os::unix::fs::symlink(&moved, &pem_path).expect("symlink key");
         let error = format!(
             "{:#}",
             ensure_desktop_tls(&root).expect_err("symlinked key must fail closed")
         );
         assert!(error.contains("symlink"), "unexpected error: {error}");
         assert!(
-            error.contains("key.pem"),
+            error.contains("tls.pem"),
             "error must name the offending file: {error}"
         );
     }
@@ -17917,8 +17926,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("desktop-app");
-        let tls = ensure_desktop_tls(&root).expect("create desktop TLS material");
-        std::fs::set_permissions(&tls.key_path, std::fs::Permissions::from_mode(0o640))
+        ensure_desktop_tls(&root).expect("create desktop TLS material");
+        std::fs::set_permissions(root.join("tls.pem"), std::fs::Permissions::from_mode(0o640))
             .expect("loosen key permissions");
         let error = format!(
             "{:#}",
