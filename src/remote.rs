@@ -5859,6 +5859,7 @@ struct MjAccountEntry {
     status: String,
     enables: String,
     signed_in: bool,
+    login_supported: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -6119,6 +6120,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                 status: credentials.status(),
                 enables: vendor.enables().to_string(),
                 signed_in: credentials.available(),
+                login_supported: vendor.supports_headless_login(),
             }
         })
         .collect();
@@ -6451,6 +6453,15 @@ async fn mjconfig_login_start(
         StatusCode::UNPROCESSABLE_ENTITY,
         format!("unknown vendor: {}", request.vendor),
     ))?;
+    if !vendor.supports_headless_login() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "{} sign-in requires an interactive terminal; run mj locally and use the ACP Servers account row",
+                vendor.label()
+            ),
+        ));
+    }
     {
         let guard = state.mjconfig.login.lock().expect("mjconfig login lock");
         if guard
@@ -10215,6 +10226,10 @@ mod tests {
             .as_array()
             .expect("accounts");
         assert_eq!(accounts.len(), crate::auth::AuthVendor::ALL.len());
+        assert_eq!(accounts[0]["vendor"], "openai");
+        assert_eq!(accounts[0]["login_supported"], true);
+        assert_eq!(accounts[1]["vendor"], "anthropic");
+        assert_eq!(accounts[1]["login_supported"], false);
 
         let themes = snapshot["appearance"]["themes"].as_array().expect("themes");
         assert_eq!(themes.len(), crate::theme::TerminalThemeKind::ALL.len());

@@ -2395,6 +2395,12 @@ mod tests {
             editor.handle_key(KeyCode::Enter),
             SettingsAction::Authenticate(crate::auth::AuthVendor::OpenAi)
         );
+
+        editor.selected = 1;
+        assert_eq!(
+            editor.handle_key(KeyCode::Enter),
+            SettingsAction::Authenticate(crate::auth::AuthVendor::Anthropic)
+        );
     }
 
     #[test]

@@ -163,18 +163,25 @@ for voice prerequisites and the full validation matrix.
 
 You need credentials for at least one provider; a mixed team needs both.
 
-For Codex, authenticate with the CLI bundled through `codex-acp`:
+On first launch, open the **ACP Servers** tab in onboarding and select the
+OpenAI or Anthropic account row to sign in. Mjolnir launches the compatible
+provider CLI bundled through that account's ACP package; no global Codex or
+Claude installation is required.
+
+For Codex, the equivalent manual command is:
 
 ```bash
 npx --yes --package=@agentclientprotocol/codex-acp codex login
 ```
 
-For Claude, authenticate with the Claude Code executable bundled through
-`claude-agent-acp`:
+For a Claude subscription, the equivalent manual command is:
 
 ```bash
-npx -y @agentclientprotocol/claude-agent-acp --cli
+npx -y @agentclientprotocol/claude-agent-acp --cli auth login --claudeai
 ```
+
+The Anthropic account row also offers Anthropic Console sign-in for API usage
+billing.
 
 These commands do not install a second global provider CLI. The ACP packages
 bring compatible platform-specific Codex and Claude executables as transitive

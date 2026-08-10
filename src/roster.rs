@@ -347,50 +347,11 @@ fn claude_auth_status() -> ClaudeAuthStatus {
 }
 
 fn claude_detection() -> Option<String> {
-    for name in ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] {
-        if nonempty_env(&[name]) {
-            return Some(format!("{name} is set"));
-        }
+    match crate::auth::detect(crate::auth::AuthVendor::Anthropic) {
+        crate::auth::CredentialSource::Environment(name) => Some(format!("{name} is set")),
+        crate::auth::CredentialSource::File(path) => Some(path.display().to_string()),
+        crate::auth::CredentialSource::Missing => None,
     }
-    let configured = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
-    let root = configured
-        .clone()
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))?;
-    if let Some(evidence) = credential_file_evidence(
-        &root.join(".credentials.json"),
-        &[
-            "/claudeAiOauth/accessToken",
-            "/claudeAiOauth/refreshToken",
-            "/oauth/accessToken",
-            "/apiKey",
-        ],
-    ) {
-        return Some(evidence);
-    }
-
-    // Claude Code may keep the OAuth secret in the OS credential store. Its
-    // non-secret account record still proves that sign-in was completed and
-    // lets the ACP probe perform the authoritative runtime check.
-    let scoped_config = root.join(".config.json");
-    if let Some(evidence) = credential_file_evidence(
-        &scoped_config,
-        &[
-            "/oauthAccount/accountUuid",
-            "/oauthAccount/organizationUuid",
-        ],
-    ) {
-        return Some(evidence);
-    }
-    let legacy_config = configured
-        .map(|root| root.join(".claude.json"))
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude.json")))?;
-    credential_file_evidence(
-        &legacy_config,
-        &[
-            "/oauthAccount/accountUuid",
-            "/oauthAccount/organizationUuid",
-        ],
-    )
 }
 
 fn codex_detection() -> Option<String> {

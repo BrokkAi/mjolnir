@@ -7,20 +7,23 @@ use anyhow::{Context, Result, bail};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthVendor {
     OpenAi,
+    Anthropic,
 }
 
 impl AuthVendor {
-    pub const ALL: [Self; 1] = [Self::OpenAi];
+    pub const ALL: [Self; 2] = [Self::OpenAi, Self::Anthropic];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::OpenAi => "OpenAI / ChatGPT",
+            Self::Anthropic => "Anthropic / Claude",
         }
     }
 
     pub fn enables(self) -> &'static str {
         match self {
             Self::OpenAi => "Codex",
+            Self::Anthropic => "Claude",
         }
     }
 
@@ -28,11 +31,18 @@ impl AuthVendor {
     pub fn id(self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
         }
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|vendor| vendor.id() == id)
+    }
+
+    /// Whether the remote viewer can complete this vendor's login without an
+    /// interactive terminal or a channel for writing to the child process.
+    pub fn supports_headless_login(self) -> bool {
+        matches!(self, Self::OpenAi)
     }
 }
 
@@ -74,6 +84,7 @@ impl CredentialSource {
 pub fn detect(vendor: AuthVendor) -> CredentialSource {
     match vendor {
         AuthVendor::OpenAi => detect_openai(),
+        AuthVendor::Anthropic => detect_anthropic(),
     }
 }
 
@@ -105,6 +116,67 @@ fn detect_openai_with(
             "/OPENAI_API_KEY",
             "/tokens/access_token",
             "/tokens/refresh_token",
+        ],
+    )
+}
+
+fn detect_anthropic() -> CredentialSource {
+    let configured = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+    let home = dirs::home_dir();
+    let root = configured
+        .clone()
+        .or_else(|| home.as_ref().map(|home| home.join(".claude")));
+    detect_anthropic_with(
+        nonempty_env("CLAUDE_CODE_OAUTH_TOKEN"),
+        nonempty_env("ANTHROPIC_API_KEY"),
+        root,
+        configured
+            .map(|root| root.join(".claude.json"))
+            .or_else(|| home.map(|home| home.join(".claude.json"))),
+    )
+}
+
+fn detect_anthropic_with(
+    has_oauth_token: bool,
+    has_api_key: bool,
+    root: Option<PathBuf>,
+    legacy_config: Option<PathBuf>,
+) -> CredentialSource {
+    if has_oauth_token {
+        return CredentialSource::Environment("CLAUDE_CODE_OAUTH_TOKEN");
+    }
+    if has_api_key {
+        return CredentialSource::Environment("ANTHROPIC_API_KEY");
+    }
+    if let Some(root) = root {
+        let credentials = root.join(".credentials.json");
+        if credential_file_has_any(
+            &credentials,
+            &[
+                "/claudeAiOauth/accessToken",
+                "/claudeAiOauth/refreshToken",
+                "/oauth/accessToken",
+                "/apiKey",
+            ],
+        ) {
+            return CredentialSource::File(credentials);
+        }
+        let config = root.join(".config.json");
+        if credential_file_has_any(
+            &config,
+            &[
+                "/oauthAccount/accountUuid",
+                "/oauthAccount/organizationUuid",
+            ],
+        ) {
+            return CredentialSource::File(config);
+        }
+    }
+    detect_file(
+        legacy_config,
+        &[
+            "/oauthAccount/accountUuid",
+            "/oauthAccount/organizationUuid",
         ],
     )
 }
@@ -141,8 +213,8 @@ fn credential_file_has_any(path: &Path, pointers: &[&str]) -> bool {
 
 /// Login invocation for contexts without an interactive terminal (the remote
 /// viewer's sign-in runs the command server-side and streams its output to the
-/// browser). OpenAI always uses the device-auth flow there: `codex login`
-/// without it wants to open a local browser, which a headless server can't.
+/// browser). Only OpenAI currently offers a device-auth flow that can complete
+/// without writing to the child process.
 pub struct LoginInvocation {
     pub command: PathBuf,
     pub args: Vec<String>,
@@ -150,11 +222,34 @@ pub struct LoginInvocation {
 }
 
 pub async fn headless_login_invocation(vendor: AuthVendor) -> Result<LoginInvocation> {
+    if !vendor.supports_headless_login() {
+        bail!(
+            "{} sign-in requires an interactive terminal; run mj locally and use the ACP Servers account row",
+            vendor.label()
+        );
+    }
     let mut invocation = bundled_invocation(vendor).await?;
-    invocation
-        .args
-        .extend(["login".to_string(), "--device-auth".to_string()]);
+    invocation.args.extend(
+        headless_login_args(vendor)
+            .iter()
+            .map(|arg| (*arg).to_string()),
+    );
     Ok(invocation)
+}
+
+fn headless_login_args(vendor: AuthVendor) -> &'static [&'static str] {
+    match vendor {
+        AuthVendor::OpenAi => &["login", "--device-auth"],
+        AuthVendor::Anthropic => &[],
+    }
+}
+
+fn anthropic_login_args(use_console: bool) -> Vec<&'static str> {
+    if use_console {
+        vec!["auth", "login", "--console"]
+    } else {
+        vec!["auth", "login", "--claudeai"]
+    }
 }
 
 pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
@@ -189,6 +284,32 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
                 vec!["login"]
             }
         }
+        AuthVendor::Anthropic => {
+            let options = [
+                crate::menu::MenuOption {
+                    label: "Claude subscription",
+                    hint: "Claude Pro, Max, Team, or Enterprise".to_string(),
+                    shortcuts: &['s'],
+                },
+                crate::menu::MenuOption {
+                    label: "Anthropic Console",
+                    hint: "API usage billing".to_string(),
+                    shortcuts: &['c'],
+                },
+            ];
+            let Some(selected) = crate::menu::select_inline_cancelable(
+                "Anthropic / Claude sign-in",
+                "Enter confirms · Esc cancels",
+                &options,
+                0,
+            )?
+            else {
+                return Ok(LoginOutcome::Cancelled(
+                    "Anthropic / Claude sign-in cancelled".to_string(),
+                ));
+            };
+            anthropic_login_args(selected == 1)
+        }
     };
     println!(
         "Signing in to {}. Mjolnir will return when it finishes.\n",
@@ -219,9 +340,7 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
 }
 
 async fn bundled_invocation(vendor: AuthVendor) -> Result<LoginInvocation> {
-    let provider = match vendor {
-        AuthVendor::OpenAi => crate::acp::ProviderCli::Codex,
-    };
+    let provider = provider_cli(vendor);
     let prepared = crate::acp::prepare_provider_cli(provider, &Default::default())
         .await
         .with_context(|| format!("prepare bundled {} CLI", vendor.label()))?;
@@ -232,15 +351,55 @@ async fn bundled_invocation(vendor: AuthVendor) -> Result<LoginInvocation> {
     })
 }
 
+fn provider_cli(vendor: AuthVendor) -> crate::acp::ProviderCli {
+    match vendor {
+        AuthVendor::OpenAi => crate::acp::ProviderCli::Codex,
+        AuthVendor::Anthropic => crate::acp::ProviderCli::Claude,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn vendors_report_labels_and_capabilities() {
-        assert_eq!(AuthVendor::ALL, [AuthVendor::OpenAi]);
+        assert_eq!(AuthVendor::ALL, [AuthVendor::OpenAi, AuthVendor::Anthropic]);
         assert_eq!(AuthVendor::OpenAi.label(), "OpenAI / ChatGPT");
         assert_eq!(AuthVendor::OpenAi.enables(), "Codex");
+        assert_eq!(AuthVendor::Anthropic.label(), "Anthropic / Claude");
+        assert_eq!(AuthVendor::Anthropic.enables(), "Claude");
+        assert_eq!(AuthVendor::Anthropic.id(), "anthropic");
+        assert!(AuthVendor::OpenAi.supports_headless_login());
+        assert!(!AuthVendor::Anthropic.supports_headless_login());
+        assert_eq!(
+            AuthVendor::from_id("anthropic"),
+            Some(AuthVendor::Anthropic)
+        );
+        assert_eq!(
+            provider_cli(AuthVendor::Anthropic),
+            crate::acp::ProviderCli::Claude
+        );
+    }
+
+    #[test]
+    fn vendors_select_their_supported_login_commands() {
+        assert_eq!(
+            headless_login_args(AuthVendor::OpenAi),
+            ["login", "--device-auth"]
+        );
+        assert!(headless_login_args(AuthVendor::Anthropic).is_empty());
+        assert_eq!(anthropic_login_args(false), ["auth", "login", "--claudeai"]);
+        assert_eq!(anthropic_login_args(true), ["auth", "login", "--console"]);
+    }
+
+    #[tokio::test]
+    async fn anthropic_headless_login_requires_an_interactive_terminal() {
+        let error = match headless_login_invocation(AuthVendor::Anthropic).await {
+            Ok(_) => panic!("headless Claude login must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("interactive terminal"));
     }
 
     #[test]
@@ -316,6 +475,56 @@ mod tests {
         );
         assert_eq!(
             detect_openai_with(false, false, None),
+            CredentialSource::Missing
+        );
+    }
+
+    #[test]
+    fn anthropic_detection_prefers_environment_then_current_and_legacy_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".claude");
+        std::fs::create_dir(&root).unwrap();
+        let credentials = root.join(".credentials.json");
+        std::fs::write(
+            &credentials,
+            r#"{"claudeAiOauth":{"refreshToken":"refresh"}}"#,
+        )
+        .unwrap();
+        let legacy = dir.path().join(".claude.json");
+        std::fs::write(&legacy, r#"{"oauthAccount":{"accountUuid":"account"}}"#).unwrap();
+
+        assert_eq!(
+            detect_anthropic_with(true, true, Some(root.clone()), Some(legacy.clone())),
+            CredentialSource::Environment("CLAUDE_CODE_OAUTH_TOKEN")
+        );
+        assert_eq!(
+            detect_anthropic_with(false, true, Some(root.clone()), Some(legacy.clone())),
+            CredentialSource::Environment("ANTHROPIC_API_KEY")
+        );
+        assert_eq!(
+            detect_anthropic_with(false, false, Some(root.clone()), Some(legacy.clone())),
+            CredentialSource::File(credentials)
+        );
+
+        std::fs::remove_file(root.join(".credentials.json")).unwrap();
+        let scoped_config = root.join(".config.json");
+        std::fs::write(
+            &scoped_config,
+            r#"{"oauthAccount":{"organizationUuid":"organization"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_anthropic_with(false, false, Some(root.clone()), Some(legacy.clone())),
+            CredentialSource::File(scoped_config.clone())
+        );
+
+        std::fs::remove_file(scoped_config).unwrap();
+        assert_eq!(
+            detect_anthropic_with(false, false, Some(root), Some(legacy.clone())),
+            CredentialSource::File(legacy)
+        );
+        assert_eq!(
+            detect_anthropic_with(false, false, None, None),
             CredentialSource::Missing
         );
     }

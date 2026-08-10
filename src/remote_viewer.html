@@ -4280,12 +4280,14 @@
                 await mjJobRequest("/api/mjconfig/login", "DELETE");
               }),
             );
-          } else {
+          } else if (account.login_supported) {
             row.appendChild(
               mjButton(account.signed_in ? "Sign in again" : "Sign in", async () => {
                 await mjJobRequest("/api/mjconfig/login", "POST", { vendor: account.vendor });
               }),
             );
+          } else {
+            row.appendChild(mjDetail("sign in from the local mj terminal"));
           }
           mjconfigBodyEl.appendChild(row);
           if (loginActive) {

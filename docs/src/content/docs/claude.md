@@ -25,27 +25,31 @@ model service itself self-hosted.
 
 ## Recommended setup
 
-Complete sign-in with the Claude Code executable supplied by the ACP route:
+After [installing Mjolnir](/install/), open a repository and run:
 
 ```bash
-npx -y @agentclientprotocol/claude-agent-acp --cli
+mj
+```
+
+Open the onboarding **ACP Servers** tab, select **Anthropic / Claude**, and
+choose **Claude subscription**. Mjolnir launches the Claude Code executable
+supplied by the ACP route and returns to onboarding after sign-in.
+
+The equivalent manual command is:
+
+```bash
+npx -y @agentclientprotocol/claude-agent-acp --cli auth login --claudeai
 ```
 
 You do not need a separate global `@anthropic-ai/claude-code` installation.
 Mjolnir detects the credentials written by this flow and runs the compatible
 Claude Code version installed transitively with `claude-agent-acp`.
 
-Then [install Mjolnir](/install/), open a repository, and run:
-
-```bash
-mj
-```
-
 First launch opens Mjolnir's onboarding on the Team tab. Choose **Claude** to
 keep primary, subagent, and review model selection on Auto while constraining
 all three seats to the Claude adapter. Then confirm:
 
-1. **Claude Code** reports that you are logged in.
+1. **Anthropic / Claude** reports that you are signed in.
 2. The **Claude** ACP server is detected and enabled.
 3. The primary model resolves to a Claude model. Keeping the model on **Auto**
    lets Mjolnir choose among currently launchable ranked Claude models.
