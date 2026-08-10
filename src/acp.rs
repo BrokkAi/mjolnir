@@ -6370,6 +6370,11 @@ mod tests {
     use std::time::Duration;
     use tokio::io::split;
 
+    /// Deadline for waits whose expiry fails the test. Only a hung test ever
+    /// waits this long, so passing runs never pay for it; loaded CI runners
+    /// (notably Windows) blow well past a few seconds.
+    const EVENT_DEADLINE: Duration = Duration::from_secs(60);
+
     #[test]
     fn exact_command_discovery_does_not_guess_aliases_or_case() {
         let commands = HashSet::from(["compact".to_string(), "clear".to_string()]);
@@ -6712,7 +6717,7 @@ mod tests {
     }
 
     async fn allow_next_permission(ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>) {
-        let ev = tokio::time::timeout(Duration::from_secs(2), ui_rx.recv())
+        let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
             .await
             .expect("permission event")
             .expect("permission event");
@@ -6726,7 +6731,7 @@ mod tests {
     }
 
     async fn expect_empty_session_config(ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>) {
-        let ev = tokio::time::timeout(Duration::from_secs(2), ui_rx.recv())
+        let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
             .await
             .expect("session config event")
             .expect("session config event");
@@ -6745,7 +6750,7 @@ mod tests {
     }
 
     async fn next_session_update(ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>) -> SessionUpdate {
-        let ev = tokio::time::timeout(Duration::from_secs(2), ui_rx.recv())
+        let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
             .await
             .expect("session update event")
             .expect("session update event");
@@ -7689,7 +7694,7 @@ mod tests {
                 .is_err(),
             "shutdown must remove terminals from the active table"
         );
-        tokio::time::timeout(Duration::from_secs(5), terminal.wait_for_exit())
+        tokio::time::timeout(EVENT_DEADLINE, terminal.wait_for_exit())
             .await
             .expect("terminal process should exit after shutdown")
             .expect("terminal wait should resolve");
@@ -8316,7 +8321,7 @@ mod tests {
         stage: &str,
     ) -> UiEvent {
         tokio::select! {
-            event = tokio::time::timeout(Duration::from_secs(30), ui_rx.recv()) => event
+            event = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv()) => event
                 .unwrap_or_else(|_| {
                     panic!("timed out waiting for {stage} with the mock agent still alive")
                 })
@@ -8588,7 +8593,7 @@ mod tests {
                     let read_path = read_path.clone();
                     let write_path = write_path.clone();
                     tokio::spawn(async move {
-                        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                        let deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
                         let read = loop {
                             match cx
                                 .send_request(
@@ -9763,7 +9768,7 @@ mod tests {
         expected_session_id: &str,
     ) {
         loop {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timed out waiting for SessionStarted")
                 .expect("ui event channel closed");
@@ -9775,7 +9780,8 @@ mod tests {
     }
 
     async fn wait_for_prompt_count(prompts: &Arc<std::sync::Mutex<Vec<String>>>, count: usize) {
-        for _ in 0..100 {
+        let deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
+        while tokio::time::Instant::now() < deadline {
             if prompts.lock().expect("prompt log").len() >= count {
                 return;
             }
@@ -9786,7 +9792,7 @@ mod tests {
 
     async fn wait_for_fatal(ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>) -> String {
         loop {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timed out waiting for fatal ACP startup error")
                 .expect("ui event channel closed");
@@ -9801,7 +9807,7 @@ mod tests {
         expected_text: &str,
     ) {
         loop {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timed out waiting for SessionUpdate")
                 .expect("ui event channel closed");
@@ -9815,7 +9821,7 @@ mod tests {
     }
 
     async fn wait_for_atomic_bool(flag: &StdAtomicBool) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
         while tokio::time::Instant::now() < deadline {
             if flag.load(Ordering::SeqCst) {
                 return;
@@ -9953,7 +9959,7 @@ mod tests {
         let mut saw_connected = false;
         let mut saw_session = false;
         while !(saw_connected && saw_session) {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for handshake")
                 .expect("channel closed");
@@ -9976,7 +9982,7 @@ mod tests {
         let mut saw_update = false;
         let mut saw_done = false;
         while !(saw_update && saw_done) {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for prompt turn")
                 .expect("channel closed");
@@ -10056,7 +10062,7 @@ mod tests {
         let mut saw_warning = false;
         let mut saw_session = false;
         while !(saw_warning && saw_session) {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for setup events")
                 .expect("channel closed");
@@ -10076,7 +10082,7 @@ mod tests {
         assert!(saw_permission_update.load(Ordering::SeqCst));
 
         drop(cmd_tx);
-        let join = tokio::time::timeout(Duration::from_secs(2), client_task)
+        let join = tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not return after cmd channel drop");
         join.expect("client task panicked")
@@ -10325,7 +10331,7 @@ mod tests {
             .expect("canonical path");
         let mut saw_diff = false;
         loop {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for prompt turn")
                 .expect("channel closed");
@@ -10422,7 +10428,7 @@ mod tests {
 
         wait_for_session_started(&mut ui_rx, "test-session").await;
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
-        tokio::time::timeout(Duration::from_secs(5), client_task)
+        tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not finish")
             .expect("client task")
@@ -10457,7 +10463,7 @@ mod tests {
 
         wait_for_session_started(&mut ui_rx, "existing-session").await;
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
-        tokio::time::timeout(Duration::from_secs(5), client_task)
+        tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not finish")
             .expect("client task")
@@ -10506,7 +10512,7 @@ mod tests {
         ));
         wait_for_session_started(&mut ui_rx, "loaded-session").await;
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
-        tokio::time::timeout(Duration::from_secs(5), client_task)
+        tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not finish")
             .expect("client task")
@@ -10543,7 +10549,7 @@ mod tests {
         cmd_tx.send(UiCommand::ForkSession).expect("send fork");
         wait_for_session_started(&mut ui_rx, "forked-session").await;
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
-        tokio::time::timeout(Duration::from_secs(5), client_task)
+        tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not finish")
             .expect("client task")
@@ -10593,7 +10599,7 @@ mod tests {
             })
             .expect("main prompt after side source");
 
-        let event = tokio::time::timeout(Duration::from_secs(2), async {
+        let event = tokio::time::timeout(EVENT_DEADLINE, async {
             loop {
                 let event = ui_rx.recv().await.expect("event channel");
                 match event {
@@ -10664,7 +10670,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         ));
 
-        let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+        let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
             .await
             .expect("timeout waiting for fatal")
             .expect("event");
@@ -10676,7 +10682,7 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
         assert!(
-            tokio::time::timeout(Duration::from_secs(5), client_task)
+            tokio::time::timeout(EVENT_DEADLINE, client_task)
                 .await
                 .expect("drive_client did not finish")
                 .expect("client task")
@@ -10717,7 +10723,7 @@ mod tests {
         wait_for_session_started(&mut ui_rx, "test-session").await;
         expect_empty_session_config(&mut ui_rx).await;
         allow_next_permission(&mut ui_rx).await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
         loop {
             if let Ok(content) = tokio::fs::read_to_string(&write_path).await {
                 assert_eq!(content, "written by agent");
@@ -10756,7 +10762,7 @@ mod tests {
 
         let mut saw_initial_session = false;
         while !saw_initial_session {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for handshake")
                 .expect("channel closed");
@@ -10775,7 +10781,7 @@ mod tests {
         let mut saw_forked_session = false;
         let mut saw_forked_info = false;
         while !(saw_forked_session && saw_forked_info) {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for fork")
                 .expect("channel closed");
@@ -10826,7 +10832,7 @@ mod tests {
 
         let mut saw_session = false;
         while !saw_session {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for handshake")
                 .expect("channel closed");
@@ -10844,7 +10850,7 @@ mod tests {
 
         cmd_tx.send(UiCommand::ForkSession).expect("send fork");
 
-        let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+        let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
             .await
             .expect("timeout waiting for fork warning")
             .expect("channel closed");
@@ -10858,7 +10864,7 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         }
 
-        let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+        let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
             .await
             .expect("timeout waiting for fork failure")
             .expect("channel closed");
@@ -10899,7 +10905,7 @@ mod tests {
 
         let mut saw_resumed_session = false;
         while !saw_resumed_session {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for resumed handshake")
                 .expect("channel closed");
@@ -10927,7 +10933,7 @@ mod tests {
 
         let mut saw_done = false;
         while !saw_done {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for resumed prompt")
                 .expect("channel closed");
@@ -11034,7 +11040,7 @@ mod tests {
         let mut saw_connected = false;
         let mut saw_session = false;
         while !(saw_connected && saw_session) {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for handshake")
                 .expect("channel closed");
@@ -11057,7 +11063,7 @@ mod tests {
             .expect("send prompt");
 
         loop {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for failed prompt")
                 .expect("channel closed");
@@ -11103,7 +11109,7 @@ mod tests {
         let mut saw_connected = false;
         let mut saw_session = false;
         while !(saw_connected && saw_session) {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for handshake")
                 .expect("channel closed");
@@ -11126,7 +11132,7 @@ mod tests {
 
         let mut saw_cancelled = false;
         while !saw_cancelled {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for cancelled prompt")
                 .expect("channel closed");
@@ -11143,7 +11149,7 @@ mod tests {
         assert_eq!(cancel_hits.load(Ordering::SeqCst), 1);
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
-        let join = tokio::time::timeout(Duration::from_secs(2), client_task)
+        let join = tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not return after shutdown");
         join.expect("client task panicked")
@@ -11178,7 +11184,7 @@ mod tests {
         let mut saw_connected = false;
         let mut saw_session = false;
         while !(saw_connected && saw_session) {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for handshake")
                 .expect("channel closed");
@@ -11200,7 +11206,7 @@ mod tests {
 
         let mut state = AppState::new();
         loop {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for permission request")
                 .expect("channel closed");
@@ -11222,7 +11228,7 @@ mod tests {
         let mut saw_cancel_event = false;
         let mut saw_cancelled_prompt = false;
         while !(saw_cancel_event && saw_cancelled_prompt) {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for permission cancellation")
                 .expect("channel closed");
@@ -11244,7 +11250,7 @@ mod tests {
         assert!(permission_cancelled.load(Ordering::SeqCst));
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
-        let join = tokio::time::timeout(Duration::from_secs(2), client_task)
+        let join = tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not return after shutdown");
         join.expect("client task panicked")
@@ -11274,7 +11280,7 @@ mod tests {
 
         let mut saw_session = false;
         while !saw_session {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("handshake timeout")
                 .expect("channel closed");
@@ -11293,7 +11299,7 @@ mod tests {
             .expect("send config update");
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
 
-        let join = tokio::time::timeout(Duration::from_secs(2), client_task)
+        let join = tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not return after shutdown");
         join.expect("client task panicked")
@@ -11323,7 +11329,7 @@ mod tests {
 
         let mut saw_session = false;
         while !saw_session {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("handshake timeout")
                 .expect("channel closed");
@@ -11335,7 +11341,7 @@ mod tests {
         cmd_tx.send(UiCommand::ForkSession).expect("send fork");
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
 
-        let join = tokio::time::timeout(Duration::from_secs(2), client_task)
+        let join = tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not return after shutdown");
         join.expect("client task panicked")
@@ -11384,7 +11390,7 @@ mod tests {
         // The agent streams "ack" as soon as it receives a prompt, so this
         // guarantees the first turn is in flight before the racing prompt.
         loop {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for first turn to start")
                 .expect("channel closed");
@@ -11408,7 +11414,7 @@ mod tests {
         let mut done = 0usize;
         let mut saw_queued_info = false;
         while done < 2 {
-            let ev = tokio::time::timeout(Duration::from_secs(10), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for both turns")
                 .expect("channel closed");
@@ -11462,7 +11468,7 @@ mod tests {
 
         let mut saw_session = false;
         while !saw_session {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("handshake timeout")
                 .expect("channel closed");
@@ -11483,7 +11489,7 @@ mod tests {
         // The fork never resolves in this rig, so the queued prompt cannot run;
         // what matters is that it was queued rather than rejected.
         loop {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for queued prompt notice")
                 .expect("channel closed");
@@ -11503,7 +11509,7 @@ mod tests {
         }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
-        let join = tokio::time::timeout(Duration::from_secs(2), client_task)
+        let join = tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not return after shutdown");
         join.expect("client task panicked")
@@ -11553,7 +11559,7 @@ mod tests {
         ));
 
         while !matches!(
-            tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("handshake timeout")
                 .expect("channel closed"),
@@ -11600,7 +11606,7 @@ mod tests {
         }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
-        tokio::time::timeout(Duration::from_secs(2), client_task)
+        tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("client shutdown timeout")
             .expect("client task")
@@ -11630,7 +11636,7 @@ mod tests {
 
         let mut saw_session = false;
         while !saw_session {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("handshake timeout")
                 .expect("channel closed");
@@ -11657,7 +11663,7 @@ mod tests {
 
         let mut saw_queued_info = false;
         loop {
-            let ev = tokio::time::timeout(Duration::from_secs(10), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for deferred prompt")
                 .expect("channel closed");
@@ -11680,7 +11686,7 @@ mod tests {
         }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
-        let join = tokio::time::timeout(Duration::from_secs(2), client_task)
+        let join = tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not return after shutdown");
         join.expect("client task panicked")
@@ -11716,7 +11722,7 @@ mod tests {
         // its `recv()` waiting on commands.
         let mut saw_session = false;
         while !saw_session {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("handshake timeout")
                 .expect("channel closed");
@@ -11729,7 +11735,7 @@ mod tests {
         // `recv()` and must return; drive_client must then resolve.
         drop(cmd_tx);
 
-        let join = tokio::time::timeout(Duration::from_secs(2), client_task)
+        let join = tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("drive_client did not return after cmd channel drop");
         join.expect("client task panicked")
@@ -11765,7 +11771,7 @@ mod tests {
 
         let run_task = tokio::spawn(run(cfg, ui_tx, cmd_rx));
 
-        let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+        let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
             .await
             .expect("timeout waiting for fatal event")
             .expect("channel closed");
@@ -11783,7 +11789,7 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
 
-        let result = tokio::time::timeout(Duration::from_secs(5), run_task)
+        let result = tokio::time::timeout(EVENT_DEADLINE, run_task)
             .await
             .expect("run task did not finish");
         assert!(result.expect("run task panicked").is_err());
@@ -11873,7 +11879,7 @@ mod tests {
 
         let run_task = tokio::spawn(run(cfg, ui_tx, cmd_rx));
 
-        let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+        let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
             .await
             .expect("timeout waiting for fatal")
             .expect("channel closed");
@@ -11891,7 +11897,7 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
 
-        let result = tokio::time::timeout(Duration::from_secs(5), run_task)
+        let result = tokio::time::timeout(EVENT_DEADLINE, run_task)
             .await
             .expect("run task did not finish");
         assert!(result.expect("run task panicked").is_err());
@@ -11910,7 +11916,7 @@ mod tests {
 
         let mut got_fatal = None;
         for _ in 0..6 {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for fatal")
                 .expect("channel closed");
@@ -11933,7 +11939,7 @@ mod tests {
             ui_rx.recv().await.is_none(),
             "expected the runtime to close the event channel after Fatal"
         );
-        let result = tokio::time::timeout(Duration::from_secs(5), run_task)
+        let result = tokio::time::timeout(EVENT_DEADLINE, run_task)
             .await
             .expect("run task did not finish");
         assert!(result.expect("run task panicked").is_err());
@@ -12032,7 +12038,7 @@ mod tests {
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
 
-        let error = tokio::time::timeout(Duration::from_secs(5), run(cfg, ui_tx, cmd_rx))
+        let error = tokio::time::timeout(EVENT_DEADLINE, run(cfg, ui_tx, cmd_rx))
             .await
             .expect("runtime timeout")
             .expect_err("stderr helper must fail");
@@ -12215,7 +12221,7 @@ mod tests {
         // independently and win the race first.
         termination.cancel();
 
-        let result = tokio::time::timeout(Duration::from_secs(5), run_task)
+        let result = tokio::time::timeout(EVENT_DEADLINE, run_task)
             .await
             .expect("run task did not finish")
             .expect("run task panicked");
@@ -12612,7 +12618,7 @@ mod tests {
 
         let mut replayed_history = false;
         while !replayed_history {
-            let event = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let event = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for replay")
                 .expect("channel closed");
@@ -12682,7 +12688,7 @@ mod tests {
         let mut retry_warning = None;
         let mut started = None;
         for _ in 0..8 {
-            let event = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let event = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for retried session")
                 .expect("event channel closed");
@@ -12750,7 +12756,7 @@ mod tests {
         let mut saw_retry_warning = false;
         let mut fatal = None;
         for _ in 0..8 {
-            let event = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let event = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for bounded retry failure")
                 .expect("event channel closed");
@@ -12774,7 +12780,7 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert!(fatal_emitted.load(Ordering::SeqCst));
 
-        let result = tokio::time::timeout(Duration::from_secs(2), client_task)
+        let result = tokio::time::timeout(EVENT_DEADLINE, client_task)
             .await
             .expect("client timeout")
             .expect("client panic")
@@ -12811,7 +12817,7 @@ mod tests {
         // succeeds), then Fatal from session/new.
         let mut got_fatal = None;
         for _ in 0..6 {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for fatal")
                 .expect("channel closed");
@@ -12858,7 +12864,7 @@ mod tests {
 
         let mut got_started = None;
         for _ in 0..6 {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for session start")
                 .expect("channel closed");
@@ -13234,7 +13240,7 @@ mod tests {
 
         let mut got_started = None;
         for _ in 0..6 {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
                 .expect("timeout waiting for session start")
                 .expect("channel closed");
@@ -13278,7 +13284,7 @@ mod tests {
             fatal_emitted.clone(),
         ));
 
-        let ev = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
+        let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
             .await
             .expect("timeout waiting for fatal")
             .expect("channel closed");
