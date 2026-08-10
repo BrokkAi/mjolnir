@@ -2,6 +2,7 @@
 name = "brokk-mj-voice-worker"
 version.workspace = true
 edition = "2024"
+rust-version = "1.97"
 description = "Native local speech-recognition sidecar for brokk-mjolnir"
 license = "GPL-3.0-only"
 repository = "https://github.com/BrokkAi/mjolnir"
