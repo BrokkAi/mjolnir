@@ -5492,7 +5492,7 @@
         const launchCardRoot = renderLaunchSessionCard();
         if (!sessions.length) {
           sessionCardById.clear();
-          sessionsEl.replaceChildren(launchCardRoot || emptyNote("No sessions have been published yet."));
+          sessionsEl.replaceChildren(launchCardRoot || emptyNote("No live sessions. Use New to start one."));
           return;
         }
         if (sessionsEl.querySelector(".empty")) {

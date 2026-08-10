@@ -4390,7 +4390,6 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    session_manager.start_session(cwd);
     let result = tokio::select! {
         joined = server_tasks.join_next() => {
             joined
@@ -10567,6 +10566,13 @@ mod tests {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("id=\"new-session-worktree\" checked"));
         assert!(viewer.contains("newSessionWorktreeEl.checked = true;"));
+    }
+
+    #[test]
+    fn embedded_viewer_empty_state_points_to_explicit_session_creation() {
+        let viewer = include_str!("remote_viewer.html");
+
+        assert!(viewer.contains("No live sessions. Use New to start one."));
     }
 
     #[test]
