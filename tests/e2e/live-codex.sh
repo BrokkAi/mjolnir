@@ -22,7 +22,7 @@ target="$workspace/subagent-live-$nonce.txt"
 target_name=$(basename "$target")
 token="SUBAGENT_LIVE_OK_$nonce"
 
-config="version = 3\n\n[agent]\nmodel = \"auto\"\n\n[subagents]\nmodel = \"auto\"\n"
+config="version = 4\n\n[agent]\nmodel = \"auto\"\n\n[subagents]\nmodel = \"auto\"\n"
 printf '%b' "$config" >"$root/home/.config/mj/config.toml"
 printf '%b' "$config" >"$root/home/Library/Application Support/mj/config.toml"
 

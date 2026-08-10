@@ -54,7 +54,7 @@ run_case() {
   # Both version markers are load-bearing: stale schema starts fresh, while
   # stale onboarding content opens the product-update card instead of a
   # session, so the pinned fixture routes would never run.
-  config="version = 3\nonboarding_version = 2\n\n[agent]\nreasoning_effort = \"high\"\n\n[subagents]\nmodel = \"gpt-5-6-luna\"\nreasoning_effort = \"high\"\n"
+  config="version = 4\nonboarding_version = 2\n\n[agent]\nreasoning_effort = \"high\"\n\n[subagents]\nmodel = \"gpt-5-6-luna\"\nreasoning_effort = \"high\"\n"
   printf '%b' "$config" >"$root/home/.config/mj/config.toml"
   printf '%b' "$config" >"$root/home/Library/Application Support/mj/config.toml"
 

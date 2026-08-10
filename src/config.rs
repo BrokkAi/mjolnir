@@ -13,13 +13,14 @@ use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
 
 pub const DISABLED_MODEL: &str = "disabled";
-pub const CONFIG_VERSION: u32 = 3;
+pub const CONFIG_VERSION: u32 = 4;
 /// Version of the product-model explanation accepted by the user. This is
 /// intentionally independent from the storage schema version.
 pub const ONBOARDING_CONTENT_VERSION: u32 = 4;
 pub const DEFAULT_ACP_PRIORITY: [&str; 2] = ["codex-acp", "claude-acp"];
-/// Schema version this build can migrate forward from.
-const MIGRATABLE_VERSION: u32 = 2;
+/// Schema versions this build can migrate forward from.
+const V2_CONFIG_VERSION: u32 = 2;
+const V3_CONFIG_VERSION: u32 = 3;
 
 /// Saved ACP session defaults are scoped to the seat that will consume them.
 /// Live accepted values remain in the top-level `session_config` cache.
@@ -440,6 +441,16 @@ impl ReviewTier {
         }
     }
 
+    /// Corrective re-review passes used when the user has not configured an
+    /// explicit round budget. Quick stays single-pass; Extended verifies one
+    /// findings-driven correction before releasing the turn.
+    pub const fn default_correction_rounds(self) -> u32 {
+        match self {
+            Self::Quick => 0,
+            Self::Extended => 1,
+        }
+    }
+
     /// Compact representation for the orchestrator's atomic live switch.
     pub const fn as_index(self) -> u8 {
         match self {
@@ -509,12 +520,11 @@ pub struct AgentConfig {
     /// `Quick` without editing anything.
     #[serde(default, skip_serializing_if = "ReviewTier::is_default")]
     pub review_tier: ReviewTier,
-    /// How many corrective re-review passes one user turn may dispatch after
-    /// its initial discrete review. `0` accepts the first correction without
-    /// re-reviewing it; the default spends exactly one bounded verification
-    /// pass, which is what stops findings-correction from re-arming forever.
-    #[serde(default = "default_max_correction_rounds")]
-    pub max_correction_rounds: u32,
+    /// Explicit override for how many corrective re-review passes one user
+    /// turn may dispatch after its initial discrete review. When omitted,
+    /// Quick uses zero and Extended uses one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_correction_rounds: Option<u32>,
 }
 
 impl Default for AgentConfig {
@@ -527,7 +537,7 @@ impl Default for AgentConfig {
             session_defaults: BTreeMap::new(),
             discrete_review: true,
             review_tier: ReviewTier::default(),
-            max_correction_rounds: default_max_correction_rounds(),
+            max_correction_rounds: None,
         }
     }
 }
@@ -638,10 +648,6 @@ fn default_max_parallel() -> usize {
     6
 }
 
-fn default_max_correction_rounds() -> u32 {
-    1
-}
-
 fn default_progress_wake_minutes() -> u64 {
     20
 }
@@ -729,7 +735,7 @@ pub struct SelectedAgent {
 impl Config {
     /// True when `path` holds a config this build can use directly or migrate
     /// forward. Callers use it to decide whether the user is already
-    /// onboarded, so a migratable v2 file counts as an existing config.
+    /// onboarded, so a migratable older file counts as an existing config.
     pub fn path_has_current_version(path: &Path) -> bool {
         let Ok(contents) = std::fs::read_to_string(path) else {
             return false;
@@ -740,7 +746,8 @@ impl Config {
                 .and_then(|document| document.get("version").and_then(toml::Value::as_integer)),
             Some(version)
                 if version == i64::from(CONFIG_VERSION)
-                    || version == i64::from(MIGRATABLE_VERSION)
+                    || version == i64::from(V2_CONFIG_VERSION)
+                    || version == i64::from(V3_CONFIG_VERSION)
         )
     }
 
@@ -838,8 +845,8 @@ impl Config {
     }
 
     /// Read the config from `path`. Returns `Config::default()` when the
-    /// file does not exist; surfaces a parse error otherwise. A `version = 2`
-    /// file is migrated to the current schema and written back in place.
+    /// file does not exist; surfaces a parse error otherwise. Older supported
+    /// configs are migrated and written back before they are returned.
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -855,14 +862,26 @@ impl Config {
                 .is_some_and(|table| table.contains_key("acp_source"))
         });
         let version = document.get("version").and_then(toml::Value::as_integer);
-        if version == Some(i64::from(MIGRATABLE_VERSION)) {
+        if version == Some(i64::from(V2_CONFIG_VERSION)) {
             let mut cfg = migrate_v2(&s).with_context(|| format!("migrate {}", path.display()))?;
             cfg.normalize()?;
             if let Err(error) = cfg.save(path) {
                 tracing::warn!(
                     path = %path.display(),
                     %error,
-                    "config migrated to v3 in memory but could not be written back"
+                    "config migrated from v2 in memory but could not be written back"
+                );
+            }
+            return Ok(cfg);
+        }
+        if version == Some(i64::from(V3_CONFIG_VERSION)) {
+            let mut cfg = migrate_v3(&s).with_context(|| format!("migrate {}", path.display()))?;
+            cfg.normalize()?;
+            if let Err(error) = cfg.save(path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "config migrated from v3 in memory but could not be written back"
                 );
             }
             return Ok(cfg);
@@ -1012,8 +1031,8 @@ struct ThorV2 {
     reasoning_effort: Option<String>,
     #[serde(default = "default_true")]
     discrete_review: bool,
-    #[serde(default = "default_max_correction_rounds")]
-    max_correction_rounds: u32,
+    #[serde(default)]
+    max_correction_rounds: Option<u32>,
 }
 
 impl Default for ThorV2 {
@@ -1022,7 +1041,7 @@ impl Default for ThorV2 {
             model: default_auto(),
             reasoning_effort: None,
             discrete_review: true,
-            max_correction_rounds: default_max_correction_rounds(),
+            max_correction_rounds: None,
         }
     }
 }
@@ -1089,6 +1108,11 @@ impl Default for CouncilV2 {
 /// persisted.
 fn migrate_v2(body: &str) -> Result<Config> {
     let old: ConfigV2 = toml::from_str(body).context("parse v2 config")?;
+    let max_correction_rounds = match old.thor.max_correction_rounds {
+        // V2 also serialized the former global default into saved configs.
+        Some(1) => None,
+        configured => configured,
+    };
     Ok(Config {
         version: CONFIG_VERSION,
         onboarding_version: 0,
@@ -1107,7 +1131,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
             session_defaults: BTreeMap::new(),
             discrete_review: old.thor.discrete_review,
             review_tier: ReviewTier::default(),
-            max_correction_rounds: old.thor.max_correction_rounds,
+            max_correction_rounds,
         },
         review: ReviewConfig {
             model: old.loki.model,
@@ -1131,6 +1155,22 @@ fn migrate_v2(body: &str) -> Result<Config> {
         session_config: BTreeMap::new(),
         ragnarok: old.ragnarok,
     })
+}
+
+/// V3 serialized the then-global correction-round default (`1`) into every
+/// saved config. Treat that indistinguishable value as unset so existing Quick
+/// users receive the new tier default; genuinely non-default budgets survive.
+fn migrate_v3(body: &str) -> Result<Config> {
+    let document: toml::Value = toml::from_str(body).context("parse v3 config document")?;
+    let mut config: Config = toml::from_str(body).context("parse v3 config")?;
+    config.version = CONFIG_VERSION;
+    if config.team.is_none() {
+        config.team = legacy_team_preset(&document).map(|team| team.id().to_string());
+    }
+    if config.agent.max_correction_rounds == Some(1) {
+        config.agent.max_correction_rounds = None;
+    }
+    Ok(config)
 }
 
 /// Default config path: `$XDG_CONFIG_HOME/mj/config.toml` (or
@@ -1424,7 +1464,8 @@ mod tests {
         assert_eq!(cfg.theme, TerminalThemeKind::Adaptive);
         assert_eq!(cfg.model_names(), ModelsConfig::default());
         assert!(cfg.agent.discrete_review);
-        assert_eq!(cfg.agent.max_correction_rounds, 1);
+        assert_eq!(cfg.agent.max_correction_rounds, None);
+        assert_eq!(cfg.agent.review_tier.default_correction_rounds(), 0);
         assert_eq!(cfg.subagents.model, "auto");
         assert_eq!(
             cfg.agent.acp_priority,
@@ -1449,11 +1490,13 @@ mod tests {
         let cfg = Config::load(&path).expect("load");
         assert!(cfg.agent.discrete_review);
         assert_eq!(cfg.agent.review_tier, ReviewTier::Quick);
+        assert_eq!(cfg.agent.max_correction_rounds, None);
 
         // The default stays out of the file; an explicit upgrade is written.
         cfg.save(&path).expect("save quick");
         let body = std::fs::read_to_string(&path).expect("read quick");
         assert!(!body.contains("review_tier"), "body: {body:?}");
+        assert!(!body.contains("max_correction_rounds"), "body: {body:?}");
 
         let mut upgraded = cfg;
         upgraded.agent.review_tier = ReviewTier::Extended;
@@ -1620,6 +1663,8 @@ kimi = "disabled"
         // still lets startup show the major-upgrade explanation.
         std::fs::write(&path, "version = 2\n").expect("v2 config");
         assert!(Config::path_has_current_version(&path));
+        std::fs::write(&path, "version = 3\n").expect("v3 config");
+        assert!(Config::path_has_current_version(&path));
         Config::default().save(&path).expect("current config");
         assert!(Config::path_has_current_version(&path));
     }
@@ -1678,7 +1723,7 @@ origin = "custom"
         assert_eq!(cfg.agent.model, "gpt-5-6-sol");
         assert_eq!(cfg.agent.reasoning_effort.as_deref(), Some("high"));
         assert!(!cfg.agent.discrete_review);
-        assert_eq!(cfg.agent.max_correction_rounds, 3);
+        assert_eq!(cfg.agent.max_correction_rounds, Some(3));
         assert_eq!(cfg.review.model, "claude-fable-5");
         assert_eq!(cfg.review.reasoning_effort.as_deref(), Some("xhigh"));
         assert_eq!(cfg.subagents.model, "gpt-5-6-terra");
@@ -1689,11 +1734,14 @@ origin = "custom"
         assert_eq!(cfg.ragnarok.max_competitors, 4);
         assert_eq!(cfg.acp.policy("codex-acp"), AcpServerPolicy::Disabled);
 
-        // The migrated file is persisted, so the next load is a plain v3 read.
+        // The migrated file is persisted, so the next load is a current read.
         // Legacy custom-server sections are tolerated on load and dropped.
         let body = std::fs::read_to_string(&path).expect("read migrated");
-        println!("--- migrated v3 config.toml ---\n{body}--- end ---");
-        assert!(body.contains("version = 3"), "{body}");
+        println!("--- migrated config.toml ---\n{body}--- end ---");
+        assert!(
+            body.contains(&format!("version = {CONFIG_VERSION}")),
+            "{body}"
+        );
         assert!(!body.contains("[thor]"), "{body}");
         assert!(!body.contains("[eitri]"), "{body}");
         assert!(!body.contains("[loki]"), "{body}");
@@ -1716,6 +1764,41 @@ origin = "custom"
                 ..Config::default()
             }
         );
+    }
+
+    #[test]
+    fn v3_migration_removes_serialized_old_round_default_but_keeps_overrides() {
+        for (saved, expected) in [(1, None), (0, Some(0)), (3, Some(3))] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("config.toml");
+            std::fs::write(
+                &path,
+                format!(
+                    "version = {V3_CONFIG_VERSION}\n[agent]\nmax_correction_rounds = {saved}\n"
+                ),
+            )
+            .expect("write v3 config");
+
+            let config = Config::load(&path).expect("migrate v3");
+            assert_eq!(config.version, CONFIG_VERSION);
+            assert_eq!(config.agent.max_correction_rounds, expected);
+        }
+    }
+
+    #[test]
+    fn v2_migration_removes_serialized_old_round_default_but_keeps_overrides() {
+        for (saved, expected) in [(1, None), (0, Some(0)), (3, Some(3))] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("config.toml");
+            std::fs::write(
+                &path,
+                format!("version = {V2_CONFIG_VERSION}\n[thor]\nmax_correction_rounds = {saved}\n"),
+            )
+            .expect("write v2 config");
+
+            let config = Config::load(&path).expect("migrate v2");
+            assert_eq!(config.agent.max_correction_rounds, expected);
+        }
     }
 
     /// The progress heartbeat is config-file only, so absent means the default
@@ -1822,7 +1905,7 @@ origin = "custom"
                 session_defaults: BTreeMap::new(),
                 discrete_review: false,
                 review_tier: ReviewTier::Extended,
-                max_correction_rounds: default_max_correction_rounds(),
+                max_correction_rounds: Some(1),
             },
             subagents: SubagentsConfig {
                 auto_failover: false,
@@ -2129,14 +2212,16 @@ eitri = "gpt-5-6-luna"
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            r#"
-version = 3
+            format!(
+                r#"
+version = {CONFIG_VERSION}
 [[acp.servers]]
 id = "custom:my-agent"
 label = "my-agent"
 command = "~/bin/agent"
 origin = "custom"
-"#,
+"#
+            ),
         )
         .expect("write");
 
@@ -2150,8 +2235,9 @@ origin = "custom"
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            r#"
-version = 3
+            format!(
+                r#"
+version = {CONFIG_VERSION}
 
 [agent]
 model = "gpt-5-6-terra"
@@ -2160,7 +2246,8 @@ acp_source = "claude-acp"
 [review]
 model = "claude-fable-5"
 acp_source = "codex-acp"
-"#,
+"#
+            ),
         )
         .expect("write");
 
@@ -2251,7 +2338,10 @@ mode = "ask"
         let path = dir.path().join("config.toml");
         Config::default().save(&path).expect("save");
         let body = std::fs::read_to_string(&path).expect("read");
-        assert!(body.contains("version = 3"), "config: {body:?}");
+        assert!(
+            body.contains(&format!("version = {CONFIG_VERSION}")),
+            "config: {body:?}"
+        );
         assert!(
             !body.contains("theme"),
             "default theme should not be serialized: {body:?}"

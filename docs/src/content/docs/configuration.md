@@ -9,9 +9,9 @@ tabs. Team and adapter changes apply to a new session. Credentials and adapter
 capabilities are probed whenever a new session roster is resolved;
 `mj models refresh` runs that probe as a standalone diagnostic.
 
-The config schema is versioned. The current schema is `version = 3`; a
-`version = 2` file is migrated in place on load. Any other version starts from
-fresh defaults rather than guessing a field-by-field migration.
+The config schema is versioned. The current schema is `version = 4`; version 2
+and 3 files are migrated in place on load. Any other version starts from fresh
+defaults rather than guessing a field-by-field migration.
 
 The guided product explanation has one monotonic `onboarding_version`, separate
 from the config schema. Mjolnir compares it only with the latest onboarding:
@@ -24,7 +24,7 @@ canceling fresh setup leaves onboarding incomplete.
 What the **Codex coder + Claude reviewer** team writes:
 
 ```toml
-version = 3
+version = 4
 
 [agent]
 model = "auto"
@@ -58,6 +58,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `agent.session_defaults` | Per-ACP saved session-option defaults for new primary sessions |
 | `agent.discrete_review` | Run the end-of-turn discrete review |
 | `agent.review_tier` | Review depth: `quick` (default) sends one general reviewer and validates its findings; `extended` runs the adversarial supervisor with on-demand Norse specialist lanes and spends far more tokens |
+| `agent.max_correction_rounds` | Optional override for review passes over findings-driven corrections; omitted defaults to `0` for Quick and `1` for Extended |
 | `review.model` | Review supervisor model, or `auto` |
 | `review.acp_source` | Optional exact ACP source constraint for the review seat |
 | `review.acp_priority` | ACP source preference for the review supervisor model |
@@ -111,15 +112,15 @@ The ACP Servers tab controls eligibility. Priority only decides which enabled
 adapter supplies a selected model when more than one advertises it.
 Sources absent from a saved list are appended in discovery order.
 
-## Migrating from version 2
+## Migrating older configs
 
 A `version = 2` file (`[thor]`, `[eitri]`, `[loki]`, `[council]`) is mapped onto
 the current schema the first time this build loads it, and the migrated result
 is written back to the same path:
 
-| v2 | v3 |
+| v2 | v4 |
 | --- | --- |
-| `thor.model`, `thor.reasoning_effort`, `thor.discrete_review` | `agent.*` |
+| `thor.model`, `thor.reasoning_effort`, `thor.discrete_review`, `thor.max_correction_rounds` | `agent.*` |
 | `eitri.model`, `eitri.reasoning_effort` | `subagents.*` |
 | `eitri.max_parallel_explores` | `subagents.max_parallel` |
 | `council.auto_failover` | `subagents.auto_failover` |
@@ -128,6 +129,11 @@ is written back to the same path:
 `theme`, `spinner`, `[acp]`, and `[ragnarok]` carry over unchanged. If the
 migrated file cannot be written back, the session still runs on the migrated
 values in memory.
+
+Versions 2 and 3 wrote the former global `max_correction_rounds = 1` default
+into saved files. Their migrations remove that generated value so review depth
+can supply the new tier default. Explicit non-default values such as `0` or
+`3` are preserved.
 
 ## ACP policy
 
