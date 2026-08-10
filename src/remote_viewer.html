@@ -2409,7 +2409,7 @@
         filter: drop-shadow(0 0 12px rgb(235 63 51 / 0.14));
       }
 
-      /* red prompt glyph in the textarea gutter */
+      /* red prompt glyph in the composer gutter */
       .console::before {
         content: "$";
         position: absolute;
@@ -2422,18 +2422,19 @@
         text-shadow: 0 0 8px rgb(235 63 51 / 0.5);
       }
 
-      .console:has(textarea:disabled)::before {
+      .console:has(.composer-input[contenteditable="false"])::before {
         color: var(--dim);
         text-shadow: none;
       }
 
-      .console textarea {
+      .composer-input {
         display: block;
         width: 100%;
         min-height: 56px;
         max-height: 200px;
-        resize: none;
         overflow-y: auto;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
         border: 0;
         background: transparent;
         color: var(--text);
@@ -2446,7 +2447,13 @@
           outline: none; /* the console frame itself signals focus */
         }
 
-        &:disabled {
+        &:empty::before {
+          content: attr(data-placeholder);
+          color: var(--dim);
+          pointer-events: none;
+        }
+
+        &[contenteditable="false"] {
           color: var(--dim);
         }
       }
@@ -3215,7 +3222,7 @@
           max-height: none;
         }
 
-        .console textarea {
+        .composer-input {
           padding: 11px 12px 8px 30px;
           /* ≥16px stops iOS Safari from zooming the page when the composer
              gains focus (same trick as .config-combo-search). */
@@ -3339,7 +3346,7 @@
           <div id="queue-list" class="queue-list"></div>
           <div class="console">
             <span class="console-frame" aria-hidden="true"></span>
-            <textarea id="queue-input" placeholder="Message the agent" enterkeyhint="send" aria-label="Message the agent"></textarea>
+            <div id="queue-input" class="composer-input" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Message the agent" enterkeyhint="send" spellcheck="true" aria-label="Message the agent"></div>
             <div id="attachment-list" class="attachment-list" aria-label="Attached images"></div>
             <div id="command-palette" class="command-palette" role="listbox" aria-label="Slash commands" hidden></div>
             <div class="console-strip">
@@ -7269,17 +7276,190 @@
 
       /* ---- queue + composer ---- */
 
-      function saveDraftForSelectedSession() {
+      let composerInputRevision = 0;
+      let composerPreserveEmptyBreak = false;
+
+      function composerText() {
+        let text = "";
+        const blockNames = new Set(["DIV", "P"]);
+
+        function append(node) {
+          if (node.nodeType === Node.TEXT_NODE) {
+            text += node.nodeValue || "";
+            return;
+          }
+          if (node.nodeName === "BR") {
+            if (!node.dataset.composerFiller) {
+              text += "\n";
+            }
+            return;
+          }
+
+          const block = node !== queueInputEl && blockNames.has(node.nodeName);
+          if (block && text && !text.endsWith("\n")) {
+            text += "\n";
+          }
+          node.childNodes.forEach(append);
+          if (block && node.nextSibling && !text.endsWith("\n")) {
+            text += "\n";
+          }
+        }
+
+        append(queueInputEl);
+        return text.replace(/\r\n?/g, "\n");
+      }
+
+      function setComposerText(text) {
+        queueInputEl.textContent = text;
+      }
+
+      function setComposerEnabled(enabled) {
+        queueInputEl.contentEditable = enabled ? "true" : "false";
+        queueInputEl.setAttribute("aria-disabled", enabled ? "false" : "true");
+      }
+
+      function setComposerPlaceholder(text) {
+        queueInputEl.dataset.placeholder = text;
+        queueInputEl.setAttribute("aria-placeholder", text);
+      }
+
+      function placeComposerCaretAtEnd() {
+        const selection = window.getSelection();
+        if (!selection) {
+          return;
+        }
+        const range = document.createRange();
+        range.selectNodeContents(queueInputEl);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+
+      function placeComposerCaretAtPoint(x, y) {
+        let range = document.caretRangeFromPoint?.(x, y) || null;
+        if (!range && document.caretPositionFromPoint) {
+          const position = document.caretPositionFromPoint(x, y);
+          if (position) {
+            range = document.createRange();
+            range.setStart(position.offsetNode, position.offset);
+            range.collapse(true);
+          }
+        }
+        if (!range || !queueInputEl.contains(range.startContainer)) {
+          return;
+        }
+        const selection = window.getSelection();
+        if (!selection) {
+          return;
+        }
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+
+      function insertComposerFallback(node, filler = null) {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount) {
+          queueInputEl.append(node);
+          if (filler) {
+            queueInputEl.append(filler);
+          }
+          placeComposerCaretAtEnd();
+          return;
+        }
+
+        const range = selection.getRangeAt(0);
+        if (!queueInputEl.contains(range.commonAncestorContainer)) {
+          queueInputEl.append(node);
+          if (filler) {
+            queueInputEl.append(filler);
+          }
+          placeComposerCaretAtEnd();
+          return;
+        }
+
+        range.deleteContents();
+        range.insertNode(node);
+        if (filler) {
+          node.after(filler);
+        }
+        range.setStartAfter(node);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+
+      function runComposerEdit(command, value, fallback) {
+        queueInputEl.focus();
+        const revision = composerInputRevision;
+        if (document.execCommand(command, false, value)) {
+          // execCommand normally emits input synchronously. Keep the state in
+          // sync on engines that preserve undo but omit that event.
+          if (composerInputRevision === revision) {
+            composerInputChanged();
+          }
+          return true;
+        }
+        fallback();
+        composerInputChanged();
+        return false;
+      }
+
+      function insertComposerText(text) {
+        const normalized = text.replace(/\r\n?/g, "\n");
+        runComposerEdit("insertText", normalized, () => {
+          insertComposerFallback(document.createTextNode(normalized));
+        });
+      }
+
+      function insertComposerLineBreak() {
+        composerPreserveEmptyBreak = true;
+        try {
+          runComposerEdit("insertLineBreak", null, () => {
+            const filler = document.createElement("br");
+            filler.dataset.composerFiller = "true";
+            insertComposerFallback(document.createElement("br"), filler);
+          });
+
+          let last = queueInputEl;
+          while (last.lastChild) {
+            last = last.lastChild;
+          }
+          if (last.nodeName === "BR" && last.previousSibling?.nodeName === "BR") {
+            last.dataset.composerFiller = "true";
+            composerInputChanged();
+          }
+        } finally {
+          composerPreserveEmptyBreak = false;
+        }
+      }
+
+      function composerInputChanged() {
+        composerInputRevision += 1;
+        let text;
+        if (
+          !composerPreserveEmptyBreak
+          && !queueInputEl.textContent
+          && queueInputEl.childNodes.length
+        ) {
+          queueInputEl.replaceChildren();
+          text = "";
+        } else {
+          text = composerText();
+        }
+        saveDraftForSelectedSession(text);
+        updateCommandPalette(text);
+      }
+
+      function saveDraftForSelectedSession(text = composerText()) {
         if (selectedSessionId) {
-          draftBySessionId.set(selectedSessionId, queueInputEl.value);
+          draftBySessionId.set(selectedSessionId, text);
         }
       }
 
       function restoreDraftForSelectedSession() {
         const draft = selectedSessionId ? draftBySessionId.get(selectedSessionId) || "" : "";
-        if (queueInputEl.value !== draft) {
-          queueInputEl.value = draft;
-          syncComposerHeight();
+        if (composerText() !== draft) {
+          setComposerText(draft);
         }
         updateCommandPalette();
         renderAttachments();
@@ -7412,12 +7592,6 @@
         }
       }
 
-      function syncComposerHeight() {
-        queueInputEl.style.height = "auto";
-        const next = Math.min(queueInputEl.scrollHeight, 200);
-        queueInputEl.style.height = `${Math.max(next, 56)}px`;
-      }
-
       function setQueueStatus(text, isError = false) {
         queueStatusEl.textContent = text;
         queueStatusEl.classList.toggle("is-error", isError);
@@ -7503,9 +7677,9 @@
         setCommandSelected(commandSelected);
       }
 
-      function updateCommandPalette() {
+      function updateCommandPalette(text = composerText()) {
         const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
-        const query = slashCommandQuery(queueInputEl.value);
+        const query = slashCommandQuery(text);
         if (query === null || !session) {
           clearCommandPalette();
           return;
@@ -7544,11 +7718,11 @@
         if (!command?.name) {
           return false;
         }
-        queueInputEl.value = `/${command.name} `;
+        setComposerText(`/${command.name} `);
         saveDraftForSelectedSession();
-        syncComposerHeight();
         clearCommandPalette();
         queueInputEl.focus();
+        placeComposerCaretAtEnd();
         return true;
       }
 
@@ -7613,18 +7787,17 @@
         } else {
           return false;
         }
-        queueInputEl.value = "";
+        setComposerText("");
         if (selectedSessionId) {
           draftBySessionId.set(selectedSessionId, "");
         }
-        syncComposerHeight();
         clearCommandPalette();
         return true;
       }
 
       function renderQueue(session) {
         queueListEl.replaceChildren();
-        queueInputEl.disabled = !session;
+        setComposerEnabled(Boolean(session));
         queueSubmitEl.disabled = !session;
         const sideActive = sessionHasCommand(session, "exit");
         exitSideEl.hidden = !sideActive;
@@ -7632,7 +7805,7 @@
         renderAttachments();
 
         if (!session) {
-          queueInputEl.placeholder = "Message the agent";
+          setComposerPlaceholder("Message the agent");
           setQueueStatus("Select a session.");
           clearCommandPalette();
           return;
@@ -7641,13 +7814,13 @@
         // Verb = intent, status = mechanism: the button says Send while the
         // strip and rows report what is queued. The placeholder tracks the
         // agent state instead of explaining the queue transport.
-        queueInputEl.placeholder = sideActive
+        setComposerPlaceholder(sideActive
           ? (session.prompt_in_flight
             ? "Side conversation is working — your prompt runs when it's free"
             : "Message the side conversation — type exit to return")
           : (session.prompt_in_flight
             ? "Agent is working — your prompt runs when it's free"
-            : "Message the agent");
+            : "Message the agent"));
         setQueueStatus(queuedPrompts.length ? `${queuedPrompts.length} queued` : "");
 
         for (const prompt of queuedPrompts) {
@@ -8656,7 +8829,7 @@
           setQueueStatus("Only live sessions can accept prompts.", true);
           return;
         }
-        const text = queueInputEl.value;
+        const text = composerText();
         const attachments = selectedAttachments();
         if (!sessionId || (!text.trim() && !attachments.length)) {
           return;
@@ -8696,12 +8869,11 @@
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }
-          queueInputEl.value = "";
+          setComposerText("");
           draftBySessionId.set(sessionId, "");
           attachmentsBySessionId.delete(sessionId);
           renderAttachments();
           clearCommandPalette();
-          syncComposerHeight();
           pendingNewEntries = 0;
           forceScrollToBottom = true;
           await refreshSessions();
@@ -8711,7 +8883,9 @@
           }
         } finally {
           queueSubmitInFlight = false;
-          queueSubmitEl.disabled = !selectedSessionId;
+          const selected = sessions.some((candidate) => candidate.session_id === selectedSessionId);
+          queueSubmitEl.disabled = !selected;
+          setComposerEnabled(selected);
         }
       }
 
@@ -8942,21 +9116,67 @@
         imagePickerEl.value = "";
         void attachImageFiles(files);
       });
-      queueInputEl.addEventListener("input", () => {
-        saveDraftForSelectedSession();
-        syncComposerHeight();
-        updateCommandPalette();
+      queueInputEl.addEventListener("input", composerInputChanged);
+      queueInputEl.addEventListener("beforeinput", (event) => {
+        const inputType = event.inputType || "";
+        if (
+          inputType === "insertHTML"
+          || inputType.startsWith("insertFromDrop")
+          || inputType.startsWith("insertFromPaste")
+          || inputType.startsWith("format")
+        ) {
+          event.preventDefault();
+        }
       });
       queueInputEl.addEventListener("paste", (event) => {
         const files = Array.from(event.clipboardData?.items || [])
           .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
           .map((item) => item.getAsFile())
           .filter(Boolean);
-        if (!files.length || !selectedSession()?.prompt_images_supported) {
+        if (files.length && selectedSession()?.prompt_images_supported) {
+          event.preventDefault();
+          void attachImageFiles(files);
+          return;
+        }
+        if (files.length) {
+          event.preventDefault();
+          setQueueStatus("This session does not support image prompts.", true);
+          return;
+        }
+
+        const text = event.clipboardData?.getData("text/plain");
+        if (text === undefined) {
           return;
         }
         event.preventDefault();
-        void attachImageFiles(files);
+        insertComposerText(text);
+      });
+      queueInputEl.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        const types = Array.from(event.dataTransfer?.types || []);
+        if (event.dataTransfer) {
+          event.dataTransfer.dropEffect = types.some((type) => type === "text/plain" || type === "Files")
+            ? "copy"
+            : "none";
+        }
+      });
+      queueInputEl.addEventListener("drop", (event) => {
+        event.preventDefault();
+        placeComposerCaretAtPoint(event.clientX, event.clientY);
+        const files = Array.from(event.dataTransfer?.files || [])
+          .filter((file) => file.type.startsWith("image/"));
+        if (files.length && selectedSession()?.prompt_images_supported) {
+          void attachImageFiles(files);
+          return;
+        }
+        if (files.length) {
+          setQueueStatus("This session does not support image prompts.", true);
+          return;
+        }
+        const text = event.dataTransfer?.getData("text/plain") || "";
+        if (text) {
+          insertComposerText(text);
+        }
       });
       queueInputEl.addEventListener("keydown", (event) => {
         // While an IME composition is active, Enter/arrows confirm or steer the
@@ -8996,6 +9216,11 @@
           submitQueuedPrompt();
           return;
         }
+        if (event.key === "Enter" && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+          event.preventDefault();
+          insertComposerLineBreak();
+          return;
+        }
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
           event.preventDefault();
           submitQueuedPrompt();
@@ -9004,7 +9229,6 @@
 
       applyThemePreference(themePreference());
       loadViewerSettings();
-      syncComposerHeight();
       syncKeyboardInset();
       applyRoute();
       void tryResumeViewerSession();

@@ -10625,6 +10625,24 @@ mod tests {
     }
 
     #[test]
+    fn embedded_viewer_uses_contenteditable_prompt_without_forcing_layout_on_input() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(
+            viewer.contains("id=\"queue-input\" class=\"composer-input\" contenteditable=\"true\"")
+        );
+        assert!(viewer.contains("const text = composerText();"));
+        assert!(viewer.contains("queueInputEl.textContent = text;"));
+        assert!(viewer.contains("&& !queueInputEl.textContent"));
+        assert!(viewer.contains("document.execCommand(command, false, value)"));
+        assert!(viewer.contains("queueInputEl.addEventListener(\"beforeinput\""));
+        assert!(viewer.contains("queueInputEl.addEventListener(\"drop\""));
+        assert!(viewer.contains("insertComposerLineBreak();"));
+        assert!(!viewer.contains("field-sizing:"));
+        assert!(!viewer.contains("syncComposerHeight"));
+        assert!(!viewer.contains("queueInputEl.scrollHeight"));
+    }
+
+    #[test]
     fn embedded_viewer_contains_role_scoped_acp_session_controls() {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("[\"team\", \"Team\"]"));
