@@ -407,4 +407,53 @@ mod tests {
         assert!(matches!(ui_rx.try_recv(), Ok(UiEvent::Warning(_))));
         assert!(ui_rx.try_recv().is_err());
     }
+
+    #[test]
+    fn near_limit_for_a_non_current_provider_keeps_the_selection_quietly() {
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        let claude = role("claude-opus", "claude-acp", AdapterKind::Claude);
+        let codex = role("gpt-codex", "codex-acp", AdapterKind::Codex);
+        let pool = RolePool::new(
+            vec![claude.clone(), codex.clone()],
+            Gate::new(PathBuf::from("."), ui_tx.clone()),
+            true,
+            "subagents",
+            ui_tx,
+        );
+
+        // The fallback seat hit its limit while the current seat is
+        // fine: it is excluded for later failover, nothing else changes.
+        assert!(pool.handle_near_limit(&codex, None));
+        assert_eq!(pool.current().launch.source_id, claude.launch.source_id);
+        assert!(ui_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn exhausted_failover_announces_the_block_with_reset_time() {
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        let claude = role("claude-opus", "claude-acp", AdapterKind::Claude);
+        let codex = role("gpt-codex", "codex-acp", AdapterKind::Codex);
+        let pool = RolePool::new(
+            vec![claude.clone(), codex.clone()],
+            Gate::new(PathBuf::from("."), ui_tx.clone()),
+            true,
+            "subagents",
+            ui_tx,
+        );
+
+        assert!(pool.handle_near_limit(&claude, None));
+        while ui_rx.try_recv().is_ok() {}
+
+        // Every provider is now excluded, so the pool blocks and names
+        // the reset time in its warning.
+        assert!(!pool.handle_near_limit(&codex, Some(0)));
+        match ui_rx.try_recv() {
+            Ok(UiEvent::Warning(text)) => {
+                assert!(text.contains("codex-acp"), "unexpected warning: {text}");
+                assert!(text.contains(" until "), "missing reset time: {text}");
+            }
+            other => panic!("expected block warning, got {other:?}"),
+        }
+        assert!(ui_rx.try_recv().is_err());
+    }
 }
