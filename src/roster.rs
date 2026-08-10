@@ -323,8 +323,6 @@ fn codex_credentials_available() -> bool {
 pub enum ClaudeAuthStatus {
     LoggedIn,
     NotLoggedIn,
-    NotInstalled,
-    Unavailable,
 }
 
 impl ClaudeAuthStatus {
@@ -335,30 +333,64 @@ impl ClaudeAuthStatus {
     fn unavailable_reason(self) -> &'static str {
         match self {
             Self::LoggedIn => "Claude Code is logged in",
-            Self::NotLoggedIn => "Claude Code is not logged in",
-            Self::NotInstalled => "Claude Code is not installed",
-            Self::Unavailable => "Claude Code login status is unavailable",
+            Self::NotLoggedIn => "Claude credentials not found",
         }
     }
 }
 
 fn claude_auth_status() -> ClaudeAuthStatus {
-    let output = match std::process::Command::new("claude")
-        .args(["auth", "status"])
-        .stdin(std::process::Stdio::null())
-        .output()
-    {
-        Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return ClaudeAuthStatus::NotInstalled;
-        }
-        Err(_) => return ClaudeAuthStatus::Unavailable,
-    };
-    if claude_auth_status_logged_in(&output.stdout) {
+    if claude_detection().is_some() {
         ClaudeAuthStatus::LoggedIn
     } else {
         ClaudeAuthStatus::NotLoggedIn
     }
+}
+
+fn claude_detection() -> Option<String> {
+    for name in ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] {
+        if nonempty_env(&[name]) {
+            return Some(format!("{name} is set"));
+        }
+    }
+    let configured = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+    let root = configured
+        .clone()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))?;
+    if let Some(evidence) = credential_file_evidence(
+        &root.join(".credentials.json"),
+        &[
+            "/claudeAiOauth/accessToken",
+            "/claudeAiOauth/refreshToken",
+            "/oauth/accessToken",
+            "/apiKey",
+        ],
+    ) {
+        return Some(evidence);
+    }
+
+    // Claude Code may keep the OAuth secret in the OS credential store. Its
+    // non-secret account record still proves that sign-in was completed and
+    // lets the ACP probe perform the authoritative runtime check.
+    let scoped_config = root.join(".config.json");
+    if let Some(evidence) = credential_file_evidence(
+        &scoped_config,
+        &[
+            "/oauthAccount/accountUuid",
+            "/oauthAccount/organizationUuid",
+        ],
+    ) {
+        return Some(evidence);
+    }
+    let legacy_config = configured
+        .map(|root| root.join(".claude.json"))
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude.json")))?;
+    credential_file_evidence(
+        &legacy_config,
+        &[
+            "/oauthAccount/accountUuid",
+            "/oauthAccount/organizationUuid",
+        ],
+    )
 }
 
 fn codex_detection() -> Option<String> {
@@ -378,13 +410,6 @@ fn codex_detection() -> Option<String> {
             "/tokens/refresh_token",
         ],
     )
-}
-
-fn claude_auth_status_logged_in(output: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(output)
-        .ok()
-        .and_then(|status| status.get("loggedIn").and_then(serde_json::Value::as_bool))
-        .unwrap_or(false)
 }
 
 /// The built-in adapter whose vendor serves this model. `None` for providers
@@ -470,10 +495,7 @@ pub fn discover_inventory(config: &Config) -> AcpInventory {
         ),
         (
             AdapterKind::Claude,
-            availability
-                .claude_status
-                .logged_in()
-                .then(|| "authenticated via `claude auth status`".to_string()),
+            claude_detection(),
             availability.claude_status.unavailable_reason().to_string(),
         ),
     ];
@@ -1182,8 +1204,8 @@ fn assemble_roster(
     {
         warnings.push(
             "subagent delegation is disabled: no launchable subagent model is available. \
-             Install and authenticate a supported ACP adapter (for Codex: install `@openai/codex` \
-             and run `codex login`), then restart and review the route in /mjconfig."
+             Authenticate a built-in Codex or Claude ACP route, then restart and review the route \
+             in /mjconfig."
                 .to_string(),
         );
     }
@@ -1241,24 +1263,10 @@ mod tests {
     }
 
     #[test]
-    fn claude_auth_status_requires_explicit_logged_in_true() {
-        assert!(claude_auth_status_logged_in(
-            br#"{"loggedIn":true,"authMethod":"claude.ai"}"#
-        ));
-        assert!(!claude_auth_status_logged_in(
-            br#"{"loggedIn":false,"authMethod":"none"}"#
-        ));
-        assert!(!claude_auth_status_logged_in(
-            br#"{"authMethod":"claude.ai"}"#
-        ));
-        assert!(!claude_auth_status_logged_in(b"not json"));
-        assert_eq!(
-            ClaudeAuthStatus::NotInstalled.unavailable_reason(),
-            "Claude Code is not installed"
-        );
+    fn claude_auth_status_reports_missing_credentials_without_requiring_a_cli() {
         assert_eq!(
             ClaudeAuthStatus::NotLoggedIn.unavailable_reason(),
-            "Claude Code is not logged in"
+            "Claude credentials not found"
         );
     }
 

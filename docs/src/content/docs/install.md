@@ -3,7 +3,7 @@ title: Install and run
 description: Install Mjolnir, connect Codex or Claude, and launch your first coding team.
 ---
 
-The recommended setup needs an authenticated Codex or Claude CLI and its
+The recommended setup needs authenticated Codex or Claude credentials and its
 launchable ACP bridge. Provider use may incur cost. The first launch can also
 download a managed runtime, ACP bridge, Bifrost package, model rankings, or
 voice assets.
@@ -130,22 +130,30 @@ for voice prerequisites and the full validation matrix.
 
 ## Connect Codex or Claude
 
-You need at least one authenticated provider CLI; a mixed team needs both.
+You need credentials for at least one provider; a mixed team needs both.
 
-For Codex, install and authenticate the official Codex CLI:
-
-```bash
-npm install -g @openai/codex
-codex login
-```
-
-For Claude, install the official Claude Code CLI and complete its sign-in;
-Mjolnir verifies the login with `claude auth status`:
+For Codex, authenticate with the CLI bundled through `codex-acp`:
 
 ```bash
-npm install -g @anthropic-ai/claude-code
-claude
+npx --yes --package=@agentclientprotocol/codex-acp codex login
 ```
+
+For Claude, authenticate with the Claude Code executable bundled through
+`claude-agent-acp`:
+
+```bash
+npx -y @agentclientprotocol/claude-agent-acp --cli
+```
+
+These commands do not install a second global provider CLI. The ACP packages
+bring compatible platform-specific Codex and Claude executables as transitive
+dependencies, and Mjolnir uses those same package entry points for login and
+quota queries.
+
+Set `CODEX_PATH` only when you intentionally want both `codex-acp` and
+Mjolnir's Codex quota poller to use a specific compatible Codex executable.
+Without that override, both use the version supplied transitively by
+`@agentclientprotocol/codex-acp`.
 
 Run `mj`. First launch opens onboarding on the Team tab and asks you to choose
 one of four teams: **Codex**, **Claude**, **Codex coder + Claude reviewer**,
@@ -157,12 +165,11 @@ Press **Ctrl+Tab** during a session to switch between the four teams, or return
 to the same choice on the **Team** tab in `/mjconfig`. Start a new session after
 switching so the new coder owns the complete turn.
 
-Existing Codex credentials can be detected without launching the ACP bridge
-during discovery; Claude login status comes from `claude auth status`. Launch
-requires the matching PATH-visible provider CLI. For `npx` ACP
-bridges and Bifrost, Mjolnir uses a PATH-visible `npx` or, on Linux, macOS, and
-Windows, installs embedded Node.js 24 automatically. Sign-in actions use the
-`codex` and `claude` CLIs as well.
+Existing credentials are detected without launching the ACP bridge during
+discovery. For the ACP bridges, provider CLIs, and Bifrost, Mjolnir uses a
+PATH-visible `npx` or, on Linux, macOS, and Windows, installs embedded Node.js
+24 automatically. npm's cache location is an implementation detail; Mjolnir
+addresses the provider executables through their ACP package entry points.
 
 The ACP Servers panel configures the built-in Codex and Claude routes, which
 are the only supported ACP servers.

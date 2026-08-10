@@ -25,12 +25,14 @@ model service itself self-hosted.
 
 ## Recommended setup
 
-Install and authenticate the official Codex CLI first:
+Authenticate with the Codex CLI supplied by Mjolnir's ACP route:
 
 ```bash
-npm install -g @openai/codex
-codex login
+npx --yes --package=@agentclientprotocol/codex-acp codex login
 ```
+
+You do not need a separate global `@openai/codex` installation. Mjolnir runs
+the compatible Codex version installed transitively with `codex-acp`.
 
 Then [install Mjolnir](/install/), open a repository, and run:
 

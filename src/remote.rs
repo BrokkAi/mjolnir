@@ -6462,9 +6462,10 @@ async fn mjconfig_run_login(
     output: Arc<Mutex<String>>,
 ) -> Result<String> {
     use tokio::io::AsyncReadExt;
-    let (command, args) = crate::auth::headless_login_invocation(vendor).await?;
-    let mut child = tokio::process::Command::new(&command)
-        .args(&args)
+    let invocation = crate::auth::headless_login_invocation(vendor).await?;
+    let mut child = tokio::process::Command::new(&invocation.command)
+        .args(&invocation.args)
+        .envs(&invocation.env)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

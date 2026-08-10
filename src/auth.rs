@@ -1,9 +1,6 @@
 //! Vendor-owned account discovery and login command selection.
 
-use std::{
-    ffi::OsStr,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -80,19 +77,6 @@ pub fn detect(vendor: AuthVendor) -> CredentialSource {
     }
 }
 
-pub fn executable(vendor: AuthVendor) -> Option<PathBuf> {
-    let name = match vendor {
-        AuthVendor::OpenAi => "codex",
-    };
-    find_on_path(name)
-}
-
-pub fn install_hint(vendor: AuthVendor) -> &'static str {
-    match vendor {
-        AuthVendor::OpenAi => "npm install -g @openai/codex",
-    }
-}
-
 fn detect_openai() -> CredentialSource {
     let root = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -155,72 +139,25 @@ fn credential_file_has_any(path: &Path, pointers: &[&str]) -> bool {
     })
 }
 
-pub fn find_on_path(name: &str) -> Option<PathBuf> {
-    find_in_path(name, std::env::var_os("PATH").as_deref())
-}
-
-fn find_in_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
-    let path = path?;
-    for directory in std::env::split_paths(&path) {
-        let candidate = directory.join(name);
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        for extension in ["exe", "cmd", "bat"] {
-            let candidate = directory.join(format!("{name}.{extension}"));
-            if is_executable_file(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
 /// Login invocation for contexts without an interactive terminal (the remote
 /// viewer's sign-in runs the command server-side and streams its output to the
 /// browser). OpenAI always uses the device-auth flow there: `codex login`
 /// without it wants to open a local browser, which a headless server can't.
-pub async fn headless_login_invocation(vendor: AuthVendor) -> Result<(PathBuf, Vec<String>)> {
-    let command = executable(vendor).with_context(|| {
-        format!(
-            "{} CLI is not installed; run `{}`",
-            vendor.label(),
-            install_hint(vendor)
-        )
-    })?;
-    let args = match vendor {
-        AuthVendor::OpenAi => vec!["login".to_string(), "--device-auth".to_string()],
-    };
-    Ok((command, args))
+pub struct LoginInvocation {
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+}
+
+pub async fn headless_login_invocation(vendor: AuthVendor) -> Result<LoginInvocation> {
+    let mut invocation = bundled_invocation(vendor).await?;
+    invocation
+        .args
+        .extend(["login".to_string(), "--device-auth".to_string()]);
+    Ok(invocation)
 }
 
 pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
-    let command = executable(vendor).with_context(|| {
-        format!(
-            "{} CLI is not installed; run `{}`",
-            vendor.label(),
-            install_hint(vendor)
-        )
-    })?;
     let args = match vendor {
         AuthVendor::OpenAi => {
             let options = [
@@ -257,9 +194,12 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
         "Signing in to {}. Mjolnir will return when it finishes.\n",
         vendor.label()
     );
+    let mut invocation = bundled_invocation(vendor).await?;
+    invocation.args.extend(args.into_iter().map(str::to_string));
     let _interrupt_guard = crate::termination::suppress_interrupts();
-    let status = tokio::process::Command::new(&command)
-        .args(&args)
+    let status = tokio::process::Command::new(&invocation.command)
+        .args(&invocation.args)
+        .envs(&invocation.env)
         .status()
         .await
         .with_context(|| format!("run {} login", vendor.label()))?;
@@ -278,19 +218,29 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
     )))
 }
 
+async fn bundled_invocation(vendor: AuthVendor) -> Result<LoginInvocation> {
+    let provider = match vendor {
+        AuthVendor::OpenAi => crate::acp::ProviderCli::Codex,
+    };
+    let prepared = crate::acp::prepare_provider_cli(provider, &Default::default())
+        .await
+        .with_context(|| format!("prepare bundled {} CLI", vendor.label()))?;
+    Ok(LoginInvocation {
+        command: prepared.command,
+        args: prepared.args,
+        env: prepared.env,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn vendors_report_labels_capabilities_and_install_hints() {
+    fn vendors_report_labels_and_capabilities() {
         assert_eq!(AuthVendor::ALL, [AuthVendor::OpenAi]);
         assert_eq!(AuthVendor::OpenAi.label(), "OpenAI / ChatGPT");
         assert_eq!(AuthVendor::OpenAi.enables(), "Codex");
-        assert_eq!(
-            install_hint(AuthVendor::OpenAi),
-            "npm install -g @openai/codex"
-        );
     }
 
     #[test]
@@ -371,52 +321,13 @@ mod tests {
     }
 
     #[test]
-    fn path_lookup_skips_non_files_and_uses_first_matching_file() {
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        std::fs::create_dir(first.path().join("helper")).unwrap();
-        let executable = second.path().join("helper");
-        std::fs::write(&executable, b"placeholder").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let path = std::env::join_paths([first.path(), second.path()]).unwrap();
-
-        assert_eq!(find_in_path("helper", Some(&path)), Some(executable));
-        assert_eq!(find_in_path("missing", Some(&path)), None);
-        assert_eq!(find_in_path("helper", None), None);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn path_lookup_skips_non_executable_files() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        std::fs::write(first.path().join("helper"), b"not executable").unwrap();
-        let executable = second.path().join("helper");
-        std::fs::write(&executable, b"executable").unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = std::env::join_paths([first.path(), second.path()]).unwrap();
-
-        assert_eq!(find_in_path("helper", Some(&path)), Some(executable));
-    }
-
-    #[test]
-    fn public_detection_and_executable_lookup_cover_each_vendor() {
+    fn public_detection_covers_each_vendor() {
         for vendor in AuthVendor::ALL {
             let source = detect(vendor);
             assert_eq!(
                 source.available(),
                 !matches!(source, CredentialSource::Missing)
             );
-
-            if let Some(path) = executable(vendor) {
-                assert!(path.is_file());
-            }
         }
     }
 }

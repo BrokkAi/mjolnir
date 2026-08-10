@@ -2813,7 +2813,7 @@ fn isolated_subagent_role_from_home(
     }
     if !isolated.path().join("auth.json").exists() {
         anyhow::bail!(
-            "Codex is available but {} has no auth.json; run `codex login`",
+            "Codex is available but {} has no auth.json; sign in from /mjconfig",
             source.display()
         );
     }
