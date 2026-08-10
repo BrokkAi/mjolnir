@@ -1178,6 +1178,9 @@ fn assemble_roster(
                 .to_string(),
         );
     }
+    if let Some(notice) = config.newer_build_notice() {
+        warnings.push(notice);
+    }
     warnings.sort();
     Ok(Roster {
         primary,

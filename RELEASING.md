@@ -6,9 +6,11 @@ tests, and dependency-license maintenance.
 
 ## Versions
 
-The root and voice-worker `Cargo.toml` files must carry the same version, with
-matching workspace entries in `Cargo.lock`. `install.sh`'s `SCRIPT_VERSION` is
-an independent installer logging revision and is not automatically synchronized
+The release version is set once, in `[workspace.package]` in the root
+`Cargo.toml`; both crates inherit it via `version.workspace = true`, so they
+cannot drift apart. After bumping it, run `cargo update --workspace` to refresh
+the workspace entries in `Cargo.lock`. `install.sh`'s `SCRIPT_VERSION` is an
+independent installer logging revision and is not automatically synchronized
 to product releases.
 
 `licenses/THIRD_PARTY_LICENSES.html` embeds the workspace crate versions, so a

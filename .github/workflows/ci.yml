@@ -95,6 +95,10 @@ jobs:
     - name: Run tests
       run: cargo test --features desktop-app
 
+    - name: Verify packaged macOS desktop feature
+      if: runner.os == 'macOS'
+      run: cargo package --locked --allow-dirty -p brokk-mjolnir --features desktop-app
+
   voice-worker:
     name: Voice worker (ubuntu-latest)
     runs-on: ubuntu-latest

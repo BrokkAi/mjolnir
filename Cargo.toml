@@ -1,6 +1,6 @@
 [package]
 name = "brokk-mjolnir"
-version = "1.8.0"
+version.workspace = true
 edition = "2024"
 description = "Forge-grade terminal client for any Agent Client Protocol (ACP) server"
 license = "GPL-3.0-only"
@@ -11,6 +11,11 @@ publish = true
 members = ["voice-worker"]
 default-members = ["."]
 
+# Single source of truth for the release version; both crates inherit it, so
+# they cannot drift apart (RELEASING.md requires them to match).
+[workspace.package]
+version = "1.9.0"
+
 [[bin]]
 name = "mj"
 path = "src/main.rs"
@@ -20,10 +25,14 @@ default = []
 # Kept opt-in until the `mj app` CLI and release packaging land in #727.
 # Android deliberately has no dependency entries for this feature.
 desktop-app = [
+    "dep:block2",
     "dep:tao",
     "dep:webbrowser",
     "dep:wry",
     "dep:gio",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-web-kit",
     "dep:webkit2gtk",
     "dep:webview2-com",
     "dep:windows-core",
@@ -99,10 +108,16 @@ http-body-util = "0.1"
 arboard = "3.4"
 tao = { version = "0.35", default-features = false, features = ["rwh_06", "x11"], optional = true }
 webbrowser = { version = "1.2", optional = true }
-# Wry's portable API does not yet expose private-CA trust. Pin the immutable
-# upstream PR commit until tauri-apps/wry#1707 is released. `version` lets Cargo
-# replace the source for crates.io packaging; desktop release wiring is #727.
-wry = { version = "0.55", git = "https://github.com/tauri-apps/wry", rev = "52ea8168d1c8ceab273df377dce6025a14d4ff4b", optional = true }
+# macOS private-CA trust is installed by the desktop shell because Wry's
+# portable API does not expose it yet. Keep this registry-backed so packaged
+# crates retain a working `desktop-app` feature.
+wry = { version = "0.55.1", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6", optional = true }
+objc2 = { version = "0.6.4", features = ["exception", "disable-encoding-assertions"], optional = true }
+objc2-foundation = { version = "0.3.0", default-features = false, features = ["std", "NSData", "NSObject", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLProtectionSpace", "NSURLRequest", "NSURLSession"], optional = true }
+objc2-web-kit = { version = "0.3.0", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKNavigationAction", "WKNavigationDelegate", "WKWebView"], optional = true }
 
 [target.'cfg(all(target_os = "linux", not(target_os = "android")))'.dependencies]
 gio = { version = "0.18", optional = true }
